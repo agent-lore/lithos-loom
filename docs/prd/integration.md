@@ -87,7 +87,7 @@ The following decisions are locked. References are to the conversation that prod
 | D3 | Architecture | Supervisor + bus + sources → subscribers; one TOML config; subprocess children; monolithic v1 lifecycle |
 | D4 | TOML shape | `[[routes]]` and `[[subscriptions]]` as distinct stanzas, structurally one type internally |
 | D5 | Filter language | Structural `match.*` tables by default + optional `where = "<expr>"` Python predicate escape hatch |
-| D6 | Task projection filter | Project a Lithos task iff `is_human_actionable(task)` — open AND not claimable by any route, OR claimed by a `human_blocking = true` route |
+| D6 | Task projection filter | Project a Lithos task iff `is_human_actionable(task)` — open AND not claimable by any route, OR claimed by a `human_blocking = true` route. Dependency-blocked tasks still project (with `⛔` markers per D19); Tasks-plugin queries decide whether to surface or hide blocked tasks. |
 | D7 | GitHub integration | Selective inbound import + transient outbound mirror, per-project, `enable_github_issues = false` default |
 | D8 | Capture flow | Multiple direct-to-Lithos entry points (CLI, Obsidian macro, coding MCP, A2A); no Obsidian → Lithos promotion mechanism |
 | D9 | Doctypes projected | v1 ships tasks + project contexts only; PRDs/ADRs/story briefs added later as `[[subscriptions]]` |
@@ -99,6 +99,11 @@ The following decisions are locked. References are to the conversation that prod
 | D15 | Multi-host | Samsara is the vault host (only Loom host running `obsidian-sync`); other Loom hosts run headless |
 | D16 | Subscription handler model | Built-in async coroutines for v1; subprocess opt-in via SDK later |
 | D17 | Untick semantics | Unticking a projected task posts a `[ReopenRequested]` finding on the completed task; no automatic reopen |
+| D18 | Priority | `task.metadata.priority` enum (`highest \| high \| medium \| low \| lowest`); projection maps to `🔺⏫🔼🔽⏬`, absent = no emoji; bidirectional (Obsidian emoji edits push to Lithos via fs-watcher) |
+| D19 | Dependencies | `task.metadata.depends_on` projected as one `⛔ lithos:<dep_id>` per entry; one-way (Lithos canonical, no push-back from Obsidian line edits — dependency graph is structurally important and line-diff editing is fragile) |
+| D20 | Resolved-task TTL | Completed and cancelled tasks remain in projection for 7 days (configurable: `[obsidian_sync] resolved_ttl_days = 7`) before dropping; existing `status.type is TODO` queries naturally exclude them so no inbox clutter |
+| D21 | Status type sync | `[ ]` ↔ `open`, `[x]` ↔ `completed`, `[-]` ↔ `cancelled` are bidirectional; `[/]` (in progress) and `[>]` (rescheduled) on projected lines are detected by fs-watcher but no-op (informational only, not synced to Lithos) |
+| D22 | Created date | `task.created_at` exists in Lithos but is **not** projected — adds visual noise without query-driving value |
 
 ## Lithos Prerequisites (Verified 2026-05-05)
 
@@ -134,10 +139,10 @@ Verified against `/home/dns/projects/lithos/code/lithos/docs/SPECIFICATION.md` v
 
 | Item | Blocking | Status |
 |------|----------|--------|
-| `task.metadata` field on tasks | All `metadata.*` references throughout Loom design | `agent-lore/lithos#215` (already known from PLAN.md) |
-| `lithos_task_reopen` tool | Clean untick semantics (current workaround: `[ReopenRequested]` finding) | New issue to file against Lithos |
+| `task.metadata` field on tasks | All `metadata.*` references throughout Loom design (including `metadata.priority`, `metadata.depends_on`, `metadata.scheduled_for`, `metadata.project`, `metadata.story_doc_id`, `metadata.prd_doc_id`, `metadata.integration_branch`, `metadata.pr_url`, `metadata.host_affinity`, `metadata.github_issue_url`, `metadata.parent_task_id`) | `agent-lore/lithos#215` (already known from PLAN.md) |
+| `lithos_task_reopen` tool | Clean untick semantics (current workaround: `[ReopenRequested]` finding per D17) | `agent-lore/lithos#243` |
 
-Track 1 slices 1–5 are unblocked by the existing Lithos surface modulo `task.metadata`. The latter is on the existing PLAN.md critical path.
+Track 1 slices 1–5 are unblocked by the existing Lithos surface modulo `task.metadata`. The latter is on the existing PLAN.md critical path. **Slice 0 (bus + supervisor scaffolding) is independent of `#215`** and can begin immediately while `#215` lands; the metadata dependency only bites from slice 1 onwards.
 
 ## User Stories
 
@@ -157,40 +162,47 @@ Vertical slices, ordered by build sequence within each phase. Each slice is inde
 7. As an operator, I want a TOML `[obsidian_sync]` section declaring `vault_path`, `tasks_file = "_lithos/tasks.md"`, and projection filter knobs, so that the Supervisor knows whether to spawn `obsidian-sync` on this host (samsara only).
 8. As an operator, I want an `obsidian-projection` subscription that listens to `lithos.task.{created,updated,completed,cancelled}`, filters via `is_human_actionable(task, routes=...)`, and rewrites `_lithos/tasks.md` with one projected line per matching task, so that my Tasks-plugin daily and inbox queries naturally include human-actionable Lithos work.
 9. As an operator, I want each projected line to carry `🆔 lithos:<id>`, computed `📅 <date>` (metadata override else state-driven), `#project/<slug>`, and `#lithos/<route-name>` tags, so that downstream Tasks-plugin queries can sort and filter by route, project, and date without parsing the line.
-10. As an operator, I want the projected file to be written atomically (temp + fsync + rename) and only when content has actually changed, so that Obsidian Sync sees clean atomic updates and idempotent re-runs are no-ops.
-11. As an operator, I want `lithos-loom doctor` (run on first boot) to verify the configured `vault_path` exists, the `_lithos/` subdirectory is creatable, and a probe write+read round-trip works, so that misconfiguration surfaces immediately.
+10. As an operator, I want priority emoji (`🔺⏫🔼🔽⏬`) projected from `task.metadata.priority` (omitted when absent), so that high-priority human-actionable Lithos work is visually distinct in my daily and inbox views and existing Tasks-plugin priority sorting works unchanged.
+11. As an operator, I want one `⛔ lithos:<dep_id>` marker per entry in `task.metadata.depends_on` rendered on each projected line, so that the Tasks plugin recognises blocked tasks natively and my queries can hide or surface blocked work as appropriate.
+12. As an operator, I want dependency-blocked tasks to still project (D6 revised), so that I have visibility into upcoming work without their being silently hidden behind a runtime predicate.
+13. As an operator, I want completed and cancelled tasks resolved within `resolved_ttl_days` (default 7) to remain in `_lithos/tasks.md` with `[x]` / `[-]` status and `✅ <date>` / `❌ <date>` markers, dropping after the TTL elapses, so that I can run "tasks done this week" / "tasks cancelled this week" queries without polluting the open-task inbox.
+14. As an operator, I want the projected file to be written atomically (temp + fsync + rename) and only when content has actually changed, so that Obsidian Sync sees clean atomic updates and idempotent re-runs are no-ops.
+15. As an operator, I want `lithos-loom doctor` (run on first boot) to verify the configured `vault_path` exists, the `_lithos/` subdirectory is creatable, and a probe write+read round-trip works, so that misconfiguration surfaces immediately.
 
-### Slice 2 — Completion push (tick semantics)
+### Slice 2 — Status push and bidirectional editing
 
-12. As an operator, I want a filesystem watcher source that watches `<vault>/_lithos/tasks.md` and emits `obsidian.task.toggled` events with prior+new tick state and parsed Lithos task ID, so that subscriptions can react to ticks without polling the file.
-13. As an operator, I want an `obsidian-completion` subscription that listens to `obsidian.task.toggled` for tick-on transitions and calls `lithos_task_complete(task_id, agent="lithos-orchestrator-<host>")`, so that ticking a projected task in Obsidian completes it in Lithos.
-14. As an operator, I want untick transitions (tick-off after a previous tick-on) to post a `[ReopenRequested]` finding on the completed Lithos task, so that I have a signal in lithos-lens that the task should be revisited, until upstream `lithos_task_reopen` lands.
-15. As an operator, I want subscription idempotency enforced: re-firing `obsidian-completion` for an already-completed task is a no-op (gated on a pre-check via `lithos_task_status`), so that source-replay on restart is safe.
-16. As an operator, I want the fs-watcher to suppress events caused by its own subscriptions' rewrites (mtime + content-hash compare against last-known), so that the projection-write-then-watcher-fires-then-push feedback loop cannot occur.
+16. As an operator, I want a filesystem watcher source that watches `<vault>/_lithos/tasks.md` and emits `obsidian.task.status_changed` events with prior+new status enum (`[ ]` / `[x]` / `[-]` / `[/]` / `[>]`) and parsed Lithos task ID, so that subscriptions can react to status transitions without polling the file.
+17. As an operator, I want an `obsidian-status-transition` subscription that on `[ ]` → `[x]` calls `lithos_task_complete(task_id, agent="lithos-orchestrator-<host>")`, so that ticking a projected task in Obsidian completes it in Lithos.
+18. As an operator, I want the same subscription to handle `[ ]` → `[-]` by calling `lithos_task_cancel(task_id, agent=...)`, so that I can cancel a task from Obsidian by changing its status marker.
+19. As an operator, I want `[x]` → `[ ]` (untick) transitions to post a `[ReopenRequested]` finding on the completed Lithos task per D17, so that I have a signal in lithos-lens that the task should be revisited, until upstream `lithos_task_reopen` lands.
+20. As an operator, I want `[/]` and `[>]` transitions on projected lines detected by the fs-watcher but no-op (with a debug log), so that my Obsidian-only conventions for "in progress" and "rescheduled" don't accidentally trigger Lithos state changes.
+21. As an operator, I want an `obsidian-priority-changed` event emitted by the fs-watcher when the priority emoji on a projected line changes, and a corresponding subscription that calls `lithos_task_update(task_id, metadata={"priority": <enum>})`, so that priority adjustments in Obsidian flow back to Lithos canonically.
+22. As an operator, I want subscription idempotency enforced: re-firing `obsidian-status-transition` for an already-completed/cancelled task is a no-op (gated on a pre-check via `lithos_task_status`), and re-firing `obsidian-priority-changed` for an unchanged priority is a no-op, so that source-replay on restart is safe.
+23. As an operator, I want the fs-watcher to suppress events caused by its own subscriptions' rewrites (mtime + content-hash compare against last-known), so that the projection-write-then-watcher-fires-then-push feedback loop cannot occur.
 
 ### Slice 3 — Capture macro
 
-17. As an operator, I want a Templater (or QuickAdd) macro `Create Lithos task` bound to a hotkey that prompts for project (autocompleted from Loom TOML), title (defaulting to selected text), optional brief, optional scheduled date, and tags, then calls `lithos_task_create` and inserts a projected line at cursor, so that I can capture project work from Obsidian without leaving the editor.
-18. As an operator, I want the inserted line to be born projected — `🆔 lithos:<id>` + frontmatter-consistent date and tags — so that the next sync recognises it and does not duplicate, and there is no Obsidian-only "captured but not yet promoted" intermediate state.
-19. As an operator, I want the macro to surface Lithos errors (validation, duplicate, network) to a notice popup with retry guidance, so that capture failures are obvious rather than silent.
-20. As an operator, I want optional macro arguments (`--no-insert`, `--target-file`) so that the same macro powers more advanced flows like "create from CLI but write the line to a specified note," so that capture is composable with my existing daily-note conventions.
+24. As an operator, I want a Templater (or QuickAdd) macro `Create Lithos task` bound to a hotkey that prompts for project (autocompleted from Loom TOML), title (defaulting to selected text), optional brief, optional scheduled date, optional priority, and tags, then calls `lithos_task_create` and inserts a projected line at cursor, so that I can capture project work from Obsidian without leaving the editor.
+25. As an operator, I want the inserted line to be born projected — `🆔 lithos:<id>` + frontmatter-consistent date, priority, and tags — so that the next sync recognises it and does not duplicate, and there is no Obsidian-only "captured but not yet promoted" intermediate state.
+26. As an operator, I want the macro to surface Lithos errors (validation, duplicate, network) to a notice popup with retry guidance, so that capture failures are obvious rather than silent.
+27. As an operator, I want optional macro arguments (`--no-insert`, `--target-file`) so that the same macro powers more advanced flows like "create from CLI but write the line to a specified note," so that capture is composable with my existing daily-note conventions.
 
 ### Slice 4 — Project context one-way pull
 
-21. As an operator, I want an SSE source that subscribes to Lithos's `GET /events` filtered to `note.{created,updated,deleted}`, replays buffered events on reconnect via `Last-Event-ID`, falls back to polling when SSE returns 503, and publishes `lithos.note.*` events onto the bus, so that doc lifecycle events drive subscriptions live rather than on poll cadence.
-22. As an operator, I want a `project-context-projection` subscription that listens to `lithos.note.*` events, filters via `path_prefix == "projects/" AND tags includes "project-context"`, and writes/rewrites `_lithos/projects/<slug>/<filename>.md` with the doc body and the Lithos-managed frontmatter, so that project context docs appear as Markdown files in my vault.
-23. As an operator, I want the projected frontmatter to include `lithos_id`, `lithos_version`, `lithos_updated_at`, `slug` (= directory name), `status` (mirroring Lithos `status` field), and any tags, so that my existing `task.file.property('status') === 'active'` query patterns continue to filter projected project files identically.
-24. As an operator, I want a `lithos-loom project list` CLI subcommand that enumerates Lithos project context docs (via `lithos_list(path_prefix="projects/")`), shows their slug, status, and presence in the local TOML, so that I can see at a glance which projects are KB-canonical vs. Loom-managed on this host.
-25. As an operator, I want `lithos-loom doctor` to verify that every TOML `[projects.<slug>]` entry has a corresponding Lithos project context doc at `knowledge/projects/<slug>/`, so that machine-local automation cannot reference non-existent projects.
+28. As an operator, I want an SSE source that subscribes to Lithos's `GET /events` filtered to `note.{created,updated,deleted}`, replays buffered events on reconnect via `Last-Event-ID`, falls back to polling when SSE returns 503, and publishes `lithos.note.*` events onto the bus, so that doc lifecycle events drive subscriptions live rather than on poll cadence.
+29. As an operator, I want a `project-context-projection` subscription that listens to `lithos.note.*` events, filters via `path_prefix == "projects/" AND tags includes "project-context"`, and writes/rewrites `_lithos/projects/<slug>/<filename>.md` with the doc body and the Lithos-managed frontmatter, so that project context docs appear as Markdown files in my vault.
+30. As an operator, I want the projected frontmatter to include `lithos_id`, `lithos_version`, `lithos_updated_at`, `slug` (= directory name), `status` (mirroring Lithos `status` field), and any tags, so that my existing `task.file.property('status') === 'active'` query patterns continue to filter projected project files identically.
+31. As an operator, I want a `lithos-loom project list` CLI subcommand that enumerates Lithos project context docs (via `lithos_list(path_prefix="projects/")`), shows their slug, status, and presence in the local TOML, so that I can see at a glance which projects are KB-canonical vs. Loom-managed on this host.
+32. As an operator, I want `lithos-loom doctor` to verify that every TOML `[projects.<slug>]` entry has a corresponding Lithos project context doc at `knowledge/projects/<slug>/`, so that machine-local automation cannot reference non-existent projects.
 
 ### Slice 5 — Bidirectional project context + create-project macro
 
-26. As an operator, I want the filesystem watcher to also watch `_lithos/projects/<slug>/*.md`, debounce file-save events (250ms), and emit `obsidian.note.modified` events, so that subscriptions can react to vault edits.
-27. As an operator, I want a `note-push` subscription that listens to `obsidian.note.modified`, parses the file's frontmatter to extract `lithos_id` and `lithos_version`, calls `lithos_write(id=lithos_id, content=body, expected_version=lithos_version)`, and updates the local frontmatter `lithos_version` on success, so that vault edits propagate to Lithos.
-28. As an operator, I want `version_conflict` envelopes from `lithos_write` to trigger a conflict procedure: the local file is moved to `_lithos/conflicts/<slug>.<filename>.<timestamp>.md`, the canonical Lithos version is pulled into the original path, and a notification is posted, so that concurrent edits are surfaced explicitly rather than silently overwritten.
-29. As an operator, I want a Templater macro `Create Lithos project` that prompts for title and slug (defaulting to slugified title, validated against `[a-z0-9-]+` and slug-collision via `lithos_list`), creates the Lithos project context doc at `knowledge/projects/<slug>/context.md` via `lithos_write`, and lets the daemon's pull populate the local file, so that new projects can be seeded from Obsidian without leaving the editor.
-30. As an operator, I want a `lithos-loom project import <path>` CLI helper that reads a local Markdown file, creates a Lithos project context doc with its body + tags + slug, and prints the projected file location, so that I can migrate my existing `projects/<x>.md` files into Lithos-canonical form one at a time.
-31. As an operator, I want frontmatter edits (tags, status) to **not** push from Obsidian via the `note-push` subscription; only body changes push. Frontmatter changes go through a separate `Edit doc tags` macro, so that accidental tag-list edits in Obsidian don't get reflected unintentionally as Lithos doc updates.
+33. As an operator, I want the filesystem watcher to also watch `_lithos/projects/<slug>/*.md`, debounce file-save events (250ms), and emit `obsidian.note.modified` events, so that subscriptions can react to vault edits.
+34. As an operator, I want a `note-push` subscription that listens to `obsidian.note.modified`, parses the file's frontmatter to extract `lithos_id` and `lithos_version`, calls `lithos_write(id=lithos_id, content=body, expected_version=lithos_version)`, and updates the local frontmatter `lithos_version` on success, so that vault edits propagate to Lithos.
+35. As an operator, I want `version_conflict` envelopes from `lithos_write` to trigger a conflict procedure: the local file is moved to `_lithos/conflicts/<slug>.<filename>.<timestamp>.md`, the canonical Lithos version is pulled into the original path, and a notification is posted, so that concurrent edits are surfaced explicitly rather than silently overwritten.
+36. As an operator, I want a Templater macro `Create Lithos project` that prompts for title and slug (defaulting to slugified title, validated against `[a-z0-9-]+` and slug-collision via `lithos_list`), creates the Lithos project context doc at `knowledge/projects/<slug>/context.md` via `lithos_write`, and lets the daemon's pull populate the local file, so that new projects can be seeded from Obsidian without leaving the editor.
+37. As an operator, I want a `lithos-loom project import <path>` CLI helper that reads a local Markdown file, creates a Lithos project context doc with its body + tags + slug, and prints the projected file location, so that I can migrate my existing `projects/<x>.md` files into Lithos-canonical form one at a time.
+38. As an operator, I want frontmatter edits (tags, status) to **not** push from Obsidian via the `note-push` subscription; only body changes push. Frontmatter changes go through a separate `Edit doc tags` macro, so that accidental tag-list edits in Obsidian don't get reflected unintentionally as Lithos doc updates.
 
 ## Implementation Decisions
 
@@ -202,10 +214,45 @@ Vertical slices, ordered by build sequence within each phase. Each slice is inde
 - **LithosSSE** (`lithos_loom.sources.lithos_sse`) — long-running async client for `GET /events` with reconnect, `Last-Event-ID`, polling fallback.
 - **FilesystemWatcher** (`lithos_loom.sources.fs_watcher`) — `watchdog` wrapper, debounce, emit `obsidian.*` events, suppress self-write loop via mtime+hash compare.
 - **Subscription registry** (`lithos_loom.subscriptions.__init__`) — entry-point discovery, retry policy enforcement, `[Friction]` posting on persistent failure.
-- **Projection subscriptions** (`lithos_loom.subscriptions.{obsidian_projection, obsidian_completion, project_context_projection, note_push}`) — atomic file rewrite, content-hash dedup, frontmatter management.
+- **Projection subscriptions** (`lithos_loom.subscriptions.{obsidian_projection, obsidian_status_transition, obsidian_priority_changed, project_context_projection, note_push}`) — atomic file rewrite, content-hash dedup, frontmatter management, status enum mapping, priority emoji parsing.
 - **Tag-mapping helpers** — `is_human_actionable`, `route_name_to_tag`, `slugify`.
 - **Optimistic locking helper** — wraps `lithos_write` with `expected_version` plumbing and conflict directory move.
 - **Conflict directory** (`lithos_loom.conflicts`) — atomic move of local file, pull canonical, notification.
+
+### Obsidian Tasks plugin attribute mapping
+
+Track 1 must integrate with the user's existing Tasks-plugin queries (daily, inbox, weekly, etc.). The full attribute table:
+
+| Plugin attribute | Plugin syntax | Lithos source | Direction | Notes |
+|---|---|---|---|---|
+| Tick state — TODO | `[ ]` | `task.status == "open"` | bidirectional | default for open tasks |
+| Tick state — DONE | `[x]` | `task.status == "completed"` | bidirectional | tick triggers `lithos_task_complete`; auto-`✅ <date>` from plugin |
+| Tick state — CANCELLED | `[-]` | `task.status == "cancelled"` | bidirectional | `[ ]` → `[-]` triggers `lithos_task_cancel` |
+| Tick state — IN PROGRESS | `[/]` | — | none | detected by fs-watcher, no-op (Obsidian-only convention) |
+| Tick state — RESCHEDULED | `[>]` | — | none | detected, no-op (Obsidian-only convention) |
+| Due date | `📅 YYYY-MM-DD` | `metadata.scheduled_for` (override) or computed | bidirectional via metadata | computed `today` for human-blocking; absent for backlog |
+| Priority | `🔺 ⏫ 🔼 🔽 ⏬` | `metadata.priority` enum | bidirectional | absent emoji = no priority |
+| Task ID | `🆔 lithos:<uuid>` | `task.id` | one-way | identity, never edited by user |
+| Dependencies | `⛔ lithos:<dep_id>` | `metadata.depends_on[]` | one-way (Lithos canonical) | one marker per dep; line edits don't push back |
+| Tags | `#project/<slug>`, `#lithos/<route-name>`, plus Lithos `task.tags` | `task.metadata.project`, claim's route, `task.tags` | one-way for `#project` and `#lithos`; Lithos tags pass through | `#daily` is reserved (never emitted) |
+| Done date | `✅ YYYY-MM-DD` | (auto-set by plugin on tick) | n/a | Lithos has `task.completed_at`; not separately rendered |
+| Cancelled date | `❌ YYYY-MM-DD` | rendered for `[-]` cancelled tasks within TTL | one-way | dropped after `resolved_ttl_days` |
+| Scheduled date | `⏳` | — | none | not differentiated from due date in v1 |
+| Start date | `🛫` | — | none | deferred |
+| Created date | `➕` | — | none | `task.created_at` exists in Lithos but not projected (avoids noise) |
+| Recurrence | `🔁` | — | none | no Lithos concept; deferred |
+
+### Projected line shape (rendered example)
+
+```markdown
+- [ ] Review PR for story 03 ⏫ 🆔 lithos:abc123 ⛔ lithos:def456 📅 2026-05-05 #project/lithos-loom #lithos/review-human
+```
+
+Field order is operator-readable; the Tasks plugin parses positionally-flexible. A cancelled task within the TTL window:
+
+```markdown
+- [-] Update old README ❌ 2026-05-04 🆔 lithos:xyz789 #project/lithos-loom
+```
 
 ### Configuration schema additions
 
@@ -216,6 +263,7 @@ tasks_file = "_lithos/tasks.md"
 projects_dir = "_lithos/projects"
 conflicts_dir = "_lithos/conflicts"
 fs_debounce_ms = 250
+resolved_ttl_days = 7      # how long completed/cancelled tasks linger before dropping
 
 [lithos]
 url = "http://localhost:8765"
@@ -329,8 +377,12 @@ The following are deferred to Track 2 (`docs/prd/mvp.md`) or to the full PRD (`d
 - Hot-reload of TOML config (operator restarts the supervisor)
 - Slug rename mechanism (D14 — explicitly out of scope)
 - Doctype projection beyond tasks + project contexts (PRDs, ADRs, story briefs, run-logs, findings — all deferred)
-- Frontmatter editing from Obsidian pushed to Lithos (Slice 5 user story 31; defer until clear demand)
+- Frontmatter editing from Obsidian pushed to Lithos (Slice 5 user story 38; defer until clear demand)
 - Native Obsidian plugin (custom plugin code is heavier than Templater/QuickAdd; reconsider after Slice 3 daily use)
+- **Per-project completion log** — append-only `_lithos/projects/<slug>/done.md` capturing every completed task for a project over time, useful for retrospectives and "what shipped this quarter" queries. Conceptually a new `project-completion-log` subscription on `lithos.task.completed` filtered by `metadata.project`. Independent of the global `_lithos/tasks.md` projection's TTL behaviour. Track 1.5 candidate.
+- Created date in projected lines (`➕`) — present in Lithos as `task.created_at`, deliberately not projected to keep Obsidian lines uncluttered
+- Start date (`🛫`), scheduled-vs-due distinction (`⏳`), and recurrence (`🔁`) — not represented in v1; revisit if query patterns require differentiation
+- `[/]` (in progress) representation in Lithos — Obsidian uses it locally; not synced. If demand emerges, candidates are: a Lithos `task.status` extension to include `in_progress`, or a `metadata.in_progress` flag, or an `[InProgress]` finding
 
 ## Further Notes
 
