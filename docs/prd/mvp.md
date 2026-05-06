@@ -15,6 +15,8 @@ labels: [needs-triage, mvp, lithos-loom, orchestrator, plugin-contract]
 
 # Lithos Loom — MVP (Proof of Concept)
 
+> **Re-prioritisation notice (2026-05-05):** This MVP is now **Track 2** of a two-track plan. **Track 1** ([docs/prd/integration.md](integration.md)) is the Lithos ↔ Obsidian bridge and ships first; it pre-invests the `sources → bus → subscribers` architecture so the plugins below slot into the existing bus without rewriting the daemon. The 35 user stories in this PRD are **unchanged in scope and intent** — only the architecture they sit on top of and the sequencing relative to Track 1 have changed. See [docs/PLAN.md](../PLAN.md) for the integrated decision table (D1–D22) and [docs/prd/integration.md](integration.md) for Track 1 detail.
+
 ## Problem Statement
 
 I write PRDs by hand using Pocock-style skills (problem statement, solution, numbered user stories) and would like LLM-driven coding agents to implement them story-by-story under my supervision. Today my options are:

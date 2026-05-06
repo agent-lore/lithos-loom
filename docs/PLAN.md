@@ -1,13 +1,16 @@
 # Lithos Loom — Build Plan
 
 Status: draft
-Date: 2026-04-30
+Date: 2026-04-30 (re-prioritised 2026-05-05)
 Owner: Dave Snowdon
 Related repos: [lithos](https://github.com/agent-lore/lithos), [lithos-lens](../lithos-lens), [ralph-plus-plus](../../agents/ralph-dev/ralph-plus-plus) (source of salvageable bits)
 
+> **Re-prioritisation notice (2026-05-05):** Track 1 (Lithos ↔ Obsidian bridge) ships **before** the original MVP plan (now Track 2). Architectural reframe to `sources → bus → subscribers` is pre-invested during Track 1 with no scope expansion to Track 2. See [docs/prd/integration.md](prd/integration.md) for the Track 1 PRD and the 22 locked design decisions (D1–D22) for the integrated system.
+
 > See also:
-> - [docs/prd/mvp.md](prd/mvp.md) — PRD for the proof-of-concept
-> - [docs/prd/full.md](prd/full.md) — PRD for the full automated workflow system
+> - [docs/prd/integration.md](prd/integration.md) — **Track 1 PRD** (Obsidian bridge; ships first)
+> - [docs/prd/mvp.md](prd/mvp.md) — Track 2 PRD (PRD → PR automation; ships second)
+> - [docs/prd/full.md](prd/full.md) — Full automated workflow system roadmap (A1–A10)
 > - Project context (in Lithos KB): `projects/lithos-loom/lithos-loom-project-context.md`
 > - Architecture design (in Lithos KB): `projects/lithos-loom/lithos-loom-architecture-design.md`
 > - Conveyor analysis (in Lithos KB): `projects/lithos-loom/conveyer-notes.md`
@@ -37,6 +40,9 @@ This is the orchestration layer that connects Lithos (knowledge + task store) to
 | Sandbox | Direct Claude invocation in MVP. Docker sandbox is a deferred A10 enhancement. |
 | Deployment | Loom runs as a **host process**, not a docker service. Lithos and Influx are services (well-defined protocols, no shelling-out, no host filesystem coupling); Loom is an orchestrator with deep host integration (git worktrees, `claude`/`codex`/`gh` CLI auth in `~/`, plugin subprocess spawning). MVP runs manually via `uv run lithos-loom run` in terminal or tmux. Systemd `--user` unit is a deferred polish item. The template's `docker/` directory is dropped during bootstrap; `python-dotenv` and `.env`-style config from the template are retained for per-host paths (Lithos URL, work_dir, Claude config dir). |
 | Agent identity | Loom registers as `lithos-orchestrator-<host>`; coding sub-agents are `claude-code` / `codex` per the existing agent identity model. |
+| Architecture (added 2026-05-05) | `sources → bus → subscribers`. Loom is an event router; the route runner is one kind of subscriber (claim-bound). Subscriptions are fire-and-forget side effects with per-subscription retry. Supervisor pattern: one TOML config, subprocess children, monolithic v1 lifecycle. See [docs/prd/integration.md](prd/integration.md) D3, D4, D11, D12, D13, D16. |
+| Sequencing (added 2026-05-05) | Track 1 (Obsidian bridge) ships first with bus architecture pre-investment; Track 2 (this PLAN's plugin MVP) ships second with plugins slotting into the existing bus. Daily-friction value framing replaces the original Loom-first ordering. |
+| Slug convention (added 2026-05-05) | Slug = directory name under `knowledge/projects/<slug>/` in Lithos KB. Loom TOML `[projects.<slug>]` matches; Lithos enforces uniqueness via `slug_collision`. No frontmatter slug field, no v1 rename mechanism. |
 
 ## Bundled plugins
 
@@ -135,7 +141,36 @@ Result schema mirrors the Ralph++ unattended-mode contract:
 | `task.metadata.pr_url` | The story's GitHub PR URL |
 | Lithos finding, summary prefixed `[Plan]` / `[Drift]` / `[Recovery]` / `[Friction]` / `[ReviewPending]` / `[ReviewMerged]` / `[ReviewRejected]` | Conveyor-style breadcrumbs queryable per task |
 
-## MVP scope (this week)
+## Lithos prerequisites (verified 2026-05-05)
+
+Verified against `lithos/docs/SPECIFICATION.md` v0.1.5 by inspection. Full audit lives in [docs/prd/integration.md § Lithos Prerequisites](prd/integration.md#lithos-prerequisites-verified-2026-05-05); summary of upstream blockers below.
+
+| Item | Blocking | Status |
+|------|----------|--------|
+| `task.metadata` field on tasks | All `metadata.*` references throughout this plan (`depends_on`, `parallelizable`, `project`, `prd_doc_id`, `story_doc_id`, `integration_branch`, `pr_url`, `priority`, `scheduled_for`, `host_affinity`, `github_issue_url`, `parent_task_id`) | `agent-lore/lithos#215` |
+| `lithos_task_reopen` tool | Clean untick semantics in Track 1 (current workaround: `[ReopenRequested]` finding) | `agent-lore/lithos#243` |
+
+Findings that simplified the design vs. earlier assumptions:
+- Slug = filename / directory name; Lithos enforces uniqueness with `slug_collision` envelope. No frontmatter slug field needed.
+- `lithos_write` accepts `id` for update + `expected_version` for optimistic locking; `version_conflict` envelope returns `current_version`. This gives Track 1 v0.3 (bidirectional project context) clean conflict semantics.
+- Doc events are named `note.created` / `note.updated` / `note.deleted` (not `doc.*`). Available on the `GET /events` SSE endpoint.
+- `note_type` enum does not include `project_context`; use `note_type: concept` + tag `project-context`.
+
+## Sequencing notes
+
+Track 1 → Track 2 → full system roadmap (A1–A10) is the macro ordering. Within that, three nuances:
+
+1. **Slice 0 of Track 1 (bus + supervisor scaffolding) is independent of `agent-lore/lithos#215`.** It can begin immediately and produces no user-visible features but pre-invests the architecture. The `#215` `task.metadata` field is required from **slice 1 onwards** (the moment task projection actually needs `metadata.scheduled_for`, `metadata.priority`, etc.). If `#215` lands behind schedule, slice 0 is the right place to be in the meantime.
+
+2. **Track 2 starts after Track 1 has been daily-usable for at least a week, not on slice 5 completion.** The soaking period is deliberate: it surfaces real-world friction in projection filters, line shape, query patterns, and capture macros that synthetic testing will miss. Don't pile Track 2 plugin work on top of an unproven Track 1 surface.
+
+3. **Track gating, not strict serialisation.** Once Track 2 begins, expect that `prd-decompose`-created tasks and `story-implement`-claimed tasks will surface Track 1 polish work in flight (formatting edge cases, filter exclusions, tag conventions for new route names). Handle those as tactical fixes alongside Track 2 progress rather than as a separate phase. Track 1 is "done enough to start Track 2," not "frozen forever."
+
+The full A1–A10 roadmap (see `docs/prd/full.md`) layers on top of Tracks 1+2 in the order documented there: A1 → A2 → A3 → A9 (pulled forward) → A4 → A5 → A8 → A6 → A7 → A10. Each layer remains independently shippable.
+
+## MVP scope (Track 2 — this week after Track 1 lands)
+
+> **Note:** This MVP is now Track 2. Track 1 (Obsidian bridge — see [docs/prd/integration.md](prd/integration.md)) ships first and pre-invests the bus architecture. The Track 2 scope below is unchanged from the original plan; only sequencing changed.
 
 Critical path: take `lithos-lens/docs/prd/milestone-1-operator-view.md`, decompose it, implement stories sequentially via Claude, land each behind a GitHub PR, with the trail visible in lithos-lens.
 

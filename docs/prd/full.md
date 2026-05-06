@@ -17,6 +17,8 @@ labels: [needs-triage, lithos-loom, orchestrator, full-system]
 
 # Lithos Loom — Full Automated Workflow System
 
+> **Re-prioritisation notice (2026-05-05):** A1–A10 sequencing now follows **Track 1** completion. Track 1 (the Lithos ↔ Obsidian bridge — [docs/prd/integration.md](integration.md)) ships first; **Track 2** ([docs/prd/mvp.md](mvp.md)) ships second; the A1–A10 layer described below stacks on top. The `sources → bus → subscribers` architecture pre-invested in Track 1 makes A6 (A2A endpoint), A7 (GitHub webhook receiver), and the SSE event subscriber from US-53a additive (each is a new source) rather than refactors. See [docs/PLAN.md](../PLAN.md) for the integrated decision table (D1–D22).
+
 ## Problem Statement
 
 The MVP (`docs/prd/mvp.md`) proves the orchestration loop works against one PRD on one workstation, but it leaves most of the actual workflow manual: I write PRDs by hand outside Loom, I review every PR by hand, I merge integration branches by hand, I notice failures by hand, the agent invocations have no awareness of the wider Lithos knowledge base, the system has no memory of why prior runs went wrong, and the whole thing only runs on one machine.
