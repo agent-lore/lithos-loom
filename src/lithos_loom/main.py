@@ -14,6 +14,7 @@ and :mod:`lithos_loom.route`. This module is the dispatcher only.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import typer
 
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
+from lithos_loom.supervisor import Supervisor, default_categories
 
 app = typer.Typer(
     name="lithos-loom",
@@ -48,10 +50,9 @@ def run(
     cfg = _load_or_exit(config)
     if dry_run:
         raise NotImplementedError("dry-run mode — implement per docs/prd/full.md US-5a")
-    raise NotImplementedError(
-        "daemon.run(cfg) — implement per docs/prd/mvp.md US-5 "
-        f"(loaded {cfg.source_path})"
-    )
+    sup = Supervisor(cfg, default_categories())
+    exit_code = asyncio.run(sup.run())
+    raise typer.Exit(exit_code)
 
 
 @app.command()
