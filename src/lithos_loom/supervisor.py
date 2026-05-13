@@ -110,9 +110,15 @@ class Supervisor:
         self._install_signal_handlers(loop)
 
         try:
-            await self._spawn_all()
-            await self._wait_for_shutdown_or_crash()
-            await self._terminate_remaining()
+            try:
+                await self._spawn_all()
+                await self._wait_for_shutdown_or_crash()
+            finally:
+                # Always reap children — including those spawned before a
+                # later spawn raised, or before the run task was cancelled.
+                # Without this, a partial-startup failure would orphan
+                # subprocesses and break the "single start/stop surface".
+                await self._terminate_remaining()
         finally:
             self._uninstall_signal_handlers(loop)
 

@@ -178,6 +178,53 @@ async def test_supervisor_records_child_crash_and_shuts_down_others(
     assert survivor.proc.returncode in (0, -signal.SIGTERM)
 
 
+async def test_supervisor_terminates_already_spawned_children_when_later_spawn_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial startup must not orphan children.
+
+    If spawn N+1 raises after spawn N succeeded, the supervisor must SIGTERM
+    the already-running children before the exception bubbles. Otherwise a
+    failed startup leaves subprocesses adrift, breaking the "single start/
+    stop surface" property of US1.
+    """
+    real_spawn = asyncio.create_subprocess_exec
+    call_count = {"n": 0}
+
+    async def flaky_spawn(
+        *args: object, **kwargs: object
+    ) -> asyncio.subprocess.Process:
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise RuntimeError("simulated spawn failure")
+        return await real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", flaky_spawn)
+
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[
+            _echo_category("first"),
+            _echo_category("second"),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="simulated spawn failure"):
+        await asyncio.wait_for(sup.run(), timeout=5.0)
+
+    # The first child was spawned successfully — it must have been reaped.
+    assert len(sup.children) == 1
+    first = sup.children[0]
+    assert first.spec.name == "first"
+    assert first.proc.returncode is not None, (
+        "first child was orphaned when second spawn failed"
+    )
+    # Clean SIGTERM honour (0) or signal-killed (-SIGTERM/-SIGKILL) — any of
+    # these proves the supervisor reaped it rather than leaking it.
+    assert first.proc.returncode in (0, -signal.SIGTERM, -signal.SIGKILL)
+
+
 async def test_supervisor_does_not_restart_crashed_child(tmp_path: Path) -> None:
     """v1 lifecycle is monolithic: no auto-restart on child crash."""
     sup = Supervisor(
