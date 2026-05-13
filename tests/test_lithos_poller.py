@@ -79,26 +79,73 @@ def _drain(sub: Subscription) -> list[str]:
 # ── Per-tick diff/emit semantics ────────────────────────────────────────
 
 
-async def test_poll_once_first_tick_emits_created_for_open_tasks() -> None:
+async def test_poll_once_first_tick_emits_created_per_open_task() -> None:
     bus = EventBus()
     listener = bus.subscribe(
         event_types=[
             "lithos.task.created",
             "lithos.task.updated",
-            "lithos.task.completed",
-            "lithos.task.cancelled",
             "lithos.task.claimed",
             "lithos.task.released",
         ]
     )
-    client = FakePoller([[_task("a"), _task("b"), _task("c", status="completed")]])
+    client = FakePoller([[_task("a"), _task("b"), _task("c")]])
     poller = LithosPoller(client=client, bus=bus, interval=0.0)
 
     await poller.poll_once()
 
-    # Open tasks emit created. Completed-on-first-sight is snapshotted but
-    # not surfaced as a created event — it's an old terminal state.
-    assert _drain(listener) == ["lithos.task.created", "lithos.task.created"]
+    assert _drain(listener) == [
+        "lithos.task.created",
+        "lithos.task.created",
+        "lithos.task.created",
+    ]
+
+
+async def test_poll_once_filters_to_open_tasks_via_status_arg() -> None:
+    """The poller MUST query Lithos with status='open' (US3 contract).
+
+    Regression test for a divergence where the poller called task_list
+    with no status filter, broadening to 'all tasks'. Story 3 explicitly
+    says the source polls open tasks; ensuring the wire-level argument
+    matches the story keeps emission semantics aligned with the PRD.
+    """
+    bus = EventBus()
+    client = FakePoller([[]])
+    poller = LithosPoller(client=client, bus=bus, interval=0.0)
+    await poller.poll_once()
+    assert client.calls[0]["status"] == "open"
+    assert client.calls[0]["with_claims"] is True
+
+
+async def test_poll_once_silently_drops_ids_that_leave_the_open_set() -> None:
+    """A task transitioning to completed/cancelled disappears from the
+    open list. The poller drops it from the snapshot without emitting
+    (terminal-state distinction is deferred to a Slice 1+ source).
+    """
+    bus = EventBus()
+    listener = bus.subscribe(
+        event_types=[
+            "lithos.task.created",
+            "lithos.task.updated",
+            "lithos.task.claimed",
+            "lithos.task.released",
+        ]
+    )
+    client = FakePoller(
+        [
+            [_task("a"), _task("b")],
+            [_task("a")],  # b vanished — was completed or cancelled, can't tell
+        ]
+    )
+    poller = LithosPoller(client=client, bus=bus, interval=0.0)
+
+    await poller.poll_once()
+    pre = _drain(listener)
+    await poller.poll_once()
+    post = _drain(listener)
+
+    assert pre == ["lithos.task.created", "lithos.task.created"]
+    assert post == []  # disappearance is silent
 
 
 async def test_poll_once_emits_updated_when_tags_change() -> None:
@@ -116,36 +163,6 @@ async def test_poll_once_emits_updated_when_tags_change() -> None:
     await poller.poll_once()
 
     assert _drain(listener) == ["lithos.task.updated"]
-
-
-async def test_poll_once_emits_completed_on_status_transition() -> None:
-    bus = EventBus()
-    listener = bus.subscribe(event_types=["lithos.task.completed"])
-    client = FakePoller(
-        [
-            [_task("a", status="open")],
-            [_task("a", status="completed")],
-        ]
-    )
-    poller = LithosPoller(client=client, bus=bus, interval=0.0)
-    await poller.poll_once()
-    await poller.poll_once()
-    assert _drain(listener) == ["lithos.task.completed"]
-
-
-async def test_poll_once_emits_cancelled_on_status_transition() -> None:
-    bus = EventBus()
-    listener = bus.subscribe(event_types=["lithos.task.cancelled"])
-    client = FakePoller(
-        [
-            [_task("a", status="open")],
-            [_task("a", status="cancelled")],
-        ]
-    )
-    poller = LithosPoller(client=client, bus=bus, interval=0.0)
-    await poller.poll_once()
-    await poller.poll_once()
-    assert _drain(listener) == ["lithos.task.cancelled"]
 
 
 async def test_poll_once_emits_claimed_when_claim_appears() -> None:
@@ -186,8 +203,6 @@ async def test_poll_once_skips_unchanged_tasks() -> None:
         event_types=[
             "lithos.task.created",
             "lithos.task.updated",
-            "lithos.task.completed",
-            "lithos.task.cancelled",
             "lithos.task.claimed",
             "lithos.task.released",
         ]
@@ -203,14 +218,6 @@ async def test_poll_once_skips_unchanged_tasks() -> None:
 
     assert pre_drain == ["lithos.task.created"]
     assert post_drain == []
-
-
-async def test_poll_once_passes_with_claims_true_to_client() -> None:
-    bus = EventBus()
-    client = FakePoller([[]])
-    poller = LithosPoller(client=client, bus=bus, interval=0.0)
-    await poller.poll_once()
-    assert client.calls[0]["with_claims"] is True
 
 
 # ── run() lifecycle ─────────────────────────────────────────────────────

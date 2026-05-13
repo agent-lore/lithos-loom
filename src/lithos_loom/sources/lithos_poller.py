@@ -1,20 +1,23 @@
-"""LithosPoller — periodic ``lithos_task_list`` source (Slice 0 US3).
+"""LithosPoller — periodic ``lithos_task_list(status="open")`` source (Slice 0 US3).
 
-Polls Lithos at a configured interval, diffs the returned list against an
-in-memory snapshot keyed by task id, and publishes ``lithos.task.*`` events
-for each transition onto the in-process :class:`EventBus`.
+Per the user story, this source polls **open** tasks only. It diffs the
+returned list against an in-memory snapshot keyed by task id and publishes
+``lithos.task.*`` events for each transition onto the in-process
+:class:`EventBus`.
 
 Emitted event types:
 
 * ``lithos.task.created`` — id newly seen this poll
-  (suppressed on first poll for tasks already in terminal state, to avoid
-  re-firing history every time the daemon restarts)
-* ``lithos.task.updated`` — same id, content changed
-  (tags, title, metadata)
-* ``lithos.task.completed`` — status went ``open → completed``
-* ``lithos.task.cancelled`` — status went ``open → cancelled``
+* ``lithos.task.updated`` — same id, content changed (tags, title, metadata)
 * ``lithos.task.claimed`` — claims went empty → non-empty
 * ``lithos.task.released`` — claims went non-empty → empty
+
+When an id disappears from the open set (because the task transitioned to
+``completed`` or ``cancelled``), the poller silently drops it from the
+snapshot. Distinguishing the two terminal states needs either a follow-up
+``task_status`` call per disappearance or a sibling source that polls
+terminal statuses; both are deferred until Slice 1+ subscribers actually
+need that distinction (the Story 5 route-runner does not).
 
 D11/D13 make this a re-authoritative source: on daemon restart the first
 poll replays whatever the current open-task list looks like, and
@@ -73,32 +76,21 @@ class LithosPoller:
 
     async def poll_once(self) -> None:
         """One poll iteration. Useful in tests + for manual triggering."""
-        tasks = await self.client.task_list(with_claims=True)
+        tasks = await self.client.task_list(status="open", with_claims=True)
         new_snapshot = {t.id: t for t in tasks}
 
         for task in tasks:
             await self._emit_for_task(task)
 
+        # Disappearing ids = task transitioned out of open. Silent drop;
+        # see module docstring for the rationale.
         self._snapshot = new_snapshot
         self._first_poll = False
 
     async def _emit_for_task(self, task: Task) -> None:
         prev = self._snapshot.get(task.id)
         if prev is None:
-            # New id this poll.
-            if self._first_poll and task.status != "open":
-                # First-ever poll picked up an already-terminal task; don't
-                # re-fire its created event every daemon restart.
-                return
             await self._publish("lithos.task.created", task)
-            return
-
-        # Status transitions take precedence over content / claim diffs.
-        if prev.status == "open" and task.status == "completed":
-            await self._publish("lithos.task.completed", task)
-            return
-        if prev.status == "open" and task.status == "cancelled":
-            await self._publish("lithos.task.cancelled", task)
             return
 
         # Claim transitions.
@@ -109,7 +101,7 @@ class LithosPoller:
             await self._publish("lithos.task.released", task)
             return
 
-        # Generic content change (tags, title, metadata, or claim shape).
+        # Generic content change (tags, title, metadata).
         if task != prev:
             await self._publish("lithos.task.updated", task)
 
