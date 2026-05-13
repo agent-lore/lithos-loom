@@ -43,15 +43,27 @@ def _task(
 
 
 class FakePoller:
-    """Records the script of polls. Each ``task_list`` call dequeues the
-    next entry; entries can be either a ``list[Task]`` (success) or an
-    ``Exception`` (raised). When the script is exhausted the next call
-    returns ``[]``.
+    """Records the script of polls.
+
+    Each ``task_list`` call dequeues the next entry from ``polls``; entries
+    can be either a ``list[Task]`` (success) or an ``Exception`` (raised).
+    When the script is exhausted the next call returns ``[]``.
+
+    ``status_responses`` maps task_id → response for the follow-up
+    ``task_status`` call: a ``Task`` (typically with status="completed" or
+    "cancelled"), ``None`` (task_not_found), or an ``Exception`` (raised).
+    Unknown ids default to ``None``.
     """
 
-    def __init__(self, polls: list[list[Task] | Exception]) -> None:
+    def __init__(
+        self,
+        polls: list[list[Task] | Exception],
+        status_responses: dict[str, Task | None | Exception] | None = None,
+    ) -> None:
         self._polls = list(polls)
+        self._status_responses = dict(status_responses or {})
         self.calls: list[dict[str, Any]] = []
+        self.status_calls: list[str] = []
 
     async def task_list(
         self,
@@ -63,6 +75,13 @@ class FakePoller:
         if not self._polls:
             return []
         nxt = self._polls.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    async def task_status(self, *, task_id: str) -> Task | None:
+        self.status_calls.append(task_id)
+        nxt = self._status_responses.get(task_id)
         if isinstance(nxt, Exception):
             raise nxt
         return nxt
@@ -117,35 +136,113 @@ async def test_poll_once_filters_to_open_tasks_via_status_arg() -> None:
     assert client.calls[0]["with_claims"] is True
 
 
-async def test_poll_once_silently_drops_ids_that_leave_the_open_set() -> None:
-    """A task transitioning to completed/cancelled disappears from the
-    open list. The poller drops it from the snapshot without emitting
-    (terminal-state distinction is deferred to a Slice 1+ source).
+async def test_poll_once_emits_completed_when_disappeared_task_is_completed() -> None:
+    """Task disappears from open set; task_status reports completed.
+
+    The poller follows up with a single task_status call and emits the
+    canonical lithos.task.completed event. Slice 1's obsidian-projection
+    subscription depends on this contract.
     """
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.completed"])
+    completed_task = _task("b", status="completed")
+    client = FakePoller(
+        polls=[[_task("a"), _task("b")], [_task("a")]],
+        status_responses={"b": completed_task},
+    )
+    poller = LithosPoller(client=client, bus=bus, interval=0.0)
+
+    await poller.poll_once()
+    _drain(listener)  # discard initial created events
+    await poller.poll_once()
+
+    assert _drain(listener) == ["lithos.task.completed"]
+    assert client.status_calls == ["b"]
+
+
+async def test_poll_once_emits_cancelled_when_disappeared_task_is_cancelled() -> None:
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.cancelled"])
+    cancelled_task = _task("b", status="cancelled")
+    client = FakePoller(
+        polls=[[_task("a"), _task("b")], [_task("a")]],
+        status_responses={"b": cancelled_task},
+    )
+    poller = LithosPoller(client=client, bus=bus, interval=0.0)
+
+    await poller.poll_once()
+    _drain(listener)
+    await poller.poll_once()
+
+    assert _drain(listener) == ["lithos.task.cancelled"]
+
+
+async def test_poll_once_silently_handles_deleted_disappeared_task() -> None:
+    """task_status returning None (task_not_found) is not a transition."""
     bus = EventBus()
     listener = bus.subscribe(
         event_types=[
             "lithos.task.created",
             "lithos.task.updated",
+            "lithos.task.completed",
+            "lithos.task.cancelled",
             "lithos.task.claimed",
             "lithos.task.released",
         ]
     )
     client = FakePoller(
-        [
-            [_task("a"), _task("b")],
-            [_task("a")],  # b vanished — was completed or cancelled, can't tell
-        ]
+        polls=[[_task("a"), _task("b")], [_task("a")]],
+        status_responses={"b": None},  # task deleted
     )
     poller = LithosPoller(client=client, bus=bus, interval=0.0)
 
     await poller.poll_once()
-    pre = _drain(listener)
+    _drain(listener)
     await poller.poll_once()
-    post = _drain(listener)
 
-    assert pre == ["lithos.task.created", "lithos.task.created"]
-    assert post == []  # disappearance is silent
+    # No completed/cancelled emission for a deleted task — only the
+    # original created events from the first poll.
+    assert _drain(listener) == []
+    assert client.status_calls == ["b"]
+
+
+async def test_poll_once_silently_handles_disappeared_task_back_to_open() -> None:
+    """Race: task transitioned out and back in between polls.
+
+    task_status reports the task is open again; the next poll will pick
+    it up via the normal open-task path. No terminal-state event fires.
+    """
+    bus = EventBus()
+    listener = bus.subscribe(
+        event_types=[
+            "lithos.task.completed",
+            "lithos.task.cancelled",
+        ]
+    )
+    reopened = _task("b", status="open")
+    client = FakePoller(
+        polls=[[_task("a"), _task("b")], [_task("a")]],
+        status_responses={"b": reopened},
+    )
+    poller = LithosPoller(client=client, bus=bus, interval=0.0)
+
+    await poller.poll_once()
+    await poller.poll_once()
+
+    assert _drain(listener) == []
+
+
+async def test_poll_once_does_not_call_task_status_when_nothing_disappeared() -> None:
+    """Stable poll → zero task_status calls; preserves the cheap-path budget."""
+    bus = EventBus()
+    same = _task("a", tags=("x",))
+    client = FakePoller(polls=[[same], [same]])
+    poller = LithosPoller(client=client, bus=bus, interval=0.0)
+
+    await poller.poll_once()
+    await poller.poll_once()
+
+    assert client.status_calls == []
 
 
 async def test_poll_once_emits_updated_when_tags_change() -> None:

@@ -118,6 +118,32 @@ class LithosClient:
         result = await self._session.call_tool("lithos_task_list", arguments=arguments)
         return _parse_task_list_response(result)
 
+    async def task_status(self, *, task_id: str) -> Task | None:
+        """Return the current status of a single task.
+
+        Returns ``None`` when Lithos reports ``task_not_found`` (the task
+        was deleted entirely). All other error codes propagate as
+        :class:`LithosClientError`. The returned :class:`Task` carries the
+        fields ``lithos_task_status`` provides — ``id``, ``title``,
+        ``status``, ``claims`` — with empty ``tags`` and empty ``metadata``
+        (those fields are not exposed by the status endpoint).
+        """
+        if self._session is None:
+            raise LithosClientError(
+                "client_not_initialised",
+                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
+            )
+        result = await self._session.call_tool(
+            "lithos_task_status", arguments={"task_id": task_id}
+        )
+        try:
+            tasks = _parse_task_list_response(result)
+        except LithosClientError as exc:
+            if exc.code == "task_not_found":
+                return None
+            raise
+        return tasks[0] if tasks else None
+
 
 # ── Pure parse helpers (heavily unit-tested) ───────────────────────────
 

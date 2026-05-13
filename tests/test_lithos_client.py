@@ -179,3 +179,57 @@ async def test_lithos_client_task_list_raises_when_not_initialized() -> None:
     client = LithosClient(base_url="http://example.test:8765")
     with pytest.raises(LithosClientError, match="not initialised"):
         await client.task_list()
+
+
+# ── LithosClient.task_status ──────────────────────────────────────────
+
+
+async def test_lithos_client_task_status_returns_parsed_task() -> None:
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {
+            "tasks": [
+                {
+                    "id": "abc",
+                    "title": "t",
+                    "status": "completed",
+                    "claims": [],
+                }
+            ]
+        }
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    task = await client.task_status(task_id="abc")
+    assert task is not None
+    assert task.id == "abc"
+    assert task.status == "completed"
+    fake_session.call_tool.assert_awaited_once_with(
+        "lithos_task_status", arguments={"task_id": "abc"}
+    )
+
+
+async def test_lithos_client_task_status_returns_none_when_task_not_found() -> None:
+    """``task_not_found`` is a routine outcome, not an exception."""
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {"status": "error", "code": "task_not_found", "message": "no such task"}
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    assert await client.task_status(task_id="missing") is None
+
+
+async def test_lithos_client_task_status_propagates_other_errors() -> None:
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {"status": "error", "code": "invalid_input", "message": "bad id"}
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_status(task_id="x")
+    assert exc.value.code == "invalid_input"
