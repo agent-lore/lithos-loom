@@ -58,3 +58,32 @@ max_runtime_seconds = 604800
 
 [routes.match]
 tags = ["trigger:story-review-human"]
+
+# ── Subscriptions ─────────────────────────────────────────────────────
+#
+# Fire-and-forget side effects on bus events. Each [[subscriptions]]
+# stanza references an `action` resolved from the
+# `lithos_loom.subscriptions.handlers` Python entry-point group. Slice 0
+# ships only the bundled `noop` action; real handlers
+# (`obsidian-projection` etc.) arrive in Slice 1+.
+#
+# Filter precedence (D5): structural `match.<key>` table runs first,
+# then the optional `where` Python expression. Both must hold (AND).
+# The `where` scope exposes `event` and `task` (= event.payload).
+#
+# On persistent failure (all retry attempts exhausted), the runner posts
+# a `[Friction]`-prefixed Lithos finding to the failing task by default
+# (`on_persistent_failure = "friction"`). Set to "ignore" to suppress.
+
+# [[subscriptions]]
+# name = "noop-smoke"
+# on = ["lithos.task.created", "lithos.task.updated"]
+# action = "noop"
+# # match.tags = ["debug:trace"]
+# # where = "task.get('priority') == 'high'"
+# on_persistent_failure = "friction"
+# [subscriptions.retry]
+# attempts = 5
+# backoff = "exponential"        # or "linear"
+# initial_delay_seconds = 0.5
+# max_delay_seconds = 30.0

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast, overload
@@ -49,12 +50,16 @@ __all__ = [
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_POLL_INTERVAL_SECONDS",
     "DEFAULT_WORK_DIR",
+    "Backoff",
     "LogLevel",
     "LoomConfig",
+    "OnPersistentFailure",
     "OrchestratorConfig",
     "ProjectConfig",
+    "RetryPolicy",
     "RouteConfig",
     "RouteMatch",
+    "SubscriptionConfig",
     "find_config_path",
     "load_config",
     "parse_log_level",
@@ -63,8 +68,12 @@ __all__ = [
 # ── Literal types + validators ─────────────────────────────────────────
 
 LogLevel = Literal["debug", "info", "warning", "error"]
+Backoff = Literal["exponential", "linear"]
+OnPersistentFailure = Literal["friction", "ignore"]
 
 _VALID_LOG_LEVEL: set[str] = {"debug", "info", "warning", "error"}
+_VALID_BACKOFF: set[str] = {"exponential", "linear"}
+_VALID_ON_PERSISTENT_FAILURE: set[str] = {"friction", "ignore"}
 
 
 # ── Defaults ───────────────────────────────────────────────────────────
@@ -121,10 +130,37 @@ class RouteConfig:
 
 
 @dataclass(frozen=True)
+class RetryPolicy:
+    """Per-subscription retry shape (Slice 0 US4).
+
+    ``initial_delay_seconds`` and ``max_delay_seconds`` are the bounds for
+    the chosen backoff curve. ``exponential`` doubles each attempt up to
+    ``max_delay_seconds``; ``linear`` adds ``initial_delay_seconds``.
+    """
+
+    attempts: int = 5
+    backoff: Backoff = "exponential"
+    initial_delay_seconds: float = 0.5
+    max_delay_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
+class SubscriptionConfig:
+    name: str
+    event_types: tuple[str, ...]
+    action: str
+    match: Mapping[str, Any] | None = None
+    where: str | None = None
+    retry: RetryPolicy = field(default_factory=RetryPolicy)
+    on_persistent_failure: OnPersistentFailure = "friction"
+
+
+@dataclass(frozen=True)
 class LoomConfig:
     orchestrator: OrchestratorConfig
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     routes: tuple[RouteConfig, ...] = ()
+    subscriptions: tuple[SubscriptionConfig, ...] = ()
     source_path: Path | None = None
     environment: str | None = None
 
@@ -218,11 +254,13 @@ def load_config(path: Path | None = None) -> LoomConfig:
     orchestrator = _parse_orchestrator(raw.get("orchestrator", {}), config_path)
     projects = _parse_projects(raw.get("projects", {}), config_path)
     routes = _parse_routes(raw.get("routes", []), config_path)
+    subscriptions = _parse_subscriptions(raw.get("subscriptions", []), config_path)
 
     cfg = LoomConfig(
         orchestrator=orchestrator,
         projects=projects,
         routes=routes,
+        subscriptions=subscriptions,
         source_path=config_path,
         environment=environment,
     )
@@ -327,6 +365,107 @@ def _parse_routes(data: Any, config_path: Path) -> tuple[RouteConfig, ...]:
     return tuple(routes)
 
 
+def _parse_subscriptions(
+    data: Any, config_path: Path
+) -> tuple[SubscriptionConfig, ...]:
+    if not isinstance(data, list):
+        raise ConfigError(
+            f"{config_path}: [[subscriptions]] must be an array of tables"
+        )
+    out: list[SubscriptionConfig] = []
+    for idx, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{config_path}: subscriptions[{idx}] must be a table")
+        scope = f"subscriptions[{idx}]"
+        name = _required_str(entry, "name", config_path, scope)
+        action = _required_str(entry, "action", config_path, scope)
+        on_raw = entry.get("on")
+        if isinstance(on_raw, str):
+            event_types: tuple[str, ...] = (on_raw,)
+        elif isinstance(on_raw, list) and all(isinstance(x, str) for x in on_raw):
+            event_types = tuple(on_raw)
+        else:
+            raise ConfigError(
+                f"{config_path}: {scope}.on must be a string or a list of strings"
+            )
+        if not event_types:
+            raise ConfigError(
+                f"{config_path}: {scope}.on must list at least one event type"
+            )
+
+        match_raw = entry.get("match")
+        if match_raw is not None and not isinstance(match_raw, dict):
+            raise ConfigError(f"{config_path}: {scope}.match must be a table")
+        match: Mapping[str, Any] | None = match_raw if match_raw else None
+
+        where_raw = entry.get("where")
+        if where_raw is not None and not isinstance(where_raw, str):
+            raise ConfigError(f"{config_path}: {scope}.where must be a string")
+        where: str | None = where_raw
+
+        retry = _parse_retry_policy(entry.get("retry"), config_path, scope)
+
+        opf_raw = entry.get("on_persistent_failure", "friction")
+        if opf_raw not in _VALID_ON_PERSISTENT_FAILURE:
+            raise ConfigError(
+                f"{config_path}: {scope}.on_persistent_failure must be one of "
+                f"{sorted(_VALID_ON_PERSISTENT_FAILURE)} (got {opf_raw!r})"
+            )
+        opf = cast(OnPersistentFailure, opf_raw)
+
+        out.append(
+            SubscriptionConfig(
+                name=name,
+                event_types=event_types,
+                action=action,
+                match=match,
+                where=where,
+                retry=retry,
+                on_persistent_failure=opf,
+            )
+        )
+    return tuple(out)
+
+
+def _parse_retry_policy(data: Any, config_path: Path, scope: str) -> RetryPolicy:
+    if data is None:
+        return RetryPolicy()
+    if not isinstance(data, dict):
+        raise ConfigError(f"{config_path}: {scope}.retry must be a table")
+    inner_scope = f"{scope}.retry"
+    attempts = _optional_int(data, "attempts", 5, config_path, inner_scope)
+    if attempts < 1:
+        raise ConfigError(f"{config_path}: {inner_scope}.attempts must be >= 1")
+    backoff_raw = data.get("backoff", "exponential")
+    if backoff_raw not in _VALID_BACKOFF:
+        raise ConfigError(
+            f"{config_path}: {inner_scope}.backoff must be one of "
+            f"{sorted(_VALID_BACKOFF)} (got {backoff_raw!r})"
+        )
+    backoff = cast(Backoff, backoff_raw)
+    initial = _optional_float(
+        data, "initial_delay_seconds", 0.5, config_path, inner_scope
+    )
+    max_delay = _optional_float(
+        data, "max_delay_seconds", 30.0, config_path, inner_scope
+    )
+    return RetryPolicy(
+        attempts=attempts,
+        backoff=backoff,
+        initial_delay_seconds=initial,
+        max_delay_seconds=max_delay,
+    )
+
+
+def _optional_float(
+    d: dict[str, Any], key: str, default: float, path: Path, scope: str
+) -> float:
+    raw = d.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ConfigError(f"{path}: {scope}.{key} must be a number")
+    return float(raw)
+
+
 def _apply_env_overrides(cfg: LoomConfig) -> LoomConfig:
     """Apply env-var overrides for the small set of always-overridable fields."""
     url = os.environ.get("LITHOS_URL", "")
@@ -344,6 +483,7 @@ def _apply_env_overrides(cfg: LoomConfig) -> LoomConfig:
         ),
         projects=cfg.projects,
         routes=cfg.routes,
+        subscriptions=cfg.subscriptions,
         source_path=cfg.source_path,
         environment=cfg.environment,
     )

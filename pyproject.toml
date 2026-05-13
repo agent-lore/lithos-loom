@@ -21,6 +21,9 @@ dependencies = [
 [project.scripts]
 lithos-loom = "lithos_loom.main:app"
 
+[project.entry-points."lithos_loom.subscriptions.handlers"]
+noop = "lithos_loom.subscriptions._noop:handle"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/lithos_loom"]
 

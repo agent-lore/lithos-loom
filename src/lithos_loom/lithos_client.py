@@ -66,8 +66,9 @@ class LithosClient:
             tasks = await client.task_list(with_claims=True)
     """
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, agent_id: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
+        self.agent_id = agent_id
         self._sse_ctx: Any = None
         self._session_ctx: Any = None
         self._session: ClientSession | None = None
@@ -117,6 +118,56 @@ class LithosClient:
             arguments["status"] = status
         result = await self._session.call_tool("lithos_task_list", arguments=arguments)
         return _parse_task_list_response(result)
+
+    async def finding_post(
+        self,
+        *,
+        task_id: str,
+        summary: str,
+        agent: str | None = None,
+        knowledge_id: str | None = None,
+    ) -> str | None:
+        """Post a finding to a task. Returns the new ``finding_id``.
+
+        ``agent`` defaults to ``self.agent_id`` (set at client construction).
+        Subscription handlers typically don't have a meaningful task_id for
+        their own friction findings — pass an empty string for the
+        ``[Friction]`` posting and Lithos will surface it cluster-wide via
+        finding listings rather than per-task.
+        """
+        if self._session is None:
+            raise LithosClientError(
+                "client_not_initialised",
+                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
+            )
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError(
+                "missing_agent",
+                "finding_post needs an agent id; pass agent= or set agent_id",
+            )
+        if not task_id:
+            # Lithos requires a task_id; punt to a logged warning instead
+            # of raising, so [Friction] postings without a task scope don't
+            # crash the runner. Caller should avoid this when possible.
+            return None
+        arguments: dict[str, Any] = {
+            "task_id": task_id,
+            "agent": agent_id,
+            "summary": summary,
+        }
+        if knowledge_id is not None:
+            arguments["knowledge_id"] = knowledge_id
+        result = await self._session.call_tool(
+            "lithos_finding_post", arguments=arguments
+        )
+        payload = _payload_from_result(result)
+        if isinstance(payload, dict):
+            _raise_if_error_envelope(payload)
+            finding_id = payload.get("finding_id")
+            if isinstance(finding_id, str):
+                return finding_id
+        return None
 
     async def task_status(self, *, task_id: str) -> Task | None:
         """Return the current status of a single task.
