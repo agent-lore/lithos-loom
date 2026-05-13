@@ -231,7 +231,13 @@ class Supervisor:
 def default_categories() -> list[CategorySpec]:
     """Categories the supervisor spawns by default in ``lithos-loom run``.
 
-    Empty in Story 1; Story 5 registers the route-runner category, Slice 1
-    registers the obsidian-sync category, etc.
+    Slice 0 registers the route-runner category (US5). Slice 1 will add
+    the obsidian-sync category (samsara only).
     """
-    return []
+    return [
+        CategorySpec(
+            name="route-runner",
+            module="lithos_loom.children.route_runner",
+            enabled=lambda cfg: bool(cfg.routes),
+        ),
+    ]

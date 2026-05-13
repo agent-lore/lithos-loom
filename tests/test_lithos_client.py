@@ -9,6 +9,7 @@ parse helpers so we don't have to spin up a real Lithos to verify shape.
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -233,3 +234,105 @@ async def test_lithos_client_task_status_propagates_other_errors() -> None:
     with pytest.raises(LithosClientError) as exc:
         await client.task_status(task_id="x")
     assert exc.value.code == "invalid_input"
+
+
+# ── task_claim / task_renew / task_release / task_complete / task_update ─
+
+
+def _client_with_session(response: Any) -> tuple[LithosClient, AsyncMock]:
+    client = LithosClient(
+        base_url="http://example.test:8765", agent_id="lithos-orchestrator-test"
+    )
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = response
+    client._session = fake_session  # type: ignore[assignment]
+    return client, fake_session
+
+
+async def test_task_claim_returns_expires_at_and_passes_arguments() -> None:
+    client, session = _client_with_session(
+        _content({"success": True, "expires_at": "2026-05-13T12:00:00Z"})
+    )
+    expires = await client.task_claim(task_id="t-1", aspect="impl", ttl_minutes=30)
+    assert expires == "2026-05-13T12:00:00Z"
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_claim",
+        arguments={
+            "task_id": "t-1",
+            "aspect": "impl",
+            "agent": "lithos-orchestrator-test",
+            "ttl_minutes": 30,
+        },
+    )
+
+
+async def test_task_claim_raises_claim_failed_when_aspect_taken() -> None:
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "claim_failed", "message": "aspect taken"})
+    )
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_claim(task_id="t-1", aspect="impl")
+    assert exc.value.code == "claim_failed"
+
+
+async def test_task_renew_returns_new_expires_at() -> None:
+    client, _ = _client_with_session(
+        _content({"success": True, "new_expires_at": "2026-05-13T13:00:00Z"})
+    )
+    expires = await client.task_renew(task_id="t-1", aspect="impl", ttl_minutes=15)
+    assert expires == "2026-05-13T13:00:00Z"
+
+
+async def test_task_release_treats_claim_not_found_as_noop() -> None:
+    """Routine outcome — a missing claim on release is not an error."""
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "claim_not_found", "message": "no claim"})
+    )
+    # Must not raise.
+    await client.task_release(task_id="t-1", aspect="impl")
+
+
+async def test_task_release_propagates_other_errors() -> None:
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "task_not_found", "message": "x"})
+    )
+    with pytest.raises(LithosClientError):
+        await client.task_release(task_id="t-1", aspect="impl")
+
+
+async def test_task_complete_invokes_correct_tool() -> None:
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_complete(task_id="t-1")
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_complete",
+        arguments={"task_id": "t-1", "agent": "lithos-orchestrator-test"},
+    )
+
+
+async def test_task_update_omits_unset_fields() -> None:
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_update(task_id="t-1", tags=["a", "b"])
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_update",
+        arguments={
+            "task_id": "t-1",
+            "agent": "lithos-orchestrator-test",
+            "tags": ["a", "b"],
+        },
+    )
+
+
+async def test_task_update_rejects_empty_call() -> None:
+    client, _ = _client_with_session(_content({"success": True}))
+    with pytest.raises(LithosClientError, match="at least one"):
+        await client.task_update(task_id="t-1")
+
+
+async def test_task_lifecycle_methods_require_agent_id() -> None:
+    client = LithosClient(base_url="http://example.test:8765")  # no agent_id
+    fake_session = AsyncMock()
+    client._session = fake_session  # type: ignore[assignment]
+    with pytest.raises(LithosClientError, match="agent"):
+        await client.task_claim(task_id="t-1", aspect="impl")
+    with pytest.raises(LithosClientError, match="agent"):
+        await client.task_complete(task_id="t-1")

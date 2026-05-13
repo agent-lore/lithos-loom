@@ -262,12 +262,23 @@ async def test_supervisor_spawns_child_with_config_path_argv(tmp_path: Path) -> 
 # ── CLI smoke ──────────────────────────────────────────────────────────
 
 
-def test_run_command_exits_cleanly_with_no_categories(loom_config_env: Path) -> None:
-    """``lithos-loom run`` returns 0 when default_categories() is empty.
+def test_run_command_exits_cleanly_when_no_routes_or_subscriptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``lithos-loom run`` returns 0 when no enabled categories apply.
 
-    Story 1's default_categories() returns []; later stories register real
-    ones. This test pins the wire-up so future regressions surface here.
+    Story 5's ``default_categories()`` includes the route-runner category
+    gated on ``cfg.routes`` being non-empty. With a minimal config that
+    has no routes (and no subscriptions), the supervisor short-circuits
+    to exit 0 without spawning any subprocesses or contacting Lithos.
     """
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[orchestrator]\n"
+        'agent_id = "lithos-orchestrator-test"\n'
+        'lithos_url = "http://localhost:8765"\n'
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg))
     result = runner.invoke(app, ["run"])
     assert result.exit_code == 0, result.output
 
