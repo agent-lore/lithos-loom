@@ -1,0 +1,271 @@
+"""Tests for ``lithos_loom.supervisor`` (Slice 0 US1).
+
+The Supervisor reads a ``LoomConfig``, fans out subprocess children for each
+enabled category, propagates a graceful shutdown to them, and surfaces a
+single exit code that summarises the run. v1 does not auto-restart crashed
+children — first crash triggers a coordinated shutdown of the rest.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import signal
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from lithos_loom.config import LoomConfig, OrchestratorConfig
+from lithos_loom.main import app
+from lithos_loom.supervisor import CategorySpec, Supervisor
+
+runner = CliRunner()
+
+
+# ── Fixtures ───────────────────────────────────────────────────────────
+
+
+def _minimal_cfg(tmp_path: Path) -> LoomConfig:
+    return LoomConfig(
+        orchestrator=OrchestratorConfig(
+            agent_id="lithos-orchestrator-test",
+            lithos_url="http://localhost:8765",
+        ),
+        source_path=tmp_path / "config.toml",
+    )
+
+
+def _echo_category(
+    name: str = "echo",
+    *,
+    enabled: bool = True,
+    extra_args: tuple[str, ...] = (),
+) -> CategorySpec:
+    return CategorySpec(
+        name=name,
+        module="lithos_loom.children._echo",
+        enabled=lambda _cfg, e=enabled: e,
+        extra_args=extra_args,
+    )
+
+
+# ── Tests ──────────────────────────────────────────────────────────────
+
+
+async def test_supervisor_returns_zero_when_no_categories(tmp_path: Path) -> None:
+    """An empty category list short-circuits to exit 0 without spawning."""
+    sup = Supervisor(_minimal_cfg(tmp_path), categories=())
+    assert await sup.run() == 0
+    assert sup.children == ()
+
+
+async def test_supervisor_returns_zero_when_all_categories_disabled(
+    tmp_path: Path,
+) -> None:
+    """A category with ``enabled(cfg) is False`` is never spawned."""
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[_echo_category("echo-off", enabled=False)],
+    )
+    assert await sup.run() == 0
+    assert sup.children == ()
+
+
+async def test_supervisor_spawns_enabled_children_then_shuts_down_cleanly(
+    tmp_path: Path,
+) -> None:
+    """Children are spawned, are alive after spawn, and exit cleanly on shutdown()."""
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[_echo_category()],
+    )
+
+    run_task = asyncio.create_task(sup.run())
+    # Give the supervisor a moment to spawn the child.
+    await asyncio.sleep(0.2)
+
+    assert len(sup.children) == 1
+    child = sup.children[0]
+    assert child.spec.name == "echo"
+    assert child.proc.pid > 0
+    assert child.proc.returncode is None
+
+    await sup.shutdown()
+    exit_code = await asyncio.wait_for(run_task, timeout=5.0)
+    assert exit_code == 0
+
+
+async def test_supervisor_filters_by_enabled_predicate(tmp_path: Path) -> None:
+    """Only the enabled category spawns; the disabled one is skipped silently."""
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[
+            _echo_category("on", enabled=True),
+            _echo_category("off", enabled=False),
+        ],
+    )
+
+    run_task = asyncio.create_task(sup.run())
+    await asyncio.sleep(0.2)
+
+    assert [c.spec.name for c in sup.children] == ["on"]
+
+    await sup.shutdown()
+    assert await asyncio.wait_for(run_task, timeout=5.0) == 0
+
+
+async def test_supervisor_waits_for_child_that_briefly_ignores_sigterm(
+    tmp_path: Path,
+) -> None:
+    """Patient shutdown: child handles SIGTERM late, supervisor still cleans up."""
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[_echo_category(extra_args=("--ignore-sigterm-for", "0.5"))],
+        shutdown_grace_seconds=3.0,
+    )
+
+    run_task = asyncio.create_task(sup.run())
+    await asyncio.sleep(0.2)
+    await sup.shutdown()
+
+    exit_code = await asyncio.wait_for(run_task, timeout=5.0)
+    assert exit_code == 0
+    # The child eventually honoured SIGTERM and exited cleanly.
+    assert sup.children[0].proc.returncode == 0
+
+
+async def test_supervisor_force_kills_child_that_exceeds_grace_period(
+    tmp_path: Path,
+) -> None:
+    """If a child won't exit within shutdown_grace_seconds, supervisor SIGKILLs it."""
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[_echo_category(extra_args=("--ignore-sigterm-for", "10"))],
+        shutdown_grace_seconds=0.5,
+    )
+
+    run_task = asyncio.create_task(sup.run())
+    await asyncio.sleep(0.2)
+    await sup.shutdown()
+
+    exit_code = await asyncio.wait_for(run_task, timeout=5.0)
+    # Force-killed children are not "clean"; surface as non-zero.
+    assert exit_code != 0
+    assert sup.children[0].proc.returncode == -signal.SIGKILL
+
+
+async def test_supervisor_records_child_crash_and_shuts_down_others(
+    tmp_path: Path,
+) -> None:
+    """A child crashing on its own triggers shutdown; supervisor exits non-zero."""
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[
+            _echo_category("crasher", extra_args=("--crash-after", "0.1")),
+            _echo_category("survivor"),
+        ],
+    )
+
+    run_task = asyncio.create_task(sup.run())
+    exit_code = await asyncio.wait_for(run_task, timeout=5.0)
+
+    assert exit_code != 0
+    assert sup.crashes == ("crasher",)
+    # The survivor was sent SIGTERM and exited cleanly.
+    survivor = next(c for c in sup.children if c.spec.name == "survivor")
+    assert survivor.proc.returncode in (0, -signal.SIGTERM)
+
+
+async def test_supervisor_does_not_restart_crashed_child(tmp_path: Path) -> None:
+    """v1 lifecycle is monolithic: no auto-restart on child crash."""
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[_echo_category(extra_args=("--crash-after", "0.1"))],
+    )
+
+    run_task = asyncio.create_task(sup.run())
+    await asyncio.wait_for(run_task, timeout=5.0)
+
+    assert len(sup.children) == 1
+    assert sup.crashes == ("echo",)
+
+
+async def test_supervisor_spawns_child_with_config_path_argv(tmp_path: Path) -> None:
+    """The child is invoked with --config <source_path> so it can load the same TOML."""
+    cfg_path = tmp_path / "alt.toml"
+    cfg = replace(_minimal_cfg(tmp_path), source_path=cfg_path)
+    sup = Supervisor(cfg, categories=[_echo_category(extra_args=("--echo-argv",))])
+
+    run_task = asyncio.create_task(sup.run())
+    await asyncio.sleep(0.3)
+    assert len(sup.children) == 1
+    await sup.shutdown()
+    await asyncio.wait_for(run_task, timeout=5.0)
+
+    # The echo child writes its argv to stderr when --echo-argv is set;
+    # we just confirm the supervisor did pass --config <cfg_path>.
+    argv = sup.children[0].argv
+    assert "--config" in argv
+    assert str(cfg_path) in argv
+    assert "--echo-argv" in argv
+
+
+# ── CLI smoke ──────────────────────────────────────────────────────────
+
+
+def test_run_command_exits_cleanly_with_no_categories(loom_config_env: Path) -> None:
+    """``lithos-loom run`` returns 0 when default_categories() is empty.
+
+    Story 1's default_categories() returns []; later stories register real
+    ones. This test pins the wire-up so future regressions surface here.
+    """
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == 0, result.output
+
+
+# ── Echo child standalone smoke ────────────────────────────────────────
+
+
+async def test_echo_child_responds_to_sigterm() -> None:
+    """The bundled echo child exits 0 when SIGTERM'd."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "lithos_loom.children._echo",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await asyncio.sleep(0.1)
+    proc.terminate()
+    rc = await asyncio.wait_for(proc.wait(), timeout=5.0)
+    assert rc == 0
+
+
+async def test_echo_child_crash_after_flag() -> None:
+    """``--crash-after`` causes a non-zero exit on its own."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "lithos_loom.children._echo",
+        "--crash-after",
+        "0.05",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    rc = await asyncio.wait_for(proc.wait(), timeout=5.0)
+    assert rc != 0
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="add_signal_handler/SIGTERM semantics differ on Windows",
+)
+def test_supervisor_signal_handler_exists() -> None:
+    """Sanity: importing supervisor doesn't blow up on signal-handler imports."""
+    # Soft check that the module imported all the bits it needs.
+    import lithos_loom.supervisor as mod
+
+    assert hasattr(mod, "Supervisor")
+    assert hasattr(mod, "CategorySpec")
