@@ -446,9 +446,24 @@ def _parse_retry_policy(data: Any, config_path: Path, scope: str) -> RetryPolicy
     initial = _optional_float(
         data, "initial_delay_seconds", 0.5, config_path, inner_scope
     )
+    if initial < 0:
+        raise ConfigError(
+            f"{config_path}: {inner_scope}.initial_delay_seconds must be >= 0 "
+            f"(got {initial})"
+        )
     max_delay = _optional_float(
         data, "max_delay_seconds", 30.0, config_path, inner_scope
     )
+    if max_delay < 0:
+        raise ConfigError(
+            f"{config_path}: {inner_scope}.max_delay_seconds must be >= 0 "
+            f"(got {max_delay})"
+        )
+    if max_delay < initial:
+        raise ConfigError(
+            f"{config_path}: {inner_scope}.max_delay_seconds ({max_delay}) "
+            f"must be >= initial_delay_seconds ({initial})"
+        )
     return RetryPolicy(
         attempts=attempts,
         backoff=backoff,

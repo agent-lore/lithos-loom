@@ -202,6 +202,68 @@ def test_subscription_block_rejects_unknown_failure_mode(
         load_config()
 
 
+def _retry_config_with(retry_block: str) -> str:
+    """Build a minimal config TOML with the supplied [subscriptions.retry] body."""
+    return dedent(
+        f"""
+        [orchestrator]
+        agent_id = "x"
+        lithos_url = "http://x:1"
+
+        [[subscriptions]]
+        name = "n"
+        on = "lithos.task.created"
+        action = "noop"
+        [subscriptions.retry]
+        {retry_block}
+        """
+    )
+
+
+def test_subscription_retry_rejects_negative_initial_delay(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_retry_config_with("initial_delay_seconds = -1"))
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="initial_delay_seconds must be >= 0"):
+        load_config()
+
+
+def test_subscription_retry_rejects_negative_max_delay(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        _retry_config_with("initial_delay_seconds = 0\nmax_delay_seconds = -2")
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="max_delay_seconds must be >= 0"):
+        load_config()
+
+
+def test_subscription_retry_rejects_max_less_than_initial(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        _retry_config_with("initial_delay_seconds = 5\nmax_delay_seconds = 1")
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="must be >= initial_delay_seconds"):
+        load_config()
+
+
+def test_subscription_retry_rejects_attempts_zero(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_retry_config_with("attempts = 0"))
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="attempts must be >= 1"):
+        load_config()
+
+
 def test_subscription_block_rejects_unknown_backoff(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
