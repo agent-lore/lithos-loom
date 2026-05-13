@@ -58,13 +58,20 @@ class Handler(Protocol):
 class SubscriptionContext:
     """Shared services injected into every handler invocation.
 
-    Slice 0 carries only the Lithos client + a scoped logger; later slices
-    will add filesystem helpers, the project list, etc. as handlers need
-    them.
+    ``agent_id`` is the Lithos agent identity the runner uses for
+    ``finding_post`` calls (and that handlers can reuse for any other
+    Lithos write that requires an ``agent`` field). It must be set
+    explicitly so [Friction] posts carry a real agent and the call
+    matches the Lithos spec for ``lithos_finding_post``.
+
+    Slice 0 carries only the Lithos client + agent_id + a scoped logger;
+    later slices will add filesystem helpers, the project list, etc. as
+    handlers need them.
     """
 
     lithos: Any  # LithosClient — Any avoids a heavy import-time cycle
     logger: logging.Logger
+    agent_id: str
 
 
 class SubscriptionRunner:
@@ -119,15 +126,34 @@ class SubscriptionRunner:
                 event.type,
             )
             return
-        task_id = ""
-        if isinstance(event.payload, Mapping):
-            task_id = str(event.payload.get("id", "") or "")
+
         summary = (
             f"[Friction] subscription {self.spec.name} failed after "
             f"{self.spec.retry.attempts} attempts on {event.type}: {last_exc!r}"
         )
+
+        task_id = ""
+        if isinstance(event.payload, Mapping):
+            task_id = str(event.payload.get("id", "") or "")
+
+        if not task_id:
+            # Non-task event (e.g. obsidian.note.modified, lithos.note.*):
+            # there is no Lithos task to scope the finding to. Log loudly so
+            # the [Friction] signal is not silently lost. Slice 1+ may
+            # elaborate this with a subscription-declared task scope or a
+            # configured infrastructure task; the Lithos spec requires a
+            # real task_id for lithos_finding_post (see
+            # /home/dns/projects/lithos/code/lithos/docs/SPECIFICATION.md
+            # §5.4 lithos_finding_post).
+            self.ctx.logger.warning("%s (no task_id in event payload)", summary)
+            return
+
         try:
-            await self.ctx.lithos.finding_post(task_id=task_id, summary=summary)
+            await self.ctx.lithos.finding_post(
+                task_id=task_id,
+                agent=self.ctx.agent_id,
+                summary=summary,
+            )
         except Exception:
             self.ctx.logger.exception(
                 "subscription %s: finding_post itself failed for [Friction] post",

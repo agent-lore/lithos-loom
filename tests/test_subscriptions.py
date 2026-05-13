@@ -53,10 +53,14 @@ def _evt(
     )
 
 
-def _ctx() -> SubscriptionContext:
+def _ctx(agent_id: str = "lithos-orchestrator-test") -> SubscriptionContext:
     import logging
 
-    return SubscriptionContext(lithos=AsyncMock(), logger=logging.getLogger("test"))
+    return SubscriptionContext(
+        lithos=AsyncMock(),
+        logger=logging.getLogger("test"),
+        agent_id=agent_id,
+    )
 
 
 def _spec(
@@ -348,7 +352,7 @@ async def test_runner_retries_handler_until_success() -> None:
 
 async def test_runner_posts_friction_finding_after_persistent_failure() -> None:
     bus = EventBus()
-    ctx = _ctx()
+    ctx = _ctx(agent_id="lithos-orchestrator-samsara")
     finding_post = ctx.lithos.finding_post  # type: ignore[attr-defined]
 
     async def always_fails(event: Event, ctx: SubscriptionContext) -> None:
@@ -371,8 +375,55 @@ async def test_runner_posts_friction_finding_after_persistent_failure() -> None:
     finding_post.assert_awaited_once()
     kwargs = finding_post.await_args.kwargs
     assert kwargs["task_id"] == "task-77"
+    # The Lithos `lithos_finding_post` tool requires `agent`; the runner
+    # must thread the orchestrator agent_id through from the context. Pin
+    # this so we don't regress against the real Lithos contract.
+    assert kwargs["agent"] == "lithos-orchestrator-samsara"
     assert kwargs["summary"].startswith("[Friction]")
     assert "bad-sub" in kwargs["summary"]
+
+
+async def test_runner_logs_friction_when_event_has_no_task_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-task event → no finding_post call (would be invalid per the Lithos
+    spec); log a [Friction]-prefixed warning instead so the signal isn't lost.
+    """
+    bus = EventBus()
+    ctx = _ctx()
+    finding_post = ctx.lithos.finding_post  # type: ignore[attr-defined]
+
+    async def always_fails(event: Event, ctx: SubscriptionContext) -> None:
+        raise RuntimeError("nope")
+
+    [runner] = build_runners(
+        bus=bus,
+        specs=(
+            _spec(
+                name="non-task-sub",
+                on=("obsidian.note.modified",),
+                retry_attempts=2,
+            ),
+        ),
+        handlers={"noop": always_fails},
+        ctx=ctx,
+    )
+    task = asyncio.create_task(runner.run())
+
+    with caplog.at_level("WARNING", logger="test"):
+        # Payload with no "id" key — typical for non-task events.
+        await bus.publish(
+            _evt(type_="obsidian.note.modified", payload={"path": "x.md"})
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    finding_post.assert_not_called()
+    matching = [r for r in caplog.records if "[Friction]" in r.message]
+    assert matching, f"expected a [Friction] warning, got: {caplog.records}"
+    assert "no task_id" in matching[0].message
 
 
 async def test_runner_does_not_post_finding_in_ignore_mode() -> None:
