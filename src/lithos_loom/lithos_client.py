@@ -101,6 +101,25 @@ class LithosClient:
                 finally:
                     self._sse_ctx = None
 
+    async def _call(self, tool: str, arguments: dict[str, Any]) -> Any:
+        """Invoke an MCP tool, decode the FastMCP content envelope, raise on errors.
+
+        Returns the decoded JSON payload (typically a ``dict``). Domain
+        errors with a ``{status: "error", code, message}`` envelope raise
+        :class:`LithosClientError`; transport-level failures from the
+        ``mcp`` SDK propagate untouched.
+        """
+        if self._session is None:
+            raise LithosClientError(
+                "client_not_initialised",
+                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
+            )
+        result = await self._session.call_tool(tool, arguments=arguments)
+        payload = _payload_from_result(result)
+        if isinstance(payload, dict):
+            _raise_if_error_envelope(payload)
+        return payload
+
     async def task_list(
         self,
         *,
@@ -168,6 +187,129 @@ class LithosClient:
             if isinstance(finding_id, str):
                 return finding_id
         return None
+
+    async def task_claim(
+        self,
+        *,
+        task_id: str,
+        aspect: str,
+        ttl_minutes: int = 60,
+        agent: str | None = None,
+    ) -> str:
+        """Claim ``aspect`` of ``task_id``. Returns the claim's ``expires_at``.
+
+        Raises :class:`LithosClientError` with ``code="claim_failed"`` when
+        the aspect is already claimed (or the task isn't open). Callers
+        treat that as "skip — another runner won the race".
+        """
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_claim needs an agent id")
+        payload = await self._call(
+            "lithos_task_claim",
+            {
+                "task_id": task_id,
+                "aspect": aspect,
+                "agent": agent_id,
+                "ttl_minutes": ttl_minutes,
+            },
+        )
+        expires = payload.get("expires_at") if isinstance(payload, dict) else None
+        if not isinstance(expires, str):
+            raise LithosClientError(
+                "invalid_response", "task_claim response missing expires_at"
+            )
+        return expires
+
+    async def task_renew(
+        self,
+        *,
+        task_id: str,
+        aspect: str,
+        ttl_minutes: int = 60,
+        agent: str | None = None,
+    ) -> str:
+        """Extend an existing claim. Returns the new ``expires_at``."""
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_renew needs an agent id")
+        payload = await self._call(
+            "lithos_task_renew",
+            {
+                "task_id": task_id,
+                "aspect": aspect,
+                "agent": agent_id,
+                "ttl_minutes": ttl_minutes,
+            },
+        )
+        expires = payload.get("new_expires_at") if isinstance(payload, dict) else None
+        if not isinstance(expires, str):
+            raise LithosClientError(
+                "invalid_response", "task_renew response missing new_expires_at"
+            )
+        return expires
+
+    async def task_release(
+        self,
+        *,
+        task_id: str,
+        aspect: str,
+        agent: str | None = None,
+    ) -> None:
+        """Release a claim. ``code="claim_not_found"`` is folded into a no-op."""
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_release needs an agent id")
+        try:
+            await self._call(
+                "lithos_task_release",
+                {"task_id": task_id, "aspect": aspect, "agent": agent_id},
+            )
+        except LithosClientError as exc:
+            if exc.code == "claim_not_found":
+                return
+            raise
+
+    async def task_complete(
+        self,
+        *,
+        task_id: str,
+        agent: str | None = None,
+    ) -> None:
+        """Mark a task as completed. Releases all claims as a side effect."""
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_complete needs an agent id")
+        await self._call(
+            "lithos_task_complete", {"task_id": task_id, "agent": agent_id}
+        )
+
+    async def task_update(
+        self,
+        *,
+        task_id: str,
+        agent: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        """Update mutable task fields. At least one of title/description/tags."""
+        if title is None and description is None and tags is None:
+            raise LithosClientError(
+                "invalid_input",
+                "task_update requires at least one of title/description/tags",
+            )
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_update needs an agent id")
+        arguments: dict[str, Any] = {"task_id": task_id, "agent": agent_id}
+        if title is not None:
+            arguments["title"] = title
+        if description is not None:
+            arguments["description"] = description
+        if tags is not None:
+            arguments["tags"] = tags
+        await self._call("lithos_task_update", arguments)
 
     async def task_status(self, *, task_id: str) -> Task | None:
         """Return the current status of a single task.
