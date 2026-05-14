@@ -101,6 +101,12 @@ class RouteRunner:
             match={"tags": list(self.route.match.tags)},
             name=f"route-runner-{self.route.name}",
         )
+        # Tasks this runner has already claimed (or attempted to claim and
+        # succeeded). Future events for the same id are skipped — without
+        # this, multiple stale events queued for the same open task would
+        # each run the plugin, relying on Lithos's claim_failed envelope
+        # for safety. Real Lithos enforces it, but the runner should too.
+        self._processed_tasks: set[str] = set()
 
     @property
     def subscription(self) -> Subscription:
@@ -130,6 +136,13 @@ class RouteRunner:
             return
         if payload.get("status") != "open":
             return  # nothing to do for terminal-state observations
+        if task_id in self._processed_tasks:
+            logger.debug(
+                "RouteRunner %s: skipping stale event for already-processed %s",
+                self.route.name,
+                task_id,
+            )
+            return
 
         depends_on = payload.get("metadata", {}).get("depends_on") or []
         if depends_on and not await self._deps_satisfied(depends_on):
@@ -146,6 +159,10 @@ class RouteRunner:
             )
         except LithosClientError as exc:
             if exc.code == "claim_failed":
+                # Another runner won the race. Don't add to processed —
+                # if they release the claim, we should still be eligible
+                # via a future event (this runner just doesn't yet
+                # subscribe to released events; that's a Slice 1+ concern).
                 logger.debug(
                     "RouteRunner %s: lost claim race for %s",
                     self.route.name,
@@ -154,6 +171,9 @@ class RouteRunner:
                 return
             raise
 
+        # Claim succeeded; remember so duplicate queued events for the same
+        # task ID are skipped rather than racing into a second plugin run.
+        self._processed_tasks.add(task_id)
         await self._run_claimed_task(task_id, payload)
 
     async def _deps_satisfied(self, dep_ids: list[str]) -> bool:
@@ -175,6 +195,7 @@ class RouteRunner:
         renew_task = asyncio.create_task(
             self._renew_loop(task_id), name=f"renew-{task_id}"
         )
+        succeeded = False
         try:
             try:
                 result = await self.plugin_runner(
@@ -189,19 +210,21 @@ class RouteRunner:
                     task_id,
                     f"plugin contract violation: {exc}",
                 )
-                return
             except TimeoutError as exc:
                 await self._release_with_finding(
                     task_id,
                     f"plugin exceeded max runtime: {exc}",
                 )
-                return
-
-            await self._apply_result(task_id, result, work_dir)
+            else:
+                succeeded = await self._apply_result(task_id, result)
         finally:
             renew_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await renew_task
+            # Cleanup runs on every exit path — success, plugin failure,
+            # contract violation, timeout, even cancellation. The flag
+            # decides whether failed dirs are retained for inspection.
+            self._cleanup_work_dir(work_dir, success=succeeded)
 
     async def _renew_loop(self, task_id: str) -> None:
         while True:
@@ -226,20 +249,21 @@ class RouteRunner:
         self,
         task_id: str,
         result: Mapping[str, Any],
-        work_dir: Path,
-    ) -> None:
+    ) -> bool:
+        """Apply the plugin's result. Returns ``True`` iff the task succeeded."""
         status = result.get("status")
         if status == "succeeded":
             await self.lithos.task_complete(task_id=task_id, agent=self.agent_id)
-            self._cleanup_work_dir(work_dir, success=True)
-        elif status == "failed":
+            return True
+        if status == "failed":
             err = result.get("error") or {}
             err_msg = err.get("message") if isinstance(err, dict) else None
             await self._release_with_finding(
                 task_id,
                 f"plugin reported failure: {err_msg or 'no error message'}",
             )
-        elif status == "interrupted":
+            return False
+        if status == "interrupted":
             # Shutdown signal — release the claim so a future run picks it
             # up. No [BlockerFailed] finding (operator-initiated, not an
             # error).
@@ -249,11 +273,12 @@ class RouteRunner:
                     aspect=self.route.name,
                     agent=self.agent_id,
                 )
-        else:
-            await self._release_with_finding(
-                task_id,
-                f"plugin returned unknown status {status!r}",
-            )
+            return False
+        await self._release_with_finding(
+            task_id,
+            f"plugin returned unknown status {status!r}",
+        )
+        return False
 
     async def _release_with_finding(self, task_id: str, detail: str) -> None:
         summary = f"[BlockerFailed] route {self.route.name}: {detail}"

@@ -167,6 +167,45 @@ async def test_run_plugin_enforces_max_runtime(tmp_path: Path) -> None:
         )
 
 
+async def test_run_plugin_clears_stale_result_file_before_launch(
+    tmp_path: Path,
+) -> None:
+    """A stale result.json from a previous attempt must not be re-applied.
+
+    Regression: without an explicit unlink before launch, a plugin that
+    exits without writing a fresh result file would leave run_plugin
+    parsing the prior attempt's outcome — silently completing or failing
+    a task on stale data.
+    """
+    work_dir = tmp_path / "wd"
+    work_dir.mkdir()
+    result_file = work_dir / "result.json"
+    # Pre-populate with a stale "succeeded" result from an imagined prior run.
+    result_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "task_id": "STALE",
+                "status": "succeeded",
+                "exit_code": 0,
+            }
+        )
+    )
+
+    plugin = _write_fake_plugin(tmp_path / "plugin.py", body="sys.exit(0)")
+    with pytest.raises(PluginContractError, match="did not write"):
+        await run_plugin(
+            command=(
+                f"{sys.executable} {plugin} "
+                "--task-json {{task_json}} --work-dir {{work_dir}} "
+                "--result-file {{result_file}}"
+            ),
+            task_json_path=work_dir / "task.json",
+            work_dir=work_dir,
+            result_file=result_file,
+        )
+
+
 async def test_run_plugin_returns_failed_result_on_nonzero_exit_with_result(
     tmp_path: Path,
 ) -> None:

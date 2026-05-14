@@ -376,6 +376,110 @@ async def test_runner_recovers_from_unexpected_exception_in_handler(
     assert lithos.task_complete.await_args.kwargs["task_id"] == "task-2"
 
 
+async def test_runner_dedupes_repeat_events_for_same_task(tmp_path: Path) -> None:
+    """Stale created/updated events for an already-handled task must not re-run.
+
+    Regression: without an in-runner processed-set, two queued events for
+    the same open task each ran the plugin and called task_complete twice
+    (mock-Lithos always returns success, so the runner couldn't rely on
+    claim_failed to dedupe). Real Lithos enforces this, but the runner
+    should too.
+    """
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    payload = _payload("task-1")
+    await bus.publish(_evt(type_="lithos.task.created", payload=payload))
+    await bus.publish(_evt(type_="lithos.task.updated", payload=payload))
+    await _run_for(runner, seconds=0.2)
+
+    # Exactly one claim → exactly one plugin run → exactly one complete.
+    assert lithos.task_claim.await_count == 1
+    assert lithos.task_complete.await_count == 1
+
+
+async def test_runner_releases_dedupe_when_claim_race_lost(tmp_path: Path) -> None:
+    """If we lose the claim race, we must NOT add the task to the dedupe set —
+    otherwise a future event (e.g. after the winner releases) would be
+    silently dropped instead of giving us a chance to take ownership.
+    """
+    bus = EventBus()
+    lithos = AsyncMock()
+    # First call: lose the race. Second call (after release): succeed.
+    lithos.task_claim.side_effect = [
+        LithosClientError("claim_failed", "taken"),
+        "expires-2",
+    ]
+    runner, _ = _make_runner(bus=bus, lithos=lithos, work_dir=tmp_path)
+
+    payload = _payload("task-9")
+    await bus.publish(_evt(payload=payload))
+    await asyncio.sleep(0.05)
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner, seconds=0.2)
+
+    # Two claim attempts — the lost-race path didn't pollute the dedupe set.
+    assert lithos.task_claim.await_count == 2
+
+
+async def test_runner_removes_work_dir_on_failure_when_not_retaining(
+    tmp_path: Path,
+) -> None:
+    """retain_failed_workdirs=False must clean up failed runs too, not just
+    successful ones. Regression: the prior implementation only cleaned the
+    success branch, so failed/timeout/contract-violation paths leaked dirs.
+    """
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "failed",
+            "exit_code": 1,
+            "error": {"category": "agent", "message": "nope"},
+        }
+    )
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "expires"
+    runner = RouteRunner(
+        route=_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="lithos-orchestrator-test",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        retain_failed_workdirs=False,
+        plugin_runner=plugin_runner,
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.2)
+
+    assert not (tmp_path / "task-1").exists()
+
+
+async def test_runner_keeps_work_dir_on_failure_when_retaining(
+    tmp_path: Path,
+) -> None:
+    """The default retain_failed_workdirs=True keeps failed dirs for inspection."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "failed",
+            "exit_code": 1,
+        }
+    )
+    runner, _ = _make_runner(bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner)
+    # _make_runner uses default retain_failed_workdirs=True.
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.2)
+
+    assert (tmp_path / "task-1").exists()
+
+
 async def test_runner_subscribes_only_to_created_and_updated(
     tmp_path: Path,
 ) -> None:

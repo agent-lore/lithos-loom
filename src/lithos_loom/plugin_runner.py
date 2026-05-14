@@ -90,6 +90,13 @@ async def run_plugin(
     work_dir.mkdir(parents=True, exist_ok=True)
     argv = _build_argv(command, task_json_path, work_dir, result_file)
 
+    # Clear any stale result file from a prior run before launching. Without
+    # this, a plugin that exits without writing a fresh result.json would
+    # leave the runner parsing the previous attempt's outcome and acting on
+    # it as if it were the new one.
+    with contextlib.suppress(FileNotFoundError):
+        result_file.unlink()
+
     proc = await asyncio.create_subprocess_exec(*argv, env=env)
     try:
         if max_runtime_seconds is None:
