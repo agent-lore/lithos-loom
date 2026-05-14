@@ -176,11 +176,39 @@ async def _dry_run_async(cfg: LoomConfig) -> int:
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
         tasks = await client.task_list(status="open", with_claims=True)
-    _print_dry_run_report(cfg, tasks)
+        dep_status = await _resolve_dep_statuses(client, tasks)
+    _print_dry_run_report(cfg, tasks, dep_status)
     return 0
 
 
-def _print_dry_run_report(cfg: LoomConfig, tasks: list[Task]) -> int:
+async def _resolve_dep_statuses(
+    client: Any, tasks: list[Task]
+) -> dict[str, str | None]:
+    """Resolve the status of every ``metadata.depends_on`` referenced by ``tasks``.
+
+    Mirrors what :class:`~lithos_loom.subscriptions.route_runner.RouteRunner`
+    does at runtime: ``task_status`` per unique dep id. Returns the status
+    string (``"completed"`` / ``"open"`` / ``"cancelled"``) or ``None`` for
+    ``task_not_found``. Without this the dry-run would report ``✓ (claim)``
+    for tasks the real runner would defer because their deps aren't done.
+    """
+    dep_ids: set[str] = set()
+    for task in tasks:
+        for dep_id in task.metadata.get("depends_on") or []:
+            if isinstance(dep_id, str) and dep_id:
+                dep_ids.add(dep_id)
+    statuses: dict[str, str | None] = {}
+    for dep_id in dep_ids:
+        result = await client.task_status(task_id=dep_id)
+        statuses[dep_id] = result.status if result is not None else None
+    return statuses
+
+
+def _print_dry_run_report(
+    cfg: LoomConfig,
+    tasks: list[Task],
+    dep_status: dict[str, str | None],
+) -> int:
     """Emit the dry-run table + orphan / dead-config summary."""
     typer.echo("")
     typer.echo("── Dry-run simulation ──────────────────────────────────")
@@ -202,8 +230,13 @@ def _print_dry_run_report(cfg: LoomConfig, tasks: list[Task]) -> int:
         title_summary = f"{task.id}  {task.title!r}"
         typer.echo(title_summary)
         for route in cfg.routes:
-            would_fire = _route_matches_task(route, task)
-            marker = "✓ (claim)" if would_fire else "—"
+            would_fire, defer_reason = _route_outcome(route, task, dep_status)
+            if would_fire:
+                marker = "✓ (claim)"
+            elif defer_reason:
+                marker = f"deferred ({defer_reason})"
+            else:
+                marker = "—"
             typer.echo(f"    route:{route.name:<30} {marker}")
             if would_fire:
                 fired_routes.add(route.name)
@@ -243,11 +276,35 @@ def _print_dry_run_report(cfg: LoomConfig, tasks: list[Task]) -> int:
     return 0
 
 
-def _route_matches_task(route: RouteConfig, task: Task) -> bool:
-    """Mirrors ``RouteRunner``'s subscription filter: tag superset on open tasks."""
+def _route_outcome(
+    route: RouteConfig,
+    task: Task,
+    dep_status: dict[str, str | None],
+) -> tuple[bool, str | None]:
+    """Mirror :class:`RouteRunner` exactly: status + tags + deps gate.
+
+    Returns ``(would_fire, defer_reason)``. The defer reason is non-None
+    when the tag filter passes but dependencies are not yet completed —
+    the operator should see "deferred" not just "—" so the difference
+    between "doesn't match" and "matches-but-blocked" is visible.
+    """
     if task.status != "open":
-        return False
-    return set(route.match.tags).issubset(set(task.tags))
+        return False, None
+    if not set(route.match.tags).issubset(set(task.tags)):
+        return False, None
+    pending = _pending_deps(task, dep_status)
+    if pending:
+        return False, f"deps not complete: {', '.join(sorted(pending))}"
+    return True, None
+
+
+def _pending_deps(task: Task, dep_status: dict[str, str | None]) -> list[str]:
+    deps = task.metadata.get("depends_on") or []
+    return [
+        str(dep_id)
+        for dep_id in deps
+        if isinstance(dep_id, str) and dep_status.get(dep_id) != "completed"
+    ]
 
 
 def _build_subscription_predicates(
@@ -272,21 +329,27 @@ def _build_subscription_predicates(
         sub = runner.subscription
 
         def _predicate(task: Task, sub_local: Any = sub) -> bool:
-            evt = Event(
-                type="lithos.task.created",
-                timestamp=datetime.now(UTC),
-                payload=MappingProxyType(
-                    {
-                        "id": task.id,
-                        "title": task.title,
-                        "status": task.status,
-                        "tags": list(task.tags),
-                        "metadata": dict(task.metadata),
-                        "claims": [dict(c) for c in task.claims],
-                    }
-                ),
+            # A subscription "would fire" for this task iff there is at
+            # least one event type in its on-list whose synthetic event
+            # for this task passes the structural match + where predicate.
+            # Hard-coding type="lithos.task.created" would silently report
+            # `on = "lithos.task.updated"` subscriptions as never firing.
+            payload = MappingProxyType(
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "status": task.status,
+                    "tags": list(task.tags),
+                    "metadata": dict(task.metadata),
+                    "claims": [dict(c) for c in task.claims],
+                }
             )
-            return sub_local.matches(evt)
+            timestamp = datetime.now(UTC)
+            for event_type in sub_local.event_types:
+                evt = Event(type=event_type, timestamp=timestamp, payload=payload)
+                if sub_local.matches(evt):
+                    return True
+            return False
 
         sub_to_test[runner.spec.name] = _predicate
     return sub_to_test

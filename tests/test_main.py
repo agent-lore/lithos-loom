@@ -50,23 +50,36 @@ def _task(
     tags: tuple[str, ...] = (),
     status: str = "open",
     title: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Task:
     return Task(
         id=id_,
         title=title or f"Task {id_}",
         status=status,
         tags=tags,
-        metadata={},
+        metadata=metadata or {},
         claims=(),
     )
 
 
 class _FakeLithos:
-    """Async-context-manager mock that records every call on it."""
+    """Async-context-manager mock that records every call on it.
 
-    def __init__(self, tasks: Sequence[Task]) -> None:
+    Read-only methods (``task_list``, ``task_status``) are explicit.
+    Anything else routed through ``__getattr__`` is recorded under
+    ``mutating_calls`` so tests can assert dry-run stays non-mutating.
+    """
+
+    def __init__(
+        self,
+        tasks: Sequence[Task],
+        *,
+        dep_statuses: dict[str, str | None] | None = None,
+    ) -> None:
         self._tasks = list(tasks)
+        self._dep_statuses = dict(dep_statuses or {})
         self.task_list_calls: list[dict[str, Any]] = []
+        self.task_status_calls: list[str] = []
         self.mutating_calls: list[str] = []
 
     async def __aenter__(self) -> _FakeLithos:
@@ -83,6 +96,19 @@ class _FakeLithos:
     ) -> list[Task]:
         self.task_list_calls.append({"status": status, "with_claims": with_claims})
         return list(self._tasks)
+
+    async def task_status(self, *, task_id: str) -> Task | None:
+        self.task_status_calls.append(task_id)
+        if task_id not in self._dep_statuses:
+            return None  # task_not_found
+        return Task(
+            id=task_id,
+            title=f"dep {task_id}",
+            status=self._dep_statuses[task_id] or "open",
+            tags=(),
+            metadata={},
+            claims=(),
+        )
 
     def __getattr__(self, name: str) -> Any:
         # Any other call is recorded so tests can assert non-mutation.
@@ -243,6 +269,111 @@ def test_dry_run_matches_subscription_with_where_predicate(
     # against the where-gated subscription.
     for line in low_lines:
         assert "would fire" not in line.lower() and "✓" not in line
+
+
+def test_dry_run_subscription_with_updated_event_type_fires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subscription with on='lithos.task.updated' must show as 'would fire'
+    when its filter matches the task — the dry-run must test the sub
+    against every type in its on-list, not hard-code lithos.task.created.
+    """
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        dedent(
+            """
+            [orchestrator]
+            agent_id = "lithos-orchestrator-test"
+            lithos_url = "http://localhost:8765"
+
+            [[subscriptions]]
+            name = "updated-only"
+            on = "lithos.task.updated"
+            action = "noop"
+            match.tags = ["any-tag"]
+            """
+        )
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    fake = _FakeLithos(tasks=[_task("t1", tags=("any-tag",))])
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["validate-config", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    sub_lines = [
+        line
+        for line in result.output.splitlines()
+        if "subscription:updated-only" in line
+    ]
+    assert sub_lines, result.output
+    assert any("would fire" in line.lower() or "✓" in line for line in sub_lines)
+
+
+def test_dry_run_route_deferred_when_dependencies_not_completed(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tag-matching open task whose depends_on includes an unfinished dep
+    must NOT be reported as 'would fire (claim)'. The runner's actual gate
+    defers it; the dry-run output must reflect that.
+    """
+    fake = _FakeLithos(
+        tasks=[
+            _task(
+                "blocked",
+                tags=("trigger:prd-decompose",),
+                metadata={"depends_on": ["dep-1"]},
+            )
+        ],
+        dep_statuses={"dep-1": "open"},  # dep is still open → not satisfied
+    )
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["validate-config", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    # Find the row under the "blocked" task heading.
+    lines = result.output.splitlines()
+    blocked_idx = next(i for i, line in enumerate(lines) if "blocked" in line)
+    # Subsequent lines indent under it; find the prd-decompose route row.
+    route_row = next(
+        line
+        for line in lines[blocked_idx + 1 : blocked_idx + 5]
+        if "route:prd-decompose" in line
+    )
+    assert "✓" not in route_row, route_row
+    assert (
+        "deferred" in route_row.lower() or "deps not complete" in route_row.lower()
+    ), route_row
+    # Dep-1 must have been resolved via task_status.
+    assert "dep-1" in fake.task_status_calls
+
+
+def test_dry_run_route_fires_when_dependencies_completed(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dep-gating doesn't over-correct: completed deps allow the route to fire."""
+    fake = _FakeLithos(
+        tasks=[
+            _task(
+                "ready",
+                tags=("trigger:prd-decompose",),
+                metadata={"depends_on": ["dep-1"]},
+            )
+        ],
+        dep_statuses={"dep-1": "completed"},
+    )
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["validate-config", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    idx = next(i for i, line in enumerate(lines) if "ready" in line)
+    route_row = next(
+        line for line in lines[idx + 1 : idx + 5] if "route:prd-decompose" in line
+    )
+    assert "✓" in route_row, route_row
 
 
 # Sentinel that keeps LithosClientError importable in this module so tests
