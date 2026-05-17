@@ -24,10 +24,45 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from lithos_loom.bus import EventBus
-from lithos_loom.config import LoomConfig, load_config
+from lithos_loom.config import LogLevel, LoomConfig, load_config
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.subscriptions.route_runner import RouteRunner
+
+_LEVEL_MAP: dict[LogLevel, int] = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+
+# Loggers we demote unless the operator has explicitly asked for debug
+# output. httpx logs every HTTP request at INFO — one POST per MCP tool
+# call plus the SSE GET — which drowns out the source + subscriber
+# lifecycle. At debug level we leave them alone so the operator gets the
+# full picture.
+_NOISY_LIBRARY_LOGGERS = ("httpx", "httpx_sse")
+
+
+def _configure_logging(level: LogLevel) -> None:
+    """Set up root logging at the configured level and silence noisy libs.
+
+    When ``level`` is ``"debug"`` the library loggers are left at the
+    root level so every HTTP request surfaces — operators asking for
+    debug want the full firehose. At any other level the library logs
+    are pinned to WARNING so they don't drown the application logs.
+    """
+    logging.basicConfig(
+        level=_LEVEL_MAP[level],
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if level == "debug":
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+    else:
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
+
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +130,11 @@ async def _amain(cfg: LoomConfig) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    # httpx / httpx-sse log every HTTP request at INFO — one POST per
-    # MCP tool call (claim, complete, renew, finding_post…) plus the
-    # SSE GET. Demote to WARNING so the operator can read the source +
-    # subscriber lifecycle without grepping past per-call noise.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpx_sse").setLevel(logging.WARNING)
+    # Load config first so we know what level to configure. Any
+    # ConfigError that escapes here surfaces via Python's default
+    # last-resort stderr handler before logging is up.
     cfg = load_config(args.config)
+    _configure_logging(cfg.orchestrator.log_level)
     try:
         return asyncio.run(_amain(cfg))
     except KeyboardInterrupt:
