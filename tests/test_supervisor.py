@@ -283,6 +283,41 @@ def test_run_command_exits_cleanly_when_no_routes_or_subscriptions(
     assert result.exit_code == 0, result.output
 
 
+def test_run_command_configures_parent_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run`` must call ``logging.basicConfig`` in the parent process.
+
+    Without this, the Supervisor's INFO (``spawned child …``) and WARNING
+    (``[Friction] child … exited``, ``SIGKILLing …``) lines are silently
+    dropped when running under ``uv run lithos-loom run`` because no
+    handler is attached to the root logger. The child process configures
+    its own logging; the parent did not, until this regression test.
+    """
+    import logging
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[orchestrator]\n"
+        'agent_id = "lithos-orchestrator-test"\n'
+        'lithos_url = "http://localhost:8765"\n'
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg))
+
+    calls: list[dict[str, object]] = []
+
+    def _spy(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(logging, "basicConfig", _spy)
+
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].get("level") == logging.INFO
+    assert "%(name)s" in str(calls[0].get("format", ""))
+
+
 # ── Echo child standalone smoke ────────────────────────────────────────
 
 

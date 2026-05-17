@@ -97,6 +97,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # httpx logs every MCP-over-SSE message at INFO — one per poll, plus
+    # one per claim/renew/complete. Demote to WARNING so RouteRunner's
+    # own claim/complete/release lines are readable.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg = load_config(args.config)
     try:
         return asyncio.run(_amain(cfg))
