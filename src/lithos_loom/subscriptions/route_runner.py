@@ -3,7 +3,7 @@
 This is the legacy poll-claim-execute behaviour preserved by the locked
 decisions, re-implemented as a special subscriber type sitting on the
 in-process :class:`EventBus`. It listens for ``lithos.task.created`` /
-``lithos.task.updated`` events whose tags match the route's
+``lithos.task.released`` events whose tags match the route's
 ``RouteMatch.tags``, claims the task via Lithos, runs the configured
 plugin subprocess, and applies the resulting status:
 
@@ -49,7 +49,7 @@ PluginRunFn = Callable[..., Awaitable[Mapping[str, Any]]]
 
 _HANDLED_EVENT_TYPES = (
     "lithos.task.created",
-    "lithos.task.updated",
+    "lithos.task.released",
 )
 
 
@@ -160,9 +160,8 @@ class RouteRunner:
         except LithosClientError as exc:
             if exc.code == "claim_failed":
                 # Another runner won the race. Don't add to processed —
-                # if they release the claim, we should still be eligible
-                # via a future event (this runner just doesn't yet
-                # subscribe to released events; that's a Slice 1+ concern).
+                # if they release the claim, the lithos.task.released
+                # event will land here again and we'll re-attempt.
                 logger.debug(
                     "RouteRunner %s: lost claim race for %s",
                     self.route.name,

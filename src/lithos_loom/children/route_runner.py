@@ -1,9 +1,10 @@
-"""Subprocess child that runs the bus + LithosPoller + RouteRunners (Slice 0 US5).
+"""Subprocess child that runs the bus + LithosEventStream + RouteRunners.
 
 Spawned by the :class:`~lithos_loom.supervisor.Supervisor` per the
 ``route-runner`` :class:`~lithos_loom.supervisor.CategorySpec`. Owns one
 :class:`~lithos_loom.bus.EventBus`, one
-:class:`~lithos_loom.sources.lithos_poller.LithosPoller`, and one
+:class:`~lithos_loom.sources.lithos_event_stream.LithosEventStream`
+consuming Lithos's ``/events`` SSE channel, and one
 :class:`~lithos_loom.subscriptions.route_runner.RouteRunner` per
 configured route. Runs until SIGTERM/SIGINT.
 
@@ -25,7 +26,7 @@ from pathlib import Path
 from lithos_loom.bus import EventBus
 from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.lithos_client import LithosClient
-from lithos_loom.sources.lithos_poller import LithosPoller
+from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.subscriptions.route_runner import RouteRunner
 
 logger = logging.getLogger(__name__)
@@ -51,10 +52,11 @@ async def _amain(cfg: LoomConfig) -> int:
     async with LithosClient(
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as lithos:
-        poller = LithosPoller(
+        events_url = cfg.orchestrator.lithos_url.rstrip("/") + "/events"
+        source = LithosEventStream(
             client=lithos,
             bus=bus,
-            interval=float(cfg.orchestrator.poll_interval_seconds),
+            events_url=events_url,
         )
         runners = [
             RouteRunner(
@@ -68,13 +70,13 @@ async def _amain(cfg: LoomConfig) -> int:
             for route in cfg.routes
         ]
         logger.info(
-            "route-runner child: starting poller + %d route runners (%s)",
+            "route-runner child: starting event-stream + %d route runners (%s)",
             len(runners),
             ", ".join(r.route.name for r in runners),
         )
 
         tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(poller.run(), name="lithos-poller"),
+            asyncio.create_task(source.run(), name="lithos-event-stream"),
             *(
                 asyncio.create_task(r.run(), name=f"route-{r.route.name}")
                 for r in runners

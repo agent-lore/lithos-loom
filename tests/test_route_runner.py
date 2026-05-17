@@ -1,7 +1,7 @@
 """Tests for ``lithos_loom.subscriptions.route_runner`` (Slice 0 US5).
 
 The RouteRunner is a claim-bound subscriber: it subscribes to bus
-``lithos.task.created`` / ``lithos.task.updated`` events filtered by the
+``lithos.task.created`` / ``lithos.task.released`` events filtered by the
 route's tag match, claims matching open tasks via Lithos, runs the plugin
 subprocess, and applies the resulting status (complete on succeeded,
 release + ``[BlockerFailed]`` finding on failed). Tests inject fake
@@ -377,7 +377,7 @@ async def test_runner_recovers_from_unexpected_exception_in_handler(
 
 
 async def test_runner_dedupes_repeat_events_for_same_task(tmp_path: Path) -> None:
-    """Stale created/updated events for an already-handled task must not re-run.
+    """Stale created/released events for an already-handled task must not re-run.
 
     Regression: without an in-runner processed-set, two queued events for
     the same open task each ran the plugin and called task_complete twice
@@ -390,7 +390,7 @@ async def test_runner_dedupes_repeat_events_for_same_task(tmp_path: Path) -> Non
 
     payload = _payload("task-1")
     await bus.publish(_evt(type_="lithos.task.created", payload=payload))
-    await bus.publish(_evt(type_="lithos.task.updated", payload=payload))
+    await bus.publish(_evt(type_="lithos.task.released", payload=payload))
     await _run_for(runner, seconds=0.2)
 
     # Exactly one claim → exactly one plugin run → exactly one complete.
@@ -480,16 +480,20 @@ async def test_runner_keeps_work_dir_on_failure_when_retaining(
     assert (tmp_path / "task-1").exists()
 
 
-async def test_runner_subscribes_only_to_created_and_updated(
+async def test_runner_subscribes_only_to_created_and_released(
     tmp_path: Path,
 ) -> None:
-    """Slice 0 contract: don't react to claimed/released/completed/cancelled."""
+    """Issue #8: react to created + released; ignore claimed/completed/cancelled.
+
+    ``released`` is the re-claim trigger now that the source is the
+    event stream — Lithos doesn't emit ``updated``, and a released task
+    is the natural moment to attempt a fresh claim.
+    """
     bus = EventBus()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
 
     for type_ in (
         "lithos.task.claimed",
-        "lithos.task.released",
         "lithos.task.completed",
         "lithos.task.cancelled",
     ):
