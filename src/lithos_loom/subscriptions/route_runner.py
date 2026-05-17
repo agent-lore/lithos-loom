@@ -173,6 +173,7 @@ class RouteRunner:
         # Claim succeeded; remember so duplicate queued events for the same
         # task ID are skipped rather than racing into a second plugin run.
         self._processed_tasks.add(task_id)
+        logger.info("RouteRunner %s: claimed %s", self.route.name, task_id)
         await self._run_claimed_task(task_id, payload)
 
     async def _deps_satisfied(self, dep_ids: list[str]) -> bool:
@@ -253,6 +254,7 @@ class RouteRunner:
         status = result.get("status")
         if status == "succeeded":
             await self.lithos.task_complete(task_id=task_id, agent=self.agent_id)
+            logger.info("RouteRunner %s: completed %s", self.route.name, task_id)
             return True
         if status == "failed":
             err = result.get("error") or {}
@@ -272,6 +274,11 @@ class RouteRunner:
                     aspect=self.route.name,
                     agent=self.agent_id,
                 )
+            logger.info(
+                "RouteRunner %s: released %s (plugin interrupted)",
+                self.route.name,
+                task_id,
+            )
             return False
         await self._release_with_finding(
             task_id,
@@ -281,6 +288,12 @@ class RouteRunner:
 
     async def _release_with_finding(self, task_id: str, detail: str) -> None:
         summary = f"[BlockerFailed] route {self.route.name}: {detail}"
+        logger.info(
+            "RouteRunner %s: releasing %s with finding: %s",
+            self.route.name,
+            task_id,
+            detail,
+        )
         try:
             await self.lithos.finding_post(
                 task_id=task_id, summary=summary, agent=self.agent_id

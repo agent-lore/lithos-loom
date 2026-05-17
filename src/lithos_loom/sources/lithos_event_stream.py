@@ -170,13 +170,16 @@ class LithosEventStream:
     # ── per-event handling ───────────────────────────────────────────
 
     async def _handle_sse_event(self, sse: Any) -> None:
+        sse_id = getattr(sse, "id", "") or "<none>"
         event_type = getattr(sse, "event", "") or ""
         if event_type not in _HANDLED_LITHOS_EVENT_TYPES:
             # Server-side ?types= filter is the canonical defence; this
             # is belt-and-braces against config drift / future event
             # types that leak into the same stream.
             logger.debug(
-                "LithosEventStream: ignoring non-task event type %r", event_type
+                "LithosEventStream: ignoring non-task event id=%s type=%r",
+                sse_id,
+                event_type,
             )
             return
 
@@ -184,7 +187,8 @@ class LithosEventStream:
             data = json.loads(sse.data) if sse.data else {}
         except json.JSONDecodeError:
             logger.warning(
-                "LithosEventStream: malformed JSON in SSE data for %s; skipping",
+                "LithosEventStream: malformed JSON in SSE id=%s type=%s; skipping",
+                sse_id,
                 event_type,
             )
             return
@@ -192,17 +196,27 @@ class LithosEventStream:
         task_id = data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             logger.warning(
-                "LithosEventStream: %s event missing task_id; skipping",
+                "LithosEventStream: SSE id=%s type=%s missing task_id; skipping",
+                sse_id,
                 event_type,
             )
             return
 
+        logger.debug(
+            "LithosEventStream: received SSE id=%s type=%s task=%s",
+            sse_id,
+            event_type,
+            task_id,
+        )
+
         task = await self._enrich(task_id, event_type)
         if task is None:
-            logger.debug(
-                "LithosEventStream: cannot resolve task %s for %s; skipping",
+            logger.warning(
+                "LithosEventStream: cannot resolve task %s for %s "
+                "(SSE id=%s); skipping",
                 task_id,
                 event_type,
+                sse_id,
             )
             return
 
@@ -240,7 +254,18 @@ class LithosEventStream:
         if terminal_status is None:
             # Non-terminal event for a task we lost track of — best we
             # can do is publish the cached payload as-is.
+            logger.info(
+                "LithosEventStream: enriching %s with stale snapshot "
+                "(task_status not_found)",
+                task_id,
+            )
             return cached
+        logger.info(
+            "LithosEventStream: enriching terminal %s with snapshot "
+            "(task_status not_found); status=%s",
+            task_id,
+            terminal_status,
+        )
         return Task(
             id=cached.id,
             title=cached.title,
@@ -259,6 +284,7 @@ class LithosEventStream:
             payload=_event_payload(task),
         )
         await self.bus.publish(event)
+        logger.info("LithosEventStream: published %s for %s", event_type, task.id)
 
 
 def _terminal_status_for(lithos_event_type: str) -> str | None:

@@ -578,3 +578,49 @@ async def test_stream_subscribes_only_to_task_event_types() -> None:
     }
     assert aconnect.calls[0]["url"] == "http://lithos.test/events"
     assert aconnect.calls[0]["method"] == "GET"
+
+
+# ── Operator-visibility logging ─────────────────────────────────────────
+
+
+async def test_stream_logs_info_per_published_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each bus publish emits one INFO log naming the event type + task id.
+
+    Operator visibility regression: without this, the source is silent
+    on the success path and the operator can't tell whether the SSE
+    channel is actually delivering events.
+    """
+    import logging
+
+    bus = EventBus()
+    bus.subscribe(event_types=["lithos.task.created"])  # passive
+    client = _FakeClient(
+        bootstrap=[],
+        status_responses={"abc-123": _task("abc-123")},
+    )
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.created", data={"task_id": "abc-123"}, id="e1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    source_logger = "lithos_loom.sources.lithos_event_stream"
+    with caplog.at_level(logging.INFO, logger=source_logger):
+        task = asyncio.create_task(source.run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    publish_logs = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "published" in r.getMessage()
+    ]
+    assert publish_logs, "expected at least one INFO 'published' log"
+    msg = publish_logs[0].getMessage()
+    assert "lithos.task.created" in msg
+    assert "abc-123" in msg

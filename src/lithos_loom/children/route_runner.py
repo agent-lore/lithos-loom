@@ -99,6 +99,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # httpx / httpx-sse log every HTTP request at INFO — one POST per
+    # MCP tool call (claim, complete, renew, finding_post…) plus the
+    # SSE GET. Demote to WARNING so the operator can read the source +
+    # subscriber lifecycle without grepping past per-call noise.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpx_sse").setLevel(logging.WARNING)
     cfg = load_config(args.config)
     try:
         return asyncio.run(_amain(cfg))
