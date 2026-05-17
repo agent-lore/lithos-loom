@@ -68,6 +68,19 @@ def run(
         # validate-config subcommand below, which is the canonical home
         # for the simulation logic. Forward and exit with its code.
         raise typer.Exit(_run_dry_run(cfg))
+    # Configure root logging so the supervisor's own INFO/WARNING lines
+    # (spawned child, [Friction] child crash, SIGKILL fallback) reach the
+    # operator. Child processes call basicConfig themselves; this only
+    # affects the parent. basicConfig is a no-op if pytest has already
+    # attached its capture handler, so tests are unaffected.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # httpx logs every MCP-over-SSE message at INFO, drowning out our own
+    # operational logs. Demote to WARNING — connection failures still
+    # surface, per-call traffic doesn't.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     sup = Supervisor(cfg, default_categories())
     exit_code = asyncio.run(sup.run())
     raise typer.Exit(exit_code)

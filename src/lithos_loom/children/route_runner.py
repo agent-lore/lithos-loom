@@ -133,6 +133,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Load config first so we know what level to configure. Any
     # ConfigError that escapes here surfaces via Python's default
     # last-resort stderr handler before logging is up.
+    # NB: the manual-testing branch (now on main) did basicConfig + httpx
+    # silencing inline here; that's superseded by _configure_logging
+    # below, which honours cfg.orchestrator.log_level and additionally
+    # silences httpx_sse.
     cfg = load_config(args.config)
     _configure_logging(cfg.orchestrator.log_level)
     try:
