@@ -64,7 +64,15 @@ _HANDLED_LITHOS_EVENT_TYPES = (
 
 
 class EventStreamClient(Protocol):
-    """Minimum surface the event-stream source depends on."""
+    """Minimum surface the event-stream source depends on.
+
+    Only ``task_list`` is required — it returns the full Task shape
+    (id, title, status, tags, metadata, claims) which downstream tag
+    filters need. ``task_status`` is deliberately NOT used for
+    enrichment because Lithos's implementation drops tags + metadata
+    (see ``LithosClient.task_status`` docstring), which would make
+    routed events unmatchable.
+    """
 
     async def task_list(
         self,
@@ -73,7 +81,19 @@ class EventStreamClient(Protocol):
         with_claims: bool = False,
     ) -> list[Task]: ...
 
-    async def task_status(self, *, task_id: str) -> Task | None: ...
+
+def _default_httpx_timeout() -> httpx.Timeout:
+    """Timeout for the SSE streaming AsyncClient.
+
+    Read timeout disabled (``None``): Lithos sends keepalive comments
+    every 15s, but the stream is otherwise idle between events. httpx's
+    default 5s read timeout would fire constantly under steady-state
+    quiet, triggering reconnect-with-backoff and losing events.
+
+    Connect / write / pool retain modest defaults so connection-level
+    failures still surface promptly.
+    """
+    return httpx.Timeout(connect=10.0, read=None, write=10.0, pool=5.0)
 
 
 @dataclass
@@ -86,13 +106,16 @@ class LithosEventStream:
     # Injection points for tests. Default to the real httpx surfaces.
     _aconnect_sse: Any = field(default=aconnect_sse)
     _httpx_client_factory: Any = field(default=httpx.AsyncClient)
+    _httpx_timeout: httpx.Timeout = field(default_factory=_default_httpx_timeout)
 
     def __post_init__(self) -> None:
         self._last_event_id: str | None = None
         # Cache of the most recent Task object seen per id. Populated
-        # during bootstrap and after every successful task_status
-        # enrichment. Used as a fallback payload when a terminal-state
-        # SSE event arrives but task_status reports not-found.
+        # during bootstrap and refreshed via ``task_list`` whenever an
+        # SSE event arrives for an unknown task id. The cache carries
+        # the full Task shape (id, title, status, tags, metadata,
+        # claims) so downstream tag filters work on every published
+        # event, not just the bootstrap ones.
         self._known_tasks: dict[str, Task] = {}
 
     async def run(self) -> None:
@@ -149,8 +172,12 @@ class LithosEventStream:
         events_seen = 0
         async with AsyncExitStack() as stack:
             # The real httpx_sse.aconnect_sse needs an AsyncClient owner;
-            # tests inject a stub that ignores it.
-            http_client = await stack.enter_async_context(self._httpx_client_factory())
+            # tests inject a stub that ignores it. Pass the source's
+            # configured timeout (read disabled by default — see
+            # _default_httpx_timeout for rationale).
+            http_client = await stack.enter_async_context(
+                self._httpx_client_factory(timeout=self._httpx_timeout)
+            )
             event_source = await stack.enter_async_context(
                 self._aconnect_sse(
                     http_client,
@@ -227,53 +254,45 @@ class LithosEventStream:
         """Return the best Task for the event, or None if we have nothing useful.
 
         Preference order:
-        1. Fresh ``task_status(task_id)`` result, if available.
-        2. Cached snapshot from bootstrap or a prior enrichment, with the
-           ``status`` field overridden by the canonical terminal state
-           inferred from the SSE event type (so the payload's status
-           reflects what the SSE event reports, not what we last saw).
-        """
-        try:
-            current = await self.client.task_status(task_id=task_id)
-        except Exception:
-            logger.exception(
-                "LithosEventStream: task_status(%s) failed; using snapshot fallback",
-                task_id,
-            )
-            current = None
+        1. Cached full-shape Task from bootstrap or a prior enrichment.
+           For terminal events the ``status`` field is overridden with
+           the canonical terminal state from the SSE event type.
+        2. On cache miss, refresh from ``task_list(status="open")`` —
+           this picks up tasks created after bootstrap. The cache is
+           updated in-place (existing terminal-state entries are
+           preserved so later terminal events still have something to
+           fall back on).
+        3. If still nothing, return ``None`` so the caller can skip.
 
-        if current is not None:
-            self._known_tasks[task_id] = current
-            return current
+        Errors from ``task_list`` propagate so the reconnect loop can
+        retry the same SSE event (we have NOT yet advanced
+        ``_last_event_id``, so the server replays). Swallowing the
+        error here would acknowledge the event and lose it.
+        """
+        cached = self._known_tasks.get(task_id)
+        if cached is not None:
+            return _with_terminal_status(cached, event_type)
+
+        # Unknown task id — refresh the open-task cache. Most SSE events
+        # for currently-open tasks will resolve here.
+        tasks = await self.client.task_list(status="open", with_claims=True)
+        for t in tasks:
+            self._known_tasks[t.id] = t
 
         cached = self._known_tasks.get(task_id)
-        if cached is None:
-            return None
-
-        terminal_status = _terminal_status_for(event_type)
-        if terminal_status is None:
-            # Non-terminal event for a task we lost track of — best we
-            # can do is publish the cached payload as-is.
-            logger.info(
-                "LithosEventStream: enriching %s with stale snapshot "
-                "(task_status not_found)",
+        if cached is not None:
+            logger.debug(
+                "LithosEventStream: enriched unknown %s via task_list refresh",
                 task_id,
             )
-            return cached
-        logger.info(
-            "LithosEventStream: enriching terminal %s with snapshot "
-            "(task_status not_found); status=%s",
-            task_id,
-            terminal_status,
-        )
-        return Task(
-            id=cached.id,
-            title=cached.title,
-            status=terminal_status,
-            tags=cached.tags,
-            metadata=cached.metadata,
-            claims=cached.claims,
-        )
+            return _with_terminal_status(cached, event_type)
+
+        # Not in the refreshed open-task list either. Two cases:
+        # - Truly unknown (deleted? race condition?): skip.
+        # - Already terminal at the time of refresh and we never saw the
+        #   open form: skip (no tags/metadata available, can't route).
+        # Either way, drop the event with a debug note.
+        return None
 
     # ── bus publish ──────────────────────────────────────────────────
 
@@ -294,6 +313,29 @@ def _terminal_status_for(lithos_event_type: str) -> str | None:
     if lithos_event_type == "task.cancelled":
         return "cancelled"
     return None
+
+
+def _with_terminal_status(task: Task, lithos_event_type: str) -> Task:
+    """Override ``task.status`` with the canonical terminal status for the SSE event.
+
+    Returns ``task`` unchanged for non-terminal event types or when the
+    status already matches. The SSE event is the source-of-truth — if a
+    ``task.completed`` arrives, the published payload's status must
+    reflect that even if the cached Task still shows ``open`` (which
+    will happen during the brief window between Lithos updating the
+    row and the source's cache being refreshed).
+    """
+    terminal = _terminal_status_for(lithos_event_type)
+    if terminal is None or task.status == terminal:
+        return task
+    return Task(
+        id=task.id,
+        title=task.title,
+        status=terminal,
+        tags=task.tags,
+        metadata=task.metadata,
+        claims=task.claims,
+    )
 
 
 def _event_payload(task: Task) -> Mapping[str, Any]:

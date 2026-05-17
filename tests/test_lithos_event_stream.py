@@ -122,18 +122,26 @@ class _FakeAconnect:
 
 
 class _FakeClient:
-    """Fake ``LithosClient`` with scripted task_list + task_status."""
+    """Fake ``LithosClient`` with scripted ``task_list`` responses.
+
+    The first ``task_list`` call returns ``bootstrap``. Subsequent
+    calls (used by ``_enrich`` to refresh the cache on cache miss)
+    return ``refresh_responses`` if provided, else ``bootstrap`` again.
+    A ``RuntimeError`` (or any exception) in ``refresh_responses`` is
+    raised instead of returned, so tests can assert reconnect behaviour
+    when enrichment fails.
+    """
 
     def __init__(
         self,
         *,
         bootstrap: list[Task] | None = None,
-        status_responses: dict[str, Task | None | Exception] | None = None,
+        refresh_responses: list[list[Task] | Exception] | None = None,
     ) -> None:
         self._bootstrap = list(bootstrap or [])
-        self._status_responses = dict(status_responses or {})
+        self._refresh_responses = list(refresh_responses or [])
+        self._first_call = True
         self.task_list_calls: list[dict[str, Any]] = []
-        self.task_status_calls: list[str] = []
 
     async def task_list(
         self,
@@ -142,14 +150,17 @@ class _FakeClient:
         with_claims: bool = False,
     ) -> list[Task]:
         self.task_list_calls.append({"status": status, "with_claims": with_claims})
+        if self._first_call:
+            self._first_call = False
+            return list(self._bootstrap)
+        if self._refresh_responses:
+            nxt = self._refresh_responses.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return list(nxt)
+        # No script set for refresh — return the bootstrap as a stable
+        # fallback so well-known tasks remain enrichable.
         return list(self._bootstrap)
-
-    async def task_status(self, *, task_id: str) -> Task | None:
-        self.task_status_calls.append(task_id)
-        resp = self._status_responses.get(task_id)
-        if isinstance(resp, Exception):
-            raise resp
-        return resp
 
 
 def _drain(sub: Subscription) -> list[tuple[str, dict[str, Any]]]:
@@ -256,9 +267,10 @@ async def test_stream_translates_sse_event_type_to_loom_namespace() -> None:
     """Lithos's task.released SSE event → Loom's lithos.task.released bus event."""
     bus = EventBus()
     listener = bus.subscribe(event_types=["lithos.task.released"])
+    # Unknown task; enrichment refresh sees it via task_list.
     client = _FakeClient(
         bootstrap=[],
-        status_responses={"r1": _task("r1", tags=("trigger:t",))},
+        refresh_responses=[[_task("r1", tags=("trigger:t",))]],
     )
     aconnect = _FakeAconnect(
         connections=[
@@ -277,8 +289,14 @@ async def test_stream_translates_sse_event_type_to_loom_namespace() -> None:
     assert types == ["lithos.task.released"]
 
 
-async def test_stream_enriches_payload_via_task_status() -> None:
-    """SSE event is slim; the source enriches via task_status before publishing."""
+async def test_stream_enriches_payload_via_task_list_for_unknown_task() -> None:
+    """SSE event for a task not seen at bootstrap → refresh via task_list.
+
+    Regression for Copilot review #4: the previous impl used
+    task_status which drops tags + metadata, so streamed events would
+    publish with empty tags and never match a RouteRunner. task_list
+    returns the full Task shape.
+    """
     bus = EventBus()
     listener = bus.subscribe(event_types=["lithos.task.created"])
     full = _task(
@@ -288,7 +306,8 @@ async def test_stream_enriches_payload_via_task_status() -> None:
         metadata={"depends_on": []},
         title="enriched",
     )
-    client = _FakeClient(bootstrap=[], status_responses={"t1": full})
+    # bootstrap is empty; the refresh after the SSE event yields the task.
+    client = _FakeClient(bootstrap=[], refresh_responses=[[full]])
     aconnect = _FakeAconnect(
         connections=[
             [_FakeSse(event="task.created", data={"task_id": "t1"}, id="evt-1")]
@@ -310,24 +329,103 @@ async def test_stream_enriches_payload_via_task_status() -> None:
     assert payload["status"] == "open"
     assert payload["tags"] == ["trigger:x"]
     assert payload["metadata"] == {"depends_on": []}
-    assert client.task_status_calls == ["t1"]
+    # First task_list call is bootstrap; second is the enrichment refresh.
+    assert len(client.task_list_calls) == 2
 
 
-async def test_stream_uses_bootstrap_snapshot_when_task_status_returns_none() -> None:
+async def test_stream_uses_cached_task_for_known_task_without_refresh() -> None:
+    """Subsequent SSE events for tasks already in cache reuse the cached
+    full-shape Task — no extra task_list refresh.
+
+    This keeps the per-event cost down to one MCP call (the bootstrap)
+    for the steady-state case where events arrive for tasks already
+    known.
+    """
+    bus = EventBus()
+    # Subscribe to both so we see the bootstrap-created event too.
+    listener = bus.subscribe(
+        event_types=["lithos.task.created", "lithos.task.released"]
+    )
+    full = _task("t1", status="open", tags=("trigger:x",), title="known")
+    client = _FakeClient(bootstrap=[full])
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.released", data={"task_id": "t1"}, id="evt-1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    drained = _drain(listener)
+    # Bootstrap created event + released event.
+    assert len(drained) == 2
+    assert drained[0][0] == "lithos.task.created"
+    assert drained[1][0] == "lithos.task.released"
+    assert drained[1][1]["tags"] == ["trigger:x"]
+    # Only bootstrap task_list — no extra refresh for the known task.
+    assert len(client.task_list_calls) == 1
+
+
+async def test_stream_propagates_task_list_errors_so_event_is_replayed() -> None:
+    """Regression for Copilot review #3: a transient task_list failure
+    during enrichment must NOT acknowledge the SSE event. The error
+    should propagate so the reconnect loop replays the same event with
+    the unchanged Last-Event-ID.
+    """
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created"])
+    full = _task("t1", tags=("trigger:x",))
+    # First refresh raises (transient); second succeeds with the task.
+    client = _FakeClient(
+        bootstrap=[],
+        refresh_responses=[RuntimeError("transient blip"), [full]],
+    )
+    aconnect = _FakeAconnect(
+        connections=[
+            # First connection: yields one event, then raises (mirroring
+            # what happens when _enrich raises mid-iteration).
+            [_FakeSse(event="task.created", data={"task_id": "t1"}, id="evt-1")],
+            # Second connection: replay yields the same event again.
+            [_FakeSse(event="task.created", data={"task_id": "t1"}, id="evt-1")],
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The event was eventually published (second attempt succeeded).
+    drained = _drain(listener)
+    assert any(t == "lithos.task.created" for t, _ in drained)
+    # Reconnect happened with no Last-Event-ID advance — the first
+    # connect set Last-Event-ID="evt-1" only AFTER the publish, which
+    # we never reached. So second connect must NOT carry it.
+    assert "Last-Event-ID" not in aconnect.calls[1]["headers"]
+
+
+async def test_stream_uses_cached_snapshot_for_terminal_event_on_known_task() -> None:
     """For terminal events on a task we knew during bootstrap, use cached snapshot.
 
-    Lithos may briefly drop a completed task from task_status before its
-    completion event drains. Without a snapshot fallback the bus would
-    silently drop the terminal event, breaking forward-compat with Slice
-    1+ subscribers (e.g., obsidian-projection on task.completed).
+    Lithos's task_list(status="open") won't return a task that's just
+    completed, so the refresh path can't enrich. But because the task
+    was open at bootstrap time, the cached entry carries the tags +
+    metadata we need to route on. The SSE event's terminal status
+    overrides the cached "open" so subscribers see the canonical state.
     """
     bus = EventBus()
     listener = bus.subscribe(event_types=["lithos.task.completed"])
     known = _task("done", tags=("trigger:t",), title="finished task")
-    client = _FakeClient(
-        bootstrap=[known],
-        status_responses={"done": None},  # task_status now reports not_found
-    )
+    # Bootstrap returns the known task (initially open). Refresh sees an
+    # empty list (the task has since left the open set).
+    client = _FakeClient(bootstrap=[known], refresh_responses=[[]])
     aconnect = _FakeAconnect(
         connections=[
             [_FakeSse(event="task.completed", data={"task_id": "done"}, id="evt-1")]
@@ -352,10 +450,8 @@ async def test_stream_uses_bootstrap_snapshot_when_task_status_returns_none() ->
     assert payload["status"] == "completed"
 
 
-async def test_stream_skips_unknown_task_when_status_and_snapshot_both_missing() -> (
-    None
-):
-    """SSE event for a task we never saw + task_status not_found → skip silently."""
+async def test_stream_skips_unknown_task_when_not_in_bootstrap_or_refresh() -> None:
+    """SSE event for a task absent from cache AND refresh result is skipped."""
     bus = EventBus()
     listener = bus.subscribe(
         event_types=[
@@ -367,7 +463,8 @@ async def test_stream_skips_unknown_task_when_status_and_snapshot_both_missing()
             "lithos.task.cancelled",
         ]
     )
-    client = _FakeClient(bootstrap=[], status_responses={"ghost": None})
+    # Empty bootstrap + empty refresh → enrichment yields nothing.
+    client = _FakeClient(bootstrap=[], refresh_responses=[[]])
     aconnect = _FakeAconnect(
         connections=[
             [_FakeSse(event="task.created", data={"task_id": "ghost"}, id="evt-1")]
@@ -414,8 +511,9 @@ async def test_stream_ignores_non_task_event_types() -> None:
         await task
 
     assert _drain(listener) == []
-    # And no enrichment was attempted for the non-task event.
-    assert client.task_status_calls == []
+    # And no enrichment was attempted for the non-task event (only the
+    # bootstrap task_list, no follow-up refresh).
+    assert len(client.task_list_calls) == 1
 
 
 # ── Reconnect + replay ──────────────────────────────────────────────────
@@ -427,7 +525,8 @@ async def test_stream_reconnects_with_last_event_id_after_transient_error() -> N
     bus.subscribe(event_types=["lithos.task.created"])  # passive consumer
     client = _FakeClient(
         bootstrap=[],
-        status_responses={"t1": _task("t1"), "t2": _task("t2")},
+        # Two enrichment refreshes — one per SSE event.
+        refresh_responses=[[_task("t1")], [_task("t2")]],
     )
     aconnect = _FakeAconnect(
         connections=[
@@ -598,7 +697,7 @@ async def test_stream_logs_info_per_published_event(
     bus.subscribe(event_types=["lithos.task.created"])  # passive
     client = _FakeClient(
         bootstrap=[],
-        status_responses={"abc-123": _task("abc-123")},
+        refresh_responses=[[_task("abc-123")]],
     )
     aconnect = _FakeAconnect(
         connections=[
@@ -624,3 +723,66 @@ async def test_stream_logs_info_per_published_event(
     msg = publish_logs[0].getMessage()
     assert "lithos.task.created" in msg
     assert "abc-123" in msg
+
+
+# ── httpx timeout for SSE streaming ─────────────────────────────────────
+
+
+def test_default_httpx_timeout_disables_read_timeout() -> None:
+    """Regression for Copilot review #5: httpx's default 5s read timeout
+    is shorter than Lithos's 15s keepalive interval, so an idle stream
+    would disconnect every 5s and back off, missing events. The source
+    must use a timeout with read disabled (or longer than the keepalive).
+    """
+    import httpx
+
+    from lithos_loom.sources.lithos_event_stream import _default_httpx_timeout
+
+    timeout = _default_httpx_timeout()
+    assert isinstance(timeout, httpx.Timeout)
+    # Read timeout disabled (None) → httpx never fires a read-timeout error
+    # on an idle SSE stream.
+    assert timeout.read is None
+    # Connect/write/pool still have sensible bounds.
+    assert timeout.connect is not None and timeout.connect > 0
+
+
+async def test_stream_passes_timeout_to_httpx_client_factory() -> None:
+    """The configured timeout is passed to the httpx.AsyncClient factory."""
+    import httpx
+
+    bus = EventBus()
+    client = _FakeClient(bootstrap=[])
+    aconnect = _FakeAconnect(connections=[[]])
+    factory_calls: list[dict[str, Any]] = []
+
+    class _SpyClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            factory_calls.append(kwargs)
+
+        async def __aenter__(self) -> _SpyClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+    custom_timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
+    source = LithosEventStream(
+        client=client,
+        bus=bus,
+        events_url="http://lithos.test/events",
+        reconnect_backoff_seconds=0.001,
+        max_reconnect_backoff_seconds=0.01,
+        _aconnect_sse=aconnect,
+        _httpx_client_factory=_SpyClient,
+        _httpx_timeout=custom_timeout,
+    )
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert factory_calls, "expected at least one client factory invocation"
+    assert factory_calls[0].get("timeout") is custom_timeout
