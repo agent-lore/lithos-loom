@@ -1,7 +1,7 @@
 """Tests for ``lithos_loom.subscriptions.route_runner`` (Slice 0 US5).
 
 The RouteRunner is a claim-bound subscriber: it subscribes to bus
-``lithos.task.created`` / ``lithos.task.updated`` events filtered by the
+``lithos.task.created`` / ``lithos.task.released`` events filtered by the
 route's tag match, claims matching open tasks via Lithos, runs the plugin
 subprocess, and applies the resulting status (complete on succeeded,
 release + ``[BlockerFailed]`` finding on failed). Tests inject fake
@@ -377,7 +377,7 @@ async def test_runner_recovers_from_unexpected_exception_in_handler(
 
 
 async def test_runner_dedupes_repeat_events_for_same_task(tmp_path: Path) -> None:
-    """Stale created/updated events for an already-handled task must not re-run.
+    """Stale created/released events for an already-handled task must not re-run.
 
     Regression: without an in-runner processed-set, two queued events for
     the same open task each ran the plugin and called task_complete twice
@@ -390,12 +390,58 @@ async def test_runner_dedupes_repeat_events_for_same_task(tmp_path: Path) -> Non
 
     payload = _payload("task-1")
     await bus.publish(_evt(type_="lithos.task.created", payload=payload))
-    await bus.publish(_evt(type_="lithos.task.updated", payload=payload))
+    await bus.publish(_evt(type_="lithos.task.released", payload=payload))
     await _run_for(runner, seconds=0.2)
 
     # Exactly one claim → exactly one plugin run → exactly one complete.
     assert lithos.task_claim.await_count == 1
     assert lithos.task_complete.await_count == 1
+
+
+async def test_runner_does_not_re_attempt_after_own_release_with_finding(
+    tmp_path: Path,
+) -> None:
+    """Behaviour contract: a task we claimed-then-released stays suppressed.
+
+    When the plugin fails the runner releases the claim and posts a
+    [BlockerFailed] finding. Lithos then emits ``task.released`` — but
+    this runner's ``_processed_tasks`` set already contains the task id
+    from the successful claim, so the released event is silently
+    dropped. Without this dedup the runner would tight-loop:
+    fail → release → released event → re-claim → fail → ...
+
+    This codifies the current "fail once per task per daemon process"
+    behaviour. Retry budget for legitimate re-attempts is tracked in
+    issue #11.
+    """
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "failed",
+            "exit_code": 1,
+            "error": {"category": "agent", "message": "boom"},
+        }
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    # First created event: claim + plugin fail + release with finding.
+    await bus.publish(_evt(type_="lithos.task.created", payload=_payload("task-1")))
+    await _run_for(runner)
+    assert lithos.task_claim.await_count == 1
+    assert lithos.task_release.await_count == 1
+    assert lithos.finding_post.await_count == 1
+
+    # Now the released event from Lithos lands. We must NOT re-claim —
+    # _processed_tasks already contains the id from the successful claim.
+    await bus.publish(_evt(type_="lithos.task.released", payload=_payload("task-1")))
+    await _run_for(runner)
+    assert lithos.task_claim.await_count == 1  # unchanged
+    assert lithos.task_release.await_count == 1  # unchanged
+    assert lithos.finding_post.await_count == 1  # unchanged
 
 
 async def test_runner_releases_dedupe_when_claim_race_lost(tmp_path: Path) -> None:
@@ -480,16 +526,20 @@ async def test_runner_keeps_work_dir_on_failure_when_retaining(
     assert (tmp_path / "task-1").exists()
 
 
-async def test_runner_subscribes_only_to_created_and_updated(
+async def test_runner_subscribes_only_to_created_and_released(
     tmp_path: Path,
 ) -> None:
-    """Slice 0 contract: don't react to claimed/released/completed/cancelled."""
+    """Issue #8: react to created + released; ignore claimed/completed/cancelled.
+
+    ``released`` is the re-claim trigger now that the source is the
+    event stream — Lithos doesn't emit ``updated``, and a released task
+    is the natural moment to attempt a fresh claim.
+    """
     bus = EventBus()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
 
     for type_ in (
         "lithos.task.claimed",
-        "lithos.task.released",
         "lithos.task.completed",
         "lithos.task.cancelled",
     ):

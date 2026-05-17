@@ -15,7 +15,6 @@ The TOML schema follows ``docs/prd/mvp.md`` US-4:
     [orchestrator]
     agent_id = "lithos-orchestrator-<host>"
     lithos_url = "http://localhost:8765"
-    poll_interval_seconds = 30
     work_dir = "/tmp/lithos-loom"
     max_concurrency = 4
 
@@ -48,7 +47,6 @@ __all__ = [
     "DEFAULT_CONFIG_FILENAME",
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_MAX_CONCURRENCY",
-    "DEFAULT_POLL_INTERVAL_SECONDS",
     "DEFAULT_WORK_DIR",
     "Backoff",
     "LogLevel",
@@ -79,7 +77,6 @@ _VALID_ON_PERSISTENT_FAILURE: set[str] = {"friction", "ignore"}
 # ── Defaults ───────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG_FILENAME = "config.toml"
-DEFAULT_POLL_INTERVAL_SECONDS = 30
 DEFAULT_WORK_DIR = Path("/tmp/lithos-loom")
 DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_LOG_LEVEL: LogLevel = "info"
@@ -101,7 +98,6 @@ def parse_log_level(value: str) -> LogLevel:
 class OrchestratorConfig:
     agent_id: str
     lithos_url: str
-    poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS
     work_dir: Path = DEFAULT_WORK_DIR
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     log_level: LogLevel = DEFAULT_LOG_LEVEL
@@ -275,13 +271,6 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
         raise ConfigError(f"{config_path}: [orchestrator] must be a table")
     agent_id = _required_str(data, "agent_id", config_path, "orchestrator")
     lithos_url = _required_str(data, "lithos_url", config_path, "orchestrator")
-    poll_interval = _optional_int(
-        data,
-        "poll_interval_seconds",
-        DEFAULT_POLL_INTERVAL_SECONDS,
-        config_path,
-        "orchestrator",
-    )
     work_dir = _optional_path(
         data, "work_dir", DEFAULT_WORK_DIR, config_path, "orchestrator"
     )
@@ -298,7 +287,6 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
     return OrchestratorConfig(
         agent_id=agent_id,
         lithos_url=lithos_url,
-        poll_interval_seconds=poll_interval,
         work_dir=work_dir,
         max_concurrency=max_concurrency,
         log_level=log_level,
@@ -490,7 +478,6 @@ def _apply_env_overrides(cfg: LoomConfig) -> LoomConfig:
         orchestrator=OrchestratorConfig(
             agent_id=cfg.orchestrator.agent_id,
             lithos_url=url,
-            poll_interval_seconds=cfg.orchestrator.poll_interval_seconds,
             work_dir=cfg.orchestrator.work_dir,
             max_concurrency=cfg.orchestrator.max_concurrency,
             log_level=cfg.orchestrator.log_level,

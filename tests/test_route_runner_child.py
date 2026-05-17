@@ -52,3 +52,49 @@ async def test_route_runner_child_module_is_importable() -> None:
     import lithos_loom.children.route_runner as mod
 
     assert callable(mod.main)
+
+
+# ── Log level + library-silencing wiring ────────────────────────────────
+
+
+def test_configure_logging_silences_httpx_at_info_level() -> None:
+    """At info/warning/error, httpx logs are demoted to WARNING.
+
+    Otherwise the per-request POST log line drowns the source +
+    subscriber lifecycle the operator is watching for.
+    """
+    import logging
+
+    from lithos_loom.children.route_runner import _configure_logging
+
+    # Reset the loggers to a known state so order-of-test doesn't pollute.
+    logging.getLogger("httpx").setLevel(logging.NOTSET)
+    logging.getLogger("httpx_sse").setLevel(logging.NOTSET)
+
+    _configure_logging("info")
+
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpx_sse").level == logging.WARNING
+
+
+def test_configure_logging_does_not_silence_httpx_at_debug_level() -> None:
+    """At debug, httpx is left alone so the operator sees every request.
+
+    Operators asking for ``log_level = "debug"`` want the firehose —
+    blanket-silencing the library loggers there would defeat the
+    purpose. They get pinned back to NOTSET (root passthrough) so the
+    root DEBUG level applies.
+    """
+    import logging
+
+    from lithos_loom.children.route_runner import _configure_logging
+
+    # Pre-pollute the httpx loggers so we can confirm _configure_logging
+    # actively resets them when debug is requested.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpx_sse").setLevel(logging.WARNING)
+
+    _configure_logging("debug")
+
+    assert logging.getLogger("httpx").level == logging.NOTSET
+    assert logging.getLogger("httpx_sse").level == logging.NOTSET

@@ -3,7 +3,7 @@
 This is the legacy poll-claim-execute behaviour preserved by the locked
 decisions, re-implemented as a special subscriber type sitting on the
 in-process :class:`EventBus`. It listens for ``lithos.task.created`` /
-``lithos.task.updated`` events whose tags match the route's
+``lithos.task.released`` events whose tags match the route's
 ``RouteMatch.tags``, claims the task via Lithos, runs the configured
 plugin subprocess, and applies the resulting status:
 
@@ -49,7 +49,7 @@ PluginRunFn = Callable[..., Awaitable[Mapping[str, Any]]]
 
 _HANDLED_EVENT_TYPES = (
     "lithos.task.created",
-    "lithos.task.updated",
+    "lithos.task.released",
 )
 
 
@@ -101,11 +101,22 @@ class RouteRunner:
             match={"tags": list(self.route.match.tags)},
             name=f"route-runner-{self.route.name}",
         )
-        # Tasks this runner has already claimed (or attempted to claim and
-        # succeeded). Future events for the same id are skipped — without
-        # this, multiple stale events queued for the same open task would
-        # each run the plugin, relying on Lithos's claim_failed envelope
-        # for safety. Real Lithos enforces it, but the runner should too.
+        # Tasks this runner has successfully claimed. Future events for
+        # the same id are skipped — without this, multiple stale events
+        # queued for the same open task would each run the plugin,
+        # relying on Lithos's claim_failed envelope for safety. Real
+        # Lithos enforces it, but the runner should too.
+        #
+        # Important: this set is also what suppresses re-attempts after a
+        # plugin failure. When the plugin fails we release the claim and
+        # post a [BlockerFailed] finding; Lithos then emits
+        # lithos.task.released; that event hits this dedup check and is
+        # silently skipped. The effect is "fail once per task per daemon
+        # process" — deliberate, to avoid tight retry loops when a plugin
+        # is deterministically broken. A proper retry budget lives in
+        # follow-up issue #11. The lost-claim-race path below
+        # (claim_failed) deliberately does NOT add to this set, so a
+        # subsequent released event there does re-attempt the claim.
         self._processed_tasks: set[str] = set()
 
     @property
@@ -160,9 +171,11 @@ class RouteRunner:
         except LithosClientError as exc:
             if exc.code == "claim_failed":
                 # Another runner won the race. Don't add to processed —
-                # if they release the claim, we should still be eligible
-                # via a future event (this runner just doesn't yet
-                # subscribe to released events; that's a Slice 1+ concern).
+                # if they release the claim, the lithos.task.released
+                # event will land here again and we'll re-attempt. This
+                # is the only path where released triggers a re-claim;
+                # for the won-claim-then-plugin-fail path, see the
+                # comment on _processed_tasks above (issue #11).
                 logger.debug(
                     "RouteRunner %s: lost claim race for %s",
                     self.route.name,
@@ -275,6 +288,11 @@ class RouteRunner:
                     aspect=self.route.name,
                     agent=self.agent_id,
                 )
+            logger.info(
+                "RouteRunner %s: released %s (plugin interrupted)",
+                self.route.name,
+                task_id,
+            )
             return False
         await self._release_with_finding(
             task_id,

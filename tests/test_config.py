@@ -9,7 +9,6 @@ import pytest
 
 from lithos_loom.config import (
     DEFAULT_MAX_CONCURRENCY,
-    DEFAULT_POLL_INTERVAL_SECONDS,
     LoomConfig,
     find_config_path,
     load_config,
@@ -22,7 +21,6 @@ def test_load_config_parses_orchestrator_projects_routes(loom_config_env: Path) 
     assert isinstance(cfg, LoomConfig)
     assert cfg.orchestrator.agent_id == "lithos-orchestrator-test"
     assert cfg.orchestrator.lithos_url == "http://localhost:8765"
-    assert cfg.orchestrator.poll_interval_seconds == 30
     assert cfg.orchestrator.max_concurrency == 2
     assert "lithos-lens" in cfg.projects
     assert len(cfg.routes) == 1
@@ -67,7 +65,6 @@ def test_environment_picks_per_env_config(
     cfg = load_config()
     assert cfg.orchestrator.agent_id == "lithos-orchestrator-prod"
     assert cfg.environment == "prod"
-    assert cfg.orchestrator.poll_interval_seconds == DEFAULT_POLL_INTERVAL_SECONDS
     assert cfg.orchestrator.max_concurrency == DEFAULT_MAX_CONCURRENCY
 
 
