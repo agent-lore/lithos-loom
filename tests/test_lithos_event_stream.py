@@ -992,6 +992,64 @@ async def test_bootstrap_events_count_toward_backoff_reset() -> None:
     )
 
 
+async def test_filtered_sse_frames_do_not_count_toward_backoff_reset() -> None:
+    """Frames we filter (non-task event type) do NOT count as published
+    events. A stream delivering only noise should be allowed to grow
+    backoff rather than spin at the base interval.
+
+    Regression for Copilot review on #15: ``_events_this_attempt`` was
+    previously incremented per SSE frame, not per actual bus publish."""
+    sleep_calls: list[float] = []
+    original_sleep = asyncio.sleep
+
+    async def _record_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        await original_sleep(0)
+
+    bus = EventBus()
+    bus.subscribe(event_types=["lithos.task.created"])
+    # Empty bootstrap (0 publishes) + a non-task SSE frame (filtered
+    # → 0 publishes) then immediate clean EOF. After this attempt
+    # ends, events_this_attempt should be 0 and backoff should DOUBLE.
+    client = _FakeClient(bootstrap=[])
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="note.created", data={"note_id": "n1"}, id="evt-1")],
+            [],
+            [],
+        ]
+    )
+    source = LithosEventStream(
+        client=client,
+        bus=bus,
+        events_url="http://lithos.test/events",
+        reconnect_backoff_seconds=1.0,
+        max_reconnect_backoff_seconds=4.0,
+        _aconnect_sse=aconnect,
+    )
+
+    import lithos_loom.sources.lithos_event_stream as mod
+
+    mod_sleep_orig = mod.asyncio.sleep
+    mod.asyncio.sleep = _record_sleep  # type: ignore[assignment]
+    try:
+        task = asyncio.create_task(source.run())
+        await original_sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        mod.asyncio.sleep = mod_sleep_orig  # type: ignore[assignment]
+
+    # First iteration produced ZERO bus publishes (bootstrap was empty,
+    # the SSE frame was a filtered non-task event). Backoff doubles
+    # rather than resetting.
+    assert sleep_calls, "no sleeps captured"
+    assert sleep_calls[:2] == [1.0, 2.0], (
+        f"expected doubling backoff with no publishes; got {sleep_calls[:2]}"
+    )
+
+
 async def test_buffered_sse_events_during_bootstrap_drain_after() -> None:
     """End-to-end #13 confidence: an SSE event that arrived during the
     snapshot window is drained after bootstrap. The source publishes

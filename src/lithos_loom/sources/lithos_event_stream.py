@@ -130,10 +130,13 @@ class LithosEventStream:
         # dead subscription's buffered events would be lost. See
         # ``_stream_once`` for the combined gate.
         self._bootstrapped: bool = False
-        # Events published during the current ``_stream_once`` attempt
-        # (bootstrap + SSE). Exposed so ``run()`` can still see how
-        # much progress an attempt made even when it raises mid-stream
-        # — used for backoff-reset decisions.
+        # Bus events actually published during the current
+        # ``_stream_once`` attempt (bootstrap publishes + SSE frames
+        # that ``_handle_sse_event`` published). SSE frames we filter
+        # out (non-task type, malformed JSON, unresolved task) do NOT
+        # count. Exposed so ``run()`` can still see how much progress
+        # an attempt made even when it raises mid-stream — used for
+        # backoff-reset decisions.
         self._events_this_attempt: int = 0
 
     async def run(self) -> None:
@@ -206,10 +209,12 @@ class LithosEventStream:
         server to start buffering events for this subscription. We take
         the ``task_list`` snapshot *after* that, so any state change
         that lands between snapshot and drain still arrives via the
-        buffered SSE feed once iteration begins. Returns total events
-        published (bootstrap + SSE). ``self._events_this_attempt`` is
-        updated incrementally so ``run()`` can read the partial count
-        if this method raises.
+        buffered SSE feed once iteration begins. Returns the count of
+        bus events actually published (bootstrap publishes + SSE
+        frames that produced a publish — filtered/dropped frames are
+        not counted). ``self._events_this_attempt`` is updated
+        incrementally so ``run()`` can read the partial count if this
+        method raises.
 
         Bootstrap-on-reconnect contract: skip bootstrap only when the
         previous attempt left us with a ``Last-Event-ID`` to replay
@@ -258,15 +263,25 @@ class LithosEventStream:
             if bootstrap_this_attempt:
                 self._events_this_attempt += await self._bootstrap()
             async for sse in event_source.aiter_sse():
-                await self._handle_sse_event(sse)
+                published = await self._handle_sse_event(sse)
                 if sse.id:
                     self._last_event_id = sse.id
-                self._events_this_attempt += 1
+                if published:
+                    self._events_this_attempt += 1
         return self._events_this_attempt
 
     # ── per-event handling ───────────────────────────────────────────
 
-    async def _handle_sse_event(self, sse: Any) -> None:
+    async def _handle_sse_event(self, sse: Any) -> bool:
+        """Process one SSE frame. Returns True iff a bus event was published.
+
+        The return value drives the caller's ``_events_this_attempt``
+        counter, which gates the reconnect-backoff reset. Frames that
+        we filter (non-task event type, malformed JSON, missing
+        task_id, unresolved task) are not counted as progress —
+        otherwise a stream delivering only noise would keep us
+        hammering with the base backoff.
+        """
         sse_id = getattr(sse, "id", "") or "<none>"
         event_type = getattr(sse, "event", "") or ""
         if event_type not in _HANDLED_LITHOS_EVENT_TYPES:
@@ -278,7 +293,7 @@ class LithosEventStream:
                 sse_id,
                 event_type,
             )
-            return
+            return False
 
         try:
             data = json.loads(sse.data) if sse.data else {}
@@ -288,7 +303,7 @@ class LithosEventStream:
                 sse_id,
                 event_type,
             )
-            return
+            return False
 
         task_id = data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
@@ -297,7 +312,7 @@ class LithosEventStream:
                 sse_id,
                 event_type,
             )
-            return
+            return False
 
         logger.debug(
             "LithosEventStream: received SSE id=%s type=%s task=%s",
@@ -315,10 +330,11 @@ class LithosEventStream:
                 event_type,
                 sse_id,
             )
-            return
+            return False
 
         loom_type = f"lithos.{event_type}"
         await self._publish(loom_type, task)
+        return True
 
     async def _enrich(self, task_id: str, event_type: str) -> Task | None:
         """Return the best Task for the event, or None if we have nothing useful.
