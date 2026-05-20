@@ -124,11 +124,11 @@ class LithosEventStream:
         # claims) so downstream tag filters work on every published
         # event, not just the bootstrap ones.
         self._known_tasks: dict[str, Task] = {}
-        # Flips to True once bootstrap has published its snapshot once.
-        # Subsequent reconnects skip bootstrap; the existing
-        # ``RouteRunner._processed_tasks`` dedup would absorb duplicates,
-        # but re-publishing the entire open-task set on every reconnect
-        # is pointless noise.
+        # Flips to True once bootstrap has published its snapshot at
+        # least once. Subsequent reconnects skip bootstrap ONLY when we
+        # also have a ``Last-Event-ID`` to replay from — otherwise the
+        # dead subscription's buffered events would be lost. See
+        # ``_stream_once`` for the combined gate.
         self._bootstrapped: bool = False
         # Events published during the current ``_stream_once`` attempt
         # (bootstrap + SSE). Exposed so ``run()`` can still see how
@@ -210,6 +210,15 @@ class LithosEventStream:
         published (bootstrap + SSE). ``self._events_this_attempt`` is
         updated incrementally so ``run()`` can read the partial count
         if this method raises.
+
+        Bootstrap-on-reconnect contract: skip bootstrap only when the
+        previous attempt left us with a ``Last-Event-ID`` to replay
+        from. If we've bootstrapped at least once but never drained an
+        SSE event with an id (e.g. the first subscription dropped
+        before any event came through), re-bootstrap so we don't lose
+        whatever events were buffered on the dead subscription. The
+        duplicate ``lithos.task.created`` events that may result are
+        absorbed by ``RouteRunner._processed_tasks``.
         """
         self._events_this_attempt = 0
         headers: dict[str, str] = {}
@@ -217,11 +226,16 @@ class LithosEventStream:
             headers["Last-Event-ID"] = self._last_event_id
         params = {"types": ",".join(_HANDLED_LITHOS_EVENT_TYPES)}
 
+        # Re-bootstrap unless we have a resume cursor from a prior
+        # successful event drain. Without that cursor a reconnect would
+        # come up empty for any events buffered on the lost subscription.
+        bootstrap_this_attempt = not self._bootstrapped or self._last_event_id is None
+
         logger.info(
             "LithosEventStream: connecting to %s (Last-Event-ID=%s, bootstrap=%s)",
             self.events_url,
             self._last_event_id or "<none>",
-            not self._bootstrapped,
+            bootstrap_this_attempt,
         )
 
         async with AsyncExitStack() as stack:
@@ -241,7 +255,7 @@ class LithosEventStream:
                     params=params,
                 )
             )
-            if not self._bootstrapped:
+            if bootstrap_this_attempt:
                 self._events_this_attempt += await self._bootstrap()
             async for sse in event_source.aiter_sse():
                 await self._handle_sse_event(sse)

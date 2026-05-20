@@ -211,12 +211,17 @@ async def test_bootstrap_emits_created_per_open_task() -> None:
         await task
 
     types = [t for t, _ in _drain(listener)]
+    # The first attempt's bootstrap publishes one created per snapshot
+    # task. Reconnects that drain no SSE event (Last-Event-ID still None)
+    # re-bootstrap by design — RouteRunner dedup absorbs the duplicates.
+    # We only assert on the first attempt's snapshot here.
     assert types[:3] == [
         "lithos.task.created",
         "lithos.task.created",
         "lithos.task.created",
     ]
-    assert client.task_list_calls == [{"status": "open", "with_claims": True}]
+    assert client.task_list_calls
+    assert client.task_list_calls[0] == {"status": "open", "with_claims": True}
 
 
 async def test_bootstrap_payload_matches_poller_shape() -> None:
@@ -248,7 +253,9 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
         await task
 
     drained = _drain(listener)
-    assert len(drained) == 1
+    # Re-bootstrap on cursorless reconnect can publish the same task
+    # more than once; we only assert on the first emission's shape.
+    assert drained, "bootstrap published nothing"
     _, payload = drained[0]
     assert payload == {
         "id": "abc",
@@ -842,19 +849,26 @@ async def test_bootstrap_failure_triggers_reconnect_not_silent_death() -> None:
     )
 
 
-async def test_bootstrap_skipped_on_reconnect_after_successful_first_attempt() -> None:
-    """After the first successful bootstrap, subsequent reconnects must
-    NOT re-snapshot. RouteRunner dedup would absorb duplicates, but
-    re-publishing the entire open-task set on every reconnect is
-    pointless noise."""
+async def test_bootstrap_skipped_on_reconnect_when_last_event_id_present() -> None:
+    """Bootstrap is skipped on reconnect ONLY when we have a
+    ``Last-Event-ID`` to replay from. Otherwise the dead subscription's
+    buffered events would be lost. Here the first connect drains an SSE
+    event (advancing the cursor) before dropping, so the reconnect can
+    safely skip bootstrap and rely on server-side replay."""
     bus = EventBus()
-    bus.subscribe(event_types=["lithos.task.created"])
-    client = _FakeClient(bootstrap=[_task("a"), _task("b")])
-    # First connect: bootstrap runs, then immediate stream drop.
-    # Second connect: empty clean stream (no SSE events → no refresh).
+    bus.subscribe(
+        event_types=["lithos.task.created", "lithos.task.claimed"],
+    )
+    # Bootstrap returns one task; the SSE then delivers a claimed event
+    # for it (advancing Last-Event-ID to "evt-1") before the connection
+    # drops. Reconnect must skip bootstrap because the cursor is set.
+    client = _FakeClient(bootstrap=[_task("a", tags=("trigger:x",))])
     aconnect = _FakeAconnect(
         connections=[
-            [ConnectionError("immediate drop")],
+            [
+                _FakeSse(event="task.claimed", data={"task_id": "a"}, id="evt-1"),
+                ConnectionError("drop after first event"),
+            ],
             [],
         ]
     )
@@ -866,13 +880,61 @@ async def test_bootstrap_skipped_on_reconnect_after_successful_first_attempt() -
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    # Snapshot exactly once; the reconnect skipped bootstrap.
-    assert len(client.task_list_calls) == 1, (
-        f"expected 1 bootstrap call, got {len(client.task_list_calls)}: "
+    # Snapshot exactly once; the reconnect skipped bootstrap because
+    # Last-Event-ID was set.
+    snapshot_calls = [c for c in client.task_list_calls if c["with_claims"] is True]
+    assert len(snapshot_calls) == 1, (
+        f"expected 1 bootstrap snapshot, got {len(snapshot_calls)}: "
         f"{client.task_list_calls}"
     )
-    # And the reconnect actually happened (proves we were past first attempt).
+    # And the reconnect actually happened with the cursor.
     assert len(aconnect.calls) >= 2
+    assert aconnect.calls[1]["headers"].get("Last-Event-ID") == "evt-1"
+
+
+async def test_bootstrap_re_runs_on_reconnect_when_no_event_id_drained() -> None:
+    """Regression: if bootstrap succeeds but the connection drops before
+    any SSE event with an id is drained, the next attempt has neither a
+    fresh snapshot nor a resume cursor. We MUST re-bootstrap so that
+    events buffered on the lost subscription aren't silently dropped.
+    ``RouteRunner._processed_tasks`` absorbs the resulting duplicates."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created"])
+    client = _FakeClient(bootstrap=[_task("a", tags=("trigger:x",))])
+    # First connect: bootstrap succeeds, then immediate drop with no
+    # SSE event drained → Last-Event-ID stays None.
+    # Second connect: clean empty stream so the test can shut down.
+    aconnect = _FakeAconnect(
+        connections=[
+            [ConnectionError("drop before any event drained")],
+            [],
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Bootstrap re-ran on the reconnect because there was no cursor.
+    snapshot_calls = [c for c in client.task_list_calls if c["with_claims"] is True]
+    assert len(snapshot_calls) >= 2, (
+        f"expected re-bootstrap on cursor-less reconnect, got "
+        f"{len(snapshot_calls)} snapshot calls: {client.task_list_calls}"
+    )
+    # And the reconnect went out with NO Last-Event-ID header (since
+    # none was ever drained), confirming the "cursor missing" path.
+    assert "Last-Event-ID" not in aconnect.calls[1]["headers"]
+    # Both bootstraps published the same task → at least two created
+    # events on the bus (RouteRunner dedup absorbs at the subscriber
+    # level; the source's job is just to publish what it sees).
+    created = [
+        payload for evt, payload in _drain(listener) if evt == "lithos.task.created"
+    ]
+    assert len(created) >= 2, f"expected duplicate created events, got {created}"
+    assert all(p["id"] == "a" for p in created)
 
 
 async def test_bootstrap_events_count_toward_backoff_reset() -> None:
