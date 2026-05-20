@@ -99,8 +99,16 @@ tags = ["trigger:story-review-human"]
 # tasks_file is relative to vault_path. resolved_ttl_days controls how
 # long completed/cancelled tasks linger in tasks_file before being
 # dropped (US13).
+#
+# Projection filter knobs (operator-level):
+#   include_blocked — project tasks whose metadata.depends_on is set
+#                     (default true; opt-out for a tighter daily view)
+#   exclude_tags    — list of tags that suppress projection when present
+#                     on a task (e.g. ["debug:trace", "internal"])
 
 # [obsidian_sync]
 # vault_path = "/home/you/Obsidian/Vault"
 # tasks_file = "_lithos/tasks.md"
 # resolved_ttl_days = 7
+# include_blocked = true
+# exclude_tags = []

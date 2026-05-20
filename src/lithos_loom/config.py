@@ -167,11 +167,25 @@ class ObsidianSyncConfig:
     ``tasks_file`` is stored as a relative path and joined with
     ``vault_path`` only at use time. Existence of the vault is not
     checked at parse time — that's ``lithos-loom doctor`` (US15).
+
+    Projection filter knobs (``include_blocked``, ``exclude_tags``) are
+    operator-level controls that ``is_human_actionable`` (US8) will
+    read alongside the route-author's ``human_blocking`` flag. These
+    are deliberately a small starter set; we expect the list to grow
+    as Slice 1 stories surface real filtering needs rather than
+    speculating now.
     """
 
     vault_path: Path
     tasks_file: Path = field(default=DEFAULT_OBSIDIAN_TASKS_FILE)
     resolved_ttl_days: int = DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS
+    include_blocked: bool = True
+    """Project tasks whose ``metadata.depends_on`` is non-empty (US12 /
+    D6 revised default). Operators who don't want blocked work in
+    their daily view can set this to ``false``."""
+    exclude_tags: tuple[str, ...] = ()
+    """Tags whose presence on a task suppresses projection. Generic
+    operator-level denylist; matched against ``task.tags`` membership."""
 
 
 @dataclass(frozen=True)
@@ -442,7 +456,13 @@ def _parse_subscriptions(
 
 
 _OBSIDIAN_SYNC_KEYS: frozenset[str] = frozenset(
-    {"vault_path", "tasks_file", "resolved_ttl_days"}
+    {
+        "vault_path",
+        "tasks_file",
+        "resolved_ttl_days",
+        "include_blocked",
+        "exclude_tags",
+    }
 )
 
 
@@ -495,10 +515,28 @@ def _parse_obsidian_sync(data: Any, config_path: Path) -> ObsidianSyncConfig | N
             f"(got {resolved_ttl_days})"
         )
 
+    include_blocked = _optional_bool(
+        data, "include_blocked", True, config_path, "obsidian_sync"
+    )
+
+    exclude_tags_raw = data.get("exclude_tags", [])
+    if not isinstance(exclude_tags_raw, list) or not all(
+        isinstance(t, str) for t in exclude_tags_raw
+    ):
+        raise ConfigError(
+            f"{config_path}: obsidian_sync.exclude_tags must be a list of strings"
+        )
+    if any(not t for t in exclude_tags_raw):
+        raise ConfigError(
+            f"{config_path}: obsidian_sync.exclude_tags entries must be non-empty"
+        )
+
     return ObsidianSyncConfig(
         vault_path=vault_path,
         tasks_file=tasks_file,
         resolved_ttl_days=resolved_ttl_days,
+        include_blocked=include_blocked,
+        exclude_tags=tuple(exclude_tags_raw),
     )
 
 

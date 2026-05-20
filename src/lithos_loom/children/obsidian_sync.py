@@ -64,10 +64,13 @@ async def _amain(cfg: LoomConfig) -> int:
 
     obs = cfg.obsidian_sync
     logger.info(
-        "obsidian-sync child started; vault=%s tasks_file=%s resolved_ttl_days=%d",
+        "obsidian-sync child started; vault=%s tasks_file=%s "
+        "resolved_ttl_days=%d include_blocked=%s exclude_tags=%s",
         obs.vault_path,
         obs.tasks_file,
         obs.resolved_ttl_days,
+        obs.include_blocked,
+        list(obs.exclude_tags) or "[]",
     )
 
     stop_event = asyncio.Event()

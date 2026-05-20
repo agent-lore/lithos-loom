@@ -31,6 +31,8 @@ def _cfg_with_obsidian(tmp_path: Path) -> LoomConfig:
             vault_path=tmp_path / "vault",
             tasks_file=Path("_lithos/tasks.md"),
             resolved_ttl_days=7,
+            include_blocked=False,
+            exclude_tags=("debug:trace",),
         ),
     )
 
@@ -110,3 +112,8 @@ async def test_obsidian_sync_logs_config_on_startup(
     assert str(cfg.obsidian_sync.vault_path) in started  # type: ignore[union-attr]
     assert "_lithos/tasks.md" in started
     assert "resolved_ttl_days=7" in started
+    # Projection filter knobs surface in the startup log too — useful
+    # for operators tweaking them via per-environment config and
+    # confirming the child actually picked the change up.
+    assert "include_blocked=False" in started
+    assert "debug:trace" in started
