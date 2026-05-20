@@ -211,12 +211,17 @@ async def test_bootstrap_emits_created_per_open_task() -> None:
         await task
 
     types = [t for t, _ in _drain(listener)]
+    # The first attempt's bootstrap publishes one created per snapshot
+    # task. Reconnects that drain no SSE event (Last-Event-ID still None)
+    # re-bootstrap by design — RouteRunner dedup absorbs the duplicates.
+    # We only assert on the first attempt's snapshot here.
     assert types[:3] == [
         "lithos.task.created",
         "lithos.task.created",
         "lithos.task.created",
     ]
-    assert client.task_list_calls == [{"status": "open", "with_claims": True}]
+    assert client.task_list_calls
+    assert client.task_list_calls[0] == {"status": "open", "with_claims": True}
 
 
 async def test_bootstrap_payload_matches_poller_shape() -> None:
@@ -248,7 +253,9 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
         await task
 
     drained = _drain(listener)
-    assert len(drained) == 1
+    # Re-bootstrap on cursorless reconnect can publish the same task
+    # more than once; we only assert on the first emission's shape.
+    assert drained, "bootstrap published nothing"
     _, payload = drained[0]
     assert payload == {
         "id": "abc",
@@ -745,6 +752,338 @@ def test_default_httpx_timeout_disables_read_timeout() -> None:
     assert timeout.read is None
     # Connect/write/pool still have sensible bounds.
     assert timeout.connect is not None and timeout.connect > 0
+
+
+# ── Bootstrap / SSE ordering (issues #13, #14) ──────────────────────────
+
+
+async def test_sse_connect_happens_before_bootstrap_snapshot() -> None:
+    """Race-window regression for #13: aconnect_sse must enter BEFORE
+    task_list runs. Otherwise a state change in the snapshot-to-connect
+    gap is invisible to both paths (not in snapshot, no Last-Event-ID
+    yet to replay)."""
+    bus = EventBus()
+    bus.subscribe(event_types=["lithos.task.created"])
+    client = _FakeClient(bootstrap=[_task("t1")])
+    aconnect = _FakeAconnect(connections=[[]])
+
+    # Capture how many aconnect calls had been made at the moment
+    # task_list ran. If the new ordering holds, this is 1 (SSE already
+    # opened); under the old ordering it would be 0.
+    snapshot_state: list[int] = []
+    original_task_list = client.task_list
+
+    async def _capturing(
+        *, status: str | None = None, with_claims: bool = False
+    ) -> list[Task]:
+        snapshot_state.append(len(aconnect.calls))
+        return await original_task_list(status=status, with_claims=with_claims)
+
+    client.task_list = _capturing  # type: ignore[assignment]
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert snapshot_state, "task_list was never called"
+    assert snapshot_state[0] == 1, (
+        f"expected SSE connect (len=1) before snapshot, got {snapshot_state[0]}"
+    )
+
+
+async def test_bootstrap_failure_triggers_reconnect_not_silent_death() -> None:
+    """Regression for #14: a transient task_list failure during bootstrap
+    must NOT escape run() and kill the source. The retry loop should
+    back off and re-bootstrap until it succeeds."""
+
+    class _FlakyBootstrapClient:
+        """First snapshot raises; subsequent snapshots return one task."""
+
+        def __init__(self) -> None:
+            self.task_list_calls: list[dict[str, Any]] = []
+            self._raised = False
+
+        async def task_list(
+            self,
+            *,
+            status: str | None = None,
+            with_claims: bool = False,
+        ) -> list[Task]:
+            self.task_list_calls.append({"status": status, "with_claims": with_claims})
+            if not self._raised:
+                self._raised = True
+                raise RuntimeError("startup blip")
+            return [_task("recovered", tags=("trigger:x",))]
+
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created"])
+    client = _FlakyBootstrapClient()
+    # Both connect attempts succeed at the SSE layer; bootstrap is what
+    # raises on attempt one. Second attempt's stream is empty + clean.
+    aconnect = _FakeAconnect(connections=[[], []])
+    source = LithosEventStream(
+        client=client,
+        bus=bus,
+        events_url="http://lithos.test/events",
+        reconnect_backoff_seconds=0.001,
+        max_reconnect_backoff_seconds=0.01,
+        _aconnect_sse=aconnect,
+    )
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.1)
+    assert not task.done(), "run() exited unexpectedly — silent death not fixed"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Bootstrap was retried after the first failure.
+    assert len(client.task_list_calls) >= 2
+    # Recovered task eventually published from the retried bootstrap.
+    drained = _drain(listener)
+    assert any(payload["id"] == "recovered" for _, payload in drained), (
+        f"expected 'recovered' task to be published; got {drained}"
+    )
+
+
+async def test_bootstrap_skipped_on_reconnect_when_last_event_id_present() -> None:
+    """Bootstrap is skipped on reconnect ONLY when we have a
+    ``Last-Event-ID`` to replay from. Otherwise the dead subscription's
+    buffered events would be lost. Here the first connect drains an SSE
+    event (advancing the cursor) before dropping, so the reconnect can
+    safely skip bootstrap and rely on server-side replay."""
+    bus = EventBus()
+    bus.subscribe(
+        event_types=["lithos.task.created", "lithos.task.claimed"],
+    )
+    # Bootstrap returns one task; the SSE then delivers a claimed event
+    # for it (advancing Last-Event-ID to "evt-1") before the connection
+    # drops. Reconnect must skip bootstrap because the cursor is set.
+    client = _FakeClient(bootstrap=[_task("a", tags=("trigger:x",))])
+    aconnect = _FakeAconnect(
+        connections=[
+            [
+                _FakeSse(event="task.claimed", data={"task_id": "a"}, id="evt-1"),
+                ConnectionError("drop after first event"),
+            ],
+            [],
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Snapshot exactly once; the reconnect skipped bootstrap because
+    # Last-Event-ID was set.
+    snapshot_calls = [c for c in client.task_list_calls if c["with_claims"] is True]
+    assert len(snapshot_calls) == 1, (
+        f"expected 1 bootstrap snapshot, got {len(snapshot_calls)}: "
+        f"{client.task_list_calls}"
+    )
+    # And the reconnect actually happened with the cursor.
+    assert len(aconnect.calls) >= 2
+    assert aconnect.calls[1]["headers"].get("Last-Event-ID") == "evt-1"
+
+
+async def test_bootstrap_re_runs_on_reconnect_when_no_event_id_drained() -> None:
+    """Regression: if bootstrap succeeds but the connection drops before
+    any SSE event with an id is drained, the next attempt has neither a
+    fresh snapshot nor a resume cursor. We MUST re-bootstrap so that
+    events buffered on the lost subscription aren't silently dropped.
+    ``RouteRunner._processed_tasks`` absorbs the resulting duplicates."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created"])
+    client = _FakeClient(bootstrap=[_task("a", tags=("trigger:x",))])
+    # First connect: bootstrap succeeds, then immediate drop with no
+    # SSE event drained → Last-Event-ID stays None.
+    # Second connect: clean empty stream so the test can shut down.
+    aconnect = _FakeAconnect(
+        connections=[
+            [ConnectionError("drop before any event drained")],
+            [],
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Bootstrap re-ran on the reconnect because there was no cursor.
+    snapshot_calls = [c for c in client.task_list_calls if c["with_claims"] is True]
+    assert len(snapshot_calls) >= 2, (
+        f"expected re-bootstrap on cursor-less reconnect, got "
+        f"{len(snapshot_calls)} snapshot calls: {client.task_list_calls}"
+    )
+    # And the reconnect went out with NO Last-Event-ID header (since
+    # none was ever drained), confirming the "cursor missing" path.
+    assert "Last-Event-ID" not in aconnect.calls[1]["headers"]
+    # Both bootstraps published the same task → at least two created
+    # events on the bus (RouteRunner dedup absorbs at the subscriber
+    # level; the source's job is just to publish what it sees).
+    created = [
+        payload for evt, payload in _drain(listener) if evt == "lithos.task.created"
+    ]
+    assert len(created) >= 2, f"expected duplicate created events, got {created}"
+    assert all(p["id"] == "a" for p in created)
+
+
+async def test_bootstrap_events_count_toward_backoff_reset() -> None:
+    """Events published during bootstrap count as progress: if bootstrap
+    publishes N events and the stream then immediately errors, the next
+    sleep must use the BASE backoff (not a doubled one). Otherwise a
+    flaky SSE channel would let backoff ratchet to max while bootstrap
+    keeps succeeding."""
+    sleep_calls: list[float] = []
+    original_sleep = asyncio.sleep
+
+    async def _record_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        await original_sleep(0)
+
+    bus = EventBus()
+    bus.subscribe(event_types=["lithos.task.created"])
+    # Bootstrap publishes 2 events. First connect: stream raises
+    # immediately after bootstrap. Following connects: clean and empty.
+    client = _FakeClient(bootstrap=[_task("a"), _task("b")])
+    aconnect = _FakeAconnect(
+        connections=[
+            [ConnectionError("immediate drop")],
+            [],
+            [],
+        ]
+    )
+    source = LithosEventStream(
+        client=client,
+        bus=bus,
+        events_url="http://lithos.test/events",
+        reconnect_backoff_seconds=1.0,
+        max_reconnect_backoff_seconds=4.0,
+        _aconnect_sse=aconnect,
+    )
+
+    import lithos_loom.sources.lithos_event_stream as mod
+
+    mod_sleep_orig = mod.asyncio.sleep
+    mod.asyncio.sleep = _record_sleep  # type: ignore[assignment]
+    try:
+        task = asyncio.create_task(source.run())
+        await original_sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        mod.asyncio.sleep = mod_sleep_orig  # type: ignore[assignment]
+
+    # First iteration: bootstrap published 2 events → events_this_attempt=2
+    # even though the stream then raised. Backoff stays at the base.
+    assert sleep_calls, "no sleeps captured"
+    assert sleep_calls[0] == 1.0, (
+        f"expected base backoff after bootstrap progress; got {sleep_calls[0]}"
+    )
+
+
+async def test_filtered_sse_frames_do_not_count_toward_backoff_reset() -> None:
+    """Frames we filter (non-task event type) do NOT count as published
+    events. A stream delivering only noise should be allowed to grow
+    backoff rather than spin at the base interval.
+
+    Regression for Copilot review on #15: ``_events_this_attempt`` was
+    previously incremented per SSE frame, not per actual bus publish."""
+    sleep_calls: list[float] = []
+    original_sleep = asyncio.sleep
+
+    async def _record_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        await original_sleep(0)
+
+    bus = EventBus()
+    bus.subscribe(event_types=["lithos.task.created"])
+    # Empty bootstrap (0 publishes) + a non-task SSE frame (filtered
+    # → 0 publishes) then immediate clean EOF. After this attempt
+    # ends, events_this_attempt should be 0 and backoff should DOUBLE.
+    client = _FakeClient(bootstrap=[])
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="note.created", data={"note_id": "n1"}, id="evt-1")],
+            [],
+            [],
+        ]
+    )
+    source = LithosEventStream(
+        client=client,
+        bus=bus,
+        events_url="http://lithos.test/events",
+        reconnect_backoff_seconds=1.0,
+        max_reconnect_backoff_seconds=4.0,
+        _aconnect_sse=aconnect,
+    )
+
+    import lithos_loom.sources.lithos_event_stream as mod
+
+    mod_sleep_orig = mod.asyncio.sleep
+    mod.asyncio.sleep = _record_sleep  # type: ignore[assignment]
+    try:
+        task = asyncio.create_task(source.run())
+        await original_sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        mod.asyncio.sleep = mod_sleep_orig  # type: ignore[assignment]
+
+    # First iteration produced ZERO bus publishes (bootstrap was empty,
+    # the SSE frame was a filtered non-task event). Backoff doubles
+    # rather than resetting.
+    assert sleep_calls, "no sleeps captured"
+    assert sleep_calls[:2] == [1.0, 2.0], (
+        f"expected doubling backoff with no publishes; got {sleep_calls[:2]}"
+    )
+
+
+async def test_buffered_sse_events_during_bootstrap_drain_after() -> None:
+    """End-to-end #13 confidence: an SSE event that arrived during the
+    snapshot window is drained after bootstrap. The source publishes
+    BOTH the bootstrap event AND the buffered SSE event for the same
+    task id; RouteRunner's _processed_tasks absorbs the duplicate."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created", "lithos.task.claimed"])
+    bootstrap_task = _task("t1", tags=("trigger:x",), title="bootstrapped")
+    client = _FakeClient(bootstrap=[bootstrap_task])
+    # SSE delivers a task.claimed for the same task — simulates a state
+    # change that occurred during the bootstrap window and was buffered
+    # server-side.
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.claimed", data={"task_id": "t1"}, id="evt-1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    drained = _drain(listener)
+    types = [t for t, _ in drained]
+    # Bootstrap emits created; SSE drain then emits claimed — both reach
+    # the bus, in that order.
+    assert types == ["lithos.task.created", "lithos.task.claimed"], (
+        f"expected created→claimed for t1; got {types}"
+    )
+    assert drained[1][1]["id"] == "t1"
+    assert drained[1][1]["tags"] == ["trigger:x"]
 
 
 async def test_stream_passes_timeout_to_httpx_client_factory() -> None:

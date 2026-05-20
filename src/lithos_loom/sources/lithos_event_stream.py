@@ -8,22 +8,29 @@ terminator); the server's event vocabulary is documented at
 
 Lifecycle on ``run()``:
 
-1. **Bootstrap.** One ``task_list(status="open")`` call. Each returned
-   task is published as ``lithos.task.created`` with the full poller-
-   shaped payload. This is the same source-replay guarantee D11/D13 ask
-   for: subscribers can be re-authoritative on restart.
-2. **Stream.** Connect to ``<events_url>?types=task.*``. Iterate events,
-   translate ``task.X`` → ``lithos.task.X``, enrich each slim Lithos
-   payload (which carries only ``{task_id, agent, aspect, …}``) into the
-   full ``{id, title, status, tags, metadata, claims}`` shape RouteRunner
-   expects by calling ``task_status(task_id)``. Cache the enriched task
-   so terminal events (where ``task_status`` may report not-found) can
-   fall back to the last-known snapshot.
-3. **Reconnect.** On any error during connection or iteration, sleep with
-   exponential backoff and reconnect, passing ``Last-Event-ID`` so the
-   server can replay buffered events. If the server's ring buffer evicted
-   the gap, events are silently lost; the operator-facing PR documents
-   this as a known limitation.
+1. **Connect.** Open ``<events_url>?types=task.*`` with ``aconnect_sse``.
+   The server immediately starts buffering events for this subscription.
+2. **Bootstrap (first attempt only).** One ``task_list(status="open")``
+   call inside the SSE context. Each returned task is published as
+   ``lithos.task.created`` with the full poller-shaped payload. This is
+   the same source-replay guarantee D11/D13 ask for: subscribers can be
+   re-authoritative on restart. Running inside the SSE context closes
+   the snapshot/connect race — any state change that happens during the
+   snapshot is buffered server-side and drained in step 3 (duplicates
+   are absorbed by ``RouteRunner._processed_tasks``).
+3. **Stream.** Iterate events, translate ``task.X`` → ``lithos.task.X``,
+   enrich each slim Lithos payload (which carries only
+   ``{task_id, agent, aspect, …}``) into the full
+   ``{id, title, status, tags, metadata, claims}`` shape RouteRunner
+   expects by calling ``task_list(status="open")`` and matching by id.
+   Cache the enriched task so terminal events (where the open list no
+   longer contains the task) can fall back to the last-known snapshot.
+4. **Reconnect.** On any error during connect, bootstrap, or iteration,
+   sleep with exponential backoff and retry, passing ``Last-Event-ID``
+   so the server can replay buffered events. Bootstrap is also retried
+   under this loop until it succeeds; subsequent reconnects skip it. If
+   the server's ring buffer evicted the gap, events are silently lost;
+   the operator-facing PR documents this as a known limitation.
 
 The source uses ``httpx_sse.aconnect_sse`` under the hood; the
 constructor accepts an ``_aconnect_sse`` injection point so tests can
@@ -117,25 +124,54 @@ class LithosEventStream:
         # claims) so downstream tag filters work on every published
         # event, not just the bootstrap ones.
         self._known_tasks: dict[str, Task] = {}
+        # Flips to True once bootstrap has published its snapshot at
+        # least once. Subsequent reconnects skip bootstrap ONLY when we
+        # also have a ``Last-Event-ID`` to replay from — otherwise the
+        # dead subscription's buffered events would be lost. See
+        # ``_stream_once`` for the combined gate.
+        self._bootstrapped: bool = False
+        # Bus events actually published during the current
+        # ``_stream_once`` attempt (bootstrap publishes + SSE frames
+        # that ``_handle_sse_event`` published). SSE frames we filter
+        # out (non-task type, malformed JSON, unresolved task) do NOT
+        # count. Exposed so ``run()`` can still see how much progress
+        # an attempt made even when it raises mid-stream — used for
+        # backoff-reset decisions.
+        self._events_this_attempt: int = 0
 
     async def run(self) -> None:
-        """Bootstrap then stream forever. Cancellable."""
-        await self._bootstrap()
+        """Connect, bootstrap-once, then stream forever. Cancellable.
+
+        Bootstrap runs *inside* the SSE context (see ``_stream_once``)
+        so that the server is already subscribed when the open-tasks
+        snapshot is taken. Any state change that occurs between snapshot
+        and drain is buffered server-side and surfaces in ``aiter_sse``;
+        the duplicate ``lithos.task.created`` for tasks present in both
+        is absorbed by ``RouteRunner._processed_tasks``. Bootstrap also
+        sits inside the reconnect/backoff loop, so a transient
+        ``task_list`` failure at startup retries with backoff instead of
+        escaping ``run()`` and killing the source task silently.
+        """
         backoff = self.reconnect_backoff_seconds
         while True:
-            events_seen = 0
             try:
                 events_seen = await self._stream_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
+                # Preserve any progress this attempt made before the
+                # exception (bootstrap publishes + any drained SSE
+                # events) so backoff resets when work happened. Without
+                # this, a successful bootstrap followed by an immediate
+                # stream drop would let backoff ratchet toward the cap.
+                events_seen = self._events_this_attempt
                 logger.exception(
-                    "LithosEventStream: stream error; reconnecting after %.3fs",
+                    "LithosEventStream: error; retrying after %.3fs",
                     backoff,
                 )
             # Always sleep between reconnect attempts so a clean-but-empty
             # server response can't busy-loop us. Reset backoff only when
-            # the connection actually produced events.
+            # the attempt produced events.
             if events_seen > 0:
                 backoff = self.reconnect_backoff_seconds
             await asyncio.sleep(backoff)
@@ -144,7 +180,15 @@ class LithosEventStream:
 
     # ── bootstrap ────────────────────────────────────────────────────
 
-    async def _bootstrap(self) -> None:
+    async def _bootstrap(self) -> int:
+        """Snapshot open tasks and publish each as ``lithos.task.created``.
+
+        Returns the number of events published. ``self._bootstrapped``
+        flips to ``True`` only after every snapshot event has been
+        published, so a mid-publish exception causes the next reconnect
+        attempt to re-bootstrap (RouteRunner dedup absorbs any partial
+        duplicates).
+        """
         tasks = await self.client.task_list(status="open", with_claims=True)
         logger.info(
             "LithosEventStream: bootstrapping snapshot of %d open task(s)",
@@ -153,23 +197,52 @@ class LithosEventStream:
         for task in tasks:
             self._known_tasks[task.id] = task
             await self._publish("lithos.task.created", task)
+        self._bootstrapped = True
+        return len(tasks)
 
     # ── streaming ────────────────────────────────────────────────────
 
     async def _stream_once(self) -> int:
-        """Connect, drain events until EOF or error. Returns count seen."""
+        """Connect, bootstrap-if-needed inside the SSE context, then drain.
+
+        Subscribe-before-snapshot: opening ``aconnect_sse`` causes the
+        server to start buffering events for this subscription. We take
+        the ``task_list`` snapshot *after* that, so any state change
+        that lands between snapshot and drain still arrives via the
+        buffered SSE feed once iteration begins. Returns the count of
+        bus events actually published (bootstrap publishes + SSE
+        frames that produced a publish — filtered/dropped frames are
+        not counted). ``self._events_this_attempt`` is updated
+        incrementally so ``run()`` can read the partial count if this
+        method raises.
+
+        Bootstrap-on-reconnect contract: skip bootstrap only when the
+        previous attempt left us with a ``Last-Event-ID`` to replay
+        from. If we've bootstrapped at least once but never drained an
+        SSE event with an id (e.g. the first subscription dropped
+        before any event came through), re-bootstrap so we don't lose
+        whatever events were buffered on the dead subscription. The
+        duplicate ``lithos.task.created`` events that may result are
+        absorbed by ``RouteRunner._processed_tasks``.
+        """
+        self._events_this_attempt = 0
         headers: dict[str, str] = {}
         if self._last_event_id is not None:
             headers["Last-Event-ID"] = self._last_event_id
         params = {"types": ",".join(_HANDLED_LITHOS_EVENT_TYPES)}
 
+        # Re-bootstrap unless we have a resume cursor from a prior
+        # successful event drain. Without that cursor a reconnect would
+        # come up empty for any events buffered on the lost subscription.
+        bootstrap_this_attempt = not self._bootstrapped or self._last_event_id is None
+
         logger.info(
-            "LithosEventStream: connecting to %s (Last-Event-ID=%s)",
+            "LithosEventStream: connecting to %s (Last-Event-ID=%s, bootstrap=%s)",
             self.events_url,
             self._last_event_id or "<none>",
+            bootstrap_this_attempt,
         )
 
-        events_seen = 0
         async with AsyncExitStack() as stack:
             # The real httpx_sse.aconnect_sse needs an AsyncClient owner;
             # tests inject a stub that ignores it. Pass the source's
@@ -187,16 +260,28 @@ class LithosEventStream:
                     params=params,
                 )
             )
+            if bootstrap_this_attempt:
+                self._events_this_attempt += await self._bootstrap()
             async for sse in event_source.aiter_sse():
-                await self._handle_sse_event(sse)
+                published = await self._handle_sse_event(sse)
                 if sse.id:
                     self._last_event_id = sse.id
-                events_seen += 1
-        return events_seen
+                if published:
+                    self._events_this_attempt += 1
+        return self._events_this_attempt
 
     # ── per-event handling ───────────────────────────────────────────
 
-    async def _handle_sse_event(self, sse: Any) -> None:
+    async def _handle_sse_event(self, sse: Any) -> bool:
+        """Process one SSE frame. Returns True iff a bus event was published.
+
+        The return value drives the caller's ``_events_this_attempt``
+        counter, which gates the reconnect-backoff reset. Frames that
+        we filter (non-task event type, malformed JSON, missing
+        task_id, unresolved task) are not counted as progress —
+        otherwise a stream delivering only noise would keep us
+        hammering with the base backoff.
+        """
         sse_id = getattr(sse, "id", "") or "<none>"
         event_type = getattr(sse, "event", "") or ""
         if event_type not in _HANDLED_LITHOS_EVENT_TYPES:
@@ -208,7 +293,7 @@ class LithosEventStream:
                 sse_id,
                 event_type,
             )
-            return
+            return False
 
         try:
             data = json.loads(sse.data) if sse.data else {}
@@ -218,7 +303,7 @@ class LithosEventStream:
                 sse_id,
                 event_type,
             )
-            return
+            return False
 
         task_id = data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
@@ -227,7 +312,7 @@ class LithosEventStream:
                 sse_id,
                 event_type,
             )
-            return
+            return False
 
         logger.debug(
             "LithosEventStream: received SSE id=%s type=%s task=%s",
@@ -245,10 +330,11 @@ class LithosEventStream:
                 event_type,
                 sse_id,
             )
-            return
+            return False
 
         loom_type = f"lithos.{event_type}"
         await self._publish(loom_type, task)
+        return True
 
     async def _enrich(self, task_id: str, event_type: str) -> Task | None:
         """Return the best Task for the event, or None if we have nothing useful.
