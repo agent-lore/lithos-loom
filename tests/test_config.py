@@ -80,6 +80,66 @@ def test_invalid_toml_surfaces_clear_error(
         load_config()
 
 
+# ── RouteConfig.human_blocking (Slice 1 US8) ───────────────────────────
+
+
+def _route_toml(human_blocking: str | None = None) -> str:
+    """Minimal config with one route; optional human_blocking line."""
+    extra = f"            human_blocking = {human_blocking}\n" if human_blocking else ""
+    return (
+        dedent(
+            """
+        [orchestrator]
+        agent_id = "lithos-orchestrator-test"
+        lithos_url = "http://localhost:8765"
+
+        [[routes]]
+        name = "r1"
+        command = "echo hi"
+        """
+        )
+        + extra
+        + dedent(
+            """
+            [routes.match]
+            tags = ["trigger:r1"]
+        """
+        )
+    )
+
+
+def test_route_human_blocking_defaults_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A route stanza without human_blocking parses with default False —
+    preserves backwards compatibility with all Slice 0 configs."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_route_toml())
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    cfg = load_config()
+    assert cfg.routes[0].human_blocking is False
+
+
+def test_route_human_blocking_true_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_route_toml(human_blocking="true"))
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    cfg = load_config()
+    assert cfg.routes[0].human_blocking is True
+
+
+def test_route_human_blocking_must_be_bool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_route_toml(human_blocking='"yes"'))
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="human_blocking must be a boolean"):
+        load_config()
+
+
 # ── [obsidian_sync] section (Slice 1 US7) ──────────────────────────────
 
 

@@ -6,10 +6,13 @@ the loaded config carries an ``[obsidian_sync]`` section. The supervisor
 gate is the presence test; this child is responsible for everything
 below that line.
 
-US7 ships a stub: the child loads its config, logs operator-visible
-startup detail, and parks on SIGTERM. US8 onwards will replace the park
-with the bus + ``obsidian-projection`` subscription (and Slice 2+ adds
-the filesystem watcher and push subscriptions).
+US7 shipped a stub that parked on SIGTERM. US8 replaces the park with
+the actual projection: a bus, a Lithos event-stream source, and a
+:class:`~lithos_loom.subscriptions.SubscriptionRunner` for each
+configured subscription whose ``action`` is in the child's allow-list
+(currently just ``"obsidian-projection"``). Subscription actions
+outside the allow-list (e.g. generic ``noop``) are silently skipped
+here — they're routed to a different child in a future story.
 
 Invocation contract (set by the supervisor):
 
@@ -27,7 +30,18 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from lithos_loom.bus import EventBus
 from lithos_loom.config import LogLevel, LoomConfig, load_config
+from lithos_loom.lithos_client import LithosClient
+from lithos_loom.sources.lithos_event_stream import LithosEventStream
+from lithos_loom.subscriptions import (
+    Handler,
+    SubscriptionContext,
+    build_runners,
+)
+from lithos_loom.subscriptions._obsidian_projection import (
+    make_handler as make_obsidian_projection_handler,
+)
 
 _LEVEL_MAP: dict[LogLevel, int] = {
     "debug": logging.DEBUG,
@@ -74,6 +88,32 @@ async def _amain(cfg: LoomConfig) -> int:
         list(obs.exclude_tags) or "[]",
     )
 
+    # Filter cfg.subscriptions to the actions this child is willing to
+    # host. Other actions are some other child's job (route-runner for
+    # routes; a future subscription-runner child for generic actions
+    # like `noop`).
+    obsidian_specs = tuple(
+        s for s in cfg.subscriptions if s.action == "obsidian-projection"
+    )
+    # Fail fast on duplicates (Copilot review on #17): the handler is
+    # stateful (per-handler state dict + per-handler tasks_file path);
+    # two subscriptions pointing at the same handler would merge their
+    # projections into one in-memory state and race on the same file.
+    if len(obsidian_specs) > 1:
+        names = ", ".join(s.name for s in obsidian_specs)
+        logger.error(
+            "obsidian-sync: refusing to wire %d obsidian-projection "
+            "subscriptions (%s); the handler is stateful and only one "
+            "instance is supported per child",
+            len(obsidian_specs),
+            names,
+        )
+        return 1
+
+    # Short-circuit when there's nothing to wire (Copilot review on
+    # #17): no point opening a LithosClient or running the SSE source
+    # if no obsidian subscription is configured. Just install signal
+    # handlers and park.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed: list[int] = []
@@ -81,8 +121,58 @@ async def _amain(cfg: LoomConfig) -> int:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop_event.set)
             installed.append(sig)
+
     try:
-        await stop_event.wait()
+        if not obsidian_specs:
+            logger.warning(
+                "obsidian-sync: no obsidian-projection subscription "
+                "configured; child will idle until SIGTERM. Add a "
+                "[[subscriptions]] block with action='obsidian-projection' "
+                "to enable projection."
+            )
+            await stop_event.wait()
+            return 0
+
+        spec = obsidian_specs[0]
+        logger.info("obsidian-sync: wiring subscription %r", spec.name)
+        my_handlers: dict[str, Handler] = {
+            "obsidian-projection": make_obsidian_projection_handler(cfg),
+        }
+
+        async with LithosClient(
+            cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
+        ) as lithos:
+            events_url = cfg.orchestrator.lithos_url.rstrip("/") + "/events"
+            source = LithosEventStream(
+                client=lithos, bus=EventBus(), events_url=events_url
+            )
+            # Re-bind the source's bus locally so the runners share it.
+            bus = source.bus
+            ctx = SubscriptionContext(
+                lithos=lithos,
+                logger=logging.getLogger("lithos_loom.subscriptions"),
+                agent_id=cfg.orchestrator.agent_id,
+            )
+            runners = build_runners(
+                bus=bus,
+                specs=obsidian_specs,
+                handlers=my_handlers,
+                ctx=ctx,
+            )
+
+            tasks: list[asyncio.Task[None]] = [
+                asyncio.create_task(source.run(), name="lithos-event-stream"),
+                *(
+                    asyncio.create_task(r.run(), name=f"sub-{r.spec.name}")
+                    for r in runners
+                ),
+            ]
+            try:
+                await stop_event.wait()
+            finally:
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         # Mirror the supervisor's install/uninstall pair so the test
         # process's event loop isn't left with handlers attached after

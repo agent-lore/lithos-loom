@@ -1,0 +1,201 @@
+"""Unit tests for ``is_human_actionable`` (Slice 1 US8, D6 semantics).
+
+The function is pure: ``(Task, routes, ObsidianSyncConfig) -> bool``.
+All tests construct minimal fixtures and assert the decision directly.
+
+D6 from ``docs/prd/integration.md``:
+  "Project a Lithos task iff is_human_actionable(task) — open AND not
+  claimable by any route, OR claimed by a human_blocking = true route."
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from lithos_loom.config import ObsidianSyncConfig, RouteConfig, RouteMatch
+from lithos_loom.lithos_client import Task
+from lithos_loom.subscriptions._human_actionable import is_human_actionable
+
+
+def _task(
+    *,
+    status: str = "open",
+    tags: tuple[str, ...] = (),
+    metadata: Mapping[str, Any] | None = None,
+    claims: tuple[Mapping[str, Any], ...] = (),
+) -> Task:
+    return Task(
+        id="t1",
+        title="t",
+        status=status,
+        tags=tags,
+        metadata=metadata or {},
+        claims=claims,
+    )
+
+
+def _route(name: str, *, tags: tuple[str, ...], human_blocking: bool) -> RouteConfig:
+    return RouteConfig(
+        name=name,
+        command="echo hi",
+        match=RouteMatch(tags=tags),
+        human_blocking=human_blocking,
+    )
+
+
+def _claim(aspect: str, agent: str = "lithos-orchestrator-test") -> Mapping[str, Any]:
+    return {"agent": agent, "aspect": aspect}
+
+
+def _cfg(
+    *,
+    include_blocked: bool = True,
+    exclude_tags: tuple[str, ...] = (),
+) -> ObsidianSyncConfig:
+    return ObsidianSyncConfig(
+        vault_path=Path("/vault"),
+        include_blocked=include_blocked,
+        exclude_tags=exclude_tags,
+    )
+
+
+# ── D6 first disjunct: open AND not claimable by any route ─────────────
+
+
+def test_open_orphan_with_no_routes_is_actionable() -> None:
+    """No routes configured at all → every open task is the operator's."""
+    assert is_human_actionable(_task(tags=("anything",)), routes=[], cfg=_cfg()) is True
+
+
+def test_open_task_with_no_matching_route_is_actionable() -> None:
+    """A task whose tags don't intersect any route's match.tags is an
+    orphan — no automation will pick it up."""
+    routes = [_route("r1", tags=("trigger:other",), human_blocking=False)]
+    assert is_human_actionable(_task(tags=("needs-review",)), routes, _cfg()) is True
+
+
+# ── D6 second disjunct: claimed by a human_blocking route ──────────────
+
+
+def test_claimed_by_human_blocking_route_is_actionable() -> None:
+    """The defining case: a route-runner has claimed this task on behalf
+    of the human, e.g. story-review-human waiting for a PR merge."""
+    routes = [_route("review-human", tags=("trigger:review",), human_blocking=True)]
+    task = _task(tags=("trigger:review",), claims=(_claim("review-human"),))
+    assert is_human_actionable(task, routes, _cfg()) is True
+
+
+def test_claimable_by_human_blocking_route_but_not_yet_claimed_hidden() -> None:
+    """Tag-matches a human_blocking route but no claim yet — wait for
+    the route-runner to actually claim before projecting. Otherwise we'd
+    surface work that's still in the autonomous-pickup queue."""
+    routes = [_route("review-human", tags=("trigger:review",), human_blocking=True)]
+    task = _task(tags=("trigger:review",), claims=())
+    assert is_human_actionable(task, routes, _cfg()) is False
+
+
+def test_claimed_by_autonomous_route_hidden() -> None:
+    """A claim by an autonomous route → automation is handling it,
+    nothing for the human to do."""
+    routes = [_route("auto", tags=("trigger:auto",), human_blocking=False)]
+    task = _task(tags=("trigger:auto",), claims=(_claim("auto"),))
+    assert is_human_actionable(task, routes, _cfg()) is False
+
+
+def test_claimable_by_autonomous_route_not_yet_claimed_hidden() -> None:
+    """Open + claimable by autonomous route + no claim yet — wait for
+    automation to pick it up. Not the operator's problem either way."""
+    routes = [_route("auto", tags=("trigger:auto",), human_blocking=False)]
+    task = _task(tags=("trigger:auto",), claims=())
+    assert is_human_actionable(task, routes, _cfg()) is False
+
+
+def test_human_blocking_claim_overrides_autonomous_claimability() -> None:
+    """Two routes both match the task's tags — one autonomous, one
+    human_blocking — and the human_blocking route already claimed.
+    Project."""
+    routes = [
+        _route("auto", tags=("trigger:shared",), human_blocking=False),
+        _route("review", tags=("trigger:shared",), human_blocking=True),
+    ]
+    task = _task(tags=("trigger:shared",), claims=(_claim("review"),))
+    assert is_human_actionable(task, routes, _cfg()) is True
+
+
+def test_claim_aspect_for_unknown_route_does_not_actionable() -> None:
+    """A claim whose aspect doesn't match any configured human_blocking
+    route name shouldn't promote the task to actionable. Defensive
+    against operator-deleted routes leaving orphaned claims behind.
+
+    Configures an autonomous route matching the task tag so the
+    "orphan" first disjunct doesn't accidentally fire — that way the
+    only path to True would be a human_blocking claim, which there
+    isn't (the claim's aspect names a deleted route)."""
+    task = _task(tags=("trigger:other",), claims=(_claim("deleted-route"),))
+    routes = [
+        _route("review", tags=("trigger:review",), human_blocking=True),
+        _route("auto", tags=("trigger:other",), human_blocking=False),
+    ]
+    assert is_human_actionable(task, routes, _cfg()) is False
+
+
+# ── Operator opt-outs ──────────────────────────────────────────────────
+
+
+def test_include_blocked_false_with_deps_returns_false() -> None:
+    """Operator opted out of blocked work — even an orphan blocked task is hidden."""
+    task = _task(tags=(), metadata={"depends_on": ["other-task-id"]})
+    assert (
+        is_human_actionable(task, routes=[], cfg=_cfg(include_blocked=False)) is False
+    )
+
+
+def test_include_blocked_true_with_deps_returns_true() -> None:
+    """D6 default: blocked tasks still project."""
+    task = _task(tags=(), metadata={"depends_on": ["other-task-id"]})
+    assert is_human_actionable(task, routes=[], cfg=_cfg(include_blocked=True)) is True
+
+
+def test_excluded_tag_returns_false_even_for_orphan_task() -> None:
+    """Operator denylist wins over the default-true orphan path."""
+    task = _task(tags=("debug:trace", "needs-review"))
+    cfg = _cfg(exclude_tags=("debug:trace",))
+    assert is_human_actionable(task, routes=[], cfg=cfg) is False
+
+
+def test_depends_on_missing_or_empty_does_not_block() -> None:
+    """metadata.depends_on absent OR [] is not 'blocked' — both must project."""
+    no_meta = _task(tags=(), metadata={})
+    empty_deps = _task(tags=(), metadata={"depends_on": []})
+    cfg = _cfg(include_blocked=False)  # the strictest setting
+    assert is_human_actionable(no_meta, routes=[], cfg=cfg) is True
+    assert is_human_actionable(empty_deps, routes=[], cfg=cfg) is True
+
+
+# ── Status semantics ────────────────────────────────────────────────────
+
+
+def test_completed_orphan_task_not_actionable() -> None:
+    """First disjunct requires status==open. A completed orphan task is
+    terminal — the removal-event branch handles it, not actionability."""
+    task = _task(status="completed", tags=("orphan",))
+    assert is_human_actionable(task, routes=[], cfg=_cfg()) is False
+
+
+def test_cancelled_task_with_human_blocking_claim_not_actionable() -> None:
+    """Even with a residual human_blocking claim, a cancelled task is
+    terminal — D6's second disjunct requires the implicit "still open"
+    context for a claim to imply actionable work."""
+    routes = [_route("review", tags=("trigger:review",), human_blocking=True)]
+    task = _task(
+        status="cancelled", tags=("trigger:review",), claims=(_claim("review"),)
+    )
+    # Per the second disjunct as worded, a claim by a human_blocking
+    # route is sufficient. But for a cancelled task this would be a
+    # stale claim. We treat status as the gating signal — terminal
+    # status overrides any claim. The handler also drops on
+    # completed/cancelled events regardless of actionability, so this
+    # is a belt-and-braces test of the helper alone.
+    assert is_human_actionable(task, routes, _cfg()) is False

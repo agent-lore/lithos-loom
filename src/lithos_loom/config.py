@@ -127,6 +127,14 @@ class RouteConfig:
     name: str
     command: str
     match: RouteMatch
+    human_blocking: bool = False
+    """Whether this route requires human action (US8 / Slice 1).
+
+    Read by ``is_human_actionable``: a task whose tags match a route
+    with ``human_blocking=True`` is projected into the operator's
+    Obsidian view; routes with ``human_blocking=False`` are treated as
+    autonomous (the daemon will handle them; hide from operator).
+    """
     max_runtime_seconds: int | None = None  # US-34
 
 
@@ -382,11 +390,15 @@ def _parse_routes(data: Any, config_path: Path) -> tuple[RouteConfig, ...]:
             raise ConfigError(
                 f"{config_path}: {scope}.max_runtime_seconds must be an integer"
             )
+        human_blocking = _optional_bool(
+            entry, "human_blocking", False, config_path, scope
+        )
         routes.append(
             RouteConfig(
                 name=name,
                 command=command,
                 match=RouteMatch(tags=tuple(tags_raw)),
+                human_blocking=human_blocking,
                 max_runtime_seconds=max_runtime,
             )
         )
