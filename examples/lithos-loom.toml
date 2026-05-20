@@ -55,6 +55,11 @@ name = "story-review-human"
 command = "uv run python -m lithos_loom.plugins.story_review_human --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
 # Long max_runtime — this plugin can run for days waiting on a human merge.
 max_runtime_seconds = 604800
+# US8: human_blocking=true surfaces tasks tagged for this route in the
+# operator's Obsidian view via the obsidian-projection subscription.
+# Routes default to human_blocking=false (the daemon handles them
+# autonomously; nothing for the human to do).
+human_blocking = true
 
 [routes.match]
 tags = ["trigger:story-review-human"]
@@ -85,6 +90,28 @@ tags = ["trigger:story-review-human"]
 # [subscriptions.retry]
 # attempts = 5
 # backoff = "exponential"        # or "linear"
+# initial_delay_seconds = 0.5
+# max_delay_seconds = 30.0
+
+# Obsidian projection (US8) — turns lithos.task.* events into a markdown
+# task list at vault_path / tasks_file. Filters via is_human_actionable:
+# tasks tagged for an autonomous route are hidden; tasks for a
+# human_blocking=true route or with no matching route show up. Only
+# wired when the obsidian-sync child is also enabled (see
+# [obsidian_sync] below).
+# [[subscriptions]]
+# name = "obsidian-tasks"
+# on = [
+#   "lithos.task.created",
+#   "lithos.task.updated",
+#   "lithos.task.completed",
+#   "lithos.task.cancelled",
+# ]
+# action = "obsidian-projection"
+# on_persistent_failure = "friction"
+# [subscriptions.retry]
+# attempts = 5
+# backoff = "exponential"
 # initial_delay_seconds = 0.5
 # max_delay_seconds = 30.0
 
