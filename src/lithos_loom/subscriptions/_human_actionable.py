@@ -46,7 +46,7 @@ from typing import Any
 from lithos_loom.config import ObsidianSyncConfig, RouteConfig
 from lithos_loom.lithos_client import Task
 
-__all__ = ["is_human_actionable"]
+__all__ = ["human_blocking_route_name", "is_human_actionable"]
 
 
 def is_human_actionable(
@@ -80,12 +80,39 @@ def is_human_actionable(
     if not claimable_routes:
         return True
 
-    # D6 second disjunct: claimed by a human_blocking route. The
-    # claim's `aspect` carries the route name (see RouteRunner).
+    # D6 second disjunct: claimed by a human_blocking route.
+    return human_blocking_route_name(task, routes) is not None
+
+
+def human_blocking_route_name(
+    task: Task,
+    routes: Sequence[RouteConfig],
+) -> str | None:
+    """Name of the ``human_blocking`` route currently claiming ``task``.
+
+    Returns ``None`` when no such claim exists. The claim's ``aspect``
+    field carries the route name (see ``RouteRunner.run`` in
+    ``subscriptions/route_runner.py``), so we match aspects against
+    the names of routes with ``human_blocking = true``.
+
+    Shared by:
+
+    - :func:`is_human_actionable` to satisfy D6's second disjunct.
+    - The ``obsidian-projection`` renderer (US9) to emit
+      ``#lithos/<route-name>`` and the computed ``today`` date.
+
+    If multiple human-blocking routes have claimed the task (unusual
+    in practice), the first match wins; ``task.claims`` ordering is
+    Lithos-canonical so the result is stable across calls.
+    """
     human_blocking_names = {r.name for r in routes if r.human_blocking}
-    return bool(human_blocking_names) and any(
-        _claim_aspect(c) in human_blocking_names for c in task.claims
-    )
+    if not human_blocking_names:
+        return None
+    for claim in task.claims:
+        aspect = _claim_aspect(claim)
+        if aspect is not None and aspect in human_blocking_names:
+            return aspect
+    return None
 
 
 def _claim_aspect(claim: Mapping[str, Any] | Any) -> str | None:

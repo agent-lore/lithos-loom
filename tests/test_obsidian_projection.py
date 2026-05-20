@@ -12,7 +12,7 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -504,3 +504,346 @@ async def test_atomic_write_cleans_up_tmp_on_failure(
     # The real file was never written, and the tmp file was cleaned up.
     assert not (tmp_path / "_lithos/tasks.md").exists()
     assert not (tmp_path / "_lithos/tasks.md.tmp").exists()
+
+
+# ── US9 line enrichment: 📅 / #project/ / #lithos/ markers ──────────────
+
+
+_TODAY = date(2026, 5, 20)
+
+
+def _fixed_today() -> date:
+    return _TODAY
+
+
+def _human_blocking_route(name: str = "review-human") -> RouteConfig:
+    return RouteConfig(
+        name=name,
+        command="echo",
+        match=RouteMatch(tags=(f"trigger:{name}",)),
+        human_blocking=True,
+    )
+
+
+def _projected_line(tmp_path: Path) -> str:
+    """Read the single rendered task line from the projection file."""
+    content = (tmp_path / "_lithos/tasks.md").read_text()
+    lines = [ln for ln in content.splitlines() if ln.startswith("- [ ]")]
+    assert len(lines) == 1, f"expected exactly one task line, got: {lines!r}"
+    return lines[0]
+
+
+# ── 📅 date marker ─────────────────────────────────────────────────────
+
+
+async def test_orphan_open_task_renders_no_date_marker(tmp_path: Path) -> None:
+    """Backlog tasks (orphan, no scheduled_for) emit no 📅 (D10)."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event("lithos.task.created", task_id="orph", title="Orphan task"), _ctx()
+    )
+    line = _projected_line(tmp_path)
+    assert "📅" not in line
+    assert line == "- [ ] Orphan task 🆔 lithos:orph"
+
+
+async def test_human_blocking_claim_renders_today_date(tmp_path: Path) -> None:
+    """A task claimed by a human_blocking route renders 📅 today."""
+    routes = (_human_blocking_route(),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="hb",
+            title="Human review",
+            tags=("trigger:review-human",),
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    assert "📅 2026-05-20" in _projected_line(tmp_path)
+
+
+async def test_scheduled_for_override_used_when_set(tmp_path: Path) -> None:
+    """metadata.scheduled_for wins over the default-absent case for orphans."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="sched",
+            title="Plan retro",
+            metadata={"scheduled_for": "2026-06-15"},
+        ),
+        _ctx(),
+    )
+    assert "📅 2026-06-15" in _projected_line(tmp_path)
+
+
+async def test_scheduled_for_override_used_for_human_blocking(
+    tmp_path: Path,
+) -> None:
+    """scheduled_for beats the computed today for claimed tasks too."""
+    routes = (_human_blocking_route(),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="hb",
+            title="Review",
+            tags=("trigger:review-human",),
+            metadata={"scheduled_for": "2026-06-15"},
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    line = _projected_line(tmp_path)
+    assert "📅 2026-06-15" in line
+    assert "2026-05-20" not in line
+
+
+async def test_scheduled_for_accepts_iso_datetime(tmp_path: Path) -> None:
+    """Full ISO datetime values (Z-suffixed) are parsed down to a date."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="dt",
+            metadata={"scheduled_for": "2026-06-15T09:00:00Z"},
+        ),
+        _ctx(),
+    )
+    assert "📅 2026-06-15" in _projected_line(tmp_path)
+
+
+async def test_scheduled_for_malformed_falls_through_to_default(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unparseable scheduled_for is warn-and-drop; orphan → no 📅."""
+    import logging as _logging
+
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    with caplog.at_level(_logging.WARNING):
+        await handler(
+            _event(
+                "lithos.task.created",
+                task_id="bad",
+                metadata={"scheduled_for": "yesterday"},
+            ),
+            _ctx(),
+        )
+    assert "📅" not in _projected_line(tmp_path)
+    warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any("scheduled_for" in m for m in warns), warns
+
+
+# ── #project/<slug> tag ────────────────────────────────────────────────
+
+
+async def test_metadata_project_renders_project_tag(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="p",
+            title="Refactor",
+            metadata={"project": "lithos-loom"},
+        ),
+        _ctx(),
+    )
+    assert "#project/lithos-loom" in _projected_line(tmp_path)
+
+
+async def test_missing_metadata_project_omits_project_tag(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(_event("lithos.task.created", task_id="np"), _ctx())
+    assert "#project/" not in _projected_line(tmp_path)
+
+
+async def test_non_string_metadata_project_omits_project_tag(
+    tmp_path: Path,
+) -> None:
+    """Defensive against schema drift — int/None project values are ignored."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="num",
+            metadata={"project": 42},
+        ),
+        _ctx(),
+    )
+    assert "#project/" not in _projected_line(tmp_path)
+
+
+# ── #lithos/<route-name> tag ───────────────────────────────────────────
+
+
+async def test_human_blocking_claim_renders_lithos_route_tag(
+    tmp_path: Path,
+) -> None:
+    routes = (_human_blocking_route(name="review-human"),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="hb",
+            tags=("trigger:review-human",),
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    assert "#lithos/review-human" in _projected_line(tmp_path)
+
+
+async def test_autonomous_claim_does_not_render_lithos_tag(tmp_path: Path) -> None:
+    """A claim by an autonomous route never produces a #lithos/ tag.
+
+    Such tasks aren't even actionable (per D6 they'd be hidden), so the
+    only way this gets exercised is the path where a task is human-
+    actionable for another reason and one of its claims is autonomous.
+    Orphan + autonomous-route-name in unrelated config: still no tag.
+    """
+    routes = (
+        RouteConfig(
+            name="auto",
+            command="echo",
+            match=RouteMatch(tags=("trigger:auto",)),
+            human_blocking=False,
+        ),
+    )
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # Orphan (its tags don't intersect the route) but claim aspect
+    # collides with the autonomous route name — must NOT produce a
+    # #lithos/auto tag because that route is not human_blocking.
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="o",
+            title="Orphan",
+            tags=("unrelated",),
+            claims=({"agent": "x", "aspect": "auto"},),
+        ),
+        _ctx(),
+    )
+    line = _projected_line(tmp_path)
+    assert "#lithos/" not in line
+
+
+async def test_orphan_task_no_lithos_tag(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(_event("lithos.task.created", task_id="orph"), _ctx())
+    assert "#lithos/" not in _projected_line(tmp_path)
+
+
+async def test_multiple_claims_first_human_blocking_wins(tmp_path: Path) -> None:
+    """When two human_blocking routes exist and the task carries claims
+    from both, the first claim (Lithos-canonical order) wins so the
+    rendered tag is stable across event re-runs."""
+    routes = (
+        _human_blocking_route(name="review-human"),
+        _human_blocking_route(name="signoff"),
+    )
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="dual",
+            tags=("trigger:review-human", "trigger:signoff"),
+            claims=(
+                {"agent": "a", "aspect": "review-human"},
+                {"agent": "b", "aspect": "signoff"},
+            ),
+        ),
+        _ctx(),
+    )
+    line = _projected_line(tmp_path)
+    assert "#lithos/review-human" in line
+    assert "#lithos/signoff" not in line
+
+
+# ── Composition + ordering ─────────────────────────────────────────────
+
+
+async def test_full_marker_set_orders_correctly(tmp_path: Path) -> None:
+    """All markers present in expected order:
+
+    - [ ] <title> 🆔 lithos:<id> 📅 <date> #project/<slug> #lithos/<route>
+    """
+    routes = (_human_blocking_route(name="review-human"),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="full",
+            title="Review PR for story 03",
+            tags=("trigger:review-human",),
+            metadata={"project": "lithos-loom", "scheduled_for": "2026-06-15"},
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == (
+        "- [ ] Review PR for story 03 🆔 lithos:full "
+        "📅 2026-06-15 #project/lithos-loom #lithos/review-human"
+    )
+
+
+async def test_no_double_space_when_optional_markers_omitted(
+    tmp_path: Path,
+) -> None:
+    """US8-shape orphan task — no trailing whitespace, no double-space."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event("lithos.task.created", task_id="bare", title="bare task"), _ctx()
+    )
+    line = _projected_line(tmp_path)
+    assert line == "- [ ] bare task 🆔 lithos:bare"
+    assert "  " not in line
+
+
+# ── Idempotency under US9 ──────────────────────────────────────────────
+
+
+async def test_repeated_event_with_fixed_today_yields_skip_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a pinned today_provider, the second identical claimed event
+    produces the same rendered line and hits the skip-write fast path."""
+    routes = (_human_blocking_route(),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+
+    event = _event(
+        "lithos.task.claimed",
+        task_id="r",
+        tags=("trigger:review-human",),
+        metadata={"project": "lithos-loom"},
+        claims=({"agent": "loom", "aspect": "review-human"},),
+    )
+    await handler(event, _ctx())
+
+    calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def _spy(src: str | Path, dst: str | Path) -> None:
+        calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _spy)
+    await handler(event, _ctx())
+    assert calls == [], "second identical claimed event triggered a write"
