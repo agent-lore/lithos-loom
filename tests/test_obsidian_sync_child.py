@@ -12,6 +12,7 @@ end-to-end gating is exercised in ``test_supervisor.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 
@@ -19,6 +20,17 @@ import pytest
 
 from lithos_loom.children.obsidian_sync import _amain
 from lithos_loom.config import LoomConfig, ObsidianSyncConfig, OrchestratorConfig
+
+
+async def _cancel_and_drain(task: asyncio.Task[None]) -> None:
+    """Cancel a helper task and await its completion so it can't leak past
+    the test (Copilot review on #16): a bare ``cancel()`` returns
+    immediately, leaving a pending task that may still race and deliver
+    its side effect after the test exits.
+    """
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 def _cfg_with_obsidian(tmp_path: Path) -> LoomConfig:
@@ -65,7 +77,7 @@ async def test_obsidian_sync_main_exits_zero_on_stop_event(tmp_path: Path) -> No
     try:
         rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
     finally:
-        sender.cancel()
+        await _cancel_and_drain(sender)
     assert rc == 0
 
 
@@ -104,7 +116,7 @@ async def test_obsidian_sync_logs_config_on_startup(
         with caplog.at_level(logging.INFO, logger=source_logger):
             await asyncio.wait_for(_amain(cfg), timeout=2.0)
     finally:
-        sender.cancel()
+        await _cancel_and_drain(sender)
 
     info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     started = next((m for m in info_msgs if "obsidian-sync child started" in m), None)

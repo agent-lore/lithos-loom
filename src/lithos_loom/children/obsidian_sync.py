@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import signal
 import sys
@@ -75,11 +76,20 @@ async def _amain(cfg: LoomConfig) -> int:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    installed: list[int] = []
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop_event.set)
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_event.set)
+            installed.append(sig)
     try:
         await stop_event.wait()
     finally:
+        # Mirror the supervisor's install/uninstall pair so the test
+        # process's event loop isn't left with handlers attached after
+        # _amain returns (Copilot review on #16).
+        for sig in installed:
+            with contextlib.suppress(NotImplementedError):
+                loop.remove_signal_handler(sig)
         logger.info("obsidian-sync child stopping")
     return 0
 
