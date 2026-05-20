@@ -280,8 +280,8 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
 ) -> None:
     """Config has [obsidian_sync] but no matching subscription — the
-    child still parks cleanly (preserves US7 behaviour) and warns that
-    projection is unconfigured."""
+    child parks WITHOUT opening a LithosClient or starting the source
+    (Copilot review on #17: don't connect to Lithos just to idle)."""
     cfg = _cfg_with_obsidian(tmp_path)  # no subscriptions
     source_logger = "lithos_loom.children.obsidian_sync"
 
@@ -294,9 +294,13 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
     assert rc == 0
 
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("no obsidian-* subscriptions configured" in m for m in warn_msgs), (
-        warn_msgs
-    )
+    assert any(
+        "no obsidian-projection subscription configured" in m for m in warn_msgs
+    ), warn_msgs
+    # Short-circuit: the source must NOT have been constructed.
+    # Otherwise we'd have opened a Lithos connection and started the
+    # SSE handshake just to do nothing.
+    assert stub_io == [], "source was constructed despite no subscriptions"
 
 
 async def test_obsidian_sync_child_ignores_non_obsidian_subscription_actions(
@@ -324,7 +328,29 @@ async def test_obsidian_sync_child_ignores_non_obsidian_subscription_actions(
 
     # The wiring log line names exactly the obsidian one — not noop.
     info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
-    wiring = next((m for m in info_msgs if "wiring" in m and "subscription" in m), None)
+    wiring = next((m for m in info_msgs if "wiring subscription" in m), None)
     assert wiring is not None, f"no wiring log; got {info_msgs}"
     assert "obs-tasks" in wiring
     assert "noop-smoke" not in wiring
+
+
+async def test_obsidian_sync_child_refuses_duplicate_obsidian_projection_specs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
+) -> None:
+    """Two [[subscriptions]] both with action='obsidian-projection' would
+    share a single stateful handler and race on the same file. Refuse
+    at startup with a non-zero exit (Copilot review on #17)."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _projection_subscription("first", action="obsidian-projection"),
+            _projection_subscription("second", action="obsidian-projection"),
+        ),
+    )
+    source_logger = "lithos_loom.children.obsidian_sync"
+    with caplog.at_level(logging.ERROR, logger=source_logger):
+        rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    assert rc == 1
+    error_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("refusing to wire" in m for m in error_msgs), error_msgs
+    assert stub_io == [], "source should not be constructed when refusing"

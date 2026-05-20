@@ -88,27 +88,32 @@ async def _amain(cfg: LoomConfig) -> int:
         list(obs.exclude_tags) or "[]",
     )
 
-    # Subscriptions this child is allowed to host. Subscriptions whose
-    # `action` is outside this map are silently skipped — they're some
-    # other child's job (route-runner for routes; a future
-    # subscription-runner child for generic actions like `noop`).
-    my_handlers: dict[str, Handler] = {
-        "obsidian-projection": make_obsidian_projection_handler(cfg),
-    }
-    my_specs = tuple(s for s in cfg.subscriptions if s.action in my_handlers)
-    if my_specs:
-        logger.info(
-            "obsidian-sync: wiring %d subscription(s): %s",
-            len(my_specs),
-            ", ".join(s.name for s in my_specs),
+    # Filter cfg.subscriptions to the actions this child is willing to
+    # host. Other actions are some other child's job (route-runner for
+    # routes; a future subscription-runner child for generic actions
+    # like `noop`).
+    obsidian_specs = tuple(
+        s for s in cfg.subscriptions if s.action == "obsidian-projection"
+    )
+    # Fail fast on duplicates (Copilot review on #17): the handler is
+    # stateful (per-handler state dict + per-handler tasks_file path);
+    # two subscriptions pointing at the same handler would merge their
+    # projections into one in-memory state and race on the same file.
+    if len(obsidian_specs) > 1:
+        names = ", ".join(s.name for s in obsidian_specs)
+        logger.error(
+            "obsidian-sync: refusing to wire %d obsidian-projection "
+            "subscriptions (%s); the handler is stateful and only one "
+            "instance is supported per child",
+            len(obsidian_specs),
+            names,
         )
-    else:
-        logger.warning(
-            "obsidian-sync: no obsidian-* subscriptions configured; "
-            "child will idle until SIGTERM. Add a [[subscriptions]] block "
-            "with action='obsidian-projection' to enable projection."
-        )
+        return 1
 
+    # Short-circuit when there's nothing to wire (Copilot review on
+    # #17): no point opening a LithosClient or running the SSE source
+    # if no obsidian subscription is configured. Just install signal
+    # handlers and park.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed: list[int] = []
@@ -118,6 +123,22 @@ async def _amain(cfg: LoomConfig) -> int:
             installed.append(sig)
 
     try:
+        if not obsidian_specs:
+            logger.warning(
+                "obsidian-sync: no obsidian-projection subscription "
+                "configured; child will idle until SIGTERM. Add a "
+                "[[subscriptions]] block with action='obsidian-projection' "
+                "to enable projection."
+            )
+            await stop_event.wait()
+            return 0
+
+        spec = obsidian_specs[0]
+        logger.info("obsidian-sync: wiring subscription %r", spec.name)
+        my_handlers: dict[str, Handler] = {
+            "obsidian-projection": make_obsidian_projection_handler(cfg),
+        }
+
         async with LithosClient(
             cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
         ) as lithos:
@@ -134,7 +155,7 @@ async def _amain(cfg: LoomConfig) -> int:
             )
             runners = build_runners(
                 bus=bus,
-                specs=my_specs,
+                specs=obsidian_specs,
                 handlers=my_handlers,
                 ctx=ctx,
             )

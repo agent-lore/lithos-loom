@@ -73,6 +73,7 @@ def _event(
     status: str = "open",
     tags: tuple[str, ...] = (),
     metadata: Mapping[str, Any] | None = None,
+    claims: tuple[Mapping[str, Any], ...] = (),
 ) -> Event:
     return Event(
         type=event_type,
@@ -83,7 +84,7 @@ def _event(
             "status": status,
             "tags": list(tags),
             "metadata": dict(metadata or {}),
-            "claims": [],
+            "claims": list(claims),
         },
     )
 
@@ -131,7 +132,13 @@ async def test_created_event_for_autonomous_task_writes_nothing(
 
 
 async def test_updated_event_replaces_line_for_same_id(tmp_path: Path) -> None:
-    """A title change on the same task replaces (not duplicates) the line."""
+    """A title change on the same task replaces (not duplicates) the line.
+
+    Note: the live LithosEventStream source doesn't actually emit
+    lithos.task.updated today (verified at lithos_event_stream.py:63);
+    the handler subscribes to it for forward-compat. The real runtime
+    re-evaluation path is exercised by the claimed/released tests below.
+    """
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg)
     await handler(
@@ -147,8 +154,9 @@ async def test_updated_event_replaces_line_for_same_id(tmp_path: Path) -> None:
     assert content.count("🆔 lithos:t1") == 1
 
 
-async def test_updated_event_removing_actionability_drops_line(tmp_path: Path) -> None:
-    """If an updated task is tagged into an autonomous route, drop its line."""
+async def test_claimed_by_autonomous_route_drops_orphan_line(tmp_path: Path) -> None:
+    """If a task that was a projected orphan gets claimed by an
+    autonomous route, drop its line — automation now owns it."""
     routes = (
         RouteConfig(
             name="auto",
@@ -162,12 +170,109 @@ async def test_updated_event_removing_actionability_drops_line(tmp_path: Path) -
     # Initially orphan (actionable) → line appears.
     await handler(_event("lithos.task.created", task_id="t1", title="x"), _ctx())
     assert "🆔 lithos:t1" in (tmp_path / "_lithos/tasks.md").read_text()
-    # Update assigns it to an autonomous route → line removed.
+    # Now claimed by the autonomous route → line removed.
     await handler(
-        _event("lithos.task.updated", task_id="t1", title="x", tags=("trigger:auto",)),
+        _event(
+            "lithos.task.claimed",
+            task_id="t1",
+            title="x",
+            tags=("trigger:auto",),
+            claims=({"agent": "automation", "aspect": "auto"},),
+        ),
         _ctx(),
     )
     assert "🆔 lithos:t1" not in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+async def test_claimed_by_human_blocking_route_promotes_task(tmp_path: Path) -> None:
+    """D6's second disjunct in action: a task that was claimable-but-
+    hidden (autonomous-route-claimable) becomes actionable the moment a
+    human_blocking route claims it. This is the real runtime path the
+    projection needs to react to — without it, US8 would never surface
+    story-review-human tasks until they hit a created/updated event."""
+    routes = (
+        RouteConfig(
+            name="review-human",
+            command="echo",
+            match=RouteMatch(tags=("trigger:review",)),
+            human_blocking=True,
+        ),
+    )
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg)
+    # Created: tag matches human_blocking route but no claim yet → hidden.
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="rev",
+            title="Review PR #42",
+            tags=("trigger:review",),
+        ),
+        _ctx(),
+    )
+    assert not (tmp_path / "_lithos/tasks.md").exists()
+
+    # Claimed by review-human → promote.
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="rev",
+            title="Review PR #42",
+            tags=("trigger:review",),
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    assert (
+        "- [ ] Review PR #42 🆔 lithos:rev"
+        in (tmp_path / "_lithos/tasks.md").read_text()
+    )
+
+
+async def test_released_by_human_blocking_route_demotes_task(tmp_path: Path) -> None:
+    """Inverse of the claim promotion: when the human_blocking route
+    releases the claim and no other claim makes the task actionable,
+    the line disappears."""
+    routes = (
+        RouteConfig(
+            name="review-human",
+            command="echo",
+            match=RouteMatch(tags=("trigger:review",)),
+            human_blocking=True,
+        ),
+    )
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg)
+    # Created + claimed → projected.
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="rev",
+            tags=("trigger:review",),
+        ),
+        _ctx(),
+    )
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="rev",
+            tags=("trigger:review",),
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    assert "lithos:rev" in (tmp_path / "_lithos/tasks.md").read_text()
+    # Released → claims=() → no longer actionable → drop line.
+    await handler(
+        _event(
+            "lithos.task.released",
+            task_id="rev",
+            tags=("trigger:review",),
+            claims=(),
+        ),
+        _ctx(),
+    )
+    assert "lithos:rev" not in (tmp_path / "_lithos/tasks.md").read_text()
 
 
 async def test_completed_event_removes_line(tmp_path: Path) -> None:
@@ -282,3 +387,120 @@ async def test_idempotent_repeated_event_yields_same_file(tmp_path: Path) -> Non
     await handler(_event("lithos.task.created", task_id="r"), _ctx())
     second = (tmp_path / "_lithos/tasks.md").read_text()
     assert first == second
+
+
+# ── Copilot review fixes (#17) ─────────────────────────────────────────
+
+
+async def test_removal_of_untracked_task_skips_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing a task that was never in state is a no-op — no disk I/O.
+    Without this, every spurious completed/cancelled event for an
+    autonomous task would touch the file's mtime and ripple through
+    Obsidian Sync."""
+    calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def _spy(src: str | Path, dst: str | Path) -> None:
+        calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _spy)
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+    # Never created — straight to completed.
+    await handler(_event("lithos.task.completed", task_id="ghost"), _ctx())
+    assert calls == [], "completed-for-untracked should not have written"
+    assert not (tmp_path / "_lithos/tasks.md").exists()
+
+
+async def test_upsert_with_identical_line_skips_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replaying a created event for a task already in state yields the
+    same rendered line — skip the write (Copilot review on #17). Also
+    sets up US14's content-hash dedup work for later."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+    await handler(_event("lithos.task.created", task_id="dup"), _ctx())
+
+    calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def _spy(src: str | Path, dst: str | Path) -> None:
+        calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _spy)
+    # Same event again — identical line, should not write.
+    await handler(_event("lithos.task.created", task_id="dup"), _ctx())
+    assert calls == [], "second identical event triggered a write"
+
+
+async def test_unknown_event_type_no_op(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An event type outside the known sets is debug-logged and dropped
+    — payload parsing is NOT attempted (Copilot review on #17 flagged
+    that a foreign payload could raise KeyError on 'id' otherwise)."""
+    import logging as _logging
+
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+    # Construct a foreign event with a payload that lacks 'id' — proof
+    # the handler doesn't try to parse it.
+    foreign = Event(
+        type="obsidian.note.modified",
+        timestamp=datetime.now(UTC),
+        payload={"path": "/some/note.md"},
+    )
+    with caplog.at_level(_logging.DEBUG):
+        await handler(foreign, _ctx())
+    # No file written; no exception raised.
+    assert not (tmp_path / "_lithos/tasks.md").exists()
+
+
+async def test_malformed_task_payload_warns_no_crash(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A task-typed event whose payload is missing 'id' (programming
+    error somewhere upstream) should warn and drop, not crash the
+    subscription loop."""
+    import logging as _logging
+
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+    bad = Event(
+        type="lithos.task.created",
+        timestamp=datetime.now(UTC),
+        payload={"title": "no id here"},
+    )
+    with caplog.at_level(_logging.WARNING):
+        await handler(bad, _ctx())  # must not raise
+
+    warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any("malformed payload" in m for m in warns), warns
+    assert not (tmp_path / "_lithos/tasks.md").exists()
+
+
+async def test_atomic_write_cleans_up_tmp_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If os.replace raises (disk full, perms flip, etc.) the .tmp file
+    must NOT be left behind to litter the vault (Copilot review on #17,
+    mirrors plugin_runner.write_result_atomically)."""
+
+    def _failing_replace(src: str | Path, dst: str | Path) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", _failing_replace)
+
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        await handler(_event("lithos.task.created", task_id="x"), _ctx())
+
+    # The real file was never written, and the tmp file was cleaned up.
+    assert not (tmp_path / "_lithos/tasks.md").exists()
+    assert not (tmp_path / "_lithos/tasks.md.tmp").exists()
