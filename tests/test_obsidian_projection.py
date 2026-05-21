@@ -778,9 +778,10 @@ async def test_multiple_claims_first_human_blocking_wins(tmp_path: Path) -> None
 
 
 async def test_full_marker_set_orders_correctly(tmp_path: Path) -> None:
-    """All markers present in expected order (after US10):
+    """All markers present in expected order (after US11):
 
-    - [ ] <title> <priority> 🆔 lithos:<id> 📅 <date> #project/<slug> #lithos/<route>
+    - [ ] <title> <priority> 🆔 lithos:<id> ⛔ lithos:<dep> \
+        📅 <date> #project/<slug> #lithos/<route>
     """
     routes = (_human_blocking_route(name="review-human"),)
     cfg = _cfg(tmp_path, routes=routes)
@@ -795,13 +796,14 @@ async def test_full_marker_set_orders_correctly(tmp_path: Path) -> None:
                 "project": "lithos-loom",
                 "scheduled_for": "2026-06-15",
                 "priority": "high",
+                "depends_on": ["dep-456"],
             },
             claims=({"agent": "loom", "aspect": "review-human"},),
         ),
         _ctx(),
     )
     assert _projected_line(tmp_path) == (
-        "- [ ] Review PR for story 03 ⏫ 🆔 lithos:full "
+        "- [ ] Review PR for story 03 ⏫ 🆔 lithos:full ⛔ lithos:dep-456 "
         "📅 2026-06-15 #project/lithos-loom #lithos/review-human"
     )
 
@@ -976,3 +978,147 @@ async def test_priority_slots_between_title_and_id(tmp_path: Path) -> None:
         _ctx(),
     )
     assert _projected_line(tmp_path) == "- [ ] Slotted task ⏫ 🆔 lithos:slot"
+
+
+# ── US11 dependency markers ────────────────────────────────────────────
+
+
+async def test_single_dep_renders_one_marker(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="t",
+            metadata={"depends_on": ["dep-1"]},
+        ),
+        _ctx(),
+    )
+    assert "⛔ lithos:dep-1" in _projected_line(tmp_path)
+
+
+async def test_multiple_deps_render_one_marker_each_in_order(
+    tmp_path: Path,
+) -> None:
+    """List order is preserved — D19 says dep order has graph meaning
+    upstream; reshuffling would lose that signal."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="t",
+            title="multi",
+            metadata={"depends_on": ["dep-a", "dep-b", "dep-c"]},
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == (
+        "- [ ] multi 🆔 lithos:t ⛔ lithos:dep-a ⛔ lithos:dep-b ⛔ lithos:dep-c"
+    )
+
+
+async def test_dep_markers_slot_between_id_and_date(tmp_path: Path) -> None:
+    """Position lock: ⛔ markers appear after 🆔 lithos:<id> and before
+    📅 <date>, matching the PRD's rendered example."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="s",
+            title="slotted",
+            metadata={"depends_on": ["dep-1"], "scheduled_for": "2026-06-15"},
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == (
+        "- [ ] slotted 🆔 lithos:s ⛔ lithos:dep-1 📅 2026-06-15"
+    )
+
+
+async def test_missing_depends_on_omits_dep_markers(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(_event("lithos.task.created", task_id="nd"), _ctx())
+    assert "⛔" not in _projected_line(tmp_path)
+
+
+async def test_empty_depends_on_omits_dep_markers(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event("lithos.task.created", task_id="e", metadata={"depends_on": []}),
+        _ctx(),
+    )
+    assert "⛔" not in _projected_line(tmp_path)
+
+
+async def test_non_list_depends_on_warns_and_omits(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Defensive: a string-by-mistake (instead of list of strings) is
+    warn-logged and dropped, never crashes the subscription loop."""
+    import logging as _logging
+
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    with caplog.at_level(_logging.WARNING):
+        await handler(
+            _event(
+                "lithos.task.created",
+                task_id="nl",
+                metadata={"depends_on": "dep-a"},
+            ),
+            _ctx(),
+        )
+    assert "⛔" not in _projected_line(tmp_path)
+    warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any("depends_on" in m and "dep-a" in m for m in warns), warns
+
+
+async def test_non_string_entries_skipped_with_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Mixed list — only string entries become markers; bad entries get
+    one consolidated warning."""
+    import logging as _logging
+
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    with caplog.at_level(_logging.WARNING):
+        await handler(
+            _event(
+                "lithos.task.created",
+                task_id="m",
+                title="mixed",
+                metadata={"depends_on": ["dep-a", 42, None, "", "dep-b"]},
+            ),
+            _ctx(),
+        )
+    assert _projected_line(tmp_path) == (
+        "- [ ] mixed 🆔 lithos:m ⛔ lithos:dep-a ⛔ lithos:dep-b"
+    )
+    warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any("depends_on" in m and "invalid" in m for m in warns), warns
+
+
+async def test_duplicate_dep_ids_deduped_preserving_first_occurrence(
+    tmp_path: Path,
+) -> None:
+    """Two ⛔ markers for the same dep is visual noise; emit once at the
+    first-occurrence position."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="d",
+            title="dup",
+            metadata={"depends_on": ["dep-a", "dep-b", "dep-a"]},
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == (
+        "- [ ] dup 🆔 lithos:d ⛔ lithos:dep-a ⛔ lithos:dep-b"
+    )
