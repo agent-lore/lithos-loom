@@ -75,18 +75,47 @@ both open and resolved entries.
 The handler maintains an in-process state dict
 ``{task_id → _StateEntry}``.
 
-File writes are atomic: write to ``<path>.tmp``, fsync, then
-``os.replace`` onto the final path. The .tmp file is cleaned up on
-any failure between write and replace so stale temps don't litter
-the vault. Content-hash dedup ("only write when content has actually
-changed") is US14; meanwhile this handler skips the write entirely
-whenever nothing about the in-memory state changed.
+File writes are layered (US14):
+
+1. **In-memory short-circuit.** When an event leaves the keyed
+   ``_StateEntry`` unchanged and the TTL sweep evicted nothing, the
+   write is skipped before rendering — the cheap fast path for
+   replayed events.
+2. **Content-hash dedup.** The rendered file string is SHA-256'd
+   and compared to ``last_written_hash`` (seeded from the existing
+   on-disk file at handler init via ``_hash_existing_file``, then
+   updated after each successful write). Skips redundant atomic-
+   write dances that would otherwise bump the file's mtime and
+   ripple no-op edits to other Obsidian Sync devices. The disk-seed
+   means a SINGLE-task restart-convergence — where bootstrap
+   replays one ``created`` event and the rendered content matches
+   the pre-restart disk content — costs zero writes.
+3. **Atomic write.** Write to ``<path>.tmp``, fsync, then
+   ``os.replace`` onto the final path. The ``.tmp`` file is best-
+   effort cleaned up on any failure between write and replace, so a
+   crashed mid-write doesn't litter the vault with ``tasks.md.tmp``.
+
+KNOWN LIMITATION (US14 scope): for a MULTI-task projection,
+bootstrap publishes N ``task.created`` events and the in-memory
+state grows incrementally — ``{A}`` → ``{A,B}`` → ``{A,B,C}``. Each
+intermediate render produces content that differs from the disk
+seed (the seed reflects the pre-restart final state ``{A,B,C}``,
+not the intermediate), so each event writes; the convergent final
+write also doesn't dedup because our own intermediate writes have
+advanced ``last_written_hash`` past the disk seed. A 40-task
+quiet-KB restart still costs 40 writes / mtime ripples. Closing
+that gap needs a write-debounce / coalesce layer that buffers
+events and flushes once per quiescence — the hash check is
+designed to compose cleanly with that future addition (debounce
+calls a single ``_flush()`` which runs the same hash check, and
+the disk-seed then naturally skips the single convergent write).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 from collections.abc import Callable, Sequence
@@ -201,8 +230,21 @@ def make_handler(
 
     tasks_path = obs.vault_path / obs.tasks_file
     state: dict[str, _StateEntry] = {}
+    # Content-hash dedup (US14). Seeded from disk so a single-event
+    # restart-convergence — where the in-memory state lands at the
+    # same content as what was on disk before the restart — skips the
+    # write entirely. Multi-event bootstrap-convergence (state grows
+    # incrementally before reaching the pre-restart final state) can't
+    # be skipped at the convergent point with a single in-memory hash
+    # because our own intermediate writes have already advanced the
+    # hash; the docstring documents this as a known limitation that
+    # needs a write-debounce layer to close.
+    # FileNotFound / OSError → None, first write seeds the hash from
+    # new content.
+    last_written_hash: bytes | None = _hash_existing_file(tasks_path)
 
     async def handle(event: Event, ctx: Any) -> None:
+        nonlocal last_written_hash
         # Branch on event type FIRST so an unknown event can't blow up
         # on payload parsing (Copilot review on #17: a missing "id" in
         # a foreign payload would raise KeyError before the unknown-type
@@ -285,9 +327,29 @@ def make_handler(
         current = state.get(task.id)
         if current == prior and not evicted:
             # Nothing actionable moved AND no TTL eviction touched the
-            # file — skip the write. Saves disk I/O and keeps the
-            # file's mtime stable so Obsidian Sync doesn't ripple no-op
-            # edits to other devices.
+            # file — skip the write before rendering. Saves disk I/O
+            # and keeps the file's mtime stable so Obsidian Sync
+            # doesn't ripple no-op edits to other devices.
+            return
+
+        # Render once, hash once, compare to the last-written digest
+        # (US14). Catches:
+        # - Single-task restart-convergence: disk-seeded hash matches
+        #   the first render → zero writes.
+        # - In-process state changes that produce identical content
+        #   (defensive — the existing _StateEntry equality short-
+        #   circuit usually covers this first).
+        # Multi-task restart bootstraps still write N times during
+        # state rebuild; closing that needs a write-debounce layer
+        # (see module docstring).
+        content = _render_file(state)
+        content_hash = hashlib.sha256(content.encode("utf-8")).digest()
+        if content_hash == last_written_hash:
+            ctx.logger.debug(
+                "obsidian-projection: content unchanged for %s on %s; skipping write",
+                task.id,
+                event.type,
+            )
             return
 
         ctx.logger.debug(
@@ -296,7 +358,8 @@ def make_handler(
             task.id,
             len(evicted),
         )
-        await _write_tasks_file_atomic(tasks_path, _render_file(state))
+        await _write_tasks_file_atomic(tasks_path, content)
+        last_written_hash = content_hash
 
     return handle
 
@@ -588,7 +651,7 @@ def _render_file(state: dict[str, _StateEntry]) -> str:
     the checkbox state (``[ ]`` vs ``[x]``/``[-]``).
 
     Sorted by task id for deterministic output (cheap stability for
-    tests and for content-hash dedup once US14 lands).
+    tests and for US14's content-hash dedup at the file boundary).
     """
     if not state:
         return _FILE_HEADER + "\n"
@@ -597,6 +660,23 @@ def _render_file(state: dict[str, _StateEntry]) -> str:
         lines.append(state[tid].line)
     lines.append("")
     return "\n".join(lines)
+
+
+def _hash_existing_file(path: Path) -> bytes | None:
+    """Compute the SHA-256 digest of ``path``'s current contents.
+
+    Returns ``None`` when the file doesn't exist or isn't readable
+    (cold start, permission flip, weird filesystem state). Used by
+    ``make_handler`` to seed ``last_written_hash`` so a daemon
+    restart that rebuilds in-memory state to the same content as the
+    on-disk file results in zero disk writes at the convergent point
+    (US14).
+    """
+    try:
+        raw = path.read_bytes()
+    except (FileNotFoundError, OSError):
+        return None
+    return hashlib.sha256(raw).digest()
 
 
 async def _write_tasks_file_atomic(path: Path, content: str) -> None:
