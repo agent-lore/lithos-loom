@@ -12,7 +12,7 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -275,22 +275,6 @@ async def test_released_by_human_blocking_route_demotes_task(tmp_path: Path) -> 
     assert "lithos:rev" not in (tmp_path / "_lithos/tasks.md").read_text()
 
 
-async def test_completed_event_removes_line(tmp_path: Path) -> None:
-    cfg = _cfg(tmp_path)
-    handler = make_handler(cfg)
-    await handler(_event("lithos.task.created", task_id="done"), _ctx())
-    await handler(_event("lithos.task.completed", task_id="done"), _ctx())
-    assert "🆔 lithos:done" not in (tmp_path / "_lithos/tasks.md").read_text()
-
-
-async def test_cancelled_event_removes_line(tmp_path: Path) -> None:
-    cfg = _cfg(tmp_path)
-    handler = make_handler(cfg)
-    await handler(_event("lithos.task.created", task_id="cx"), _ctx())
-    await handler(_event("lithos.task.cancelled", task_id="cx"), _ctx())
-    assert "🆔 lithos:cx" not in (tmp_path / "_lithos/tasks.md").read_text()
-
-
 async def test_title_with_newlines_collapsed_to_spaces(tmp_path: Path) -> None:
     """Multi-line titles would break the single-line markdown task syntax —
     collapse whitespace so the projection stays parseable."""
@@ -390,29 +374,6 @@ async def test_idempotent_repeated_event_yields_same_file(tmp_path: Path) -> Non
 
 
 # ── Copilot review fixes (#17) ─────────────────────────────────────────
-
-
-async def test_removal_of_untracked_task_skips_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Removing a task that was never in state is a no-op — no disk I/O.
-    Without this, every spurious completed/cancelled event for an
-    autonomous task would touch the file's mtime and ripple through
-    Obsidian Sync."""
-    calls: list[tuple[str, str]] = []
-    real_replace = os.replace
-
-    def _spy(src: str | Path, dst: str | Path) -> None:
-        calls.append((str(src), str(dst)))
-        real_replace(src, dst)
-
-    monkeypatch.setattr(os, "replace", _spy)
-    cfg = _cfg(tmp_path)
-    handler = make_handler(cfg)
-    # Never created — straight to completed.
-    await handler(_event("lithos.task.completed", task_id="ghost"), _ctx())
-    assert calls == [], "completed-for-untracked should not have written"
-    assert not (tmp_path / "_lithos/tasks.md").exists()
 
 
 async def test_upsert_with_identical_line_skips_write(
@@ -526,9 +487,16 @@ def _human_blocking_route(name: str = "review-human") -> RouteConfig:
 
 
 def _projected_line(tmp_path: Path) -> str:
-    """Read the single rendered task line from the projection file."""
+    """Read the single rendered task line from the projection file.
+
+    Matches all three checkbox states emitted by the renderer:
+    ``- [ ]`` (open, US8+), ``- [x]`` (completed, US13),
+    ``- [-]`` (cancelled, US13).
+    """
     content = (tmp_path / "_lithos/tasks.md").read_text()
-    lines = [ln for ln in content.splitlines() if ln.startswith("- [ ]")]
+    lines = [
+        ln for ln in content.splitlines() if ln.startswith(("- [ ]", "- [x]", "- [-]"))
+    ]
     assert len(lines) == 1, f"expected exactly one task line, got: {lines!r}"
     return lines[0]
 
@@ -1122,3 +1090,392 @@ async def test_duplicate_dep_ids_deduped_preserving_first_occurrence(
     assert _projected_line(tmp_path) == (
         "- [ ] dup 🆔 lithos:d ⛔ lithos:dep-a ⛔ lithos:dep-b"
     )
+
+
+# ── US13 resolved-task TTL lingering ───────────────────────────────────
+
+
+def _ts_at(d: date) -> datetime:
+    """Build a UTC datetime at midday on ``d`` so .astimezone().date() is
+    deterministic regardless of host timezone (within ±12h)."""
+    return datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=UTC)
+
+
+def _resolved_event(
+    event_type: str,
+    *,
+    task_id: str,
+    title: str = "test task",
+    when: date = _TODAY,
+    metadata: Mapping[str, Any] | None = None,
+) -> Event:
+    """Build a completed/cancelled event whose timestamp lands on
+    ``when`` regardless of host tz."""
+    return Event(
+        type=event_type,
+        timestamp=_ts_at(when),
+        payload={
+            "id": task_id,
+            "title": title,
+            "status": "completed" if event_type.endswith("completed") else "cancelled",
+            "tags": [],
+            "metadata": dict(metadata or {}),
+            "claims": [],
+        },
+    )
+
+
+# Resolved-line rendering
+
+
+async def test_completed_event_renders_x_line_with_check_mark(
+    tmp_path: Path,
+) -> None:
+    """Completed event on an open task → [x] line with ✅ <date>."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event("lithos.task.created", task_id="d", title="ship feature"), _ctx()
+    )
+    await handler(
+        _resolved_event(
+            "lithos.task.completed", task_id="d", title="ship feature", when=_TODAY
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == ("- [x] ship feature ✅ 2026-05-20 🆔 lithos:d")
+
+
+async def test_cancelled_event_renders_dash_line_with_x_mark(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event("lithos.task.created", task_id="c", title="abandon idea"), _ctx()
+    )
+    await handler(
+        _resolved_event(
+            "lithos.task.cancelled", task_id="c", title="abandon idea", when=_TODAY
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == ("- [-] abandon idea ❌ 2026-05-20 🆔 lithos:c")
+
+
+async def test_resolved_line_preserves_project_tag(tmp_path: Path) -> None:
+    """metadata.project is the one decoration kept on resolved lines —
+    so 'done this week for project X' queries still cluster correctly."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="p",
+            title="ship",
+            metadata={"project": "cardinal"},
+        ),
+        _ctx(),
+    )
+    await handler(
+        _resolved_event(
+            "lithos.task.completed",
+            task_id="p",
+            title="ship",
+            when=_TODAY,
+            metadata={"project": "cardinal"},
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == (
+        "- [x] ship ✅ 2026-05-20 🆔 lithos:p #project/cardinal"
+    )
+
+
+async def test_resolved_line_omits_priority_dep_due_route_markers(
+    tmp_path: Path,
+) -> None:
+    """A task with the full open-line marker set, when completed,
+    renders the minimal resolved shape — priority emoji, ⛔ deps, 📅,
+    and #lithos/<route> all drop because they are actionability-only."""
+    routes = (_human_blocking_route(name="review-human"),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # First land the task as open with everything set.
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="full",
+            title="rich task",
+            tags=("trigger:review-human",),
+            metadata={
+                "project": "p1",
+                "priority": "high",
+                "depends_on": ["dep-1"],
+                "scheduled_for": "2026-06-15",
+            },
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    # Then complete it.
+    await handler(
+        _resolved_event(
+            "lithos.task.completed",
+            task_id="full",
+            title="rich task",
+            when=_TODAY,
+            metadata={
+                "project": "p1",
+                "priority": "high",
+                "depends_on": ["dep-1"],
+                "scheduled_for": "2026-06-15",
+            },
+        ),
+        _ctx(),
+    )
+    line = _projected_line(tmp_path)
+    assert line == "- [x] rich task ✅ 2026-05-20 🆔 lithos:full #project/p1"
+    # Belt-and-braces: explicitly none of the actionability markers.
+    assert not any(ch in line for ch in "🔺⏫🔼🔽⏬")
+    assert "⛔" not in line
+    assert "📅" not in line
+    assert "#lithos/" not in line
+
+
+async def test_completed_event_for_untracked_task_creates_resolved_entry(
+    tmp_path: Path,
+) -> None:
+    """Behaviour change vs the deleted US8 test: a completed event for a
+    task we never tracked is no longer a no-op — it adds a fresh
+    resolved entry. The Lithos-side completion of a task that was never
+    actionable to this operator is still historical record worth showing
+    in 'done this week' queries during the TTL window."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed",
+            task_id="ghost",
+            title="ghost task",
+            when=_TODAY,
+        ),
+        _ctx(),
+    )
+    assert _projected_line(tmp_path) == (
+        "- [x] ghost task ✅ 2026-05-20 🆔 lithos:ghost"
+    )
+
+
+# TTL lingering / eviction
+
+
+async def test_resolved_task_lingers_within_ttl(tmp_path: Path) -> None:
+    """Default TTL = 7. Completed today → still in file today."""
+    cfg = _cfg(tmp_path)  # resolved_ttl_days default = 7
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _resolved_event("lithos.task.completed", task_id="x", title="t", when=_TODAY),
+        _ctx(),
+    )
+    assert "lithos:x" in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+async def test_resolved_task_evicted_after_ttl_via_next_event(
+    tmp_path: Path,
+) -> None:
+    """Task A completed 10 days ago, TTL = 7. State carries it. An
+    unrelated event for task B arrives today → A is evicted by the
+    sweep at the top of the handle, and the file is rewritten without
+    A even though the triggering event was about B."""
+    cfg = _cfg(tmp_path)  # ttl_days = 7
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # Seed: complete task A 10 days ago.
+    ten_days_ago = _TODAY - timedelta(days=10)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed", task_id="a", title="old done", when=ten_days_ago
+        ),
+        _ctx(),
+    )
+    assert "lithos:a" in (tmp_path / "_lithos/tasks.md").read_text()
+    # Now a fresh open event for B arrives today.
+    await handler(
+        _event("lithos.task.created", task_id="b", title="new open"),
+        _ctx(),
+    )
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:a" not in text, "old completed task should be evicted by TTL sweep"
+    assert "lithos:b" in text
+
+
+async def test_resolved_task_at_ttl_boundary_still_lingers(tmp_path: Path) -> None:
+    """Completed exactly 7 days ago, TTL = 7. cutoff = today-7;
+    resolved_at == cutoff is NOT < cutoff, so the entry survives."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    boundary = _TODAY - timedelta(days=7)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed", task_id="edge", title="t", when=boundary
+        ),
+        _ctx(),
+    )
+    # Trigger a sweep via an unrelated event.
+    await handler(_event("lithos.task.created", task_id="trigger", title="t"), _ctx())
+    assert "lithos:edge" in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+async def test_resolved_task_one_day_past_ttl_evicted(tmp_path: Path) -> None:
+    """Completed 8 days ago, TTL = 7 → evicted on next event handle."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    past = _TODAY - timedelta(days=8)
+    await handler(
+        _resolved_event("lithos.task.completed", task_id="gone", title="t", when=past),
+        _ctx(),
+    )
+    await handler(_event("lithos.task.created", task_id="trigger", title="t"), _ctx())
+    assert "lithos:gone" not in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+async def test_ttl_zero_evicts_immediately_on_next_event(tmp_path: Path) -> None:
+    """ttl=0 means cutoff == today; an entry resolved_at < today gets
+    evicted. An entry resolved today survives (resolved_at == cutoff)
+    — operator can still see things completed in the current day
+    until the next day rolls over."""
+    cfg = LoomConfig(
+        orchestrator=OrchestratorConfig(
+            agent_id="lithos-orchestrator-test",
+            lithos_url="http://localhost:8765",
+        ),
+        routes=(),
+        obsidian_sync=ObsidianSyncConfig(
+            vault_path=tmp_path,
+            tasks_file=Path("_lithos/tasks.md"),
+            resolved_ttl_days=0,
+        ),
+    )
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # Resolved yesterday → cutoff is today, yesterday < today → evicted.
+    yesterday = _TODAY - timedelta(days=1)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed", task_id="dead", title="t", when=yesterday
+        ),
+        _ctx(),
+    )
+    await handler(_event("lithos.task.created", task_id="trigger", title="t"), _ctx())
+    assert "lithos:dead" not in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+# State immunity for resolved entries
+
+
+async def test_claimed_event_on_resolved_task_does_not_change_line(
+    tmp_path: Path,
+) -> None:
+    """Once resolved, terminal status is final — a stale claimed event
+    (e.g. from a delayed retry by a route) must not rewrite the line."""
+    routes = (_human_blocking_route(name="review-human"),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # Resolve it.
+    await handler(
+        _resolved_event(
+            "lithos.task.completed", task_id="done", title="t", when=_TODAY
+        ),
+        _ctx(),
+    )
+    before = (tmp_path / "_lithos/tasks.md").read_text()
+    # Stale claimed event arrives for the same task.
+    await handler(
+        _event(
+            "lithos.task.claimed",
+            task_id="done",
+            tags=("trigger:review-human",),
+            claims=({"agent": "loom", "aspect": "review-human"},),
+        ),
+        _ctx(),
+    )
+    after = (tmp_path / "_lithos/tasks.md").read_text()
+    assert before == after, "resolved-state should be immune to claimed event"
+
+
+async def test_updated_event_on_resolved_task_does_not_change_line(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed", task_id="done", title="t", when=_TODAY
+        ),
+        _ctx(),
+    )
+    before = (tmp_path / "_lithos/tasks.md").read_text()
+    await handler(
+        _event(
+            "lithos.task.updated",
+            task_id="done",
+            title="t",
+            metadata={"priority": "high"},
+        ),
+        _ctx(),
+    )
+    after = (tmp_path / "_lithos/tasks.md").read_text()
+    assert before == after, "resolved-state should be immune to updated event"
+
+
+# Interleaving + idempotency
+
+
+async def test_open_and_resolved_tasks_sort_by_id_together(
+    tmp_path: Path,
+) -> None:
+    """Mixed open + resolved entries in state → file output sorts by
+    task id; the user's Tasks-plugin queries differentiate via the
+    checkbox state."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(_event("lithos.task.created", task_id="a-open", title="A"), _ctx())
+    await handler(_event("lithos.task.created", task_id="c-open", title="C"), _ctx())
+    await handler(
+        _resolved_event(
+            "lithos.task.completed", task_id="b-done", title="B", when=_TODAY
+        ),
+        _ctx(),
+    )
+    content = (tmp_path / "_lithos/tasks.md").read_text()
+    task_lines = [
+        ln for ln in content.splitlines() if ln.startswith(("- [ ]", "- [x]", "- [-]"))
+    ]
+    assert task_lines == [
+        "- [ ] A 🆔 lithos:a-open",
+        "- [x] B ✅ 2026-05-20 🆔 lithos:b-done",
+        "- [ ] C 🆔 lithos:c-open",
+    ]
+
+
+async def test_idempotent_repeat_completed_event_skips_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replaying the same completed event twice produces an identical
+    _StateEntry → skip-write triggers on the second call."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    event = _resolved_event(
+        "lithos.task.completed", task_id="dup", title="t", when=_TODAY
+    )
+    await handler(event, _ctx())
+
+    calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def _spy(src: str | Path, dst: str | Path) -> None:
+        calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _spy)
+    await handler(event, _ctx())
+    assert calls == [], "second identical completed event should skip the write"
