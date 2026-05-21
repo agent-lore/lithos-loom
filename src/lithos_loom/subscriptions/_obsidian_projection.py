@@ -75,18 +75,46 @@ both open and resolved entries.
 The handler maintains an in-process state dict
 ``{task_id → _StateEntry}``.
 
-File writes are atomic: write to ``<path>.tmp``, fsync, then
-``os.replace`` onto the final path. The .tmp file is cleaned up on
-any failure between write and replace so stale temps don't litter
-the vault. Content-hash dedup ("only write when content has actually
-changed") is US14; meanwhile this handler skips the write entirely
-whenever nothing about the in-memory state changed.
+File writes are layered (US14):
+
+1. **In-memory short-circuit.** When an event leaves the keyed
+   ``_StateEntry`` unchanged and the TTL sweep evicted nothing, the
+   write is skipped before rendering — the cheap fast path for
+   replayed events.
+2. **Debounce / coalesce.** Each event schedules a deferred
+   ``_flush()`` task; a subsequent event within the
+   ``debounce_seconds`` window cancels-and-reschedules so bursts
+   (especially bootstrap) coalesce into a single flush at
+   quiescence. ``debounce_seconds = 0`` (test default) disables this
+   and runs ``_flush()`` inline. Production passes a small positive
+   value from the ``obsidian-sync`` child.
+3. **Content-hash dedup.** The flush renders the file string,
+   SHA-256s it, and compares to ``last_written_hash`` (seeded from
+   the existing on-disk file at handler init via
+   ``_hash_existing_file``, then updated after each successful
+   write). When they match, the atomic-write dance is skipped — so
+   a quiet-KB restart converges to the pre-restart disk content and
+   the single coalesced flush is a hash-match, zero writes,
+   zero mtime ripples.
+4. **Atomic write.** Write to ``<path>.tmp``, fsync, then
+   ``os.replace`` onto the final path. The ``.tmp`` file is best-
+   effort cleaned up on any failure between write and replace, so a
+   crashed mid-write doesn't litter the vault with ``tasks.md.tmp``.
+
+Pending flushes are best-effort under shutdown. When the
+subscription task is cancelled mid-debounce, the in-flight flush
+task is cancelled too and its writes are dropped. Correctness
+self-heals on restart: the bootstrap rebuilds state from Lithos
+and the first divergent event writes the corrected content (the
+disk-seed catches the no-divergence case for free). No Loom-side
+persistence is required.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 from collections.abc import Callable, Sequence
@@ -176,6 +204,7 @@ def make_handler(
     cfg: LoomConfig,
     *,
     today_provider: Callable[[], date] = date.today,
+    debounce_seconds: float = 0.0,
 ) -> Any:
     """Build a stateful obsidian-projection handler bound to ``cfg``.
 
@@ -191,6 +220,23 @@ def make_handler(
     it at the default and get :func:`date.today`. Read at event-handle
     time (not at handler-build time), so a long-running daemon picks up
     each new day naturally on the next event for any task.
+
+    ``debounce_seconds`` controls write coalescing (US14):
+
+    - ``0.0`` (default): each event triggers an inline flush. Tests
+      use this so they can assert on the file state immediately after
+      ``await handler(...)``.
+    - ``> 0``: each event schedules a deferred ``_flush()`` task; a
+      subsequent event within the window cancels and reschedules so
+      bursts (bootstrap) coalesce into a single write at convergence.
+      The ``obsidian-sync`` child sets this to a small positive value
+      so multi-task restart on a quiet KB causes zero on-disk changes
+      (the convergent flush hash-matches the disk seed and skips).
+
+    Pending flushes are best-effort: shutdown via task cancellation
+    drops them, but the restart bootstrap rebuilds state from Lithos
+    and the first divergent event writes the corrected content. Lost
+    flushes therefore self-heal — no Loom-side persistence required.
     """
     obs = cfg.obsidian_sync
     if obs is None:
@@ -201,8 +247,21 @@ def make_handler(
 
     tasks_path = obs.vault_path / obs.tasks_file
     state: dict[str, _StateEntry] = {}
+    # Content-hash dedup (US14). Seeded from disk so the convergent
+    # flush — where the in-memory state lands at the same content as
+    # what was on disk before the restart — skips the write entirely.
+    # With debounce_seconds > 0, multi-event bootstrap coalesces into
+    # one flush at quiescence; that single flush is what the disk-seed
+    # short-circuits. FileNotFound / OSError → None, first write
+    # seeds the hash from new content.
+    last_written_hash: bytes | None = _hash_existing_file(tasks_path)
+    # Pending debounced flush task (None when not debouncing or when
+    # the last burst has already flushed). Subsequent events within
+    # the debounce window cancel-and-reschedule this task.
+    pending_flush: asyncio.Task[None] | None = None
 
     async def handle(event: Event, ctx: Any) -> None:
+        nonlocal last_written_hash
         # Branch on event type FIRST so an unknown event can't blow up
         # on payload parsing (Copilot review on #17: a missing "id" in
         # a foreign payload would raise KeyError before the unknown-type
@@ -285,18 +344,73 @@ def make_handler(
         current = state.get(task.id)
         if current == prior and not evicted:
             # Nothing actionable moved AND no TTL eviction touched the
-            # file — skip the write. Saves disk I/O and keeps the
-            # file's mtime stable so Obsidian Sync doesn't ripple no-op
-            # edits to other devices.
+            # file — skip even scheduling a flush. Saves disk I/O and
+            # keeps the file's mtime stable so Obsidian Sync doesn't
+            # ripple no-op edits to other devices.
             return
 
+        # Schedule a flush. The flush itself runs the hash check
+        # (skip when content is byte-identical to the last write or
+        # the disk seed); debouncing coalesces bursts so the multi-
+        # task bootstrap-convergence case becomes a single hash-
+        # skipped flush at quiescence.
         ctx.logger.debug(
-            "obsidian-projection: write triggered by %s for %s (evicted=%d)",
-            event.type,
+            "obsidian-projection: scheduling flush for %s on %s (evicted=%d)",
             task.id,
+            event.type,
             len(evicted),
         )
-        await _write_tasks_file_atomic(tasks_path, _render_file(state))
+        await _schedule_flush()
+
+    async def _flush() -> None:
+        """Render current state, hash, compare, and (maybe) write.
+
+        Skips the atomic-write dance when the rendered content's
+        SHA-256 matches ``last_written_hash`` (which is seeded from
+        disk on init, then updated after each successful write).
+        """
+        nonlocal last_written_hash
+        content = _render_file(state)
+        content_hash = hashlib.sha256(content.encode("utf-8")).digest()
+        if content_hash == last_written_hash:
+            logger.debug("obsidian-projection: flush content unchanged; skipping write")
+            return
+        await _write_tasks_file_atomic(tasks_path, content)
+        last_written_hash = content_hash
+
+    async def _delayed_flush() -> None:
+        """Sleep the debounce window, then flush.
+
+        A newer event arriving within the window cancels this task
+        (raises ``CancelledError`` inside the sleep); we swallow it
+        and return without flushing — the newer event will have
+        scheduled its own ``_delayed_flush`` for its own latest
+        state, so the flush happens at the burst's tail.
+        """
+        try:
+            await asyncio.sleep(debounce_seconds)
+        except asyncio.CancelledError:
+            return
+        await _flush()
+
+    async def _schedule_flush() -> None:
+        """Either flush inline (debounce disabled) or schedule a
+        deferred flush task (debounce enabled).
+
+        Test default is ``debounce_seconds = 0`` → inline flush so
+        ``await handler(...)`` produces an immediately-observable
+        file state. Production sets a small positive value so bursts
+        coalesce.
+        """
+        nonlocal pending_flush
+        if debounce_seconds <= 0:
+            await _flush()
+            return
+        if pending_flush is not None and not pending_flush.done():
+            pending_flush.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending_flush
+        pending_flush = asyncio.create_task(_delayed_flush())
 
     return handle
 
@@ -588,7 +702,7 @@ def _render_file(state: dict[str, _StateEntry]) -> str:
     the checkbox state (``[ ]`` vs ``[x]``/``[-]``).
 
     Sorted by task id for deterministic output (cheap stability for
-    tests and for content-hash dedup once US14 lands).
+    tests and for US14's content-hash dedup at the file boundary).
     """
     if not state:
         return _FILE_HEADER + "\n"
@@ -597,6 +711,23 @@ def _render_file(state: dict[str, _StateEntry]) -> str:
         lines.append(state[tid].line)
     lines.append("")
     return "\n".join(lines)
+
+
+def _hash_existing_file(path: Path) -> bytes | None:
+    """Compute the SHA-256 digest of ``path``'s current contents.
+
+    Returns ``None`` when the file doesn't exist or isn't readable
+    (cold start, permission flip, weird filesystem state). Used by
+    ``make_handler`` to seed ``last_written_hash`` so a daemon
+    restart that rebuilds in-memory state to the same content as the
+    on-disk file results in zero disk writes at the convergent point
+    (US14).
+    """
+    try:
+        raw = path.read_bytes()
+    except (FileNotFoundError, OSError):
+        return None
+    return hashlib.sha256(raw).digest()
 
 
 async def _write_tasks_file_atomic(path: Path, content: str) -> None:

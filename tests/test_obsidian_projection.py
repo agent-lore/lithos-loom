@@ -8,6 +8,7 @@ is covered in ``test_obsidian_sync_child.py``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Mapping
@@ -1615,3 +1616,479 @@ async def test_idempotent_repeat_completed_event_skips_write(
     monkeypatch.setattr(os, "replace", _spy)
     await handler(event, _ctx())
     assert calls == [], "second identical completed event should skip the write"
+
+
+# ── US14 content-hash dedup ────────────────────────────────────────────
+
+
+def _spy_os_replace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, str]]:
+    """Install an os.replace spy that records (src, dst) pairs while
+    still performing the actual replace. Returns the recording list."""
+    calls: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def _spy(src: str | Path, dst: str | Path) -> None:
+        calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _spy)
+    return calls
+
+
+def _read_handler_closure(handler: Any, name: str) -> Any:
+    """Read a closure variable from a handler returned by make_handler.
+
+    Reaches into Python-private state (``__code__.co_freevars`` /
+    ``__closure__``) — only suitable for verifying internal invariants
+    that can't be observed via the public event API. Specifically,
+    ``last_written_hash`` is updated AFTER ``_write_tasks_file_atomic``
+    returns, so a failed write must leave it untouched; the same-
+    content retry path that would otherwise prove this hits the
+    in-memory ``current == prior`` short-circuit and never reaches
+    the hash check.
+    """
+    freevars = handler.__code__.co_freevars
+    closure = handler.__closure__ or ()
+    for cell_name, cell in zip(freevars, closure, strict=True):
+        if cell_name == name:
+            return cell.cell_contents
+    raise AssertionError(f"handler does not close over {name!r} (freevars: {freevars})")
+
+
+# Disk-seed behaviour
+
+
+async def test_handler_init_seeds_hash_from_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A handler constructed against a vault whose projection file
+    already contains exactly the content we'd render next must NOT
+    write. The seed reads the file's current bytes and skips the
+    first convergent write — restart-idempotency at the file
+    boundary (US14)."""
+    # First handler: write a known projection.
+    cfg = _cfg(tmp_path)
+    handler_a = make_handler(cfg, today_provider=_fixed_today)
+    await handler_a(
+        _event("lithos.task.created", task_id="seed", title="seeded"), _ctx()
+    )
+    disk_content = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:seed" in disk_content
+
+    # Second handler: brand-new state, but file already on disk.
+    # Replay the same created event — final render should match disk
+    # → disk-seed should fire → zero writes.
+    handler_b = make_handler(cfg, today_provider=_fixed_today)
+    calls = _spy_os_replace(monkeypatch)
+    await handler_b(
+        _event("lithos.task.created", task_id="seed", title="seeded"), _ctx()
+    )
+    assert calls == [], (
+        "convergent replay against disk-seeded handler should write zero times; "
+        f"got {calls}"
+    )
+
+
+async def test_handler_init_no_seed_when_file_missing(tmp_path: Path) -> None:
+    """Cold-start case: vault dir exists but projection file doesn't.
+    last_written_hash starts None; first event writes normally and
+    seeds the hash from new content."""
+    cfg = _cfg(tmp_path)
+    assert not (tmp_path / "_lithos/tasks.md").exists()
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(_event("lithos.task.created", task_id="cold"), _ctx())
+    assert (tmp_path / "_lithos/tasks.md").exists()
+    assert "lithos:cold" in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+async def test_handler_init_no_seed_when_file_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Permission flip / weird FS state: seed read raises OSError →
+    last_written_hash stays None → first write happens normally.
+    Init must NOT crash."""
+
+    def _explode(self: Path) -> bytes:
+        raise PermissionError("simulated permission flip")
+
+    monkeypatch.setattr(Path, "read_bytes", _explode)
+
+    cfg = _cfg(tmp_path)
+    # make_handler must not raise even though _hash_existing_file's
+    # disk read would.
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # First write should happen normally (no seeded hash to compare).
+    await handler(_event("lithos.task.created", task_id="perm"), _ctx())
+    # Stop intercepting so the read-back works.
+    monkeypatch.undo()
+    assert "lithos:perm" in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+# Content-hash dedup at runtime
+
+
+async def test_write_skipped_when_content_matches_disk_seeded_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct test of the disk-seed path: write some content via
+    handler A, tear down. Build handler B against the same vault —
+    its ``last_written_hash`` is seeded from the existing on-disk
+    file via ``_hash_existing_file``. Replay the same event → render
+    matches seed → no write happens."""
+    cfg = _cfg(tmp_path)
+    handler_a = make_handler(cfg, today_provider=_fixed_today)
+    await handler_a(_event("lithos.task.created", task_id="seed"), _ctx())
+
+    handler_b = make_handler(cfg, today_provider=_fixed_today)
+    calls = _spy_os_replace(monkeypatch)
+    await handler_b(_event("lithos.task.created", task_id="seed"), _ctx())
+    assert calls == [], (
+        "single-task replay against disk-seeded handler should skip the write"
+    )
+
+
+async def test_write_happens_when_state_change_produces_different_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    calls = _spy_os_replace(monkeypatch)
+    await handler(_event("lithos.task.created", task_id="b"), _ctx())
+    assert len(calls) == 1, (
+        f"adding a different task should have written once; got {calls}"
+    )
+
+
+async def test_last_written_hash_updates_after_successful_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write A then write A+B then write A+B again. The third call's
+    content matches the second write's hash → skipped. If the
+    last_written_hash hadn't been updated after the second write,
+    the third call would NOT be skipped."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    await handler(_event("lithos.task.created", task_id="b"), _ctx())
+    calls = _spy_os_replace(monkeypatch)
+    # Replay the second event — identical state, identical content.
+    await handler(_event("lithos.task.created", task_id="b"), _ctx())
+    assert calls == [], "replay of last write should be hash-skipped"
+
+
+async def test_atomic_write_failure_does_not_advance_last_written_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Internal invariant: when ``os.replace`` raises mid-write,
+    ``last_written_hash`` must NOT be updated to the failed-write's
+    hash — otherwise a same-content retry would silently skip and
+    leave disk byte-inconsistent with in-memory state.
+
+    The public-event-API path that would otherwise demonstrate this
+    (replay the same event after failure) hits the in-memory
+    ``current == prior`` short-circuit and never reaches the hash
+    check, so we read the closure variable directly via
+    ``_read_handler_closure``. Verifies correctness by construction:
+    the assignment to ``last_written_hash`` is after ``await
+    _write_tasks_file_atomic`` returns; if that raises, the
+    assignment is skipped.
+    """
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # Cold start: nothing on disk → seed is None.
+    assert _read_handler_closure(handler, "last_written_hash") is None
+
+    # First write succeeds → hash advances away from None.
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    hash_after_a = _read_handler_closure(handler, "last_written_hash")
+    assert hash_after_a is not None, "successful write should seed the hash"
+
+    # Second write fails → hash must NOT advance to the would-be
+    # {a, b} hash.
+    def _failing(src: str | Path, dst: str | Path) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", _failing)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        await handler(_event("lithos.task.created", task_id="b"), _ctx())
+
+    hash_after_failed = _read_handler_closure(handler, "last_written_hash")
+    assert hash_after_failed == hash_after_a, (
+        "last_written_hash must not be updated when os.replace raises mid-write"
+    )
+
+
+# Restart convergence (the US14 user-facing scenario)
+
+
+async def test_post_restart_single_task_replay_is_a_no_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user-facing US14 scenario at its cleanest: a single-task
+    projection. Write via handler A, tear down, build handler B
+    against the same vault, replay the single created event. The
+    render produces content matching the disk-seed → zero writes.
+
+    Multi-task projections still cost N writes during bootstrap
+    (state grows incrementally and the seed gets overwritten by our
+    own intermediate writes before the convergent state lands);
+    closing that needs a write-debounce / coalesce layer, documented
+    as a known limitation in the module docstring."""
+    cfg = _cfg(tmp_path)
+    handler_a = make_handler(cfg, today_provider=_fixed_today)
+    await handler_a(_event("lithos.task.created", task_id="only"), _ctx())
+    disk_content_before = (tmp_path / "_lithos/tasks.md").read_text()
+
+    handler_b = make_handler(cfg, today_provider=_fixed_today)
+    calls = _spy_os_replace(monkeypatch)
+    await handler_b(_event("lithos.task.created", task_id="only"), _ctx())
+    assert calls == [], (
+        f"single-task restart should hash-skip the convergent write; got {calls}"
+    )
+    # Disk content is unchanged.
+    assert (tmp_path / "_lithos/tasks.md").read_text() == disk_content_before
+
+
+async def test_post_restart_multi_task_replay_inline_writes_intermediates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Documents the inline-flush behavior (``debounce_seconds=0``):
+    bootstrap of an N-task quiet-KB restart writes N times during
+    state rebuild because each event flushes immediately, the
+    intermediate render differs from disk-seed, and the disk-seed
+    gets overwritten in ``last_written_hash`` by our own
+    intermediates before convergence.
+
+    Production uses ``debounce_seconds > 0`` to coalesce this — see
+    ``test_post_restart_multi_task_replay_under_debounce_coalesces_to_zero_writes``
+    for the user-visible behaviour."""
+    cfg = _cfg(tmp_path)
+    handler_a = make_handler(cfg, today_provider=_fixed_today)
+    for tid in ("a", "b", "c"):
+        await handler_a(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    disk_content_before = (tmp_path / "_lithos/tasks.md").read_text()
+
+    handler_b = make_handler(cfg, today_provider=_fixed_today)
+    calls = _spy_os_replace(monkeypatch)
+    for tid in ("a", "b", "c"):
+        await handler_b(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    assert len(calls) == 3, (
+        f"inline-flush mode writes once per event during multi-task bootstrap; "
+        f"got {len(calls)}: {calls}"
+    )
+    # End-state on disk matches what was there before.
+    assert (tmp_path / "_lithos/tasks.md").read_text() == disk_content_before
+
+
+async def test_post_restart_with_different_state_writes_normally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inverse: when the rebuilt state differs from disk, writes
+    happen normally (no spurious dedup)."""
+    cfg = _cfg(tmp_path)
+    handler_a = make_handler(cfg, today_provider=_fixed_today)
+    await handler_a(_event("lithos.task.created", task_id="a", title="A"), _ctx())
+    await handler_a(_event("lithos.task.created", task_id="b", title="B"), _ctx())
+
+    handler_b = make_handler(cfg, today_provider=_fixed_today)
+    calls = _spy_os_replace(monkeypatch)
+    # New restart sees only 'a' and a new 'c' — final state differs
+    # from pre-restart {a, b}. Each step must actually write:
+    #  - "a": render {a} differs from disk-seed sha256({a, b}) → WRITE
+    #  - "c": render {a, c} differs from sha256({a}) → WRITE
+    # Exact count guards against an over-dedup regression that would
+    # silently skip one of the writes.
+    await handler_b(_event("lithos.task.created", task_id="a", title="A"), _ctx())
+    await handler_b(_event("lithos.task.created", task_id="c", title="C"), _ctx())
+    assert len(calls) == 2, (
+        f"expected exactly 2 writes (one per event with different content); "
+        f"got {len(calls)}: {calls}"
+    )
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:a" in text and "lithos:c" in text
+
+
+# TTL eviction interaction
+
+
+async def test_ttl_eviction_alone_still_triggers_write_when_content_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry expires under TTL between event handles → file rewrites
+    because content actually changed (the resolved line is gone). The
+    content-hash layer must NOT block the eviction-driven write."""
+    cfg = _cfg(tmp_path)
+    # Stepping today_provider: stays at _TODAY until we bump it.
+    now_box = [_TODAY]
+
+    def _stepping_today() -> date:
+        return now_box[0]
+
+    handler = make_handler(cfg, today_provider=_stepping_today)
+    # Land a resolved entry today (well within TTL = 7).
+    await handler(
+        _resolved_event("lithos.task.completed", task_id="r", title="r", when=_TODAY),
+        _ctx(),
+    )
+    assert "lithos:r" in (tmp_path / "_lithos/tasks.md").read_text()
+
+    # Jump 20 days forward — TTL=7 means the resolved entry is now
+    # past cutoff and the sweep will evict it on the next event.
+    now_box[0] = _TODAY + timedelta(days=20)
+
+    calls = _spy_os_replace(monkeypatch)
+    # Any non-replayed event triggers the sweep at top of handle.
+    # Use a fresh orphan that ALSO mutates state, so content changes
+    # via two paths (eviction + new entry). The write should fire.
+    await handler(_event("lithos.task.created", task_id="fresh"), _ctx())
+
+    assert len(calls) == 1, (
+        f"TTL eviction + new content should have written once; got {calls}"
+    )
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:r" not in text
+    assert "lithos:fresh" in text
+
+
+# ── US14 debounce / coalesce (production mode) ─────────────────────────
+
+
+_TEST_DEBOUNCE = 0.02
+"""20ms — long enough that the test can fire several events inside the
+window before the timer expires; short enough that the test waits a
+total of ~30ms after the burst to observe the coalesced flush."""
+
+
+async def test_burst_of_events_coalesces_into_single_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three events fired back-to-back within the debounce window
+    cancel-and-reschedule the pending flush; only the burst's tail
+    flush actually writes — once, with the final {a,b,c} content."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    for tid in ("a", "b", "c"):
+        await handler(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    # Wait long enough for the trailing debounce to expire and the
+    # flush task to complete.
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert len(calls) == 1, (
+        f"burst of 3 events inside the debounce window should coalesce "
+        f"into 1 write; got {len(calls)}: {calls}"
+    )
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:a" in text and "lithos:b" in text and "lithos:c" in text
+
+
+async def test_post_restart_multi_task_replay_under_debounce_zero_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user-facing US14 scenario at full strength: write a 3-task
+    projection via handler A (inline), tear down, build handler B with
+    debounce enabled and replay the same 3 events. The burst coalesces
+    into one flush; that flush's rendered content matches the disk
+    seed → ZERO writes. Obsidian Sync sees no mtime ripple."""
+    cfg = _cfg(tmp_path)
+    handler_a = make_handler(cfg, today_provider=_fixed_today)  # inline
+    for tid in ("a", "b", "c"):
+        await handler_a(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    disk_content_before = (tmp_path / "_lithos/tasks.md").read_text()
+    mtime_before = (tmp_path / "_lithos/tasks.md").stat().st_mtime_ns
+
+    handler_b = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    for tid in ("a", "b", "c"):
+        await handler_b(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert calls == [], (
+        f"debounced multi-task replay against disk-seeded handler should "
+        f"write zero times; got {calls}"
+    )
+    # Disk content + mtime both unchanged.
+    assert (tmp_path / "_lithos/tasks.md").read_text() == disk_content_before
+    assert (tmp_path / "_lithos/tasks.md").stat().st_mtime_ns == mtime_before
+
+
+async def test_single_event_under_debounce_flushes_after_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single event in debounce mode writes once after the window
+    elapses — verifies the deferred flush actually fires."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    await handler(_event("lithos.task.created", task_id="x"), _ctx())
+    # Immediately: no write yet (still inside debounce window).
+    assert calls == [], "write should be deferred during debounce window"
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert len(calls) == 1, (
+        f"single event should produce one write after debounce; got {calls}"
+    )
+
+
+async def test_new_event_cancels_pending_flush(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Event A schedules a flush. Event B arrives within the window
+    and cancels-then-reschedules. Only ONE write happens (B's tail
+    flush), with the final {a,b} content — not two."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    # Sleep less than the debounce window — A's flush is still pending.
+    await asyncio.sleep(_TEST_DEBOUNCE * 0.3)
+    await handler(_event("lithos.task.created", task_id="b"), _ctx())
+    # Now wait the full window for B's coalesced flush.
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert len(calls) == 1, (
+        f"A's pending flush should have been cancelled by B; expected one "
+        f"coalesced write, got {len(calls)}: {calls}"
+    )
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:a" in text and "lithos:b" in text
+
+
+async def test_under_debounce_in_memory_short_circuit_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replaying the same event under debounce mode hits the in-memory
+    ``current == prior`` short-circuit BEFORE _schedule_flush is even
+    reached — so no pending flush gets created, and the spy stays
+    empty. Defensive: the in-memory layer should not be defeated by
+    the debounce layer."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    # First event writes (after debounce).
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    calls = _spy_os_replace(monkeypatch)
+    # Replay same event — current == prior, short-circuits before
+    # scheduling any flush.
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert calls == [], f"replayed event should have stayed inert; got {calls}"
