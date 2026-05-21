@@ -3,7 +3,8 @@
 Subcommands per ``docs/PLAN.md`` and ``docs/prd/integration.md`` Slice 0:
 
 * ``lithos-loom run`` — start the daemon (supervisor + child processes)
-* ``lithos-loom doctor`` — verify Lithos connectivity (deferred US-35)
+* ``lithos-loom doctor`` — verify the vault is writable (Slice 1 US15);
+  Lithos-connectivity probe (US-35) is tracked as a follow-up
 * ``lithos-loom validate-config`` — typecheck the TOML config
 * ``lithos-loom validate-config --dry-run`` — also poll Lithos and print
   which routes / subscriptions would fire for each open task (Slice 0 US6)
@@ -30,6 +31,7 @@ from lithos_loom.config import (
     SubscriptionConfig,
     load_config,
 )
+from lithos_loom.doctor import format_results, run_vault_checks
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.lithos_client import LithosClient, Task
 from lithos_loom.subscriptions import (
@@ -95,12 +97,39 @@ def doctor(
         help="Explicit TOML config path.",
     ),
 ) -> None:
-    """Verify Lithos connectivity and ``task.metadata`` support (deferred)."""
+    """Verify the vault is writable and (eventually) Lithos is reachable.
+
+    Slice 1 US15 ships the three vault probes (vault_path exists,
+    ``_lithos/`` creatable, write+read round-trip). The
+    Lithos-connectivity probe (MVP US-35) is tracked as a follow-up;
+    the doctor output always includes a placeholder line for it so
+    the deferral is visible.
+
+    Exit codes: 0 if all checks passed (or were skipped); 1 if any
+    check failed; 2 if the config couldn't be loaded.
+    """
     cfg = _load_or_exit(config)
-    raise NotImplementedError(
-        "doctor.run(cfg) — implement per docs/prd/mvp.md US-35 "
-        f"(loaded {cfg.source_path})"
+    typer.echo(f"lithos-loom doctor: {cfg.source_path}")
+
+    vault_results = run_vault_checks(cfg)
+    if vault_results:
+        for line in format_results(vault_results):
+            typer.echo(line)
+    else:
+        typer.echo("  ⊘ vault probe skipped: no [obsidian_sync] in config")
+
+    # US-35 placeholder — informational, never a failure. Always
+    # printed so the operator knows what's still coming.
+    typer.echo(
+        "  ⊘ lithos_connectivity (US-35): not yet implemented; see docs/prd/mvp.md"
     )
+
+    failed = [r for r in vault_results if not r.passed]
+    passed = [r for r in vault_results if r.passed]
+    if failed:
+        typer.echo(f"FAIL: {len(passed)} passed, {len(failed)} failed")
+        raise typer.Exit(1)
+    typer.echo(f"OK: {len(passed)} passed, 0 failed")
 
 
 @app.command("validate-config")
