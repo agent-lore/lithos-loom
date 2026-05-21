@@ -380,3 +380,91 @@ def test_dry_run_route_fires_when_dependencies_completed(
 # referencing it don't lose to import pruning even when the symbol isn't
 # actively used.
 _ = LithosClientError
+
+
+# ── doctor CLI integration (US15) ──────────────────────────────────────
+
+
+def _write_doctor_config(
+    tmp_path: Path,
+    *,
+    vault_path: Path | None,
+) -> Path:
+    """Write a minimal config.toml; include [obsidian_sync] only when
+    ``vault_path`` is provided."""
+    config_path = tmp_path / "config.toml"
+    parts = [
+        "[orchestrator]",
+        'agent_id = "lithos-orchestrator-test"',
+        'lithos_url = "http://localhost:8765"',
+        f'work_dir = "{tmp_path / "work"}"',
+        "max_concurrency = 2",
+        "",
+    ]
+    if vault_path is not None:
+        parts.extend(
+            [
+                "[obsidian_sync]",
+                f'vault_path = "{vault_path}"',
+                'tasks_file = "_lithos/tasks.md"',
+                "",
+            ]
+        )
+    config_path.write_text("\n".join(parts))
+    return config_path
+
+
+def test_doctor_succeeds_on_healthy_vault(tmp_path: Path) -> None:
+    """All three vault checks pass against a real tmp_path vault."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    config = _write_doctor_config(tmp_path, vault_path=vault)
+
+    result = runner.invoke(app, ["doctor", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "vault_path_exists" in result.output
+    assert "lithos_subdir_creatable" in result.output
+    assert "probe_write_read_roundtrip" in result.output
+    assert "OK: 3 passed, 0 failed" in result.output
+    # Probe file cleaned up.
+    assert not (vault / "_lithos" / ".doctor-probe.tmp").exists()
+
+
+def test_doctor_fails_with_exit_1_on_missing_vault(tmp_path: Path) -> None:
+    """vault_path pointing at a nonexistent dir → ✗ + FAIL + exit 1."""
+    missing_vault = tmp_path / "no-such-vault"
+    config = _write_doctor_config(tmp_path, vault_path=missing_vault)
+
+    result = runner.invoke(app, ["doctor", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert "vault_path_exists" in result.output
+    assert "does not exist" in result.output
+    assert "FAIL: 0 passed, 1 failed" in result.output
+
+
+def test_doctor_skips_vault_probes_when_no_obsidian_sync(tmp_path: Path) -> None:
+    """No [obsidian_sync] → skip note + exit 0 (nothing failed)."""
+    config = _write_doctor_config(tmp_path, vault_path=None)
+
+    result = runner.invoke(app, ["doctor", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "vault probe skipped" in result.output
+    assert "OK: 0 passed, 0 failed" in result.output
+
+
+def test_doctor_includes_us35_placeholder_line(tmp_path: Path) -> None:
+    """Every invocation prints the US-35 (Lithos connectivity) placeholder
+    so the operator can see what's still coming."""
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    result = runner.invoke(app, ["doctor", "--config", str(config)])
+    assert "lithos_connectivity (US-35)" in result.output
+    assert "not yet implemented" in result.output
+
+
+def test_doctor_fails_with_exit_nonzero_on_missing_config(tmp_path: Path) -> None:
+    """Bogus config path → exit ≠ 0 via _load_or_exit (matches
+    validate-config behavior)."""
+    result = runner.invoke(
+        app, ["doctor", "--config", str(tmp_path / "no-such-config.toml")]
+    )
+    assert result.exit_code != 0
