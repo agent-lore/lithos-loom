@@ -45,7 +45,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -70,6 +70,11 @@ _HANDLED_LITHOS_EVENT_TYPES = (
 """Lithos-side event types we subscribe to. Sent server-side as ``?types=``."""
 
 
+_MIDNIGHT = time(0, 0)
+"""Local midnight, used by ``_bootstrap_resolved`` to render the
+boundary-date cutoff as a tz-aware datetime."""
+
+
 class EventStreamClient(Protocol):
     """Minimum surface the event-stream source depends on.
 
@@ -86,6 +91,7 @@ class EventStreamClient(Protocol):
         *,
         status: str | None = None,
         with_claims: bool = False,
+        resolved_since: datetime | None = None,
     ) -> list[Task]: ...
 
 
@@ -114,12 +120,13 @@ class LithosEventStream:
     """Recover recently-resolved tasks at bootstrap.
 
     When set, ``_bootstrap`` also fetches ``status="completed"`` and
-    ``status="cancelled"`` from Lithos, filters client-side by local
-    date — ``completed_at.astimezone().date() >= today - window`` —
-    matching the projection layer's TTL-eviction semantic exactly so
-    the boundary day behaves identically across live operation and
-    restart (PR #21 review #2). Each surviving task is published as a
-    ``lithos.task.completed`` / ``lithos.task.cancelled`` bus event.
+    ``status="cancelled"`` from Lithos with a ``resolved_since``
+    server-side filter (lithos#286 / PR #288) computed as
+    ``_now_provider() - window``. The boundary semantic still pairs
+    with :func:`_evict_expired` because the projection layer derives
+    its TTL cutoff from the same local-date calculation. Each
+    returned task is published as a ``lithos.task.completed`` /
+    ``lithos.task.cancelled`` bus event.
 
     Set by the ``obsidian-sync`` child to
     ``timedelta(days=resolved_ttl_days)`` so the US13 TTL-lingering
@@ -211,10 +218,11 @@ class LithosEventStream:
 
         Open tasks always replay as ``lithos.task.created``. When
         ``bootstrap_resolved_window`` is set, also fetch
-        ``status="completed"`` and ``status="cancelled"``, filter
-        client-side by ``completed_at >= now - window``, and publish
-        each as the appropriate terminal-event type — restart-recovery
-        for US13's TTL lingering (PR #21 review issue 1).
+        ``status="completed"`` and ``status="cancelled"`` with a
+        server-side ``resolved_since`` filter (lithos#286), and
+        publish each as the appropriate terminal-event type —
+        restart-recovery for US13's TTL lingering (PR #21 review
+        issue 1).
 
         Returns the total number of events published.
         ``self._bootstrapped`` flips to ``True`` only after every
@@ -241,8 +249,7 @@ class LithosEventStream:
         return published
 
     async def _bootstrap_resolved(self) -> int:
-        """Replay terminal tasks whose ``completed_at`` is within the
-        configured window.
+        """Replay terminal tasks resolved within the configured window.
 
         Required by the ``obsidian-projection`` US13 TTL-lingering
         contract: on a fresh daemon start, Monday's completed tasks
@@ -250,47 +257,48 @@ class LithosEventStream:
         Without this, the in-memory state dict comes up empty after
         restart and resolved entries vanish until they're re-resolved.
 
-        Uses ``completed_at`` from each task's payload (Lithos's
-        canonical timestamp). Tasks without a parseable
-        ``completed_at`` are silently skipped — they can't anchor a
-        TTL window. With ``lithos_task_list`` not yet exposing a
-        ``resolved_since`` filter (see ``agent-lore/lithos#286``), we
-        over-fetch and filter client-side; per-KB scale this is
-        acceptable.
+        Server-side filter via ``resolved_since`` (lithos#286): we
+        ask Lithos for tasks with ``resolved_at >= cutoff_dt`` and
+        publish whatever comes back. Tasks without a parseable
+        ``resolved_at`` are dropped server-side (the SQL ``>=``
+        excludes NULL).
 
-        The filter compares local-tz dates, not datetimes, to match
-        :func:`_evict_expired` exactly. A task with
-        ``completed_at.astimezone().date() == today - window`` is on
-        the eviction boundary in a running process and must survive
-        a restart too — datetime subtraction would otherwise drop
-        boundary-day tasks completed earlier in the day (PR #21
-        review #2).
+        The cutoff is **local midnight on the boundary date** —
+        ``today - window`` rendered as a tz-aware datetime at 00:00
+        local. This exactly matches the projection layer's
+        :func:`_evict_expired` semantic (which compares
+        ``resolved_at.astimezone().date() >= today - ttl_days``), so a
+        task resolved at any time on the boundary local-date survives
+        both the live eviction walk and the bootstrap recovery. Naive
+        ``now - window`` would re-introduce the PR #21 review #2
+        regression on boundary days.
         """
         assert self.bootstrap_resolved_window is not None
         today = self._now_provider().astimezone().date()
-        cutoff_date = today - self.bootstrap_resolved_window
+        boundary_date = today - self.bootstrap_resolved_window
+        # Local midnight on boundary_date — naive .astimezone() interprets
+        # the wall-clock as local, then attaches the local tz.
+        cutoff_dt = datetime.combine(boundary_date, _MIDNIGHT).astimezone()
 
         published = 0
         for status, event_type in (
             ("completed", "lithos.task.completed"),
             ("cancelled", "lithos.task.cancelled"),
         ):
-            tasks = await self.client.task_list(status=status, with_claims=True)
-            recent = [
-                t
-                for t in tasks
-                if t.completed_at is not None
-                and t.completed_at.astimezone().date() >= cutoff_date
-            ]
+            tasks = await self.client.task_list(
+                status=status,
+                with_claims=True,
+                resolved_since=cutoff_dt,
+            )
             logger.info(
-                "LithosEventStream: bootstrap-resolved %d of %d %s task(s) "
-                "within %s window",
-                len(recent),
+                "LithosEventStream: bootstrap-resolved %d %s task(s) "
+                "within %s window (resolved_since=%s)",
                 len(tasks),
                 status,
                 self.bootstrap_resolved_window,
+                cutoff_dt.isoformat(),
             )
-            for task in recent:
+            for task in tasks:
                 # Cache the terminal-state Task so any subsequent SSE
                 # event for the same id can resolve from cache without
                 # a refresh. _with_terminal_status is a no-op when the
@@ -529,10 +537,10 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
 
     Mirrors :func:`lithos_loom.sources.lithos_poller._event_payload` so
     RouteRunner (and any future bus subscriber) is unaffected by the
-    source swap. ``completed_at`` is published as ISO 8601 so the
+    source swap. ``resolved_at`` is published as ISO 8601 so the
     obsidian-projection handler (US13) can anchor ``✅``/``❌`` markers
     and TTL eviction on Lithos's canonical timestamp instead of
-    receive-at time.
+    receive-at time. The key matches Lithos's post-#286 column name.
     """
     return MappingProxyType(
         {
@@ -542,8 +550,8 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
             "tags": list(task.tags),
             "metadata": dict(task.metadata),
             "claims": [dict(c) for c in task.claims],
-            "completed_at": (
-                task.completed_at.isoformat() if task.completed_at is not None else None
+            "resolved_at": (
+                task.resolved_at.isoformat() if task.resolved_at is not None else None
             ),
         }
     )

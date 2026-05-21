@@ -1107,7 +1107,7 @@ _MISSING = _Missing()
 def _local_noon(d: date) -> datetime:
     """Build a tz-aware datetime anchored at noon-local on ``d``.
 
-    Used for both ``Event.timestamp`` and ``payload["completed_at"]`` so
+    Used for both ``Event.timestamp`` and ``payload["resolved_at"]`` so
     ``.astimezone().date()`` round-trips back to ``d`` regardless of
     host timezone (the previous UTC-noon helper flipped dates on
     +13/+14 offsets — Copilot review on PR #21).
@@ -1121,26 +1121,28 @@ def _resolved_event(
     task_id: str,
     title: str = "test task",
     when: date = _TODAY,
-    completed_at: date | None | _Missing = _MISSING,
+    resolved_at: date | None | _Missing = _MISSING,
     tags: tuple[str, ...] = (),
     metadata: Mapping[str, Any] | None = None,
     claims: tuple[Mapping[str, Any], ...] = (),
 ) -> Event:
     """Build a completed/cancelled event for the obsidian-projection handler.
 
-    Sets payload ``completed_at`` to ``_local_noon(when)`` by default —
-    the handler's canonical resolution-date source after PR #21 review.
-    Pass ``completed_at=None`` to exercise the fallback-to-event-timestamp
-    path; pass ``completed_at=<date>`` to anchor it elsewhere than
+    Sets payload ``resolved_at`` to ``_local_noon(when)`` by default —
+    the handler's canonical resolution-date source (lithos#286 / PR
+    #288 renamed Lithos's column from completed_at to resolved_at; both
+    complete_task and cancel_task now write it).
+    Pass ``resolved_at=None`` to exercise the fallback-to-event-timestamp
+    path; pass ``resolved_at=<date>`` to anchor it elsewhere than
     ``when`` (e.g. for "payload wins over event timestamp" tests).
     """
-    completed_at_iso: str | None
-    if isinstance(completed_at, _Missing):
-        completed_at_iso = _local_noon(when).isoformat()
-    elif completed_at is None:
-        completed_at_iso = None
+    resolved_at_iso: str | None
+    if isinstance(resolved_at, _Missing):
+        resolved_at_iso = _local_noon(when).isoformat()
+    elif resolved_at is None:
+        resolved_at_iso = None
     else:
-        completed_at_iso = _local_noon(completed_at).isoformat()
+        resolved_at_iso = _local_noon(resolved_at).isoformat()
     return Event(
         type=event_type,
         timestamp=_local_noon(when),
@@ -1151,7 +1153,7 @@ def _resolved_event(
             "tags": list(tags),
             "metadata": dict(metadata or {}),
             "claims": list(claims),
-            "completed_at": completed_at_iso,
+            "resolved_at": resolved_at_iso,
         },
     )
 
@@ -1355,16 +1357,16 @@ async def test_completed_event_for_human_blocking_claim_promotes(
     assert "lithos:hb-done" in (tmp_path / "_lithos/tasks.md").read_text()
 
 
-async def test_resolved_at_prefers_payload_completed_at_over_event_timestamp(
+async def test_resolved_at_prefers_payload_resolved_at_over_event_timestamp(
     tmp_path: Path,
 ) -> None:
-    """PR #21 review issue 3: Lithos's canonical ``completed_at`` is the
+    """PR #21 review issue 3: Lithos's canonical ``resolved_at`` is the
     truth for the resolution date. Event.timestamp is "when Loom
     received the event", which drifts under reconnect/replay/restart.
     When both are present and differ, the payload wins."""
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg, today_provider=_fixed_today)
-    # Event "received" today, but Lithos says the task was completed
+    # Event "received" today, but Lithos says the task was resolved
     # three days ago. Render the canonical date, not today.
     three_days_ago = _TODAY - timedelta(days=3)
     await handler(
@@ -1373,7 +1375,7 @@ async def test_resolved_at_prefers_payload_completed_at_over_event_timestamp(
             task_id="canon",
             title="canonical",
             when=_TODAY,
-            completed_at=three_days_ago,
+            resolved_at=three_days_ago,
         ),
         _ctx(),
     )
@@ -1386,7 +1388,7 @@ async def test_resolved_at_falls_back_to_event_timestamp_when_payload_silent(
     tmp_path: Path,
 ) -> None:
     """Backwards-compat: an older SSE source / replay path that doesn't
-    include ``completed_at`` in the payload falls back to
+    include ``resolved_at`` in the payload falls back to
     ``event.timestamp``. The marker is still rendered (this path is
     less canonical but doesn't crash)."""
     cfg = _cfg(tmp_path)
@@ -1397,7 +1399,7 @@ async def test_resolved_at_falls_back_to_event_timestamp_when_payload_silent(
             task_id="fb",
             title="fallback",
             when=_TODAY,
-            completed_at=None,  # explicit: payload has no completed_at
+            resolved_at=None,  # explicit: payload has no resolved_at
         ),
         _ctx(),
     )

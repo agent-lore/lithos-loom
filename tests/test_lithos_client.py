@@ -182,6 +182,104 @@ async def test_lithos_client_task_list_raises_when_not_initialized() -> None:
         await client.task_list()
 
 
+async def test_lithos_client_task_list_passes_resolved_since_as_iso_string() -> None:
+    """lithos#286: server-side resolved_since filter is sent as an
+    ISO-8601 datetime string. Loom converts the datetime arg at the
+    boundary so callers stay in Python time."""
+    from datetime import UTC, datetime
+
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content({"tasks": []})
+    client._session = fake_session  # type: ignore[assignment]
+
+    cutoff = datetime(2026, 5, 14, 0, 0, 0, tzinfo=UTC)
+    await client.task_list(status="completed", resolved_since=cutoff)
+
+    fake_session.call_tool.assert_awaited_once_with(
+        "lithos_task_list",
+        arguments={
+            "with_claims": False,
+            "status": "completed",
+            "resolved_since": cutoff.isoformat(),
+        },
+    )
+
+
+async def test_lithos_client_task_list_omits_resolved_since_when_none() -> None:
+    """Wire-identical to the pre-#286 contract when the new kwarg is
+    not used — important during the staging→prod rollout window so an
+    old Lithos doesn't trip on an unknown parameter."""
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content({"tasks": []})
+    client._session = fake_session  # type: ignore[assignment]
+
+    await client.task_list(status="open")
+
+    fake_session.call_tool.assert_awaited_once_with(
+        "lithos_task_list", arguments={"with_claims": False, "status": "open"}
+    )
+
+
+# ── _parse_task resolved_at handling ───────────────────────────────────
+
+
+def test_parse_task_reads_resolved_at_field() -> None:
+    """lithos#286 renamed the column to resolved_at; loom reads the new
+    payload key into Task.resolved_at as a parsed datetime."""
+    from datetime import datetime
+
+    result = _content(
+        {
+            "tasks": [
+                {
+                    "id": "abc",
+                    "title": "t",
+                    "status": "completed",
+                    "resolved_at": "2026-05-21T10:00:00+00:00",
+                }
+            ]
+        }
+    )
+    tasks = _parse_task_list_response(result)
+    assert tasks[0].resolved_at == datetime.fromisoformat("2026-05-21T10:00:00+00:00")
+
+
+def test_parse_task_resolved_at_absent_is_none() -> None:
+    """Open tasks (no resolved_at) parse to Task.resolved_at == None."""
+    result = _content(
+        {
+            "tasks": [
+                {"id": "x", "title": "t", "status": "open"},
+            ]
+        }
+    )
+    tasks = _parse_task_list_response(result)
+    assert tasks[0].resolved_at is None
+
+
+def test_parse_task_ignores_legacy_completed_at_key() -> None:
+    """Defence in depth: an old Lithos server emitting completed_at
+    instead of resolved_at must not crash; the field stays None and the
+    projection layer falls back to event.timestamp. (Loom can roll out
+    against a still-old server during staging → prod transitions.)"""
+    result = _content(
+        {
+            "tasks": [
+                {
+                    "id": "x",
+                    "title": "t",
+                    "status": "completed",
+                    "completed_at": "2026-05-21T10:00:00+00:00",
+                }
+            ]
+        }
+    )
+    tasks = _parse_task_list_response(result)
+    assert tasks[0].resolved_at is None
+
+
 # ── LithosClient.task_status ──────────────────────────────────────────
 
 
