@@ -1636,6 +1636,26 @@ def _spy_os_replace(
     return calls
 
 
+def _read_handler_closure(handler: Any, name: str) -> Any:
+    """Read a closure variable from a handler returned by make_handler.
+
+    Reaches into Python-private state (``__code__.co_freevars`` /
+    ``__closure__``) — only suitable for verifying internal invariants
+    that can't be observed via the public event API. Specifically,
+    ``last_written_hash`` is updated AFTER ``_write_tasks_file_atomic``
+    returns, so a failed write must leave it untouched; the same-
+    content retry path that would otherwise prove this hits the
+    in-memory ``current == prior`` short-circuit and never reaches
+    the hash check.
+    """
+    freevars = handler.__code__.co_freevars
+    closure = handler.__closure__ or ()
+    for cell_name, cell in zip(freevars, closure, strict=True):
+        if cell_name == name:
+            return cell.cell_contents
+    raise AssertionError(f"handler does not close over {name!r} (freevars: {freevars})")
+
+
 # Disk-seed behaviour
 
 
@@ -1708,13 +1728,14 @@ async def test_handler_init_no_seed_when_file_unreadable(
 # Content-hash dedup at runtime
 
 
-async def test_write_skipped_when_content_matches_initial_disk_hash(
+async def test_write_skipped_when_content_matches_disk_seeded_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Direct test of the ``initial_disk_hash`` layer: write some
-    content via handler A, tear down. Build handler B against the
-    same vault — its ``initial_disk_hash`` is seeded from disk.
-    Replay the same event → state matches disk → no write happens."""
+    """Direct test of the disk-seed path: write some content via
+    handler A, tear down. Build handler B against the same vault —
+    its ``last_written_hash`` is seeded from the existing on-disk
+    file via ``_hash_existing_file``. Replay the same event → render
+    matches seed → no write happens."""
     cfg = _cfg(tmp_path)
     handler_a = make_handler(cfg, today_provider=_fixed_today)
     await handler_a(_event("lithos.task.created", task_id="seed"), _ctx())
@@ -1760,26 +1781,32 @@ async def test_last_written_hash_updates_after_successful_write(
 async def test_atomic_write_failure_does_not_advance_last_written_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If ``os.replace`` raises mid-write, ``last_written_hash`` must
-    NOT be advanced to the failed-write's hash. Verified by:
+    """Internal invariant: when ``os.replace`` raises mid-write,
+    ``last_written_hash`` must NOT be updated to the failed-write's
+    hash — otherwise a same-content retry would silently skip and
+    leave disk byte-inconsistent with in-memory state.
 
-    1. Successful write seeds last_written_hash to sha256({a}).
-    2. Write attempt for {a,b} fails via os.replace exception. If the
-       hash were advanced to sha256({a,b}), a subsequent state change
-       to a DIFFERENT content {a,c} that happens to differ from both
-       sha256({a}) and any other tracked hash would still write — but
-       the failed sha256({a,b}) value should NOT be in the dedup set.
-    3. Roll back state to {a,c} via a fresh event, restore os.replace.
-       The write should HAPPEN because the new content matches
-       neither last_written_hash=sha256({a}) nor the seed (None for
-       cold start).
+    The public-event-API path that would otherwise demonstrate this
+    (replay the same event after failure) hits the in-memory
+    ``current == prior`` short-circuit and never reaches the hash
+    check, so we read the closure variable directly via
+    ``_read_handler_closure``. Verifies correctness by construction:
+    the assignment to ``last_written_hash`` is after ``await
+    _write_tasks_file_atomic`` returns; if that raises, the
+    assignment is skipped.
     """
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg, today_provider=_fixed_today)
+    # Cold start: nothing on disk → seed is None.
+    assert _read_handler_closure(handler, "last_written_hash") is None
+
+    # First write succeeds → hash advances away from None.
     await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    hash_after_a = _read_handler_closure(handler, "last_written_hash")
+    assert hash_after_a is not None, "successful write should seed the hash"
 
-    real_replace = os.replace
-
+    # Second write fails → hash must NOT advance to the would-be
+    # {a, b} hash.
     def _failing(src: str | Path, dst: str | Path) -> None:
         raise OSError("simulated replace failure")
 
@@ -1787,21 +1814,9 @@ async def test_atomic_write_failure_does_not_advance_last_written_hash(
     with pytest.raises(OSError, match="simulated replace failure"):
         await handler(_event("lithos.task.created", task_id="b"), _ctx())
 
-    # Restore + spy. Send a DIFFERENT event whose render also differs
-    # from sha256({a}). The write should fire (verifying we didn't
-    # somehow advance last_written_hash to sha256({a,b})). The state
-    # still has {a, b} from the failed handle, so adding c gives
-    # {a, b, c} — different from sha256({a}).
-    calls: list[tuple[str, str]] = []
-
-    def _spy(src: str | Path, dst: str | Path) -> None:
-        calls.append((str(src), str(dst)))
-        real_replace(src, dst)
-
-    monkeypatch.setattr(os, "replace", _spy)
-    await handler(_event("lithos.task.created", task_id="c"), _ctx())
-    assert len(calls) == 1, (
-        f"write after a failed write should still happen for fresh content; got {calls}"
+    hash_after_failed = _read_handler_closure(handler, "last_written_hash")
+    assert hash_after_failed == hash_after_a, (
+        "last_written_hash must not be updated when os.replace raises mid-write"
     )
 
 
@@ -1884,12 +1899,17 @@ async def test_post_restart_with_different_state_writes_normally(
     handler_b = make_handler(cfg, today_provider=_fixed_today)
     calls = _spy_os_replace(monkeypatch)
     # New restart sees only 'a' and a new 'c' — final state differs
-    # from pre-restart {a, b}.
+    # from pre-restart {a, b}. Each step must actually write:
+    #  - "a": render {a} differs from disk-seed sha256({a, b}) → WRITE
+    #  - "c": render {a, c} differs from sha256({a}) → WRITE
+    # Exact count guards against an over-dedup regression that would
+    # silently skip one of the writes.
     await handler_b(_event("lithos.task.created", task_id="a", title="A"), _ctx())
     await handler_b(_event("lithos.task.created", task_id="c", title="C"), _ctx())
-    # Both writes should happen because content actually differs at
-    # each step from the disk-seeded content.
-    assert len(calls) >= 1, f"expected at least one write; got {calls}"
+    assert len(calls) == 2, (
+        f"expected exactly 2 writes (one per event with different content); "
+        f"got {len(calls)}: {calls}"
+    )
     text = (tmp_path / "_lithos/tasks.md").read_text()
     assert "lithos:a" in text and "lithos:c" in text
 

@@ -101,14 +101,15 @@ state grows incrementally — ``{A}`` → ``{A,B}`` → ``{A,B,C}``. Each
 intermediate render produces content that differs from the disk
 seed (the seed reflects the pre-restart final state ``{A,B,C}``,
 not the intermediate), so each event writes; the convergent final
-write also doesn't dedup because our own intermediate writes have
-advanced ``last_written_hash`` past the disk seed. A 40-task
-quiet-KB restart still costs 40 writes / mtime ripples. Closing
-that gap needs a write-debounce / coalesce layer that buffers
-events and flushes once per quiescence — the hash check is
-designed to compose cleanly with that future addition (debounce
-calls a single ``_flush()`` which runs the same hash check, and
-the disk-seed then naturally skips the single convergent write).
+write also doesn't dedup because the disk seed has been overwritten
+in ``last_written_hash`` by our own intermediate writes by the time
+we reach the convergent state. A 40-task quiet-KB restart still
+costs 40 writes / mtime ripples. Closing that gap needs a write-
+debounce / coalesce layer that buffers events and flushes once per
+quiescence — the hash check is designed to compose cleanly with
+that future addition (debounce calls a single ``_flush()`` which
+runs the same hash check, and the disk-seed then naturally skips
+the single convergent write).
 """
 
 from __future__ import annotations
