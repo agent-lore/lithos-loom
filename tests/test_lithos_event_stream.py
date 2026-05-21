@@ -156,8 +156,15 @@ class _FakeClient:
         *,
         status: str | None = None,
         with_claims: bool = False,
+        resolved_since: datetime | None = None,
     ) -> list[Task]:
-        self.task_list_calls.append({"status": status, "with_claims": with_claims})
+        self.task_list_calls.append(
+            {
+                "status": status,
+                "with_claims": with_claims,
+                "resolved_since": resolved_since,
+            }
+        )
         if status == "completed":
             return list(self._bootstrap_completed)
         if status == "cancelled":
@@ -244,7 +251,11 @@ async def test_bootstrap_emits_created_per_open_task() -> None:
         "lithos.task.created",
     ]
     assert client.task_list_calls
-    assert client.task_list_calls[0] == {"status": "open", "with_claims": True}
+    assert client.task_list_calls[0] == {
+        "status": "open",
+        "with_claims": True,
+        "resolved_since": None,
+    }
 
 
 async def test_bootstrap_payload_matches_poller_shape() -> None:
@@ -287,7 +298,7 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
         "tags": ["trigger:test"],
         "metadata": {"depends_on": ["x"]},
         "claims": [],
-        "completed_at": None,
+        "resolved_at": None,
     }
 
 
@@ -835,8 +846,15 @@ async def test_bootstrap_failure_triggers_reconnect_not_silent_death() -> None:
             *,
             status: str | None = None,
             with_claims: bool = False,
+            resolved_since: datetime | None = None,
         ) -> list[Task]:
-            self.task_list_calls.append({"status": status, "with_claims": with_claims})
+            self.task_list_calls.append(
+                {
+                    "status": status,
+                    "with_claims": with_claims,
+                    "resolved_since": resolved_since,
+                }
+            )
             if not self._raised:
                 self._raised = True
                 raise RuntimeError("startup blip")
@@ -1158,7 +1176,7 @@ def _resolved_task(
     id: str,
     *,
     status: str = "completed",
-    completed_at: datetime | None = None,
+    resolved_at: datetime | None = None,
 ) -> Task:
     return Task(
         id=id,
@@ -1167,17 +1185,17 @@ def _resolved_task(
         tags=(),
         metadata={},
         claims=(),
-        completed_at=completed_at,
+        resolved_at=resolved_at,
     )
 
 
-async def test_bootstrap_resolved_publishes_completed_and_cancelled_within_window() -> (
-    None
-):
-    """When bootstrap_resolved_window is set, the source over-fetches
-    completed + cancelled tasks and publishes each as the appropriate
-    terminal-event type — the restart-recovery path that lets the
-    obsidian-projection handler rehydrate its TTL lingering window."""
+async def test_bootstrap_resolved_publishes_completed_and_cancelled() -> None:
+    """When bootstrap_resolved_window is set, the source fetches
+    completed + cancelled tasks (via the server-side resolved_since
+    filter — lithos#286) and publishes each as the appropriate
+    terminal-event type. This is the restart-recovery path that lets
+    the obsidian-projection handler rehydrate its TTL lingering
+    window."""
     bus = EventBus()
     sub = bus.subscribe(
         event_types=[
@@ -1188,12 +1206,8 @@ async def test_bootstrap_resolved_publishes_completed_and_cancelled_within_windo
     )
     now = datetime.now(UTC)
     recent = now - timedelta(days=2)
-    completed_in_window = _resolved_task(
-        "c-in", status="completed", completed_at=recent
-    )
-    cancelled_in_window = _resolved_task(
-        "x-in", status="cancelled", completed_at=recent
-    )
+    completed_in_window = _resolved_task("c-in", status="completed", resolved_at=recent)
+    cancelled_in_window = _resolved_task("x-in", status="cancelled", resolved_at=recent)
     client = _FakeClient(
         bootstrap=[],
         bootstrap_completed=[completed_in_window],
@@ -1221,23 +1235,20 @@ async def test_bootstrap_resolved_publishes_completed_and_cancelled_within_windo
     assert statuses[:3] == ["open", "completed", "cancelled"]
 
 
-async def test_bootstrap_resolved_filters_tasks_outside_window() -> None:
-    """Tasks resolved older than the window are dropped client-side
-    (no `resolved_since` filter upstream yet — `lithos#286`)."""
+async def test_bootstrap_resolved_publishes_everything_server_returns() -> None:
+    """lithos#286 moved the cutoff filter server-side. Loom no longer
+    double-filters — whatever the server returns is published verbatim.
+    This locks in the contract: a future Lithos change to the SQL
+    predicate doesn't need a parallel loom-side change."""
     bus = EventBus()
-    sub = bus.subscribe(
-        event_types=[
-            "lithos.task.created",
-            "lithos.task.completed",
-            "lithos.task.cancelled",
-        ]
-    )
-    now = datetime.now(UTC)
-    in_window = _resolved_task("in", completed_at=now - timedelta(days=2))
-    out_of_window = _resolved_task("out", completed_at=now - timedelta(days=30))
+    sub = bus.subscribe(event_types=["lithos.task.completed"])
+    # Two tasks the server chose to return — loom doesn't second-guess.
     client = _FakeClient(
         bootstrap=[],
-        bootstrap_completed=[in_window, out_of_window],
+        bootstrap_completed=[
+            _resolved_task("a", resolved_at=datetime.now(UTC) - timedelta(days=1)),
+            _resolved_task("b", resolved_at=datetime.now(UTC) - timedelta(days=2)),
+        ],
     )
     aconnect = _FakeAconnect(connections=[[]])
     source = _stream(
@@ -1252,9 +1263,39 @@ async def test_bootstrap_resolved_filters_tasks_outside_window() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    ids = [payload["id"] for _, payload in _drain(sub)]
-    assert "in" in ids
-    assert "out" not in ids
+    ids = sorted({payload["id"] for _, payload in _drain(sub)})
+    assert ids == ["a", "b"]
+
+
+async def test_bootstrap_resolved_passes_resolved_since_to_server() -> None:
+    """The server-side filter only works if loom actually sends the
+    cutoff. Assert that resolved_since is present on both the completed
+    and cancelled fetches."""
+    bus = EventBus()
+    client = _FakeClient(bootstrap=[])
+    aconnect = _FakeAconnect(connections=[[]])
+    source = _stream(
+        client=client,
+        bus=bus,
+        aconnect=aconnect,
+        bootstrap_resolved_window=timedelta(days=7),
+    )
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    resolved_calls = [
+        c for c in client.task_list_calls if c["status"] in ("completed", "cancelled")
+    ]
+    assert len(resolved_calls) >= 2
+    for call in resolved_calls:
+        assert call["resolved_since"] is not None
+        assert isinstance(call["resolved_since"], datetime)
+        # tz-aware — loom must not send naive datetimes (Lithos expects
+        # ISO-8601 with offset; naive would render ambiguous).
+        assert call["resolved_since"].tzinfo is not None
 
 
 async def test_bootstrap_resolved_skipped_when_window_is_none() -> None:
@@ -1271,7 +1312,7 @@ async def test_bootstrap_resolved_skipped_when_window_is_none() -> None:
     )
     client = _FakeClient(
         bootstrap=[],
-        bootstrap_completed=[_resolved_task("c1", completed_at=datetime.now(UTC))],
+        bootstrap_completed=[_resolved_task("c1", resolved_at=datetime.now(UTC))],
     )
     aconnect = _FakeAconnect(connections=[[]])
     source = _stream(
@@ -1289,69 +1330,20 @@ async def test_bootstrap_resolved_skipped_when_window_is_none() -> None:
     assert "cancelled" not in statuses
 
 
-async def test_bootstrap_resolved_skips_tasks_without_completed_at() -> None:
-    """A resolved task whose payload is missing completed_at (schema
-    drift) is silently skipped — we can't anchor a TTL window without
-    a timestamp, so dropping is safer than guessing."""
+async def test_bootstrap_resolved_cutoff_is_local_midnight_on_boundary_date() -> None:
+    """The cutoff sent to the server is local midnight on the boundary
+    date — ``today - window`` rendered at 00:00 local. This matches
+    ``_evict_expired``'s ``resolved_at.astimezone().date() >= today - ttl_days``
+    semantic exactly, so a task resolved at any time on the boundary
+    local-date survives both the live walk and the bootstrap recovery
+    (PR #21 review #2 preserved through the server-side move)."""
     bus = EventBus()
-    sub = bus.subscribe(
-        event_types=[
-            "lithos.task.created",
-            "lithos.task.completed",
-            "lithos.task.cancelled",
-        ]
-    )
-    client = _FakeClient(
-        bootstrap=[],
-        bootstrap_completed=[_resolved_task("no-ts", completed_at=None)],
-    )
+    client = _FakeClient(bootstrap=[])
     aconnect = _FakeAconnect(connections=[[]])
-    source = _stream(
-        client=client,
-        bus=bus,
-        aconnect=aconnect,
-        bootstrap_resolved_window=timedelta(days=7),
-    )
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert _drain(sub) == []
-
-
-async def test_bootstrap_resolved_keeps_task_at_ttl_boundary_local_date() -> None:
-    """Boundary day must match the projection layer's eviction semantic:
-    a task whose ``completed_at.astimezone().date() == today - window``
-    survives. Previously bootstrap used naive UTC datetime subtraction,
-    so a task completed earlier-in-the-day on the boundary date would be
-    kept by the live ``_evict_expired`` walk but dropped on restart —
-    a restart-only disappearance window (PR #21 review #2).
-    """
-    bus = EventBus()
-    sub = bus.subscribe(
-        event_types=[
-            "lithos.task.created",
-            "lithos.task.completed",
-            "lithos.task.cancelled",
-        ]
-    )
-
-    # Pin "now" to a known instant. Boundary date is today - 7 days
-    # (matching ttl_days=7 below). Anchor the boundary task's
-    # completed_at at 02:00 local on the boundary date — earlier than
-    # the pinned time-of-day, which is the case naive datetime
-    # subtraction would drop.
+    # Pin "now" to 2026-05-21 18:00 UTC. With a 7-day window the
+    # boundary local-date is 2026-05-14; cutoff should be local
+    # midnight on that date.
     now = datetime(2026, 5, 21, 18, 0, 0, tzinfo=UTC)
-    boundary_date = now.astimezone().date() - timedelta(days=7)
-    boundary_completed_at = datetime(
-        boundary_date.year, boundary_date.month, boundary_date.day, 2, 0, 0
-    ).astimezone()
-
-    boundary_task = _resolved_task("boundary", completed_at=boundary_completed_at)
-    client = _FakeClient(bootstrap=[], bootstrap_completed=[boundary_task])
-    aconnect = _FakeAconnect(connections=[[]])
     source = _stream(
         client=client,
         bus=bus,
@@ -1365,52 +1357,15 @@ async def test_bootstrap_resolved_keeps_task_at_ttl_boundary_local_date() -> Non
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    ids = [payload["id"] for _, payload in _drain(sub)]
-    assert "boundary" in ids, (
-        "task at TTL local-date boundary must survive bootstrap recovery "
-        "to match the projection layer's _evict_expired semantic"
+    resolved_call = next(
+        c for c in client.task_list_calls if c["status"] == "completed"
     )
-
-
-async def test_bootstrap_resolved_drops_task_one_day_past_ttl_boundary() -> None:
-    """Symmetric to the boundary-keeps test: a task one day OLDER than
-    the boundary date is correctly dropped, even if its time-of-day
-    would land it inside the naive datetime window."""
-    bus = EventBus()
-    sub = bus.subscribe(
-        event_types=[
-            "lithos.task.created",
-            "lithos.task.completed",
-            "lithos.task.cancelled",
-        ]
-    )
-    now = datetime(2026, 5, 21, 18, 0, 0, tzinfo=UTC)
-    past_date = now.astimezone().date() - timedelta(days=8)
-    # 23:00 local on day boundary-1 — naive datetime subtraction with a
-    # 7-day window from 18:00-local-now would put this 1h INSIDE the
-    # naive window. Local-date comparison correctly drops it.
-    past_completed_at = datetime(
-        past_date.year, past_date.month, past_date.day, 23, 0, 0
-    ).astimezone()
-
-    past_task = _resolved_task("past", completed_at=past_completed_at)
-    client = _FakeClient(bootstrap=[], bootstrap_completed=[past_task])
-    aconnect = _FakeAconnect(connections=[[]])
-    source = _stream(
-        client=client,
-        bus=bus,
-        aconnect=aconnect,
-        bootstrap_resolved_window=timedelta(days=7),
-        now=now,
-    )
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    ids = [payload["id"] for _, payload in _drain(sub)]
-    assert "past" not in ids, (
-        "task one day past the boundary must NOT be republished, regardless "
-        "of time-of-day"
-    )
+    cutoff = resolved_call["resolved_since"]
+    assert isinstance(cutoff, datetime)
+    expected_boundary_date = now.astimezone().date() - timedelta(days=7)
+    # Local midnight on the boundary date.
+    assert cutoff.astimezone().date() == expected_boundary_date
+    assert cutoff.astimezone().hour == 0
+    assert cutoff.astimezone().minute == 0
+    assert cutoff.astimezone().second == 0
+    assert cutoff.tzinfo is not None

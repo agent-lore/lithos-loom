@@ -45,12 +45,15 @@ class Task:
     """A Lithos task as returned by ``lithos_task_list``.
 
     Field set covers what the poller diffs over plus what the route-runner
-    needs to make claim/match decisions. ``completed_at`` is the canonical
-    Lithos timestamp for terminal-state transitions (US13: the obsidian-
-    projection handler uses it as the resolution-date anchor for
-    ``✅``/``❌`` markers and TTL eviction). The Lithos spec also returns
-    ``description``, ``created_by``, and ``created_at``; those are ignored
-    for slice 0 and can be added without breaking call sites.
+    needs to make claim/match decisions. ``resolved_at`` is the canonical
+    Lithos timestamp for terminal-state transitions — written by both
+    ``complete_task`` and ``cancel_task`` (lithos#286 / PR #288, which
+    also renamed it from ``completed_at`` server-side with no BC alias).
+    The obsidian-projection handler uses it as the resolution-date anchor
+    for ``✅``/``❌`` markers and TTL eviction (US13). The Lithos spec
+    also returns ``description``, ``created_by``, and ``created_at``;
+    those are ignored for slice 0 and can be added without breaking
+    call sites.
     """
 
     id: str
@@ -59,7 +62,7 @@ class Task:
     tags: tuple[str, ...]
     metadata: Mapping[str, Any]
     claims: tuple[Mapping[str, Any], ...]
-    completed_at: datetime | None = None
+    resolved_at: datetime | None = None
 
 
 class LithosClient:
@@ -130,8 +133,18 @@ class LithosClient:
         *,
         status: str | None = None,
         with_claims: bool = False,
+        resolved_since: datetime | None = None,
     ) -> list[Task]:
-        """Return tasks matching the filters. Omitted ``status`` = all."""
+        """Return tasks matching the filters. Omitted ``status`` = all.
+
+        ``resolved_since`` (lithos#286 / PR #288) is converted to an
+        ISO-8601 string before passing through; Lithos compares it
+        against ``tasks.resolved_at >= ?`` so open tasks (whose
+        ``resolved_at`` is NULL) are excluded automatically. Omitting
+        the parameter keeps the call wire-identical to the pre-#286
+        contract so loom can roll out ahead of a staging Lithos that
+        doesn't yet recognise the kwarg.
+        """
         if self._session is None:
             raise LithosClientError(
                 "client_not_initialised",
@@ -140,6 +153,8 @@ class LithosClient:
         arguments: dict[str, Any] = {"with_claims": with_claims}
         if status is not None:
             arguments["status"] = status
+        if resolved_since is not None:
+            arguments["resolved_since"] = resolved_since.isoformat()
         result = await self._session.call_tool("lithos_task_list", arguments=arguments)
         return _parse_task_list_response(result)
 
@@ -381,7 +396,7 @@ def _parse_task(raw: Any) -> Task:
             tags=tuple(tags_raw),
             metadata=dict(raw.get("metadata") or {}),
             claims=tuple(dict(c) for c in claims_raw),
-            completed_at=_parse_iso_datetime(raw.get("completed_at")),
+            resolved_at=_parse_iso_datetime(raw.get("resolved_at")),
         )
     except KeyError as exc:
         raise LithosClientError(
@@ -392,7 +407,7 @@ def _parse_task(raw: Any) -> Task:
 def _parse_iso_datetime(value: Any) -> datetime | None:
     """Best-effort ISO-8601 datetime parse. Returns ``None`` for absent
     or unparseable values so a Lithos schema drift on optional fields
-    doesn't crash the client (US13 only needs ``completed_at`` for
+    doesn't crash the client (US13 only needs ``resolved_at`` for
     terminal-state rendering; missing values fall back to the bus event
     timestamp at the projection layer)."""
     if value is None or value == "":

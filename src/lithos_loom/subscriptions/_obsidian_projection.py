@@ -57,16 +57,16 @@ Terminal events are gated through ``would_be_actionable`` (same
 predicate as ``is_human_actionable`` minus the status check) so
 autonomous-route work that was never on the operator's view does
 not suddenly appear in "done this week" queries on completion.
-Resolution dates anchor on Lithos's canonical ``completed_at``
+Resolution dates anchor on Lithos's canonical ``resolved_at``
 (falling back to ``event.timestamp`` only if the payload is silent),
 so reconnect / replay / restart paths render the same date the
 operator would have seen at live receipt.
 
 Restart-recovery: ``LithosEventStream`` accepts
 ``bootstrap_resolved_window`` (set to ``timedelta(days=resolved_ttl_days)``
-by the ``obsidian-sync`` child) and over-fetches recent
-completed + cancelled tasks at bootstrap, filters by
-``completed_at`` client-side, and publishes each as the
+by the ``obsidian-sync`` child) and fetches recent completed +
+cancelled tasks at bootstrap via Lithos's server-side
+``resolved_since`` filter (lithos#286), publishing each as the
 appropriate terminal-event type. Open tasks replay as ``created``;
 the in-memory state thus rebuilds naturally on restart — same
 idempotency contract as ``RouteRunner._processed_tasks`` — for
@@ -310,9 +310,9 @@ def make_handler(
                 new_status = (
                     "completed" if event.type.endswith("completed") else "cancelled"
                 )
-                # Prefer Lithos's canonical completed_at; fall back to
+                # Prefer Lithos's canonical resolved_at; fall back to
                 # the bus event's receive-at time only when the payload
-                # didn't carry one (e.g. a pre-`completed_at`-aware
+                # didn't carry one (e.g. a pre-`resolved_at`-aware
                 # source). PR #21 review issue 3: receive-at drifts vs
                 # canonical date around reconnect/replay/tz boundaries.
                 resolved_at = _resolved_at_for(event, task)
@@ -423,7 +423,7 @@ def _task_from_payload(payload: Any) -> Task:
 
     The :class:`~lithos_loom.sources.lithos_event_stream.LithosEventStream`
     publishes the full Task shape (id, title, status, tags, metadata,
-    claims, completed_at), so this is just dict-lookups, not a re-fetch.
+    claims, resolved_at), so this is just dict-lookups, not a re-fetch.
     """
     return Task(
         id=str(payload["id"]),
@@ -432,12 +432,12 @@ def _task_from_payload(payload: Any) -> Task:
         tags=tuple(payload.get("tags") or ()),
         metadata=dict(payload.get("metadata") or {}),
         claims=tuple(payload.get("claims") or ()),
-        completed_at=_parse_completed_at(payload.get("completed_at")),
+        resolved_at=_parse_resolved_at(payload.get("resolved_at")),
     )
 
 
-def _parse_completed_at(value: Any) -> datetime | None:
-    """Defensive ISO-8601 parse for ``completed_at`` from the SSE payload.
+def _parse_resolved_at(value: Any) -> datetime | None:
+    """Defensive ISO-8601 parse for ``resolved_at`` from the SSE payload.
 
     Returns ``None`` for missing / malformed values so the handler can
     fall back to ``event.timestamp`` rather than crashing.
@@ -450,7 +450,7 @@ def _parse_completed_at(value: Any) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         logger.warning(
-            "obsidian-projection: ignoring malformed completed_at=%r in payload",
+            "obsidian-projection: ignoring malformed resolved_at=%r in payload",
             value,
         )
         return None
@@ -534,10 +534,11 @@ def _resolved_at_for(event: Event, task: Task) -> date:
 
     Preference order (per PR #21 review issue 3):
 
-    1. ``task.completed_at`` from the SSE payload — this is Lithos's
-       canonical timestamp, written when the task transitioned to a
-       terminal state. Stable across reconnect-replay, restart, and
-       any future bootstrap-resolved-discovery path.
+    1. ``task.resolved_at`` from the SSE payload — this is Lithos's
+       canonical timestamp (lithos#286 / PR #288), written by both
+       ``complete_task`` and ``cancel_task`` when the task transitions
+       to a terminal state. Stable across reconnect-replay, restart,
+       and the bootstrap-resolved-discovery path.
     2. ``event.timestamp.astimezone().date()`` — the bus event's
        receive-at time. Fallback only; drifts vs. canonical for
        delayed/replayed events but matches the local-tz "today" the
@@ -546,8 +547,8 @@ def _resolved_at_for(event: Event, task: Task) -> date:
     Both branches return a local-tz ``date`` so the rendered marker
     matches the operator's calendar.
     """
-    if task.completed_at is not None:
-        return task.completed_at.astimezone().date()
+    if task.resolved_at is not None:
+        return task.resolved_at.astimezone().date()
     return event.timestamp.astimezone().date()
 
 

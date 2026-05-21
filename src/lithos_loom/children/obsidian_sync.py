@@ -153,9 +153,9 @@ async def _amain(cfg: LoomConfig) -> int:
             events_url = cfg.orchestrator.lithos_url.rstrip("/") + "/events"
             # Pull resolved-task history into the bootstrap so the
             # US13 TTL-lingering window survives daemon restart (PR #21
-            # review issue 1). The source over-fetches completed +
-            # cancelled tasks at bootstrap and filters by completed_at
-            # >= now - window before publishing them as terminal events.
+            # review issue 1). The source fetches completed + cancelled
+            # tasks at bootstrap via Lithos's server-side resolved_since
+            # filter (lithos#286) before publishing them as terminal events.
             source = LithosEventStream(
                 client=lithos,
                 bus=EventBus(),
