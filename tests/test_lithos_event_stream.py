@@ -375,6 +375,93 @@ async def test_stream_enriches_payload_via_task_list_for_unknown_task() -> None:
     assert len(client.task_list_calls) == 2
 
 
+async def test_stream_force_refreshes_on_task_updated_even_for_cached_task() -> None:
+    """lithos#283: task.updated event payload is minimal ({task_id}
+    only) and the cached Task is stale by definition for that event,
+    so _enrich must always refresh — not return the cached value."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.updated"])
+    # Bootstrap puts a stale snapshot in the cache.
+    stale = _task("t1", status="open", tags=("trigger:x",), title="OLD title")
+    fresh = _task("t1", status="open", tags=("trigger:x",), title="NEW title")
+    client = _FakeClient(
+        bootstrap=[stale],
+        refresh_responses=[[fresh]],
+    )
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.updated", data={"task_id": "t1"}, id="evt-1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    drained = _drain(listener)
+    assert drained, "task.updated was not published"
+    _, payload = drained[0]
+    # The fresh title made it through — the refresh ran despite cache hit.
+    assert payload["title"] == "NEW title", (
+        f"task.updated must force-refresh; saw stale payload {payload!r}"
+    )
+    # Two task_list calls: bootstrap + force refresh.
+    assert len(client.task_list_calls) == 2, (
+        f"expected bootstrap + force refresh, got {client.task_list_calls}"
+    )
+
+
+async def test_stream_publishes_lithos_task_updated_for_task_updated_sse() -> None:
+    """Smoke: a Lithos task.updated SSE arrives → loom publishes
+    lithos.task.updated on the bus with the enriched payload."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.updated"])
+    fresh = _task("u1", status="open", tags=("trigger:x",), title="refreshed")
+    client = _FakeClient(bootstrap=[], refresh_responses=[[fresh]])
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.updated", data={"task_id": "u1"}, id="evt-1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    types = [t for t, _ in _drain(listener)]
+    assert types == ["lithos.task.updated"]
+
+
+async def test_stream_skips_task_updated_for_task_no_longer_open() -> None:
+    """task.updated for a task that's not in the refreshed open list
+    (deleted, or moved to terminal in the same window) is skipped — same
+    fallback as the deleted-task race for created/claimed/released."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.updated"])
+    # Refresh returns no tasks at all (the updated task is no longer open).
+    client = _FakeClient(bootstrap=[], refresh_responses=[[]])
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.updated", data={"task_id": "gone"}, id="evt-1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _drain(listener) == []
+
+
 async def test_stream_uses_cached_task_for_known_task_without_refresh() -> None:
     """Subsequent SSE events for tasks already in cache reuse the cached
     full-shape Task — no extra task_list refresh.
@@ -712,6 +799,7 @@ async def test_stream_subscribes_only_to_task_event_types() -> None:
     parts = set(types_filter.split(","))
     assert parts == {
         "task.created",
+        "task.updated",
         "task.claimed",
         "task.released",
         "task.completed",

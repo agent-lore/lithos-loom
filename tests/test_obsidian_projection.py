@@ -135,10 +135,10 @@ async def test_created_event_for_autonomous_task_writes_nothing(
 async def test_updated_event_replaces_line_for_same_id(tmp_path: Path) -> None:
     """A title change on the same task replaces (not duplicates) the line.
 
-    Note: the live LithosEventStream source doesn't actually emit
-    lithos.task.updated today (verified at lithos_event_stream.py:63);
-    the handler subscribes to it for forward-compat. The real runtime
-    re-evaluation path is exercised by the claimed/released tests below.
+    lithos.task.updated arrives whenever the upstream task is edited
+    (lithos#283 / PR #284). The source force-refreshes for that event
+    type so the payload carries the post-edit task snapshot; the
+    projection then re-renders with the new field values.
     """
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg)
@@ -153,6 +153,52 @@ async def test_updated_event_replaces_line_for_same_id(tmp_path: Path) -> None:
     assert "new title" in content
     assert "old title" not in content
     assert content.count("🆔 lithos:t1") == 1
+
+
+async def test_updated_event_with_identical_content_skips_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """lithos#283 + US14 compose: an updated event whose rendered line
+    is byte-identical to the prior write is content-hash-deduped and
+    no second write happens. This guards the common case where the
+    upstream edit changed a field loom doesn't render (e.g. description)
+    — Obsidian Sync shouldn't ripple a no-op mtime touch to other
+    devices."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+
+    # First event writes the file once.
+    await handler(
+        _event("lithos.task.created", task_id="t1", title="same title"), _ctx()
+    )
+    tasks_file = tmp_path / "_lithos/tasks.md"
+    assert tasks_file.exists()
+    first_mtime = tasks_file.stat().st_mtime_ns
+
+    # Spy on the atomic-write helper to count writes precisely; mtime
+    # snapshotting is also captured for the cross-check.
+    from lithos_loom.subscriptions import _obsidian_projection as proj
+
+    write_calls: list[Path] = []
+    real_write = proj._write_tasks_file_atomic
+
+    async def _spy_write(path: Path, content: str) -> None:
+        write_calls.append(path)
+        await real_write(path, content)
+
+    monkeypatch.setattr(proj, "_write_tasks_file_atomic", _spy_write)
+
+    # Updated event with the SAME title → render produces an identical
+    # line → content-hash matches last_written_hash → no write.
+    await handler(
+        _event("lithos.task.updated", task_id="t1", title="same title"), _ctx()
+    )
+
+    assert write_calls == [], (
+        f"identical-content update should not write, got writes: {write_calls}"
+    )
+    # Belt + braces: mtime did not move.
+    assert tasks_file.stat().st_mtime_ns == first_mtime
 
 
 async def test_claimed_by_autonomous_route_drops_orphan_line(tmp_path: Path) -> None:
