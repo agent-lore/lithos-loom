@@ -93,17 +93,25 @@ tags = ["trigger:story-review-human"]
 # initial_delay_seconds = 0.5
 # max_delay_seconds = 30.0
 
-# Obsidian projection (US8) — turns lithos.task.* events into a markdown
-# task list at vault_path / tasks_file. Filters via is_human_actionable:
-# tasks tagged for an autonomous route are hidden; tasks for a
-# human_blocking=true route or with no matching route show up. Only
-# wired when the obsidian-sync child is also enabled (see
-# [obsidian_sync] below).
+# Obsidian projection (US8/US9) — turns lithos.task.* events into a
+# markdown task list at vault_path / tasks_file. Filters via
+# is_human_actionable: tasks tagged for an autonomous route are hidden;
+# tasks for a human_blocking=true route (once claimed) or with no
+# matching route show up. Only wired when the obsidian-sync child is
+# also enabled (see [obsidian_sync] below).
+#
+# Subscribe to {created, updated, claimed, released, completed,
+# cancelled}: claimed/released are load-bearing for D6 — without them
+# the projection never surfaces tasks that become actionable only when
+# a human_blocking route claims them, never refreshes the computed
+# 📅 today date, and never emits the #lithos/<route-name> tag.
 # [[subscriptions]]
 # name = "obsidian-tasks"
 # on = [
 #   "lithos.task.created",
 #   "lithos.task.updated",
+#   "lithos.task.claimed",
+#   "lithos.task.released",
 #   "lithos.task.completed",
 #   "lithos.task.cancelled",
 # ]

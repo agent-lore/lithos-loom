@@ -16,7 +16,10 @@ from typing import Any
 
 from lithos_loom.config import ObsidianSyncConfig, RouteConfig, RouteMatch
 from lithos_loom.lithos_client import Task
-from lithos_loom.subscriptions._human_actionable import is_human_actionable
+from lithos_loom.subscriptions._human_actionable import (
+    human_blocking_route_name,
+    is_human_actionable,
+)
 
 
 def _task(
@@ -199,3 +202,43 @@ def test_cancelled_task_with_human_blocking_claim_not_actionable() -> None:
     # completed/cancelled events regardless of actionability, so this
     # is a belt-and-braces test of the helper alone.
     assert is_human_actionable(task, routes, _cfg()) is False
+
+
+# ── human_blocking_route_name (US9 extraction) ─────────────────────────
+
+
+def test_human_blocking_route_name_returns_route_for_matching_claim() -> None:
+    routes = [_route("review-human", tags=("trigger:review",), human_blocking=True)]
+    task = _task(claims=(_claim("review-human"),))
+    assert human_blocking_route_name(task, routes) == "review-human"
+
+
+def test_human_blocking_route_name_returns_none_when_no_claims() -> None:
+    routes = [_route("review-human", tags=("trigger:review",), human_blocking=True)]
+    task = _task(claims=())
+    assert human_blocking_route_name(task, routes) is None
+
+
+def test_human_blocking_route_name_returns_none_when_aspect_mismatch() -> None:
+    """Claim aspect must equal a configured human_blocking route's name."""
+    routes = [_route("review-human", tags=("trigger:review",), human_blocking=True)]
+    task = _task(claims=(_claim("some-other-aspect"),))
+    assert human_blocking_route_name(task, routes) is None
+
+
+def test_human_blocking_route_name_returns_none_with_no_blocking_routes() -> None:
+    """Claims by autonomous routes never qualify, even when aspect = name."""
+    routes = [_route("auto", tags=("trigger:auto",), human_blocking=False)]
+    task = _task(claims=(_claim("auto"),))
+    assert human_blocking_route_name(task, routes) is None
+
+
+def test_human_blocking_route_name_picks_first_matching_claim() -> None:
+    """When two human_blocking routes have claimed the task, return the
+    first claim's aspect (Lithos-canonical order) for stability."""
+    routes = [
+        _route("review-human", tags=("trigger:review",), human_blocking=True),
+        _route("signoff", tags=("trigger:signoff",), human_blocking=True),
+    ]
+    task = _task(claims=(_claim("review-human"), _claim("signoff")))
+    assert human_blocking_route_name(task, routes) == "review-human"
