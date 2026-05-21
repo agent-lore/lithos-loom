@@ -136,8 +136,15 @@ async def _amain(cfg: LoomConfig) -> int:
 
         spec = obsidian_specs[0]
         logger.info("obsidian-sync: wiring subscription %r", spec.name)
+        # 50ms debounce coalesces bursts of bus events (especially the
+        # source's bootstrap, which can fire dozens of created events in
+        # quick succession) into a single flush at quiescence. The
+        # disk-seeded content-hash check then turns a quiet-KB restart
+        # into zero on-disk writes (US14 "idempotent re-runs").
         my_handlers: dict[str, Handler] = {
-            "obsidian-projection": make_obsidian_projection_handler(cfg),
+            "obsidian-projection": make_obsidian_projection_handler(
+                cfg, debounce_seconds=0.05
+            ),
         }
 
         async with LithosClient(

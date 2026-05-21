@@ -8,6 +8,7 @@ is covered in ``test_obsidian_sync_child.py``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Mapping
@@ -1851,17 +1852,19 @@ async def test_post_restart_single_task_replay_is_a_no_op(
     assert (tmp_path / "_lithos/tasks.md").read_text() == disk_content_before
 
 
-async def test_post_restart_multi_task_replay_still_writes_intermediates(
+async def test_post_restart_multi_task_replay_inline_writes_intermediates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Documents the multi-task wart explicitly: bootstrap of an
-    N-task quiet-KB restart writes N times during state rebuild.
-    The disk-seed gets overwritten by our own intermediate writes,
-    so the convergent final write doesn't dedup. This is the
-    debounce-shaped follow-up.
+    """Documents the inline-flush behavior (``debounce_seconds=0``):
+    bootstrap of an N-task quiet-KB restart writes N times during
+    state rebuild because each event flushes immediately, the
+    intermediate render differs from disk-seed, and the disk-seed
+    gets overwritten in ``last_written_hash`` by our own
+    intermediates before convergence.
 
-    The end-state on disk still matches what was there before — just
-    after N intermediate mtime ripples."""
+    Production uses ``debounce_seconds > 0`` to coalesce this — see
+    ``test_post_restart_multi_task_replay_under_debounce_coalesces_to_zero_writes``
+    for the user-visible behaviour."""
     cfg = _cfg(tmp_path)
     handler_a = make_handler(cfg, today_provider=_fixed_today)
     for tid in ("a", "b", "c"):
@@ -1876,11 +1879,9 @@ async def test_post_restart_multi_task_replay_still_writes_intermediates(
         await handler_b(
             _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
         )
-    # 3 writes — the known multi-task limitation. Once a debounce
-    # layer ships, this should become 0 (or at least 1).
     assert len(calls) == 3, (
-        f"current implementation writes once per event during multi-task "
-        f"bootstrap; got {len(calls)}: {calls}"
+        f"inline-flush mode writes once per event during multi-task bootstrap; "
+        f"got {len(calls)}: {calls}"
     )
     # End-state on disk matches what was there before.
     assert (tmp_path / "_lithos/tasks.md").read_text() == disk_content_before
@@ -1954,3 +1955,140 @@ async def test_ttl_eviction_alone_still_triggers_write_when_content_changes(
     text = (tmp_path / "_lithos/tasks.md").read_text()
     assert "lithos:r" not in text
     assert "lithos:fresh" in text
+
+
+# ── US14 debounce / coalesce (production mode) ─────────────────────────
+
+
+_TEST_DEBOUNCE = 0.02
+"""20ms — long enough that the test can fire several events inside the
+window before the timer expires; short enough that the test waits a
+total of ~30ms after the burst to observe the coalesced flush."""
+
+
+async def test_burst_of_events_coalesces_into_single_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three events fired back-to-back within the debounce window
+    cancel-and-reschedule the pending flush; only the burst's tail
+    flush actually writes — once, with the final {a,b,c} content."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    for tid in ("a", "b", "c"):
+        await handler(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    # Wait long enough for the trailing debounce to expire and the
+    # flush task to complete.
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert len(calls) == 1, (
+        f"burst of 3 events inside the debounce window should coalesce "
+        f"into 1 write; got {len(calls)}: {calls}"
+    )
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:a" in text and "lithos:b" in text and "lithos:c" in text
+
+
+async def test_post_restart_multi_task_replay_under_debounce_zero_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user-facing US14 scenario at full strength: write a 3-task
+    projection via handler A (inline), tear down, build handler B with
+    debounce enabled and replay the same 3 events. The burst coalesces
+    into one flush; that flush's rendered content matches the disk
+    seed → ZERO writes. Obsidian Sync sees no mtime ripple."""
+    cfg = _cfg(tmp_path)
+    handler_a = make_handler(cfg, today_provider=_fixed_today)  # inline
+    for tid in ("a", "b", "c"):
+        await handler_a(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    disk_content_before = (tmp_path / "_lithos/tasks.md").read_text()
+    mtime_before = (tmp_path / "_lithos/tasks.md").stat().st_mtime_ns
+
+    handler_b = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    for tid in ("a", "b", "c"):
+        await handler_b(
+            _event("lithos.task.created", task_id=tid, title=tid.upper()), _ctx()
+        )
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert calls == [], (
+        f"debounced multi-task replay against disk-seeded handler should "
+        f"write zero times; got {calls}"
+    )
+    # Disk content + mtime both unchanged.
+    assert (tmp_path / "_lithos/tasks.md").read_text() == disk_content_before
+    assert (tmp_path / "_lithos/tasks.md").stat().st_mtime_ns == mtime_before
+
+
+async def test_single_event_under_debounce_flushes_after_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single event in debounce mode writes once after the window
+    elapses — verifies the deferred flush actually fires."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    await handler(_event("lithos.task.created", task_id="x"), _ctx())
+    # Immediately: no write yet (still inside debounce window).
+    assert calls == [], "write should be deferred during debounce window"
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert len(calls) == 1, (
+        f"single event should produce one write after debounce; got {calls}"
+    )
+
+
+async def test_new_event_cancels_pending_flush(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Event A schedules a flush. Event B arrives within the window
+    and cancels-then-reschedules. Only ONE write happens (B's tail
+    flush), with the final {a,b} content — not two."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    calls = _spy_os_replace(monkeypatch)
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    # Sleep less than the debounce window — A's flush is still pending.
+    await asyncio.sleep(_TEST_DEBOUNCE * 0.3)
+    await handler(_event("lithos.task.created", task_id="b"), _ctx())
+    # Now wait the full window for B's coalesced flush.
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert len(calls) == 1, (
+        f"A's pending flush should have been cancelled by B; expected one "
+        f"coalesced write, got {len(calls)}: {calls}"
+    )
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:a" in text and "lithos:b" in text
+
+
+async def test_under_debounce_in_memory_short_circuit_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replaying the same event under debounce mode hits the in-memory
+    ``current == prior`` short-circuit BEFORE _schedule_flush is even
+    reached — so no pending flush gets created, and the spy stays
+    empty. Defensive: the in-memory layer should not be defeated by
+    the debounce layer."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(
+        cfg, today_provider=_fixed_today, debounce_seconds=_TEST_DEBOUNCE
+    )
+    # First event writes (after debounce).
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    calls = _spy_os_replace(monkeypatch)
+    # Replay same event — current == prior, short-circuits before
+    # scheduling any flush.
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
+    assert calls == [], f"replayed event should have stayed inert; got {calls}"
