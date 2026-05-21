@@ -114,12 +114,16 @@ class LithosEventStream:
     """Recover recently-resolved tasks at bootstrap.
 
     When set, ``_bootstrap`` also fetches ``status="completed"`` and
-    ``status="cancelled"`` from Lithos, filters client-side by
-    ``completed_at >= now - bootstrap_resolved_window``, and publishes
-    each as a ``lithos.task.completed`` / ``lithos.task.cancelled`` bus
-    event. Set by the ``obsidian-sync`` child to
+    ``status="cancelled"`` from Lithos, filters client-side by local
+    date — ``completed_at.astimezone().date() >= today - window`` —
+    matching the projection layer's TTL-eviction semantic exactly so
+    the boundary day behaves identically across live operation and
+    restart (PR #21 review #2). Each surviving task is published as a
+    ``lithos.task.completed`` / ``lithos.task.cancelled`` bus event.
+
+    Set by the ``obsidian-sync`` child to
     ``timedelta(days=resolved_ttl_days)`` so the US13 TTL-lingering
-    window survives daemon restart (PR #21 review issue 1).
+    window survives daemon restart.
 
     ``None`` (default) means open-only bootstrap. Other source consumers
     (e.g. route-runner) don't need this and leave it ``None``.
@@ -128,6 +132,14 @@ class LithosEventStream:
     _aconnect_sse: Any = field(default=aconnect_sse)
     _httpx_client_factory: Any = field(default=httpx.AsyncClient)
     _httpx_timeout: httpx.Timeout = field(default_factory=_default_httpx_timeout)
+    _now_provider: Any = field(default=lambda: datetime.now(UTC))
+    """Wall-clock seam for tests of the bootstrap-resolved boundary.
+
+    Production callers leave at the default and get ``datetime.now(UTC)``.
+    Used by ``_bootstrap_resolved`` to compute the local-date cutoff;
+    tests pin a known ``datetime`` so the boundary-day assertion is
+    deterministic regardless of when the test runs.
+    """
 
     def __post_init__(self) -> None:
         self._last_event_id: str | None = None
@@ -245,9 +257,18 @@ class LithosEventStream:
         ``resolved_since`` filter (see ``agent-lore/lithos#286``), we
         over-fetch and filter client-side; per-KB scale this is
         acceptable.
+
+        The filter compares local-tz dates, not datetimes, to match
+        :func:`_evict_expired` exactly. A task with
+        ``completed_at.astimezone().date() == today - window`` is on
+        the eviction boundary in a running process and must survive
+        a restart too — datetime subtraction would otherwise drop
+        boundary-day tasks completed earlier in the day (PR #21
+        review #2).
         """
         assert self.bootstrap_resolved_window is not None
-        cutoff = datetime.now(UTC) - self.bootstrap_resolved_window
+        today = self._now_provider().astimezone().date()
+        cutoff_date = today - self.bootstrap_resolved_window
 
         published = 0
         for status, event_type in (
@@ -258,7 +279,8 @@ class LithosEventStream:
             recent = [
                 t
                 for t in tasks
-                if t.completed_at is not None and t.completed_at >= cutoff
+                if t.completed_at is not None
+                and t.completed_at.astimezone().date() >= cutoff_date
             ]
             logger.info(
                 "LithosEventStream: bootstrap-resolved %d of %d %s task(s) "

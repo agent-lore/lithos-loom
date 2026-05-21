@@ -193,17 +193,25 @@ def _stream(
     reconnect_backoff_seconds: float = 0.001,
     max_reconnect_backoff_seconds: float = 0.01,
     bootstrap_resolved_window: timedelta | None = None,
+    now: datetime | None = None,
 ) -> LithosEventStream:
-    """Build a stream with the fake aconnect injected."""
-    return LithosEventStream(
-        client=client,
-        bus=bus,
-        events_url="http://lithos.test/events",
-        reconnect_backoff_seconds=reconnect_backoff_seconds,
-        max_reconnect_backoff_seconds=max_reconnect_backoff_seconds,
-        bootstrap_resolved_window=bootstrap_resolved_window,
-        _aconnect_sse=aconnect,
-    )
+    """Build a stream with the fake aconnect injected.
+
+    Pass ``now`` to pin the wall-clock seam used by
+    ``_bootstrap_resolved`` for deterministic boundary-day assertions.
+    """
+    kwargs: dict[str, Any] = {
+        "client": client,
+        "bus": bus,
+        "events_url": "http://lithos.test/events",
+        "reconnect_backoff_seconds": reconnect_backoff_seconds,
+        "max_reconnect_backoff_seconds": max_reconnect_backoff_seconds,
+        "bootstrap_resolved_window": bootstrap_resolved_window,
+        "_aconnect_sse": aconnect,
+    }
+    if now is not None:
+        kwargs["_now_provider"] = lambda: now
+    return LithosEventStream(**kwargs)
 
 
 # ── Bootstrap ───────────────────────────────────────────────────────────
@@ -1311,3 +1319,98 @@ async def test_bootstrap_resolved_skips_tasks_without_completed_at() -> None:
         await task
 
     assert _drain(sub) == []
+
+
+async def test_bootstrap_resolved_keeps_task_at_ttl_boundary_local_date() -> None:
+    """Boundary day must match the projection layer's eviction semantic:
+    a task whose ``completed_at.astimezone().date() == today - window``
+    survives. Previously bootstrap used naive UTC datetime subtraction,
+    so a task completed earlier-in-the-day on the boundary date would be
+    kept by the live ``_evict_expired`` walk but dropped on restart —
+    a restart-only disappearance window (PR #21 review #2).
+    """
+    bus = EventBus()
+    sub = bus.subscribe(
+        event_types=[
+            "lithos.task.created",
+            "lithos.task.completed",
+            "lithos.task.cancelled",
+        ]
+    )
+
+    # Pin "now" to a known instant. Boundary date is today - 7 days
+    # (matching ttl_days=7 below). Anchor the boundary task's
+    # completed_at at 02:00 local on the boundary date — earlier than
+    # the pinned time-of-day, which is the case naive datetime
+    # subtraction would drop.
+    now = datetime(2026, 5, 21, 18, 0, 0, tzinfo=UTC)
+    boundary_date = now.astimezone().date() - timedelta(days=7)
+    boundary_completed_at = datetime(
+        boundary_date.year, boundary_date.month, boundary_date.day, 2, 0, 0
+    ).astimezone()
+
+    boundary_task = _resolved_task("boundary", completed_at=boundary_completed_at)
+    client = _FakeClient(bootstrap=[], bootstrap_completed=[boundary_task])
+    aconnect = _FakeAconnect(connections=[[]])
+    source = _stream(
+        client=client,
+        bus=bus,
+        aconnect=aconnect,
+        bootstrap_resolved_window=timedelta(days=7),
+        now=now,
+    )
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    ids = [payload["id"] for _, payload in _drain(sub)]
+    assert "boundary" in ids, (
+        "task at TTL local-date boundary must survive bootstrap recovery "
+        "to match the projection layer's _evict_expired semantic"
+    )
+
+
+async def test_bootstrap_resolved_drops_task_one_day_past_ttl_boundary() -> None:
+    """Symmetric to the boundary-keeps test: a task one day OLDER than
+    the boundary date is correctly dropped, even if its time-of-day
+    would land it inside the naive datetime window."""
+    bus = EventBus()
+    sub = bus.subscribe(
+        event_types=[
+            "lithos.task.created",
+            "lithos.task.completed",
+            "lithos.task.cancelled",
+        ]
+    )
+    now = datetime(2026, 5, 21, 18, 0, 0, tzinfo=UTC)
+    past_date = now.astimezone().date() - timedelta(days=8)
+    # 23:00 local on day boundary-1 — naive datetime subtraction with a
+    # 7-day window from 18:00-local-now would put this 1h INSIDE the
+    # naive window. Local-date comparison correctly drops it.
+    past_completed_at = datetime(
+        past_date.year, past_date.month, past_date.day, 23, 0, 0
+    ).astimezone()
+
+    past_task = _resolved_task("past", completed_at=past_completed_at)
+    client = _FakeClient(bootstrap=[], bootstrap_completed=[past_task])
+    aconnect = _FakeAconnect(connections=[[]])
+    source = _stream(
+        client=client,
+        bus=bus,
+        aconnect=aconnect,
+        bootstrap_resolved_window=timedelta(days=7),
+        now=now,
+    )
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    ids = [payload["id"] for _, payload in _drain(sub)]
+    assert "past" not in ids, (
+        "task one day past the boundary must NOT be republished, regardless "
+        "of time-of-day"
+    )
