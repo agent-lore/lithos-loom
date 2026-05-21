@@ -25,6 +25,9 @@ Lifecycle on ``run()``:
    expects by calling ``task_list(status="open")`` and matching by id.
    Cache the enriched task so terminal events (where the open list no
    longer contains the task) can fall back to the last-known snapshot.
+   For ``task.updated`` (lithos#283) the cache is bypassed: the event
+   payload is minimal (``{task_id}`` only) and the cache is stale by
+   definition for that event, so ``_enrich`` always refreshes.
 4. **Reconnect.** On any error during connect, bootstrap, or iteration,
    sleep with exponential backoff and retry, passing ``Last-Event-ID``
    so the server can replay buffered events. Bootstrap is also retried
@@ -62,12 +65,18 @@ logger = logging.getLogger(__name__)
 
 _HANDLED_LITHOS_EVENT_TYPES = (
     "task.created",
+    "task.updated",
     "task.claimed",
     "task.released",
     "task.completed",
     "task.cancelled",
 )
-"""Lithos-side event types we subscribe to. Sent server-side as ``?types=``."""
+"""Lithos-side event types we subscribe to. Sent server-side as ``?types=``.
+
+``task.updated`` (lithos#283 / PR #284) fires on any successful
+``lithos_task_update`` — title, description, tags. Payload is minimal
+(``{task_id}`` only), so :meth:`_enrich` force-refreshes for that
+event type to pick up the new field values."""
 
 
 _MIDNIGHT = time(0, 0)
@@ -458,17 +467,30 @@ class LithosEventStream:
            fall back on).
         3. If still nothing, return ``None`` so the caller can skip.
 
+        ``task.updated`` (lithos#283 / PR #284) is the cache-bypassing
+        case: the event payload is minimal (``{task_id}`` only) and
+        the cached Task is stale by definition (that's literally what
+        the event reports). Skip step 1 and always refresh — the
+        existing step-2 refresh-cache logic then publishes the new
+        field values. If the task isn't in ``status="open"`` after
+        refresh (deleted, or moved to a terminal state in the same
+        window), return ``None`` and let the caller skip; loom's
+        downstream projection only cares about open-task updates.
+
         Errors from ``task_list`` propagate so the reconnect loop can
         retry the same SSE event (we have NOT yet advanced
         ``_last_event_id``, so the server replays). Swallowing the
         error here would acknowledge the event and lose it.
         """
-        cached = self._known_tasks.get(task_id)
-        if cached is not None:
-            return _with_terminal_status(cached, event_type)
+        force_refresh = event_type == "task.updated"
+        if not force_refresh:
+            cached = self._known_tasks.get(task_id)
+            if cached is not None:
+                return _with_terminal_status(cached, event_type)
 
-        # Unknown task id — refresh the open-task cache. Most SSE events
-        # for currently-open tasks will resolve here.
+        # Cache miss — or task.updated force-refresh. Refresh the
+        # open-task cache. The post-update cache entry is fresh by
+        # construction.
         tasks = await self.client.task_list(status="open", with_claims=True)
         for t in tasks:
             self._known_tasks[t.id] = t
@@ -476,15 +498,20 @@ class LithosEventStream:
         cached = self._known_tasks.get(task_id)
         if cached is not None:
             logger.debug(
-                "LithosEventStream: enriched unknown %s via task_list refresh",
+                "LithosEventStream: enriched %s via task_list refresh "
+                "(force_refresh=%s)",
                 task_id,
+                force_refresh,
             )
             return _with_terminal_status(cached, event_type)
 
-        # Not in the refreshed open-task list either. Two cases:
+        # Not in the refreshed open-task list either. Three cases:
         # - Truly unknown (deleted? race condition?): skip.
         # - Already terminal at the time of refresh and we never saw the
         #   open form: skip (no tags/metadata available, can't route).
+        # - task.updated arrived for a resolved task: skip (the
+        #   projection layer doesn't route updates to terminal tasks;
+        #   matches deleted-task race semantics).
         # Either way, drop the event with a debug note.
         return None
 

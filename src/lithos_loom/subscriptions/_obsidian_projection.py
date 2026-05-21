@@ -159,7 +159,7 @@ class _StateEntry:
 _REEVALUATE_EVENTS = frozenset(
     {
         "lithos.task.created",
-        "lithos.task.updated",  # forward-compat; source doesn't emit today
+        "lithos.task.updated",
         "lithos.task.claimed",
         "lithos.task.released",
     }
@@ -174,6 +174,11 @@ appears once a human_blocking route claims it (lithos.task.claimed); a
 task in the projection because of a human_blocking claim disappears
 when that claim is released and no replacement claim arrives
 (lithos.task.released).
+
+``lithos.task.updated`` (lithos#283 / PR #284) carries the post-edit
+task snapshot — the source force-refreshes for that event type, so
+title / tag / priority changes flow through here within the debounce
+window.
 """
 
 _REMOVAL_EVENTS = frozenset({"lithos.task.completed", "lithos.task.cancelled"})
