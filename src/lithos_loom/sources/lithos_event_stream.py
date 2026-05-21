@@ -45,7 +45,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -110,6 +110,20 @@ class LithosEventStream:
     events_url: str
     reconnect_backoff_seconds: float = 1.0
     max_reconnect_backoff_seconds: float = 30.0
+    bootstrap_resolved_window: timedelta | None = None
+    """Recover recently-resolved tasks at bootstrap.
+
+    When set, ``_bootstrap`` also fetches ``status="completed"`` and
+    ``status="cancelled"`` from Lithos, filters client-side by
+    ``completed_at >= now - bootstrap_resolved_window``, and publishes
+    each as a ``lithos.task.completed`` / ``lithos.task.cancelled`` bus
+    event. Set by the ``obsidian-sync`` child to
+    ``timedelta(days=resolved_ttl_days)`` so the US13 TTL-lingering
+    window survives daemon restart (PR #21 review issue 1).
+
+    ``None`` (default) means open-only bootstrap. Other source consumers
+    (e.g. route-runner) don't need this and leave it ``None``.
+    """
     # Injection points for tests. Default to the real httpx surfaces.
     _aconnect_sse: Any = field(default=aconnect_sse)
     _httpx_client_factory: Any = field(default=httpx.AsyncClient)
@@ -181,24 +195,88 @@ class LithosEventStream:
     # ── bootstrap ────────────────────────────────────────────────────
 
     async def _bootstrap(self) -> int:
-        """Snapshot open tasks and publish each as ``lithos.task.created``.
+        """Snapshot open tasks (and optionally recently-resolved ones).
 
-        Returns the number of events published. ``self._bootstrapped``
-        flips to ``True`` only after every snapshot event has been
-        published, so a mid-publish exception causes the next reconnect
-        attempt to re-bootstrap (RouteRunner dedup absorbs any partial
-        duplicates).
+        Open tasks always replay as ``lithos.task.created``. When
+        ``bootstrap_resolved_window`` is set, also fetch
+        ``status="completed"`` and ``status="cancelled"``, filter
+        client-side by ``completed_at >= now - window``, and publish
+        each as the appropriate terminal-event type — restart-recovery
+        for US13's TTL lingering (PR #21 review issue 1).
+
+        Returns the total number of events published.
+        ``self._bootstrapped`` flips to ``True`` only after every
+        snapshot event has been published, so a mid-publish exception
+        causes the next reconnect attempt to re-bootstrap (RouteRunner
+        dedup absorbs any partial duplicates).
         """
-        tasks = await self.client.task_list(status="open", with_claims=True)
+        published = 0
+
+        open_tasks = await self.client.task_list(status="open", with_claims=True)
         logger.info(
             "LithosEventStream: bootstrapping snapshot of %d open task(s)",
-            len(tasks),
+            len(open_tasks),
         )
-        for task in tasks:
+        for task in open_tasks:
             self._known_tasks[task.id] = task
             await self._publish("lithos.task.created", task)
+            published += 1
+
+        if self.bootstrap_resolved_window is not None:
+            published += await self._bootstrap_resolved()
+
         self._bootstrapped = True
-        return len(tasks)
+        return published
+
+    async def _bootstrap_resolved(self) -> int:
+        """Replay terminal tasks whose ``completed_at`` is within the
+        configured window.
+
+        Required by the ``obsidian-projection`` US13 TTL-lingering
+        contract: on a fresh daemon start, Monday's completed tasks
+        must still appear in the operator's "done this week" view.
+        Without this, the in-memory state dict comes up empty after
+        restart and resolved entries vanish until they're re-resolved.
+
+        Uses ``completed_at`` from each task's payload (Lithos's
+        canonical timestamp). Tasks without a parseable
+        ``completed_at`` are silently skipped — they can't anchor a
+        TTL window. With ``lithos_task_list`` not yet exposing a
+        ``resolved_since`` filter (see ``agent-lore/lithos#286``), we
+        over-fetch and filter client-side; per-KB scale this is
+        acceptable.
+        """
+        assert self.bootstrap_resolved_window is not None
+        cutoff = datetime.now(UTC) - self.bootstrap_resolved_window
+
+        published = 0
+        for status, event_type in (
+            ("completed", "lithos.task.completed"),
+            ("cancelled", "lithos.task.cancelled"),
+        ):
+            tasks = await self.client.task_list(status=status, with_claims=True)
+            recent = [
+                t
+                for t in tasks
+                if t.completed_at is not None and t.completed_at >= cutoff
+            ]
+            logger.info(
+                "LithosEventStream: bootstrap-resolved %d of %d %s task(s) "
+                "within %s window",
+                len(recent),
+                len(tasks),
+                status,
+                self.bootstrap_resolved_window,
+            )
+            for task in recent:
+                # Cache the terminal-state Task so any subsequent SSE
+                # event for the same id can resolve from cache without
+                # a refresh. _with_terminal_status is a no-op when the
+                # cached status already matches the event type.
+                self._known_tasks[task.id] = task
+                await self._publish(event_type, task)
+                published += 1
+        return published
 
     # ── streaming ────────────────────────────────────────────────────
 
@@ -429,7 +507,10 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
 
     Mirrors :func:`lithos_loom.sources.lithos_poller._event_payload` so
     RouteRunner (and any future bus subscriber) is unaffected by the
-    source swap.
+    source swap. ``completed_at`` is published as ISO 8601 so the
+    obsidian-projection handler (US13) can anchor ``✅``/``❌`` markers
+    and TTL eviction on Lithos's canonical timestamp instead of
+    receive-at time.
     """
     return MappingProxyType(
         {
@@ -439,5 +520,8 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
             "tags": list(task.tags),
             "metadata": dict(task.metadata),
             "claims": [dict(c) for c in task.claims],
+            "completed_at": (
+                task.completed_at.isoformat() if task.completed_at is not None else None
+            ),
         }
     )

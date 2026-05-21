@@ -53,19 +53,27 @@ Resolved entries are immune to re-evaluation events: stale
 claimed/released/updated for an already-resolved task no-op on
 the state; only TTL expiry can evict.
 
-KNOWN LIMITATION (US13 scope): the SSE bootstrap only replays
-open tasks (``lithos_event_stream.py:64-68``), so resolved
-entries from before the daemon started are not re-discovered on
-a fresh restart. Fixing this needs either Loom-side state
-persistence (breaks Lithos-canonicality) or an upstream
-``lithos_task_list(resolved_since=...)`` filter — sibling to
-``agent-lore/lithos#283``.
+Terminal events are gated through ``would_be_actionable`` (same
+predicate as ``is_human_actionable`` minus the status check) so
+autonomous-route work that was never on the operator's view does
+not suddenly appear in "done this week" queries on completion.
+Resolution dates anchor on Lithos's canonical ``completed_at``
+(falling back to ``event.timestamp`` only if the payload is silent),
+so reconnect / replay / restart paths render the same date the
+operator would have seen at live receipt.
+
+Restart-recovery: ``LithosEventStream`` accepts
+``bootstrap_resolved_window`` (set to ``timedelta(days=resolved_ttl_days)``
+by the ``obsidian-sync`` child) and over-fetches recent
+completed + cancelled tasks at bootstrap, filters by
+``completed_at`` client-side, and publishes each as the
+appropriate terminal-event type. Open tasks replay as ``created``;
+the in-memory state thus rebuilds naturally on restart — same
+idempotency contract as ``RouteRunner._processed_tasks`` — for
+both open and resolved entries.
 
 The handler maintains an in-process state dict
-``{task_id → _StateEntry}``. The SSE source's bootstrap replays
-all open tasks as ``created`` events on daemon startup, so open-
-task state rebuilds naturally on restart — same idempotency
-contract as ``RouteRunner._processed_tasks``.
+``{task_id → _StateEntry}``.
 
 File writes are atomic: write to ``<path>.tmp``, fsync, then
 ``os.replace`` onto the final path. The .tmp file is cleaned up on
@@ -93,6 +101,7 @@ from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions._human_actionable import (
     human_blocking_route_name,
     is_human_actionable,
+    would_be_actionable,
 )
 
 __all__ = ["make_handler"]
@@ -222,21 +231,37 @@ def make_handler(
         prior = state.get(task.id)
 
         if event.type in _REMOVAL_EVENTS:
-            # Promote to resolved — keep in state for the TTL window.
-            # The event timestamp is the resolution date (local-tz
-            # date is what the operator sees in queries); using
-            # Lithos's canonical completed_at would require a payload
-            # shape we don't currently rely on, and for live events
-            # the two are within milliseconds anyway.
-            new_status = (
-                "completed" if event.type.endswith("completed") else "cancelled"
-            )
-            resolved_at = event.timestamp.astimezone().date()
-            state[task.id] = _StateEntry(
-                line=_render_resolved_line(task, new_status, resolved_at),
-                status=new_status,
-                resolved_at=resolved_at,
-            )
+            # Promote to resolved — but only for tasks that would have
+            # been actionable while open. Autonomous-route work that
+            # was never on the operator's view should not suddenly
+            # appear in "done this week" queries on completion
+            # (PR #21 review: terminal events must respect D6 the same
+            # way live re-eval does).
+            if not would_be_actionable(task, cfg.routes, obs):
+                ctx.logger.debug(
+                    "obsidian-projection: skipping terminal event %s for "
+                    "never-actionable task %s",
+                    event.type,
+                    task.id,
+                )
+                # Defensive: if the task somehow had a stale entry from
+                # a config change, drop it now.
+                state.pop(task.id, None)
+            else:
+                new_status = (
+                    "completed" if event.type.endswith("completed") else "cancelled"
+                )
+                # Prefer Lithos's canonical completed_at; fall back to
+                # the bus event's receive-at time only when the payload
+                # didn't carry one (e.g. a pre-`completed_at`-aware
+                # source). PR #21 review issue 3: receive-at drifts vs
+                # canonical date around reconnect/replay/tz boundaries.
+                resolved_at = _resolved_at_for(event, task)
+                state[task.id] = _StateEntry(
+                    line=_render_resolved_line(task, new_status, resolved_at),
+                    status=new_status,
+                    resolved_at=resolved_at,
+                )
         elif prior is not None and prior.status != "open":
             # Resolved entry — terminal status is final. Stale
             # claimed/released/updated events for the same task no-op;
@@ -284,7 +309,7 @@ def _task_from_payload(payload: Any) -> Task:
 
     The :class:`~lithos_loom.sources.lithos_event_stream.LithosEventStream`
     publishes the full Task shape (id, title, status, tags, metadata,
-    claims), so this is just dict-lookups, not a re-fetch.
+    claims, completed_at), so this is just dict-lookups, not a re-fetch.
     """
     return Task(
         id=str(payload["id"]),
@@ -293,7 +318,28 @@ def _task_from_payload(payload: Any) -> Task:
         tags=tuple(payload.get("tags") or ()),
         metadata=dict(payload.get("metadata") or {}),
         claims=tuple(payload.get("claims") or ()),
+        completed_at=_parse_completed_at(payload.get("completed_at")),
     )
+
+
+def _parse_completed_at(value: Any) -> datetime | None:
+    """Defensive ISO-8601 parse for ``completed_at`` from the SSE payload.
+
+    Returns ``None`` for missing / malformed values so the handler can
+    fall back to ``event.timestamp`` rather than crashing.
+    """
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        logger.warning(
+            "obsidian-projection: ignoring malformed completed_at=%r in payload",
+            value,
+        )
+        return None
 
 
 def _render_line(
@@ -367,6 +413,28 @@ def _render_resolved_line(task: Task, status: str, resolved_at: date) -> str:
     if isinstance(project, str) and project:
         parts.append(f"#project/{project}")
     return " ".join(parts)
+
+
+def _resolved_at_for(event: Event, task: Task) -> date:
+    """Pick the canonical resolution date for a terminal event.
+
+    Preference order (per PR #21 review issue 3):
+
+    1. ``task.completed_at`` from the SSE payload — this is Lithos's
+       canonical timestamp, written when the task transitioned to a
+       terminal state. Stable across reconnect-replay, restart, and
+       any future bootstrap-resolved-discovery path.
+    2. ``event.timestamp.astimezone().date()`` — the bus event's
+       receive-at time. Fallback only; drifts vs. canonical for
+       delayed/replayed events but matches the local-tz "today" the
+       operator sees.
+
+    Both branches return a local-tz ``date`` so the rendered marker
+    matches the operator's calendar.
+    """
+    if task.completed_at is not None:
+        return task.completed_at.astimezone().date()
+    return event.timestamp.astimezone().date()
 
 
 def _evict_expired(

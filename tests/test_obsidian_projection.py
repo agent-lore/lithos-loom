@@ -1095,10 +1095,23 @@ async def test_duplicate_dep_ids_deduped_preserving_first_occurrence(
 # ── US13 resolved-task TTL lingering ───────────────────────────────────
 
 
-def _ts_at(d: date) -> datetime:
-    """Build a UTC datetime at midday on ``d`` so .astimezone().date() is
-    deterministic regardless of host timezone (within ±12h)."""
-    return datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=UTC)
+class _Missing:
+    """Sentinel marker — distinguishes "argument not passed" from
+    "explicitly passed ``None``" in ``_resolved_event``."""
+
+
+_MISSING = _Missing()
+
+
+def _local_noon(d: date) -> datetime:
+    """Build a tz-aware datetime anchored at noon-local on ``d``.
+
+    Used for both ``Event.timestamp`` and ``payload["completed_at"]`` so
+    ``.astimezone().date()`` round-trips back to ``d`` regardless of
+    host timezone (the previous UTC-noon helper flipped dates on
+    +13/+14 offsets — Copilot review on PR #21).
+    """
+    return datetime(d.year, d.month, d.day, 12, 0, 0).astimezone()
 
 
 def _resolved_event(
@@ -1107,20 +1120,37 @@ def _resolved_event(
     task_id: str,
     title: str = "test task",
     when: date = _TODAY,
+    completed_at: date | None | _Missing = _MISSING,
+    tags: tuple[str, ...] = (),
     metadata: Mapping[str, Any] | None = None,
+    claims: tuple[Mapping[str, Any], ...] = (),
 ) -> Event:
-    """Build a completed/cancelled event whose timestamp lands on
-    ``when`` regardless of host tz."""
+    """Build a completed/cancelled event for the obsidian-projection handler.
+
+    Sets payload ``completed_at`` to ``_local_noon(when)`` by default —
+    the handler's canonical resolution-date source after PR #21 review.
+    Pass ``completed_at=None`` to exercise the fallback-to-event-timestamp
+    path; pass ``completed_at=<date>`` to anchor it elsewhere than
+    ``when`` (e.g. for "payload wins over event timestamp" tests).
+    """
+    completed_at_iso: str | None
+    if isinstance(completed_at, _Missing):
+        completed_at_iso = _local_noon(when).isoformat()
+    elif completed_at is None:
+        completed_at_iso = None
+    else:
+        completed_at_iso = _local_noon(completed_at).isoformat()
     return Event(
         type=event_type,
-        timestamp=_ts_at(when),
+        timestamp=_local_noon(when),
         payload={
             "id": task_id,
             "title": title,
             "status": "completed" if event_type.endswith("completed") else "cancelled",
-            "tags": [],
+            "tags": list(tags),
             "metadata": dict(metadata or {}),
-            "claims": [],
+            "claims": list(claims),
+            "completed_at": completed_at_iso,
         },
     )
 
@@ -1243,28 +1273,134 @@ async def test_resolved_line_omits_priority_dep_due_route_markers(
     assert "#lithos/" not in line
 
 
-async def test_completed_event_for_untracked_task_creates_resolved_entry(
+async def test_completed_event_for_untracked_orphan_creates_resolved_entry(
     tmp_path: Path,
 ) -> None:
-    """Behaviour change vs the deleted US8 test: a completed event for a
-    task we never tracked is no longer a no-op — it adds a fresh
-    resolved entry. The Lithos-side completion of a task that was never
-    actionable to this operator is still historical record worth showing
-    in 'done this week' queries during the TTL window."""
+    """Behaviour change vs the deleted US8 test: a completed event for an
+    untracked task is no longer always a no-op. When ``would_be_actionable``
+    is True (orphan with no matching route → first D6 disjunct), the
+    event adds a fresh resolved entry — this is the path the
+    bootstrap-resolved restart recovery (LithosEventStream
+    ``bootstrap_resolved_window``) relies on to rehydrate Monday's
+    completed tasks into Wednesday's projection."""
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg, today_provider=_fixed_today)
     await handler(
         _resolved_event(
             "lithos.task.completed",
-            task_id="ghost",
-            title="ghost task",
+            task_id="orph",
+            title="orphan done",
             when=_TODAY,
         ),
         _ctx(),
     )
     assert _projected_line(tmp_path) == (
-        "- [x] ghost task ✅ 2026-05-20 🆔 lithos:ghost"
+        "- [x] orphan done ✅ 2026-05-20 🆔 lithos:orph"
     )
+
+
+async def test_completed_event_for_autonomous_route_task_does_not_project(
+    tmp_path: Path,
+) -> None:
+    """PR #21 review issue 2: terminal events must respect D6 the same
+    way live re-evaluation does. An autonomous-route task that was
+    hidden while open should NOT appear in the resolved-task projection
+    just because Lithos transitioned it to completed."""
+    routes = (
+        RouteConfig(
+            name="auto",
+            command="echo",
+            match=RouteMatch(tags=("trigger:auto",)),
+            human_blocking=False,
+        ),
+    )
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed",
+            task_id="auto-done",
+            title="automation ran",
+            tags=("trigger:auto",),
+            when=_TODAY,
+        ),
+        _ctx(),
+    )
+    assert not (tmp_path / "_lithos/tasks.md").exists(), (
+        "autonomous-route task that completed must NOT join the projection"
+    )
+
+
+async def test_completed_event_for_human_blocking_claim_promotes(
+    tmp_path: Path,
+) -> None:
+    """A task with tags matching a human_blocking route AND a claim by
+    that route (D6 second disjunct) is would-be-actionable and should
+    project as resolved on completion."""
+    routes = (_human_blocking_route(name="review-human"),)
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed",
+            task_id="hb-done",
+            title="reviewed",
+            tags=("trigger:review-human",),
+            claims=({"agent": "loom", "aspect": "review-human"},),
+            when=_TODAY,
+        ),
+        _ctx(),
+    )
+    assert "lithos:hb-done" in (tmp_path / "_lithos/tasks.md").read_text()
+
+
+async def test_resolved_at_prefers_payload_completed_at_over_event_timestamp(
+    tmp_path: Path,
+) -> None:
+    """PR #21 review issue 3: Lithos's canonical ``completed_at`` is the
+    truth for the resolution date. Event.timestamp is "when Loom
+    received the event", which drifts under reconnect/replay/restart.
+    When both are present and differ, the payload wins."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    # Event "received" today, but Lithos says the task was completed
+    # three days ago. Render the canonical date, not today.
+    three_days_ago = _TODAY - timedelta(days=3)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed",
+            task_id="canon",
+            title="canonical",
+            when=_TODAY,
+            completed_at=three_days_ago,
+        ),
+        _ctx(),
+    )
+    line = _projected_line(tmp_path)
+    assert "✅ 2026-05-17" in line, line
+    assert "2026-05-20" not in line, line
+
+
+async def test_resolved_at_falls_back_to_event_timestamp_when_payload_silent(
+    tmp_path: Path,
+) -> None:
+    """Backwards-compat: an older SSE source / replay path that doesn't
+    include ``completed_at`` in the payload falls back to
+    ``event.timestamp``. The marker is still rendered (this path is
+    less canonical but doesn't crash)."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _resolved_event(
+            "lithos.task.completed",
+            task_id="fb",
+            title="fallback",
+            when=_TODAY,
+            completed_at=None,  # explicit: payload has no completed_at
+        ),
+        _ctx(),
+    )
+    assert "✅ 2026-05-20" in _projected_line(tmp_path)
 
 
 # TTL lingering / eviction

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -124,23 +125,30 @@ class _FakeAconnect:
 class _FakeClient:
     """Fake ``LithosClient`` with scripted ``task_list`` responses.
 
-    The first ``task_list`` call returns ``bootstrap``. Subsequent
-    calls (used by ``_enrich`` to refresh the cache on cache miss)
-    return ``refresh_responses`` if provided, else ``bootstrap`` again.
-    A ``RuntimeError`` (or any exception) in ``refresh_responses`` is
-    raised instead of returned, so tests can assert reconnect behaviour
-    when enrichment fails.
+    For ``status="open"`` the first call returns ``bootstrap``;
+    subsequent open calls (used by ``_enrich`` to refresh the cache on
+    cache miss) consume ``refresh_responses`` if provided, else return
+    ``bootstrap`` again. A ``RuntimeError`` (or any exception) in
+    ``refresh_responses`` is raised instead of returned.
+
+    For ``status="completed"`` / ``status="cancelled"`` (used by
+    ``_bootstrap_resolved`` when ``bootstrap_resolved_window`` is set),
+    the call returns the corresponding ``bootstrap_*`` list, or empty.
     """
 
     def __init__(
         self,
         *,
         bootstrap: list[Task] | None = None,
+        bootstrap_completed: list[Task] | None = None,
+        bootstrap_cancelled: list[Task] | None = None,
         refresh_responses: list[list[Task] | Exception] | None = None,
     ) -> None:
         self._bootstrap = list(bootstrap or [])
+        self._bootstrap_completed = list(bootstrap_completed or [])
+        self._bootstrap_cancelled = list(bootstrap_cancelled or [])
         self._refresh_responses = list(refresh_responses or [])
-        self._first_call = True
+        self._first_open_call = True
         self.task_list_calls: list[dict[str, Any]] = []
 
     async def task_list(
@@ -150,8 +158,13 @@ class _FakeClient:
         with_claims: bool = False,
     ) -> list[Task]:
         self.task_list_calls.append({"status": status, "with_claims": with_claims})
-        if self._first_call:
-            self._first_call = False
+        if status == "completed":
+            return list(self._bootstrap_completed)
+        if status == "cancelled":
+            return list(self._bootstrap_cancelled)
+        # status == "open" or None
+        if self._first_open_call:
+            self._first_open_call = False
             return list(self._bootstrap)
         if self._refresh_responses:
             nxt = self._refresh_responses.pop(0)
@@ -179,6 +192,7 @@ def _stream(
     aconnect: _FakeAconnect,
     reconnect_backoff_seconds: float = 0.001,
     max_reconnect_backoff_seconds: float = 0.01,
+    bootstrap_resolved_window: timedelta | None = None,
 ) -> LithosEventStream:
     """Build a stream with the fake aconnect injected."""
     return LithosEventStream(
@@ -187,6 +201,7 @@ def _stream(
         events_url="http://lithos.test/events",
         reconnect_backoff_seconds=reconnect_backoff_seconds,
         max_reconnect_backoff_seconds=max_reconnect_backoff_seconds,
+        bootstrap_resolved_window=bootstrap_resolved_window,
         _aconnect_sse=aconnect,
     )
 
@@ -264,6 +279,7 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
         "tags": ["trigger:test"],
         "metadata": {"depends_on": ["x"]},
         "claims": [],
+        "completed_at": None,
     }
 
 
@@ -1125,3 +1141,173 @@ async def test_stream_passes_timeout_to_httpx_client_factory() -> None:
 
     assert factory_calls, "expected at least one client factory invocation"
     assert factory_calls[0].get("timeout") is custom_timeout
+
+
+# ── Bootstrap-resolved (PR #21 review issue 1) ─────────────────────────
+
+
+def _resolved_task(
+    id: str,
+    *,
+    status: str = "completed",
+    completed_at: datetime | None = None,
+) -> Task:
+    return Task(
+        id=id,
+        title=f"task {id}",
+        status=status,
+        tags=(),
+        metadata={},
+        claims=(),
+        completed_at=completed_at,
+    )
+
+
+async def test_bootstrap_resolved_publishes_completed_and_cancelled_within_window() -> (
+    None
+):
+    """When bootstrap_resolved_window is set, the source over-fetches
+    completed + cancelled tasks and publishes each as the appropriate
+    terminal-event type — the restart-recovery path that lets the
+    obsidian-projection handler rehydrate its TTL lingering window."""
+    bus = EventBus()
+    sub = bus.subscribe(
+        event_types=[
+            "lithos.task.created",
+            "lithos.task.completed",
+            "lithos.task.cancelled",
+        ]
+    )
+    now = datetime.now(UTC)
+    recent = now - timedelta(days=2)
+    completed_in_window = _resolved_task(
+        "c-in", status="completed", completed_at=recent
+    )
+    cancelled_in_window = _resolved_task(
+        "x-in", status="cancelled", completed_at=recent
+    )
+    client = _FakeClient(
+        bootstrap=[],
+        bootstrap_completed=[completed_in_window],
+        bootstrap_cancelled=[cancelled_in_window],
+    )
+    aconnect = _FakeAconnect(connections=[[]])
+    source = _stream(
+        client=client,
+        bus=bus,
+        aconnect=aconnect,
+        bootstrap_resolved_window=timedelta(days=7),
+    )
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    events = _drain(sub)
+    types = [t for t, _ in events]
+    assert "lithos.task.completed" in types
+    assert "lithos.task.cancelled" in types
+    # All three list calls happened: open + completed + cancelled.
+    statuses = [call["status"] for call in client.task_list_calls]
+    assert statuses[:3] == ["open", "completed", "cancelled"]
+
+
+async def test_bootstrap_resolved_filters_tasks_outside_window() -> None:
+    """Tasks resolved older than the window are dropped client-side
+    (no `resolved_since` filter upstream yet — `lithos#286`)."""
+    bus = EventBus()
+    sub = bus.subscribe(
+        event_types=[
+            "lithos.task.created",
+            "lithos.task.completed",
+            "lithos.task.cancelled",
+        ]
+    )
+    now = datetime.now(UTC)
+    in_window = _resolved_task("in", completed_at=now - timedelta(days=2))
+    out_of_window = _resolved_task("out", completed_at=now - timedelta(days=30))
+    client = _FakeClient(
+        bootstrap=[],
+        bootstrap_completed=[in_window, out_of_window],
+    )
+    aconnect = _FakeAconnect(connections=[[]])
+    source = _stream(
+        client=client,
+        bus=bus,
+        aconnect=aconnect,
+        bootstrap_resolved_window=timedelta(days=7),
+    )
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    ids = [payload["id"] for _, payload in _drain(sub)]
+    assert "in" in ids
+    assert "out" not in ids
+
+
+async def test_bootstrap_resolved_skipped_when_window_is_none() -> None:
+    """Default (no bootstrap_resolved_window) means open-only bootstrap
+    — route-runner and other source consumers don't pay for an unused
+    over-fetch."""
+    bus = EventBus()
+    sub = bus.subscribe(
+        event_types=[
+            "lithos.task.created",
+            "lithos.task.completed",
+            "lithos.task.cancelled",
+        ]
+    )
+    client = _FakeClient(
+        bootstrap=[],
+        bootstrap_completed=[_resolved_task("c1", completed_at=datetime.now(UTC))],
+    )
+    aconnect = _FakeAconnect(connections=[[]])
+    source = _stream(
+        client=client, bus=bus, aconnect=aconnect, bootstrap_resolved_window=None
+    )
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _drain(sub) == []
+    statuses = [call["status"] for call in client.task_list_calls]
+    assert "completed" not in statuses
+    assert "cancelled" not in statuses
+
+
+async def test_bootstrap_resolved_skips_tasks_without_completed_at() -> None:
+    """A resolved task whose payload is missing completed_at (schema
+    drift) is silently skipped — we can't anchor a TTL window without
+    a timestamp, so dropping is safer than guessing."""
+    bus = EventBus()
+    sub = bus.subscribe(
+        event_types=[
+            "lithos.task.created",
+            "lithos.task.completed",
+            "lithos.task.cancelled",
+        ]
+    )
+    client = _FakeClient(
+        bootstrap=[],
+        bootstrap_completed=[_resolved_task("no-ts", completed_at=None)],
+    )
+    aconnect = _FakeAconnect(connections=[[]])
+    source = _stream(
+        client=client,
+        bus=bus,
+        aconnect=aconnect,
+        bootstrap_resolved_window=timedelta(days=7),
+    )
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _drain(sub) == []
