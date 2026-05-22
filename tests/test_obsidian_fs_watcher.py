@@ -368,8 +368,8 @@ async def test_priority_emoji_table_matches_projection_table() -> None:
     other must change too — same enum, same emoji set, no missing
     keys, no swapped pairs. Anything else means an emoji edit would
     parse to a different enum than the projection rendered for."""
+    from lithos_loom.render import PRIORITY_EMOJI as _PRIORITY_EMOJI
     from lithos_loom.sources.obsidian_fs_watcher import EMOJI_TO_PRIORITY
-    from lithos_loom.subscriptions._obsidian_projection import _PRIORITY_EMOJI
 
     assert set(EMOJI_TO_PRIORITY.values()) == set(_PRIORITY_EMOJI.keys())
     for enum_value, emoji in _PRIORITY_EMOJI.items():

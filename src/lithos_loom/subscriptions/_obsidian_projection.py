@@ -117,17 +117,25 @@ import contextlib
 import hashlib
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from lithos_loom.bus import Event
-from lithos_loom.config import LoomConfig, RouteConfig
+from lithos_loom.config import LoomConfig
 from lithos_loom.lithos_client import Task
+from lithos_loom.render import (
+    render_line as _render_line,
+)
+from lithos_loom.render import (
+    render_resolved_line as _render_resolved_line,
+)
+from lithos_loom.render import (
+    validated_priority as _validated_priority,
+)
 from lithos_loom.subscriptions._human_actionable import (
-    human_blocking_route_name,
     is_human_actionable,
     would_be_actionable,
 )
@@ -197,13 +205,10 @@ _FILE_HEADER = (
     "new tasks (Slice 3+). %%"
 )
 
-_PRIORITY_EMOJI: dict[str, str] = {
-    "highest": "🔺",
-    "high": "⏫",
-    "medium": "🔼",
-    "low": "🔽",
-    "lowest": "⏬",
-}
+# ``_PRIORITY_EMOJI`` lives in :mod:`lithos_loom.render` now (extracted
+# in Slice 3 so the capture-macro CLI can re-render lines identical to
+# what the projection writes). Aliased above as ``_PRIORITY_EMOJI`` so
+# existing references in this module keep working.
 
 _STATUS_TO_MARKER: dict[str, str] = {
     "open": "[ ]",
@@ -214,12 +219,6 @@ _STATUS_TO_MARKER: dict[str, str] = {
 emits. Used by ``_flush`` to publish per-task marker state into the
 shared :class:`ProjectionSyncState` so the fs watcher (US23) can tell
 projection writes from user edits on a per-task basis."""
-"""D18 enum (`docs/prd/integration.md:102`) → Tasks-plugin emoji.
-
-Strict case-sensitive match: the Lithos surface owns this enum, and
-lenient matching would let drift go silent and complicate the
-reverse-sync (Slice 2 US21 needs the round-trip to be lossless).
-"""
 
 
 def make_handler(
@@ -546,79 +545,6 @@ def _parse_resolved_at(value: Any) -> datetime | None:
         return None
 
 
-def _render_line(
-    task: Task,
-    routes: Sequence[RouteConfig],
-    today: date,
-) -> str:
-    """Render one Tasks-plugin task line for an open task.
-
-    Field order (omit optional markers when they don't apply):
-
-        - [ ] <title> [<prio>] 🆔 lithos:<id> [⛔ lithos:<dep>]... \
-            [📅 <date>] [#project/<slug>] [#lithos/<route>]
-
-    Titles with embedded newlines (rare in Lithos but possible) are
-    collapsed to spaces so the markdown line stays single-line. The
-    ``🆔 lithos:<id>`` marker is what lets US14's dedup identify the
-    same task across rewrites.
-
-    US13 keeps completed/cancelled lines around for
-    ``resolved_ttl_days`` (see :func:`_render_resolved_line`).
-    """
-    title = " ".join(task.title.split())  # collapse \n, \r, runs of spaces
-    parts: list[str] = [f"- [ ] {title}"]
-
-    priority = _priority_marker(task)
-    if priority is not None:
-        parts.append(priority)
-
-    parts.append(f"🆔 lithos:{task.id}")
-
-    parts.extend(_dep_markers(task))
-
-    due = _due_date_str(task, routes, today)
-    if due is not None:
-        parts.append(f"📅 {due}")
-
-    project = task.metadata.get("project")
-    if isinstance(project, str) and project:
-        parts.append(f"#project/{project}")
-
-    route_name = human_blocking_route_name(task, routes)
-    if route_name:
-        parts.append(f"#lithos/{route_name}")
-
-    return " ".join(parts)
-
-
-def _render_resolved_line(task: Task, status: str, resolved_at: date) -> str:
-    """Render the historical-line shape for completed/cancelled tasks.
-
-    Matches the PRD example exactly (``docs/prd/integration.md:253-255``):
-
-        - [x] <title> ✅ <date> 🆔 lithos:<id> [#project/<slug>]
-        - [-] <title> ❌ <date> 🆔 lithos:<id> [#project/<slug>]
-
-    Resolved tasks drop priority / dep / due-date / route-name
-    markers — they are historical record, not actionable work. The
-    ``#project/<slug>`` tag is kept so the operator's
-    ``done-this-week-for-project-X`` queries still cluster correctly.
-    """
-    checkbox = "[x]" if status == "completed" else "[-]"
-    marker_emoji = "✅" if status == "completed" else "❌"
-    title = " ".join(task.title.split())
-    parts: list[str] = [
-        f"- {checkbox} {title}",
-        f"{marker_emoji} {resolved_at.isoformat()}",
-        f"🆔 lithos:{task.id}",
-    ]
-    project = task.metadata.get("project")
-    if isinstance(project, str) and project:
-        parts.append(f"#project/{project}")
-    return " ".join(parts)
-
-
 def _resolved_at_for(event: Event, task: Task) -> date:
     """Pick the canonical resolution date for a terminal event.
 
@@ -666,142 +592,6 @@ def _evict_expired(
             del state[tid]
             evicted.append(tid)
     return evicted
-
-
-def _priority_marker(task: Task) -> str | None:
-    """Map ``task.metadata.priority`` (D18 enum) to its Tasks-plugin emoji.
-
-    Returns ``None`` for absent / non-string / unknown-enum values so
-    the renderer simply omits the marker. Unknown values are warn-
-    logged once per event — same shape as :func:`_parse_scheduled_for`,
-    because malformed metadata must never crash the projection.
-    """
-    value = task.metadata.get("priority")
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        logger.warning(
-            "obsidian-projection: ignoring non-string metadata.priority=%r",
-            value,
-        )
-        return None
-    emoji = _PRIORITY_EMOJI.get(value)
-    if emoji is None:
-        logger.warning(
-            "obsidian-projection: ignoring unknown metadata.priority=%r "
-            "(expected one of: %s)",
-            value,
-            ", ".join(_PRIORITY_EMOJI),
-        )
-    return emoji
-
-
-def _validated_priority(task: Task) -> str | None:
-    """Return ``task.metadata.priority`` only when it's a known enum
-    value, else ``None``.
-
-    Parallel to :func:`_priority_marker` but returns the enum string
-    rather than the emoji — :class:`_StateEntry` carries the enum so
-    ``_flush`` can pass per-task priority into
-    :meth:`ProjectionSyncState.record_projection_write` without
-    re-parsing the rendered line. Deliberately silent on malformed
-    values: :func:`_priority_marker` already warns on the same code
-    path (called by :func:`_render_line`), so we'd duplicate the
-    warning if this also logged.
-    """
-    value = task.metadata.get("priority")
-    if isinstance(value, str) and value in _PRIORITY_EMOJI:
-        return value
-    return None
-
-
-def _dep_markers(task: Task) -> list[str]:
-    """Render one ``⛔ lithos:<dep_id>`` marker per entry in
-    ``task.metadata.depends_on`` (D19).
-
-    Preserves list order; dedups duplicate IDs (first occurrence
-    wins) since the marker is a visual signal not a count. Returns
-    ``[]`` for absent / ``None`` / non-list / all-invalid inputs.
-    Non-string and empty-string entries are skipped with a single
-    warn per event — same shape as :func:`_priority_marker` and
-    :func:`_parse_scheduled_for`, so malformed metadata can never
-    crash the subscription loop.
-    """
-    raw = task.metadata.get("depends_on")
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        logger.warning(
-            "obsidian-projection: ignoring non-list metadata.depends_on=%r",
-            raw,
-        )
-        return []
-
-    seen: set[str] = set()
-    markers: list[str] = []
-    bad: list[Any] = []
-    for entry in raw:
-        if not isinstance(entry, str) or not entry:
-            bad.append(entry)
-            continue
-        if entry in seen:
-            continue
-        seen.add(entry)
-        markers.append(f"⛔ lithos:{entry}")
-    if bad:
-        logger.warning(
-            "obsidian-projection: skipping invalid entries in metadata.depends_on=%r",
-            bad,
-        )
-    return markers
-
-
-def _due_date_str(
-    task: Task,
-    routes: Sequence[RouteConfig],
-    today: date,
-) -> str | None:
-    """D10 due-date semantics.
-
-    Hybrid policy from ``docs/prd/integration.md`` D10:
-
-    - ``task.metadata.scheduled_for`` (if present and parseable) is an
-      explicit override and wins for all cases.
-    - Else, tasks claimed by a ``human_blocking = true`` route render
-      ``today`` so they surface in the operator's daily query.
-    - Else (orphan / backlog), no ``📅`` marker is emitted; the user's
-      Inbox query (open tasks without due/scheduled/start date) picks
-      them up naturally.
-    """
-    override = _parse_scheduled_for(task.metadata.get("scheduled_for"))
-    if override is not None:
-        return override.isoformat()
-    if human_blocking_route_name(task, routes) is not None:
-        return today.isoformat()
-    return None
-
-
-def _parse_scheduled_for(value: Any) -> date | None:
-    """Best-effort parse of ``metadata.scheduled_for``.
-
-    Accepts ``YYYY-MM-DD`` and full ISO 8601 datetime strings; returns
-    ``None`` for anything we can't read. Malformed metadata must never
-    crash the projection — a warn-and-fall-through is the right shape.
-    """
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        # Datetime form ('2026-06-15T09:00:00Z' etc.). fromisoformat
-        # in 3.11+ accepts the trailing 'Z'.
-        if "T" in value:
-            return datetime.fromisoformat(value).date()
-        return date.fromisoformat(value)
-    except ValueError:
-        logger.warning(
-            "obsidian-projection: ignoring malformed metadata.scheduled_for=%r",
-            value,
-        )
-        return None
 
 
 def _render_file(state: dict[str, _StateEntry]) -> str:
