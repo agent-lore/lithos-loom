@@ -35,6 +35,7 @@ from lithos_loom.bus import EventBus
 from lithos_loom.config import LogLevel, LoomConfig, load_config
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
+from lithos_loom.sources.obsidian_fs_watcher import ObsidianFsWatcher
 from lithos_loom.subscriptions import (
     Handler,
     SubscriptionContext,
@@ -43,6 +44,7 @@ from lithos_loom.subscriptions import (
 from lithos_loom.subscriptions._obsidian_projection import (
     make_handler as make_obsidian_projection_handler,
 )
+from lithos_loom.sync_state import ProjectionSyncState
 
 _LEVEL_MAP: dict[LogLevel, int] = {
     "debug": logging.DEBUG,
@@ -111,10 +113,6 @@ async def _amain(cfg: LoomConfig) -> int:
         )
         return 1
 
-    # Short-circuit when there's nothing to wire (Copilot review on
-    # #17): no point opening a LithosClient or running the SSE source
-    # if no obsidian subscription is configured. Just install signal
-    # handlers and park.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed: list[int] = []
@@ -124,14 +122,41 @@ async def _amain(cfg: LoomConfig) -> int:
             installed.append(sig)
 
     try:
+        # Slice 2 US16/US23 wire the fs watcher as a first-class source
+        # whose lifecycle is gated on ``[obsidian_sync]`` alone, not on
+        # whether a projection subscription is present. Without
+        # projection state to compare against, the watcher's per-task
+        # transition check never fires (every parsed task has
+        # ``prior is None``) and no events are published — runtime
+        # behaviour is identical to the previous "idle and warn" path,
+        # but the source itself is now independently spawnable so a
+        # future story (e.g. Slice 3's capture macro populating
+        # ``sync_state`` by another route) doesn't have to re-plumb
+        # the spawn gate.
+        sync_state = ProjectionSyncState()
+        bus = EventBus()
+        fs_watcher = ObsidianFsWatcher(
+            bus=bus,
+            tasks_path=obs.vault_path / obs.tasks_file,
+            sync_state=sync_state,
+        )
+        tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(fs_watcher.run(), name="obsidian-fs-watcher"),
+        ]
+
         if not obsidian_specs:
             logger.warning(
                 "obsidian-sync: no obsidian-projection subscription "
-                "configured; child will idle until SIGTERM. Add a "
-                "[[subscriptions]] block with action='obsidian-projection' "
-                "to enable projection."
+                "configured; fs watcher runs but emits nothing without "
+                "projection state. Add a [[subscriptions]] block with "
+                "action='obsidian-projection' to populate it."
             )
-            await stop_event.wait()
+            try:
+                await stop_event.wait()
+            finally:
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             return 0
 
         spec = obsidian_specs[0]
@@ -143,7 +168,7 @@ async def _amain(cfg: LoomConfig) -> int:
         # into zero on-disk writes (US14 "idempotent re-runs").
         my_handlers: dict[str, Handler] = {
             "obsidian-projection": make_obsidian_projection_handler(
-                cfg, debounce_seconds=0.05
+                cfg, debounce_seconds=0.05, sync_state=sync_state
             ),
         }
 
@@ -158,12 +183,10 @@ async def _amain(cfg: LoomConfig) -> int:
             # filter (lithos#286) before publishing them as terminal events.
             source = LithosEventStream(
                 client=lithos,
-                bus=EventBus(),
+                bus=bus,
                 events_url=events_url,
                 bootstrap_resolved_window=timedelta(days=obs.resolved_ttl_days),
             )
-            # Re-bind the source's bus locally so the runners share it.
-            bus = source.bus
             ctx = SubscriptionContext(
                 lithos=lithos,
                 logger=logging.getLogger("lithos_loom.subscriptions"),
@@ -176,13 +199,10 @@ async def _amain(cfg: LoomConfig) -> int:
                 ctx=ctx,
             )
 
-            tasks: list[asyncio.Task[None]] = [
-                asyncio.create_task(source.run(), name="lithos-event-stream"),
-                *(
-                    asyncio.create_task(r.run(), name=f"sub-{r.spec.name}")
-                    for r in runners
-                ),
-            ]
+            tasks.append(asyncio.create_task(source.run(), name="lithos-event-stream"))
+            tasks.extend(
+                asyncio.create_task(r.run(), name=f"sub-{r.spec.name}") for r in runners
+            )
             try:
                 await stop_event.wait()
             finally:
