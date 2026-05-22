@@ -106,11 +106,15 @@ async def test_change_from_none_sets_priority_for_the_first_time() -> None:
 
 @pytest.mark.parametrize("enum_value", ["highest", "high", "medium", "low", "lowest"])
 async def test_all_five_priority_enum_values_round_trip(enum_value: str) -> None:
-    """Every D18 enum value forwards verbatim into the metadata patch."""
+    """Every D18 enum value forwards verbatim into the metadata patch.
+
+    Uses ``prior=None`` so the US22 ``prior == new`` short-circuit
+    can't fire for any of the parametrized values (every enum_value
+    is ``!= None``)."""
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos)
 
-    await handle(_event(prior="medium", new=enum_value), ctx)
+    await handle(_event(prior=None, new=enum_value), ctx)
 
     args = lithos.task_update.await_args.kwargs
     assert args["metadata"] == {"priority": enum_value}
@@ -204,3 +208,80 @@ async def test_lithos_error_propagates() -> None:
 
     with pytest.raises(RuntimeError, match="simulated lithos error"):
         await handle(_event(), ctx)
+
+
+# ── US22: payload-only idempotency short-circuit ───────────────────────
+
+
+async def test_skips_when_prior_equals_new(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``prior == new`` (both ``"high"``) → ``task_update`` NOT
+    called; INFO log mentions the idempotent skip. The fs-watcher
+    won't naturally emit prior==new in steady state (layer-3 diff
+    suppresses it) but a third-party producer or restart-replay
+    degenerate case might."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_priority_changed"):
+        await handle(_event(task_id="abc", prior="high", new="high"), ctx)
+
+    lithos.task_update.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "payload prior==new (high)" in m
+        and "skipping idempotent update for task abc" in m
+        for m in info_msgs
+    ), info_msgs
+
+
+async def test_skips_when_both_prior_and_new_are_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``None → None`` degenerate case: the watcher would never emit
+    this (no observable change), but the short-circuit must still
+    catch it if a third party publishes one."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_priority_changed"):
+        await handle(_event(task_id="abc", prior=None, new=None), ctx)
+
+    lithos.task_update.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "payload prior==new (None)" in m
+        and "skipping idempotent update for task abc" in m
+        for m in info_msgs
+    ), info_msgs
+
+
+async def test_does_not_skip_when_prior_none_new_set() -> None:
+    """``None → "high"`` (user added an emoji where none existed) is
+    a genuine change; the short-circuit must NOT trigger."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior=None, new="high"), ctx)
+
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"priority": "high"},
+    )
+
+
+async def test_does_not_skip_when_prior_set_new_none() -> None:
+    """``"high" → None`` (user deleted the emoji) is a genuine
+    change — the delete-semantics patch must still go through."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="high", new=None), ctx)
+
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"priority": None},
+    )
