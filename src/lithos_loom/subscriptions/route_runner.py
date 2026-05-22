@@ -191,8 +191,12 @@ class RouteRunner:
         await self._run_claimed_task(task_id, payload)
 
     async def _deps_satisfied(self, dep_ids: list[str]) -> bool:
+        # Use task_get (post-lithos#294) — only ``.status`` is read here,
+        # so skipping claim serialization with the dedicated single-task
+        # endpoint is a small per-call efficiency win, plus we get an
+        # explicit task_not_found envelope instead of an empty-list miss.
         for dep_id in dep_ids:
-            status = await self.lithos.task_status(task_id=dep_id)
+            status = await self.lithos.task_get(task_id=dep_id)
             if status is None or status.status != "completed":
                 return False
         return True

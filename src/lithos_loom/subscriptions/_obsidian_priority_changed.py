@@ -30,12 +30,12 @@ US22 idempotency
 
 US22 requires re-firing for an unchanged priority to be a no-op so
 source-replay on restart is safe. This is delivered jointly by the
-fs-watcher and this handler:
+fs-watcher and this handler, defence-in-depth:
 
-1. **Source-side (load-bearing).** The watcher's poll loop gates
-   every emission on ``prior_status is None: continue`` (see
-   ``obsidian_fs_watcher.py``: layer-3 loop). On a cold-start
-   restart, both ``_observed_priorities`` and
+1. **Source-side (load-bearing for cold-start replay).** The
+   watcher's poll loop gates every emission on ``prior_status is
+   None: continue`` (see ``obsidian_fs_watcher.py``: layer-3 loop).
+   On a cold-start restart, both ``_observed_priorities`` and
    ``sync_state.task_priority_markers`` are empty for every task,
    so the status-side ``prior_status is None`` check fires first
    and the ``continue`` short-circuits the entire loop iteration —
@@ -43,19 +43,25 @@ fs-watcher and this handler:
    are emitted on cold start. (Regression test:
    ``test_cold_start_restart_with_unchanged_file_emits_nothing``.)
 
-2. **Handler-side (belt-and-braces).** If a third-party producer
-   ever publishes a priority_changed event with ``prior == new``
-   (or the degenerate ``None → None`` case), the payload-only
-   short-circuit below catches it. The fs-watcher itself won't
-   emit such an event in steady state, but the architecture allows
-   for additional sources, so the handler enforces the invariant
-   too.
+2. **Handler-side payload short-circuit (cheap).** If a third-party
+   producer ever publishes a priority_changed event with
+   ``prior == new`` (or the degenerate ``None → None`` case), the
+   payload-only check below catches it before any RPC.
 
-A future upstream extension exposing ``metadata`` on
-``lithos_task_status`` (currently only ``id, title, status,
-claims``) would let the handler compare strictly against
-Lithos-side state — useful as a tightening but not required for
-US22 compliance, which the source-side gate already satisfies.
+3. **Handler-side Lithos pre-check (lithos#294 tightening).** Calls
+   ``task_get`` and skips when ``current.metadata.get("priority")``
+   already matches ``new``. Catches the case where the watcher
+   emits a genuine ``prior != new`` but Lithos already has ``new``
+   as the canonical priority — e.g., another agent updated the
+   priority via a direct MCP call between watcher emission and
+   handler dispatch, or the sync_state baseline drifted from
+   Lithos truth without the watcher noticing.
+
+The three layers are ordered cheapest-first: payload check
+(no I/O) → Lithos read → Lithos write. If Lithos reports the task
+as ``task_not_found`` (returned as ``None`` from ``task_get``),
+the handler logs and skips rather than letting the subsequent
+``task_update`` fail.
 """
 
 from __future__ import annotations
@@ -86,18 +92,41 @@ async def handle(event: Event, ctx: SubscriptionContext) -> None:
     prior_str: str | None = str(prior) if prior is not None else None
     new_str: str | None = str(new) if new is not None else None
 
-    # US22 payload-only idempotency short-circuit. The fs-watcher's
-    # projection-known gate ("prior_status is None: continue") is the
-    # load-bearing US22 mechanism — it ensures cold-start restart
-    # emits zero priority_changed events. This handler-side check is
-    # belt-and-braces for third-party producers and the degenerate
-    # ``None → None`` case. See module docstring.
+    # US22 layer 2: payload-only short-circuit. Free (no I/O); catches
+    # degenerate ``prior == new`` publishes before reaching the
+    # Lithos-side pre-check below. The fs-watcher won't naturally
+    # emit such events in steady state.
     if prior_str == new_str:
         ctx.logger.info(
             "obsidian-priority-changed: payload prior==new (%s); "
             "skipping idempotent update for task %s",
             prior_str,
             task_id,
+        )
+        return
+
+    # US22 layer 3: Lithos-side strict pre-check (lithos#294). Reads
+    # the canonical task and skips when ``metadata.priority`` already
+    # matches ``new`` — catches the case where the watcher emits a
+    # genuine prior!=new but Lithos already has the new value (another
+    # agent updated it, or sync_state drifted from Lithos truth). Uses
+    # ``task_get`` rather than ``task_status`` since claims aren't
+    # needed here.
+    current = await ctx.lithos.task_get(task_id=task_id)
+    if current is None:
+        ctx.logger.info(
+            "obsidian-priority-changed: task %s not found in Lithos "
+            "(possibly deleted); skipping",
+            task_id,
+        )
+        return
+    current_priority = current.metadata.get("priority")
+    if current_priority == new_str:
+        ctx.logger.info(
+            "obsidian-priority-changed: task %s already at priority %s; "
+            "skipping idempotent update",
+            task_id,
+            new_str,
         )
         return
 

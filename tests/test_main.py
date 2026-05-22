@@ -65,7 +65,7 @@ def _task(
 class _FakeLithos:
     """Async-context-manager mock that records every call on it.
 
-    Read-only methods (``task_list``, ``task_status``) are explicit.
+    Read-only methods (``task_list``, ``task_get``) are explicit.
     Anything else routed through ``__getattr__`` is recorded under
     ``mutating_calls`` so tests can assert dry-run stays non-mutating.
     """
@@ -79,7 +79,7 @@ class _FakeLithos:
         self._tasks = list(tasks)
         self._dep_statuses = dict(dep_statuses or {})
         self.task_list_calls: list[dict[str, Any]] = []
-        self.task_status_calls: list[str] = []
+        self.task_get_calls: list[str] = []
         self.mutating_calls: list[str] = []
 
     async def __aenter__(self) -> _FakeLithos:
@@ -97,8 +97,11 @@ class _FakeLithos:
         self.task_list_calls.append({"status": status, "with_claims": with_claims})
         return list(self._tasks)
 
-    async def task_status(self, *, task_id: str) -> Task | None:
-        self.task_status_calls.append(task_id)
+    async def task_get(self, *, task_id: str) -> Task | None:
+        """Post-lithos#294: dry-run resolves dep statuses via task_get
+        (not task_status). Both surfaces are read-only; this stub only
+        implements the one the production code calls."""
+        self.task_get_calls.append(task_id)
         if task_id not in self._dep_statuses:
             return None  # task_not_found
         return Task(
@@ -345,8 +348,8 @@ def test_dry_run_route_deferred_when_dependencies_not_completed(
     assert (
         "deferred" in route_row.lower() or "deps not complete" in route_row.lower()
     ), route_row
-    # Dep-1 must have been resolved via task_status.
-    assert "dep-1" in fake.task_status_calls
+    # Dep-1 must have been resolved via task_get (post-lithos#294).
+    assert "dep-1" in fake.task_get_calls
 
 
 def test_dry_run_route_fires_when_dependencies_completed(

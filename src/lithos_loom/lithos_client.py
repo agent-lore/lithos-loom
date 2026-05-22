@@ -42,18 +42,23 @@ __all__ = ["LithosClient", "Task"]
 
 @dataclass(frozen=True)
 class Task:
-    """A Lithos task as returned by ``lithos_task_list``.
+    """A Lithos task as returned by ``lithos_task_list``,
+    ``lithos_task_status``, and ``lithos_task_get`` (lithos#294).
 
-    Field set covers what the poller diffs over plus what the route-runner
-    needs to make claim/match decisions. ``resolved_at`` is the canonical
-    Lithos timestamp for terminal-state transitions — written by both
-    ``complete_task`` and ``cancel_task`` (lithos#286 / PR #288, which
-    also renamed it from ``completed_at`` server-side with no BC alias).
-    The obsidian-projection handler uses it as the resolution-date anchor
-    for ``✅``/``❌`` markers and TTL eviction (US13). The Lithos spec
-    also returns ``description``, ``created_by``, and ``created_at``;
-    those are ignored for slice 0 and can be added without breaking
-    call sites.
+    Field set mirrors the full Lithos task envelope so handlers can
+    read any persisted field without a plumbing PR. ``resolved_at`` is
+    the canonical Lithos timestamp for terminal-state transitions —
+    written by both ``complete_task`` and ``cancel_task`` (lithos#286
+    / PR #288, which also renamed it from ``completed_at`` server-side
+    with no BC alias). The obsidian-projection handler uses it as the
+    resolution-date anchor for ``✅``/``❌`` markers and TTL eviction
+    (US13).
+
+    ``description``, ``created_by``, ``created_at``, and ``outcome``
+    were added in lithos#294 (full task record on status + new
+    ``lithos_task_get`` tool). They default to falsy values so the
+    parser stays backwards-compatible with pre-#294 servers that
+    don't return them.
     """
 
     id: str
@@ -63,6 +68,10 @@ class Task:
     metadata: Mapping[str, Any]
     claims: tuple[Mapping[str, Any], ...]
     resolved_at: datetime | None = None
+    description: str | None = None
+    created_by: str = ""
+    created_at: datetime | None = None
+    outcome: str | None = None
 
 
 class LithosClient:
@@ -373,14 +382,20 @@ class LithosClient:
         await self._call("lithos_task_update", arguments)
 
     async def task_status(self, *, task_id: str) -> Task | None:
-        """Return the current status of a single task.
+        """Return the full record of a single task, including its
+        active claims.
 
-        Returns ``None`` when Lithos reports ``task_not_found`` (the task
-        was deleted entirely). All other error codes propagate as
-        :class:`LithosClientError`. The returned :class:`Task` carries the
-        fields ``lithos_task_status`` provides — ``id``, ``title``,
-        ``status``, ``claims`` — with empty ``tags`` and empty ``metadata``
-        (those fields are not exposed by the status endpoint).
+        Post-lithos#294 the response envelope is the full task record
+        (``id, title, description, status, created_by, created_at,
+        resolved_at, tags, metadata, outcome``) wrapped in a single-
+        element ``tasks`` list, plus the embedded ``claims`` array.
+        Returns ``None`` when Lithos reports the task as not found
+        (the historical ``{tasks: []}`` shape).
+
+        Prefer :meth:`task_get` when you don't need claims — it
+        returns the same record without the list wrapper or the
+        claim serialization cost, and uses an explicit
+        ``task_not_found`` error envelope instead of an empty list.
         """
         if self._session is None:
             raise LithosClientError(
@@ -397,6 +412,35 @@ class LithosClient:
                 return None
             raise
         return tasks[0] if tasks else None
+
+    async def task_get(self, *, task_id: str) -> Task | None:
+        """Return the full record of a single task without its claims.
+
+        Added in lithos#294 as the lightweight counterpart to
+        :meth:`task_status`: same task envelope, no claims, single-
+        object response shape (``{task: {...}}``), and an explicit
+        ``task_not_found`` error envelope on miss (mapped here to
+        ``None`` to match the :meth:`task_status` convention).
+
+        Use this for pre-checks where only the persisted task fields
+        matter — dependency resolution, idempotency gates,
+        ``metadata.priority`` comparisons — and reserve
+        :meth:`task_status` for callers that need claims.
+        """
+        if self._session is None:
+            raise LithosClientError(
+                "client_not_initialised",
+                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
+            )
+        result = await self._session.call_tool(
+            "lithos_task_get", arguments={"task_id": task_id}
+        )
+        try:
+            return _parse_task_get_response(result)
+        except LithosClientError as exc:
+            if exc.code == "task_not_found":
+                return None
+            raise
 
 
 # ── Pure parse helpers (heavily unit-tested) ───────────────────────────
@@ -430,6 +474,8 @@ def _parse_task(raw: Any) -> Task:
     try:
         tags_raw = raw.get("tags") or []
         claims_raw = raw.get("claims") or []
+        description_raw = raw.get("description")
+        outcome_raw = raw.get("outcome")
         return Task(
             id=str(raw["id"]),
             title=str(raw["title"]),
@@ -438,11 +484,37 @@ def _parse_task(raw: Any) -> Task:
             metadata=dict(raw.get("metadata") or {}),
             claims=tuple(dict(c) for c in claims_raw),
             resolved_at=_parse_iso_datetime(raw.get("resolved_at")),
+            description=str(description_raw) if description_raw is not None else None,
+            created_by=str(raw.get("created_by") or ""),
+            created_at=_parse_iso_datetime(raw.get("created_at")),
+            outcome=str(outcome_raw) if outcome_raw is not None else None,
         )
     except KeyError as exc:
         raise LithosClientError(
             "invalid_response", f"task entry missing required field: {exc.args[0]}"
         ) from exc
+
+
+def _parse_task_get_response(result: CallToolResult) -> Task:
+    """Parse the ``lithos_task_get`` single-object envelope (lithos#294).
+
+    Shape: ``{"task": {...}}`` on success;
+    ``{"status": "error", "code": "task_not_found", ...}`` when the
+    task doesn't exist (handled here by re-raising — the caller
+    method maps it to ``None``).
+    """
+    payload = _payload_from_result(result)
+    if not isinstance(payload, dict):
+        raise LithosClientError(
+            "invalid_response",
+            f"expected dict response, got {type(payload).__name__}",
+        )
+    _raise_if_error_envelope(payload)
+    if "task" not in payload:
+        raise LithosClientError(
+            "invalid_response", "missing 'task' key in lithos_task_get response"
+        )
+    return _parse_task(payload["task"])
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
