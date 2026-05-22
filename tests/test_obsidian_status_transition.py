@@ -8,6 +8,7 @@ directly with synthetic events and assert on a mocked
 
 from __future__ import annotations
 
+import itertools
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -161,26 +162,36 @@ def test_reopen_request_summary_uses_reopen_prefix() -> None:
     assert _REOPEN_REQUEST_SUMMARY.startswith("[ReopenRequested] ")
 
 
-# ── US20 side-effect: other transitions are silent no-ops ──────────────
+# ── US20: [/] and [>] are Obsidian-only conventions, always silent ──────
 
 
-@pytest.mark.parametrize(
-    ("prior", "new"),
-    [
-        ("[-]", "[ ]"),  # un-cancel — not in scope; PRD only covers [x]→[ ]
-        ("[ ]", "[/]"),  # in-progress — US20 no-op
-        ("[ ]", "[>]"),  # rescheduled — US20 no-op
-        ("[/]", "[>]"),  # arbitrary user marker transition
-        ("[x]", "[-]"),  # done → cancelled (weird but possible)
-        ("[ ]", "[ ]"),  # same-marker (won't actually fire from source, but safe)
-    ],
+_US20_MARKERS = ("[/]", "[>]")
+_ALL_MARKERS = ("[ ]", "[x]", "[-]", "[/]", "[>]")
+
+# Every (prior, new) where at least one side is [/] or [>]. Sorted for
+# deterministic parametrise IDs. Includes same-marker pairs even though
+# the fs-watcher source filters them out — the handler must still
+# no-op safely if one ever shows up via a future source.
+_US20_TRANSITIONS = sorted(
+    {
+        (p, n)
+        for p, n in itertools.product(_ALL_MARKERS, _ALL_MARKERS)
+        if p in _US20_MARKERS or n in _US20_MARKERS
+    }
 )
-async def test_other_transitions_are_silent_no_ops(prior: str, new: str) -> None:
-    """Every transition not in the dispatch table must NOT call Lithos.
 
-    Folds in US20's no-op-for-`[/]`/`[>]` requirement as a free side
-    effect of the dispatch-table design — the formal US20 PR will
-    just confirm this behaviour stays correct.
+
+@pytest.mark.parametrize(("prior", "new"), _US20_TRANSITIONS)
+async def test_in_progress_and_rescheduled_markers_are_silent_no_ops(
+    prior: str, new: str
+) -> None:
+    """US20: every transition involving ``[/]`` (in progress) or ``[>]``
+    (rescheduled) is an Obsidian-only convention and must never trigger
+    a Lithos call.
+
+    Anti-regression for any future change that tries to map, say,
+    ``[/] → [x]`` to ``task_complete`` — that would break this test
+    rather than slip past the generic catch-all below.
     """
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos)
@@ -192,19 +203,51 @@ async def test_other_transitions_are_silent_no_ops(prior: str, new: str) -> None
     lithos.finding_post.assert_not_awaited()
 
 
+@pytest.mark.parametrize("new_marker", _US20_MARKERS)
 async def test_unknown_transition_logged_at_debug(
-    caplog: pytest.LogCaptureFixture,
+    new_marker: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Skipped transitions leave a DEBUG breadcrumb so operators can
-    enable verbose logging to see what's flowing through."""
+    enable verbose logging to see what's flowing through. Parametrised
+    over both US20 markers (``[/]`` and ``[>]``) so the exact format
+    is pinned for both — a US20-regression guard alongside the
+    no-Lithos-call test above.
+    """
     ctx = _ctx()
     with caplog.at_level(logging.DEBUG, logger="test.obsidian_status_transition"):
-        await handle(_event(task_id="xyz", prior="[ ]", new="[/]"), ctx)
+        await handle(_event(task_id="xyz", prior="[ ]", new=new_marker), ctx)
 
     debug_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
-    assert any(
-        "no handler for transition [ ]→[/] on task xyz" in m for m in debug_msgs
-    ), debug_msgs
+    expected = f"no handler for transition [ ]→{new_marker} on task xyz"
+    assert any(expected in m for m in debug_msgs), debug_msgs
+
+
+# ── Other weird transitions stay silent (catch-all anti-regression) ────
+
+
+@pytest.mark.parametrize(
+    ("prior", "new"),
+    [
+        ("[-]", "[ ]"),  # un-cancel — not in scope; PRD only covers [x]→[ ]
+        ("[x]", "[-]"),  # done → cancelled (weird but possible)
+        ("[ ]", "[ ]"),  # same-marker (won't fire from source, but safe)
+    ],
+)
+async def test_other_transitions_are_silent_no_ops(prior: str, new: str) -> None:
+    """Catch-all for transitions outside the dispatch table that are
+    NOT US20's ``[/]``/``[>]`` cases — those are covered by
+    ``test_in_progress_and_rescheduled_markers_are_silent_no_ops``
+    above. This test guards the remaining "weird but possible"
+    transitions (un-cancel, done→cancelled, same-marker) against
+    silently growing a Lithos side effect."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(prior=prior, new=new), ctx)
+
+    lithos.task_complete.assert_not_awaited()
+    lithos.task_cancel.assert_not_awaited()
+    lithos.finding_post.assert_not_awaited()
 
 
 # ── Robustness ─────────────────────────────────────────────────────────

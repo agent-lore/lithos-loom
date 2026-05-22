@@ -735,6 +735,76 @@ async def test_obsidian_sync_child_status_transition_posts_reopen_finding(
     )
 
 
+@pytest.mark.parametrize("marker", ["[/]", "[>]"])
+async def test_obsidian_sync_child_no_op_for_in_progress_or_rescheduled(
+    tmp_path: Path, stub_io: list[EventBus], marker: str
+) -> None:
+    """Slice 2 US20 end-to-end: configure both projection +
+    status-transition; publish a task.created so the projection writes
+    a ``[ ]`` line; simulate the user flipping the checkbox to ``[/]``
+    or ``[>]``; assert ZERO Lithos calls. The watcher emits the event
+    (verified by the existing fs-watcher test suite), the handler sees
+    it (verified by the handler-level US20 test), but neither
+    ``task_complete``, ``task_cancel``, nor ``finding_post`` fire.
+    This closes the integration gap and pins the no-Lithos contract
+    end-to-end."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _projection_subscription(),
+            _status_transition_subscription(),
+        ),
+    )
+    tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+
+    async def _drive() -> None:
+        await asyncio.sleep(0.1)
+        bus = stub_io[-1]
+        await bus.publish(
+            _event("lithos.task.created", task_id="ipr", title="Working on it")
+        )
+        await asyncio.sleep(0.2)
+        assert tasks_file.exists()
+        assert "- [ ] Working on it 🆔 lithos:ipr" in tasks_file.read_text(
+            encoding="utf-8"
+        )
+
+        # User flips to [/] or [>] — Obsidian-only convention; must not
+        # leak into Lithos.
+        tasks_file.write_text(
+            tasks_file.read_text(encoding="utf-8").replace(
+                "- [ ] Working on it 🆔 lithos:ipr",
+                f"- {marker} Working on it 🆔 lithos:ipr",
+            ),
+            encoding="utf-8",
+        )
+        # Give the watcher poll + handler dispatch window time to fire.
+        await asyncio.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    driver = asyncio.create_task(_drive())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=5.0)
+    finally:
+        await _cancel_and_drain(driver)
+    assert rc == 0
+
+    # All three call-record lists MUST be empty — US20's "silent
+    # no-op" contract.
+    assert _StubLithosClient.task_complete_calls == [], (
+        f"task_complete must not be called for {marker} transitions; "
+        f"got {_StubLithosClient.task_complete_calls}"
+    )
+    assert _StubLithosClient.task_cancel_calls == [], (
+        f"task_cancel must not be called for {marker} transitions; "
+        f"got {_StubLithosClient.task_cancel_calls}"
+    )
+    assert _StubLithosClient.finding_post_calls == [], (
+        f"finding_post must not be called for {marker} transitions; "
+        f"got {_StubLithosClient.finding_post_calls}"
+    )
+
+
 async def test_obsidian_sync_child_rejects_duplicate_status_transition_specs(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
 ) -> None:
