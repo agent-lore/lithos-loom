@@ -72,7 +72,7 @@ from typing import Any
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.sync_state import ProjectionSyncState
 
-__all__ = ["ObsidianFsWatcher", "VALID_STATUS_MARKERS"]
+__all__ = ["EMOJI_TO_PRIORITY", "ObsidianFsWatcher", "VALID_STATUS_MARKERS"]
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +86,33 @@ flip among these; the status-transition subscription decides which
 ones map to Lithos calls (US17–US20)."""
 
 
+EMOJI_TO_PRIORITY: dict[str, str] = {
+    "🔺": "highest",
+    "⏫": "high",
+    "🔼": "medium",
+    "🔽": "low",
+    "⏬": "lowest",
+}
+"""D18 priority enum (Slice 2 US21), inverse of the projection's
+``_PRIORITY_EMOJI``. The two tables are pinned to agree by an
+anti-drift test in ``tests/test_obsidian_fs_watcher.py``
+(``test_priority_emoji_table_matches_projection_table``); if either
+changes, that test fails loudly. Public (no underscore) so the
+anti-drift test can import it without reaching into private
+internals."""
+
+
 # `- [<m>] ...` where <m> is exactly one character (PRD line shapes
 # use single-char markers; the regex deliberately rejects multi-char
 # weirdness rather than guessing).
 _LINE_RE = re.compile(r"^- \[(?P<marker>.)\] ")
 _TASK_ID_RE = re.compile(r"🆔 lithos:(?P<task_id>[A-Za-z0-9_-]+)")
+# Match any of the five D18 priority emoji anywhere in the line. The
+# projection renders the emoji between the title and the 🆔 marker
+# but we don't anchor to that position — a user might move it around
+# while editing, and the only signal that matters is "is one present
+# and which one".
+_PRIORITY_EMOJI_RE = re.compile(r"(🔺|⏫|🔼|🔽|⏬)")
 
 
 @dataclass
@@ -129,6 +151,13 @@ class ObsidianFsWatcher:
         # projection self-write — the projection's re-rendered file is
         # authoritative over any user edits sitting on top of it.
         self._observed_markers: dict[str, str] = {}
+        # Parallel per-task memory for priority enums (Slice 2 US21).
+        # Same role as ``_observed_markers`` but for the
+        # ``obsidian.task.priority_changed`` event family. ``None``
+        # values are meaningful — "user committed a line with no
+        # priority emoji" — so this is ``dict[str, str | None]``
+        # rather than just ``dict[str, str]``.
+        self._observed_priorities: dict[str, str | None] = {}
         # Snapshot of ``sync_state.write_version`` from our last poll.
         # If it's advanced, the projection has committed a re-render
         # since we last looked. We use that signal to distinguish
@@ -176,18 +205,25 @@ class ObsidianFsWatcher:
             await asyncio.sleep(self.poll_interval_seconds)
 
     async def poll_once(self) -> int:
-        """Read the file once, emit events for user-driven status flips.
+        """Read the file once, emit events for user-driven status or
+        priority flips.
 
-        Returns the count of ``obsidian.task.status_changed`` bus events
-        published this poll — zero when the file is unchanged, matches
-        the projection's last write, or contains only no-op flips
-        (markers unchanged, unknown task ids, line not parseable).
+        Returns the total count of bus events published this poll
+        (``obsidian.task.status_changed`` + ``obsidian.task.priority_changed``).
+        Zero when the file is unchanged, matches the projection's
+        last write, or contains only no-op flips (markers unchanged,
+        unknown task ids, line not parseable).
 
         The file is read exactly once per call — the bytes are hashed
         for the layer-1/2 short-circuits and reused as text for
         layer-3 parsing. Reading twice would open a small TOCTOU
         window where the parsed content might disagree with the
         recorded hash on a rapidly-edited file.
+
+        A single user save can produce BOTH a status_changed AND a
+        priority_changed event for the same task (e.g. tick + change
+        priority emoji in one edit). They fire as independent bus
+        events; the two corresponding handlers run independently.
         """
         raw = _read_file(self.tasks_path)
         current_hash = hashlib.sha256(raw).digest() if raw is not None else None
@@ -222,8 +258,10 @@ class ObsidianFsWatcher:
             # The projection's re-rendered file is authoritative over
             # any user edits we'd previously observed — drop them so
             # the next real user edit measures against the projection's
-            # fresh view, not a stale user marker.
+            # fresh view, not a stale user marker. Both status and
+            # priority observed-maps clear together.
             self._observed_markers.clear()
+            self._observed_priorities.clear()
             self._last_seen_hash = current_hash
             self._last_processed_write_version = self.sync_state.write_version
             return 0
@@ -235,6 +273,7 @@ class ObsidianFsWatcher:
         # version cursor so we don't keep re-clearing on every poll.
         if projection_wrote_since_last_poll:
             self._observed_markers.clear()
+            self._observed_priorities.clear()
             self._last_processed_write_version = self.sync_state.write_version
 
         # Layer 3: real user edit. Parse + per-task transition detection.
@@ -249,21 +288,38 @@ class ObsidianFsWatcher:
         # second disk read and the TOCTOU window it would open.
         # ``raw is None`` means missing/unreadable; nothing to parse.
         text = raw.decode("utf-8", errors="replace") if raw is not None else ""
-        for task_id, marker in _parse_status_markers(text):
-            prior = self._observed_markers.get(
+        for task_id, marker, priority in _parse_line_markers(text):
+            # ─── status diff (US17–US19) ──────────────────────────────
+            prior_status = self._observed_markers.get(
                 task_id, self.sync_state.task_status_markers.get(task_id)
             )
-            if prior is None:
+            if prior_status is None:
                 # Task not in the projection's last-known render and
                 # we haven't observed it before. Stale line, or a
                 # Slice 3+ capture-macro line. Suppress — Slice 2
                 # only owns projection-known tasks.
                 continue
-            if marker == prior:
-                continue
-            await self._publish_status_change(task_id, prior, marker)
-            self._observed_markers[task_id] = marker
-            published += 1
+            if marker != prior_status:
+                await self._publish_status_change(task_id, prior_status, marker)
+                self._observed_markers[task_id] = marker
+                published += 1
+
+            # ─── priority diff (US21) ─────────────────────────────────
+            # Only diff priority for projection-known tasks (same
+            # ``prior_status is None`` gate above). ``None`` is a
+            # meaningful value here — "no priority emoji on the
+            # line" — so we use a ``KeyError``-style check via
+            # explicit membership rather than ``get(..., default)``,
+            # which would conflate "task absent" with "task has
+            # ``priority=None``".
+            if task_id in self._observed_priorities:
+                prior_priority = self._observed_priorities[task_id]
+            else:
+                prior_priority = self.sync_state.task_priority_markers.get(task_id)
+            if priority != prior_priority:
+                await self._publish_priority_change(task_id, prior_priority, priority)
+                self._observed_priorities[task_id] = priority
+                published += 1
 
         self._last_seen_hash = current_hash
         return published
@@ -277,6 +333,30 @@ class ObsidianFsWatcher:
         await self.bus.publish(event)
         logger.info(
             "ObsidianFsWatcher: published obsidian.task.status_changed task=%s %s→%s",
+            task_id,
+            prior,
+            new,
+        )
+
+    async def _publish_priority_change(
+        self, task_id: str, prior: str | None, new: str | None
+    ) -> None:
+        """Publish ``obsidian.task.priority_changed`` (Slice 2 US21).
+
+        ``prior`` / ``new`` carry the canonical D18 enum strings
+        (``"highest"``, ``"high"``, ``"medium"``, ``"low"``,
+        ``"lowest"``) or ``None`` for "no priority". The handler
+        consumes enums; the emoji-to-enum translation is the
+        watcher's job (see :data:`EMOJI_TO_PRIORITY`).
+        """
+        event = Event(
+            type="obsidian.task.priority_changed",
+            timestamp=self._now_provider(),
+            payload=MappingProxyType({"task_id": task_id, "prior": prior, "new": new}),
+        )
+        await self.bus.publish(event)
+        logger.info(
+            "ObsidianFsWatcher: published obsidian.task.priority_changed task=%s %s→%s",
             task_id,
             prior,
             new,
@@ -302,8 +382,9 @@ def _read_file(path: Path) -> bytes | None:
         return None
 
 
-def _parse_status_markers(text: str) -> Iterator[tuple[str, str]]:
-    """Yield ``(task_id, marker)`` pairs for every parseable task line.
+def _parse_line_markers(text: str) -> Iterator[tuple[str, str, str | None]]:
+    """Yield ``(task_id, status_marker, priority_enum_or_none)``
+    triples for every parseable task line.
 
     Takes already-decoded text rather than a path so the caller (see
     :meth:`ObsidianFsWatcher.poll_once`) can hash and parse the same
@@ -311,7 +392,11 @@ def _parse_status_markers(text: str) -> Iterator[tuple[str, str]]:
 
     Format expected (matches the projection's renderer):
 
-        - [<m>] <title> ... 🆔 lithos:<id> ...
+        - [<m>] <title> [<prio>] 🆔 lithos:<id> ...
+
+    where ``<prio>`` is one of the D18 priority emoji (or absent).
+    The priority emoji is mapped to its canonical enum string via
+    :data:`EMOJI_TO_PRIORITY`; absent → ``None``.
 
     Lines that don't start with ``- [<m>] `` (header comments, blank
     lines, free-text) are skipped silently. A matching prefix without
@@ -338,4 +423,6 @@ def _parse_status_markers(text: str) -> Iterator[tuple[str, str]]:
         id_match = _TASK_ID_RE.search(line)
         if id_match is None:
             continue
-        yield id_match.group("task_id"), marker
+        prio_match = _PRIORITY_EMOJI_RE.search(line)
+        priority = EMOJI_TO_PRIORITY[prio_match.group(1)] if prio_match else None
+        yield id_match.group("task_id"), marker, priority

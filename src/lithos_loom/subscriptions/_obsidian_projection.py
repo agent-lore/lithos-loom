@@ -142,19 +142,25 @@ logger = logging.getLogger(__name__)
 class _StateEntry:
     """One row of the in-memory projection state.
 
-    For open tasks: ``status="open"``, ``resolved_at=None``.
+    For open tasks: ``status="open"``, ``resolved_at=None``,
+    ``priority`` is the validated D18 enum or ``None``.
     For completed/cancelled tasks lingering inside the TTL window:
-    ``status="completed"`` or ``"cancelled"``, ``resolved_at`` set.
+    ``status="completed"`` or ``"cancelled"``, ``resolved_at`` set,
+    ``priority`` is always ``None`` (the renderer drops priority
+    markers on resolved lines per the PRD example).
 
-    Carrying status + resolved_at alongside the rendered line lets
-    the handler distinguish open vs resolved entries without parsing
-    the line back out, and lets the TTL sweep walk by resolved_at
-    cheaply.
+    Carrying status + resolved_at + priority alongside the rendered
+    line lets the handler distinguish open vs resolved entries
+    without parsing the line back out, lets the TTL sweep walk by
+    resolved_at cheaply, and lets ``_flush`` extract per-task
+    priority for the Slice 2 US21 ``sync_state`` map without
+    re-parsing the rendered line.
     """
 
     line: str
     status: str  # "open" | "completed" | "cancelled"
     resolved_at: date | None
+    priority: str | None = None
 
 
 _REEVALUATE_EVENTS = frozenset(
@@ -368,6 +374,7 @@ def make_handler(
                     line=_render_line(task, cfg.routes, today_val),
                     status="open",
                     resolved_at=None,
+                    priority=_validated_priority(task),
                 )
             else:
                 state.pop(task.id, None)
@@ -432,6 +439,16 @@ def make_handler(
             logger.debug("obsidian-projection: flush content unchanged; skipping write")
             return
         markers = {tid: _STATUS_TO_MARKER[entry.status] for tid, entry in state.items()}
+        # Priority map (Slice 2 US21). Only open entries carry a
+        # priority; resolved entries always map to ``None`` because
+        # the renderer drops the priority emoji on the resolved-line
+        # shape — surfacing them here would let the watcher diff
+        # against a stale projection-known priority after a task
+        # resolves.
+        priority_markers = {
+            tid: (entry.priority if entry.status == "open" else None)
+            for tid, entry in state.items()
+        }
         # Disk first. Raises → sync_state untouched → next event retries.
         await _write_tasks_file_atomic(tasks_path, content)
         # Synchronously update sync_state. No yield between the
@@ -442,7 +459,9 @@ def make_handler(
         # success path, so a failed write doesn't trick the watcher
         # into thinking the projection wrote.
         sync_state.record_projection_write(
-            content_hash=content_hash, task_status_markers=markers
+            content_hash=content_hash,
+            task_status_markers=markers,
+            task_priority_markers=priority_markers,
         )
         # Cancellation point for clean shutdown between events; safe
         # to fire here because both the rename AND the sync_state
@@ -675,6 +694,25 @@ def _priority_marker(task: Task) -> str | None:
             ", ".join(_PRIORITY_EMOJI),
         )
     return emoji
+
+
+def _validated_priority(task: Task) -> str | None:
+    """Return ``task.metadata.priority`` only when it's a known enum
+    value, else ``None``.
+
+    Parallel to :func:`_priority_marker` but returns the enum string
+    rather than the emoji — :class:`_StateEntry` carries the enum so
+    ``_flush`` can pass per-task priority into
+    :meth:`ProjectionSyncState.record_projection_write` without
+    re-parsing the rendered line. Deliberately silent on malformed
+    values: :func:`_priority_marker` already warns on the same code
+    path (called by :func:`_render_line`), so we'd duplicate the
+    warning if this also logged.
+    """
+    value = task.metadata.get("priority")
+    if isinstance(value, str) and value in _PRIORITY_EMOJI:
+        return value
+    return None
 
 
 def _dep_markers(task: Task) -> list[str]:

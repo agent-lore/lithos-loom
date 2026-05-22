@@ -15,7 +15,7 @@ projection updates it *before* committing each write; the watcher reads
 it on every poll and short-circuits when the on-disk content matches the
 projection's last known emission.
 
-Two pieces of state matter:
+Three pieces of state matter:
 
 * ``last_written_hash`` — SHA-256 of the projection's most recent
   successful write. Lets the watcher cheaply skip the parse step when
@@ -26,6 +26,11 @@ Two pieces of state matter:
   user edits from projection-driven status changes on a per-task basis
   when the file content does differ (e.g. user edited an unrelated
   line, projection added a new task, etc.).
+* ``task_priority_markers`` (Slice 2 US21) — per-task priority enum
+  (``"highest"``/``"high"``/``"medium"``/``"low"``/``"lowest"`` or
+  ``None`` for no priority) the projection most recently emitted.
+  Same role for ``obsidian.task.priority_changed`` as the status map
+  has for ``obsidian.task.status_changed``.
 
 Both updates happen in :meth:`ProjectionSyncState.record_projection_write`
 before the projection commits its atomic rename, so a watcher poll that
@@ -68,6 +73,17 @@ class ProjectionSyncState:
     no-longer-actionable) are removed from this dict so re-additions
     later don't trip on stale markers."""
 
+    task_priority_markers: dict[str, str | None] = field(default_factory=dict)
+    """Per-task priority enum (``highest``/``high``/``medium``/
+    ``low``/``lowest``) or ``None`` the projection most recently
+    emitted, keyed by Lithos task id. Same role for the
+    ``obsidian.task.priority_changed`` event (Slice 2 US21) as
+    ``task_status_markers`` plays for ``status_changed``. ``None``
+    means "task is open but has no priority"; a key being absent
+    means the projection has never written that task. Resolved tasks
+    are not added here — the renderer drops priority on resolved
+    lines, so there's no projection baseline to compare against."""
+
     write_version: int = 0
     """Monotonically incremented on each ``record_projection_write``
     call. The fs watcher snapshots this on every poll; a tick since
@@ -85,6 +101,7 @@ class ProjectionSyncState:
         *,
         content_hash: bytes,
         task_status_markers: Mapping[str, str],
+        task_priority_markers: Mapping[str, str | None],
     ) -> None:
         """Capture the post-render state the projection is about to commit.
 
@@ -92,9 +109,10 @@ class ProjectionSyncState:
         atomic rename, so any concurrent watcher poll that sees the new
         file content also sees the matching coordination state.
 
-        ``task_status_markers`` is copied into a fresh dict so subsequent
-        mutation of the projection's render-state dict cannot silently
-        change suppression behaviour after this point.
+        Both ``task_status_markers`` and ``task_priority_markers`` are
+        copied into fresh dicts so subsequent mutation of the
+        projection's render-state dicts cannot silently change
+        suppression behaviour after this point.
 
         ``write_version`` increments unconditionally — even
         same-content overwrites bump it, so the watcher's "did
@@ -105,4 +123,5 @@ class ProjectionSyncState:
         """
         self.last_written_hash = content_hash
         self.task_status_markers = dict(task_status_markers)
+        self.task_priority_markers = dict(task_priority_markers)
         self.write_version += 1

@@ -60,6 +60,7 @@ def _record_projection(
     sync_state: ProjectionSyncState,
     path: Path,
     markers: dict[str, str],
+    priorities: dict[str, str | None] | None = None,
 ) -> None:
     """Stand in for the projection's ``_flush`` call.
 
@@ -67,10 +68,17 @@ def _record_projection(
     projection writes; this helper records the post-write state into
     ``sync_state`` so the watcher's US23 suppression has something
     to compare against, exactly matching what ``_flush`` does.
+
+    ``priorities`` (Slice 2 US21) maps each task id to its priority
+    enum (or ``None``). Defaults to all-None for the given markers
+    so existing tests don't need to care about priority.
     """
+    if priorities is None:
+        priorities = dict.fromkeys(markers, None)
     sync_state.record_projection_write(
         content_hash=_hash_of(path),
         task_status_markers=markers,
+        task_priority_markers=priorities,
     )
 
 
@@ -214,6 +222,192 @@ async def test_poll_emits_one_event_per_changed_task(
     assert by_task["a"]["new"] == "[x]"
     assert by_task["b"]["new"] == "[-]"
     assert "c" not in by_task  # unchanged → no event
+
+
+# ── US21: priority emoji changes ───────────────────────────────────────
+
+
+def _subscribe_priority(bus: EventBus) -> Subscription:
+    return bus.subscribe(
+        event_types=("obsidian.task.priority_changed",),
+        name="test-priority-subscriber",
+    )
+
+
+async def test_priority_emoji_change_emits_priority_changed_event(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """User edits the priority emoji on a projected line → watcher
+    emits ``obsidian.task.priority_changed`` with the prior + new
+    enum strings (not the emoji literals)."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🔺 🆔 lithos:a"])
+    published = await watcher.poll_once()
+    events = _drain(pri_sub)
+
+    assert published == 1
+    assert len(events) == 1
+    assert events[0].type == "obsidian.task.priority_changed"
+    assert events[0].payload == {"task_id": "a", "prior": "high", "new": "highest"}
+
+
+async def test_priority_emoji_removed_emits_event_with_new_none(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """User deleting the emoji entirely → ``new=None``."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    await watcher.poll_once()
+    [event] = _drain(pri_sub)
+    assert event.payload == {"task_id": "a", "prior": "high", "new": None}
+
+
+async def test_priority_emoji_added_emits_event_with_prior_none(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """User adding an emoji where none existed → ``prior=None``."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": None})
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🔽 🆔 lithos:a"])
+    await watcher.poll_once()
+    [event] = _drain(pri_sub)
+    assert event.payload == {"task_id": "a", "prior": None, "new": "low"}
+
+
+async def test_status_and_priority_change_in_same_save_emit_both_events(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+) -> None:
+    """One save that flips BOTH ``[ ] → [x]`` AND the priority emoji
+    emits two distinct events on the bus — one ``status_changed``
+    and one ``priority_changed`` — neither suppresses the other."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [x] Task 🔺 🆔 lithos:a"])
+    published = await watcher.poll_once()
+
+    status_events = _drain(sub)
+    priority_events = _drain(pri_sub)
+    assert published == 2
+    assert len(status_events) == 1
+    assert status_events[0].payload == {
+        "task_id": "a",
+        "prior": "[ ]",
+        "new": "[x]",
+    }
+    assert len(priority_events) == 1
+    assert priority_events[0].payload == {
+        "task_id": "a",
+        "prior": "high",
+        "new": "highest",
+    }
+
+
+async def test_priority_change_subject_to_self_write_suppression(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """When the projection's self-write fires layer 2, both
+    ``_observed_markers`` AND ``_observed_priorities`` clear; no
+    spurious event for the priority diff that the self-write
+    introduced."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    # Simulate a projection self-write: priority becomes "highest".
+    _write_tasks_file(tasks_path, ["- [ ] Task 🔺 🆔 lithos:a"])
+    _record_projection(
+        sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "highest"}
+    )
+
+    assert await watcher.poll_once() == 0
+    assert _drain(pri_sub) == []
+    # _observed_priorities was cleared by the layer-2 path; future
+    # user edits compare against the fresh sync_state baseline.
+    assert watcher._observed_priorities == {}
+
+
+async def test_priority_emoji_table_matches_projection_table() -> None:
+    """Anti-drift: ``EMOJI_TO_PRIORITY`` (watcher) is the exact inverse
+    of ``_PRIORITY_EMOJI`` (projection). If either is changed the
+    other must change too — same enum, same emoji set, no missing
+    keys, no swapped pairs. Anything else means an emoji edit would
+    parse to a different enum than the projection rendered for."""
+    from lithos_loom.sources.obsidian_fs_watcher import EMOJI_TO_PRIORITY
+    from lithos_loom.subscriptions._obsidian_projection import _PRIORITY_EMOJI
+
+    assert set(EMOJI_TO_PRIORITY.values()) == set(_PRIORITY_EMOJI.keys())
+    for enum_value, emoji in _PRIORITY_EMOJI.items():
+        assert EMOJI_TO_PRIORITY[emoji] == enum_value, (
+            f"emoji {emoji!r} → {EMOJI_TO_PRIORITY[emoji]!r} in watcher but "
+            f"projection renders {enum_value!r} → {emoji!r}"
+        )
+
+
+async def test_user_priority_edit_followed_by_unrelated_save_does_not_re_emit(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """Transition semantics for priority (parallel to the status
+    test above): once the user changes ⏫ → 🔺, a subsequent save
+    that leaves 🔺 in place must NOT re-emit."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🔺 🆔 lithos:a"])
+    assert await watcher.poll_once() == 1
+    _drain(pri_sub)
+
+    # Subsequent save: same priority, whitespace tweak elsewhere.
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [ ] Task 🔺 🆔 lithos:a",
+            "  comment line",
+        ],
+    )
+    assert await watcher.poll_once() == 0
+    assert _drain(pri_sub) == []
 
 
 # ── Transition semantics: each transition emits exactly once ───────────

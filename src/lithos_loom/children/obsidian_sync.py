@@ -18,7 +18,11 @@ Slice 2 extends the allow-list. The actions this child hosts (see
   ``_lithos/tasks.md`` (Slice 1 US8+).
 * ``"obsidian-status-transition"`` — consumes the fs watcher's
   ``obsidian.task.status_changed`` events and pushes the
-  corresponding action to Lithos (Slice 2 US17+).
+  corresponding action to Lithos (Slice 2 US17–US19).
+* ``"obsidian-priority-changed"`` — consumes the fs watcher's
+  ``obsidian.task.priority_changed`` events; posts a
+  ``[PriorityChangeRequested]`` finding as the interim signal
+  (Slice 2 US21).
 
 Subscription actions outside the allow-list (e.g. generic ``noop``)
 are silently skipped here — they're routed to a different child in a
@@ -51,6 +55,9 @@ from lithos_loom.subscriptions import (
     SubscriptionContext,
     build_runners,
 )
+from lithos_loom.subscriptions._obsidian_priority_changed import (
+    handle as handle_obsidian_priority_changed,
+)
 from lithos_loom.subscriptions._obsidian_projection import (
     make_handler as make_obsidian_projection_handler,
 )
@@ -64,7 +71,11 @@ from lithos_loom.sync_state import ProjectionSyncState
 # (route-runner for routes, a future generic subscription-runner for
 # things like ``noop``).
 _CHILD_ACTIONS: frozenset[str] = frozenset(
-    {"obsidian-projection", "obsidian-status-transition"}
+    {
+        "obsidian-projection",
+        "obsidian-status-transition",
+        "obsidian-priority-changed",
+    }
 )
 
 _LEVEL_MAP: dict[LogLevel, int] = {
@@ -140,26 +151,30 @@ async def _amain(cfg: LoomConfig) -> int:
 
     projection_specs = by_action.get("obsidian-projection", [])
     status_transition_specs = by_action.get("obsidian-status-transition", [])
+    priority_changed_specs = by_action.get("obsidian-priority-changed", [])
     projection_spec = projection_specs[0] if projection_specs else None
     status_transition_spec = (
         status_transition_specs[0] if status_transition_specs else None
     )
+    priority_changed_spec = (
+        priority_changed_specs[0] if priority_changed_specs else None
+    )
 
-    if status_transition_spec is not None and projection_spec is None:
-        # The status-transition handler needs the projection's
-        # ``sync_state.task_status_markers`` to be populated for the
-        # fs watcher to emit any events at all (see
-        # ObsidianFsWatcher.poll_once — tasks with ``prior is None``
-        # are silently skipped). The configuration is permitted but
-        # inert; call that out at startup rather than letting the
-        # operator wonder why ticks don't push.
-        logger.warning(
-            "obsidian-sync: %r is configured but no obsidian-projection "
-            "subscription is present. The handler will load but never "
-            "fire, because the projection is what populates the marker "
-            "baseline the fs watcher reads against.",
-            status_transition_spec.name,
-        )
+    # Both status-transition and priority-changed need the projection's
+    # ``sync_state`` to be populated for the fs watcher to emit any
+    # events at all (the watcher silently skips tasks with no
+    # projection-known baseline). Configuring either without projection
+    # is permitted but inert — call that out at startup rather than
+    # letting the operator wonder why their edits don't push.
+    for downstream_spec in (status_transition_spec, priority_changed_spec):
+        if downstream_spec is not None and projection_spec is None:
+            logger.warning(
+                "obsidian-sync: %r is configured but no obsidian-projection "
+                "subscription is present. The handler will load but never "
+                "fire, because the projection is what populates the marker "
+                "baseline the fs watcher reads against.",
+                downstream_spec.name,
+            )
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -194,11 +209,11 @@ async def _amain(cfg: LoomConfig) -> int:
 
         if not child_specs:
             logger.warning(
-                "obsidian-sync: no obsidian-projection or "
-                "obsidian-status-transition subscription configured; "
-                "fs watcher runs but emits nothing without projection "
-                "state. Add a [[subscriptions]] block with "
-                "action='obsidian-projection' to populate it."
+                "obsidian-sync: no obsidian-projection, "
+                "obsidian-status-transition, or obsidian-priority-changed "
+                "subscription configured; fs watcher runs but emits "
+                "nothing without projection state. Add a [[subscriptions]] "
+                "block with action='obsidian-projection' to populate it."
             )
             try:
                 await stop_event.wait()
@@ -228,6 +243,12 @@ async def _amain(cfg: LoomConfig) -> int:
             my_handlers["obsidian-status-transition"] = (
                 handle_obsidian_status_transition
             )
+        if priority_changed_spec is not None:
+            logger.info(
+                "obsidian-sync: wiring subscription %r",
+                priority_changed_spec.name,
+            )
+            my_handlers["obsidian-priority-changed"] = handle_obsidian_priority_changed
 
         # LithosClient is needed for both: the projection wires through
         # to LithosEventStream for upstream events; the status-transition
