@@ -2,36 +2,33 @@
 
 Consumes ``obsidian.task.priority_changed`` events emitted by
 :class:`~lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher`
-when the user edits the priority emoji on a projected line.
+when the user edits the priority emoji on a projected line, and
+pushes the change to Lithos via
+``lithos_task_update(task_id, metadata={"priority": <enum>})``.
 
-The terminal action — pushing the change back to Lithos via
-``lithos_task_update(task_id, metadata={"priority": <enum>})`` — is
-blocked on upstream support: the current ``lithos_task_update`` MCP
-tool only accepts ``title`` / ``description`` / ``tags`` per
-``lithos/docs/SPECIFICATION.md`` §5.4. Until upstream lands a
-``metadata`` arg (issue filed alongside this PR), this handler uses
-the same workaround shape that US19's ``_reopen_request`` uses for
-the still-missing ``task_reopen`` — post a finding with a stable
-prefix so lithos-lens and the operator have the signal.
+The handler is **stateless** — mirrors :mod:`._noop` and
+:mod:`._obsidian_status_transition`. The obsidian-sync child wires
+this module's :func:`handle` directly into its ``my_handlers`` dict.
 
-Summary format::
+**Priority enum** (D18):
+``"highest"`` / ``"high"`` / ``"medium"`` / ``"low"`` / ``"lowest"``
+or ``None`` for "no priority". The fs watcher emits ``prior`` and
+``new`` as enum strings (not emoji literals), so the handler doesn't
+need the emoji-to-enum mapping; it just forwards ``new`` into the
+metadata patch.
 
-    [PriorityChangeRequested] task priority changed in Obsidian: <prior> → <new>
+**Clearing a priority.** When the user deletes the emoji entirely
+(``new=None``), the handler sends ``metadata={"priority": None}``.
+Per Lithos's additive-per-key merge semantics (spec §5.4, post
+lithos#290), a ``null`` value deletes the key from
+``task.metadata``. Other metadata keys (``depends_on``,
+``scheduled_for``, ``story_doc_id``, etc.) are preserved
+unconditionally.
 
-``<prior>`` / ``<new>`` are the canonical D18 enum strings
-(``"highest"``, ``"high"``, ``"medium"``, ``"low"``, ``"lowest"``)
-or the literal string ``"none"`` when the emoji was absent.
-
-When upstream metadata-update support ships, swap the
-``finding_post`` call below for a real
-``task_update(task_id=..., metadata={"priority": new_enum or None})``.
-The fs watcher, sync_state extension, and projection plumbing all
-stay; only this handler's inner call changes.
-
-Idempotency is NOT enforced here. US22 will add a pre-check via
-``lithos_task_status``; until then, posting a
-``[PriorityChangeRequested]`` finding for a no-op edit (rare race)
-is harmless but redundant.
+Idempotency is **not** enforced here. US22 will add a pre-check via
+``lithos_task_status`` — until then, ``task_update`` on a task
+whose ``metadata.priority`` already matches is a Lithos-side
+no-op (the merge runs but produces identical state).
 """
 
 from __future__ import annotations
@@ -40,23 +37,6 @@ from lithos_loom.bus import Event
 from lithos_loom.subscriptions import SubscriptionContext
 
 __all__ = ["handle"]
-
-
-_PRIORITY_CHANGE_PREFIX = "[PriorityChangeRequested]"
-"""Stable finding-summary prefix. Operators and lithos-lens grep
-for this exact string to surface pending priority changes; do not
-reword without also updating any downstream consumer."""
-
-
-def _format_priority_summary(prior: str | None, new: str | None) -> str:
-    """Build the finding summary so the prefix is the stable part and
-    the prior/new enum values are included for context. ``None``
-    renders as the literal string ``none`` so the summary is grep-
-    friendly even when one side has no priority."""
-    return (
-        f"{_PRIORITY_CHANGE_PREFIX} task priority changed in Obsidian: "
-        f"{prior or 'none'} → {new or 'none'}"
-    )
 
 
 async def handle(event: Event, ctx: SubscriptionContext) -> None:
@@ -75,20 +55,20 @@ async def handle(event: Event, ctx: SubscriptionContext) -> None:
         return
 
     # Source emits prior/new as ``str | None``; coerce defensively in
-    # case a third party publishes the event with a non-string value
-    # (e.g. an int priority level).
+    # case a third party publishes the event with a non-string value.
     prior_str: str | None = str(prior) if prior is not None else None
     new_str: str | None = str(new) if new is not None else None
 
-    summary = _format_priority_summary(prior_str, new_str)
-    await ctx.lithos.finding_post(
+    # Per-key merge patch. ``None`` deletes the priority key entirely
+    # (Lithos JSON-null delete semantics); a string value sets it.
+    # Other metadata keys are untouched.
+    await ctx.lithos.task_update(
         task_id=task_id,
-        summary=summary,
         agent=ctx.agent_id,
+        metadata={"priority": new_str},
     )
     ctx.logger.info(
-        "obsidian-priority-changed: posted [PriorityChangeRequested] for "
-        "task %s (%s → %s)",
+        "obsidian-priority-changed: updated task %s priority (%s → %s)",
         task_id,
         prior_str,
         new_str,

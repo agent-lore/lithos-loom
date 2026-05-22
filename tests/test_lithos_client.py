@@ -474,9 +474,57 @@ async def test_task_update_omits_unset_fields() -> None:
 
 
 async def test_task_update_rejects_empty_call() -> None:
+    """Lithos requires at least one of title/description/tags/metadata
+    (post-#290 adds metadata to the at-least-one list)."""
     client, _ = _client_with_session(_content({"success": True}))
     with pytest.raises(LithosClientError, match="at least one"):
         await client.task_update(task_id="t-1")
+
+
+async def test_task_update_passes_metadata_when_provided() -> None:
+    """``metadata`` kwarg (Lithos #290) is forwarded as the
+    per-key merge patch on the MCP call."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_update(task_id="t-1", metadata={"priority": "high"})
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_update",
+        arguments={
+            "task_id": "t-1",
+            "agent": "lithos-orchestrator-test",
+            "metadata": {"priority": "high"},
+        },
+    )
+
+
+async def test_task_update_metadata_with_none_value_passes_through() -> None:
+    """A ``None`` value inside the metadata dict (Python ``None`` →
+    JSON ``null``) is preserved on the wire. Lithos's merge
+    semantics interpret null as "delete this key" — the client
+    doesn't filter it out."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_update(task_id="t-1", metadata={"priority": None})
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["metadata"] == {"priority": None}
+
+
+async def test_task_update_omits_metadata_arg_when_none() -> None:
+    """``metadata=None`` (default) → no ``"metadata"`` key in the MCP
+    args. Distinct from ``metadata={}`` (which Lithos treats as a
+    no-op patch) or ``metadata={"k": None}`` (delete the key).
+    Mirrors the pattern other optional args use."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_update(task_id="t-1", tags=["x"])  # no metadata
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert "metadata" not in args
+
+
+async def test_task_update_metadata_alone_satisfies_at_least_one() -> None:
+    """Per Lithos #290, the at-least-one constraint now accepts
+    metadata as the satisfier — title/description/tags can all be
+    omitted if metadata is provided."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_update(task_id="t-1", metadata={"priority": "low"})
+    session.call_tool.assert_awaited_once()
 
 
 async def test_task_lifecycle_methods_require_agent_id() -> None:

@@ -3,7 +3,10 @@
 
 The handler is stateless; tests just call ``handle(event, ctx)``
 directly with synthetic events and assert on a mocked
-``ctx.lithos`` (``AsyncMock``).
+``ctx.lithos`` (``AsyncMock``). The handler calls
+``ctx.lithos.task_update(task_id=..., agent=..., metadata={"priority": new_str})``
+to push the change to Lithos via the per-key merge semantics
+introduced in Lithos #290.
 """
 
 from __future__ import annotations
@@ -17,10 +20,7 @@ import pytest
 
 from lithos_loom.bus import Event
 from lithos_loom.subscriptions import SubscriptionContext
-from lithos_loom.subscriptions._obsidian_priority_changed import (
-    _PRIORITY_CHANGE_PREFIX,
-    handle,
-)
+from lithos_loom.subscriptions._obsidian_priority_changed import handle
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -52,51 +52,72 @@ def _event(
 # ── Happy path ─────────────────────────────────────────────────────────
 
 
-async def test_change_to_high_posts_priority_change_finding() -> None:
-    """``medium → high`` posts a finding with the configured agent id,
-    a summary starting with the stable ``[PriorityChangeRequested]``
-    prefix, and both enum values rendered in the message body."""
+async def test_change_to_high_calls_task_update_with_metadata_priority() -> None:
+    """``medium → high`` calls ``task_update(metadata={"priority": "high"})``
+    with the configured agent_id. ``finding_post`` is NOT called
+    (post-#290 the handler uses the real Lithos surface, not the
+    interim finding workaround)."""
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos, agent_id="lithos-orchestrator-samsara")
 
     await handle(_event(task_id="t1", prior="medium", new="high"), ctx)
 
-    lithos.finding_post.assert_awaited_once()
-    call = lithos.finding_post.await_args.kwargs
-    assert call["task_id"] == "t1"
-    assert call["agent"] == "lithos-orchestrator-samsara"
-    assert call["summary"].startswith(_PRIORITY_CHANGE_PREFIX)
-    assert "medium" in call["summary"]
-    assert "high" in call["summary"]
+    lithos.task_update.assert_awaited_once_with(
+        task_id="t1",
+        agent="lithos-orchestrator-samsara",
+        metadata={"priority": "high"},
+    )
+    lithos.finding_post.assert_not_awaited()
 
 
-async def test_change_to_none_renders_none_in_summary() -> None:
-    """User deleting the priority emoji: ``high → None`` → summary
-    contains the literal string ``none`` for the new value so a
-    grep on the finding makes the deletion visible."""
+async def test_change_to_none_sends_metadata_priority_null_to_delete_key() -> None:
+    """User deleting the emoji: ``high → None`` → the handler sends
+    ``metadata={"priority": None}`` which Lithos interprets (per
+    #290's additive-merge semantics) as "delete the priority key".
+    Other metadata keys (``depends_on`` etc) are preserved by
+    Lithos because they're not mentioned in the patch."""
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos)
 
     await handle(_event(prior="high", new=None), ctx)
 
-    summary = lithos.finding_post.await_args.kwargs["summary"]
-    assert "high → none" in summary, summary
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"priority": None},
+    )
 
 
-async def test_change_from_none_renders_none_in_summary() -> None:
+async def test_change_from_none_sets_priority_for_the_first_time() -> None:
     """Inverse: user adding an emoji where none existed:
-    ``None → low``."""
+    ``None → low``. The handler sends
+    ``metadata={"priority": "low"}``; Lithos creates the key."""
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos)
 
     await handle(_event(prior=None, new="low"), ctx)
 
-    summary = lithos.finding_post.await_args.kwargs["summary"]
-    assert "none → low" in summary, summary
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"priority": "low"},
+    )
+
+
+@pytest.mark.parametrize("enum_value", ["highest", "high", "medium", "low", "lowest"])
+async def test_all_five_priority_enum_values_round_trip(enum_value: str) -> None:
+    """Every D18 enum value forwards verbatim into the metadata patch."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(prior="medium", new=enum_value), ctx)
+
+    args = lithos.task_update.await_args.kwargs
+    assert args["metadata"] == {"priority": enum_value}
 
 
 async def test_handler_uses_ctx_agent_id_not_hardcoded() -> None:
-    """The agent passed to ``finding_post`` comes from ``ctx.agent_id``,
+    """The agent passed to ``task_update`` comes from ``ctx.agent_id``,
     not a hardcoded string — different hosts (samsara, mac-mini, test)
     must each pass their own identity through unchanged."""
     lithos = AsyncMock()
@@ -105,28 +126,38 @@ async def test_handler_uses_ctx_agent_id_not_hardcoded() -> None:
     await handle(_event(), ctx)
 
     assert (
-        lithos.finding_post.await_args.kwargs["agent"] == "lithos-orchestrator-mac-mini"
+        lithos.task_update.await_args.kwargs["agent"] == "lithos-orchestrator-mac-mini"
     )
 
 
 async def test_handler_logs_at_info(caplog: pytest.LogCaptureFixture) -> None:
-    """The handler emits an INFO log with the prefix and task id so
-    operators have a grep trail mirroring the other status-transition
-    handlers."""
+    """The handler emits an INFO log with the task id and the
+    prior → new transition so operators have a grep trail mirroring
+    the status-transition handlers."""
     ctx = _ctx()
     with caplog.at_level(logging.INFO, logger="test.obsidian_priority_changed"):
         await handle(_event(task_id="lt7", prior="low", new="medium"), ctx)
 
     info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
-    assert any("[PriorityChangeRequested]" in m and "lt7" in m for m in info_msgs), (
-        info_msgs
-    )
+    assert any(
+        "updated task lt7 priority" in m and "low" in m and "medium" in m
+        for m in info_msgs
+    ), info_msgs
 
 
-def test_priority_change_prefix_is_stable() -> None:
-    """Pin the exact prefix string — lithos-lens and operators grep
-    for this. Reword only with a coordinated change downstream."""
-    assert _PRIORITY_CHANGE_PREFIX == "[PriorityChangeRequested]"
+async def test_handler_does_not_touch_other_metadata_keys() -> None:
+    """The patch only contains the ``priority`` key — Lithos's
+    additive-per-key merge preserves every other metadata key on
+    the task. Regression guard against accidentally widening the
+    patch and clobbering ``depends_on`` / ``scheduled_for`` /
+    ``story_doc_id`` / etc."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(prior="medium", new="high"), ctx)
+
+    patch = lithos.task_update.await_args.kwargs["metadata"]
+    assert list(patch.keys()) == ["priority"]
 
 
 # ── Robustness ─────────────────────────────────────────────────────────
@@ -158,17 +189,17 @@ async def test_malformed_payload_warns_and_returns(
     with caplog.at_level(logging.WARNING, logger="test.obsidian_priority_changed"):
         await handle(event, ctx)  # must not raise
 
-    lithos.finding_post.assert_not_awaited()
+    lithos.task_update.assert_not_awaited()
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("malformed payload" in m for m in warn_msgs), warn_msgs
 
 
 async def test_lithos_error_propagates() -> None:
-    """A ``LithosClientError`` (or any exception) from ``finding_post``
+    """A ``LithosClientError`` (or any exception) from ``task_update``
     must bubble up so the :class:`SubscriptionRunner` retry-with-backoff
     + on_persistent_failure=friction backstop can take over."""
     lithos = AsyncMock()
-    lithos.finding_post.side_effect = RuntimeError("simulated lithos error")
+    lithos.task_update.side_effect = RuntimeError("simulated lithos error")
     ctx = _ctx(lithos=lithos)
 
     with pytest.raises(RuntimeError, match="simulated lithos error"):
