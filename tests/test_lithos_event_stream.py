@@ -687,13 +687,25 @@ async def test_stream_reconnect_backoff_grows_then_caps() -> None:
     """Repeated connection failures back off exponentially up to the cap.
 
     Captures the sleep durations the stream requests so we can assert the
-    sequence without burning real wall-clock time.
+    sequence without burning real wall-clock time. Polls deterministically
+    until the expected number of backoff calls have been recorded rather
+    than racing a fixed-duration timer (the latter was flaky on slow CI
+    runners — see PR #28's first CI run).
     """
     sleep_calls: list[float] = []
     original_sleep = asyncio.sleep
+    target_calls = 5
+
+    # Awaitable that fires when the 5th backoff sleep has been recorded.
+    # Set inside _record_sleep so the driver can wait deterministically
+    # for the loop to make progress instead of guessing at a wall-clock
+    # window.
+    target_reached = asyncio.Event()
 
     async def _record_sleep(delay: float) -> None:
         sleep_calls.append(delay)
+        if len(sleep_calls) >= target_calls:
+            target_reached.set()
         # Use a tiny real sleep so the loop keeps making progress.
         await original_sleep(0)
 
@@ -725,7 +737,10 @@ async def test_stream_reconnect_backoff_grows_then_caps() -> None:
     mod.asyncio.sleep = _record_sleep  # type: ignore[assignment]
     try:
         task = asyncio.create_task(source.run())
-        await original_sleep(0.05)
+        # Wait until the loop has recorded the target number of backoff
+        # calls. The outer 2.0s wall-clock cap is just a safety net —
+        # locally this completes in <10ms.
+        await asyncio.wait_for(target_reached.wait(), timeout=2.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -733,7 +748,7 @@ async def test_stream_reconnect_backoff_grows_then_caps() -> None:
         mod.asyncio.sleep = mod_sleep_orig  # type: ignore[assignment]
 
     # Doubling sequence starting at 1.0, capped at 4.0: 1, 2, 4, 4, 4.
-    assert sleep_calls[:5] == [1.0, 2.0, 4.0, 4.0, 4.0]
+    assert sleep_calls[:target_calls] == [1.0, 2.0, 4.0, 4.0, 4.0]
 
 
 async def test_stream_cancellable_during_event_iteration() -> None:
