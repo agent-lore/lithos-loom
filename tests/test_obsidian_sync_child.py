@@ -571,6 +571,70 @@ async def test_obsidian_sync_child_wires_status_transition_handler(
     )
 
 
+async def test_obsidian_sync_child_status_transition_pushes_cancel_to_lithos(
+    tmp_path: Path, stub_io: list[EventBus]
+) -> None:
+    """Slice 2 US18 end-to-end: same wiring as the US17 round-trip,
+    but user flips ``[ ]`` to ``[-]`` instead of ``[x]``. Handler must
+    call ``lithos.task_cancel`` with the constant reason."""
+    from lithos_loom.subscriptions._obsidian_status_transition import _CANCEL_REASON
+
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _projection_subscription(),
+            _status_transition_subscription(),
+        ),
+    )
+    tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+
+    async def _drive() -> None:
+        await asyncio.sleep(0.1)
+        bus = stub_io[-1]
+        await bus.publish(
+            _event("lithos.task.created", task_id="cxl", title="Drop old README")
+        )
+        await asyncio.sleep(0.2)
+        assert tasks_file.exists()
+        assert "- [ ] Drop old README 🆔 lithos:cxl" in tasks_file.read_text(
+            encoding="utf-8"
+        )
+
+        # User cancels via the [-] marker.
+        tasks_file.write_text(
+            tasks_file.read_text(encoding="utf-8").replace(
+                "- [ ] Drop old README 🆔 lithos:cxl",
+                "- [-] Drop old README 🆔 lithos:cxl",
+            ),
+            encoding="utf-8",
+        )
+        await asyncio.sleep(0.6)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    driver = asyncio.create_task(_drive())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=5.0)
+    finally:
+        await _cancel_and_drain(driver)
+    assert rc == 0
+
+    # Exactly one task_cancel; zero task_complete (US18-only path).
+    assert _StubLithosClient.task_cancel_calls == [
+        {
+            "task_id": "cxl",
+            "agent": "lithos-orchestrator-test",
+            "reason": _CANCEL_REASON,
+        }
+    ], (
+        f"expected one task_cancel call for cxl; got "
+        f"{_StubLithosClient.task_cancel_calls}"
+    )
+    assert _StubLithosClient.task_complete_calls == [], (
+        "task_complete must not be called for [ ]→[-] transitions; "
+        f"got {_StubLithosClient.task_complete_calls}"
+    )
+
+
 async def test_obsidian_sync_child_rejects_duplicate_status_transition_specs(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
 ) -> None:
