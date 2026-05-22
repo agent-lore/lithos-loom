@@ -182,8 +182,15 @@ class ObsidianFsWatcher:
         published this poll — zero when the file is unchanged, matches
         the projection's last write, or contains only no-op flips
         (markers unchanged, unknown task ids, line not parseable).
+
+        The file is read exactly once per call — the bytes are hashed
+        for the layer-1/2 short-circuits and reused as text for
+        layer-3 parsing. Reading twice would open a small TOCTOU
+        window where the parsed content might disagree with the
+        recorded hash on a rapidly-edited file.
         """
-        current_hash = _hash_file(self.tasks_path)
+        raw = _read_file(self.tasks_path)
+        current_hash = hashlib.sha256(raw).digest() if raw is not None else None
 
         # Layer 1: nothing changed since last poll. Single hash compare,
         # no file re-read or parsing. The cheap steady-state path.
@@ -238,7 +245,11 @@ class ObsidianFsWatcher:
         # content (whitespace change, edit to a sibling line) does NOT
         # re-trigger an already-emitted transition.
         published = 0
-        for task_id, marker in _parse_status_markers(self.tasks_path):
+        # Reuse the bytes we already read for hashing — avoids the
+        # second disk read and the TOCTOU window it would open.
+        # ``raw is None`` means missing/unreadable; nothing to parse.
+        text = raw.decode("utf-8", errors="replace") if raw is not None else ""
+        for task_id, marker in _parse_status_markers(text):
             prior = self._observed_markers.get(
                 task_id, self.sync_state.task_status_markers.get(task_id)
             )
@@ -275,23 +286,28 @@ class ObsidianFsWatcher:
 # ── helpers ────────────────────────────────────────────────────────────
 
 
-def _hash_file(path: Path) -> bytes | None:
-    """SHA-256 of ``path``'s current contents, or ``None`` when absent
-    / unreadable.
+def _read_file(path: Path) -> bytes | None:
+    """Read ``path``'s current contents, or ``None`` when absent /
+    unreadable.
 
-    Mirrors :func:`~lithos_loom.subscriptions._obsidian_projection._hash_existing_file`
-    so the projection and watcher compute byte-identical hashes for
-    the same content — required for the US23 self-write suppression.
+    Returning raw bytes (not a hash or decoded text) lets the caller
+    reuse the same bytes for both hashing and parsing without a
+    second disk read — eliminates the TOCTOU window where the parsed
+    content could disagree with the recorded hash on a rapidly-edited
+    file.
     """
     try:
-        raw = path.read_bytes()
+        return path.read_bytes()
     except (FileNotFoundError, OSError):
         return None
-    return hashlib.sha256(raw).digest()
 
 
-def _parse_status_markers(path: Path) -> Iterator[tuple[str, str]]:
+def _parse_status_markers(text: str) -> Iterator[tuple[str, str]]:
     """Yield ``(task_id, marker)`` pairs for every parseable task line.
+
+    Takes already-decoded text rather than a path so the caller (see
+    :meth:`ObsidianFsWatcher.poll_once`) can hash and parse the same
+    bytes it read in one pass.
 
     Format expected (matches the projection's renderer):
 
@@ -307,10 +323,6 @@ def _parse_status_markers(path: Path) -> Iterator[tuple[str, str]]:
     are skipped with a debug log; the user typed something we don't
     recognise, treat as no-op rather than emit a confusing event.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return
     for line in text.splitlines():
         m = _LINE_RE.match(line)
         if m is None:

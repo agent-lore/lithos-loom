@@ -415,10 +415,19 @@ def make_handler(
         values so the on-disk content and the in-memory coordination
         state stay consistent — otherwise a retry of the same event
         would hash-match the ahead-of-disk ``last_written_hash`` and
-        silently skip a still-needed write. ``CancelledError`` is
-        deliberately NOT caught: it can only fire at ``asyncio.sleep(0)``
-        AFTER the rename has already committed, so the new state IS
-        the correct one to keep.
+        silently skip a still-needed write.
+
+        ``CancelledError`` is deliberately NOT caught (and rolling
+        back on it would be wrong). Cancellation can only fire at a
+        real suspension point — ``_write_tasks_file_atomic`` has no
+        internal ``await``\\s (enforced; see its docstring), so the
+        coroutine runs to completion synchronously when awaited.
+        That means cancellation cannot interrupt the rename. The only
+        post-update yield is ``await asyncio.sleep(0)`` below, which
+        fires AFTER ``os.replace`` has already committed the new
+        file — at that point the sync_state values ARE the correct
+        ones to keep, and rolling back would silently desync them
+        from the on-disk content.
         """
         content = _render_file(state)
         content_hash = hashlib.sha256(content.encode("utf-8")).digest()
@@ -811,16 +820,30 @@ async def _write_tasks_file_atomic(path: Path, content: str) -> None:
     (Copilot review on #17, mirroring ``write_result_atomically`` in
     plugin_runner.py).
 
-    No internal ``await`` points (Slice 2 US23): if there were a yield
-    between the caller's ``sync_state`` update and the ``os.replace``
-    here, the fs watcher could poll with sync_state pointing at the
-    new hash while the file still shows the old content, mis-firing
-    per-task suppression. The caller (``_flush``) yields once *after*
-    a successful return so cancellation can still fire between events.
+    **No internal** ``await`` **points** — load-bearing invariant for
+    Slice 2 US23. Two properties depend on it:
+
+    1. The fs watcher's self-write suppression. The caller updates
+       ``sync_state`` *before* awaiting this function; if there were
+       a yield between that update and ``os.replace``, the watcher
+       could poll with ``sync_state.last_written_hash`` pointing at
+       the new content while the file still showed the old, mis-firing
+       per-task suppression.
+    2. The caller's failure-rollback contract. The caller catches
+       ``Exception`` to roll back ``sync_state`` when the rename
+       didn't apply, and lets ``CancelledError`` propagate without
+       rolling back on the grounds that cancellation cannot fire
+       mid-rename. That reasoning requires this function to have no
+       suspension points where cancellation could fire after the
+       rename but before this function returns.
+
+    Don't add ``await`` here without re-deriving both invariants. If
+    write latency becomes an issue, ``asyncio.to_thread`` wraps this
+    whole synchronous body in one yield-after-completion shot rather
+    than introducing yields inside it.
 
     Synchronous I/O inside an async function — fine for the
-    vault-sized files this serves (<10kB typical). Move to
-    ``asyncio.to_thread`` if write latency under load becomes an issue.
+    vault-sized files this serves (<10kB typical).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")

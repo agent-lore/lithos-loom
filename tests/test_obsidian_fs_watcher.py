@@ -435,6 +435,42 @@ async def test_task_unknown_to_projection_is_ignored(
 # ── Robustness: malformed input, missing file ──────────────────────────
 
 
+async def test_poll_reads_file_exactly_once(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each ``poll_once`` invocation must read the file exactly once,
+    not twice (once for hashing + once for parsing). Reading twice
+    opens a TOCTOU window where the parsed content can disagree with
+    the recorded hash on a rapidly-edited file. Regression for the
+    Copilot review on PR #26.
+    """
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"})
+
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    # User edit so layer 3 runs (otherwise we'd short-circuit before
+    # the parse and not exercise both code paths).
+    _write_tasks_file(tasks_path, ["- [x] Task 🆔 lithos:a"])
+
+    read_calls: list[Path] = []
+    real_read_bytes = Path.read_bytes
+
+    def _counting_read(self: Path) -> bytes:
+        if self == tasks_path:
+            read_calls.append(self)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _counting_read)
+    await watcher.poll_once()
+    assert len(read_calls) == 1, (
+        f"poll_once must read {tasks_path} exactly once; got {len(read_calls)} reads"
+    )
+
+
 async def test_missing_file_is_no_op(
     bus: EventBus,
     sub: Subscription,
