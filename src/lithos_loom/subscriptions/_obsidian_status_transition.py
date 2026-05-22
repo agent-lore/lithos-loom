@@ -27,9 +27,10 @@ US22 idempotency pre-check
 --------------------------
 
 Before invoking any transition function, :func:`handle` calls
-:meth:`LithosClient.task_status` once to read the task's current
-state from Lithos and passes the resulting :class:`Task` down to
-the transition function. Each function then runs its own skip
+:meth:`LithosClient.task_get` once (post-lithos#294 — claim
+serialization isn't needed here) to read the task's current state
+from Lithos and passes the resulting :class:`Task` down to the
+transition function. Each function then runs its own skip
 predicate so the action is co-located with the predicate that
 guards it:
 
@@ -43,8 +44,9 @@ guards it:
   is nonsensical; this is the projection-lag case where the user
   unticked a line that Lithos was already showing as open.
 
-``task_status`` returning ``None`` (task deleted upstream) is
-treated as a skip for all three transitions.
+``task_get`` returning ``None`` (task deleted upstream — explicit
+``task_not_found`` envelope from Lithos) is treated as a skip for
+all three transitions.
 
 The pre-check costs one extra RPC per dispatched event but
 guarantees source-replay on daemon restart is silent — re-reading
@@ -187,7 +189,7 @@ _TRANSITIONS: dict[tuple[str, str], TransitionFn] = {
 async def handle(event: Event, ctx: SubscriptionContext) -> None:
     """Dispatch a single ``obsidian.task.status_changed`` event.
 
-    US22: pre-check :meth:`LithosClient.task_status` once before
+    US22: pre-check :meth:`LithosClient.task_get` once before
     invoking the transition function. The dispatch-table miss path
     short-circuits before the pre-check (so the silent no-op cases
     in US20 don't incur the RPC).
@@ -221,10 +223,11 @@ async def handle(event: Event, ctx: SubscriptionContext) -> None:
         )
         return
 
-    # US22: one task_status RPC per dispatched event, regardless of
-    # which transition fires. Each transition fn then runs its own
-    # skip predicate against ``current.status``.
-    current = await ctx.lithos.task_status(task_id=task_id)
+    # US22: one task_get RPC per dispatched event, regardless of
+    # which transition fires (lithos#294 — no claims needed here).
+    # Each transition fn then runs its own skip predicate against
+    # ``current.status``.
+    current = await ctx.lithos.task_get(task_id=task_id)
     if current is None:
         ctx.logger.info(
             "obsidian-status-transition: task %s not found in Lithos "

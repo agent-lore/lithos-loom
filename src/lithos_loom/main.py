@@ -229,10 +229,11 @@ async def _resolve_dep_statuses(
     """Resolve the status of every ``metadata.depends_on`` referenced by ``tasks``.
 
     Mirrors what :class:`~lithos_loom.subscriptions.route_runner.RouteRunner`
-    does at runtime: ``task_status`` per unique dep id. Returns the status
-    string (``"completed"`` / ``"open"`` / ``"cancelled"``) or ``None`` for
-    ``task_not_found``. Without this the dry-run would report ``✓ (claim)``
-    for tasks the real runner would defer because their deps aren't done.
+    does at runtime: ``task_get`` per unique dep id (post-lithos#294).
+    Returns the status string (``"completed"`` / ``"open"`` /
+    ``"cancelled"``) or ``None`` for ``task_not_found``. Without this
+    the dry-run would report ``✓ (claim)`` for tasks the real runner
+    would defer because their deps aren't done.
     """
     dep_ids: set[str] = set()
     for task in tasks:
@@ -241,7 +242,7 @@ async def _resolve_dep_statuses(
                 dep_ids.add(dep_id)
     statuses: dict[str, str | None] = {}
     for dep_id in dep_ids:
-        result = await client.task_status(task_id=dep_id)
+        result = await client.task_get(task_id=dep_id)
         statuses[dep_id] = result.status if result is not None else None
     return statuses
 

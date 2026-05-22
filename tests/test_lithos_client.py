@@ -334,6 +334,153 @@ async def test_lithos_client_task_status_propagates_other_errors() -> None:
     assert exc.value.code == "invalid_input"
 
 
+async def test_lithos_client_task_status_parses_full_envelope_post_lithos_294() -> None:
+    """Post-lithos#294 the status envelope carries the full task record
+    plus claims. Each new field surfaces on the returned :class:`Task`."""
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {
+            "tasks": [
+                {
+                    "id": "abc",
+                    "title": "Review PR",
+                    "description": "Look it over carefully.",
+                    "status": "completed",
+                    "created_by": "alice",
+                    "created_at": "2026-05-20T09:00:00+00:00",
+                    "resolved_at": "2026-05-21T10:00:00+00:00",
+                    "tags": ["code-review", "priority:high"],
+                    "metadata": {"priority": "high", "depends_on": ["dep1"]},
+                    "outcome": "approved",
+                    "claims": [
+                        {
+                            "agent": "agent-a",
+                            "aspect": "work",
+                            "expires_at": "2026-05-22T00:00:00+00:00",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    task = await client.task_status(task_id="abc")
+    assert task is not None
+    assert task.id == "abc"
+    assert task.title == "Review PR"
+    assert task.description == "Look it over carefully."
+    assert task.status == "completed"
+    assert task.created_by == "alice"
+    assert task.created_at is not None
+    assert task.tags == ("code-review", "priority:high")
+    assert task.metadata == {"priority": "high", "depends_on": ["dep1"]}
+    assert task.outcome == "approved"
+    assert task.resolved_at is not None
+    assert len(task.claims) == 1
+    assert task.claims[0]["agent"] == "agent-a"
+
+
+# ── LithosClient.task_get (lithos#294) ────────────────────────────────
+
+
+async def test_lithos_client_task_get_returns_parsed_task() -> None:
+    """``task_get`` parses the single-object ``{task: {...}}`` envelope
+    introduced in lithos#294 — no list wrapper, no claims."""
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {
+            "task": {
+                "id": "abc",
+                "title": "Task",
+                "description": "desc",
+                "status": "open",
+                "created_by": "agent",
+                "created_at": "2026-05-20T09:00:00+00:00",
+                "resolved_at": None,
+                "tags": ["a"],
+                "metadata": {"priority": "high"},
+                "outcome": None,
+            }
+        }
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    task = await client.task_get(task_id="abc")
+    assert task is not None
+    assert task.id == "abc"
+    assert task.status == "open"
+    assert task.metadata == {"priority": "high"}
+    # Claims default to an empty tuple — task_get never returns them.
+    assert task.claims == ()
+    fake_session.call_tool.assert_awaited_once_with(
+        "lithos_task_get", arguments={"task_id": "abc"}
+    )
+
+
+async def test_lithos_client_task_get_returns_none_when_task_not_found() -> None:
+    """``task_not_found`` is a routine outcome — mapped to ``None`` to
+    match the :meth:`task_status` convention."""
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {"status": "error", "code": "task_not_found", "message": "no such task"}
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    assert await client.task_get(task_id="missing") is None
+
+
+async def test_lithos_client_task_get_propagates_other_errors() -> None:
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {"status": "error", "code": "invalid_input", "message": "bad id"}
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_get(task_id="x")
+    assert exc.value.code == "invalid_input"
+
+
+async def test_lithos_client_task_get_handles_minimal_envelope() -> None:
+    """Defensive: a server that returns only the required fields
+    (``id, title, status``) should still parse without error.
+    Backwards-compat in case future Lithos trims optional keys or a
+    test server stubs a minimal response."""
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content(
+        {"task": {"id": "abc", "title": "t", "status": "open"}}
+    )
+    client._session = fake_session  # type: ignore[assignment]
+
+    task = await client.task_get(task_id="abc")
+    assert task is not None
+    assert task.metadata == {}
+    assert task.tags == ()
+    assert task.description is None
+    assert task.created_by == ""
+    assert task.created_at is None
+    assert task.outcome is None
+
+
+async def test_lithos_client_task_get_rejects_missing_task_key() -> None:
+    """Malformed envelope (no 'task' key, no error envelope) is an
+    invalid_response, not a silent success with defaults."""
+    client = LithosClient(base_url="http://example.test:8765")
+    fake_session = AsyncMock()
+    fake_session.call_tool.return_value = _content({"unexpected": "shape"})
+    client._session = fake_session  # type: ignore[assignment]
+
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_get(task_id="x")
+    assert exc.value.code == "invalid_response"
+
+
 # ── task_claim / task_renew / task_release / task_complete / task_update ─
 
 

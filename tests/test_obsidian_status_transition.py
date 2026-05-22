@@ -5,9 +5,10 @@ The handler is stateless; tests just call ``handle(event, ctx)``
 directly with synthetic events and assert on a mocked
 ``ctx.lithos`` (``AsyncMock``).
 
-US22 added a pre-check via ``lithos_task_status`` at the top of
+US22 added a pre-check via ``lithos_task_get`` (post-lithos#294,
+swapped from ``task_status`` for lighter RPC) at the top of
 ``handle``. The :func:`_ctx` helper below wires
-``lithos.task_status.return_value`` to an open ``Task`` by default so
+``lithos.task_get.return_value`` to an open ``Task`` by default so
 existing happy-path tests reach their mutating call without
 per-test boilerplate; tests that exercise the skip predicates
 override the return value (or set ``side_effect``) explicitly.
@@ -58,14 +59,17 @@ def _ctx(
     *,
     current_status: str | None = "open",
 ) -> SubscriptionContext:
-    """Build a SubscriptionContext with a default-wired ``task_status``.
+    """Build a SubscriptionContext with a default-wired ``task_get``.
 
-    When ``current_status`` is a string, ``lithos.task_status``
-    returns a Task with that status. When ``current_status is None``,
-    ``task_status`` returns ``None`` (the deleted-upstream case).
+    Post-lithos#294 the status-transition handler pre-checks via
+    ``task_get`` (no claims overhead) rather than ``task_status``.
+
+    When ``current_status`` is a string, ``lithos.task_get`` returns
+    a Task with that status. When ``current_status is None``,
+    ``task_get`` returns ``None`` (the deleted-upstream case).
 
     If the caller passes a pre-configured ``lithos`` AsyncMock, the
-    helper does NOT overwrite an existing ``task_status.return_value``
+    helper does NOT overwrite an existing ``task_get.return_value``
     or ``side_effect`` — it only fills in a default when the mock
     has no configuration. This lets individual tests prepare a
     bespoke ``side_effect`` (e.g., for sequencing assertions) by
@@ -73,12 +77,12 @@ def _ctx(
     if lithos is None:
         lithos = AsyncMock()
     # Only set a default when the test hasn't already configured one.
-    task_status_mock = lithos.task_status
+    task_get_mock = lithos.task_get
     if (
-        task_status_mock.return_value is None
-        or isinstance(task_status_mock.return_value, AsyncMock)
-    ) and task_status_mock.side_effect is None:
-        task_status_mock.return_value = (
+        task_get_mock.return_value is None
+        or isinstance(task_get_mock.return_value, AsyncMock)
+    ) and task_get_mock.side_effect is None:
+        task_get_mock.return_value = (
             _task(status=current_status) if current_status is not None else None
         )
     return SubscriptionContext(
@@ -247,7 +251,7 @@ async def test_in_progress_and_rescheduled_markers_are_silent_no_ops(
     """US20: every transition involving ``[/]`` (in progress) or ``[>]``
     (rescheduled) is an Obsidian-only convention and must never trigger
     a Lithos call. The dispatch-table miss must also short-circuit
-    BEFORE the US22 pre-check — calling task_status for a no-op
+    BEFORE the US22 pre-check — calling task_get for a no-op
     transition would be wasteful.
 
     Anti-regression for any future change that tries to map, say,
@@ -263,7 +267,7 @@ async def test_in_progress_and_rescheduled_markers_are_silent_no_ops(
     lithos.task_cancel.assert_not_awaited()
     lithos.finding_post.assert_not_awaited()
     # US22: dispatch-table miss short-circuits before the RPC.
-    lithos.task_status.assert_not_awaited()
+    lithos.task_get.assert_not_awaited()
 
 
 @pytest.mark.parametrize("new_marker", _US20_MARKERS)
@@ -313,11 +317,11 @@ async def test_other_transitions_are_silent_no_ops(prior: str, new: str) -> None
     lithos.finding_post.assert_not_awaited()
 
 
-# ── US22: idempotency pre-check via task_status ────────────────────────
+# ── US22: idempotency pre-check via task_get (lithos#294) ──────────────
 
 
-async def test_complete_pre_checks_task_status() -> None:
-    """The dispatch layer calls ``task_status`` once before invoking
+async def test_complete_pre_checks_task_get() -> None:
+    """The dispatch layer calls ``task_get`` once before invoking
     the transition function. The happy path (open → task_complete)
     must include the pre-check RPC."""
     lithos = AsyncMock()
@@ -325,8 +329,11 @@ async def test_complete_pre_checks_task_status() -> None:
 
     await handle(_event(task_id="abc", prior="[ ]", new="[x]"), ctx)
 
-    lithos.task_status.assert_awaited_once_with(task_id="abc")
+    lithos.task_get.assert_awaited_once_with(task_id="abc")
     lithos.task_complete.assert_awaited_once()
+    # Regression guard: must NOT use task_status (heavier — returns
+    # claims we don't need).
+    lithos.task_status.assert_not_awaited()
 
 
 async def test_complete_skips_when_already_completed(
@@ -367,7 +374,7 @@ async def test_complete_skips_when_already_cancelled(
 async def test_complete_skips_when_task_not_found(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """task_status returns None (deleted upstream) → no mutating call;
+    """task_get returns None (deleted upstream) → no mutating call;
     INFO log mentions "not found"."""
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos, current_status=None)
@@ -419,7 +426,7 @@ async def test_cancel_skips_when_task_not_found(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Cancel on a deleted-upstream task short-circuits at the
-    task_status pre-check."""
+    task_get pre-check."""
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos, current_status=None)
 
@@ -475,7 +482,7 @@ async def test_reopen_request_skips_when_task_not_found(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Untick on a deleted-upstream task short-circuits at the
-    task_status pre-check."""
+    task_get pre-check."""
     lithos = AsyncMock()
     ctx = _ctx(lithos=lithos, current_status=None)
 
@@ -503,7 +510,7 @@ async def test_reopen_request_posts_finding_when_task_is_completed() -> None:
 
 
 async def test_pre_check_happens_once_per_event() -> None:
-    """The dispatch layer makes exactly one ``task_status`` call per
+    """The dispatch layer makes exactly one ``task_get`` call per
     event, regardless of which transition fires. Catches a regression
     where the per-transition fn might double-dip on the RPC."""
     lithos = AsyncMock()
@@ -511,7 +518,7 @@ async def test_pre_check_happens_once_per_event() -> None:
 
     await handle(_event(task_id="abc", prior="[ ]", new="[x]"), ctx)
 
-    assert lithos.task_status.await_count == 1
+    assert lithos.task_get.await_count == 1
 
 
 # ── Robustness ─────────────────────────────────────────────────────────
@@ -546,7 +553,7 @@ async def test_malformed_payload_warns_and_returns(
 
     lithos.task_complete.assert_not_awaited()
     # Malformed payloads short-circuit before the pre-check.
-    lithos.task_status.assert_not_awaited()
+    lithos.task_get.assert_not_awaited()
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("malformed payload" in m for m in warn_msgs), warn_msgs
 

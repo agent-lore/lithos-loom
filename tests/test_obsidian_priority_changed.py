@@ -19,18 +19,47 @@ from unittest.mock import AsyncMock
 import pytest
 
 from lithos_loom.bus import Event
+from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._obsidian_priority_changed import handle
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
+def _default_open_task(task_id: str = "abc") -> Task:
+    """A synthetic open task with empty metadata — the default
+    response from ``task_get`` so the strict-priority pre-check
+    (post-lithos#294) doesn't compare against an AsyncMock attribute
+    and leak un-awaited-coroutine warnings."""
+    return Task(
+        id=task_id,
+        title="t",
+        status="open",
+        tags=(),
+        metadata={},
+        claims=(),
+    )
+
+
 def _ctx(
     lithos: Any | None = None,
     agent_id: str = "lithos-orchestrator-test",
 ) -> SubscriptionContext:
+    """Build a SubscriptionContext with ``task_get`` pre-wired to a
+    synthetic open task by default. Tests that need a specific
+    metadata.priority value override ``lithos.task_get.return_value``
+    explicitly before calling _ctx (or after — _ctx only fills in the
+    default when nothing's configured)."""
+    if lithos is None:
+        lithos = AsyncMock()
+    task_get_mock = lithos.task_get
+    if (
+        task_get_mock.return_value is None
+        or isinstance(task_get_mock.return_value, AsyncMock)
+    ) and task_get_mock.side_effect is None:
+        task_get_mock.return_value = _default_open_task()
     return SubscriptionContext(
-        lithos=lithos if lithos is not None else AsyncMock(),
+        lithos=lithos,
         logger=logging.getLogger("test.obsidian_priority_changed"),
         agent_id=agent_id,
     )
@@ -75,8 +104,21 @@ async def test_change_to_none_sends_metadata_priority_null_to_delete_key() -> No
     ``metadata={"priority": None}`` which Lithos interprets (per
     #290's additive-merge semantics) as "delete the priority key".
     Other metadata keys (``depends_on`` etc) are preserved by
-    Lithos because they're not mentioned in the patch."""
+    Lithos because they're not mentioned in the patch.
+
+    Wires ``task_get`` so the strict pre-check (post-lithos#294)
+    sees the task with ``priority=high`` in metadata — required so
+    the pre-check observes a genuine mismatch (``"high" != None``)
+    and proceeds to the update."""
     lithos = AsyncMock()
+    lithos.task_get.return_value = Task(
+        id="abc",
+        title="t",
+        status="open",
+        tags=(),
+        metadata={"priority": "high"},
+        claims=(),
+    )
     ctx = _ctx(lithos=lithos)
 
     await handle(_event(prior="high", new=None), ctx)
@@ -274,8 +316,23 @@ async def test_does_not_skip_when_prior_none_new_set() -> None:
 
 async def test_does_not_skip_when_prior_set_new_none() -> None:
     """``"high" → None`` (user deleted the emoji) is a genuine
-    change — the delete-semantics patch must still go through."""
+    change — the delete-semantics patch must still go through.
+
+    Lithos has ``priority=high`` so the strict pre-check
+    (post-lithos#294) sees a mismatch (``"high" != None``) and
+    proceeds. The companion test
+    :func:`test_strict_check_skips_when_lithos_has_no_priority_and_new_is_none`
+    covers the symmetric case where Lithos already has no priority
+    and the handler correctly skips."""
     lithos = AsyncMock()
+    lithos.task_get.return_value = Task(
+        id="abc",
+        title="t",
+        status="open",
+        tags=(),
+        metadata={"priority": "high"},
+        claims=(),
+    )
     ctx = _ctx(lithos=lithos)
 
     await handle(_event(task_id="abc", prior="high", new=None), ctx)
@@ -285,3 +342,143 @@ async def test_does_not_skip_when_prior_set_new_none() -> None:
         agent="lithos-orchestrator-test",
         metadata={"priority": None},
     )
+
+
+# ── US22: Lithos-side strict idempotency check (lithos#294) ───────────
+
+
+def _task(
+    task_id: str = "abc", *, priority: str | None = None, status: str = "open"
+) -> Task:
+    """Construct a Task with the minimum fields needed for the strict
+    priority check. Metadata is empty unless ``priority`` is given."""
+    metadata: dict[str, Any] = {}
+    if priority is not None:
+        metadata["priority"] = priority
+    return Task(
+        id=task_id,
+        title="t",
+        status=status,
+        tags=(),
+        metadata=metadata,
+        claims=(),
+    )
+
+
+async def test_skips_when_lithos_priority_already_matches_new(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Payload says ``low → high`` (genuine change from watcher view),
+    but Lithos already has ``priority=high`` (another agent updated it,
+    or sync_state drifted). The strict pre-check skips the redundant
+    update."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = _task("abc", priority="high")
+    ctx = _ctx(lithos=lithos)
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_priority_changed"):
+        await handle(_event(task_id="abc", prior="low", new="high"), ctx)
+
+    lithos.task_update.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task abc already at priority high" in m and "skipping idempotent update" in m
+        for m in info_msgs
+    ), info_msgs
+
+
+async def test_proceeds_when_lithos_priority_differs_from_new() -> None:
+    """Happy path: Lithos has ``medium``, payload says ``low → high``.
+    Pre-check sees a real mismatch, ``task_update`` fires. Guards
+    against an over-strict predicate that would block legitimate
+    updates."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = _task("abc", priority="medium")
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="low", new="high"), ctx)
+
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"priority": "high"},
+    )
+
+
+async def test_skips_when_task_not_found_in_lithos(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``task_get`` returns ``None`` (task deleted upstream) → no
+    ``task_update``; INFO log mentions "not found".
+
+    Sets ``return_value = None`` AFTER calling ``_ctx`` so the
+    helper's default-task wiring doesn't overwrite the explicit
+    ``None``."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+    lithos.task_get.return_value = None
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_priority_changed"):
+        await handle(_event(task_id="gone1", prior="low", new="high"), ctx)
+
+    lithos.task_update.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task gone1 not found in Lithos" in m and "skipping" in m for m in info_msgs
+    ), info_msgs
+
+
+async def test_strict_check_skips_when_lithos_has_no_priority_and_new_is_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``prior="high", new=None`` (user deleted emoji). Lithos already
+    has no ``priority`` key in metadata → ``current_priority`` is None,
+    equals ``new_str=None`` → skip. Symmetric to the explicit
+    ``priority=value`` match."""
+    lithos = AsyncMock()
+    # Task with NO priority key in metadata.
+    lithos.task_get.return_value = _task("abc")
+    ctx = _ctx(lithos=lithos)
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_priority_changed"):
+        await handle(_event(task_id="abc", prior="high", new=None), ctx)
+
+    lithos.task_update.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task abc already at priority None" in m and "skipping" in m for m in info_msgs
+    ), info_msgs
+
+
+async def test_strict_check_proceeds_when_prior_none_and_lithos_has_no_priority() -> (
+    None
+):
+    """``prior=None, new="high"`` (user added an emoji). Lithos also
+    has no priority → ``current_priority=None != "high"=new_str`` →
+    proceed. Guards against an over-strict predicate that would block
+    the "user adds priority where none existed" case."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = _task("abc")
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior=None, new="high"), ctx)
+
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"priority": "high"},
+    )
+
+
+async def test_strict_check_pre_check_uses_task_get_not_task_status() -> None:
+    """The handler uses ``task_get`` (no claims needed) for the
+    strict pre-check, not ``task_status`` (heavier). Regression
+    guard against a future change that re-adds task_status."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = _task("abc", priority="medium")
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="low", new="high"), ctx)
+
+    lithos.task_get.assert_awaited_once_with(task_id="abc")
+    lithos.task_status.assert_not_awaited()

@@ -143,8 +143,10 @@ async def test_runner_skips_non_open_tasks(tmp_path: Path) -> None:
 async def test_runner_skips_when_dependencies_not_completed(tmp_path: Path) -> None:
     bus = EventBus()
     lithos = AsyncMock()
-    # task_status for the dep returns an open dep task — not completed.
-    lithos.task_status.return_value = Task(
+    # task_get for the dep returns an open dep task — not completed.
+    # (Post-lithos#294 the runner uses task_get rather than task_status:
+    # claims aren't needed for the dep check.)
+    lithos.task_get.return_value = Task(
         id="dep-1", title="t", status="open", tags=(), metadata={}, claims=()
     )
     runner, _ = _make_runner(
@@ -155,7 +157,7 @@ async def test_runner_skips_when_dependencies_not_completed(tmp_path: Path) -> N
 
     await bus.publish(_evt(payload=_payload(metadata={"depends_on": ["dep-1"]})))
     await _run_for(runner)
-    lithos.task_status.assert_awaited_with(task_id="dep-1")
+    lithos.task_get.assert_awaited_with(task_id="dep-1")
     lithos.task_claim.assert_not_called()
 
 
@@ -163,7 +165,7 @@ async def test_runner_runs_when_dependencies_are_completed(tmp_path: Path) -> No
     bus = EventBus()
     lithos = AsyncMock()
     lithos.task_claim.return_value = "expires"
-    lithos.task_status.return_value = Task(
+    lithos.task_get.return_value = Task(
         id="dep-1",
         title="t",
         status="completed",

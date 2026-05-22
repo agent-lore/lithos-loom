@@ -173,6 +173,15 @@ class _StubLithosClient:
     receive a synthetic open ``Task`` so existing happy-path
     end-to-end tests reach their mutating call without setup
     changes.
+
+    Post-lithos#294 the status-transition and priority-changed
+    handlers use ``task_get`` instead of ``task_status`` (lighter:
+    no claims). The stub's ``task_get`` reads from the same
+    ``task_status_returns`` map so a single per-test pre-seed
+    governs both surfaces and the auto-state-transitions on
+    ``task_complete`` / ``task_cancel`` remain visible to whichever
+    method a handler picks. ``task_get_calls`` records lookups so
+    tests can assert which surface was used.
     """
 
     task_complete_calls: ClassVar[list[dict[str, Any]]] = []
@@ -181,6 +190,7 @@ class _StubLithosClient:
     finding_post_calls: ClassVar[list[dict[str, Any]]] = []
     task_status_returns: ClassVar[dict[str, Task | None]] = {}
     task_status_calls: ClassVar[list[str]] = []
+    task_get_calls: ClassVar[list[str]] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         pass
@@ -284,6 +294,26 @@ class _StubLithosClient:
             claims=(),
         )
 
+    async def task_get(self, *, task_id: str) -> Task | None:
+        """Post-lithos#294: lightweight single-task fetch (no claims).
+        Reads from the same ``task_status_returns`` map as
+        :meth:`task_status` so auto-state-transitions on
+        ``task_complete`` / ``task_cancel`` remain visible to
+        whichever method a handler picks.
+        """
+        type(self).task_get_calls.append(task_id)
+        cls = type(self)
+        if task_id in cls.task_status_returns:
+            return cls.task_status_returns[task_id]
+        return Task(
+            id=task_id,
+            title="t",
+            status="open",
+            tags=(),
+            metadata={},
+            claims=(),
+        )
+
 
 @pytest.fixture(autouse=True)
 def _reset_stub_lithos_state() -> None:
@@ -295,6 +325,7 @@ def _reset_stub_lithos_state() -> None:
     _StubLithosClient.finding_post_calls.clear()
     _StubLithosClient.task_status_returns.clear()
     _StubLithosClient.task_status_calls.clear()
+    _StubLithosClient.task_get_calls.clear()
 
 
 class _StubSource:
@@ -1176,9 +1207,9 @@ async def test_obsidian_sync_child_skips_complete_when_already_completed(
     assert rc == 0
 
     # The pre-check fired, but task_complete did not.
-    assert "dup1" in _StubLithosClient.task_status_calls, (
-        f"pre-check task_status must have been called for dup1; "
-        f"got {_StubLithosClient.task_status_calls}"
+    assert "dup1" in _StubLithosClient.task_get_calls, (
+        f"pre-check task_get must have been called for dup1; "
+        f"got {_StubLithosClient.task_get_calls}"
     )
     assert _StubLithosClient.task_complete_calls == [], (
         "task_complete must NOT be called when task is already completed; "
@@ -1233,7 +1264,7 @@ async def test_obsidian_sync_child_skips_cancel_when_already_cancelled(
         await _cancel_and_drain(driver)
     assert rc == 0
 
-    assert "dup2" in _StubLithosClient.task_status_calls
+    assert "dup2" in _StubLithosClient.task_get_calls
     assert _StubLithosClient.task_cancel_calls == [], (
         "task_cancel must NOT be called when task is already cancelled; "
         f"got {_StubLithosClient.task_cancel_calls}"
@@ -1285,9 +1316,9 @@ async def test_obsidian_sync_child_skips_reopen_when_task_is_open(
         await _cancel_and_drain(driver)
     assert rc == 0
 
-    assert "lag1" in _StubLithosClient.task_status_calls, (
-        f"pre-check task_status must have been called for lag1; "
-        f"got {_StubLithosClient.task_status_calls}"
+    assert "lag1" in _StubLithosClient.task_get_calls, (
+        f"pre-check task_get must have been called for lag1; "
+        f"got {_StubLithosClient.task_get_calls}"
     )
     assert _StubLithosClient.finding_post_calls == [], (
         "finding_post must NOT be called for untick on already-open task; "
@@ -1380,13 +1411,75 @@ async def test_obsidian_sync_child_happy_paths_still_work_with_pre_check(
     assert rc == 0
 
     # Pre-check fired and task_complete then fired (default open task).
-    assert "hp1" in _StubLithosClient.task_status_calls, (
+    assert "hp1" in _StubLithosClient.task_get_calls, (
         f"pre-check must have been called for hp1; "
-        f"got {_StubLithosClient.task_status_calls}"
+        f"got {_StubLithosClient.task_get_calls}"
     )
     assert _StubLithosClient.task_complete_calls == [
         {"task_id": "hp1", "agent": "lithos-orchestrator-test"}
     ], (
         f"happy path must still produce a task_complete call; "
         f"got {_StubLithosClient.task_complete_calls}"
+    )
+
+
+# ── Lithos#294: strict priority idempotency end-to-end ─────────────────
+
+
+async def test_obsidian_sync_child_skips_priority_when_lithos_already_matches(
+    tmp_path: Path, stub_io: list[EventBus]
+) -> None:
+    """Lithos#294 strict priority pre-check end-to-end. Pre-seed the
+    stub so the task already has ``metadata.priority="high"``.
+    Synthesise a ``priority_changed`` event with ``prior="medium",
+    new="high"`` (genuine change from watcher view, but Lithos
+    already has the new value). The handler's strict pre-check must
+    skip the ``task_update`` call."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _projection_subscription(),
+            _priority_changed_subscription(),
+        ),
+    )
+
+    # Lithos already has priority=high — strict pre-check should skip.
+    _StubLithosClient.task_status_returns["pri1"] = Task(
+        id="pri1",
+        title="t",
+        status="open",
+        tags=(),
+        metadata={"priority": "high"},
+        claims=(),
+    )
+
+    async def _drive() -> None:
+        await asyncio.sleep(0.1)
+        bus = stub_io[-1]
+        await bus.publish(
+            Event(
+                type="obsidian.task.priority_changed",
+                timestamp=datetime.now(UTC),
+                payload={"task_id": "pri1", "prior": "medium", "new": "high"},
+            )
+        )
+        await asyncio.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    driver = asyncio.create_task(_drive())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=5.0)
+    finally:
+        await _cancel_and_drain(driver)
+    assert rc == 0
+
+    # Pre-check fired but task_update did not — strict idempotency
+    # closed the gap that the payload-only check would have missed.
+    assert "pri1" in _StubLithosClient.task_get_calls, (
+        f"strict pre-check task_get must have been called for pri1; "
+        f"got {_StubLithosClient.task_get_calls}"
+    )
+    assert _StubLithosClient.task_update_calls == [], (
+        "task_update must NOT be called when Lithos already has the "
+        f"target priority; got {_StubLithosClient.task_update_calls}"
     )
