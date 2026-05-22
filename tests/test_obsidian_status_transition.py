@@ -1,9 +1,16 @@
 """Tests for ``lithos_loom.subscriptions._obsidian_status_transition``
-(Slice 2 US17).
+(Slice 2 US17-US22).
 
 The handler is stateless; tests just call ``handle(event, ctx)``
 directly with synthetic events and assert on a mocked
 ``ctx.lithos`` (``AsyncMock``).
+
+US22 added a pre-check via ``lithos_task_status`` at the top of
+``handle``. The :func:`_ctx` helper below wires
+``lithos.task_status.return_value`` to an open ``Task`` by default so
+existing happy-path tests reach their mutating call without
+per-test boilerplate; tests that exercise the skip predicates
+override the return value (or set ``side_effect``) explicitly.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from lithos_loom.bus import Event
+from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._obsidian_status_transition import (
     _CANCEL_REASON,
@@ -27,12 +35,54 @@ from lithos_loom.subscriptions._obsidian_status_transition import (
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
+def _task(task_id: str = "abc", *, status: str = "open") -> Task:
+    """Construct a Task matching the envelope ``lithos_task_status``
+    returns (id, title, status, claims — no tags / metadata).
+
+    Default ``status="open"`` so happy-path tests skip the pre-check
+    branch and reach their mutating call. Override per-test to
+    exercise the skip predicates."""
+    return Task(
+        id=task_id,
+        title="t",
+        status=status,
+        tags=(),
+        metadata={},
+        claims=(),
+    )
+
+
 def _ctx(
     lithos: Any | None = None,
     agent_id: str = "lithos-orchestrator-test",
+    *,
+    current_status: str | None = "open",
 ) -> SubscriptionContext:
+    """Build a SubscriptionContext with a default-wired ``task_status``.
+
+    When ``current_status`` is a string, ``lithos.task_status``
+    returns a Task with that status. When ``current_status is None``,
+    ``task_status`` returns ``None`` (the deleted-upstream case).
+
+    If the caller passes a pre-configured ``lithos`` AsyncMock, the
+    helper does NOT overwrite an existing ``task_status.return_value``
+    or ``side_effect`` — it only fills in a default when the mock
+    has no configuration. This lets individual tests prepare a
+    bespoke ``side_effect`` (e.g., for sequencing assertions) by
+    constructing the AsyncMock themselves before calling _ctx."""
+    if lithos is None:
+        lithos = AsyncMock()
+    # Only set a default when the test hasn't already configured one.
+    task_status_mock = lithos.task_status
+    if (
+        task_status_mock.return_value is None
+        or isinstance(task_status_mock.return_value, AsyncMock)
+    ) and task_status_mock.side_effect is None:
+        task_status_mock.return_value = (
+            _task(status=current_status) if current_status is not None else None
+        )
     return SubscriptionContext(
-        lithos=lithos if lithos is not None else AsyncMock(),
+        lithos=lithos,
         logger=logging.getLogger("test.obsidian_status_transition"),
         agent_id=agent_id,
     )
@@ -126,9 +176,18 @@ async def test_untick_posts_reopen_request_finding() -> None:
     awaited once with the constant ``[ReopenRequested]`` summary and
     the context's agent id. ``task_complete`` and ``task_cancel`` must
     NOT be called — untick is a reopen-request, not a state
-    transition."""
+    transition.
+
+    US22 pre-check: requires the task to actually be in
+    ``status=completed`` upstream, else the finding is nonsensical.
+    """
     lithos = AsyncMock()
-    ctx = _ctx(lithos=lithos, agent_id="lithos-orchestrator-samsara")
+    # The pre-check sees a completed task → finding-post proceeds.
+    ctx = _ctx(
+        lithos=lithos,
+        agent_id="lithos-orchestrator-samsara",
+        current_status="completed",
+    )
 
     await handle(_event(task_id="done1", prior="[x]", new="[ ]"), ctx)
 
@@ -146,7 +205,7 @@ async def test_untick_logs_at_info(
 ) -> None:
     """The reopen-request path emits an INFO log naming the task id
     and the ``[ReopenRequested]`` marker so operators can grep for it."""
-    ctx = _ctx()
+    ctx = _ctx(current_status="completed")
     with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
         await handle(_event(task_id="done7", prior="[x]", new="[ ]"), ctx)
 
@@ -187,7 +246,9 @@ async def test_in_progress_and_rescheduled_markers_are_silent_no_ops(
 ) -> None:
     """US20: every transition involving ``[/]`` (in progress) or ``[>]``
     (rescheduled) is an Obsidian-only convention and must never trigger
-    a Lithos call.
+    a Lithos call. The dispatch-table miss must also short-circuit
+    BEFORE the US22 pre-check — calling task_status for a no-op
+    transition would be wasteful.
 
     Anti-regression for any future change that tries to map, say,
     ``[/] → [x]`` to ``task_complete`` — that would break this test
@@ -201,6 +262,8 @@ async def test_in_progress_and_rescheduled_markers_are_silent_no_ops(
     lithos.task_complete.assert_not_awaited()
     lithos.task_cancel.assert_not_awaited()
     lithos.finding_post.assert_not_awaited()
+    # US22: dispatch-table miss short-circuits before the RPC.
+    lithos.task_status.assert_not_awaited()
 
 
 @pytest.mark.parametrize("new_marker", _US20_MARKERS)
@@ -250,6 +313,207 @@ async def test_other_transitions_are_silent_no_ops(prior: str, new: str) -> None
     lithos.finding_post.assert_not_awaited()
 
 
+# ── US22: idempotency pre-check via task_status ────────────────────────
+
+
+async def test_complete_pre_checks_task_status() -> None:
+    """The dispatch layer calls ``task_status`` once before invoking
+    the transition function. The happy path (open → task_complete)
+    must include the pre-check RPC."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="[ ]", new="[x]"), ctx)
+
+    lithos.task_status.assert_awaited_once_with(task_id="abc")
+    lithos.task_complete.assert_awaited_once()
+
+
+async def test_complete_skips_when_already_completed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pre-check sees status=completed → ``task_complete`` NOT called,
+    INFO log mentions the idempotent skip."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="completed")
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="abc", prior="[ ]", new="[x]"), ctx)
+
+    lithos.task_complete.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task abc already completed" in m and "idempotent skip" in m for m in info_msgs
+    ), info_msgs
+
+
+async def test_complete_skips_when_already_cancelled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cancelled task cannot be completed; the pre-check skips it."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="cancelled")
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="xyz", prior="[ ]", new="[x]"), ctx)
+
+    lithos.task_complete.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task xyz already cancelled" in m and "idempotent skip" in m for m in info_msgs
+    ), info_msgs
+
+
+async def test_complete_skips_when_task_not_found(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """task_status returns None (deleted upstream) → no mutating call;
+    INFO log mentions "not found"."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status=None)
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="gone1", prior="[ ]", new="[x]"), ctx)
+
+    lithos.task_complete.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("task gone1 not found in Lithos" in m for m in info_msgs), info_msgs
+
+
+async def test_cancel_skips_when_already_completed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancelling a completed task is meaningless; the pre-check skips
+    it. Mirrors ``test_complete_skips_when_already_cancelled``."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="completed")
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="abc", prior="[ ]", new="[-]"), ctx)
+
+    lithos.task_cancel.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task abc already completed" in m and "idempotent skip" in m for m in info_msgs
+    ), info_msgs
+
+
+async def test_cancel_skips_when_already_cancelled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Re-cancelling an already-cancelled task is a no-op."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="cancelled")
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="xyz", prior="[ ]", new="[-]"), ctx)
+
+    lithos.task_cancel.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task xyz already cancelled" in m and "idempotent skip" in m for m in info_msgs
+    ), info_msgs
+
+
+async def test_cancel_skips_when_task_not_found(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancel on a deleted-upstream task short-circuits at the
+    task_status pre-check."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status=None)
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="gone2", prior="[ ]", new="[-]"), ctx)
+
+    lithos.task_cancel.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("task gone2 not found in Lithos" in m for m in info_msgs), info_msgs
+
+
+async def test_reopen_request_skips_when_task_is_open(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``[x]→[ ]`` on a task Lithos shows as open is the projection-lag
+    case — the task isn't actually completed upstream, so posting
+    ``[ReopenRequested]`` would be nonsensical."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="open")
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="op1", prior="[x]", new="[ ]"), ctx)
+
+    lithos.finding_post.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task op1 is open (not completed)" in m and "skipping [ReopenRequested]" in m
+        for m in info_msgs
+    ), info_msgs
+
+
+async def test_reopen_request_skips_when_task_is_cancelled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cancelled task isn't a reopen candidate either; skip without
+    posting the finding."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="cancelled")
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="cn1", prior="[x]", new="[ ]"), ctx)
+
+    lithos.finding_post.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "task cn1 is cancelled (not completed)" in m
+        and "skipping [ReopenRequested]" in m
+        for m in info_msgs
+    ), info_msgs
+
+
+async def test_reopen_request_skips_when_task_not_found(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Untick on a deleted-upstream task short-circuits at the
+    task_status pre-check."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status=None)
+
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="gone3", prior="[x]", new="[ ]"), ctx)
+
+    lithos.finding_post.assert_not_awaited()
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("task gone3 not found in Lithos" in m for m in info_msgs), info_msgs
+
+
+async def test_reopen_request_posts_finding_when_task_is_completed() -> None:
+    """Happy path: ``[x]→[ ]`` on a task that IS completed upstream
+    → finding_post fires (verifies the predicate isn't over-strict)."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="completed")
+
+    await handle(_event(task_id="done5", prior="[x]", new="[ ]"), ctx)
+
+    lithos.finding_post.assert_awaited_once_with(
+        task_id="done5",
+        summary=_REOPEN_REQUEST_SUMMARY,
+        agent="lithos-orchestrator-test",
+    )
+
+
+async def test_pre_check_happens_once_per_event() -> None:
+    """The dispatch layer makes exactly one ``task_status`` call per
+    event, regardless of which transition fires. Catches a regression
+    where the per-transition fn might double-dip on the RPC."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, current_status="completed")
+
+    await handle(_event(task_id="abc", prior="[ ]", new="[x]"), ctx)
+
+    assert lithos.task_status.await_count == 1
+
+
 # ── Robustness ─────────────────────────────────────────────────────────
 
 
@@ -281,6 +545,8 @@ async def test_malformed_payload_warns_and_returns(
         await handle(event, ctx)  # must not raise
 
     lithos.task_complete.assert_not_awaited()
+    # Malformed payloads short-circuit before the pre-check.
+    lithos.task_status.assert_not_awaited()
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("malformed payload" in m for m in warn_msgs), warn_msgs
 

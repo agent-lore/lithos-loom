@@ -626,6 +626,100 @@ async def test_task_unknown_to_projection_is_ignored(
     assert _drain(sub) == []
 
 
+# ── US22: source-replay on restart is safe ────────────────────────────
+
+
+async def test_cold_start_restart_with_unchanged_file_emits_nothing(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+) -> None:
+    """US22 source-replay safety: after a daemon restart, the file on
+    disk still has the pre-restart projected lines (status markers and
+    priority emoji) but ``sync_state`` is empty because in-memory
+    state was lost. The watcher's first poll must emit ZERO events —
+    nothing actually changed; only Loom's coordinator state did.
+
+    This is exercised by the same projection-known gate that
+    :func:`test_task_unknown_to_projection_is_ignored` covers for
+    capture-macro lines, but called out separately because the
+    restart-replay phrasing is what US22 explicitly promises and
+    a future change that "improves" the gate could regress this
+    without breaking the capture-macro test."""
+    pri_sub = _subscribe_priority(bus)
+
+    # File written by a pre-restart projection: one open task with a
+    # priority emoji (high), one completed task within the resolved
+    # TTL. Both should be silent post-restart.
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [ ] Open thing ⏫ 🆔 lithos:cs1",
+            "- [x] Done thing ✅ 2026-05-22 🆔 lithos:cs2",
+        ],
+    )
+
+    # Cold-start invariant: in-memory sync_state was lost.
+    sync_state = ProjectionSyncState()
+    assert sync_state.task_status_markers == {}
+    assert sync_state.task_priority_markers == {}
+
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    published = await watcher.poll_once()
+
+    assert published == 0, f"cold start emitted {published} events; expected 0"
+    assert _drain(sub) == [], "no status_changed events on cold start"
+    assert _drain(pri_sub) == [], "no priority_changed events on cold start"
+
+
+async def test_cold_start_then_projection_settles_then_user_edit_emits(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+) -> None:
+    """US22 follow-through: after cold start the projection re-processes
+    Lithos events and populates ``sync_state``. A subsequent genuine
+    user edit then emits the expected transition. Pins the "safe on
+    restart, still alive after settle" contract — the cold-start
+    suppression must not silently break legitimate edits once the
+    coordinator catches up."""
+    pri_sub = _subscribe_priority(bus)
+
+    _write_tasks_file(tasks_path, ["- [ ] Settled task ⏫ 🆔 lithos:s1"])
+    sync_state = ProjectionSyncState()
+
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+
+    # 1. Cold-start poll — silent.
+    assert await watcher.poll_once() == 0
+    assert _drain(sub) == []
+    assert _drain(pri_sub) == []
+
+    # 2. Projection settles: it re-renders the file (same content here,
+    # so the hash matches what's on disk) and records the post-write
+    # state into sync_state.
+    _record_projection(sync_state, tasks_path, {"s1": "[ ]"}, priorities={"s1": "high"})
+
+    # 3. User edits: ticks the task AND changes priority emoji.
+    _write_tasks_file(tasks_path, ["- [x] Settled task 🔺 🆔 lithos:s1"])
+
+    published = await watcher.poll_once()
+    status_events = _drain(sub)
+    priority_events = _drain(pri_sub)
+
+    # One status_changed + one priority_changed — the projection-known
+    # gate cleared and both diffs surfaced normally.
+    assert published == 2
+    assert len(status_events) == 1
+    assert status_events[0].payload == {"task_id": "s1", "prior": "[ ]", "new": "[x]"}
+    assert len(priority_events) == 1
+    assert priority_events[0].payload == {
+        "task_id": "s1",
+        "prior": "high",
+        "new": "highest",
+    }
+
+
 # ── Robustness: malformed input, missing file ──────────────────────────
 
 
