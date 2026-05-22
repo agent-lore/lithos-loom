@@ -114,6 +114,18 @@ def _status_transition_subscription(
     )
 
 
+def _priority_changed_subscription(
+    name: str = "obsidian-tasks-priority",
+) -> SubscriptionConfig:
+    return SubscriptionConfig(
+        name=name,
+        event_types=("obsidian.task.priority_changed",),
+        action="obsidian-priority-changed",
+        retry=RetryPolicy(attempts=1, initial_delay_seconds=0.0, max_delay_seconds=0.0),
+        on_persistent_failure="ignore",
+    )
+
+
 def _event(
     event_type: str,
     *,
@@ -145,15 +157,17 @@ class _StubLithosClient:
     The real client does an MCP/SSE handshake on __aenter__; tests
     can't reach a real Lithos, so we substitute this no-op.
 
-    Records ``task_complete``, ``task_cancel``, and ``finding_post``
-    invocations on class-level lists so the
-    obsidian-status-transition end-to-end tests can assert on the
-    round-trip. The ``_reset_stub_lithos_state`` autouse fixture
-    clears them between tests.
+    Records ``task_complete``, ``task_cancel``, ``task_update``, and
+    ``finding_post`` invocations on class-level lists so the
+    obsidian-status-transition and obsidian-priority-changed
+    end-to-end tests can assert on the round-trip. The
+    ``_reset_stub_lithos_state`` autouse fixture clears them between
+    tests.
     """
 
     task_complete_calls: ClassVar[list[dict[str, Any]]] = []
     task_cancel_calls: ClassVar[list[dict[str, Any]]] = []
+    task_update_calls: ClassVar[list[dict[str, Any]]] = []
     finding_post_calls: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -196,6 +210,27 @@ class _StubLithosClient:
             {"task_id": task_id, "agent": agent, "reason": reason}
         )
 
+    async def task_update(
+        self,
+        *,
+        task_id: str,
+        agent: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        type(self).task_update_calls.append(
+            {
+                "task_id": task_id,
+                "agent": agent,
+                "title": title,
+                "description": description,
+                "tags": tags,
+                "metadata": metadata,
+            }
+        )
+
 
 @pytest.fixture(autouse=True)
 def _reset_stub_lithos_state() -> None:
@@ -203,6 +238,7 @@ def _reset_stub_lithos_state() -> None:
     so cross-test leakage can't make an assertion accidentally pass."""
     _StubLithosClient.task_complete_calls.clear()
     _StubLithosClient.task_cancel_calls.clear()
+    _StubLithosClient.task_update_calls.clear()
     _StubLithosClient.finding_post_calls.clear()
 
 
@@ -358,7 +394,9 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
 
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "no obsidian-projection or obsidian-status-transition subscription" in m
+        "no obsidian-projection, obsidian-status-transition, or "
+        "obsidian-priority-changed subscription"
+        in m
         and "fs watcher runs but emits nothing" in m
         for m in warn_msgs
     ), warn_msgs
@@ -881,3 +919,139 @@ async def test_obsidian_sync_child_skips_event_stream_for_status_transition_only
         "LithosEventStream should not be constructed when only "
         "status-transition is wired"
     )
+
+
+# ── US21: priority-changed end-to-end ──────────────────────────────────
+
+
+async def test_obsidian_sync_child_priority_change_calls_task_update(
+    tmp_path: Path, stub_io: list[EventBus]
+) -> None:
+    """Slice 2 US21 end-to-end (post-Lithos #290): configure projection
+    + priority-changed (and status-transition for full-stack symmetry).
+    Publish a ``task.created`` with ``metadata.priority='medium'`` so
+    the projection writes a line with ``🔼``; simulate the user
+    swapping it for ``🔺``; assert the handler calls
+    ``lithos.task_update(metadata={"priority": "highest"})``. No
+    ``task_complete`` / ``task_cancel`` / ``finding_post`` fires
+    (priority-only edit, no other surface touched)."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _projection_subscription(),
+            _status_transition_subscription(),
+            _priority_changed_subscription(),
+        ),
+    )
+    tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+
+    async def _drive() -> None:
+        await asyncio.sleep(0.1)
+        bus = stub_io[-1]
+        await bus.publish(
+            _event(
+                "lithos.task.created",
+                task_id="pri",
+                title="Pick the right priority",
+                metadata={"priority": "medium"},
+            )
+        )
+        await asyncio.sleep(0.2)
+        assert tasks_file.exists()
+        text_before = tasks_file.read_text(encoding="utf-8")
+        assert "🔼" in text_before, text_before
+        assert "🆔 lithos:pri" in text_before
+
+        # User flips the priority emoji from medium to highest.
+        tasks_file.write_text(
+            text_before.replace("🔼", "🔺"),
+            encoding="utf-8",
+        )
+        await asyncio.sleep(0.6)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    driver = asyncio.create_task(_drive())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=5.0)
+    finally:
+        await _cancel_and_drain(driver)
+    assert rc == 0
+
+    # Exactly one task_update call for the priority change.
+    assert len(_StubLithosClient.task_update_calls) == 1, (
+        f"expected one task_update call; got {_StubLithosClient.task_update_calls}"
+    )
+    call = _StubLithosClient.task_update_calls[0]
+    assert call["task_id"] == "pri"
+    assert call["agent"] == "lithos-orchestrator-test"
+    assert call["metadata"] == {"priority": "highest"}
+    # The handler MUST NOT pass title/description/tags — only the
+    # priority key in metadata, so Lithos's per-key merge preserves
+    # everything else on the task.
+    assert call["title"] is None
+    assert call["description"] is None
+    assert call["tags"] is None
+
+    # The user didn't change the checkbox, so status-transition path
+    # must not have fired. No findings either — task_update is the
+    # actual API call now, the [PriorityChangeRequested] workaround
+    # is gone.
+    assert _StubLithosClient.task_complete_calls == [], (
+        f"task_complete must not be called for a priority-only edit; "
+        f"got {_StubLithosClient.task_complete_calls}"
+    )
+    assert _StubLithosClient.task_cancel_calls == [], (
+        f"task_cancel must not be called for a priority-only edit; "
+        f"got {_StubLithosClient.task_cancel_calls}"
+    )
+    assert _StubLithosClient.finding_post_calls == [], (
+        f"finding_post must not be called now that task_update is wired; "
+        f"got {_StubLithosClient.finding_post_calls}"
+    )
+
+
+async def test_obsidian_sync_child_warns_when_priority_changed_without_projection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
+) -> None:
+    """priority-changed without projection is permitted but inert.
+    Mirrors the status-transition warning."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(_priority_changed_subscription("only-priority"),),
+    )
+    source_logger = "lithos_loom.children.obsidian_sync"
+    sender = asyncio.create_task(_sigterm_soon())
+    try:
+        with caplog.at_level(logging.WARNING, logger=source_logger):
+            rc = await asyncio.wait_for(_amain(cfg), timeout=3.0)
+    finally:
+        await _cancel_and_drain(sender)
+    assert rc == 0
+
+    warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "'only-priority' is configured but no obsidian-projection" in m
+        for m in warn_msgs
+    ), warn_msgs
+
+
+async def test_obsidian_sync_child_rejects_duplicate_priority_changed_specs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
+) -> None:
+    """Two priority-changed specs would mean duplicate findings per
+    user edit. Refused with the per-action error message."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _priority_changed_subscription("first"),
+            _priority_changed_subscription("second"),
+        ),
+    )
+    source_logger = "lithos_loom.children.obsidian_sync"
+    with caplog.at_level(logging.ERROR, logger=source_logger):
+        rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    assert rc == 1
+    error_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(
+        "refusing to wire" in m and "obsidian-priority-changed" in m for m in error_msgs
+    ), error_msgs

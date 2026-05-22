@@ -338,12 +338,25 @@ class LithosClient:
         title: str | None = None,
         description: str | None = None,
         tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Update mutable task fields. At least one of title/description/tags."""
-        if title is None and description is None and tags is None:
+        """Update mutable task fields.
+
+        At least one of ``title`` / ``description`` / ``tags`` /
+        ``metadata`` must be provided.
+
+        ``metadata`` (Lithos #290) is applied as an **additive per-key
+        merge**: keys with non-null values overwrite, keys with the
+        literal Python ``None`` (JSON ``null``) delete the existing
+        key, and keys not mentioned are preserved. ``metadata={}``
+        passes through to Lithos as a no-op; if you want to skip
+        sending metadata at all, leave the kwarg at its default
+        ``None``.
+        """
+        if title is None and description is None and tags is None and metadata is None:
             raise LithosClientError(
                 "invalid_input",
-                "task_update requires at least one of title/description/tags",
+                "task_update requires at least one of title/description/tags/metadata",
             )
         agent_id = agent or self.agent_id
         if not agent_id:
@@ -355,6 +368,8 @@ class LithosClient:
             arguments["description"] = description
         if tags is not None:
             arguments["tags"] = tags
+        if metadata is not None:
+            arguments["metadata"] = metadata
         await self._call("lithos_task_update", arguments)
 
     async def task_status(self, *, task_id: str) -> Task | None:

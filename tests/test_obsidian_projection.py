@@ -2177,3 +2177,100 @@ async def test_under_debounce_in_memory_short_circuit_still_works(
     await handler(_event("lithos.task.created", task_id="a"), _ctx())
     await asyncio.sleep(_TEST_DEBOUNCE * 2.5)
     assert calls == [], f"replayed event should have stayed inert; got {calls}"
+
+
+# ── US21: priority on _StateEntry + sync_state ride-through ────────────
+
+
+async def test_flush_passes_priority_to_sync_state_for_open_task(
+    tmp_path: Path,
+) -> None:
+    """After ``_flush``, ``sync_state.task_priority_markers`` reflects
+    the per-task priority for open tasks. Drives the fs-watcher's
+    US21 priority diff."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="ap",
+            metadata={"priority": "high"},
+        ),
+        _ctx(),
+    )
+    assert sync_state.task_priority_markers == {"ap": "high"}
+
+
+async def test_flush_passes_none_priority_when_metadata_absent(
+    tmp_path: Path,
+) -> None:
+    """Open task with no priority → sync_state carries ``None`` (not
+    a missing key). The fs-watcher relies on the dict entry existing
+    to distinguish "projection knows about this task, no priority"
+    from "projection has never written this task"."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    await handler(_event("lithos.task.created", task_id="np"), _ctx())
+    assert sync_state.task_priority_markers == {"np": None}
+
+
+async def test_flush_drops_priority_for_unknown_enum_value(
+    tmp_path: Path,
+) -> None:
+    """Lithos sends an unknown priority enum (typo, future value) →
+    sync_state stores ``None`` so the watcher diff doesn't trip
+    against a value the projection never rendered."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="up",
+            metadata={"priority": "urgent"},  # not in the D18 enum
+        ),
+        _ctx(),
+    )
+    assert sync_state.task_priority_markers == {"up": None}
+
+
+async def test_resolved_state_entry_has_none_priority(
+    tmp_path: Path,
+) -> None:
+    """Completed/cancelled lines drop the priority marker; sync_state
+    must mirror that with ``None`` for resolved entries so the
+    watcher's diff doesn't fire against a stale projection-known
+    priority after the task resolves."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="rp",
+            metadata={"priority": "high"},
+        ),
+        _ctx(),
+    )
+    assert sync_state.task_priority_markers == {"rp": "high"}
+    # Now complete it.
+    await handler(
+        _event(
+            "lithos.task.completed",
+            task_id="rp",
+            status="completed",
+            metadata={"priority": "high"},
+        ),
+        _ctx(),
+    )
+    assert sync_state.task_priority_markers == {"rp": None}
