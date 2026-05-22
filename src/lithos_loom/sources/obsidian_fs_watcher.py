@@ -116,6 +116,29 @@ class ObsidianFsWatcher:
         # poll path short-circuit before consulting sync_state or
         # parsing.
         self._last_seen_hash: bytes | None = None
+        # Per-task marker memory layered on top of
+        # ``sync_state.task_status_markers``. The sync_state map only
+        # advances on projection writes — without local memory of what
+        # we've already observed and emitted for, a user edit followed
+        # by any subsequent file save (unrelated whitespace change,
+        # edit to another line) would re-trigger layer 3 with the same
+        # ``[ ] → [x]`` diff and re-emit the same transition. The
+        # local map records the marker we last saw the user *commit* to
+        # disk; emission compares against (and updates) this map so we
+        # publish at most one event per actual transition. Cleared on
+        # projection self-write — the projection's re-rendered file is
+        # authoritative over any user edits sitting on top of it.
+        self._observed_markers: dict[str, str] = {}
+        # Snapshot of ``sync_state.write_version`` from our last poll.
+        # If it's advanced, the projection has committed a re-render
+        # since we last looked. We use that signal to distinguish
+        # genuine projection self-writes (file matches new
+        # ``last_written_hash`` AND version advanced → suppress) from
+        # user reverts that happen to match the projection's last
+        # written content (version unchanged → real user transition,
+        # let layer 3 emit). Without this, a flip-then-flip-back was
+        # silently absorbed by the layer-2 hash compare.
+        self._last_processed_write_version: int = 0
 
     async def run(self) -> None:
         """Poll forever. Cancellable.
@@ -131,11 +154,14 @@ class ObsidianFsWatcher:
         user's edit as a real change and emits the expected event.
         """
         self._last_seen_hash = self.sync_state.last_written_hash
+        self._last_processed_write_version = self.sync_state.write_version
         logger.info(
-            "ObsidianFsWatcher: watching %s (poll=%.3fs, seeded_hash=%s)",
+            "ObsidianFsWatcher: watching %s (poll=%.3fs, seeded_hash=%s, "
+            "seeded_write_version=%d)",
             self.tasks_path,
             self.poll_interval_seconds,
             "<none>" if self._last_seen_hash is None else "<seeded>",
+            self._last_processed_write_version,
         )
         while True:
             try:
@@ -164,35 +190,68 @@ class ObsidianFsWatcher:
         if current_hash == self._last_seen_hash:
             return 0
 
-        # Layer 2: file changed, but to content the projection just
-        # wrote. The projection updates sync_state BEFORE committing
-        # the atomic rename, so a poll that sees the new file content
-        # also sees the matching last_written_hash here.
+        # Layer 2: a genuine projection self-write — projection
+        # committed a re-render since our last poll AND the file
+        # currently matches that write. Distinguishing on the version
+        # counter (not just the hash) is what makes the flip-then-
+        # flip-back case work: if the user reverts to projection-known
+        # content without the projection writing in between, the
+        # version is unchanged and we fall through to layer 3 so the
+        # real transition is emitted.
+        projection_wrote_since_last_poll = (
+            self.sync_state.write_version > self._last_processed_write_version
+        )
         if (
-            current_hash is not None
+            projection_wrote_since_last_poll
+            and current_hash is not None
             and current_hash == self.sync_state.last_written_hash
         ):
             logger.debug(
                 "ObsidianFsWatcher: %s changed to projection-known content; "
-                "suppressing self-write",
+                "suppressing self-write (write_version=%d)",
                 self.tasks_path,
+                self.sync_state.write_version,
             )
+            # The projection's re-rendered file is authoritative over
+            # any user edits we'd previously observed — drop them so
+            # the next real user edit measures against the projection's
+            # fresh view, not a stale user marker.
+            self._observed_markers.clear()
             self._last_seen_hash = current_hash
+            self._last_processed_write_version = self.sync_state.write_version
             return 0
 
-        # Layer 3: real user edit. Parse + per-task suppression.
+        # If the projection wrote but the file doesn't match (user
+        # raced in between with their own edit, or two projection
+        # writes coalesced and we missed one), still drop _observed —
+        # the projection's view is the new baseline — and update the
+        # version cursor so we don't keep re-clearing on every poll.
+        if projection_wrote_since_last_poll:
+            self._observed_markers.clear()
+            self._last_processed_write_version = self.sync_state.write_version
+
+        # Layer 3: real user edit. Parse + per-task transition detection.
+        # The "prior" is the marker the user last committed to disk for
+        # this task — falling back to the projection's view when we've
+        # never seen a user edit for it. Emitting against this layered
+        # baseline gives transition semantics: re-saving the same file
+        # content (whitespace change, edit to a sibling line) does NOT
+        # re-trigger an already-emitted transition.
         published = 0
         for task_id, marker in _parse_status_markers(self.tasks_path):
-            projection_marker = self.sync_state.task_status_markers.get(task_id)
-            if projection_marker is None:
-                # Task not in the projection's last-known render. Either
-                # a stale line from before this projection write, or a
-                # capture-macro line (Slice 3). Either way, suppress
-                # silently — Slice 2 only owns projection-known tasks.
+            prior = self._observed_markers.get(
+                task_id, self.sync_state.task_status_markers.get(task_id)
+            )
+            if prior is None:
+                # Task not in the projection's last-known render and
+                # we haven't observed it before. Stale line, or a
+                # Slice 3+ capture-macro line. Suppress — Slice 2
+                # only owns projection-known tasks.
                 continue
-            if marker == projection_marker:
+            if marker == prior:
                 continue
-            await self._publish_status_change(task_id, projection_marker, marker)
+            await self._publish_status_change(task_id, prior, marker)
+            self._observed_markers[task_id] = marker
             published += 1
 
         self._last_seen_hash = current_hash

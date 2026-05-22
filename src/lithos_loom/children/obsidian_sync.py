@@ -113,10 +113,6 @@ async def _amain(cfg: LoomConfig) -> int:
         )
         return 1
 
-    # Short-circuit when there's nothing to wire (Copilot review on
-    # #17): no point opening a LithosClient or running the SSE source
-    # if no obsidian subscription is configured. Just install signal
-    # handlers and park.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed: list[int] = []
@@ -126,24 +122,45 @@ async def _amain(cfg: LoomConfig) -> int:
             installed.append(sig)
 
     try:
+        # Slice 2 US16/US23 wire the fs watcher as a first-class source
+        # whose lifecycle is gated on ``[obsidian_sync]`` alone, not on
+        # whether a projection subscription is present. Without
+        # projection state to compare against, the watcher's per-task
+        # transition check never fires (every parsed task has
+        # ``prior is None``) and no events are published — runtime
+        # behaviour is identical to the previous "idle and warn" path,
+        # but the source itself is now independently spawnable so a
+        # future story (e.g. Slice 3's capture macro populating
+        # ``sync_state`` by another route) doesn't have to re-plumb
+        # the spawn gate.
+        sync_state = ProjectionSyncState()
+        bus = EventBus()
+        fs_watcher = ObsidianFsWatcher(
+            bus=bus,
+            tasks_path=obs.vault_path / obs.tasks_file,
+            sync_state=sync_state,
+        )
+        tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(fs_watcher.run(), name="obsidian-fs-watcher"),
+        ]
+
         if not obsidian_specs:
             logger.warning(
                 "obsidian-sync: no obsidian-projection subscription "
-                "configured; child will idle until SIGTERM. Add a "
-                "[[subscriptions]] block with action='obsidian-projection' "
-                "to enable projection."
+                "configured; fs watcher runs but emits nothing without "
+                "projection state. Add a [[subscriptions]] block with "
+                "action='obsidian-projection' to populate it."
             )
-            await stop_event.wait()
+            try:
+                await stop_event.wait()
+            finally:
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             return 0
 
         spec = obsidian_specs[0]
         logger.info("obsidian-sync: wiring subscription %r", spec.name)
-        # Shared coordination handle between the projection writer and
-        # the fs watcher (Slice 2 US23). Constructed here so both sides
-        # see the same instance. The projection seeds last_written_hash
-        # from disk on its first construction; the watcher reads from
-        # sync_state on run() to avoid the startup-edit race.
-        sync_state = ProjectionSyncState()
         # 50ms debounce coalesces bursts of bus events (especially the
         # source's bootstrap, which can fire dozens of created events in
         # quick succession) into a single flush at quiescence. The
@@ -166,12 +183,10 @@ async def _amain(cfg: LoomConfig) -> int:
             # filter (lithos#286) before publishing them as terminal events.
             source = LithosEventStream(
                 client=lithos,
-                bus=EventBus(),
+                bus=bus,
                 events_url=events_url,
                 bootstrap_resolved_window=timedelta(days=obs.resolved_ttl_days),
             )
-            # Re-bind the source's bus locally so the runners share it.
-            bus = source.bus
             ctx = SubscriptionContext(
                 lithos=lithos,
                 logger=logging.getLogger("lithos_loom.subscriptions"),
@@ -184,27 +199,10 @@ async def _amain(cfg: LoomConfig) -> int:
                 ctx=ctx,
             )
 
-            # Slice 2 US16 + US23: poll the projected tasks file so
-            # user edits in Obsidian flow back as bus events. Sharing
-            # ``sync_state`` with the projection handler suppresses
-            # the projection-write → watcher-fires → push feedback
-            # loop. No subscriber for these events exists yet (US17+
-            # land in follow-up PRs); events fan out to the bus and
-            # are silently dropped until then.
-            fs_watcher = ObsidianFsWatcher(
-                bus=bus,
-                tasks_path=obs.vault_path / obs.tasks_file,
-                sync_state=sync_state,
+            tasks.append(asyncio.create_task(source.run(), name="lithos-event-stream"))
+            tasks.extend(
+                asyncio.create_task(r.run(), name=f"sub-{r.spec.name}") for r in runners
             )
-
-            tasks: list[asyncio.Task[None]] = [
-                asyncio.create_task(source.run(), name="lithos-event-stream"),
-                asyncio.create_task(fs_watcher.run(), name="obsidian-fs-watcher"),
-                *(
-                    asyncio.create_task(r.run(), name=f"sub-{r.spec.name}")
-                    for r in runners
-                ),
-            ]
             try:
                 await stop_event.wait()
             finally:

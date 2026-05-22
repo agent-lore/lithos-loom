@@ -68,6 +68,18 @@ class ProjectionSyncState:
     no-longer-actionable) are removed from this dict so re-additions
     later don't trip on stale markers."""
 
+    write_version: int = 0
+    """Monotonically incremented on each ``record_projection_write``
+    call. The fs watcher snapshots this on every poll; a tick since
+    last poll means the projection wrote in the meantime. Lets the
+    watcher distinguish two hash-identical scenarios that look the
+    same to a naive ``last_written_hash`` compare: (a) the projection
+    re-rendered and committed (genuine self-write — suppress, clear
+    observed markers) versus (b) the user manually reverted the file
+    to whatever the projection had last written (a real user
+    transition that must NOT be suppressed). Without this counter the
+    flip-then-flip-back case was silently dropped."""
+
     def record_projection_write(
         self,
         *,
@@ -83,6 +95,14 @@ class ProjectionSyncState:
         ``task_status_markers`` is copied into a fresh dict so subsequent
         mutation of the projection's render-state dict cannot silently
         change suppression behaviour after this point.
+
+        ``write_version`` increments unconditionally — even
+        same-content overwrites bump it, so the watcher's "did
+        projection write since last poll" check stays accurate. (In
+        practice ``_flush`` short-circuits on hash-match before
+        calling this, so the counter only advances when content
+        actually changed.)
         """
         self.last_written_hash = content_hash
         self.task_status_markers = dict(task_status_markers)
+        self.write_version += 1

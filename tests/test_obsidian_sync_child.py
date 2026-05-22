@@ -280,8 +280,10 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
 ) -> None:
     """Config has [obsidian_sync] but no matching subscription — the
-    child parks WITHOUT opening a LithosClient or starting the source
-    (Copilot review on #17: don't connect to Lithos just to idle)."""
+    child does NOT open a LithosClient or start the SSE source (no
+    point connecting to Lithos with no consumer), but the fs watcher
+    spawns regardless (Slice 2 US16 treats it as a first-class source
+    gated on ``[obsidian_sync]``, not on a projection subscription)."""
     cfg = _cfg_with_obsidian(tmp_path)  # no subscriptions
     source_logger = "lithos_loom.children.obsidian_sync"
 
@@ -295,12 +297,40 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
 
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "no obsidian-projection subscription configured" in m for m in warn_msgs
+        "no obsidian-projection subscription configured" in m
+        and "fs watcher runs but emits nothing" in m
+        for m in warn_msgs
     ), warn_msgs
-    # Short-circuit: the source must NOT have been constructed.
-    # Otherwise we'd have opened a Lithos connection and started the
-    # SSE handshake just to do nothing.
-    assert stub_io == [], "source was constructed despite no subscriptions"
+    # The Lithos source must NOT have been constructed — there is no
+    # consumer to justify the Lithos handshake. fs-watcher's own
+    # spawn is exercised in the dedicated test below.
+    assert stub_io == [], "Lithos source was constructed despite no subscriptions"
+
+
+async def test_obsidian_sync_child_spawns_fs_watcher_even_without_projection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
+) -> None:
+    """Slice 2 US16: the fs watcher is a source in its own right; its
+    spawn is gated on ``[obsidian_sync]`` alone, not on the presence
+    of an ``obsidian-projection`` subscription. Runtime behaviour
+    without projection is unchanged (no projection writes →
+    sync_state empty → no events emitted) but the source task DOES
+    run, ready to emit as soon as something populates sync_state."""
+    cfg = _cfg_with_obsidian(tmp_path)  # no subscriptions
+
+    sender = asyncio.create_task(_sigterm_soon())
+    fs_watcher_logger = "lithos_loom.sources.obsidian_fs_watcher"
+    try:
+        with caplog.at_level(logging.INFO, logger=fs_watcher_logger):
+            rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    finally:
+        await _cancel_and_drain(sender)
+    assert rc == 0
+
+    info_msgs = [r.getMessage() for r in caplog.records if r.name == fs_watcher_logger]
+    assert any("ObsidianFsWatcher: watching" in m for m in info_msgs), (
+        f"fs watcher did not log its startup; got {info_msgs}"
+    )
 
 
 async def test_obsidian_sync_child_ignores_non_obsidian_subscription_actions(

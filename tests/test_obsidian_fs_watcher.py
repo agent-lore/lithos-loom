@@ -216,6 +216,122 @@ async def test_poll_emits_one_event_per_changed_task(
     assert "c" not in by_task  # unchanged → no event
 
 
+# ── Transition semantics: each transition emits exactly once ───────────
+
+
+async def test_subsequent_save_with_same_marker_does_not_re_emit(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+) -> None:
+    """Once the user flips ``[ ] → [x]``, any subsequent file save that
+    leaves the marker at ``[x]`` (whitespace change, edit to a sibling
+    line, comment added) must NOT re-emit the same transition.
+
+    Regression: the watcher previously compared parsed markers against
+    ``sync_state.task_status_markers`` only, which advances only on
+    projection writes. A user save that didn't trigger a projection
+    write would re-trigger layer 3 with the same prior=[ ] / new=[x]
+    diff every time.
+    """
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Review PR 🆔 lithos:abc"])
+    _record_projection(sync_state, tasks_path, {"abc": "[ ]"})
+
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+
+    # First save: real transition → emit.
+    _write_tasks_file(tasks_path, ["- [x] Review PR 🆔 lithos:abc"])
+    assert await watcher.poll_once() == 1
+    [first] = _drain(sub)
+    assert first.payload == {"task_id": "abc", "prior": "[ ]", "new": "[x]"}
+
+    # Second save: same marker, different surrounding content (the
+    # user added a note line). Must NOT re-emit.
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [x] Review PR 🆔 lithos:abc",
+            "  - the PR comment is here",
+        ],
+    )
+    assert await watcher.poll_once() == 0
+    assert _drain(sub) == []
+
+    # Third save: yet another unrelated whitespace tweak. Still no
+    # re-emit.
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [x] Review PR 🆔 lithos:abc",
+            "  - the PR comment is here  ",  # trailing whitespace
+        ],
+    )
+    assert await watcher.poll_once() == 0
+    assert _drain(sub) == []
+
+
+async def test_user_flip_then_flip_back_emits_both_transitions(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+) -> None:
+    """``[ ] → [x] → [ ]`` produces two distinct events; the second one
+    correctly uses ``[x]`` (the user's last observed marker) as
+    ``prior``, not the stale projection-known ``[ ]``."""
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"})
+
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+
+    _write_tasks_file(tasks_path, ["- [x] Task 🆔 lithos:a"])
+    await watcher.poll_once()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    await watcher.poll_once()
+
+    events = _drain(sub)
+    assert len(events) == 2
+    assert events[0].payload == {"task_id": "a", "prior": "[ ]", "new": "[x]"}
+    assert events[1].payload == {"task_id": "a", "prior": "[x]", "new": "[ ]"}
+
+
+async def test_projection_self_write_clears_observed_markers(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+) -> None:
+    """When the projection re-renders the file (Lithos drove a change),
+    its content is authoritative over any user edits we've previously
+    observed. Subsequent user edits must therefore use the projection's
+    fresh marker as ``prior``, not the stale user-observed one."""
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"})
+
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+
+    # 1. User ticks to [x]. Watcher emits and records observed_markers[a]=[x].
+    _write_tasks_file(tasks_path, ["- [x] Task 🆔 lithos:a"])
+    assert await watcher.poll_once() == 1
+    _drain(sub)
+
+    # 2. Projection re-renders, e.g. reflects a status change Lithos
+    #    initiated independently. Disk now matches the projection's
+    #    view; layer 2 fires and clears observed_markers.
+    _write_tasks_file(tasks_path, ["- [-] Task ❌ 2026-05-22 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[-]"})
+    assert await watcher.poll_once() == 0
+
+    # 3. User toggles to [x]. With observed_markers cleared in step 2,
+    #    the prior must come from sync_state ([-]), NOT from the stale
+    #    observed [x] from step 1.
+    _write_tasks_file(tasks_path, ["- [x] Task ❌ 2026-05-22 🆔 lithos:a"])
+    assert await watcher.poll_once() == 1
+    [event] = _drain(sub)
+    assert event.payload == {"task_id": "a", "prior": "[-]", "new": "[x]"}
+
+
 # ── US23: self-write suppression ───────────────────────────────────────
 
 
