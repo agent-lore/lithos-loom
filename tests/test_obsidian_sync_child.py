@@ -334,6 +334,77 @@ async def test_obsidian_sync_child_ignores_non_obsidian_subscription_actions(
     assert "noop-smoke" not in wiring
 
 
+async def test_obsidian_sync_child_spawns_fs_watcher_that_emits_user_edits(
+    tmp_path: Path, stub_io: list[EventBus]
+) -> None:
+    """Slice 2 US16 + US23: the child spawns an ObsidianFsWatcher
+    alongside the projection. Publishing a created event writes the
+    projection file; a subsequent user edit to that file flows back
+    onto the bus as an ``obsidian.task.status_changed`` event without
+    triggering a self-write feedback loop.
+    """
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(_projection_subscription(),),
+    )
+    tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+    captured_status_events: list[Event] = []
+
+    async def _drive() -> None:
+        # Wait for _amain to wire everything up.
+        await asyncio.sleep(0.1)
+        bus = stub_io[-1]
+        # Subscribe to obsidian.task.status_changed BEFORE the user edit
+        # so we don't miss the publication.
+        sub = bus.subscribe(
+            event_types=("obsidian.task.status_changed",),
+            name="test-status-listener",
+        )
+
+        async def _drain() -> None:
+            while True:
+                event = await sub.queue.get()
+                captured_status_events.append(event)
+
+        drain_task = asyncio.create_task(_drain())
+        try:
+            # 1. Publish a task.created → projection writes file.
+            await bus.publish(
+                _event("lithos.task.created", task_id="abc", title="Review PR")
+            )
+            # Wait for the projection's debounced flush to commit.
+            await asyncio.sleep(0.2)
+            assert tasks_file.exists()
+            assert "- [ ] Review PR 🆔 lithos:abc" in tasks_file.read_text()
+
+            # 2. User edits the file: flip [ ] to [x].
+            tasks_file.write_text(
+                tasks_file.read_text().replace(
+                    "- [ ] Review PR 🆔 lithos:abc",
+                    "- [x] Review PR 🆔 lithos:abc",
+                ),
+                encoding="utf-8",
+            )
+            # Wait for at least one watcher poll cycle.
+            await asyncio.sleep(0.4)
+        finally:
+            await _cancel_and_drain(drain_task)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    driver = asyncio.create_task(_drive())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=5.0)
+    finally:
+        await _cancel_and_drain(driver)
+    assert rc == 0
+
+    # The user-tick event must have flowed through the bus.
+    status_payloads = [e.payload for e in captured_status_events]
+    assert any(
+        p.get("task_id") == "abc" and p.get("new") == "[x]" for p in status_payloads
+    ), f"expected obsidian.task.status_changed for abc → [x]; got {status_payloads}"
+
+
 async def test_obsidian_sync_child_refuses_duplicate_obsidian_projection_specs(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
 ) -> None:

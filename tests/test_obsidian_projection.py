@@ -1830,32 +1830,34 @@ async def test_last_written_hash_updates_after_successful_write(
 async def test_atomic_write_failure_does_not_advance_last_written_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Internal invariant: when ``os.replace`` raises mid-write,
-    ``last_written_hash`` must NOT be updated to the failed-write's
-    hash — otherwise a same-content retry would silently skip and
-    leave disk byte-inconsistent with in-memory state.
+    """Internal invariant: when ``os.replace`` raises mid-write, the
+    coordination state shared with the fs-watcher (Slice 2 US23) must
+    NOT be updated to the failed-write's hash — otherwise a same-content
+    retry would silently skip and leave disk byte-inconsistent with
+    in-memory state, and the watcher's per-task suppression would
+    desync from disk reality.
 
-    The public-event-API path that would otherwise demonstrate this
-    (replay the same event after failure) hits the in-memory
-    ``current == prior`` short-circuit and never reaches the hash
-    check, so we read the closure variable directly via
-    ``_read_handler_closure``. Verifies correctness by construction:
-    the assignment to ``last_written_hash`` is after ``await
-    _write_tasks_file_atomic`` returns; if that raises, the
-    assignment is skipped.
+    Verified via the explicit ``sync_state`` handle so we can observe
+    its post-failure values directly without reaching into the
+    handler's closure.
     """
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, today_provider=_fixed_today)
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
     # Cold start: nothing on disk → seed is None.
-    assert _read_handler_closure(handler, "last_written_hash") is None
+    assert sync_state.last_written_hash is None
+    assert sync_state.task_status_markers == {}
 
     # First write succeeds → hash advances away from None.
     await handler(_event("lithos.task.created", task_id="a"), _ctx())
-    hash_after_a = _read_handler_closure(handler, "last_written_hash")
+    hash_after_a = sync_state.last_written_hash
+    markers_after_a = dict(sync_state.task_status_markers)
     assert hash_after_a is not None, "successful write should seed the hash"
+    assert markers_after_a == {"a": "[ ]"}
 
-    # Second write fails → hash must NOT advance to the would-be
-    # {a, b} hash.
+    # Second write fails → hash + markers must roll back to post-a state.
     def _failing(src: str | Path, dst: str | Path) -> None:
         raise OSError("simulated replace failure")
 
@@ -1863,9 +1865,11 @@ async def test_atomic_write_failure_does_not_advance_last_written_hash(
     with pytest.raises(OSError, match="simulated replace failure"):
         await handler(_event("lithos.task.created", task_id="b"), _ctx())
 
-    hash_after_failed = _read_handler_closure(handler, "last_written_hash")
-    assert hash_after_failed == hash_after_a, (
-        "last_written_hash must not be updated when os.replace raises mid-write"
+    assert sync_state.last_written_hash == hash_after_a, (
+        "sync_state.last_written_hash must roll back when os.replace raises"
+    )
+    assert sync_state.task_status_markers == markers_after_a, (
+        "sync_state.task_status_markers must roll back when os.replace raises"
     )
 
 

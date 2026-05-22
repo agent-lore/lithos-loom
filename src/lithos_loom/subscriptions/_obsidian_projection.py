@@ -131,6 +131,7 @@ from lithos_loom.subscriptions._human_actionable import (
     is_human_actionable,
     would_be_actionable,
 )
+from lithos_loom.sync_state import ProjectionSyncState
 
 __all__ = ["make_handler"]
 
@@ -197,6 +198,16 @@ _PRIORITY_EMOJI: dict[str, str] = {
     "low": "🔽",
     "lowest": "⏬",
 }
+
+_STATUS_TO_MARKER: dict[str, str] = {
+    "open": "[ ]",
+    "completed": "[x]",
+    "cancelled": "[-]",
+}
+"""Map a ``_StateEntry.status`` to the checkbox marker the renderer
+emits. Used by ``_flush`` to publish per-task marker state into the
+shared :class:`ProjectionSyncState` so the fs watcher (US23) can tell
+projection writes from user edits on a per-task basis."""
 """D18 enum (`docs/prd/integration.md:102`) → Tasks-plugin emoji.
 
 Strict case-sensitive match: the Lithos surface owns this enum, and
@@ -210,6 +221,7 @@ def make_handler(
     *,
     today_provider: Callable[[], date] = date.today,
     debounce_seconds: float = 0.0,
+    sync_state: ProjectionSyncState | None = None,
 ) -> Any:
     """Build a stateful obsidian-projection handler bound to ``cfg``.
 
@@ -242,6 +254,17 @@ def make_handler(
     drops them, but the restart bootstrap rebuilds state from Lithos
     and the first divergent event writes the corrected content. Lost
     flushes therefore self-heal — no Loom-side persistence required.
+
+    ``sync_state`` is the Slice 2 US23 coordination handle. The handler
+    updates ``sync_state.last_written_hash`` and
+    ``sync_state.task_status_markers`` *before* committing each atomic
+    rename so the
+    :class:`~lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher`
+    can identify projection-driven file changes as self-writes and
+    suppress them. ``None`` (test default) constructs a fresh isolated
+    state — the projection still works, just without a watcher
+    consumer. Production callers in
+    :mod:`lithos_loom.children.obsidian_sync` pass a shared instance.
     """
     obs = cfg.obsidian_sync
     if obs is None:
@@ -252,21 +275,24 @@ def make_handler(
 
     tasks_path = obs.vault_path / obs.tasks_file
     state: dict[str, _StateEntry] = {}
+    sync_state = sync_state if sync_state is not None else ProjectionSyncState()
     # Content-hash dedup (US14). Seeded from disk so the convergent
     # flush — where the in-memory state lands at the same content as
     # what was on disk before the restart — skips the write entirely.
     # With debounce_seconds > 0, multi-event bootstrap coalesces into
     # one flush at quiescence; that single flush is what the disk-seed
     # short-circuits. FileNotFound / OSError → None, first write
-    # seeds the hash from new content.
-    last_written_hash: bytes | None = _hash_existing_file(tasks_path)
+    # seeds the hash from new content. Seeded into sync_state only
+    # when not already set, so the obsidian-sync child's pre-seeding
+    # (if any) wins over the projection's defensive re-read.
+    if sync_state.last_written_hash is None:
+        sync_state.last_written_hash = _hash_existing_file(tasks_path)
     # Pending debounced flush task (None when not debouncing or when
     # the last burst has already flushed). Subsequent events within
     # the debounce window cancel-and-reschedule this task.
     pending_flush: asyncio.Task[None] | None = None
 
     async def handle(event: Event, ctx: Any) -> None:
-        nonlocal last_written_hash
         # Branch on event type FIRST so an unknown event can't blow up
         # on payload parsing (Copilot review on #17: a missing "id" in
         # a foreign payload would raise KeyError before the unknown-type
@@ -371,17 +397,55 @@ def make_handler(
         """Render current state, hash, compare, and (maybe) write.
 
         Skips the atomic-write dance when the rendered content's
-        SHA-256 matches ``last_written_hash`` (which is seeded from
-        disk on init, then updated after each successful write).
+        SHA-256 matches ``sync_state.last_written_hash`` (which is
+        seeded from disk on init, then updated after each successful
+        write).
+
+        Updates ``sync_state`` *before* the atomic write commits so
+        the US23 self-write suppression in the fs watcher has the
+        new hash and marker map in place by the time any poll sees
+        the new on-disk content. Single-threaded asyncio — no locks
+        needed, and :func:`_write_tasks_file_atomic` has no yield
+        points until after the rename, so a watcher poll cannot
+        interleave between the sync_state update and the file
+        becoming visible on disk.
+
+        Failure rollback: if the atomic write raises (e.g. permission
+        flip mid-write), ``sync_state`` is rolled back to its pre-write
+        values so the on-disk content and the in-memory coordination
+        state stay consistent — otherwise a retry of the same event
+        would hash-match the ahead-of-disk ``last_written_hash`` and
+        silently skip a still-needed write. ``CancelledError`` is
+        deliberately NOT caught: it can only fire at ``asyncio.sleep(0)``
+        AFTER the rename has already committed, so the new state IS
+        the correct one to keep.
         """
-        nonlocal last_written_hash
         content = _render_file(state)
         content_hash = hashlib.sha256(content.encode("utf-8")).digest()
-        if content_hash == last_written_hash:
+        if content_hash == sync_state.last_written_hash:
             logger.debug("obsidian-projection: flush content unchanged; skipping write")
             return
-        await _write_tasks_file_atomic(tasks_path, content)
-        last_written_hash = content_hash
+        markers = {tid: _STATUS_TO_MARKER[entry.status] for tid, entry in state.items()}
+        prior_hash = sync_state.last_written_hash
+        prior_markers = sync_state.task_status_markers
+        sync_state.record_projection_write(
+            content_hash=content_hash, task_status_markers=markers
+        )
+        try:
+            await _write_tasks_file_atomic(tasks_path, content)
+        except Exception:
+            # POSIX os.replace is atomic: if _write_tasks_file_atomic
+            # raised, the rename did NOT apply — disk is unchanged.
+            # Roll sync_state back so the next replay re-attempts the
+            # write rather than hash-matching its way into a no-op.
+            sync_state.last_written_hash = prior_hash
+            sync_state.task_status_markers = prior_markers
+            raise
+        # Cancellation point AFTER successful commit so the consumer
+        # task can be cancelled cleanly between events under
+        # back-to-back delivery (preserves the prior _write_tasks_
+        # file_atomic trailing-sleep behaviour).
+        await asyncio.sleep(0)
 
     async def _delayed_flush() -> None:
         """Sleep the debounce window, then flush.
@@ -747,6 +811,13 @@ async def _write_tasks_file_atomic(path: Path, content: str) -> None:
     (Copilot review on #17, mirroring ``write_result_atomically`` in
     plugin_runner.py).
 
+    No internal ``await`` points (Slice 2 US23): if there were a yield
+    between the caller's ``sync_state`` update and the ``os.replace``
+    here, the fs watcher could poll with sync_state pointing at the
+    new hash while the file still shows the old content, mis-firing
+    per-task suppression. The caller (``_flush``) yields once *after*
+    a successful return so cancellation can still fire between events.
+
     Synchronous I/O inside an async function — fine for the
     vault-sized files this serves (<10kB typical). Move to
     ``asyncio.to_thread`` if write latency under load becomes an issue.
@@ -768,6 +839,3 @@ async def _write_tasks_file_atomic(path: Path, content: str) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
-    # Yield once so the async caller can be cancelled cleanly between
-    # events even under back-to-back delivery.
-    await asyncio.sleep(0)

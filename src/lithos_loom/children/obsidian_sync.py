@@ -35,6 +35,7 @@ from lithos_loom.bus import EventBus
 from lithos_loom.config import LogLevel, LoomConfig, load_config
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
+from lithos_loom.sources.obsidian_fs_watcher import ObsidianFsWatcher
 from lithos_loom.subscriptions import (
     Handler,
     SubscriptionContext,
@@ -43,6 +44,7 @@ from lithos_loom.subscriptions import (
 from lithos_loom.subscriptions._obsidian_projection import (
     make_handler as make_obsidian_projection_handler,
 )
+from lithos_loom.sync_state import ProjectionSyncState
 
 _LEVEL_MAP: dict[LogLevel, int] = {
     "debug": logging.DEBUG,
@@ -136,6 +138,12 @@ async def _amain(cfg: LoomConfig) -> int:
 
         spec = obsidian_specs[0]
         logger.info("obsidian-sync: wiring subscription %r", spec.name)
+        # Shared coordination handle between the projection writer and
+        # the fs watcher (Slice 2 US23). Constructed here so both sides
+        # see the same instance. The projection seeds last_written_hash
+        # from disk on its first construction; the watcher reads from
+        # sync_state on run() to avoid the startup-edit race.
+        sync_state = ProjectionSyncState()
         # 50ms debounce coalesces bursts of bus events (especially the
         # source's bootstrap, which can fire dozens of created events in
         # quick succession) into a single flush at quiescence. The
@@ -143,7 +151,7 @@ async def _amain(cfg: LoomConfig) -> int:
         # into zero on-disk writes (US14 "idempotent re-runs").
         my_handlers: dict[str, Handler] = {
             "obsidian-projection": make_obsidian_projection_handler(
-                cfg, debounce_seconds=0.05
+                cfg, debounce_seconds=0.05, sync_state=sync_state
             ),
         }
 
@@ -176,8 +184,22 @@ async def _amain(cfg: LoomConfig) -> int:
                 ctx=ctx,
             )
 
+            # Slice 2 US16 + US23: poll the projected tasks file so
+            # user edits in Obsidian flow back as bus events. Sharing
+            # ``sync_state`` with the projection handler suppresses
+            # the projection-write → watcher-fires → push feedback
+            # loop. No subscriber for these events exists yet (US17+
+            # land in follow-up PRs); events fan out to the bus and
+            # are silently dropped until then.
+            fs_watcher = ObsidianFsWatcher(
+                bus=bus,
+                tasks_path=obs.vault_path / obs.tasks_file,
+                sync_state=sync_state,
+            )
+
             tasks: list[asyncio.Task[None]] = [
                 asyncio.create_task(source.run(), name="lithos-event-stream"),
+                asyncio.create_task(fs_watcher.run(), name="obsidian-fs-watcher"),
                 *(
                     asyncio.create_task(r.run(), name=f"sub-{r.spec.name}")
                     for r in runners
