@@ -17,7 +17,10 @@ import pytest
 
 from lithos_loom.bus import Event
 from lithos_loom.subscriptions import SubscriptionContext
-from lithos_loom.subscriptions._obsidian_status_transition import handle
+from lithos_loom.subscriptions._obsidian_status_transition import (
+    _CANCEL_REASON,
+    handle,
+)
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -78,13 +81,47 @@ async def test_open_to_done_logs_at_info(
     )
 
 
+# ── US18: [ ] → [-] → task_cancel ──────────────────────────────────────
+
+
+async def test_open_to_cancelled_calls_task_cancel() -> None:
+    """``[ ]`` → ``[-]`` for a known task → ``lithos.task_cancel`` called
+    with the task id, the context's agent id, and the constant
+    breadcrumb reason."""
+    lithos = AsyncMock()
+    ctx = _ctx(lithos=lithos, agent_id="lithos-orchestrator-samsara")
+
+    await handle(_event(task_id="xyz", prior="[ ]", new="[-]"), ctx)
+
+    lithos.task_cancel.assert_awaited_once_with(
+        task_id="xyz",
+        agent="lithos-orchestrator-samsara",
+        reason=_CANCEL_REASON,
+    )
+    # And task_complete must not have been called for this transition.
+    lithos.task_complete.assert_not_awaited()
+
+
+async def test_open_to_cancelled_logs_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The cancel path emits an INFO log naming the task id."""
+    ctx = _ctx()
+    with caplog.at_level(logging.INFO, logger="test.obsidian_status_transition"):
+        await handle(_event(task_id="xyz789", prior="[ ]", new="[-]"), ctx)
+
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("cancelled task xyz789 via Obsidian flip" in m for m in info_msgs), (
+        info_msgs
+    )
+
+
 # ── US20 side-effect: other transitions are silent no-ops ──────────────
 
 
 @pytest.mark.parametrize(
     ("prior", "new"),
     [
-        ("[ ]", "[-]"),  # cancel — US18 future
         ("[x]", "[ ]"),  # untick → reopen — US19 future
         ("[-]", "[ ]"),  # un-cancel — US19 family
         ("[ ]", "[/]"),  # in-progress — US20 no-op

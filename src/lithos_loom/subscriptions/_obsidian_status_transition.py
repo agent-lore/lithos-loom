@@ -5,7 +5,7 @@ Consumes ``obsidian.task.status_changed`` events emitted by
 and pushes the matching action to Lithos:
 
 * ``("[ ]", "[x]")`` → :meth:`LithosClient.task_complete` (US17)
-* ``("[ ]", "[-]")`` → :meth:`LithosClient.task_cancel`   (US18 — follow-up)
+* ``("[ ]", "[-]")`` → :meth:`LithosClient.task_cancel`   (US18)
 * ``("[x]", "[ ]")`` → ``[ReopenRequested]`` finding      (US19 — follow-up)
 * ``("[ ]", "[/]")`` / ``("[ ]", "[>]")`` — silent no-op  (US20)
 * anything else — silent no-op with a debug log
@@ -22,9 +22,10 @@ state. The obsidian-sync child wires this module's :func:`handle`
 directly into its ``my_handlers`` dict.
 
 Idempotency is **not** enforced here. US22 will add a pre-check via
-``lithos_task_status``; until then, calling ``task_complete`` on an
-already-completed task raises a :class:`LithosClientError` which the
-:class:`SubscriptionRunner` retry-then-friction path absorbs.
+``lithos_task_status``; until then, calling ``task_complete`` /
+``task_cancel`` on an already-resolved task raises a
+:class:`LithosClientError` which the :class:`SubscriptionRunner`
+retry-then-friction path absorbs.
 """
 
 from __future__ import annotations
@@ -49,12 +50,34 @@ async def _complete(task_id: str, ctx: SubscriptionContext) -> None:
     )
 
 
+# Constant reason passed alongside the Lithos cancel call. The Lithos
+# spec says ``reason`` is accepted by the MCP surface but not persisted
+# in SQLite, so this is breadcrumb-only — surfaces in MCP-level logs
+# and traces and identifies the origin of the cancel for anyone
+# inspecting them.
+_CANCEL_REASON = "cancelled via Obsidian status flip"
+
+
+async def _cancel(task_id: str, ctx: SubscriptionContext) -> None:
+    """US18: ``[ ] → [-]`` — Obsidian cancel marker → Lithos cancel."""
+    await ctx.lithos.task_cancel(
+        task_id=task_id,
+        agent=ctx.agent_id,
+        reason=_CANCEL_REASON,
+    )
+    ctx.logger.info(
+        "obsidian-status-transition: cancelled task %s via Obsidian flip",
+        task_id,
+    )
+
+
 # Dispatch table. Each entry maps a ``(prior, new)`` checkbox-marker
 # pair to the coroutine that pushes the corresponding action to Lithos.
-# US18/19 add one row each; US20's silent no-op for ``[/]`` and ``[>]``
+# US19 adds one more row; US20's silent no-op for ``[/]`` and ``[>]``
 # falls out of the missing-entry path below — no explicit row needed.
 _TRANSITIONS: dict[tuple[str, str], TransitionFn] = {
     ("[ ]", "[x]"): _complete,
+    ("[ ]", "[-]"): _cancel,
 }
 
 

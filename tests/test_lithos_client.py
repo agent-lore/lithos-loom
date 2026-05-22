@@ -407,6 +407,59 @@ async def test_task_complete_invokes_correct_tool() -> None:
     )
 
 
+async def test_task_cancel_invokes_correct_tool() -> None:
+    """``task_cancel(task_id=...)`` with no explicit agent or reason
+    sends just ``{task_id, agent: <client default>}`` to the MCP tool."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_cancel(task_id="t-1")
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_cancel",
+        arguments={"task_id": "t-1", "agent": "lithos-orchestrator-test"},
+    )
+
+
+async def test_task_cancel_passes_reason_when_provided() -> None:
+    """Explicit ``reason`` is forwarded to Lithos so MCP-level logs
+    carry the breadcrumb (Lithos doesn't persist it but accepts it)."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_cancel(task_id="t-1", reason="user request")
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_cancel",
+        arguments={
+            "task_id": "t-1",
+            "agent": "lithos-orchestrator-test",
+            "reason": "user request",
+        },
+    )
+
+
+async def test_task_cancel_omits_reason_when_none() -> None:
+    """``reason=None`` (the default) must NOT add a ``"reason": None``
+    key — older/strict Lithos servers shouldn't see the field at all.
+    Mirrors the ``resolved_since``-omit-when-none pattern in ``task_list``."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_cancel(task_id="t-1", reason=None)
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert "reason" not in args, args
+
+
+async def test_task_cancel_uses_explicit_agent_over_default() -> None:
+    """Explicit ``agent=`` overrides the client's default ``agent_id``."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_cancel(task_id="t-1", agent="alt-agent")
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["agent"] == "alt-agent"
+
+
+async def test_task_cancel_raises_when_no_agent_anywhere() -> None:
+    """Client with no ``agent_id`` AND no explicit agent arg → raises."""
+    client = LithosClient(base_url="http://example.test:8765")  # no agent_id
+    fake_session = AsyncMock()
+    client._session = fake_session  # type: ignore[assignment]
+    with pytest.raises(LithosClientError, match="agent"):
+        await client.task_cancel(task_id="t-1")
+
+
 async def test_task_update_omits_unset_fields() -> None:
     client, session = _client_with_session(_content({"success": True}))
     await client.task_update(task_id="t-1", tags=["a", "b"])

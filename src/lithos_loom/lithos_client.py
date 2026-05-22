@@ -304,6 +304,32 @@ class LithosClient:
             "lithos_task_complete", {"task_id": task_id, "agent": agent_id}
         )
 
+    async def task_cancel(
+        self,
+        *,
+        task_id: str,
+        agent: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Cancel a task and release all claims.
+
+        Mirrors :meth:`task_complete` — both terminal transitions
+        populate ``tasks.resolved_at`` upstream (lithos#286). ``reason``
+        is accepted by the MCP surface but per the Lithos spec is not
+        persisted in SQLite; pass a short breadcrumb so the origin
+        surfaces in MCP-level logs/traces. Omit it from the MCP
+        arguments when ``None`` so old/strict Lithos servers don't
+        choke on an explicit-null (mirrors the ``resolved_since``
+        pattern from :meth:`task_list`).
+        """
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_cancel needs an agent id")
+        arguments: dict[str, Any] = {"task_id": task_id, "agent": agent_id}
+        if reason is not None:
+            arguments["reason"] = reason
+        await self._call("lithos_task_cancel", arguments)
+
     async def task_update(
         self,
         *,
