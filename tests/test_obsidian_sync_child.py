@@ -272,7 +272,10 @@ async def test_obsidian_sync_child_wires_projection_subscription(
 
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
     assert tasks_file.exists(), "projection file was not written"
-    content = tasks_file.read_text()
+    # Explicit encoding — projected content contains the non-ASCII
+    # task-id marker 🆔, so default-encoding reads can fail on systems
+    # where the locale isn't UTF-8.
+    content = tasks_file.read_text(encoding="utf-8")
     assert "- [ ] Review PR 🆔 lithos:abc" in content
 
 
@@ -405,11 +408,16 @@ async def test_obsidian_sync_child_spawns_fs_watcher_that_emits_user_edits(
             # Wait for the projection's debounced flush to commit.
             await asyncio.sleep(0.2)
             assert tasks_file.exists()
-            assert "- [ ] Review PR 🆔 lithos:abc" in tasks_file.read_text()
+            # Explicit encoding — the projected content contains the
+            # non-ASCII task-id marker 🆔, so default-encoding reads
+            # could fail on systems where the locale isn't UTF-8.
+            assert "- [ ] Review PR 🆔 lithos:abc" in tasks_file.read_text(
+                encoding="utf-8"
+            )
 
             # 2. User edits the file: flip [ ] to [x].
             tasks_file.write_text(
-                tasks_file.read_text().replace(
+                tasks_file.read_text(encoding="utf-8").replace(
                     "- [ ] Review PR 🆔 lithos:abc",
                     "- [x] Review PR 🆔 lithos:abc",
                 ),

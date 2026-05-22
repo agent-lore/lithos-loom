@@ -401,33 +401,30 @@ def make_handler(
         seeded from disk on init, then updated after each successful
         write).
 
-        Updates ``sync_state`` *before* the atomic write commits so
-        the US23 self-write suppression in the fs watcher has the
-        new hash and marker map in place by the time any poll sees
-        the new on-disk content. Single-threaded asyncio — no locks
-        needed, and :func:`_write_tasks_file_atomic` has no yield
-        points until after the rename, so a watcher poll cannot
-        interleave between the sync_state update and the file
-        becoming visible on disk.
+        **Ordering — write first, sync_state second.** The disk
+        commit runs before the ``sync_state`` update; that keeps
+        ``sync_state`` from ever being ahead of disk. If the atomic
+        write raises, ``sync_state`` is simply never touched, so no
+        rollback is needed and ``write_version`` can't drift either
+        — the US14 retry on the next event re-renders the same
+        content, the hash-skip short-circuit fires correctly, and
+        the watcher's self-write suppression keeps seeing consistent
+        state.
 
-        Failure rollback: if the atomic write raises (e.g. permission
-        flip mid-write), ``sync_state`` is rolled back to its pre-write
-        values so the on-disk content and the in-memory coordination
-        state stay consistent — otherwise a retry of the same event
-        would hash-match the ahead-of-disk ``last_written_hash`` and
-        silently skip a still-needed write.
+        This ordering only works because :func:`_write_tasks_file_atomic`
+        has no internal ``await`` points (enforced; see its docstring).
+        ``await coro()`` on a yield-less coroutine runs the coroutine
+        to completion synchronously, so there is no observable
+        interleaving between ``os.replace`` returning and the
+        ``record_projection_write`` call below — a watcher poll
+        can only happen at a suspension point, and the first one
+        after the rename is the trailing ``asyncio.sleep(0)`` *after*
+        sync_state has already been updated.
 
-        ``CancelledError`` is deliberately NOT caught (and rolling
-        back on it would be wrong). Cancellation can only fire at a
-        real suspension point — ``_write_tasks_file_atomic`` has no
-        internal ``await``\\s (enforced; see its docstring), so the
-        coroutine runs to completion synchronously when awaited.
-        That means cancellation cannot interrupt the rename. The only
-        post-update yield is ``await asyncio.sleep(0)`` below, which
-        fires AFTER ``os.replace`` has already committed the new
-        file — at that point the sync_state values ARE the correct
-        ones to keep, and rolling back would silently desync them
-        from the on-disk content.
+        ``CancelledError`` is intentionally not caught. Cancellation
+        cannot fire mid-rename (no yields in the atomic write), and
+        if it ever fires at the trailing ``sleep(0)`` the rename and
+        sync_state update are both already complete and consistent.
         """
         content = _render_file(state)
         content_hash = hashlib.sha256(content.encode("utf-8")).digest()
@@ -435,25 +432,21 @@ def make_handler(
             logger.debug("obsidian-projection: flush content unchanged; skipping write")
             return
         markers = {tid: _STATUS_TO_MARKER[entry.status] for tid, entry in state.items()}
-        prior_hash = sync_state.last_written_hash
-        prior_markers = sync_state.task_status_markers
+        # Disk first. Raises → sync_state untouched → next event retries.
+        await _write_tasks_file_atomic(tasks_path, content)
+        # Synchronously update sync_state. No yield between the
+        # rename returning and this call, so the fs watcher never
+        # observes the new file content without the matching
+        # coordination state. The ``write_version`` bump inside
+        # ``record_projection_write`` only happens here on the
+        # success path, so a failed write doesn't trick the watcher
+        # into thinking the projection wrote.
         sync_state.record_projection_write(
             content_hash=content_hash, task_status_markers=markers
         )
-        try:
-            await _write_tasks_file_atomic(tasks_path, content)
-        except Exception:
-            # POSIX os.replace is atomic: if _write_tasks_file_atomic
-            # raised, the rename did NOT apply — disk is unchanged.
-            # Roll sync_state back so the next replay re-attempts the
-            # write rather than hash-matching its way into a no-op.
-            sync_state.last_written_hash = prior_hash
-            sync_state.task_status_markers = prior_markers
-            raise
-        # Cancellation point AFTER successful commit so the consumer
-        # task can be cancelled cleanly between events under
-        # back-to-back delivery (preserves the prior _write_tasks_
-        # file_atomic trailing-sleep behaviour).
+        # Cancellation point for clean shutdown between events; safe
+        # to fire here because both the rename AND the sync_state
+        # update are already complete.
         await asyncio.sleep(0)
 
     async def _delayed_flush() -> None:

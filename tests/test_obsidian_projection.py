@@ -1866,10 +1866,43 @@ async def test_atomic_write_failure_does_not_advance_last_written_hash(
         await handler(_event("lithos.task.created", task_id="b"), _ctx())
 
     assert sync_state.last_written_hash == hash_after_a, (
-        "sync_state.last_written_hash must roll back when os.replace raises"
+        "sync_state.last_written_hash must not advance when os.replace raises"
     )
     assert sync_state.task_status_markers == markers_after_a, (
-        "sync_state.task_status_markers must roll back when os.replace raises"
+        "sync_state.task_status_markers must not advance when os.replace raises"
+    )
+
+
+async def test_atomic_write_failure_does_not_advance_write_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ProjectionSyncState.write_version`` must NOT advance on a
+    failed write. The watcher uses ``write_version > _last_processed``
+    to detect "projection wrote since my last poll"; if version
+    advanced on a failed write, the watcher would clear
+    ``_observed_markers`` and emit a duplicate transition on the
+    next real user edit. Regression for Copilot review on PR #26.
+    """
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+
+    await handler(_event("lithos.task.created", task_id="a"), _ctx())
+    version_after_a = sync_state.write_version
+    assert version_after_a == 1, "successful first write must bump version to 1"
+
+    def _failing(src: str | Path, dst: str | Path) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", _failing)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        await handler(_event("lithos.task.created", task_id="b"), _ctx())
+
+    assert sync_state.write_version == version_after_a, (
+        "write_version must not advance when os.replace raises; "
+        f"got {sync_state.write_version} (expected {version_after_a})"
     )
 
 
