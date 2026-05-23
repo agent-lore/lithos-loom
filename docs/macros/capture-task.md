@@ -18,14 +18,16 @@ The `Create Lithos task` macro prompts you for the capture form, calls `lithos-l
 
 ## Install
 
-1. Create a folder for Templater user scripts in your vault (e.g. `_meta/templater/`). Tell Templater about it in `Settings → Templater → User Script Functions Folder`.
-2. Save the JS below as `<your-templater-folder>/capture-task.md` (Templater treats `.md` files in its scripts folder as inline templates).
-3. Bind a hotkey: `Settings → Hotkeys` → search "Templater: Open insert template modal" or use `Settings → Templater → Template Hotkeys` to bind `capture-task.md` directly to a hotkey such as `Mod+Shift+L`.
-4. Sanity check: place the cursor in any note, fire the hotkey. The project picker should appear immediately.
+This macro is a Templater **template** (it uses the `<%* ... %>` execution block and `tp.*` template helpers), so it lives in the Template Folder — not the User Script Functions Folder (that one is for plain `.js` files exported as `tp.user.<name>` functions; see the [Templater script-user-functions docs](https://silentvoid13.github.io/Templater/user-functions/script-user-functions.html)).
+
+1. **Pick a template folder** in your vault if you don't already have one (e.g. `_meta/templates/`). Tell Templater about it: `Settings → Templater → Template Folder Location` and set it to that folder. (See the [Templater settings docs](https://silentvoid13.github.io/Templater/settings.html).)
+2. **Save the template** (the file below) as `<your-template-folder>/capture-task.md`. The `.md` extension is required — Templater scans the Template Folder for `.md` files.
+3. **Bind a hotkey:** `Settings → Templater → Template Hotkeys` → "Add new hotkey for template" → pick `capture-task.md`. Then `Settings → Hotkeys` → search for "Templater: capture-task" and assign your hotkey (e.g. `Mod+Shift+L`). The two-step is intentional: the Templater pane registers the command, the global Hotkeys pane binds the keystroke.
+4. **Sanity check:** place the cursor in any note, fire the hotkey. The project picker should appear immediately. If nothing happens, confirm Template Folder Location is set correctly and the file appears under `Settings → Templater → Template Hotkeys`.
 
 ## Macro source
 
-Copy this verbatim into `<your-templater-folder>/capture-task.md`:
+Copy this verbatim into `<your-template-folder>/capture-task.md`:
 
 ````markdown
 <%*
@@ -112,9 +114,13 @@ tR += line + "\n";
 - **Errors**: any non-zero exit from `lithos-loom` (unknown project, network failure, Lithos validation envelope) surfaces in a Notice popup with the stderr message. The macro returns without inserting anything.
 - **Lithos availability**: the macro doesn't pre-check Lithos health. If the daemon is down, the `task create` invocation surfaces the connection error directly. Run `lithos-loom doctor` first if the macro silently no-ops.
 
-## Optional: target-file flag (US27)
+## Optional CLI flags (US27)
 
-The CLI supports `--target-file PATH` for appending the line to a specific file instead of printing to stdout. Useful for "create a task and put it in next week's daily note" flows. To wire that into the macro, add the optional prompt before the argv build:
+The CLI ships two output-mode flags so the same `lithos-loom task create` invocation powers more than just the cursor-insert flow this macro defaults to. The two flags are mutually exclusive — passing both is a usage error (exit 2).
+
+### `--target-file PATH`
+
+Appends the projected line to `PATH` instead of printing to stdout (nothing is printed). Useful for "create a task and put it in next week's daily note" flows. The file is created (with parent dirs) if it doesn't exist. To wire it into this macro, add an optional prompt before the argv build:
 
 ```javascript
 const targetFile = await tp.system.prompt(
@@ -126,3 +132,14 @@ if (targetFile) args.push("--target-file", targetFile);
 ```
 
 When `--target-file` is given, the CLI writes the line directly and prints nothing to stdout — adjust the macro's insert step accordingly (e.g. wrap the `tR += line + "\n"` in `if (!targetFile)`).
+
+### `--no-insert`
+
+Creates the task but discards the projected line — stdout gets just the new task's id. Useful for shell-script callers that only need the id back, e.g. inside another script that chains "create task → assign it to a process". The macro doesn't typically need this (the macro's whole point is to insert), but it's the documented escape hatch for "I want the side effect without the line":
+
+```sh
+task_id=$(lithos-loom task create --project lithos-loom --title "Track this" --no-insert)
+echo "created $task_id"
+```
+
+Combining `--no-insert` with `--target-file` is a usage error — the two flags answer the same question ("where does the line go?") differently.

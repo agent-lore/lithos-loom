@@ -77,7 +77,18 @@ def task_create(
         help=(
             "Optional file to append the projected line to instead of "
             "printing to stdout (US27). Created if missing; the line "
-            "is appended with a trailing newline."
+            "is appended with a trailing newline. Mutually exclusive "
+            "with --no-insert."
+        ),
+    ),
+    no_insert: bool = typer.Option(
+        False,
+        "--no-insert",
+        help=(
+            "Don't emit the projected line anywhere — just create the "
+            "task and print its id (US27). Useful for scripted flows "
+            "that only need the task_id back. Mutually exclusive with "
+            "--target-file."
         ),
     ),
     config: Path | None = typer.Option(
@@ -96,16 +107,31 @@ def task_create(
     the shared :func:`lithos_loom.render.render_line` so a macro-
     inserted line is byte-equal to what the projection will write.
 
+    Output mode (US27):
+    * Default: print the projected line to stdout (macro inserts at cursor).
+    * ``--target-file PATH``: append the line to PATH; nothing to stdout.
+    * ``--no-insert``: print just the new task's id to stdout; the
+      projected line is discarded. Useful for "create-and-discard"
+      scripted flows.
+
     Exit codes:
     * 0 — success.
     * 1 — config load / Lithos RPC failure / target-file write failure.
-    * 2 — input validation error (unknown project, bad priority).
+    * 2 — input validation error (unknown project, bad priority,
+      mutually-exclusive flags).
     """
     try:
         cfg = load_config(config)
     except LithosLoomError as exc:
         typer.echo(f"lithos-loom: {exc}", err=True)
         sys.exit(1)
+
+    if no_insert and target_file is not None:
+        typer.echo(
+            "lithos-loom: --no-insert and --target-file are mutually exclusive",
+            err=True,
+        )
+        sys.exit(2)
 
     if project not in cfg.projects:
         configured = ", ".join(sorted(cfg.projects)) or "(none)"
@@ -147,6 +173,13 @@ def task_create(
             err=True,
         )
         sys.exit(1)
+
+    # --no-insert short-circuits before we bother rendering a line
+    # we're about to throw away. Print just the task_id so scripted
+    # callers can capture it from stdout.
+    if no_insert:
+        typer.echo(task_id)
+        return
 
     task = Task(
         id=task_id,

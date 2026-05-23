@@ -1,10 +1,22 @@
-"""``lithos-loom project`` sub-app (Slice 3, US31 pulled forward).
+"""``lithos-loom project`` sub-app (Slice 3 capture-macro helper).
 
-Currently exposes only ``list``, which the Slice 3 capture-macro
-Templater script uses to populate the project-autocomplete prompt.
-US31's broader ``project list`` shape (status / KB-presence columns)
-will land in Slice 4 when the project-context-projection subscription
-gives us the upstream signal; for now this is the minimal slice-3 cut.
+This is **not** a US31 implementation, despite living in the
+namespace US31 will eventually own. The full US31
+(``docs/prd/integration.md:195``) enumerates Lithos project context
+docs via ``lithos_list(path_prefix="projects/")`` and renders
+status + presence-in-local-TOML columns — that depends on the
+Slice 4 project-context-projection subscription giving us the
+upstream signal, so it can't fully land until then.
+
+What this command DOES ship is the minimum the Slice 3 capture
+macro needs: enumerate the slugs in the operator's local TOML
+``[projects]`` table so the macro's project-autocomplete prompt has
+something to suggest. Local-config-only; no Lithos round-trip.
+
+When US31 lands in Slice 4, this command's surface extends: same
+sub-app, same ``list`` verb, but the output gains the Lithos-side
+columns and the source of truth becomes a union of local TOML
+and ``lithos_list``.
 """
 
 from __future__ import annotations

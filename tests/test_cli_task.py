@@ -243,6 +243,68 @@ def test_task_create_target_file_appends_line(
     assert "- [ ] Captured 🆔 lithos:new-1 #project/lithos-loom" in content
 
 
+def test_task_create_no_insert_prints_task_id_only(
+    tmp_path: Path, patched_lithos: type[_StubLithosClient]
+) -> None:
+    """``--no-insert`` (US27) prints just the task_id and discards the
+    projected line. Scripted callers use this to capture the id from
+    stdout without dealing with the line."""
+    config_path = _write_config(tmp_path)
+    patched_lithos.task_create_returns = "task-99"
+
+    result = runner.invoke(
+        app,
+        [
+            "task",
+            "create",
+            "--project",
+            "lithos-loom",
+            "--title",
+            "Scripted create",
+            "--no-insert",
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    # Task was still created upstream.
+    assert len(patched_lithos.task_create_calls) == 1
+
+    # Stdout is just the task_id — no projected-line markers.
+    assert result.stdout.strip() == "task-99"
+    assert "🆔" not in result.stdout
+    assert "#project/" not in result.stdout
+
+
+def test_task_create_no_insert_mutually_exclusive_with_target_file(
+    tmp_path: Path, patched_lithos: type[_StubLithosClient]
+) -> None:
+    """Passing both ``--no-insert`` and ``--target-file`` is a usage
+    error (exit 2); the CLI rejects before reaching Lithos so the
+    operator's intent is unambiguous."""
+    config_path = _write_config(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "task",
+            "create",
+            "--project",
+            "lithos-loom",
+            "--title",
+            "x",
+            "--no-insert",
+            "--target-file",
+            str(tmp_path / "out.md"),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.stderr
+    assert patched_lithos.task_create_calls == []
+
+
 def test_task_create_target_file_appends_to_existing(
     tmp_path: Path, patched_lithos: type[_StubLithosClient]
 ) -> None:
