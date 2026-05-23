@@ -81,17 +81,27 @@ def render_line(
 
     Field order (omit optional markers when they don't apply):
 
-        - [ ] <title> 🆔 lithos:<id> [⛔ lithos:<dep>]... \
-            [📅 <date>] [#project/<slug>] [#lithos/<route>] [<prio>]
+        - [ ] <title> 🆔 lithos:<id> [#project/<slug>] \
+            [#lithos/<route>] [⛔ lithos:<dep>]... [<prio>] [📅 <date>]
 
-    Priority emoji is at the **end** of the line. The Tasks plugin's
-    emoji-format docs (`Reference/Task Formats/Tasks Emoji Format`
-    on the Tasks plugin's public docs site) don't pin a required
-    field order, but empirical testing shows lines with priority
-    emoji in mid-line positions (between title and `🆔`) do NOT
-    sort by priority in Tasks queries; trailing-position priority
-    sorts correctly. Matches the convention in the plugin's own
-    examples.
+    Layout follows the canonical Tasks-plugin emoji format the
+    user empirically confirmed by re-running a task through the
+    plugin's own rewrite dialogue:
+
+      title → 🆔 (stable identifier, immediately after title) →
+      tags → Tasks-plugin emoji metadata (⛔ deps, priority, dates)
+
+    The plugin's public emoji-format docs
+    (`Reference/Task Formats/Tasks Emoji Format`) don't formally
+    pin field order, but mid-line emoji metadata is silently
+    ignored for sort/filter — only trailing-position metadata is
+    parsed. Tags must come BEFORE trailing emoji metadata; 🆔 is
+    the lone exception (immediately after title) because it acts
+    as a stable identifier other tasks reference via ⛔, not as
+    sort/filter metadata.
+
+    Within trailing metadata, the order is: ⛔ deps → priority →
+    📅 date. Matches the plugin's rewrite-dialogue output.
 
     Titles with embedded newlines (rare in Lithos but possible) are
     collapsed to spaces so the markdown line stays single-line. The
@@ -102,16 +112,10 @@ def render_line(
     ``resolved_ttl_days`` (see :func:`render_resolved_line`).
     """
     title = " ".join(task.title.split())  # collapse \n, \r, runs of spaces
-    parts: list[str] = [f"- [ ] {title}"]
+    parts: list[str] = [f"- [ ] {title}", f"🆔 lithos:{task.id}"]
 
-    parts.append(f"🆔 lithos:{task.id}")
-
-    parts.extend(dep_markers(task))
-
-    due = due_date_str(task, routes, today)
-    if due is not None:
-        parts.append(f"📅 {due}")
-
+    # Tags BEFORE Tasks-plugin emoji metadata so the trailing
+    # metadata sorts/filters correctly.
     project = task.metadata.get("project")
     if isinstance(project, str) and project:
         parts.append(f"#project/{project}")
@@ -120,11 +124,16 @@ def render_line(
     if route_name:
         parts.append(f"#lithos/{route_name}")
 
-    # Priority emoji must be at the END for the Tasks plugin's
-    # sort-by-priority parser to recognise it (see docstring).
+    # Trailing Tasks-plugin emoji metadata: deps → priority → due date.
+    parts.extend(dep_markers(task))
+
     priority = priority_marker(task)
     if priority is not None:
         parts.append(priority)
+
+    due = due_date_str(task, routes, today)
+    if due is not None:
+        parts.append(f"📅 {due}")
 
     return " ".join(parts)
 
@@ -132,10 +141,17 @@ def render_line(
 def render_resolved_line(task: Task, status: str, resolved_at: date) -> str:
     """Render the historical-line shape for completed/cancelled tasks.
 
-    Matches the PRD example exactly (``docs/prd/integration.md:253-255``):
+    Field order:
 
-        - [x] <title> ✅ <date> 🆔 lithos:<id> [#project/<slug>]
-        - [-] <title> ❌ <date> 🆔 lithos:<id> [#project/<slug>]
+        - [x] <title> 🆔 lithos:<id> [#project/<slug>] ✅ <date>
+        - [-] <title> 🆔 lithos:<id> [#project/<slug>] ❌ <date>
+
+    Layout follows the same Tasks-plugin convention as
+    :func:`render_line`: title → 🆔 → tag → trailing emoji metadata
+    (here the ✅/❌ date is the only emoji metadata for resolved
+    tasks). The ✅ / ❌ date must be at the END so the Tasks plugin's
+    `sort by done date` / `done after Y-M-D` filters parse it
+    correctly.
 
     Resolved tasks drop priority / dep / due-date / route-name
     markers — they are historical record, not actionable work. The
@@ -145,14 +161,12 @@ def render_resolved_line(task: Task, status: str, resolved_at: date) -> str:
     checkbox = "[x]" if status == "completed" else "[-]"
     marker_emoji = "✅" if status == "completed" else "❌"
     title = " ".join(task.title.split())
-    parts: list[str] = [
-        f"- {checkbox} {title}",
-        f"{marker_emoji} {resolved_at.isoformat()}",
-        f"🆔 lithos:{task.id}",
-    ]
+    parts: list[str] = [f"- {checkbox} {title}", f"🆔 lithos:{task.id}"]
     project = task.metadata.get("project")
     if isinstance(project, str) and project:
         parts.append(f"#project/{project}")
+    # Done/cancelled date at the END for Tasks-plugin filter recognition.
+    parts.append(f"{marker_emoji} {resolved_at.isoformat()}")
     return " ".join(parts)
 
 

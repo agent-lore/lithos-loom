@@ -817,11 +817,12 @@ async def test_full_marker_set_orders_correctly(tmp_path: Path) -> None:
         ),
         _ctx(),
     )
-    # Priority emoji at the END (Tasks-plugin sort convention); see
-    # render.py docstring.
+    # Tasks-plugin layout: title → 🆔 → tags → trailing emoji metadata
+    # (deps → priority → date). See render.py docstring.
     assert _projected_line(tmp_path) == (
-        "- [ ] Review PR for story 03 🆔 lithos:full ⛔ lithos:dep-456 "
-        "📅 2026-06-15 #project/lithos-loom #lithos/review-human ⏫"
+        "- [ ] Review PR for story 03 🆔 lithos:full "
+        "#project/lithos-loom #lithos/review-human "
+        "⛔ lithos:dep-456 ⏫ 📅 2026-06-15"
     )
 
 
@@ -1225,7 +1226,7 @@ async def test_completed_event_renders_x_line_with_check_mark(
         ),
         _ctx(),
     )
-    assert _projected_line(tmp_path) == ("- [x] ship feature ✅ 2026-05-20 🆔 lithos:d")
+    assert _projected_line(tmp_path) == ("- [x] ship feature 🆔 lithos:d ✅ 2026-05-20")
 
 
 async def test_cancelled_event_renders_dash_line_with_x_mark(
@@ -1242,7 +1243,7 @@ async def test_cancelled_event_renders_dash_line_with_x_mark(
         ),
         _ctx(),
     )
-    assert _projected_line(tmp_path) == ("- [-] abandon idea ❌ 2026-05-20 🆔 lithos:c")
+    assert _projected_line(tmp_path) == ("- [-] abandon idea 🆔 lithos:c ❌ 2026-05-20")
 
 
 async def test_resolved_line_preserves_project_tag(tmp_path: Path) -> None:
@@ -1270,7 +1271,7 @@ async def test_resolved_line_preserves_project_tag(tmp_path: Path) -> None:
         _ctx(),
     )
     assert _projected_line(tmp_path) == (
-        "- [x] ship ✅ 2026-05-20 🆔 lithos:p #project/cardinal"
+        "- [x] ship 🆔 lithos:p #project/cardinal ✅ 2026-05-20"
     )
 
 
@@ -1317,7 +1318,7 @@ async def test_resolved_line_omits_priority_dep_due_route_markers(
         _ctx(),
     )
     line = _projected_line(tmp_path)
-    assert line == "- [x] rich task ✅ 2026-05-20 🆔 lithos:full #project/p1"
+    assert line == "- [x] rich task 🆔 lithos:full #project/p1 ✅ 2026-05-20"
     # Belt-and-braces: explicitly none of the actionability markers.
     assert not any(ch in line for ch in "🔺⏫🔼🔽⏬")
     assert "⛔" not in line
@@ -1347,7 +1348,7 @@ async def test_completed_event_for_untracked_orphan_creates_resolved_entry(
         _ctx(),
     )
     assert _projected_line(tmp_path) == (
-        "- [x] orphan done ✅ 2026-05-20 🆔 lithos:orph"
+        "- [x] orphan done 🆔 lithos:orph ✅ 2026-05-20"
     )
 
 
@@ -1640,7 +1641,7 @@ async def test_open_and_resolved_tasks_sort_by_id_together(
     ]
     assert task_lines == [
         "- [ ] A 🆔 lithos:a-open",
-        "- [x] B ✅ 2026-05-20 🆔 lithos:b-done",
+        "- [x] B 🆔 lithos:b-done ✅ 2026-05-20",
         "- [ ] C 🆔 lithos:c-open",
     ]
 

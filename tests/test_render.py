@@ -123,14 +123,16 @@ def test_render_resolved_line_completed() -> None:
     """Completed task renders ``[x] ... ✅ <date> 🆔 lithos:<id>``."""
     task = _task(status="completed")
     line = render_resolved_line(task, status="completed", resolved_at=_TODAY)
-    assert line == "- [x] Review PR ✅ 2026-05-22 🆔 lithos:abc"
+    # Done date at the END (Tasks-plugin convention) — see render.py docstring.
+    assert line == "- [x] Review PR 🆔 lithos:abc ✅ 2026-05-22"
 
 
 def test_render_resolved_line_cancelled() -> None:
     """Cancelled task renders ``[-] ... ❌ <date> 🆔 lithos:<id>``."""
     task = _task(status="cancelled")
     line = render_resolved_line(task, status="cancelled", resolved_at=_TODAY)
-    assert line == "- [-] Review PR ❌ 2026-05-22 🆔 lithos:abc"
+    # Cancelled date at the END (Tasks-plugin convention).
+    assert line == "- [-] Review PR 🆔 lithos:abc ❌ 2026-05-22"
 
 
 def test_render_resolved_line_keeps_project_tag() -> None:
