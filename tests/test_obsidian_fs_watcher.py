@@ -61,6 +61,7 @@ def _record_projection(
     path: Path,
     markers: dict[str, str],
     priorities: dict[str, str | None] | None = None,
+    due_dates: dict[str, str | None] | None = None,
 ) -> None:
     """Stand in for the projection's ``_flush`` call.
 
@@ -70,15 +71,20 @@ def _record_projection(
     to compare against, exactly matching what ``_flush`` does.
 
     ``priorities`` (Slice 2 US21) maps each task id to its priority
-    enum (or ``None``). Defaults to all-None for the given markers
-    so existing tests don't need to care about priority.
+    enum (or ``None``). ``due_dates`` (Slice 3 round-trip) maps each
+    task id to its rendered ``YYYY-MM-DD`` string (or ``None``).
+    Both default to all-None for the given markers so existing tests
+    don't need to care about the new fields.
     """
     if priorities is None:
         priorities = dict.fromkeys(markers, None)
+    if due_dates is None:
+        due_dates = dict.fromkeys(markers, None)
     sync_state.record_projection_write(
         content_hash=_hash_of(path),
         task_status_markers=markers,
         task_priority_markers=priorities,
+        task_due_date_markers=due_dates,
     )
 
 
@@ -408,6 +414,179 @@ async def test_user_priority_edit_followed_by_unrelated_save_does_not_re_emit(
     )
     assert await watcher.poll_once() == 0
     assert _drain(pri_sub) == []
+
+
+# ── Due-date changes (Slice 3 round-trip) ──────────────────────────────
+
+
+def _subscribe_due_date(bus: EventBus) -> Subscription:
+    return bus.subscribe(
+        event_types=("obsidian.task.due_date_changed",),
+        name="test-due-date-subscriber",
+    )
+
+
+async def test_due_date_change_emits_due_date_changed_event(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """User edits ``📅 YYYY-MM-DD`` on a projected line → watcher
+    emits ``obsidian.task.due_date_changed`` with the verbatim date
+    strings (or None)."""
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 2026-05-20"])
+    _record_projection(
+        sync_state, tasks_path, {"a": "[ ]"}, due_dates={"a": "2026-05-20"}
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 2026-06-15"])
+    published = await watcher.poll_once()
+    events = _drain(due_sub)
+
+    assert published == 1
+    assert len(events) == 1
+    assert events[0].type == "obsidian.task.due_date_changed"
+    assert events[0].payload == {
+        "task_id": "a",
+        "prior": "2026-05-20",
+        "new": "2026-06-15",
+    }
+
+
+async def test_due_date_removed_emits_event_with_new_none(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """User deleting the 📅 marker entirely → ``new=None``."""
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 2026-05-20"])
+    _record_projection(
+        sync_state, tasks_path, {"a": "[ ]"}, due_dates={"a": "2026-05-20"}
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    await watcher.poll_once()
+    [event] = _drain(due_sub)
+    assert event.payload == {"task_id": "a", "prior": "2026-05-20", "new": None}
+
+
+async def test_due_date_added_emits_event_with_prior_none(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """Inverse: user added a 📅 marker where none existed."""
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a"])
+    _record_projection(sync_state, tasks_path, {"a": "[ ]"}, due_dates={"a": None})
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 2026-07-01"])
+    await watcher.poll_once()
+    [event] = _drain(due_sub)
+    assert event.payload == {"task_id": "a", "prior": None, "new": "2026-07-01"}
+
+
+async def test_due_date_malformed_format_treated_as_no_date(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """``📅 next Friday`` doesn't match ``YYYY-MM-DD`` so the watcher
+    treats it as "no date" and would emit a delete (None) if the
+    projection had previously recorded a date. Guards against
+    bouncing garbage values back to Lithos."""
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 2026-05-20"])
+    _record_projection(
+        sync_state, tasks_path, {"a": "[ ]"}, due_dates={"a": "2026-05-20"}
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 next Friday"])
+    await watcher.poll_once()
+    [event] = _drain(due_sub)
+    # Malformed date parsed as None → handler sends scheduled_for=None
+    # which deletes the key in Lithos. Operator's edit "failed" cleanly
+    # rather than persisting a garbage value.
+    assert event.payload == {"task_id": "a", "prior": "2026-05-20", "new": None}
+
+
+async def test_due_date_change_subject_to_self_write_suppression(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """Layer-2 self-write suppression clears _observed_dates too."""
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 2026-05-20"])
+    _record_projection(
+        sync_state, tasks_path, {"a": "[ ]"}, due_dates={"a": "2026-05-20"}
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    # Projection writes a new content with a different date.
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 📅 2026-06-15"])
+    _record_projection(
+        sync_state, tasks_path, {"a": "[ ]"}, due_dates={"a": "2026-06-15"}
+    )
+
+    # Watcher polls — sees the projection write, suppresses.
+    assert await watcher.poll_once() == 0
+    assert _drain(due_sub) == []
+    # _observed_dates should have been cleared by the layer-2 path.
+    assert watcher._observed_dates == {}
+
+
+async def test_due_date_combined_with_status_and_priority_in_one_save(
+    bus: EventBus,
+    sub: Subscription,
+    tasks_path: Path,
+) -> None:
+    """One file save that changes status + priority + due date emits
+    three independent events for the same task."""
+    pri_sub = _subscribe_priority(bus)
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a ⏫ 📅 2026-05-20"])
+    _record_projection(
+        sync_state,
+        tasks_path,
+        {"a": "[ ]"},
+        priorities={"a": "high"},
+        due_dates={"a": "2026-05-20"},
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(tasks_path, ["- [x] Task 🆔 lithos:a 🔺 📅 2026-06-15"])
+    published = await watcher.poll_once()
+
+    assert published == 3
+    status_events = _drain(sub)
+    pri_events = _drain(pri_sub)
+    due_events = _drain(due_sub)
+    assert len(status_events) == 1
+    assert len(pri_events) == 1
+    assert len(due_events) == 1
+    assert status_events[0].payload["new"] == "[x]"
+    assert pri_events[0].payload["new"] == "highest"
+    assert due_events[0].payload["new"] == "2026-06-15"
 
 
 # ── Transition semantics: each transition emits exactly once ───────────

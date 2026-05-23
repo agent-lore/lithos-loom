@@ -113,6 +113,13 @@ _TASK_ID_RE = re.compile(r"🆔 lithos:(?P<task_id>[A-Za-z0-9_-]+)")
 # while editing, and the only signal that matters is "is one present
 # and which one".
 _PRIORITY_EMOJI_RE = re.compile(r"(🔺|⏫|🔼|🔽|⏬)")
+# Match the Tasks-plugin due-date marker: `📅 YYYY-MM-DD`. We match
+# the canonical format only; anything else (e.g. `📅 next Friday`,
+# `📅 2026-06-15T09:00Z`) is treated as "no date" so a malformed
+# user edit doesn't bounce a garbage value back to Lithos. Tasks
+# plugin itself only renders `YYYY-MM-DD` so the round-trip stays
+# closed under valid inputs.
+_DUE_DATE_RE = re.compile(r"📅 (\d{4}-\d{2}-\d{2})")
 
 
 @dataclass
@@ -158,6 +165,14 @@ class ObsidianFsWatcher:
         # priority emoji" — so this is ``dict[str, str | None]``
         # rather than just ``dict[str, str]``.
         self._observed_priorities: dict[str, str | None] = {}
+        # Parallel per-task memory for due dates (Slice 3 round-trip).
+        # Same role as ``_observed_priorities`` but for
+        # ``obsidian.task.due_date_changed``. ``None`` is a meaningful
+        # value here — "user committed a line with no 📅 marker" — so
+        # the type is ``dict[str, str | None]``. The string values are
+        # canonical ``YYYY-MM-DD`` strings the renderer emits / the
+        # ``_DUE_DATE_RE`` regex matches.
+        self._observed_dates: dict[str, str | None] = {}
         # Snapshot of ``sync_state.write_version`` from our last poll.
         # If it's advanced, the projection has committed a re-render
         # since we last looked. We use that signal to distinguish
@@ -258,10 +273,11 @@ class ObsidianFsWatcher:
             # The projection's re-rendered file is authoritative over
             # any user edits we'd previously observed — drop them so
             # the next real user edit measures against the projection's
-            # fresh view, not a stale user marker. Both status and
-            # priority observed-maps clear together.
+            # fresh view, not a stale user marker. Status, priority,
+            # AND due-date observed-maps clear together.
             self._observed_markers.clear()
             self._observed_priorities.clear()
+            self._observed_dates.clear()
             self._last_seen_hash = current_hash
             self._last_processed_write_version = self.sync_state.write_version
             return 0
@@ -274,6 +290,7 @@ class ObsidianFsWatcher:
         if projection_wrote_since_last_poll:
             self._observed_markers.clear()
             self._observed_priorities.clear()
+            self._observed_dates.clear()
             self._last_processed_write_version = self.sync_state.write_version
 
         # Layer 3: real user edit. Parse + per-task transition detection.
@@ -288,7 +305,7 @@ class ObsidianFsWatcher:
         # second disk read and the TOCTOU window it would open.
         # ``raw is None`` means missing/unreadable; nothing to parse.
         text = raw.decode("utf-8", errors="replace") if raw is not None else ""
-        for task_id, marker, priority in _parse_line_markers(text):
+        for task_id, marker, priority, due_date in _parse_line_markers(text):
             # ─── status diff (US17–US19) ──────────────────────────────
             prior_status = self._observed_markers.get(
                 task_id, self.sync_state.task_status_markers.get(task_id)
@@ -319,6 +336,21 @@ class ObsidianFsWatcher:
             if priority != prior_priority:
                 await self._publish_priority_change(task_id, prior_priority, priority)
                 self._observed_priorities[task_id] = priority
+                published += 1
+
+            # ─── due-date diff (Slice 3 round-trip) ───────────────────
+            # Same shape as the priority diff above. ``None`` is
+            # meaningful ("no 📅 marker on the line"), so we use
+            # explicit membership for the observed-map lookup. The
+            # baseline fallback is ``sync_state.task_due_date_markers``
+            # which the projection populates on each flush.
+            if task_id in self._observed_dates:
+                prior_due = self._observed_dates[task_id]
+            else:
+                prior_due = self.sync_state.task_due_date_markers.get(task_id)
+            if due_date != prior_due:
+                await self._publish_due_date_change(task_id, prior_due, due_date)
+                self._observed_dates[task_id] = due_date
                 published += 1
 
         self._last_seen_hash = current_hash
@@ -362,6 +394,30 @@ class ObsidianFsWatcher:
             new,
         )
 
+    async def _publish_due_date_change(
+        self, task_id: str, prior: str | None, new: str | None
+    ) -> None:
+        """Publish ``obsidian.task.due_date_changed`` (Slice 3 round-trip).
+
+        ``prior`` / ``new`` carry the canonical ``YYYY-MM-DD`` strings
+        the renderer emits / the ``_DUE_DATE_RE`` regex matches — or
+        ``None`` for "no 📅 marker on the line". The handler pushes
+        the change back to Lithos as
+        ``task_update(metadata={"scheduled_for": new})``.
+        """
+        event = Event(
+            type="obsidian.task.due_date_changed",
+            timestamp=self._now_provider(),
+            payload=MappingProxyType({"task_id": task_id, "prior": prior, "new": new}),
+        )
+        await self.bus.publish(event)
+        logger.info(
+            "ObsidianFsWatcher: published obsidian.task.due_date_changed task=%s %s→%s",
+            task_id,
+            prior,
+            new,
+        )
+
 
 # ── helpers ────────────────────────────────────────────────────────────
 
@@ -382,9 +438,11 @@ def _read_file(path: Path) -> bytes | None:
         return None
 
 
-def _parse_line_markers(text: str) -> Iterator[tuple[str, str, str | None]]:
-    """Yield ``(task_id, status_marker, priority_enum_or_none)``
-    triples for every parseable task line.
+def _parse_line_markers(
+    text: str,
+) -> Iterator[tuple[str, str, str | None, str | None]]:
+    """Yield ``(task_id, status_marker, priority_enum_or_none,
+    due_date_or_none)`` quadruples for every parseable task line.
 
     Takes already-decoded text rather than a path so the caller (see
     :meth:`ObsidianFsWatcher.poll_once`) can hash and parse the same
@@ -392,11 +450,14 @@ def _parse_line_markers(text: str) -> Iterator[tuple[str, str, str | None]]:
 
     Format expected (matches the projection's renderer):
 
-        - [<m>] <title> [<prio>] 🆔 lithos:<id> ...
+        - [<m>] <title> 🆔 lithos:<id> ... [<prio>] [📅 <date>]
 
-    where ``<prio>`` is one of the D18 priority emoji (or absent).
-    The priority emoji is mapped to its canonical enum string via
-    :data:`EMOJI_TO_PRIORITY`; absent → ``None``.
+    where ``<prio>`` is one of the D18 priority emoji (or absent)
+    and ``<date>`` is the YYYY-MM-DD form Tasks plugin renders. The
+    priority emoji is mapped to its canonical enum string via
+    :data:`EMOJI_TO_PRIORITY`; the due date is yielded verbatim as a
+    string (no parse / no validation here — that's the handler's
+    job). Both default to ``None`` when absent.
 
     Lines that don't start with ``- [<m>] `` (header comments, blank
     lines, free-text) are skipped silently. A matching prefix without
@@ -425,4 +486,6 @@ def _parse_line_markers(text: str) -> Iterator[tuple[str, str, str | None]]:
             continue
         prio_match = _PRIORITY_EMOJI_RE.search(line)
         priority = EMOJI_TO_PRIORITY[prio_match.group(1)] if prio_match else None
-        yield id_match.group("task_id"), marker, priority
+        due_match = _DUE_DATE_RE.search(line)
+        due_date = due_match.group(1) if due_match else None
+        yield id_match.group("task_id"), marker, priority, due_date

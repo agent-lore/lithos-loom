@@ -127,6 +127,9 @@ from lithos_loom.bus import Event
 from lithos_loom.config import LoomConfig
 from lithos_loom.lithos_client import Task
 from lithos_loom.render import (
+    due_date_str as _due_date_str,
+)
+from lithos_loom.render import (
     render_line as _render_line,
 )
 from lithos_loom.render import (
@@ -151,24 +154,30 @@ class _StateEntry:
     """One row of the in-memory projection state.
 
     For open tasks: ``status="open"``, ``resolved_at=None``,
-    ``priority`` is the validated D18 enum or ``None``.
+    ``priority`` is the validated D18 enum or ``None``, ``due_date``
+    is the ``YYYY-MM-DD`` string the renderer would emit in the
+    ``📅`` marker or ``None``.
     For completed/cancelled tasks lingering inside the TTL window:
     ``status="completed"`` or ``"cancelled"``, ``resolved_at`` set,
-    ``priority`` is always ``None`` (the renderer drops priority
-    markers on resolved lines per the PRD example).
+    ``priority`` and ``due_date`` are always ``None`` (the renderer
+    drops both markers on resolved lines per the PRD example).
 
-    Carrying status + resolved_at + priority alongside the rendered
-    line lets the handler distinguish open vs resolved entries
-    without parsing the line back out, lets the TTL sweep walk by
-    resolved_at cheaply, and lets ``_flush`` extract per-task
-    priority for the Slice 2 US21 ``sync_state`` map without
-    re-parsing the rendered line.
+    Carrying status + resolved_at + priority + due_date alongside the
+    rendered line lets the handler distinguish open vs resolved
+    entries without parsing the line back out, lets the TTL sweep
+    walk by resolved_at cheaply, and lets ``_flush`` extract per-task
+    priority + due_date for the ``sync_state`` maps without
+    re-parsing the rendered line. The ``sync_state`` maps in turn
+    feed the fs-watcher's diff for the corresponding
+    ``obsidian.task.priority_changed`` / ``obsidian.task.due_date_changed``
+    event families.
     """
 
     line: str
     status: str  # "open" | "completed" | "cancelled"
     resolved_at: date | None
     priority: str | None = None
+    due_date: str | None = None
 
 
 _REEVALUATE_EVENTS = frozenset(
@@ -374,6 +383,12 @@ def make_handler(
                     status="open",
                     resolved_at=None,
                     priority=_validated_priority(task),
+                    # Reuse the renderer's due_date computation so
+                    # the projection's _StateEntry holds exactly
+                    # what the renderer puts on the line. The
+                    # fs-watcher's _DUE_DATE_RE matches that
+                    # string verbatim.
+                    due_date=_due_date_str(task, cfg.routes, today_val),
                 )
             else:
                 state.pop(task.id, None)
@@ -448,6 +463,15 @@ def make_handler(
             tid: (entry.priority if entry.status == "open" else None)
             for tid, entry in state.items()
         }
+        # Due-date map (Slice 3 round-trip). Same shape as the
+        # priority map: open entries carry the rendered date string
+        # (or ``None``); resolved entries always map to ``None``
+        # because the renderer drops the 📅 marker on resolved
+        # lines.
+        due_date_markers = {
+            tid: (entry.due_date if entry.status == "open" else None)
+            for tid, entry in state.items()
+        }
         # Disk first. Raises → sync_state untouched → next event retries.
         await _write_tasks_file_atomic(tasks_path, content)
         # Synchronously update sync_state. No yield between the
@@ -461,6 +485,7 @@ def make_handler(
             content_hash=content_hash,
             task_status_markers=markers,
             task_priority_markers=priority_markers,
+            task_due_date_markers=due_date_markers,
         )
         # Cancellation point for clean shutdown between events; safe
         # to fire here because both the rename AND the sync_state
