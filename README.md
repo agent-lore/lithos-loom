@@ -26,7 +26,7 @@ It is the orchestration layer that connects Lithos to coding agents — replacin
 | [`docs/prd/integration.md`](docs/prd/integration.md) | **Track 1 PRD** — Obsidian bridge, 38 user stories across 5 slices |
 | [`docs/prd/mvp.md`](docs/prd/mvp.md) | **Track 2 MVP PRD** — original coding pipeline, ~35 user stories |
 | [`docs/prd/full.md`](docs/prd/full.md) | Full system PRD — 75 user stories spanning A1–A10 |
-| [`docs/macros/capture-task.md`](docs/macros/capture-task.md) | Slice 3 worked Templater macro — install instructions + JS source |
+| [`docs/macros/README.md`](docs/macros/README.md) | Slice 3 Obsidian capture macro — install instructions + behaviour notes. The macro source itself lives at [`docs/macros/capture-task.md`](docs/macros/capture-task.md) (copy-it-verbatim into your vault's Templater Template Folder). |
 | [`docs/result-schema.json`](docs/result-schema.json) | Versioned JSON Schema for the plugin `result.json` contract |
 
 ## Requirements
@@ -65,7 +65,7 @@ require("child_process").execSync("which lithos-loom").toString()
 If that errors, either:
 
 - Install via `uv tool install lithos-loom` (puts the binary in `~/.local/bin/`, typically in the launcher PATH on Linux; on macOS use `launchctl setenv PATH ...` or symlink into `/usr/local/bin/`).
-- Or hardcode the absolute path in the macro's `execFileSync` call (see [`docs/macros/capture-task.md`](docs/macros/capture-task.md)).
+- Or hardcode the absolute path in the macro's `execFileSync` call (see [`docs/macros/README.md`](docs/macros/README.md)).
 
 ## Quick start
 
@@ -107,7 +107,7 @@ Loom runs as a foreground process. For background operation, use `tmux`, `nohup`
 
 ### 6. (Track 1) Install the Obsidian capture macro
 
-If you want to create Lithos tasks from inside Obsidian, follow the install instructions in [`docs/macros/capture-task.md`](docs/macros/capture-task.md). Summary: copy the `<%* %>` template into your vault's Templater Template Folder, bind a hotkey via Templater Template Hotkeys. Verify the CLI-on-PATH check above first.
+If you want to create Lithos tasks from inside Obsidian, follow the install instructions in [`docs/macros/README.md`](docs/macros/README.md). Summary: copy `docs/macros/capture-task.md` verbatim into your vault's Templater Template Folder, register it via Templater, then bind your hotkey to **`Templater: Insert capture-task`** (not the auto-generated "Create" variant — that one produces an empty new note). Verify the CLI-on-PATH check above first.
 
 ## Per-environment configuration
 
