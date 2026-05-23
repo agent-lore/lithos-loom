@@ -249,13 +249,13 @@ async def test_priority_emoji_change_emits_priority_changed_event(
     enum strings (not the emoji literals)."""
     pri_sub = _subscribe_priority(bus)
     sync_state = ProjectionSyncState()
-    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a ⏫"])
     _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
     watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
     watcher._last_seen_hash = sync_state.last_written_hash
     watcher._last_processed_write_version = sync_state.write_version
 
-    _write_tasks_file(tasks_path, ["- [ ] Task 🔺 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 🔺"])
     published = await watcher.poll_once()
     events = _drain(pri_sub)
 
@@ -272,7 +272,7 @@ async def test_priority_emoji_removed_emits_event_with_new_none(
     """User deleting the emoji entirely → ``new=None``."""
     pri_sub = _subscribe_priority(bus)
     sync_state = ProjectionSyncState()
-    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a ⏫"])
     _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
     watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
     watcher._last_seen_hash = sync_state.last_written_hash
@@ -297,7 +297,7 @@ async def test_priority_emoji_added_emits_event_with_prior_none(
     watcher._last_seen_hash = sync_state.last_written_hash
     watcher._last_processed_write_version = sync_state.write_version
 
-    _write_tasks_file(tasks_path, ["- [ ] Task 🔽 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 🔽"])
     await watcher.poll_once()
     [event] = _drain(pri_sub)
     assert event.payload == {"task_id": "a", "prior": None, "new": "low"}
@@ -313,13 +313,13 @@ async def test_status_and_priority_change_in_same_save_emit_both_events(
     and one ``priority_changed`` — neither suppresses the other."""
     pri_sub = _subscribe_priority(bus)
     sync_state = ProjectionSyncState()
-    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a ⏫"])
     _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
     watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
     watcher._last_seen_hash = sync_state.last_written_hash
     watcher._last_processed_write_version = sync_state.write_version
 
-    _write_tasks_file(tasks_path, ["- [x] Task 🔺 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [x] Task 🆔 lithos:a 🔺"])
     published = await watcher.poll_once()
 
     status_events = _drain(sub)
@@ -349,14 +349,14 @@ async def test_priority_change_subject_to_self_write_suppression(
     introduced."""
     pri_sub = _subscribe_priority(bus)
     sync_state = ProjectionSyncState()
-    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a ⏫"])
     _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
     watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
     watcher._last_seen_hash = sync_state.last_written_hash
     watcher._last_processed_write_version = sync_state.write_version
 
     # Simulate a projection self-write: priority becomes "highest".
-    _write_tasks_file(tasks_path, ["- [ ] Task 🔺 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 🔺"])
     _record_projection(
         sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "highest"}
     )
@@ -394,13 +394,13 @@ async def test_user_priority_edit_followed_by_unrelated_save_does_not_re_emit(
     that leaves 🔺 in place must NOT re-emit."""
     pri_sub = _subscribe_priority(bus)
     sync_state = ProjectionSyncState()
-    _write_tasks_file(tasks_path, ["- [ ] Task ⏫ 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a ⏫"])
     _record_projection(sync_state, tasks_path, {"a": "[ ]"}, priorities={"a": "high"})
     watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
     watcher._last_seen_hash = sync_state.last_written_hash
     watcher._last_processed_write_version = sync_state.write_version
 
-    _write_tasks_file(tasks_path, ["- [ ] Task 🔺 🆔 lithos:a"])
+    _write_tasks_file(tasks_path, ["- [ ] Task 🆔 lithos:a 🔺"])
     assert await watcher.poll_once() == 1
     _drain(pri_sub)
 
@@ -408,7 +408,7 @@ async def test_user_priority_edit_followed_by_unrelated_save_does_not_re_emit(
     _write_tasks_file(
         tasks_path,
         [
-            "- [ ] Task 🔺 🆔 lithos:a",
+            "- [ ] Task 🆔 lithos:a 🔺",
             "  comment line",
         ],
     )
@@ -587,6 +587,176 @@ async def test_due_date_combined_with_status_and_priority_in_one_save(
     assert status_events[0].payload["new"] == "[x]"
     assert pri_events[0].payload["new"] == "highest"
     assert due_events[0].payload["new"] == "2026-06-15"
+
+
+# ── Title-vs-metadata isolation (reviewer-finding regression) ──────────
+#
+# The renderer puts priority / 📅 markers in the trailing-metadata zone
+# AFTER ``🆔 lithos:<id>``. Title text appears BEFORE 🆔 and may
+# legitimately contain any character — including the priority emoji or
+# a date-shaped string. Previously the watcher's regexes ran against
+# the whole line, so a task titled e.g. ``Investigate 🔺 incident`` or
+# ``Prepare notes for 📅 2026-06-15 review`` would be parsed as having
+# that priority / due date and emit spurious change events on first
+# poll. Both regexes are now scoped to the trailing zone via
+# ``line[id_match.end():]``.
+
+
+async def test_title_containing_priority_emoji_is_not_misread_as_priority(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """A task whose title contains a priority emoji (``🔺 incident``)
+    but has no trailing priority marker must parse as ``priority=None``.
+    Otherwise the watcher emits a spurious
+    ``obsidian.task.priority_changed`` event on the first poll after
+    the projection writes a task with such a title."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    # Title contains 🔺, no trailing priority emoji. Renderer-style
+    # layout: title → 🆔 → tag (no priority, no date).
+    _write_tasks_file(
+        tasks_path,
+        ["- [ ] Investigate 🔺 incident 🆔 lithos:abc #project/ops"],
+    )
+    _record_projection(
+        sync_state,
+        tasks_path,
+        {"abc": "[ ]"},
+        priorities={"abc": None},
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    # Touch the file with the same shape (re-write to bump hash). The
+    # title-embedded 🔺 must not produce a priority event.
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [ ] Investigate 🔺 incident 🆔 lithos:abc #project/ops",
+            "  - note: still investigating",  # trivial change to bump hash
+        ],
+    )
+    published = await watcher.poll_once()
+
+    assert published == 0
+    assert _drain(pri_sub) == []
+
+
+async def test_title_with_priority_emoji_does_not_clobber_real_trailing_priority(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """A title containing ``🔺`` AND a real trailing ``⏬`` (lowest)
+    must parse as ``priority=lowest`` — the trailing marker is
+    authoritative. Previously the whole-line regex took the first
+    match, so the title's 🔺 would overwrite the real low priority and
+    push back ``"highest"`` to Lithos."""
+    pri_sub = _subscribe_priority(bus)
+    sync_state = ProjectionSyncState()
+    # Projection already knows this task is at priority=lowest (the
+    # real trailing ⏬).
+    _write_tasks_file(
+        tasks_path,
+        ["- [ ] Investigate 🔺 incident 🆔 lithos:abc #project/ops ⏬"],
+    )
+    _record_projection(
+        sync_state,
+        tasks_path,
+        {"abc": "[ ]"},
+        priorities={"abc": "lowest"},
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    # User saves the file (whitespace tweak) without touching priority.
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [ ] Investigate 🔺 incident 🆔 lithos:abc #project/ops ⏬",
+            "  - note: still investigating",
+        ],
+    )
+    published = await watcher.poll_once()
+
+    assert published == 0
+    assert _drain(pri_sub) == []
+
+
+async def test_title_containing_date_string_is_not_misread_as_due_date(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """A task whose title contains ``📅 2026-06-15`` (date-shaped
+    string in the title text) but has no trailing date marker must
+    parse as ``due_date=None``. Otherwise the watcher emits a spurious
+    ``obsidian.task.due_date_changed`` event on the first poll, and
+    the handler pushes a bogus ``scheduled_for`` back to Lithos."""
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(
+        tasks_path,
+        ["- [ ] Prepare notes for 📅 2026-06-15 review 🆔 lithos:abc #project/ops"],
+    )
+    _record_projection(
+        sync_state,
+        tasks_path,
+        {"abc": "[ ]"},
+        due_dates={"abc": None},
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [ ] Prepare notes for 📅 2026-06-15 review 🆔 lithos:abc #project/ops",
+            "  - note: agenda drafted",
+        ],
+    )
+    published = await watcher.poll_once()
+
+    assert published == 0
+    assert _drain(due_sub) == []
+
+
+async def test_title_with_date_does_not_clobber_real_trailing_date(
+    bus: EventBus,
+    tasks_path: Path,
+) -> None:
+    """Title contains ``📅 2026-06-15`` AND the line has a real
+    trailing ``📅 2026-07-01``. The trailing date must win — both
+    on initial parse and on any subsequent unrelated save."""
+    due_sub = _subscribe_due_date(bus)
+    sync_state = ProjectionSyncState()
+    _write_tasks_file(
+        tasks_path,
+        ["- [ ] Notes 📅 2026-06-15 draft 🆔 lithos:abc #project/ops 📅 2026-07-01"],
+    )
+    _record_projection(
+        sync_state,
+        tasks_path,
+        {"abc": "[ ]"},
+        due_dates={"abc": "2026-07-01"},
+    )
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    watcher._last_seen_hash = sync_state.last_written_hash
+    watcher._last_processed_write_version = sync_state.write_version
+
+    _write_tasks_file(
+        tasks_path,
+        [
+            "- [ ] Notes 📅 2026-06-15 draft 🆔 lithos:abc #project/ops 📅 2026-07-01",
+            "  - note: nothing else changed",
+        ],
+    )
+    published = await watcher.poll_once()
+
+    assert published == 0
+    assert _drain(due_sub) == []
 
 
 # ── Transition semantics: each transition emits exactly once ───────────
@@ -833,8 +1003,8 @@ async def test_cold_start_restart_with_unchanged_file_emits_nothing(
     _write_tasks_file(
         tasks_path,
         [
-            "- [ ] Open thing ⏫ 🆔 lithos:cs1",
-            "- [x] Done thing ✅ 2026-05-22 🆔 lithos:cs2",
+            "- [ ] Open thing 🆔 lithos:cs1 ⏫",
+            "- [x] Done thing 🆔 lithos:cs2 ✅ 2026-05-22",
         ],
     )
 
@@ -864,7 +1034,7 @@ async def test_cold_start_then_projection_settles_then_user_edit_emits(
     coordinator catches up."""
     pri_sub = _subscribe_priority(bus)
 
-    _write_tasks_file(tasks_path, ["- [ ] Settled task ⏫ 🆔 lithos:s1"])
+    _write_tasks_file(tasks_path, ["- [ ] Settled task 🆔 lithos:s1 ⏫"])
     sync_state = ProjectionSyncState()
 
     watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
@@ -880,7 +1050,7 @@ async def test_cold_start_then_projection_settles_then_user_edit_emits(
     _record_projection(sync_state, tasks_path, {"s1": "[ ]"}, priorities={"s1": "high"})
 
     # 3. User edits: ticks the task AND changes priority emoji.
-    _write_tasks_file(tasks_path, ["- [x] Settled task 🔺 🆔 lithos:s1"])
+    _write_tasks_file(tasks_path, ["- [x] Settled task 🆔 lithos:s1 🔺"])
 
     published = await watcher.poll_once()
     status_events = _drain(sub)

@@ -261,7 +261,8 @@ async def test_skips_when_lithos_scheduled_for_already_matches_new(
     lithos.task_update.assert_not_awaited()
     info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert any(
-        "task abc already at scheduled_for=2026-06-15" in m
+        "task abc already at scheduled_for=" in m
+        and "2026-06-15" in m
         and "skipping idempotent update" in m
         for m in info_msgs
     ), info_msgs
@@ -332,3 +333,98 @@ async def test_pre_check_uses_task_get_not_task_status() -> None:
 
     lithos.task_get.assert_awaited_once_with(task_id="abc")
     lithos.task_status.assert_not_awaited()
+
+
+# ── Idempotency: ISO datetime normalisation (reviewer-finding regression) ─
+
+
+async def test_skips_when_lithos_scheduled_for_is_iso_datetime_matching_new() -> None:
+    """Lithos holds ``scheduled_for="2026-06-15T09:00:00Z"`` (full ISO
+    datetime); watcher emits ``new="2026-06-15"`` (date-only — that's
+    all the renderer projects and all the user can type into the
+    ``📅`` marker). Without datetime normalisation, the string compare
+    fails and the handler pushes back a date-only patch that silently
+    drops the time component. With normalisation, both sides parse to
+    ``date(2026, 6, 15)`` and the handler skips — Lithos's datetime
+    is preserved."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = Task(
+        id="abc",
+        title="t",
+        status="open",
+        tags=(),
+        metadata={"scheduled_for": "2026-06-15T09:00:00Z"},
+        claims=(),
+    )
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="2026-05-20", new="2026-06-15"), ctx)
+
+    lithos.task_update.assert_not_awaited()
+
+
+async def test_proceeds_when_lithos_iso_datetime_date_differs_from_new() -> None:
+    """Lithos holds ``"2026-06-15T09:00:00Z"`` but the user changed
+    the marker to a different date. The dates don't match → the
+    handler proceeds (with the documented limitation that the time
+    component is lost — the projection has no way to round-trip it)."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = Task(
+        id="abc",
+        title="t",
+        status="open",
+        tags=(),
+        metadata={"scheduled_for": "2026-06-15T09:00:00Z"},
+        claims=(),
+    )
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="2026-06-15", new="2026-06-20"), ctx)
+
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"scheduled_for": "2026-06-20"},
+    )
+
+
+async def test_proceeds_when_lithos_has_malformed_value_and_user_deletes() -> None:
+    """Lithos holds an unparseable value (``"garbage"``); user removes
+    the marker (``new=None``). Both ``parse_scheduled_for`` to
+    ``None``, but the raw-not-None guard prevents the "matches new=None"
+    skip — handler proceeds with ``scheduled_for=None`` to clean up the
+    garbage. Without the guard, the handler would silently leave the
+    bad value in place."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = Task(
+        id="abc",
+        title="t",
+        status="open",
+        tags=(),
+        metadata={"scheduled_for": "garbage"},
+        claims=(),
+    )
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="2026-06-15", new=None), ctx)
+
+    lithos.task_update.assert_awaited_once_with(
+        task_id="abc",
+        agent="lithos-orchestrator-test",
+        metadata={"scheduled_for": None},
+    )
+
+
+async def test_skips_when_lithos_absent_and_new_is_none_after_normalisation() -> None:
+    """Lithos has no ``scheduled_for`` (raw=None), user removes the
+    marker (new=None). Both raw values are None; both parse to None;
+    ``both_absent`` skip path applies. Tightens the equivalent test
+    above by exercising the path AFTER the datetime-normalisation
+    change."""
+    lithos = AsyncMock()
+    lithos.task_get.return_value = _default_open_task("abc")
+    ctx = _ctx(lithos=lithos)
+
+    await handle(_event(task_id="abc", prior="2026-06-15", new=None), ctx)
+
+    lithos.task_update.assert_not_awaited()

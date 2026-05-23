@@ -107,18 +107,22 @@ internals."""
 # weirdness rather than guessing).
 _LINE_RE = re.compile(r"^- \[(?P<marker>.)\] ")
 _TASK_ID_RE = re.compile(r"🆔 lithos:(?P<task_id>[A-Za-z0-9_-]+)")
-# Match any of the five D18 priority emoji anywhere in the line. The
-# projection renders the emoji between the title and the 🆔 marker
-# but we don't anchor to that position — a user might move it around
-# while editing, and the only signal that matters is "is one present
-# and which one".
+# Match any of the five D18 priority emoji. The projection renders
+# the emoji in the trailing-metadata zone *after* the 🆔 marker
+# (see ``render.render_line``). The parser scopes search to the
+# zone after ``id_match.end()`` so titles freely containing one of
+# these emoji can't be misread as the task's priority. Mid-line
+# emoji in titles are by design ignored — only trailing-zone
+# metadata is authoritative.
 _PRIORITY_EMOJI_RE = re.compile(r"(🔺|⏫|🔼|🔽|⏬)")
-# Match the Tasks-plugin due-date marker: `📅 YYYY-MM-DD`. We match
-# the canonical format only; anything else (e.g. `📅 next Friday`,
-# `📅 2026-06-15T09:00Z`) is treated as "no date" so a malformed
-# user edit doesn't bounce a garbage value back to Lithos. Tasks
-# plugin itself only renders `YYYY-MM-DD` so the round-trip stays
-# closed under valid inputs.
+# Match the Tasks-plugin due-date marker: `📅 YYYY-MM-DD`. Same
+# trailing-zone-only scoping as the priority regex above — a title
+# like "Prepare 📅 2026-06-15 review notes" must NOT be misread
+# as a due date. We match the canonical format only; anything else
+# (e.g. `📅 next Friday`, `📅 2026-06-15T09:00Z`) is treated as
+# "no date" so a malformed user edit doesn't bounce a garbage
+# value back to Lithos. Tasks plugin itself only renders
+# `YYYY-MM-DD` so the round-trip stays closed under valid inputs.
 _DUE_DATE_RE = re.compile(r"📅 (\d{4}-\d{2}-\d{2})")
 
 
@@ -459,6 +463,14 @@ def _parse_line_markers(
     string (no parse / no validation here — that's the handler's
     job). Both default to ``None`` when absent.
 
+    The 🆔 marker is the only fixed anchor in the line, and the
+    renderer always writes priority / date in the trailing-metadata
+    zone *after* it. Priority and due-date regexes are scoped to
+    that zone (``line[id_match.end():]``) so a title containing
+    one of the priority emoji or a date-shaped string can't be
+    misread as task metadata — invariant: title text may freely
+    contain any character, only trailing metadata is authoritative.
+
     Lines that don't start with ``- [<m>] `` (header comments, blank
     lines, free-text) are skipped silently. A matching prefix without
     a ``🆔 lithos:<id>`` marker is also skipped — it's a task-shaped
@@ -484,8 +496,12 @@ def _parse_line_markers(
         id_match = _TASK_ID_RE.search(line)
         if id_match is None:
             continue
-        prio_match = _PRIORITY_EMOJI_RE.search(line)
+        # Trailing metadata only — title text is whatever precedes
+        # ``🆔 lithos:<id>`` and is explicitly out of scope for
+        # priority / date parsing. See module-level regex comments.
+        metadata_zone = line[id_match.end() :]
+        prio_match = _PRIORITY_EMOJI_RE.search(metadata_zone)
         priority = EMOJI_TO_PRIORITY[prio_match.group(1)] if prio_match else None
-        due_match = _DUE_DATE_RE.search(line)
+        due_match = _DUE_DATE_RE.search(metadata_zone)
         due_date = due_match.group(1) if due_match else None
         yield id_match.group("task_id"), marker, priority, due_date

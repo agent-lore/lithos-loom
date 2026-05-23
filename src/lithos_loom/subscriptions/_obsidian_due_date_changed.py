@@ -27,6 +27,20 @@ on the next rewrite reads ``metadata.scheduled_for`` back via
 :func:`lithos_loom.render.due_date_str` to render the marker, so
 the round-trip is closed under valid inputs.
 
+**Datetime preservation.** Lithos may hold ``scheduled_for`` as a
+full ISO datetime (``"2026-06-15T09:00:00Z"``) but the projection
+renders only the date part. A no-op user save that re-emits the
+same date must not push back a date-only string and silently drop
+the time component. The Lithos-side pre-check normalises both
+sides to :class:`datetime.date` via
+:func:`lithos_loom.render.parse_scheduled_for` before comparing,
+so a watcher ``new="2026-06-15"`` against a Lithos
+``scheduled_for="2026-06-15T09:00:00Z"`` is recognised as
+equivalent and skipped — the original datetime is preserved. A
+genuine user date change (different date) still proceeds, with the
+known limitation that the time component is dropped because the
+projection has no way to round-trip it.
+
 **Clearing a date.** When the user deletes the marker entirely
 (``new=None``), the handler sends
 ``metadata={"scheduled_for": None}``. Per Lithos's additive-per-key
@@ -49,6 +63,7 @@ Idempotency follows the same three-layer pattern as
 from __future__ import annotations
 
 from lithos_loom.bus import Event
+from lithos_loom.render import parse_scheduled_for
 from lithos_loom.subscriptions import SubscriptionContext
 
 __all__ = ["handle"]
@@ -92,6 +107,16 @@ async def handle(event: Event, ctx: SubscriptionContext) -> None:
     # prior!=new but Lithos already has the new value (another agent
     # updated it, or sync_state drifted from Lithos truth). Uses
     # ``task_get`` (no claims needed).
+    #
+    # Comparison is normalised to ``date`` objects, not strings: the
+    # watcher always emits ``YYYY-MM-DD`` (date-only) but Lithos can
+    # hold either a date string or a full ISO datetime. A direct
+    # string compare would treat ``"2026-06-15"`` and
+    # ``"2026-06-15T09:00:00Z"`` as different and push back a date-
+    # only patch that silently drops the time component. Normalising
+    # both sides via :func:`parse_scheduled_for` (the same helper the
+    # renderer uses for the inverse direction) makes the round-trip
+    # symmetric.
     current = await ctx.lithos.task_get(task_id=task_id)
     if current is None:
         ctx.logger.info(
@@ -100,13 +125,26 @@ async def handle(event: Event, ctx: SubscriptionContext) -> None:
             task_id,
         )
         return
-    current_due = current.metadata.get("scheduled_for")
-    if current_due == new_str:
+    current_due_raw = current.metadata.get("scheduled_for")
+    current_due_date = parse_scheduled_for(current_due_raw)
+    new_due_date = parse_scheduled_for(new_str)
+    # Skip when both sides agree on the parsed date OR when both
+    # sides are absent (raw=None on both). The ``current_due_raw is
+    # None`` clause prevents an unparseable Lithos value (e.g. a
+    # malformed string or a non-string type) from being silently
+    # accepted as "matches new=None" — in that case we still proceed
+    # so the user-driven delete cleans up the garbage value.
+    both_parse_equal_and_non_null = (
+        current_due_date is not None and current_due_date == new_due_date
+    )
+    both_absent = current_due_raw is None and new_str is None
+    if both_parse_equal_and_non_null or both_absent:
         ctx.logger.info(
             "obsidian-due-date-changed: task %s already at "
-            "scheduled_for=%s; skipping idempotent update",
+            "scheduled_for=%r (parsed=%s); skipping idempotent update",
             task_id,
-            new_str,
+            current_due_raw,
+            current_due_date.isoformat() if current_due_date else None,
         )
         return
 
