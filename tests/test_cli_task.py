@@ -383,26 +383,40 @@ def test_task_create_unknown_priority_exits_two(
     assert patched_lithos.task_create_calls == []
 
 
-def test_task_create_missing_required_project(tmp_path: Path) -> None:
-    """Typer's normal "missing required option" error path."""
+def test_task_create_missing_required_project(
+    tmp_path: Path, patched_lithos: type[_StubLithosClient]
+) -> None:
+    """Typer's normal "missing required option" error path.
+
+    Asserts on exit code (Typer uses 2 for usage errors) + the
+    absence of a Lithos call rather than the text of Typer's error
+    message — the latter gets word-wrapped to the terminal width on
+    CI's narrow runner, where the option name doesn't make it into
+    the rendered panel."""
     config_path = _write_config(tmp_path)
     result = runner.invoke(
         app,
         ["task", "create", "--title", "x", "--config", str(config_path)],
     )
-    assert result.exit_code != 0
-    assert "Missing option" in result.stdout or "--project" in result.stderr
+    assert result.exit_code == 2
+    assert patched_lithos.task_create_calls == []
 
 
-def test_task_create_missing_required_title(tmp_path: Path) -> None:
-    """Typer's normal "missing required option" error path."""
+def test_task_create_missing_required_title(
+    tmp_path: Path, patched_lithos: type[_StubLithosClient]
+) -> None:
+    """Typer's normal "missing required option" error path.
+
+    See :func:`test_task_create_missing_required_project` for the
+    rationale behind asserting on exit code + no-Lithos-call rather
+    than Typer's error text."""
     config_path = _write_config(tmp_path)
     result = runner.invoke(
         app,
         ["task", "create", "--project", "lithos-loom", "--config", str(config_path)],
     )
-    assert result.exit_code != 0
-    assert "Missing option" in result.stdout or "--title" in result.stderr
+    assert result.exit_code == 2
+    assert patched_lithos.task_create_calls == []
 
 
 # ── Lithos / I/O failure surfacing ─────────────────────────────────────
