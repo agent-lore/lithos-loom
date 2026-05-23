@@ -17,15 +17,24 @@
 const { execSync, execFileSync } = require("child_process");
 const obsidian = require("obsidian");
 
-// 1. Load project list from Loom config.
+// 1. Load project list AND obsidian_sync config from Loom. The
+//    tasks_file path is operator-configurable; hardcoding the
+//    default would break the wikilink on hosts that customise it.
 let projects;
+let tasksFile;
 try {
   projects = JSON.parse(
     execSync("lithos-loom project list --format json", { encoding: "utf-8" })
   );
+  const obsCfg = JSON.parse(
+    execSync("lithos-loom obsidian-sync show --format json", {
+      encoding: "utf-8",
+    })
+  );
+  tasksFile = obsCfg.tasks_file;
 } catch (e) {
   const stderr = (e.stderr && e.stderr.toString()) || e.message;
-  new obsidian.Notice(`Failed to load projects:\n${stderr}`, 10000);
+  new obsidian.Notice(`Failed to load Loom config:\n${stderr}`, 10000);
   return;
 }
 if (!projects.length) {
@@ -160,5 +169,7 @@ const safeTitle = form.title.replace(/[\[\]\|]/g, " ").replace(/\s+/g, " ").trim
 
 // 7. Insert wiki-link at cursor. Title is the clickable bit; the
 //    trailing 🆔 lithos:<id> is greppable from anywhere in the vault.
-tR += `[[_lithos/tasks.md|${safeTitle}]] 🆔 lithos:${taskId}\n`;
+//    `tasksFile` came from `lithos-loom obsidian-sync show` so it
+//    respects any operator-customised `obsidian_sync.tasks_file`.
+tR += `[[${tasksFile}|${safeTitle}]] 🆔 lithos:${taskId}\n`;
 %>

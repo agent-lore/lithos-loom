@@ -15,24 +15,27 @@ Creates a new Lithos task from a one-dialog form, then inserts a wikilink at cur
 ## What it does
 
 1. Calls `lithos-loom project list --format json` to populate the project dropdown.
-2. Opens an Obsidian Modal with all six fields visible at once: project, title (defaulted to your current selection), brief, scheduled date, priority, tags.
-3. On submit, shells out to `lithos-loom task create --no-insert ...` which creates the task in Lithos and returns just the task_id.
-4. Inserts a wikilink at cursor:
+2. Calls `lithos-loom obsidian-sync show --format json` to discover the configured `tasks_file` path (defaults to `_lithos/tasks.md` but is operator-configurable per `[obsidian_sync].tasks_file`).
+3. Opens an Obsidian Modal with all six fields visible at once: project, title (defaulted to your current selection), brief, scheduled date, priority, tags.
+4. On submit, shells out to `lithos-loom task create --no-insert ...` which creates the task in Lithos and returns just the task_id.
+5. Inserts a wikilink at cursor pointing at the configured tasks_file:
    ```
-   [[_lithos/tasks.md|<title>]] 🆔 lithos:<id>
+   [[<tasks_file>|<title>]] 🆔 lithos:<id>
    ```
-5. The daemon's `obsidian-projection` subscription receives the `task.created` event from Lithos and writes the canonical Tasks-plugin line into `_lithos/tasks.md` independently — within ~250ms.
+   So a default-config vault gets `[[_lithos/tasks.md|...]]`; a host with `tasks_file = "_inbox/lithos.md"` gets `[[_inbox/lithos.md|...]]`.
+6. The daemon's `obsidian-projection` subscription receives the `task.created` event from Lithos and writes the canonical Tasks-plugin line into the same `tasks_file` independently — within ~250ms.
 
 ## Why a wikilink, not the task line itself?
 
-The intuitive "insert the task line at cursor" model has a fatal architectural flaw: the daemon's projection already places the canonical line in `_lithos/tasks.md`. If the macro ALSO inserts the line at cursor, you end up with the same task in two places — and only the projection's copy gets updates. Worse, if both files match a Tasks-plugin daily query, the task renders **twice** in the daily view.
+The intuitive "insert the task line at cursor" model has a fatal architectural flaw: the daemon's projection already places the canonical line in the configured `tasks_file`. If the macro ALSO inserts the line at cursor, you end up with the same task in two places — and only the projection's copy gets updates. Worse, if both files match a Tasks-plugin daily query, the task renders **twice** in the daily view.
 
 The wikilink shape sidesteps that:
-- **One source of truth** for the actionable task: `_lithos/tasks.md`, managed by the daemon. Tick/cancel/priority edits there flow back to Lithos via the Slice 2 handlers.
+- **One source of truth** for the actionable task: the configured `tasks_file`, managed by the daemon. Tick/cancel/priority edits there flow back to Lithos via the Slice 2 handlers.
 - **Capture context preserved** in the current note: a clickable reference that says "I had this thought while writing about X". Doesn't double-render in Tasks queries (it's not a `- [ ]` line).
 - **Greppable**: the trailing `🆔 lithos:<id>` is searchable from anywhere in the vault if you forget where you captured it.
+- **Config-aware**: the wikilink target is resolved at macro fire time from `lithos-loom obsidian-sync show`, so hosts that customise `[obsidian_sync].tasks_file` get a working link without editing the macro.
 
-To navigate from the wikilink to the actual task line: click → `_lithos/tasks.md` opens → `Ctrl-F` the task id.
+To navigate from the wikilink to the actual task line: click → `tasks_file` opens → `Ctrl-F` the task id.
 
 ## Prerequisites
 

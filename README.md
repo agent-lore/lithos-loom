@@ -149,6 +149,7 @@ Individual `story-implement` runs *can* be sandboxed in docker (deferred A10 enh
 | `lithos-loom config --show` | Print the merged effective config (US-4). |
 | `lithos-loom task create --project X --title Y [--brief Z] [--scheduled DATE] [--priority P] [--tags A,B] [--target-file PATH \| --no-insert]` | Create a Lithos task and emit its projected line (Slice 3 US24-27). Used by the Templater capture macro. |
 | `lithos-loom project list [--format text\|json]` | List configured local-TOML project slugs (Slice 3 helper; full US31 lands in Slice 4). |
+| `lithos-loom obsidian-sync show [--format text\|json]` | Print the resolved `[obsidian_sync]` block — vault_path, tasks_file, filter knobs. Used by the capture macro to discover the configured `tasks_file` path at runtime. |
 
 ## Project layout
 

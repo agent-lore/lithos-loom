@@ -25,7 +25,7 @@ from typing import Any
 import typer
 
 from lithos_loom.bus import Event, EventBus
-from lithos_loom.cli import project_app, task_app
+from lithos_loom.cli import obsidian_sync_app, project_app, task_app
 from lithos_loom.config import (
     LoomConfig,
     RouteConfig,
@@ -51,6 +51,7 @@ app = typer.Typer(
 # Slice 3 sub-apps for the capture-macro CLI surface.
 app.add_typer(task_app, name="task")
 app.add_typer(project_app, name="project")
+app.add_typer(obsidian_sync_app, name="obsidian-sync")
 
 
 @app.command()
