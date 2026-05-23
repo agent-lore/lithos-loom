@@ -1,33 +1,43 @@
 # lithos-loom
 
-Workflow orchestration daemon that turns [Lithos](https://github.com/agent-lore/lithos) tasks into executable work via bundled subprocess plugins.
+Workflow orchestration daemon for [Lithos](https://github.com/agent-lore/lithos) tasks. Ships two integration tracks:
 
-Loom polls a Lithos knowledge base for open tasks, matches them against tag-based routes in a TOML config, claims them collision-safely, and dispatches plugins (subprocesses) that produce artifacts back into Lithos. Plugins shipped in the MVP build the full pipeline: decompose a [Pocock-shaped PRD](https://aihero.dev/) into story tasks, implement each story via a coding agent, and watch the resulting GitHub PR for human merge.
+- **Track 1 — Obsidian ↔ Lithos bridge.** Projects Lithos open tasks into an Obsidian-Tasks-compatible inbox, pushes Obsidian-side status / priority edits back to Lithos, and offers a CLI + Templater macro for capturing new tasks from Obsidian. Slices 1-3 of [`docs/prd/integration.md`](docs/prd/integration.md) are shipped; Slices 4-5 (project-context bidirectional sync) are queued.
+- **Track 2 — Coding pipeline.** A `sources → bus → subscribers` daemon that polls Lithos for open tasks, claims them collision-safely, and dispatches subprocess plugins (`prd-decompose`, `story-implement`, `story-review-human`) that produce artifacts back into Lithos. Plugin scaffolding is in place; the plugin bodies are queued behind Track 1 daily-use validation.
 
 It is the orchestration layer that connects Lithos to coding agents — replacing the [Ralph++](https://github.com/snarktank/ralph) approach with a fine-grained, fault-tolerant pipeline whose state lives in Lithos and whose hot state lives on the host filesystem.
 
 ## Status
 
-Skeleton — the package is scaffolded, the design and PRDs are in [`docs/`](docs/), and the implementation has not landed yet. Tracking work via the user stories in [`docs/prd/mvp.md`](docs/prd/mvp.md).
+- **Architecture:** `sources → bus → subscribers` with a supervisor + per-domain child processes (see [`docs/prd/integration.md`](docs/prd/integration.md) D3, D11). 528+ tests; ruff + pyright clean.
+- **Track 1 — Obsidian bridge:**
+  - Slice 1 (US7–15, read-only projection) — **shipped**
+  - Slice 2 (US16–23, bidirectional status / priority push) — **shipped**
+  - Slice 3 (US24–27, capture macro + CLI) — **shipped**
+  - Slices 4–5 (project-context pull / push) — not started
+- **Track 2 — Coding pipeline plugins:** scaffolded under `src/lithos_loom/plugins/` but bodies not yet built.
 
 ## Project documents
 
 | Doc | Purpose |
 |-----|---------|
-| [`docs/PLAN.md`](docs/PLAN.md) | Locked design decisions, plugin list, plugin contract, repo layout, build order, ambitious roadmap |
-| [`docs/prd/mvp.md`](docs/prd/mvp.md) | MVP PRD — 35 user stories, ~4 days of focused work |
-| [`docs/prd/full.md`](docs/prd/full.md) | Full system PRD — 75 user stories spanning roadmap items A1–A10 |
-| [`docs/result-schema.json`](docs/result-schema.json) | Versioned JSON Schema for the plugin `result.json` contract (US-3, US-33) |
+| [`AGENTS.md`](AGENTS.md) | Non-obvious project facts + the mandatory pre-merge check |
+| [`docs/PLAN.md`](docs/PLAN.md) | Locked design decisions, plugin contract, build order, roadmap A1–A10 |
+| [`docs/prd/integration.md`](docs/prd/integration.md) | **Track 1 PRD** — Obsidian bridge, 38 user stories across 5 slices |
+| [`docs/prd/mvp.md`](docs/prd/mvp.md) | **Track 2 MVP PRD** — original coding pipeline, ~35 user stories |
+| [`docs/prd/full.md`](docs/prd/full.md) | Full system PRD — 75 user stories spanning A1–A10 |
+| [`docs/macros/capture-task.md`](docs/macros/capture-task.md) | Slice 3 worked Templater macro — install instructions + JS source |
+| [`docs/result-schema.json`](docs/result-schema.json) | Versioned JSON Schema for the plugin `result.json` contract |
 
 ## Requirements
 
 - Python 3.12
 - [`uv`](https://docs.astral.sh/uv/) (recommended)
-- A reachable Lithos server at `LITHOS_URL` (HTTP transport)
-- Lithos with `task.metadata` support (`agent-lore/lithos#215` or later)
-- `claude` and/or `codex` CLI authenticated against your account, depending on which agents your routes invoke
-- `gh` CLI authenticated, for plugins that open GitHub PRs (`story-implement`, `story-review-human`)
+- A reachable Lithos server (MCP-over-SSE transport at `<LITHOS_URL>/sse`). Compatible with Lithos `#295` or later — the capture-macro CLI calls `lithos_task_create(metadata=...)` from `#295`, and the Obsidian-sync handlers depend on `#283` (task.updated event), `#286`/`#288` (resolved_at), `#290` (per-key metadata merge), and `#294` (full task envelope on status + new `task_get`).
+- `claude` and/or `codex` CLI authenticated (Track 2 plugins only — not needed for Track 1)
+- `gh` CLI authenticated (Track 2 plugins only — `story-implement`, `story-review-human`)
 - `git` with worktree support
+- **For the Obsidian bridge (Track 1):** Obsidian Desktop with [Templater](https://github.com/SilentVoid13/Templater) for the capture macro, and the [Tasks](https://publish.obsidian.md/tasks/Introduction) plugin for the daily-view queries that read projected lines.
 
 ## Install
 
@@ -42,6 +52,20 @@ For end-user install once published:
 ```bash
 uv tool install lithos-loom
 ```
+
+### CLI on PATH for the capture macro
+
+The Slice 3 Templater macro shells out to `lithos-loom task create` via Node's `child_process`. Obsidian Desktop inherits its PATH from the **desktop launcher session** (launchd on macOS, the systemd user session on Linux), **not** from your shell rc. Confirm Obsidian can find the binary:
+
+```bash
+# In Obsidian: Developer Console (Cmd-Opt-I / Ctrl-Shift-I) → Console tab:
+require("child_process").execSync("which lithos-loom").toString()
+```
+
+If that errors, either:
+
+- Install via `uv tool install lithos-loom` (puts the binary in `~/.local/bin/`, typically in the launcher PATH on Linux; on macOS use `launchctl setenv PATH ...` or symlink into `/usr/local/bin/`).
+- Or hardcode the absolute path in the macro's `execFileSync` call (see [`docs/macros/capture-task.md`](docs/macros/capture-task.md)).
 
 ## Quick start
 
@@ -70,6 +94,7 @@ $EDITOR .env  # set LITHOS_URL
 
 ```bash
 uv run lithos-loom validate-config
+uv run lithos-loom doctor
 ```
 
 ### 5. Run the daemon
@@ -79,6 +104,10 @@ uv run lithos-loom run
 ```
 
 Loom runs as a foreground process. For background operation, use `tmux`, `nohup`, or eventually a `systemd --user` unit (deferred per `docs/PLAN.md`).
+
+### 6. (Track 1) Install the Obsidian capture macro
+
+If you want to create Lithos tasks from inside Obsidian, follow the install instructions in [`docs/macros/capture-task.md`](docs/macros/capture-task.md). Summary: copy the `<%* %>` template into your vault's Templater Template Folder, bind a hotkey via Templater Template Hotkeys. Verify the CLI-on-PATH check above first.
 
 ## Per-environment configuration
 
@@ -105,7 +134,7 @@ uv run lithos-loom run --config /tmp/experimental.toml
 
 ## Why Loom doesn't run in docker
 
-Lithos and Influx run as docker services because they're services — long-lived, stable protocols, no host filesystem coupling. Loom is different: it creates git worktrees you can `cd` into, invokes `claude` / `codex` / `gh` CLIs that authenticate against per-user dotfiles, and spawns plugin subprocesses that need the same access. Containerizing Loom would require bind-mounting `~/.claude/`, `~/.codex/`, `~/.config/gh/`, every project repo's parent dir, and `/var/run/docker.sock`, which defeats containerization. Loom runs as a host process; a `systemd --user` unit is a deferred polish item (see `docs/prd/full.md` US-62).
+Lithos and Influx run as docker services because they're services — long-lived, stable protocols, no host filesystem coupling. Loom is different: it creates git worktrees you can `cd` into, invokes `claude` / `codex` / `gh` CLIs that authenticate against per-user dotfiles, and spawns plugin subprocesses that need the same access. The Slice 3 capture macro additionally requires the CLI to be on Obsidian Desktop's PATH. Containerizing Loom would require bind-mounting `~/.claude/`, `~/.codex/`, `~/.config/gh/`, every project repo's parent dir, the vault directory, and `/var/run/docker.sock`, which defeats containerization. Loom runs as a host process; a `systemd --user` unit is a deferred polish item (see `docs/prd/full.md` US-62).
 
 Individual `story-implement` runs *can* be sandboxed in docker (deferred A10 enhancement) for untrusted-code projects, but the orchestrator itself stays on the host.
 
@@ -113,70 +142,95 @@ Individual `story-implement` runs *can* be sandboxed in docker (deferred A10 enh
 
 | Command | Purpose |
 |---------|---------|
-| `lithos-loom run` | Start the daemon (poll loop). |
-| `lithos-loom run --dry-run` | Preview matched tasks and rendered commands; no claims, no writes. |
-| `lithos-loom doctor` | Verify Lithos connectivity and `task.metadata` support (US-35). |
-| `lithos-loom validate-config` | Typecheck the TOML, list interpolation variables. |
+| `lithos-loom run` | Start the daemon: supervisor + per-domain children (route-runner, obsidian-sync). |
+| `lithos-loom doctor` | Verify the vault is writable and Lithos has `task.metadata` (US15 + US-35). |
+| `lithos-loom validate-config` | Typecheck the TOML, list configured projects / routes / subscriptions. |
+| `lithos-loom validate-config --dry-run` | Also poll Lithos and print which routes / subscriptions would fire for each open task (US6). |
 | `lithos-loom config --show` | Print the merged effective config (US-4). |
+| `lithos-loom task create --project X --title Y [--brief Z] [--scheduled DATE] [--priority P] [--tags A,B] [--target-file PATH \| --no-insert]` | Create a Lithos task and emit its projected line (Slice 3 US24-27). Used by the Templater capture macro. |
+| `lithos-loom project list [--format text\|json]` | List configured local-TOML project slugs (Slice 3 helper; full US31 lands in Slice 4). |
 
 ## Project layout
 
 ```
 lithos-loom/
 ├── pyproject.toml
-├── Makefile                       # install / fmt / lint / typecheck / test / check
-├── .python-version                # 3.12
-├── .env.example                   # template for shell-side LITHOS_* vars
+├── Makefile                              # install / fmt / lint / typecheck / test / check
+├── .python-version                       # 3.12
+├── .env.example                          # template for shell-side LITHOS_* vars
 ├── .github/workflows/ci.yml
+├── AGENTS.md                             # non-obvious project facts + pre-merge check
 ├── examples/
-│   └── lithos-loom.toml           # example TOML config
+│   └── lithos-loom.toml                  # example TOML config
 ├── src/
 │   └── lithos_loom/
-│       ├── main.py                # Typer dispatcher (entry point)
-│       ├── config.py              # TOML loader (US-4)
-│       ├── daemon.py              # poll/claim loop (US-5, US-7, US-29)
-│       ├── lithos_client.py       # async HTTP client over Lithos MCP (US-2)
-│       ├── route.py               # tag matching + dependency resolution (US-5, US-6, US-9)
-│       ├── plugin_runner.py       # subprocess + result.json schema (US-3, US-31, US-33, US-34)
-│       ├── errors.py              # exception hierarchy
-│       ├── runner/                # salvaged from Ralph++
-│       │   ├── worktree.py        # per-task git worktree (US-11)
-│       │   ├── agents.py          # claude/codex subprocess + stream-json (US-12)
-│       │   └── git.py             # base SHA, commits-since (US-13)
-│       └── plugins/               # bundled subprocess plugins
-│           ├── prd_decompose/     # US-12, US-13
-│           ├── story_implement/   # US-10, US-14-17
-│           └── story_review_human/  # US-11, US-18-20
-├── tests/
-│   ├── conftest.py                # clean LITHOS_* env per test, loom_config_env fixture
-│   ├── test_main.py               # CLI smoke
-│   ├── test_config.py             # TOML loader behaviour
-│   └── test_plugin_runner.py      # atomic-write contract
+│       ├── main.py                       # Typer dispatcher (entry point)
+│       ├── __main__.py                   # `python -m lithos_loom`
+│       ├── config.py                     # TOML loader (US-4)
+│       ├── bus.py                        # in-process EventBus
+│       ├── supervisor.py                 # spawns + monitors per-domain children
+│       ├── doctor.py                     # vault + Lithos health checks (US15)
+│       ├── errors.py                     # exception hierarchy
+│       ├── lithos_client.py              # async MCP-over-SSE client
+│       ├── plugin_runner.py              # subprocess + result.json schema (US-3)
+│       ├── sync_state.py                 # projection ↔ fs-watcher coordination (US23)
+│       ├── render.py                     # shared projected-line renderer (Slice 3)
+│       ├── sources/
+│       │   ├── lithos_event_stream.py    # Lithos SSE consumer
+│       │   └── obsidian_fs_watcher.py    # vault file watcher (Slice 2)
+│       ├── subscriptions/
+│       │   ├── _obsidian_projection.py        # writes _lithos/tasks.md (Slice 1)
+│       │   ├── _obsidian_status_transition.py # [ ]→[x]/[-], [x]→[ ] handlers (Slice 2)
+│       │   ├── _obsidian_priority_changed.py  # priority emoji edit handler (Slice 2)
+│       │   ├── _human_actionable.py           # projection filter
+│       │   ├── route_runner.py                # claim-bound subscriber (Track 2)
+│       │   └── _noop.py
+│       ├── children/
+│       │   ├── obsidian_sync.py          # obsidian-sync child entry point
+│       │   ├── route_runner.py           # route-runner child entry point
+│       │   └── _echo.py
+│       ├── cli/
+│       │   ├── task.py                   # `lithos-loom task create` (Slice 3)
+│       │   └── project.py                # `lithos-loom project list` (Slice 3)
+│       ├── runner/                       # salvaged from Ralph++ (Track 2)
+│       │   ├── worktree.py
+│       │   ├── agents.py
+│       │   └── git.py
+│       └── plugins/                      # bundled subprocess plugins (Track 2 — scaffolded)
+│           ├── prd_decompose/
+│           ├── story_implement/
+│           └── story_review_human/
+├── tests/                                # 528+ tests; ruff + pyright clean
 └── docs/
     ├── PLAN.md
     ├── result-schema.json
+    ├── macros/
+    │   └── capture-task.md               # Slice 3 Templater macro source + install
     └── prd/
-        ├── mvp.md
-        └── full.md
+        ├── integration.md                # Track 1 (Obsidian bridge)
+        ├── mvp.md                        # Track 2 MVP
+        └── full.md                       # Roadmap A1–A10
 ```
 
 ## Development
 
 ```bash
 uv sync          # create the venv and install deps
-make check       # ruff + pyright + pytest
+make check       # ruff + ruff format + pyright + pytest
 ```
+
+`make check` is the mandatory pre-merge gate; all four stages must be green. See [`AGENTS.md`](AGENTS.md) for the non-obvious project facts and rules of engagement.
 
 ## Configuration model
 
 | Layer | What it sets | When you change it |
 |-------|--------------|--------------------|
 | Defaults baked in | `poll_interval_seconds`, `max_concurrency`, `log_level`, etc | Almost never. |
-| TOML config | `orchestrator.*`, project registry, route table | Per-machine, per-environment. Hot-reload deferred to A6. |
+| TOML config | `orchestrator.*`, project registry, route table, subscriptions, `obsidian_sync` | Per-machine, per-environment. Hot-reload deferred to A6. |
 | `.env` (CWD) or shell rc | `LITHOS_URL`, `LITHOS_LOOM_CONFIG`, `LITHOS_LOOM_ENVIRONMENT` | Per-shell session. |
 | CLI flags (`--config`, `--dry-run`) | One-off overrides | Per invocation. |
 
-The TOML schema is documented inline in [`examples/lithos-loom.toml`](examples/lithos-loom.toml) and validated by `lithos_loom.config`. See `docs/prd/mvp.md` US-4 for the full FR-level spec.
+The TOML schema is documented inline in [`examples/lithos-loom.toml`](examples/lithos-loom.toml) and validated by `lithos_loom.config`.
 
 ## License
 
