@@ -817,9 +817,11 @@ async def test_full_marker_set_orders_correctly(tmp_path: Path) -> None:
         ),
         _ctx(),
     )
+    # Priority emoji at the END (Tasks-plugin sort convention); see
+    # render.py docstring.
     assert _projected_line(tmp_path) == (
-        "- [ ] Review PR for story 03 ⏫ 🆔 lithos:full ⛔ lithos:dep-456 "
-        "📅 2026-06-15 #project/lithos-loom #lithos/review-human"
+        "- [ ] Review PR for story 03 🆔 lithos:full ⛔ lithos:dep-456 "
+        "📅 2026-06-15 #project/lithos-loom #lithos/review-human ⏫"
     )
 
 
@@ -992,7 +994,8 @@ async def test_priority_slots_between_title_and_id(tmp_path: Path) -> None:
         ),
         _ctx(),
     )
-    assert _projected_line(tmp_path) == "- [ ] Slotted task ⏫ 🆔 lithos:slot"
+    # Priority emoji at the END — see render.py docstring.
+    assert _projected_line(tmp_path) == "- [ ] Slotted task 🆔 lithos:slot ⏫"
 
 
 # ── US11 dependency markers ────────────────────────────────────────────

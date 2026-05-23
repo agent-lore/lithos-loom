@@ -81,8 +81,17 @@ def render_line(
 
     Field order (omit optional markers when they don't apply):
 
-        - [ ] <title> [<prio>] 🆔 lithos:<id> [⛔ lithos:<dep>]... \
-            [📅 <date>] [#project/<slug>] [#lithos/<route>]
+        - [ ] <title> 🆔 lithos:<id> [⛔ lithos:<dep>]... \
+            [📅 <date>] [#project/<slug>] [#lithos/<route>] [<prio>]
+
+    Priority emoji is at the **end** of the line. The Tasks plugin's
+    emoji-format docs (`Reference/Task Formats/Tasks Emoji Format`
+    on the Tasks plugin's public docs site) don't pin a required
+    field order, but empirical testing shows lines with priority
+    emoji in mid-line positions (between title and `🆔`) do NOT
+    sort by priority in Tasks queries; trailing-position priority
+    sorts correctly. Matches the convention in the plugin's own
+    examples.
 
     Titles with embedded newlines (rare in Lithos but possible) are
     collapsed to spaces so the markdown line stays single-line. The
@@ -94,10 +103,6 @@ def render_line(
     """
     title = " ".join(task.title.split())  # collapse \n, \r, runs of spaces
     parts: list[str] = [f"- [ ] {title}"]
-
-    priority = priority_marker(task)
-    if priority is not None:
-        parts.append(priority)
 
     parts.append(f"🆔 lithos:{task.id}")
 
@@ -114,6 +119,12 @@ def render_line(
     route_name = human_blocking_route_name(task, routes)
     if route_name:
         parts.append(f"#lithos/{route_name}")
+
+    # Priority emoji must be at the END for the Tasks plugin's
+    # sort-by-priority parser to recognise it (see docstring).
+    priority = priority_marker(task)
+    if priority is not None:
+        parts.append(priority)
 
     return " ".join(parts)
 

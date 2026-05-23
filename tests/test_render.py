@@ -69,7 +69,10 @@ def test_render_line_with_priority_and_project() -> None:
     """Priority emoji + project tag in canonical positions."""
     task = _task(metadata={"priority": "high", "project": "lithos-loom"})
     line = render_line(task, routes=(), today=_TODAY)
-    assert line == "- [ ] Review PR ⏫ 🆔 lithos:abc #project/lithos-loom"
+    # Priority emoji is at the END for Tasks-plugin sort recognition;
+    # mid-line emoji is treated as part of the description by the
+    # plugin's parser and silently ignored for sort.
+    assert line == "- [ ] Review PR 🆔 lithos:abc #project/lithos-loom ⏫"
 
 
 def test_render_line_with_depends_on() -> None:
