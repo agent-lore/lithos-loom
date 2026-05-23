@@ -15,7 +15,11 @@
 //      that file independently — we never duplicate the line here)
 
 const { execSync, execFileSync } = require("child_process");
-const obsidian = require("obsidian");
+// `tp.obsidian` is Templater's seam for Obsidian's API classes
+// (Modal, Setting, Notice). `require("obsidian")` does NOT work
+// in a Templater scriptlet — the `obsidian` module is only
+// resolvable from plugin code, not from the Eta exec context.
+const { Modal, Setting, Notice } = tp.obsidian;
 
 // 1. Load project list AND obsidian_sync config from Loom. The
 //    tasks_file path is operator-configurable; hardcoding the
@@ -34,11 +38,11 @@ try {
   tasksFile = obsCfg.tasks_file;
 } catch (e) {
   const stderr = (e.stderr && e.stderr.toString()) || e.message;
-  new obsidian.Notice(`Failed to load Loom config:\n${stderr}`, 10000);
+  new Notice(`Failed to load Loom config:\n${stderr}`, 10000);
   return;
 }
 if (!projects.length) {
-  new obsidian.Notice(
+  new Notice(
     "No projects configured. Add a [projects.<slug>] table to your lithos-loom.toml.",
     10000
   );
@@ -46,7 +50,7 @@ if (!projects.length) {
 }
 
 // 2. Custom Modal with all fields in one dialog.
-class CaptureModal extends obsidian.Modal {
+class CaptureModal extends Modal {
   constructor(app, projects, defaultTitle, onSubmit) {
     super(app);
     this.projects = projects;
@@ -66,12 +70,12 @@ class CaptureModal extends obsidian.Modal {
     const { contentEl } = this;
     contentEl.createEl("h2", { text: "Capture Lithos task" });
 
-    new obsidian.Setting(contentEl).setName("Project").addDropdown((dd) => {
+    new Setting(contentEl).setName("Project").addDropdown((dd) => {
       this.projects.forEach((p) => dd.addOption(p, p));
       dd.setValue(this.result.project).onChange((v) => (this.result.project = v));
     });
 
-    new obsidian.Setting(contentEl).setName("Title").addText((t) => {
+    new Setting(contentEl).setName("Title").addText((t) => {
       t.setValue(this.result.title).onChange((v) => (this.result.title = v));
       // Auto-focus title after render so Tab order starts here.
       setTimeout(() => t.inputEl.focus(), 0);
@@ -84,30 +88,30 @@ class CaptureModal extends obsidian.Modal {
       });
     });
 
-    new obsidian.Setting(contentEl).setName("Brief (optional)").addTextArea((ta) => {
+    new Setting(contentEl).setName("Brief (optional)").addTextArea((ta) => {
       ta.onChange((v) => (this.result.brief = v));
     });
 
-    new obsidian.Setting(contentEl)
+    new Setting(contentEl)
       .setName("Scheduled (YYYY-MM-DD, optional)")
       .addText((t) => {
         t.onChange((v) => (this.result.scheduled = v));
       });
 
-    new obsidian.Setting(contentEl).setName("Priority").addDropdown((dd) => {
+    new Setting(contentEl).setName("Priority").addDropdown((dd) => {
       ["", "highest", "high", "medium", "low", "lowest"].forEach((p) =>
         dd.addOption(p, p || "(none)")
       );
       dd.onChange((v) => (this.result.priority = v));
     });
 
-    new obsidian.Setting(contentEl)
+    new Setting(contentEl)
       .setName("Tags (comma-separated, optional)")
       .addText((t) => {
         t.onChange((v) => (this.result.tags = v));
       });
 
-    new obsidian.Setting(contentEl)
+    new Setting(contentEl)
       .addButton((b) =>
         b
           .setButtonText("Create")
@@ -119,7 +123,7 @@ class CaptureModal extends obsidian.Modal {
 
   submit() {
     if (!this.result.title.trim()) {
-      new obsidian.Notice("Title is required", 3000);
+      new Notice("Title is required", 3000);
       return;
     }
     this.submitted = true;
@@ -159,7 +163,7 @@ try {
   taskId = execFileSync("lithos-loom", args, { encoding: "utf-8" }).trim();
 } catch (e) {
   const stderr = (e.stderr && e.stderr.toString().trim()) || e.message;
-  new obsidian.Notice(`lithos-loom task create failed:\n${stderr}`, 10000);
+  new Notice(`lithos-loom task create failed:\n${stderr}`, 10000);
   return;
 }
 
