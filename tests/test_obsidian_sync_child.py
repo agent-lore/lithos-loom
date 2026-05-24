@@ -1574,3 +1574,26 @@ async def test_no_note_stream_without_project_context_subscription(
     assert len(stub_io) == 1, (
         f"expected exactly 1 source spawn (event stream only); got {len(stub_io)}"
     )
+
+
+# ── MCP SDK logger suppression (soak regression 2026-05-24) ────────────
+
+
+def test_configure_logging_pins_mcp_sse_logger_to_critical() -> None:
+    """The MCP SDK's ``mcp.client.sse.sse_reader`` logs a multi-page
+    ERROR traceback whenever its session is torn down — fires on every
+    Lithos restart. Our LithosClient + the stream sources' reconnect
+    loops are what actually recover; the SDK's trace is noise.
+
+    Soak 2026-05-24 confirmed the daemon log was dominated by these
+    tracebacks during a Lithos cycle. ``_configure_logging`` pins the
+    SDK logger to CRITICAL so real auth/protocol failures still show
+    but routine 'peer closed connection' tracebacks are suppressed.
+    """
+    obs_sync_mod._configure_logging("info")
+    mcp_logger = logging.getLogger("mcp.client.sse")
+    actual = logging.getLevelName(mcp_logger.level)
+    assert mcp_logger.level == logging.CRITICAL, (
+        f"mcp.client.sse logger must be pinned to CRITICAL to suppress "
+        f"SDK tracebacks on Lithos restart; got {actual}"
+    )

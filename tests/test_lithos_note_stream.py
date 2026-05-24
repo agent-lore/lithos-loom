@@ -618,6 +618,48 @@ async def test_stream_cancellable_during_event_iteration() -> None:
         await task
 
 
+# ── Reconnect-loop noise (soak regression 2026-05-24) ──────────────────
+
+
+async def test_reconnect_logs_warning_without_traceback_on_transient_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mirrors the LithosEventStream regression: a transient server
+    disconnect must log at WARNING with a one-line message, not at
+    ERROR with a full traceback. See LithosEventStream's matching test
+    for the rationale (soak 2026-05-24 — Lithos restart firing a
+    multi-page trace every backoff cycle)."""
+    import logging
+
+    bus = EventBus()
+    client = _FakeClient(responses=[[]])
+    # First connection raises during _stream_once → triggers except clause.
+    aconnect = _FakeAconnect([RuntimeError("server disconnected")])
+    stream = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    source_logger = "lithos_loom.sources.lithos_note_stream"
+    with caplog.at_level(logging.DEBUG, logger=source_logger):
+        task = asyncio.create_task(stream.run())
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    retry_records = [r for r in caplog.records if "retrying after" in r.getMessage()]
+    assert retry_records, "expected at least one 'retrying after' log"
+    for r in retry_records:
+        assert r.levelno == logging.WARNING, (
+            f"reconnect log must be WARNING not {logging.getLevelName(r.levelno)}"
+        )
+        assert r.exc_info is None, (
+            "reconnect WARNING must not carry exc_info (renders traceback)"
+        )
+        msg = r.getMessage()
+        assert "RuntimeError" in msg and "server disconnected" in msg, (
+            f"WARNING must include exception type + message inline; got: {msg!r}"
+        )
+
+
 # ── Wall clock provider ───────────────────────────────────────────────
 
 
