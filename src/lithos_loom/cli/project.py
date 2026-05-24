@@ -219,27 +219,76 @@ def _merge_lithos_with_toml(
 
     Multiple Lithos docs may share a slug (a project with both a
     ``context.md`` and an ``architecture.md`` under the same slug
-    directory). We collapse on the slug — one row per slug. Status
-    comes from the first doc encountered; tie-breaking on doc count
-    isn't useful here. If the operator wants per-doc visibility,
-    that's a separate command (``project docs <slug>`` — future).
+    directory). We collapse on the slug — one row per slug. The
+    status column reflects the **canonical project context doc**
+    (``projects/<slug>/context.md``) when one exists for the slug.
+    That's the doc the project-context registry actually means by
+    "the project's status"; other docs (architecture, roadmap, etc.)
+    live alongside but aren't the registry entry, so their status
+    flips wouldn't reflect what the operator means by "is this
+    project active".
+
+    When no ``context.md`` is present for the slug (rare — operator
+    structured the project differently), we fall back to the
+    summary with the lexicographically-smallest path so the choice
+    is deterministic regardless of Lithos's response order. Without
+    this rule the displayed status was list-order dependent; could
+    flip between ``active`` and ``archived`` on the same operator
+    state if Lithos returned summaries in a different order.
+
+    Per-doc visibility lives in a separate command (``project docs
+    <slug>`` — future).
     """
-    seen: dict[str, _ProjectRow] = {}
+    # Group all summaries by slug first; we need to inspect all the
+    # candidates for a slug before picking the canonical one rather
+    # than committing to the first-seen.
+    by_slug: dict[str, list[NoteSummary]] = {}
     for summary in summaries:
         slug = summary.slug
         if not slug:
             continue
-        if slug in seen:
-            continue
+        by_slug.setdefault(slug, []).append(summary)
+
+    rows: list[_ProjectRow] = []
+    for slug in sorted(by_slug):
+        canonical = _pick_canonical_summary(slug, by_slug[slug])
         is_local = slug in toml_projects
         repo = str(getattr(toml_projects[slug], "repo", "")) if is_local else None
-        seen[slug] = _ProjectRow(
-            slug=slug,
-            status=summary.status,
-            local=is_local,
-            repo=repo,
+        rows.append(
+            _ProjectRow(
+                slug=slug,
+                status=canonical.status,
+                local=is_local,
+                repo=repo,
+            )
         )
-    return [seen[slug] for slug in sorted(seen)]
+    return rows
+
+
+def _pick_canonical_summary(slug: str, candidates: list[NoteSummary]) -> NoteSummary:
+    """Pick the project-context doc whose status represents the slug.
+
+    Preference order:
+
+    1. ``projects/<slug>/context.md`` — by convention the canonical
+       project context registry entry. Other doctypes alongside it
+       (``architecture.md``, ``roadmap.md``, ad-hoc notes) are
+       supplementary; their status flips don't represent "is the
+       project active".
+    2. Lexicographically-smallest path among the remaining
+       candidates. Deterministic regardless of Lithos's response
+       order — without this fallback, two docs both labelled
+       supplementary (no ``context.md``) would expose the order-
+       dependent bug the canonical-preference rule was added to
+       fix.
+
+    Pre: ``candidates`` is non-empty (caller filtered empty slugs).
+    """
+    canonical_path = f"{_PROJECTS_PATH_PREFIX}{slug}/context.md"
+    for candidate in candidates:
+        if candidate.path == canonical_path:
+            return candidate
+    return min(candidates, key=lambda c: c.path)
 
 
 def _print_text_rows(rows: list[_ProjectRow]) -> None:

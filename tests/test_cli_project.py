@@ -114,6 +114,86 @@ def test_merge_collapses_multiple_docs_per_slug() -> None:
     assert rows[0].slug == "loom"
 
 
+def test_merge_status_comes_from_context_md_regardless_of_list_order() -> None:
+    """Reviewer-finding regression: when a slug has multiple docs,
+    the displayed status MUST reflect ``projects/<slug>/context.md``
+    (the canonical project registry entry), not the first doc in
+    Lithos's response. Without this, the status flipped between
+    ``active`` and ``archived`` depending on Lithos's response order.
+
+    Both orderings exercised so the test fails if the picker reverts
+    to "first wins": the supplementary architecture doc is archived,
+    the context doc is active, the operator must see ``active``."""
+    context_doc = NoteSummary(
+        id="doc-context",
+        title="loom",
+        version=2,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="active",
+        note_type="concept",
+        path="projects/loom/context.md",
+        slug="loom",
+    )
+    architecture_doc = NoteSummary(
+        id="doc-arch",
+        title="loom",
+        version=1,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="archived",
+        note_type="concept",
+        path="projects/loom/architecture.md",
+        slug="loom",
+    )
+
+    # Order 1: architecture first (would mis-pick "archived" under
+    # the previous first-wins rule).
+    rows = _merge_lithos_with_toml([architecture_doc, context_doc], {})
+    assert rows[0].status == "active"
+
+    # Order 2: context first (would coincidentally pick "active"
+    # under first-wins; the test still pins the rule).
+    rows = _merge_lithos_with_toml([context_doc, architecture_doc], {})
+    assert rows[0].status == "active"
+
+
+def test_merge_falls_back_to_lex_min_path_when_no_context_md() -> None:
+    """When no ``context.md`` exists for the slug (operator structured
+    the project with only supplementary docs), the picker falls back
+    to the lexicographically-smallest path so the choice is
+    deterministic regardless of Lithos's response order."""
+    arch = NoteSummary(
+        id="doc-arch",
+        title="loom",
+        version=1,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="active",
+        note_type="concept",
+        path="projects/loom/architecture.md",
+        slug="loom",
+    )
+    roadmap = NoteSummary(
+        id="doc-roadmap",
+        title="loom",
+        version=1,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="archived",
+        note_type="concept",
+        path="projects/loom/roadmap.md",
+        slug="loom",
+    )
+
+    # ``architecture.md`` < ``roadmap.md`` lexicographically →
+    # architecture's status wins both ways.
+    rows = _merge_lithos_with_toml([roadmap, arch], {})
+    assert rows[0].status == "active"
+    rows = _merge_lithos_with_toml([arch, roadmap], {})
+    assert rows[0].status == "active"
+
+
 def test_merge_drops_empty_slug_entries() -> None:
     """Docs whose path didn't parse to a slug (degenerate paths)
     are dropped — there's nothing for the operator to act on."""
