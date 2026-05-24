@@ -119,17 +119,26 @@ def _setup_local_file(tmp_path: Path) -> Path:
 async def test_updated_status_pushes_body_and_refreshes_frontmatter(
     tmp_path: Path,
 ) -> None:
+    """Real Lithos's ``updated`` envelope is top-level
+    ``{status, id, path, version, warnings}`` — no ``document``
+    field, so ``WriteResult.note`` is ``None``. The handler MUST
+    re-fetch via ``note_read`` to get the bumped version, otherwise
+    the local frontmatter would carry the stale pre-write version
+    and every subsequent edit would immediate-conflict."""
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
     sync_state = ProjectionSyncState()
     handler = make_handler(cfg, sync_state=sync_state)
 
     lithos = AsyncMock()
-    lithos.note_read.return_value = _note(version=5, body="Old server body")
-    lithos.note_write.return_value = WriteResult(
-        status="updated",
-        note=_note(version=6, body="# Lithos Loom\n\nOperator's new body\n"),
-    )
+    # Two note_read calls expected: pre-write (canonical at v5) and
+    # post-write (canonical at v6 after server bump).
+    lithos.note_read.side_effect = [
+        _note(version=5, body="Old server body"),
+        _note(version=6, body="Operator's new body"),
+    ]
+    # Production-shaped success: status=updated, note=None.
+    lithos.note_write.return_value = WriteResult(status="updated", note=None)
 
     await handler(
         _event(vault_path=local, body="# Lithos Loom\n\nOperator's new body\n"),
@@ -147,7 +156,12 @@ async def test_updated_status_pushes_body_and_refreshes_frontmatter(
     assert kwargs["note_type"] == "concept"
     assert kwargs["status"] == "active"
 
-    # Local file refreshed with bumped version.
+    # Pinned: post-write note_read happens (the bug-fix invariant).
+    # Without this, the local frontmatter would have the stale v5.
+    assert lithos.note_read.await_count == 2
+
+    # Local file refreshed with the SERVER-bumped version (v6), not
+    # the pre-write current.version (v5).
     rendered = local.read_text()
     fm, _ = extract_frontmatter(rendered)
     assert fm["lithos_version"] == 6
@@ -157,6 +171,60 @@ async def test_updated_status_pushes_body_and_refreshes_frontmatter(
     assert "doc-1" in sync_state.note_file_hashes
     assert "doc-1" in sync_state.note_body_hashes
     assert sync_state.note_versions["doc-1"] == 6
+
+
+async def test_post_write_fetch_vanished_skips_refresh(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If the doc is deleted between the successful push and the
+    post-write fetch (rare race), log and skip the frontmatter
+    refresh rather than crashing. Operator's local file is left at
+    the pre-push version; the next edit will trigger a conflict
+    (which is the right outcome — the doc no longer exists, so the
+    operator's edit either gets re-created or surfaces as orphan)."""
+    caplog.set_level(logging.WARNING)
+    cfg = _cfg(tmp_path)
+    local = _setup_local_file(tmp_path)
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    lithos = AsyncMock()
+    lithos.note_read.side_effect = [_note(version=5), None]
+    lithos.note_write.return_value = WriteResult(status="updated", note=None)
+
+    await handler(_event(vault_path=local), _ctx(lithos))
+
+    assert any("vanished between successful push" in r.message for r in caplog.records)
+    # sync_state not updated — we couldn't refresh.
+    assert "doc-1" not in sync_state.note_file_hashes
+
+
+async def test_duplicate_status_skips_rewrite(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``duplicate`` means Lithos saw the body already at this content;
+    no version bump, no rewrite needed. Common when re-firing the
+    same event (idempotency) — must not noisily complain."""
+    caplog.set_level(logging.INFO)
+    cfg = _cfg(tmp_path)
+    local = _setup_local_file(tmp_path)
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(version=5)
+    lithos.note_write.return_value = WriteResult(status="duplicate")
+
+    original = local.read_text()
+    await handler(_event(vault_path=local), _ctx(lithos))
+
+    # File unchanged (no rewrite); no post-write fetch attempted.
+    assert local.read_text() == original
+    assert lithos.note_read.await_count == 1
+    # sync_state untouched — no write happened.
+    assert "doc-1" not in sync_state.note_file_hashes
+    # Info-level log explains why we skipped (operator-friendly).
+    assert any("duplicate" in r.message for r in caplog.records)
 
 
 # ── Version conflict path ──────────────────────────────────────────────
@@ -332,13 +400,17 @@ async def test_re_firing_after_successful_push_is_safe(
     handler = make_handler(cfg, sync_state=sync_state)
 
     lithos = AsyncMock()
-    lithos.note_read.return_value = _note(version=5)
-    # First push bumps to 6; second push would bump to 7 (but we
-    # provide updated=v6 again to model the idempotent contract).
-    lithos.note_write.return_value = WriteResult(
-        status="updated",
-        note=_note(version=6, body="# Lithos Loom\n\nOperator's new body\n"),
-    )
+    # Each push: pre-write fetch + post-write fetch. Both pushes
+    # land at v6 to model the idempotent re-fire contract (in real
+    # Lithos the second push would advance to v7; mocking v6 twice
+    # asserts the same-hash assertion below).
+    lithos.note_read.side_effect = [
+        _note(version=5),
+        _note(version=6, body="Operator's new body"),
+        _note(version=5),
+        _note(version=6, body="Operator's new body"),
+    ]
+    lithos.note_write.return_value = WriteResult(status="updated", note=None)
 
     event = _event(vault_path=local)
     await handler(event, _ctx(lithos))

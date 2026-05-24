@@ -140,14 +140,46 @@ def make_handler(
         )
 
         if result.status == "updated":
-            updated_note = result.note or current
+            # Re-fetch canonical for the post-write frontmatter rewrite.
+            # The real Lithos write envelope is top-level
+            # ``{status, id, path, version, warnings}`` (see
+            # lithos/src/lithos/server.py:1327) — no ``document``
+            # field, so :attr:`WriteResult.note` is always ``None``
+            # in production. Without re-fetching, the rewrite uses
+            # ``current`` (the pre-write canonical) and writes the
+            # STALE version into the operator's local frontmatter,
+            # so the operator's next edit would push with the old
+            # ``expected_version`` and hit a guaranteed conflict.
+            # One extra RPC per push is acceptable; these are
+            # operator-initiated edits, not bulk writes.
+            post_write = await ctx.lithos.note_read(id=doc_id)
+            if post_write is None:
+                ctx.logger.warning(
+                    "note-push: doc=%s vanished between successful push "
+                    "and post-write fetch; skipping frontmatter refresh "
+                    "(local file left at pre-push version)",
+                    doc_id,
+                )
+                return
             await _refresh_local_frontmatter(
                 doc_id=doc_id,
-                note=updated_note,
-                lithos_path=_pick_lithos_path(updated_note, current, slug, filename),
+                note=post_write,
+                lithos_path=_pick_lithos_path(post_write, current, slug, filename),
                 local_path=local_path,
                 sync_state=sync_state,
                 ctx=ctx,
+            )
+            return
+
+        if result.status == "duplicate":
+            # Lithos reports the body was already what we sent — no
+            # version bump, no rewrite needed. The local file's
+            # ``lithos_version`` is already current. Common when
+            # re-firing the same event (idempotency) and harmless.
+            ctx.logger.info(
+                "note-push: doc=%s reported duplicate (body unchanged "
+                "server-side); skipping frontmatter refresh",
+                doc_id,
             )
             return
 
