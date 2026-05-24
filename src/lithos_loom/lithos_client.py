@@ -719,6 +719,58 @@ class LithosClient:
         result = await self._session.call_tool("lithos_list", arguments=arguments)
         return _parse_note_list_response(result)
 
+    async def note_delete(
+        self,
+        *,
+        id: str,
+        agent: str | None = None,
+    ) -> bool:
+        """Delete a Lithos KB doc by id; returns ``True`` if deleted,
+        ``False`` if Lithos reports it as already gone.
+
+        ``doc_not_found`` is folded to ``False`` (not raised) so
+        cleanup loops can call this idempotently — the common
+        soak/test pattern is "delete these N docs whether or not
+        they exist". Callers that need the distinction can call
+        :meth:`note_read` first.
+
+        ``agent`` defaults to ``self.agent_id`` and is **required**
+        by the Lithos server (audit trail). Without an agent the
+        bare ``lithos_delete`` MCP call fails with a pydantic
+        "missing_argument" error that's hard to spot when only the
+        message is rendered — this wrapper raises a typed
+        :class:`LithosClientError` instead so the failure mode is
+        obvious at the call site.
+
+        Other domain errors (transport failures, permission
+        errors) propagate as raised
+        :class:`LithosClientError` — only ``doc_not_found`` is
+        folded.
+        """
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "note_delete needs an agent id")
+        try:
+            payload = await self._call("lithos_delete", {"id": id, "agent": agent_id})
+        except LithosClientError as exc:
+            if exc.code == "doc_not_found":
+                return False
+            raise
+        # Lithos's contract is ``{"success": True}`` on delete
+        # (lithos/src/lithos/server.py:1434). Be strict about the
+        # success envelope rather than treating any non-error
+        # response as success — without this, a server-side drift
+        # (``{}``, ``{"success": false}``, a non-dict payload)
+        # would silently report a successful delete and leave the
+        # stale doc behind. Raising on shape divergence makes the
+        # contract break visible at the call site.
+        if not isinstance(payload, dict) or payload.get("success") is not True:
+            raise LithosClientError(
+                "invalid_response",
+                f"lithos_delete returned non-success payload: {payload!r}",
+            )
+        return True
+
     async def _call_for_write_result(
         self,
         tool: str,

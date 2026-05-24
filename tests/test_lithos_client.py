@@ -1293,6 +1293,113 @@ async def test_note_list_omits_filters_when_none() -> None:
     assert "tags" not in args
 
 
+# ── LithosClient.note_delete ───────────────────────────────────────────
+
+
+async def test_note_delete_returns_true_on_success() -> None:
+    """Happy path: Lithos returns ``{success: True}`` → method returns True."""
+    client, session = _client_with_session(_content({"success": True}))
+    deleted = await client.note_delete(id="doc-1")
+    assert deleted is True
+    session.call_tool.assert_awaited_once_with(
+        "lithos_delete",
+        arguments={"id": "doc-1", "agent": "lithos-orchestrator-test"},
+    )
+
+
+async def test_note_delete_returns_false_on_doc_not_found() -> None:
+    """``doc_not_found`` is folded to False so cleanup loops can
+    call this idempotently — equivalent to ``rm -f``. The common
+    use case is "delete these N test docs whether or not they
+    exist", which would otherwise need try/except at every call
+    site (the trap the user hit during soak 2026-05-24 before
+    this wrapper existed)."""
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "doc_not_found", "message": "no"})
+    )
+    deleted = await client.note_delete(id="ghost")
+    assert deleted is False
+
+
+async def test_note_delete_propagates_other_errors() -> None:
+    """Only ``doc_not_found`` is folded; other domain errors
+    (permission, transport, internal) still raise so the caller
+    knows their cleanup didn't actually run."""
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "permission_denied", "message": "no"})
+    )
+    with pytest.raises(LithosClientError) as exc:
+        await client.note_delete(id="doc-1")
+    assert exc.value.code == "permission_denied"
+
+
+async def test_note_delete_uses_explicit_agent_when_provided() -> None:
+    """Explicit ``agent=`` overrides the client's default — same
+    shape as :meth:`note_write` / :meth:`finding_post`."""
+    client, session = _client_with_session(_content({"success": True}))
+    await client.note_delete(id="doc-1", agent="cleanup-bot")
+    session.call_tool.assert_awaited_once_with(
+        "lithos_delete",
+        arguments={"id": "doc-1", "agent": "cleanup-bot"},
+    )
+
+
+async def test_note_delete_raises_on_missing_success_field() -> None:
+    """The Lithos contract is ``{"success": True}`` on delete
+    (lithos/src/lithos/server.py:1434). If the response is empty
+    (``{}``) — e.g. server-side drift, a regression on the Lithos
+    side, or a future API change — we MUST raise rather than
+    silently report success. Otherwise a failed cleanup would
+    leave the stale doc in place while Loom told the caller
+    everything was fine."""
+    client, _ = _client_with_session(_content({}))
+    with pytest.raises(LithosClientError) as exc:
+        await client.note_delete(id="doc-1")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_note_delete_raises_on_success_false() -> None:
+    """Explicit ``{"success": False}`` is the unambiguous "I tried
+    and it didn't work" signal — must surface as an error rather
+    than be folded to True (which would mask the cleanup failure)
+    or False (which is reserved for the doc_not_found idempotent
+    path). Treat shape divergence as a typed error."""
+    client, _ = _client_with_session(_content({"success": False}))
+    with pytest.raises(LithosClientError) as exc:
+        await client.note_delete(id="doc-1")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_note_delete_raises_on_non_dict_payload() -> None:
+    """A non-dict response (string, list, etc.) is server-side
+    drift — refuse to interpret it as success."""
+    # Build the CallToolResult directly here — the shared `_content`
+    # helper is typed to `dict` (which is what every other test
+    # needs); the non-dict shape is the regression we're pinning.
+    non_dict_result = CallToolResult(
+        content=[TextContent(type="text", text=json.dumps("ok"))]
+    )
+    client, _ = _client_with_session(non_dict_result)
+    with pytest.raises(LithosClientError) as exc:
+        await client.note_delete(id="doc-1")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_note_delete_requires_agent_id() -> None:
+    """Lithos requires ``agent`` for audit-trail purposes. Without
+    an explicit kwarg AND no ``agent_id`` on the client, raise a
+    typed error rather than letting Lithos respond with a pydantic
+    "missing_argument" message that the operator has to debug.
+    Soak regression: this exact failure mode bit the user when they
+    were using ``_call`` directly without the wrapper."""
+    client = LithosClient(base_url="http://example.test:8765")  # no agent_id
+    fake_session = AsyncMock()
+    client._session = fake_session  # type: ignore[assignment]
+    with pytest.raises(LithosClientError, match="agent"):
+        await client.note_delete(id="doc-1")
+    fake_session.call_tool.assert_not_awaited()
+
+
 def test_write_result_default_warnings_is_empty_tuple() -> None:
     """Regression: ``warnings`` default must be the canonical empty
     tuple (not None, not a fresh list each construction) so handler
