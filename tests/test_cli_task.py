@@ -579,7 +579,13 @@ def test_task_create_target_file_write_failure_exits_one(
 def test_project_list_json_is_machine_parseable(tmp_path: Path) -> None:
     """``lithos-loom project list --format json`` returns clean JSON
     the macro can ``JSON.parse``. Tested here (CLI-level) so a future
-    formatting change has to break this loudly."""
+    formatting change has to break this loudly.
+
+    Pinned via ``--source toml`` because Slice 4 (D23) flipped the
+    default to ``--source lithos`` (which requires a live Lithos
+    connection). The macro itself can use either source — the JSON
+    shape is invariant (array of slugs); this test just locks the
+    machine-parseable contract."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     config_path = tmp_path / "config.toml"
@@ -597,7 +603,17 @@ def test_project_list_json_is_machine_parseable(tmp_path: Path) -> None:
     )
 
     result = runner.invoke(
-        app, ["project", "list", "--config", str(config_path), "--format", "json"]
+        app,
+        [
+            "project",
+            "list",
+            "--config",
+            str(config_path),
+            "--source",
+            "toml",
+            "--format",
+            "json",
+        ],
     )
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
