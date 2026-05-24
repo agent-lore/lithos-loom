@@ -114,25 +114,32 @@ def test_merge_collapses_multiple_docs_per_slug() -> None:
     assert rows[0].slug == "loom"
 
 
-def test_merge_status_comes_from_context_md_regardless_of_list_order() -> None:
+def test_merge_status_comes_from_canonical_doc_regardless_of_order() -> None:
     """Reviewer-finding regression: when a slug has multiple docs,
-    the displayed status MUST reflect ``projects/<slug>/context.md``
-    (the canonical project registry entry), not the first doc in
-    Lithos's response. Without this, the status flipped between
-    ``active`` and ``archived`` depending on Lithos's response order.
+    the displayed status MUST reflect
+    ``projects/<slug>/<slug>-project-context.md`` (the prod-convention
+    canonical project registry entry), not the first doc in Lithos's
+    response. Without this, the status flipped between ``active`` and
+    ``archived`` depending on Lithos's response order.
+
+    The picker convention matches what real prod docs use today
+    (e.g. ``projects/lithos-loom/lithos-loom-project-context.md``);
+    see the design discussion in
+    ``examples/slice-4-test/MANUAL_TEST.md`` ("Open design question").
 
     Both orderings exercised so the test fails if the picker reverts
     to "first wins": the supplementary architecture doc is archived,
-    the context doc is active, the operator must see ``active``."""
-    context_doc = NoteSummary(
+    the canonical context doc is active, the operator must see
+    ``active``."""
+    canonical_doc = NoteSummary(
         id="doc-context",
-        title="loom",
+        title="loom project context",
         version=2,
         updated_at=datetime(2026, 5, 24, tzinfo=UTC),
         tags=("project-context",),
         status="active",
         note_type="concept",
-        path="projects/loom/context.md",
+        path="projects/loom/loom-project-context.md",
         slug="loom",
     )
     architecture_doc = NoteSummary(
@@ -148,21 +155,23 @@ def test_merge_status_comes_from_context_md_regardless_of_list_order() -> None:
     )
 
     # Order 1: architecture first (would mis-pick "archived" under
-    # the previous first-wins rule).
-    rows = _merge_lithos_with_toml([architecture_doc, context_doc], {})
+    # the previous first-wins rule, AND under the lex-min fallback
+    # since ``architecture.md`` < ``loom-project-context.md``).
+    rows = _merge_lithos_with_toml([architecture_doc, canonical_doc], {})
     assert rows[0].status == "active"
 
-    # Order 2: context first (would coincidentally pick "active"
+    # Order 2: canonical first (would coincidentally pick "active"
     # under first-wins; the test still pins the rule).
-    rows = _merge_lithos_with_toml([context_doc, architecture_doc], {})
+    rows = _merge_lithos_with_toml([canonical_doc, architecture_doc], {})
     assert rows[0].status == "active"
 
 
-def test_merge_falls_back_to_lex_min_path_when_no_context_md() -> None:
-    """When no ``context.md`` exists for the slug (operator structured
-    the project with only supplementary docs), the picker falls back
-    to the lexicographically-smallest path so the choice is
-    deterministic regardless of Lithos's response order."""
+def test_merge_falls_back_to_lex_min_path_when_no_canonical_doc() -> None:
+    """When no ``<slug>-project-context.md`` exists for the slug
+    (operator structured the project with only supplementary docs,
+    or it's a test fixture), the picker falls back to the
+    lexicographically-smallest path so the choice is deterministic
+    regardless of Lithos's response order."""
     arch = NoteSummary(
         id="doc-arch",
         title="loom",
@@ -191,6 +200,40 @@ def test_merge_falls_back_to_lex_min_path_when_no_context_md() -> None:
     rows = _merge_lithos_with_toml([roadmap, arch], {})
     assert rows[0].status == "active"
     rows = _merge_lithos_with_toml([arch, roadmap], {})
+    assert rows[0].status == "active"
+
+
+def test_merge_prefers_canonical_over_lex_min_when_both_present() -> None:
+    """Sanity: the canonical-name preference must beat the lex-min
+    fallback. Architecture sorts lex-min over the canonical doc
+    (``architecture.md`` < ``loom-project-context.md``); the picker
+    must still pick the canonical doc by name, not the lex-min."""
+    canonical = NoteSummary(
+        id="doc-context",
+        title="loom project context",
+        version=1,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="active",
+        note_type="concept",
+        path="projects/loom/loom-project-context.md",
+        slug="loom",
+    )
+    architecture = NoteSummary(
+        id="doc-arch",
+        title="loom",
+        version=1,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="archived",
+        note_type="concept",
+        path="projects/loom/architecture.md",  # lex-min over the canonical
+        slug="loom",
+    )
+
+    rows = _merge_lithos_with_toml([architecture, canonical], {})
+    assert rows[0].status == "active"
+    rows = _merge_lithos_with_toml([canonical, architecture], {})
     assert rows[0].status == "active"
 
 

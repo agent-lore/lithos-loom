@@ -218,23 +218,32 @@ def _merge_lithos_with_toml(
     — there's nothing for the operator to act on.
 
     Multiple Lithos docs may share a slug (a project with both a
-    ``context.md`` and an ``architecture.md`` under the same slug
-    directory). We collapse on the slug — one row per slug. The
-    status column reflects the **canonical project context doc**
-    (``projects/<slug>/context.md``) when one exists for the slug.
-    That's the doc the project-context registry actually means by
-    "the project's status"; other docs (architecture, roadmap, etc.)
-    live alongside but aren't the registry entry, so their status
-    flips wouldn't reflect what the operator means by "is this
-    project active".
+    ``<slug>-project-context.md`` and an ``architecture.md`` under
+    the same slug directory). We collapse on the slug — one row per
+    slug. The status column reflects the **canonical project context
+    doc** (``projects/<slug>/<slug>-project-context.md``) when one
+    exists for the slug. That's the doc the project-context registry
+    actually means by "the project's status"; other docs
+    (architecture, roadmap, etc.) live alongside but aren't the
+    registry entry, so their status flips wouldn't reflect what the
+    operator means by "is this project active".
 
-    When no ``context.md`` is present for the slug (rare — operator
-    structured the project differently), we fall back to the
-    summary with the lexicographically-smallest path so the choice
-    is deterministic regardless of Lithos's response order. Without
-    this rule the displayed status was list-order dependent; could
-    flip between ``active`` and ``archived`` on the same operator
-    state if Lithos returned summaries in a different order.
+    The ``<slug>-project-context.md`` naming convention matches what
+    real prod project-context docs use today (e.g.
+    ``projects/lithos-loom/lithos-loom-project-context.md``).
+    Earlier the picker looked for literal ``context.md`` — a clean
+    name in isolation, but it never matched prod docs, so the
+    canonical preference silently became dead code in practice. See
+    the soak-phase note in ``examples/slice-4-test/MANUAL_TEST.md``.
+
+    When no ``<slug>-project-context.md`` is present for the slug
+    (operator structured the project differently, or this is a
+    test fixture), we fall back to the summary with the
+    lexicographically-smallest path so the choice is deterministic
+    regardless of Lithos's response order. Without this rule the
+    displayed status was list-order dependent; could flip between
+    ``active`` and ``archived`` on the same operator state if Lithos
+    returned summaries in a different order.
 
     Per-doc visibility lives in a separate command (``project docs
     <slug>`` — future).
@@ -270,21 +279,22 @@ def _pick_canonical_summary(slug: str, candidates: list[NoteSummary]) -> NoteSum
 
     Preference order:
 
-    1. ``projects/<slug>/context.md`` — by convention the canonical
-       project context registry entry. Other doctypes alongside it
-       (``architecture.md``, ``roadmap.md``, ad-hoc notes) are
-       supplementary; their status flips don't represent "is the
-       project active".
+    1. ``projects/<slug>/<slug>-project-context.md`` — the prod
+       convention for canonical project context registry entries
+       (e.g. ``projects/lithos-loom/lithos-loom-project-context.md``).
+       Other doctypes alongside it (``architecture.md``,
+       ``roadmap.md``, ad-hoc notes) are supplementary; their status
+       flips don't represent "is the project active".
     2. Lexicographically-smallest path among the remaining
        candidates. Deterministic regardless of Lithos's response
        order — without this fallback, two docs both labelled
-       supplementary (no ``context.md``) would expose the order-
-       dependent bug the canonical-preference rule was added to
-       fix.
+       supplementary (no ``<slug>-project-context.md``) would expose
+       the order-dependent bug the canonical-preference rule was
+       added to fix.
 
     Pre: ``candidates`` is non-empty (caller filtered empty slugs).
     """
-    canonical_path = f"{_PROJECTS_PATH_PREFIX}{slug}/context.md"
+    canonical_path = f"{_PROJECTS_PATH_PREFIX}{slug}/{slug}-project-context.md"
     for candidate in candidates:
         if candidate.path == canonical_path:
             return candidate
