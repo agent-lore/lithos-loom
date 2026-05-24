@@ -107,6 +107,29 @@ class ProjectionSyncState:
     transition that must NOT be suppressed). Without this counter the
     flip-then-flip-back case was silently dropped."""
 
+    note_content_hashes: dict[str, bytes] = field(default_factory=dict)
+    """Per-project-context-doc body hash the projection most recently
+    emitted, keyed by Lithos doc id (Slice 4). Same role for the
+    Slice 5 dir-watcher's body-only diff as ``last_written_hash``
+    plays for the single-file tasks watcher: lets the watcher skip
+    parsing a body that matches what the projection just wrote.
+
+    Hash is over body-only (frontmatter excluded — see D28) computed
+    by :func:`lithos_loom.render_project_context.compute_body_hash`.
+    A doc deleted from Lithos removes its entry so the dir-watcher
+    doesn't carry stale state forward."""
+
+    note_versions: dict[str, int] = field(default_factory=dict)
+    """Per-project-context-doc ``lithos_version`` the projection most
+    recently wrote into vault frontmatter (Slice 4). The Slice 5
+    note-push handler reads this to provide ``expected_version`` to
+    ``lithos_write`` for optimistic locking. Keyed by Lithos doc id.
+
+    Distinct from ``note_content_hashes`` because the dir-watcher
+    needs both: the hash tells it whether a save was a self-write
+    (suppress) or a user edit (emit); the version tells the
+    push-back handler what to lock against."""
+
     def record_projection_write(
         self,
         *,
@@ -138,3 +161,46 @@ class ProjectionSyncState:
         self.task_priority_markers = dict(task_priority_markers)
         self.task_due_date_markers = dict(task_due_date_markers)
         self.write_version += 1
+
+    def record_project_context_write(
+        self,
+        *,
+        doc_id: str,
+        body_hash: bytes,
+        version: int,
+    ) -> None:
+        """Capture the post-render state for a single project-context
+        doc the projection is about to commit (Slice 4).
+
+        Per-doc state lives in two parallel maps keyed by doc id:
+        ``note_content_hashes`` (body hash for the Slice 5 dir-watcher's
+        self-write suppression) and ``note_versions`` (the version
+        Slice 5's note-push provides to ``expected_version`` for
+        optimistic locking).
+
+        Called by the project-context projection per doc, before the
+        atomic rename — same ordering invariant as
+        :meth:`record_projection_write` so any concurrent dir-watcher
+        poll that sees the new file also sees the matching
+        coordination state.
+
+        Unlike the task projection's ``write_version`` (one counter
+        shared across all tasks in a single file), per-doc projection
+        is naturally file-scoped — re-rendering one doc doesn't
+        invalidate the dir-watcher's view of any other doc — so no
+        global counter is needed here. The dir-watcher compares
+        per-file body hash against the per-doc entry directly.
+        """
+        self.note_content_hashes[doc_id] = body_hash
+        self.note_versions[doc_id] = version
+
+    def forget_project_context(self, *, doc_id: str) -> None:
+        """Drop a doc's projection state (called on
+        ``lithos.note.deleted`` after the local file is removed).
+
+        Keeping a stale hash here would cause the dir-watcher to
+        suppress a subsequent re-creation of the same doc (e.g. if
+        the operator restores it from KB) as a self-write. Idempotent
+        — silent no-op when the id isn't tracked."""
+        self.note_content_hashes.pop(doc_id, None)
+        self.note_versions.pop(doc_id, None)
