@@ -515,6 +515,7 @@ async def _create_project_async(
     Shared with :func:`project_import` so both entry points share the
     same validation + write semantics.
     """
+    doc_path = f"{_PROJECTS_PATH_PREFIX}{slug}/{filename}"
     async with LithosClient(
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
@@ -527,19 +528,42 @@ async def _create_project_async(
                 existing_path=existing[0].path,
             )
         result: WriteResult = await client.note_write(
-            path=f"{_PROJECTS_PATH_PREFIX}{slug}/{filename}",
+            path=doc_path,
             title=title,
             content=content,
             tags=tags,
             note_type="concept",
         )
-    if result.status not in ("created", "updated"):
+        if result.status not in ("created", "updated"):
+            raise LithosClientError(
+                code=result.status,
+                message=result.message
+                or f"note_write returned status={result.status!r}",
+            )
+        # Real Lithos's write envelope is top-level
+        # ``{status, id, path, version, warnings}`` — no ``document``
+        # key, so ``WriteResult.note`` is always None in production
+        # (mirror of the PR #45 reviewer finding for the note-push
+        # path). Re-fetch via ``note_read(path=...)`` so the JSON
+        # output's ``id`` field is the canonical Lithos doc id, not
+        # an empty string. One extra RPC per successful create —
+        # acceptable for an operator-initiated command. The latent
+        # parser bug is filed for a separate PR.
+        canonical = await client.note_read(path=doc_path)
+    if canonical is None:
+        # Doc was created (or already existed and we updated it) but
+        # vanished between the write and the re-fetch. Vanishingly
+        # unlikely outside test environments; surface explicitly so
+        # the operator doesn't get a silent empty id back.
         raise LithosClientError(
-            code=result.status,
-            message=result.message or f"note_write returned status={result.status!r}",
+            code="post_write_fetch_missing",
+            message=(
+                f"note_write succeeded for {doc_path!r} but the post-write "
+                f"note_read returned None — doc was deleted between the "
+                f"write and the re-fetch?"
+            ),
         )
-    doc_id = result.note.id if result.note is not None else ""
-    return _CreateProjectResult(id=doc_id, slug=slug)
+    return _CreateProjectResult(id=canonical.id, slug=slug)
 
 
 def _slugify(value: str) -> str:

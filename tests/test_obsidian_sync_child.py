@@ -1623,11 +1623,14 @@ async def test_note_push_without_project_context_projection_warns(
     stub_io: list[EventBus],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Configuring ``note-push`` without the project-context-projection
-    that populates its body-hash baseline is permitted but inert —
-    the dir-watcher treats every operator edit as first-sight
-    (no emit). Surface that at startup so the operator doesn't wonder
-    why their edits don't push."""
+    """Configuring ``note-push`` without project-context-projection is
+    permitted but **degraded** — the dir-watcher still emits for
+    pre-existing on-disk docs after their first-sight seed (so
+    operator edits still push), but the daemon doesn't pull canonical
+    Lithos updates back to local files. The warning text must describe
+    THIS risk, not the earlier (wrong) claim that the handler "will
+    never fire" (PR #46 reviewer finding).
+    """
     cfg = _cfg_with_obsidian(
         tmp_path,
         subscriptions=(
@@ -1648,10 +1651,19 @@ async def test_note_push_without_project_context_projection_warns(
     assert rc == 0
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "'note-push' is configured" in m
-        and "no project-context-projection subscription is present" in m
+        "'note-push' is configured without project-context-projection" in m
+        # The wording must describe the actual degraded behaviour, not
+        # claim the handler never fires.
+        and "will not pull canonical Lithos-side changes" in m
         for m in warn_msgs
     ), warn_msgs
+
+    # Anti-drift: the OLD wording ("will never fire") must NOT appear,
+    # because the reviewer documented that it's materially wrong.
+    assert not any("will never fire" in m for m in warn_msgs), (
+        f"warning must not use the 'will never fire' wording — it's wrong "
+        f"for hosts with pre-existing projected docs on disk; got {warn_msgs}"
+    )
 
 
 async def test_dir_watcher_spawns_when_obsidian_sync_present(

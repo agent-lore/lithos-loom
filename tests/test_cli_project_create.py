@@ -126,18 +126,39 @@ def _make_note(doc_id: str = "doc-1", path: str = _DEFAULT_PATH) -> Note:
     )
 
 
+_SENTINEL = object()
+
+
 def _stub_client(
     note_list_return: list[NoteSummary] | None = None,
     note_write_return: WriteResult | None = None,
+    note_read_return: Any = _SENTINEL,
 ) -> Any:
-    """Build an AsyncMock that masquerades as a LithosClient context manager."""
+    """Build an AsyncMock that masquerades as a LithosClient context manager.
+
+    ``note_read_return`` mocks the post-write canonical fetch the
+    handler does to get the real doc id (real Lithos's write envelope
+    is top-level ``{status, id, path, version, warnings}`` — no
+    ``document`` field, so ``WriteResult.note`` is always None in
+    production). Default is a fully-populated canonical Note so happy-
+    path tests don't have to wire it explicitly.
+    """
     client = AsyncMock()
     client.__aenter__.return_value = client
     client.__aexit__.return_value = None
     client.note_list.return_value = note_list_return or []
+    # Production-shaped success: ``note`` is None. Tests that need
+    # a different status pass it explicitly.
     client.note_write.return_value = note_write_return or WriteResult(
-        status="created", note=_make_note()
+        status="created", note=None
     )
+    # Default the post-write fetch to a real canonical Note so happy-
+    # path tests don't have to wire it. Pass None explicitly to
+    # simulate the vanished-doc edge case.
+    if note_read_return is _SENTINEL:
+        client.note_read.return_value = _make_note()
+    else:
+        client.note_read.return_value = note_read_return
     return client
 
 
@@ -440,6 +461,65 @@ def test_create_propagates_lithos_client_error(tmp_path: Path) -> None:
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
     assert "note_write failed" in combined
+
+
+def test_create_uses_post_write_canonical_id_not_writeresult_note(
+    tmp_path: Path,
+) -> None:
+    """Real Lithos's write envelope is top-level ``{status, id, path,
+    version, warnings}`` — no ``document`` field, so
+    ``WriteResult.note`` is always None in production. The handler
+    MUST re-fetch via ``note_read`` to get the real doc id, otherwise
+    the JSON output's ``id`` field would be the empty string.
+
+    Pinned regression for the PR #46 reviewer finding."""
+    cfg_path = _write_config(tmp_path)
+    runner = CliRunner()
+    canonical = _make_note(doc_id="real-canonical-id")
+    client = _stub_client(
+        # Production shape: status=created, note=None.
+        note_write_return=WriteResult(status="created", note=None),
+        # Post-write fetch returns the canonical with the real id.
+        note_read_return=canonical,
+    )
+
+    with patch("lithos_loom.cli.project.LithosClient", return_value=client):
+        result = runner.invoke(
+            project_app,
+            ["create", "-c", str(cfg_path), "--title", "T", "--format", "json"],
+        )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["id"] == "real-canonical-id", (
+        f"id must come from the post-write note_read, not WriteResult.note "
+        f"(which is None in production); got {payload['id']!r}"
+    )
+    # Pin: the post-write fetch happened.
+    client.note_read.assert_awaited_once()
+
+
+def test_create_raises_when_post_write_fetch_returns_none(
+    tmp_path: Path,
+) -> None:
+    """If the post-write fetch returns None (doc deleted between the
+    write and the re-fetch — vanishingly rare outside tests),
+    surface explicitly rather than silently returning an empty id."""
+    cfg_path = _write_config(tmp_path)
+    runner = CliRunner()
+    client = _stub_client(
+        note_write_return=WriteResult(status="created", note=None),
+        note_read_return=None,  # vanished
+    )
+
+    with patch("lithos_loom.cli.project.LithosClient", return_value=client):
+        result = runner.invoke(
+            project_app, ["create", "-c", str(cfg_path), "--title", "T"]
+        )
+
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
+    assert "note_write succeeded" in combined or "post_write_fetch_missing" in combined
 
 
 def test_create_treats_non_created_status_as_failure(tmp_path: Path) -> None:

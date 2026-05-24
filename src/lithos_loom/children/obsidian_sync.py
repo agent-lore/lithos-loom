@@ -229,18 +229,38 @@ async def _amain(cfg: LoomConfig) -> int:
                 downstream_spec.name,
             )
 
-    # note-push has the same dependency shape but reads
-    # ``sync_state.note_body_hashes`` populated by the project-context
-    # projection — without that projection running, the dir-watcher
-    # has no body-hash baseline so it silently treats every operator
-    # edit as a first-sight (no emit). Calling it out at startup
-    # mirrors the task-side warning above.
+    # note-push has a softer dependency than the task-side handlers:
+    # without project-context-projection, the dir-watcher still
+    # emits events for pre-existing on-disk docs once they've been
+    # seeded on first-sight (subsequent body edits trip the
+    # observed-hash diff), but two important properties degrade:
+    #
+    # 1. **No baseline pull.** The daemon won't project Lithos-side
+    #    updates to local files, so canonical changes that happen
+    #    via MCP / other agents silently diverge from disk. The next
+    #    operator edit pushes their stale local body OVER those
+    #    upstream changes (no conflict detected because the local
+    #    ``lithos_version`` in frontmatter is still what Lithos has
+    #    on its side as of when this file was last projected).
+    #
+    # 2. **First-sight skip.** A doc that's never been on disk
+    #    before — e.g. a project created upstream via MCP — won't
+    #    materialise locally without project-context-projection, so
+    #    the operator can't push to it from Obsidian either.
+    #
+    # Both degraded modes are real failure modes for the operator;
+    # the previous warning text claimed the handler "will never fire"
+    # which is materially wrong (reviewer finding on PR #46). Reword
+    # to describe the actual risk.
     if note_push_spec is not None and project_context_projection_spec is None:
         logger.warning(
-            "obsidian-sync: %r is configured but no project-context-projection "
-            "subscription is present. The handler will load but never fire, "
-            "because the projection is what populates the per-doc body-hash "
-            "baseline the dir watcher reads against.",
+            "obsidian-sync: %r is configured without project-context-projection. "
+            "The dir watcher will still detect edits to pre-existing projected "
+            "files on disk and push them upstream, BUT the daemon will not "
+            "pull canonical Lithos-side changes back to your vault. Operator "
+            "edits can overwrite upstream changes without surfacing a "
+            "conflict. Enable project-context-projection for the full "
+            "bidirectional contract.",
             note_push_spec.name,
         )
 
