@@ -144,6 +144,40 @@ def test_render_doc_collapses_trailing_whitespace_in_body() -> None:
     assert not rendered.endswith("\n\n")
 
 
+def test_render_doc_strips_leading_h1_matching_title() -> None:
+    """``lithos_write`` stores ``content`` verbatim, so a body that
+    starts with ``# {title}\\n\\n...`` (the operator's natural
+    pattern) would double-render the title without this guard.
+    Regression test for the soak-phase bug surfaced 2026-05-24:
+    the projected file showed the title twice."""
+    n = _note(body="# Lithos Loom\n\nReal body content.")
+    rendered = render_doc(n)
+    # Exactly one occurrence of the H1, not two.
+    assert rendered.count("# Lithos Loom") == 1
+    assert "Real body content." in rendered
+
+
+def test_render_doc_keeps_body_when_leading_h1_does_not_match_title() -> None:
+    """Only the title's own H1 is stripped — a different leading H1
+    (e.g. the operator's body genuinely starts with a section
+    heading) is preserved verbatim."""
+    n = _note(body="# Different Heading\n\nReal body.")
+    rendered = render_doc(n)
+    assert "# Lithos Loom" in rendered  # the title
+    assert "# Different Heading" in rendered  # body's own heading
+    assert "Real body." in rendered
+
+
+def test_render_doc_is_idempotent_across_both_content_shapes() -> None:
+    """Two notes with the same effective content but different storage
+    shapes (one with H1 baked into body, one without) render to the
+    same file. Important for the projection's dedup hash — without
+    this both versions would write the same file on every event."""
+    n_with_h1 = _note(body="# Lithos Loom\n\nBody.")
+    n_without_h1 = _note(body="Body.")
+    assert render_doc(n_with_h1) == render_doc(n_without_h1)
+
+
 # ── extract_frontmatter ─────────────────────────────────────────────────
 
 
