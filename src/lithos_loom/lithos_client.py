@@ -299,6 +299,45 @@ class LithosClient:
                 return
             raise
 
+    async def task_create(
+        self,
+        *,
+        title: str,
+        agent: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Create a coordination task. Returns the new task's ``id``.
+
+        ``metadata`` (lithos#295) is a one-shot initial set — there's
+        no merge to think about because the task doesn't exist yet.
+        Omitted when ``None``, matching :meth:`task_update`'s
+        omit-when-default pattern so old/strict Lithos servers don't
+        reject an unexpected key.
+
+        Wraps the ``lithos_task_create`` MCP tool's
+        ``{task_id: string}`` response shape. Domain errors
+        (``invalid_input`` etc.) raise :class:`LithosClientError`.
+        """
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_create needs an agent id")
+        arguments: dict[str, Any] = {"title": title, "agent": agent_id}
+        if description is not None:
+            arguments["description"] = description
+        if tags is not None:
+            arguments["tags"] = tags
+        if metadata is not None:
+            arguments["metadata"] = metadata
+        payload = await self._call("lithos_task_create", arguments)
+        task_id = payload.get("task_id") if isinstance(payload, dict) else None
+        if not isinstance(task_id, str) or not task_id:
+            raise LithosClientError(
+                "invalid_response", "task_create response missing task_id"
+            )
+        return task_id
+
     async def task_complete(
         self,
         *,

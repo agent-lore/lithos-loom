@@ -84,6 +84,17 @@ class ProjectionSyncState:
     are not added here — the renderer drops priority on resolved
     lines, so there's no projection baseline to compare against."""
 
+    task_due_date_markers: dict[str, str | None] = field(default_factory=dict)
+    """Per-task due date (``YYYY-MM-DD`` string, matching what the
+    renderer emits in the ``📅`` marker) or ``None`` the projection
+    most recently emitted. Same role for the
+    ``obsidian.task.due_date_changed`` event (Slice 3 round-trip) as
+    ``task_status_markers`` plays for ``status_changed``. ``None``
+    means "task is open but has no due date on the projected line";
+    a key being absent means the projection has never written that
+    task. Resolved tasks are not added here — the renderer drops
+    the due date on resolved lines."""
+
     write_version: int = 0
     """Monotonically incremented on each ``record_projection_write``
     call. The fs watcher snapshots this on every poll; a tick since
@@ -102,6 +113,7 @@ class ProjectionSyncState:
         content_hash: bytes,
         task_status_markers: Mapping[str, str],
         task_priority_markers: Mapping[str, str | None],
+        task_due_date_markers: Mapping[str, str | None],
     ) -> None:
         """Capture the post-render state the projection is about to commit.
 
@@ -109,10 +121,10 @@ class ProjectionSyncState:
         atomic rename, so any concurrent watcher poll that sees the new
         file content also sees the matching coordination state.
 
-        Both ``task_status_markers`` and ``task_priority_markers`` are
-        copied into fresh dicts so subsequent mutation of the
-        projection's render-state dicts cannot silently change
-        suppression behaviour after this point.
+        ``task_status_markers`` / ``task_priority_markers`` /
+        ``task_due_date_markers`` are each copied into fresh dicts so
+        subsequent mutation of the projection's render-state dicts
+        cannot silently change suppression behaviour after this point.
 
         ``write_version`` increments unconditionally — even
         same-content overwrites bump it, so the watcher's "did
@@ -124,4 +136,5 @@ class ProjectionSyncState:
         self.last_written_hash = content_hash
         self.task_status_markers = dict(task_status_markers)
         self.task_priority_markers = dict(task_priority_markers)
+        self.task_due_date_markers = dict(task_due_date_markers)
         self.write_version += 1

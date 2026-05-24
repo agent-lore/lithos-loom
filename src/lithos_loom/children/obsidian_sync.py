@@ -20,9 +20,16 @@ Slice 2 extends the allow-list. The actions this child hosts (see
   ``obsidian.task.status_changed`` events and pushes the
   corresponding action to Lithos (Slice 2 US17–US19).
 * ``"obsidian-priority-changed"`` — consumes the fs watcher's
-  ``obsidian.task.priority_changed`` events; posts a
-  ``[PriorityChangeRequested]`` finding as the interim signal
-  (Slice 2 US21).
+  ``obsidian.task.priority_changed`` events; pushes the new
+  priority enum to Lithos via ``task_update(metadata={"priority":
+  <enum>})`` (Slice 2 US21).
+* ``"obsidian-due-date-changed"`` — consumes the fs watcher's
+  ``obsidian.task.due_date_changed`` events; pushes the new
+  ``YYYY-MM-DD`` date to Lithos via
+  ``task_update(metadata={"scheduled_for": <date>})``. Closes the
+  date-edit round-trip surfaced during Slice 3 manual testing —
+  without this, date edits in the file were silently overwritten
+  on the next projection rewrite.
 
 Subscription actions outside the allow-list (e.g. generic ``noop``)
 are silently skipped here — they're routed to a different child in a
@@ -55,6 +62,9 @@ from lithos_loom.subscriptions import (
     SubscriptionContext,
     build_runners,
 )
+from lithos_loom.subscriptions._obsidian_due_date_changed import (
+    handle as handle_obsidian_due_date_changed,
+)
 from lithos_loom.subscriptions._obsidian_priority_changed import (
     handle as handle_obsidian_priority_changed,
 )
@@ -75,6 +85,7 @@ _CHILD_ACTIONS: frozenset[str] = frozenset(
         "obsidian-projection",
         "obsidian-status-transition",
         "obsidian-priority-changed",
+        "obsidian-due-date-changed",
     }
 )
 
@@ -152,6 +163,7 @@ async def _amain(cfg: LoomConfig) -> int:
     projection_specs = by_action.get("obsidian-projection", [])
     status_transition_specs = by_action.get("obsidian-status-transition", [])
     priority_changed_specs = by_action.get("obsidian-priority-changed", [])
+    due_date_changed_specs = by_action.get("obsidian-due-date-changed", [])
     projection_spec = projection_specs[0] if projection_specs else None
     status_transition_spec = (
         status_transition_specs[0] if status_transition_specs else None
@@ -159,14 +171,22 @@ async def _amain(cfg: LoomConfig) -> int:
     priority_changed_spec = (
         priority_changed_specs[0] if priority_changed_specs else None
     )
+    due_date_changed_spec = (
+        due_date_changed_specs[0] if due_date_changed_specs else None
+    )
 
-    # Both status-transition and priority-changed need the projection's
-    # ``sync_state`` to be populated for the fs watcher to emit any
-    # events at all (the watcher silently skips tasks with no
-    # projection-known baseline). Configuring either without projection
-    # is permitted but inert — call that out at startup rather than
-    # letting the operator wonder why their edits don't push.
-    for downstream_spec in (status_transition_spec, priority_changed_spec):
+    # status-transition / priority-changed / due-date-changed all need
+    # the projection's ``sync_state`` populated for the fs watcher to
+    # emit any events at all (the watcher silently skips tasks with no
+    # projection-known baseline). Configuring any of them without
+    # projection is permitted but inert — call that out at startup
+    # rather than letting the operator wonder why their edits don't
+    # push.
+    for downstream_spec in (
+        status_transition_spec,
+        priority_changed_spec,
+        due_date_changed_spec,
+    ):
         if downstream_spec is not None and projection_spec is None:
             logger.warning(
                 "obsidian-sync: %r is configured but no obsidian-projection "
@@ -210,10 +230,11 @@ async def _amain(cfg: LoomConfig) -> int:
         if not child_specs:
             logger.warning(
                 "obsidian-sync: no obsidian-projection, "
-                "obsidian-status-transition, or obsidian-priority-changed "
-                "subscription configured; fs watcher runs but emits "
-                "nothing without projection state. Add a [[subscriptions]] "
-                "block with action='obsidian-projection' to populate it."
+                "obsidian-status-transition, obsidian-priority-changed, "
+                "or obsidian-due-date-changed subscription configured; "
+                "fs watcher runs but emits nothing without projection "
+                "state. Add a [[subscriptions]] block with "
+                "action='obsidian-projection' to populate it."
             )
             try:
                 await stop_event.wait()
@@ -249,6 +270,12 @@ async def _amain(cfg: LoomConfig) -> int:
                 priority_changed_spec.name,
             )
             my_handlers["obsidian-priority-changed"] = handle_obsidian_priority_changed
+        if due_date_changed_spec is not None:
+            logger.info(
+                "obsidian-sync: wiring subscription %r",
+                due_date_changed_spec.name,
+            )
+            my_handlers["obsidian-due-date-changed"] = handle_obsidian_due_date_changed
 
         # LithosClient is needed for both: the projection wires through
         # to LithosEventStream for upstream events; the status-transition

@@ -682,3 +682,87 @@ async def test_task_lifecycle_methods_require_agent_id() -> None:
         await client.task_claim(task_id="t-1", aspect="impl")
     with pytest.raises(LithosClientError, match="agent"):
         await client.task_complete(task_id="t-1")
+    with pytest.raises(LithosClientError, match="agent"):
+        await client.task_create(title="t")
+
+
+# ── LithosClient.task_create (lithos#295) ─────────────────────────────
+
+
+async def test_task_create_returns_task_id_and_passes_arguments() -> None:
+    """Happy path: passes title + agent (defaults to client's
+    agent_id), parses the ``{task_id: ...}`` response envelope."""
+    client, session = _client_with_session(_content({"task_id": "new-1"}))
+
+    task_id = await client.task_create(title="Review PR")
+
+    assert task_id == "new-1"
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_create",
+        arguments={"title": "Review PR", "agent": "lithos-orchestrator-test"},
+    )
+
+
+async def test_task_create_forwards_description_tags_metadata() -> None:
+    """Optional fields are forwarded verbatim when provided. The
+    post-lithos#295 metadata argument is the load-bearing one for
+    Slice 3 ("born projected" lines need metadata.project /
+    .priority / .scheduled_for set at create time)."""
+    client, session = _client_with_session(_content({"task_id": "x"}))
+
+    await client.task_create(
+        title="t",
+        description="brief",
+        tags=["a", "b"],
+        metadata={"project": "lithos-loom", "priority": "high"},
+    )
+
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["title"] == "t"
+    assert args["description"] == "brief"
+    assert args["tags"] == ["a", "b"]
+    assert args["metadata"] == {"project": "lithos-loom", "priority": "high"}
+
+
+async def test_task_create_omits_optional_args_when_none() -> None:
+    """``None`` defaults are omitted from the MCP arguments dict so
+    old/strict Lithos servers don't choke on unexpected keys."""
+    client, session = _client_with_session(_content({"task_id": "x"}))
+
+    await client.task_create(title="t")  # only required field
+
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert set(args.keys()) == {"title", "agent"}
+
+
+async def test_task_create_uses_explicit_agent_when_provided() -> None:
+    """An explicit ``agent=`` overrides the client-level default."""
+    client, session = _client_with_session(_content({"task_id": "x"}))
+
+    await client.task_create(title="t", agent="lithos-orchestrator-mac-mini")
+
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["agent"] == "lithos-orchestrator-mac-mini"
+
+
+async def test_task_create_raises_when_response_missing_task_id() -> None:
+    """Defensive: a malformed response (no ``task_id`` key) surfaces
+    as a typed ``invalid_response`` error rather than a silent
+    ``None`` return."""
+    client, _ = _client_with_session(_content({"unexpected": "shape"}))
+
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_create(title="t")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_task_create_propagates_lithos_error_envelope() -> None:
+    """``invalid_input`` (or any other domain error) propagates as
+    ``LithosClientError``, lining up with the rest of the surface."""
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "invalid_input", "message": "no title"})
+    )
+
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_create(title="")
+    assert exc.value.code == "invalid_input"

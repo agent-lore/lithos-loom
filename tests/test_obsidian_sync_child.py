@@ -480,8 +480,9 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
 
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "no obsidian-projection, obsidian-status-transition, or "
-        "obsidian-priority-changed subscription"
+        "no obsidian-projection, obsidian-status-transition, "
+        "obsidian-priority-changed, or obsidian-due-date-changed "
+        "subscription configured"
         in m
         and "fs watcher runs but emits nothing" in m
         for m in warn_msgs

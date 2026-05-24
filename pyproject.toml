@@ -55,6 +55,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # default-argument position; B008 ("function call in default argument") is a
 # known false positive for Typer code.
 "src/lithos_loom/main.py" = ["B008"]
+"src/lithos_loom/cli/**.py" = ["B008"]
 "src/lithos_loom/plugins/**/__main__.py" = ["B008"]
 
 [tool.pyright]
