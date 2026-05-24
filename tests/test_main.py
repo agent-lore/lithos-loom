@@ -455,13 +455,17 @@ def test_doctor_skips_vault_probes_when_no_obsidian_sync(tmp_path: Path) -> None
     assert "OK: 0 passed, 0 failed" in result.output
 
 
-def test_doctor_includes_us35_placeholder_line(tmp_path: Path) -> None:
-    """Every invocation prints the US-35 (Lithos connectivity) placeholder
-    so the operator can see what's still coming."""
+def test_doctor_skips_project_probe_when_no_projects_table(
+    tmp_path: Path,
+) -> None:
+    """Slice 4 replaced the US-35 placeholder with the actual project
+    probe. When ``[projects]`` is empty the probe is skipped cleanly
+    (no Lithos round-trip, no failure) — the operator sees a clear
+    ⊘ line rather than a fail-cascade."""
     config = _write_doctor_config(tmp_path, vault_path=None)
     result = runner.invoke(app, ["doctor", "--config", str(config)])
-    assert "lithos_connectivity (US-35)" in result.output
-    assert "not yet implemented" in result.output
+    assert "project probe skipped" in result.output
+    assert "[projects] table is empty" in result.output
 
 
 def test_doctor_fails_with_exit_nonzero_on_missing_config(tmp_path: Path) -> None:

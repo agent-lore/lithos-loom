@@ -79,6 +79,7 @@ def show(
     data = {
         "vault_path": str(obs.vault_path),
         "tasks_file": str(obs.tasks_file),
+        "projects_dir": str(obs.projects_dir),
         "resolved_ttl_days": obs.resolved_ttl_days,
         "include_blocked": obs.include_blocked,
         "exclude_tags": list(obs.exclude_tags),

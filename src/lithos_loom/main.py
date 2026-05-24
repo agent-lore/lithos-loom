@@ -32,7 +32,7 @@ from lithos_loom.config import (
     SubscriptionConfig,
     load_config,
 )
-from lithos_loom.doctor import format_results, run_vault_checks
+from lithos_loom.doctor import format_results, run_project_checks, run_vault_checks
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.lithos_client import LithosClient, Task
 from lithos_loom.subscriptions import (
@@ -123,18 +123,34 @@ def doctor(
     else:
         typer.echo("  ⊘ vault probe skipped: no [obsidian_sync] in config")
 
-    # US-35 placeholder — informational, never a failure. Always
-    # printed so the operator knows what's still coming.
-    typer.echo(
-        "  ⊘ lithos_connectivity (US-35): not yet implemented; see docs/prd/mvp.md"
-    )
+    # Slice 4 US32: TOML project entries must match Lithos. Skip
+    # cleanly when [projects] is empty; otherwise spin up a one-shot
+    # LithosClient. Transport failures surface as a single failing
+    # check rather than crashing the doctor run.
+    project_results: list = []
+    if cfg.projects:
+        project_results = asyncio.run(_run_project_checks_async(cfg))
+        for line in format_results(project_results):
+            typer.echo(line)
+    else:
+        typer.echo("  ⊘ project probe skipped: [projects] table is empty")
 
-    failed = [r for r in vault_results if not r.passed]
-    passed = [r for r in vault_results if r.passed]
+    failed = [r for r in vault_results + project_results if not r.passed]
+    passed = [r for r in vault_results + project_results if r.passed]
     if failed:
         typer.echo(f"FAIL: {len(passed)} passed, {len(failed)} failed")
         raise typer.Exit(1)
     typer.echo(f"OK: {len(passed)} passed, 0 failed")
+
+
+async def _run_project_checks_async(cfg: LoomConfig) -> list:
+    """One-shot ``LithosClient`` wrapper around
+    :func:`run_project_checks`. Mirrors the
+    :func:`_create_task_async` pattern in ``cli/task.py``."""
+    async with LithosClient(
+        cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
+    ) as client:
+        return await run_project_checks(cfg, client)
 
 
 @app.command("validate-config")

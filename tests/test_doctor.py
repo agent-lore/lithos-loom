@@ -1,7 +1,9 @@
-"""Unit tests for the doctor check framework + vault probes (US15)."""
+"""Unit tests for the doctor check framework + vault probes (US15) + project
+probes (Slice 4 US32)."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from lithos_loom.config import (
     LoomConfig,
     ObsidianSyncConfig,
     OrchestratorConfig,
+    ProjectConfig,
 )
 from lithos_loom.doctor import (
     PROBE_FILENAME,
@@ -18,8 +21,11 @@ from lithos_loom.doctor import (
     _check_probe_write_read,
     _check_vault_path_exists,
     format_results,
+    run_project_checks,
     run_vault_checks,
 )
+from lithos_loom.errors import LithosClientError
+from lithos_loom.lithos_client import NoteSummary
 
 
 def _cfg(
@@ -203,3 +209,177 @@ def test_format_results_renders_check_marks_and_messages() -> None:
         "  ✓ alpha: all good",
         "  ✗ beta: oh no",
     ]
+
+
+# ── run_project_checks (Slice 4 US32) ─────────────────────────────────
+
+
+def _summary(slug: str) -> NoteSummary:
+    """Minimal NoteSummary fixture — only ``slug`` is meaningful for
+    the project-check join; other fields exist for ``Note``/``NoteSummary``
+    completeness."""
+    return NoteSummary(
+        id=f"id-{slug}",
+        title=slug,
+        version=1,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="active",
+        note_type="concept",
+        path=f"projects/{slug}/context.md",
+        slug=slug,
+    )
+
+
+def _cfg_with_projects(tmp_path: Path, *slugs: str) -> LoomConfig:
+    return LoomConfig(
+        orchestrator=OrchestratorConfig(
+            agent_id="lithos-orchestrator-test",
+            lithos_url="http://localhost:8765",
+        ),
+        projects={
+            slug: ProjectConfig(name=slug, repo=tmp_path / slug) for slug in slugs
+        },
+    )
+
+
+class _FakeClient:
+    def __init__(
+        self,
+        *,
+        summaries: list[NoteSummary] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._summaries = list(summaries or [])
+        self._error = error
+        self.calls: list[dict] = []
+
+    async def note_list(
+        self,
+        *,
+        path_prefix: str | None = None,
+        tags: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[NoteSummary]:
+        self.calls.append(
+            {"path_prefix": path_prefix, "tags": list(tags or []), "limit": limit}
+        )
+        if self._error is not None:
+            raise self._error
+        return list(self._summaries)
+
+
+async def test_run_project_checks_empty_projects_returns_empty_list(
+    tmp_path: Path,
+) -> None:
+    """No ``[projects]`` table → no Lithos round-trip, no results."""
+    cfg = _cfg_with_projects(tmp_path)
+    client = _FakeClient()
+    results = await run_project_checks(cfg, client)
+    assert results == []
+    assert client.calls == []
+
+
+async def test_run_project_checks_passes_when_slug_exists_in_lithos(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg_with_projects(tmp_path, "lithos-loom")
+    client = _FakeClient(summaries=[_summary("lithos-loom")])
+    results = await run_project_checks(cfg, client)
+    assert len(results) == 1
+    assert results[0].passed
+    assert results[0].name == "toml_project[lithos-loom]"
+
+
+async def test_run_project_checks_fails_when_slug_missing_from_lithos(
+    tmp_path: Path,
+) -> None:
+    """A TOML stanza referencing a slug Lithos doesn't know about is
+    a misconfiguration the operator should fix (either create the
+    Lithos doc or remove the TOML entry)."""
+    cfg = _cfg_with_projects(tmp_path, "ghost-project")
+    client = _FakeClient(summaries=[_summary("real-project")])
+    results = await run_project_checks(cfg, client)
+    assert len(results) == 1
+    assert not results[0].passed
+    assert "ghost-project" in results[0].message
+    assert "either create one in Lithos or remove the TOML stanza" in results[0].message
+
+
+async def test_run_project_checks_filters_query_to_project_context_only(
+    tmp_path: Path,
+) -> None:
+    """The Lithos query MUST be ``path_prefix='projects/'`` AND
+    ``tags=['project-context']`` so we don't accidentally credit a
+    PRD or ADR doc as a project-context match."""
+    cfg = _cfg_with_projects(tmp_path, "alpha")
+    client = _FakeClient(summaries=[])
+    await run_project_checks(cfg, client)
+    [call] = client.calls
+    assert call["path_prefix"] == "projects/"
+    assert call["tags"] == ["project-context"]
+
+
+async def test_run_project_checks_orders_results_alphabetically(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg_with_projects(tmp_path, "zeta", "alpha", "middle")
+    client = _FakeClient(
+        summaries=[
+            _summary("alpha"),
+            _summary("middle"),
+            _summary("zeta"),
+        ]
+    )
+    results = await run_project_checks(cfg, client)
+    names = [r.name for r in results]
+    assert names == [
+        "toml_project[alpha]",
+        "toml_project[middle]",
+        "toml_project[zeta]",
+    ]
+
+
+async def test_run_project_checks_does_not_fail_on_extra_lithos_slugs(
+    tmp_path: Path,
+) -> None:
+    """Lithos-side projects WITHOUT a TOML entry are legitimate
+    (other hosts may have automation; non-coding projects may never
+    need one). The doctor doesn't surface them — that's
+    ``project list``'s job."""
+    cfg = _cfg_with_projects(tmp_path, "alpha")
+    client = _FakeClient(summaries=[_summary("alpha"), _summary("non-toml-project")])
+    results = await run_project_checks(cfg, client)
+    # Only the TOML entry is checked; "non-toml-project" is silent.
+    assert len(results) == 1
+    assert results[0].name == "toml_project[alpha]"
+    assert results[0].passed
+
+
+async def test_run_project_checks_unreachable_lithos_returns_single_failure(
+    tmp_path: Path,
+) -> None:
+    """A transport failure (Lithos down, network drop) returns a
+    single ``lithos_unreachable`` check rather than crashing the
+    doctor run. Operators on flaky networks shouldn't be told their
+    config is broken because Lithos was momentarily unreachable."""
+    cfg = _cfg_with_projects(tmp_path, "alpha")
+    client = _FakeClient(error=OSError("connection refused"))
+    results = await run_project_checks(cfg, client)
+    assert len(results) == 1
+    assert results[0].name == "lithos_unreachable"
+    assert not results[0].passed
+    assert "connection refused" in results[0].message
+
+
+async def test_run_project_checks_lithos_client_error_surfaces_as_unreachable(
+    tmp_path: Path,
+) -> None:
+    """``LithosClientError`` (envelope-level failure from the MCP
+    surface) also surfaces as ``lithos_unreachable`` so the
+    operator-visible diagnostic is the same."""
+    cfg = _cfg_with_projects(tmp_path, "alpha")
+    client = _FakeClient(error=LithosClientError("transport_failure", "down"))
+    results = await run_project_checks(cfg, client)
+    assert len(results) == 1
+    assert results[0].name == "lithos_unreachable"

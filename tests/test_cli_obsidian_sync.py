@@ -51,6 +51,7 @@ def test_obsidian_sync_show_text_format(tmp_path: Path) -> None:
     out = result.stdout
     assert "vault_path:" in out
     assert "tasks_file: _lithos/tasks.md" in out
+    assert "projects_dir: _lithos/projects" in out
     assert "resolved_ttl_days:" in out
     assert "include_blocked:" in out
     assert "exclude_tags:" in out
@@ -59,7 +60,11 @@ def test_obsidian_sync_show_text_format(tmp_path: Path) -> None:
 def test_obsidian_sync_show_json_format(tmp_path: Path) -> None:
     """JSON output: single object, all fields. This is what the macro
     consumes to discover the configured ``tasks_file`` path so the
-    wikilink targets the right file on hosts that customise it."""
+    wikilink targets the right file on hosts that customise it.
+
+    Also exposes ``projects_dir`` (Slice 4) so a future create-project
+    macro can echo a wikilink to the projected context doc at the
+    right vault path."""
     config_path = _write_config(tmp_path)
     result = runner.invoke(
         app,
@@ -68,10 +73,30 @@ def test_obsidian_sync_show_json_format(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     parsed = json.loads(result.stdout)
     assert parsed["tasks_file"] == "_lithos/tasks.md"
+    assert parsed["projects_dir"] == "_lithos/projects"  # default
     assert parsed["resolved_ttl_days"] == 7  # default
     assert parsed["include_blocked"] is True  # default
     assert parsed["exclude_tags"] == []  # default
     assert "vault_path" in parsed
+
+
+def test_obsidian_sync_show_reflects_custom_projects_dir(tmp_path: Path) -> None:
+    """A host that customises ``projects_dir`` gets that value back
+    from ``show`` — Slice 5's create-project macro will read this
+    to insert a wikilink at the right vault path."""
+    config_path = _write_config(
+        tmp_path,
+        obsidian_sync_block=(
+            '[obsidian_sync]\nvault_path = "{vault}"\nprojects_dir = "loom/projects"\n'
+        ),
+    )
+    result = runner.invoke(
+        app,
+        ["obsidian-sync", "show", "--config", str(config_path), "--format", "json"],
+    )
+    assert result.exit_code == 0
+    parsed = json.loads(result.stdout)
+    assert parsed["projects_dir"] == "loom/projects"
 
 
 def test_obsidian_sync_show_reflects_custom_tasks_file(tmp_path: Path) -> None:
