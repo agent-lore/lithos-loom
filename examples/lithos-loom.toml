@@ -147,3 +147,58 @@ tags = ["trigger:story-review-human"]
 # resolved_ttl_days = 7
 # include_blocked = true
 # exclude_tags = []
+# # Slice 4: where the project-context-projection writes per-project
+# # context docs (one file per Lithos doc tagged project-context, at
+# # <vault_path>/<projects_dir>/<slug>/<filename>). Default matches
+# # the operator's typical "_lithos/" namespace for daemon-managed
+# # files. Without project-context-projection wired (below), this is
+# # unused.
+# projects_dir = "_lithos/projects"
+
+# ── Slice 4: project-context one-way pull (Lithos → vault) ─────────────
+#
+# Subscribes to lithos.note.{created,updated,deleted} events from the
+# LithosNoteStream source (spawned only when this subscription is
+# present). Bootstrap re-projects every existing project-context doc
+# on startup; per-doc whole-file hash dedup makes cold restart a
+# near-no-op when nothing changed.
+# [[subscriptions]]
+# name = "project-context"
+# on = [
+#   "lithos.note.created",
+#   "lithos.note.updated",
+#   "lithos.note.deleted",
+# ]
+# action = "project-context-projection"
+# on_persistent_failure = "friction"
+# [subscriptions.retry]
+# attempts = 5
+# backoff = "exponential"
+# initial_delay_seconds = 0.5
+# max_delay_seconds = 30.0
+
+# ── Slice 5: project-context bidirectional sync (vault → Lithos) ───────
+#
+# Subscribes to obsidian.note.modified events from the
+# ObsidianDirWatcher (spawned alongside the file watcher whenever
+# [obsidian_sync] is present). Pushes operator body edits back to
+# Lithos via lithos_write with optimistic locking; frontmatter-only
+# edits are silently absorbed (D28 invariant). Conflicts move the
+# operator's body to <vault>/_lithos/conflicts/ for recovery and pull
+# canonical to the original path.
+#
+# Requires the project-context-projection subscription above — without
+# the projection populating per-doc body-hash baselines, the dir
+# watcher treats every operator edit as first-sight and never emits.
+# The daemon logs a startup warning if note-push is configured
+# without project-context-projection.
+# [[subscriptions]]
+# name = "note-push"
+# on = ["obsidian.note.modified"]
+# action = "note-push"
+# on_persistent_failure = "friction"
+# [subscriptions.retry]
+# attempts = 5
+# backoff = "exponential"
+# initial_delay_seconds = 0.5
+# max_delay_seconds = 30.0

@@ -57,11 +57,15 @@ from lithos_loom.config import LogLevel, LoomConfig, SubscriptionConfig, load_co
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
+from lithos_loom.sources.obsidian_dir_watcher import ObsidianDirWatcher
 from lithos_loom.sources.obsidian_fs_watcher import ObsidianFsWatcher
 from lithos_loom.subscriptions import (
     Handler,
     SubscriptionContext,
     build_runners,
+)
+from lithos_loom.subscriptions._note_push import (
+    make_handler as make_note_push_handler,
 )
 from lithos_loom.subscriptions._obsidian_due_date_changed import (
     handle as handle_obsidian_due_date_changed,
@@ -91,6 +95,7 @@ _CHILD_ACTIONS: frozenset[str] = frozenset(
         "obsidian-priority-changed",
         "obsidian-due-date-changed",
         "project-context-projection",
+        "note-push",
     }
 )
 
@@ -185,6 +190,7 @@ async def _amain(cfg: LoomConfig) -> int:
     priority_changed_specs = by_action.get("obsidian-priority-changed", [])
     due_date_changed_specs = by_action.get("obsidian-due-date-changed", [])
     project_context_projection_specs = by_action.get("project-context-projection", [])
+    note_push_specs = by_action.get("note-push", [])
     projection_spec = projection_specs[0] if projection_specs else None
     status_transition_spec = (
         status_transition_specs[0] if status_transition_specs else None
@@ -200,6 +206,7 @@ async def _amain(cfg: LoomConfig) -> int:
         if project_context_projection_specs
         else None
     )
+    note_push_spec = note_push_specs[0] if note_push_specs else None
 
     # status-transition / priority-changed / due-date-changed all need
     # the projection's ``sync_state`` populated for the fs watcher to
@@ -221,6 +228,21 @@ async def _amain(cfg: LoomConfig) -> int:
                 "baseline the fs watcher reads against.",
                 downstream_spec.name,
             )
+
+    # note-push has the same dependency shape but reads
+    # ``sync_state.note_body_hashes`` populated by the project-context
+    # projection — without that projection running, the dir-watcher
+    # has no body-hash baseline so it silently treats every operator
+    # edit as a first-sight (no emit). Calling it out at startup
+    # mirrors the task-side warning above.
+    if note_push_spec is not None and project_context_projection_spec is None:
+        logger.warning(
+            "obsidian-sync: %r is configured but no project-context-projection "
+            "subscription is present. The handler will load but never fire, "
+            "because the projection is what populates the per-doc body-hash "
+            "baseline the dir watcher reads against.",
+            note_push_spec.name,
+        )
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -249,18 +271,30 @@ async def _amain(cfg: LoomConfig) -> int:
             tasks_path=obs.vault_path / obs.tasks_file,
             sync_state=sync_state,
         )
+        # Slice 5 US33: spawn the dir-watcher alongside the file-watcher.
+        # SAME sync_state instance — the projection populates the per-doc
+        # body-hash baseline that the dir-watcher reads against, and the
+        # note-push handler updates sync_state after a successful push so
+        # the dir-watcher absorbs the post-push frontmatter rewrite as a
+        # self-write. All three see one coordinator state.
+        dir_watcher = ObsidianDirWatcher(
+            bus=bus,
+            projects_root=obs.vault_path / obs.projects_dir,
+            sync_state=sync_state,
+        )
         tasks: list[asyncio.Task[None]] = [
             asyncio.create_task(fs_watcher.run(), name="obsidian-fs-watcher"),
+            asyncio.create_task(dir_watcher.run(), name="obsidian-dir-watcher"),
         ]
 
         if not child_specs:
             logger.warning(
                 "obsidian-sync: no obsidian-projection, "
                 "obsidian-status-transition, obsidian-priority-changed, "
-                "obsidian-due-date-changed, or "
-                "project-context-projection subscription configured; "
-                "fs watcher runs but emits nothing without projection "
-                "state. Add a [[subscriptions]] block with "
+                "obsidian-due-date-changed, "
+                "project-context-projection, or note-push subscription "
+                "configured; both watchers run but emit nothing without "
+                "projection state. Add a [[subscriptions]] block with "
                 "action='obsidian-projection' to populate it."
             )
             try:
@@ -310,6 +344,14 @@ async def _amain(cfg: LoomConfig) -> int:
             )
             my_handlers["project-context-projection"] = (
                 make_project_context_projection_handler(cfg, sync_state=sync_state)
+            )
+        if note_push_spec is not None:
+            logger.info(
+                "obsidian-sync: wiring subscription %r",
+                note_push_spec.name,
+            )
+            my_handlers["note-push"] = make_note_push_handler(
+                cfg, sync_state=sync_state
             )
 
         # LithosClient is needed for both: the projection wires through

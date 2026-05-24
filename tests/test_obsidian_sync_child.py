@@ -487,10 +487,10 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
     warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
         "no obsidian-projection, obsidian-status-transition, "
-        "obsidian-priority-changed, obsidian-due-date-changed, or "
-        "project-context-projection subscription configured"
+        "obsidian-priority-changed, obsidian-due-date-changed, "
+        "project-context-projection, or note-push subscription configured"
         in m
-        and "fs watcher runs but emits nothing" in m
+        and "both watchers run but emit nothing" in m
         for m in warn_msgs
     ), warn_msgs
     # The Lithos source must NOT have been constructed — there is no
@@ -1574,6 +1574,111 @@ async def test_no_note_stream_without_project_context_subscription(
     assert len(stub_io) == 1, (
         f"expected exactly 1 source spawn (event stream only); got {len(stub_io)}"
     )
+
+
+# ── Slice 5: note-push wiring ──────────────────────────────────────────
+
+
+def _note_push_subscription(name: str = "note-push") -> SubscriptionConfig:
+    return SubscriptionConfig(
+        name=name,
+        event_types=("obsidian.note.modified",),
+        action="note-push",
+        retry=RetryPolicy(attempts=1, initial_delay_seconds=0.0, max_delay_seconds=0.0),
+        on_persistent_failure="ignore",
+    )
+
+
+async def test_note_push_subscription_wires_handler(
+    tmp_path: Path,
+    stub_io: list[EventBus],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``note-push`` subscription registers the handler at startup —
+    the daemon log carries a ``wiring subscription 'note-push'`` info
+    line, mirroring the projection's wiring trace."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _projection_subscription(),
+            _project_context_projection_subscription(),
+            _note_push_subscription(),
+        ),
+    )
+
+    sender = asyncio.create_task(_sigterm_soon())
+    try:
+        with caplog.at_level(logging.INFO, logger="lithos_loom.children.obsidian_sync"):
+            rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    finally:
+        await _cancel_and_drain(sender)
+
+    assert rc == 0
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("wiring subscription 'note-push'" in m for m in info_msgs), info_msgs
+
+
+async def test_note_push_without_project_context_projection_warns(
+    tmp_path: Path,
+    stub_io: list[EventBus],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Configuring ``note-push`` without the project-context-projection
+    that populates its body-hash baseline is permitted but inert —
+    the dir-watcher treats every operator edit as first-sight
+    (no emit). Surface that at startup so the operator doesn't wonder
+    why their edits don't push."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _projection_subscription(),  # task projection only
+            _note_push_subscription(),
+        ),
+    )
+
+    sender = asyncio.create_task(_sigterm_soon())
+    try:
+        with caplog.at_level(
+            logging.WARNING, logger="lithos_loom.children.obsidian_sync"
+        ):
+            rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    finally:
+        await _cancel_and_drain(sender)
+
+    assert rc == 0
+    warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "'note-push' is configured" in m
+        and "no project-context-projection subscription is present" in m
+        for m in warn_msgs
+    ), warn_msgs
+
+
+async def test_dir_watcher_spawns_when_obsidian_sync_present(
+    tmp_path: Path,
+    stub_io: list[EventBus],
+) -> None:
+    """The dir-watcher is gated on ``[obsidian_sync]`` alone (same as
+    the file watcher), not on a specific subscription. Confirms the
+    runtime stays valid even when only the task half is wired —
+    operators on a vault host can adopt Slice 5 incrementally without
+    a config error."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(_projection_subscription(),),  # tasks only
+    )
+    projects_root = tmp_path / "vault" / "_lithos" / "projects"
+    # Seed a file so the dir-watcher has something to (silently) walk
+    # without errors; we don't assert on it — the test passes if the
+    # spawn doesn't raise and the SIGTERM cleanly stops both watchers.
+    projects_root.mkdir(parents=True, exist_ok=True)
+
+    sender = asyncio.create_task(_sigterm_soon())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    finally:
+        await _cancel_and_drain(sender)
+    assert rc == 0
 
 
 # ── MCP SDK logger suppression (soak regression 2026-05-24) ────────────

@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +43,8 @@ import typer
 
 from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.errors import LithosClientError, LithosLoomError
-from lithos_loom.lithos_client import LithosClient, NoteSummary
+from lithos_loom.lithos_client import LithosClient, NoteSummary, WriteResult
+from lithos_loom.render_project_context import extract_frontmatter
 
 project_app = typer.Typer(
     name="project",
@@ -66,6 +69,18 @@ _SOURCE_TOML = "toml"
 
 _PROJECTS_PATH_PREFIX = "projects/"
 _PROJECT_CONTEXT_TAG = "project-context"
+# The single file the project-create command writes per project. The
+# Slice 4 ``project list`` canonical-doc picker recognises BOTH
+# ``<slug>/context.md`` and ``<slug>/<slug>-project-context.md`` —
+# the latter is the prod convention. We default-create the latter so
+# `project create` lands the doc at the path ``project list`` will
+# happily pick up as the project's canonical context entry.
+_DEFAULT_DOC_FILENAME_TEMPLATE = "{slug}-project-context.md"
+# Validation: a slug must start AND end with [a-z0-9], with hyphens
+# allowed only in between. Matches Lithos's directory-name convention
+# and avoids edge cases (leading/trailing hyphens that break path
+# parsing, double-hyphens that look like a delete marker).
+_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 
 
 @dataclass(frozen=True)
@@ -299,6 +314,473 @@ def _pick_canonical_summary(slug: str, candidates: list[NoteSummary]) -> NoteSum
         if candidate.path == canonical_path:
             return candidate
     return min(candidates, key=lambda c: c.path)
+
+
+@project_app.command("create")
+def project_create(
+    title: str = typer.Option(
+        ...,
+        "--title",
+        "-t",
+        help="Project title (used for the H1 + frontmatter title).",
+    ),
+    slug: str | None = typer.Option(
+        None,
+        "--slug",
+        "-s",
+        help=(
+            "Project slug (directory name under projects/). "
+            "Defaults to a slugified version of --title."
+        ),
+    ),
+    tags: str | None = typer.Option(
+        None,
+        "--tags",
+        help="Comma-separated extra tags (project-context is added automatically).",
+    ),
+    body: str | None = typer.Option(
+        None,
+        "--body",
+        "-b",
+        help="Inline body text. Mutually exclusive with --body-file.",
+    ),
+    body_file: Path | None = typer.Option(
+        None,
+        "--body-file",
+        help=(
+            "Read body from this file. Useful for multiline content "
+            "without shell-escape pain (the create-project macro uses this)."
+        ),
+    ),
+    output_format: str = typer.Option(
+        _FORMAT_TEXT,
+        "--format",
+        "-f",
+        help=(
+            "Output format: 'text' (just the projected vault path on stdout) "
+            "or 'json' ({id, slug, vault_path}) for scripted consumers."
+        ),
+    ),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit TOML config path (overrides LITHOS_LOOM_CONFIG).",
+    ),
+) -> None:
+    """Create a new Lithos project-context doc.
+
+    Writes ``projects/<slug>/<slug>-project-context.md`` in Lithos. The
+    obsidian-sync child's project-context-projection then projects it
+    into the vault at ``<vault>/<projects_dir>/<slug>/<slug>-project-
+    context.md`` within ~250ms.
+
+    Exit codes:
+    * 0 — success.
+    * 1 — Lithos call / config-load failure / slug collision.
+    * 2 — input validation error (invalid slug, mutually exclusive
+      flags, --body-file unreadable).
+    """
+    try:
+        cfg = load_config(config)
+    except LithosLoomError as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        sys.exit(1)
+
+    if cfg.obsidian_sync is None:
+        typer.echo(
+            "lithos-loom: project create requires [obsidian_sync] in config "
+            "(needed to compute the projected vault path for output)",
+            err=True,
+        )
+        sys.exit(2)
+
+    if body is not None and body_file is not None:
+        typer.echo(
+            "lithos-loom: --body and --body-file are mutually exclusive",
+            err=True,
+        )
+        sys.exit(2)
+
+    body_text = _read_body(body, body_file)
+    if body_text is None:
+        # _read_body already printed the error
+        sys.exit(2)
+
+    resolved_slug = slug if slug is not None else _slugify(title)
+    if not _SLUG_RE.match(resolved_slug):
+        typer.echo(
+            f"lithos-loom: invalid slug {resolved_slug!r}; must match "
+            f"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$ "
+            f"(lowercase alphanumerics + hyphens, must start+end alphanumeric)",
+            err=True,
+        )
+        sys.exit(2)
+
+    tag_list = _project_tags(tags)
+    filename = _DEFAULT_DOC_FILENAME_TEMPLATE.format(slug=resolved_slug)
+
+    try:
+        result = asyncio.run(
+            _create_project_async(
+                cfg=cfg,
+                slug=resolved_slug,
+                title=title,
+                content=body_text,
+                tags=tag_list,
+                filename=filename,
+            )
+        )
+    except _SlugCollisionError as exc:
+        typer.echo(
+            f"lithos-loom: slug {resolved_slug!r} already exists at "
+            f"doc id {exc.existing_id} ({exc.existing_path})",
+            err=True,
+        )
+        sys.exit(1)
+    except OSError as exc:
+        typer.echo(
+            f"lithos-loom: could not reach Lithos at "
+            f"{cfg.orchestrator.lithos_url} ({exc})",
+            err=True,
+        )
+        sys.exit(1)
+    except LithosClientError as exc:
+        typer.echo(f"lithos-loom: note_write failed: {exc}", err=True)
+        sys.exit(1)
+
+    obs = cfg.obsidian_sync
+    vault_path = obs.vault_path / obs.projects_dir / resolved_slug / filename
+
+    if output_format == _FORMAT_JSON:
+        typer.echo(
+            json.dumps(
+                {
+                    "id": result.id,
+                    "slug": resolved_slug,
+                    "vault_path": str(vault_path),
+                }
+            )
+        )
+        return
+    if output_format == _FORMAT_TEXT:
+        # Single-line stdout — macro reads it directly.
+        typer.echo(str(vault_path))
+        return
+    typer.echo(
+        f"lithos-loom: unknown --format {output_format!r} "
+        f"(expected one of: {_FORMAT_TEXT}, {_FORMAT_JSON})",
+        err=True,
+    )
+    sys.exit(2)
+
+
+@dataclass(frozen=True)
+class _CreateProjectResult:
+    """Return value of :func:`_create_project_async`."""
+
+    id: str
+    slug: str
+
+
+class _SlugCollisionError(Exception):
+    """Raised by :func:`_create_project_async` when the pre-flight
+    ``note_list`` finds a doc already at ``projects/<slug>/``."""
+
+    def __init__(self, existing_id: str, existing_path: str) -> None:
+        super().__init__(f"slug already exists at {existing_id} ({existing_path})")
+        self.existing_id = existing_id
+        self.existing_path = existing_path
+
+
+async def _create_project_async(
+    *,
+    cfg: LoomConfig,
+    slug: str,
+    title: str,
+    content: str,
+    tags: list[str],
+    filename: str,
+) -> _CreateProjectResult:
+    """One-shot Lithos write for a new project-context doc.
+
+    Pre-flight check: ``note_list(path_prefix=f"projects/{slug}/")`` —
+    if anything exists we raise :class:`_SlugCollisionError` with the
+    existing doc's id and path so the caller can surface a clear
+    message instead of catching ``slug_collision`` from
+    :meth:`LithosClient.note_write` (which would also work but the
+    pre-flight gives a cheaper, single-source-of-truth check that's
+    easier to test).
+
+    Shared with :func:`project_import` so both entry points share the
+    same validation + write semantics.
+    """
+    async with LithosClient(
+        cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
+    ) as client:
+        existing = await client.note_list(
+            path_prefix=f"{_PROJECTS_PATH_PREFIX}{slug}/", limit=1
+        )
+        if existing:
+            raise _SlugCollisionError(
+                existing_id=existing[0].id,
+                existing_path=existing[0].path,
+            )
+        result: WriteResult = await client.note_write(
+            path=f"{_PROJECTS_PATH_PREFIX}{slug}/{filename}",
+            title=title,
+            content=content,
+            tags=tags,
+            note_type="concept",
+        )
+    if result.status not in ("created", "updated"):
+        raise LithosClientError(
+            code=result.status,
+            message=result.message or f"note_write returned status={result.status!r}",
+        )
+    doc_id = result.note.id if result.note is not None else ""
+    return _CreateProjectResult(id=doc_id, slug=slug)
+
+
+def _slugify(value: str) -> str:
+    """Pure slugify: lowercase + ASCII-fold + non-alphanumeric → hyphen.
+
+    Drops anything that isn't ASCII alphanumeric after NFKD-folding
+    (so ``café`` → ``cafe``, ``Łódź`` → ``odz``), collapses runs of
+    non-alphanumeric into single hyphens, strips leading/trailing
+    hyphens. Empty / all-unrepresentable input returns ``""`` — the
+    caller is responsible for validating against :data:`_SLUG_RE`
+    which rejects empty strings.
+
+    Why ``unicodedata`` rather than a slugify library: standard-library
+    only (we already depend on ``re``), no extra package, and the
+    behaviour is fully tested below. ``slugify`` PyPI packages have
+    locale-dependent transliteration tables that drift between
+    versions; we want byte-stable slugs.
+    """
+    folded = unicodedata.normalize("NFKD", value)
+    ascii_only = folded.encode("ascii", errors="ignore").decode("ascii")
+    lower = ascii_only.lower()
+    hyphenated = re.sub(r"[^a-z0-9]+", "-", lower)
+    return hyphenated.strip("-")
+
+
+def _project_tags(raw: str | None) -> list[str]:
+    """Build the tag list for a new project doc.
+
+    Always includes ``project-context`` (the filter tag the projection
+    uses; without it the doc would never be projected to the vault).
+    Operator-supplied tags are deduplicated against it so an explicit
+    ``--tags project-context,foo`` doesn't produce two copies.
+
+    Returns ``["project-context"]`` for empty / None input.
+    """
+    extra = [part.strip() for part in (raw or "").split(",") if part.strip()]
+    out = list(extra)
+    if _PROJECT_CONTEXT_TAG not in out:
+        out.append(_PROJECT_CONTEXT_TAG)
+    return out
+
+
+def _read_body(body: str | None, body_file: Path | None) -> str | None:
+    """Pick the body content from --body / --body-file / neither.
+
+    Returns the body string, or ``None`` if the operator passed a
+    ``--body-file`` that couldn't be read (caller exits 2). Neither
+    flag → empty string (operator fills in via Obsidian after the
+    projection writes the file).
+    """
+    if body is not None:
+        return body
+    if body_file is not None:
+        try:
+            return body_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            typer.echo(
+                f"lithos-loom: could not read --body-file {body_file}: {exc}",
+                err=True,
+            )
+            return None
+    return ""
+
+
+@project_app.command("import")
+def project_import(
+    source: Path = typer.Argument(
+        ...,
+        help="Path to a local Markdown file to import as a new project doc.",
+    ),
+    slug: str | None = typer.Option(
+        None,
+        "--slug",
+        "-s",
+        help=(
+            "Override slug. Defaults to slugified frontmatter title, or "
+            "slugified file stem if no frontmatter title."
+        ),
+    ),
+    tags: str | None = typer.Option(
+        None,
+        "--tags",
+        help=(
+            "Extra comma-separated tags. Union'd with frontmatter tags "
+            "and project-context (no duplicates)."
+        ),
+    ),
+    output_format: str = typer.Option(
+        _FORMAT_TEXT,
+        "--format",
+        "-f",
+        help="Output format: 'text' (vault path) or 'json' ({id, slug, vault_path}).",
+    ),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit TOML config path (overrides LITHOS_LOOM_CONFIG).",
+    ),
+) -> None:
+    """Import a local Markdown file as a new Lithos project-context doc.
+
+    Reads ``source``, parses optional YAML frontmatter for ``title`` /
+    ``tags``, and calls the same write path as ``project create``.
+
+    Refuses to import files that already carry ``lithos_id`` in
+    frontmatter — that's an already-projected file, and re-importing
+    would create a duplicate doc with a fresh id. Operator should
+    either edit the original in Lithos or `project create` a fresh
+    doc with a different slug.
+
+    Exit codes mirror ``project create`` (0 / 1 / 2).
+    """
+    try:
+        cfg = load_config(config)
+    except LithosLoomError as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        sys.exit(1)
+
+    if cfg.obsidian_sync is None:
+        typer.echo(
+            "lithos-loom: project import requires [obsidian_sync] in config",
+            err=True,
+        )
+        sys.exit(2)
+
+    try:
+        raw = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        typer.echo(f"lithos-loom: could not read {source}: {exc}", err=True)
+        sys.exit(2)
+
+    frontmatter, body = extract_frontmatter(raw)
+    if "lithos_id" in frontmatter:
+        typer.echo(
+            f"lithos-loom: {source} already carries lithos_id "
+            f"{frontmatter['lithos_id']!r} in frontmatter — refusing to "
+            "re-import (would create a duplicate doc). Edit the original "
+            "doc in Lithos, or 'project create' with a different slug.",
+            err=True,
+        )
+        sys.exit(2)
+
+    fm_title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
+    if isinstance(fm_title, str) and fm_title:
+        title = str(fm_title)
+    else:
+        title = _title_from_stem(source.stem)
+    resolved_slug = slug if slug is not None else _slugify(title)
+    if not _SLUG_RE.match(resolved_slug):
+        typer.echo(
+            f"lithos-loom: invalid slug {resolved_slug!r}; must match "
+            f"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+            err=True,
+        )
+        sys.exit(2)
+
+    fm_tags = frontmatter.get("tags") if isinstance(frontmatter, dict) else None
+    fm_tag_list = [str(t) for t in fm_tags] if isinstance(fm_tags, list) else []
+    tag_list = _merge_tags(fm_tag_list, tags)
+    filename = _DEFAULT_DOC_FILENAME_TEMPLATE.format(slug=resolved_slug)
+
+    try:
+        result = asyncio.run(
+            _create_project_async(
+                cfg=cfg,
+                slug=resolved_slug,
+                title=title,
+                content=body,
+                tags=tag_list,
+                filename=filename,
+            )
+        )
+    except _SlugCollisionError as exc:
+        typer.echo(
+            f"lithos-loom: slug {resolved_slug!r} already exists at "
+            f"doc id {exc.existing_id} ({exc.existing_path})",
+            err=True,
+        )
+        sys.exit(1)
+    except OSError as exc:
+        typer.echo(
+            f"lithos-loom: could not reach Lithos at "
+            f"{cfg.orchestrator.lithos_url} ({exc})",
+            err=True,
+        )
+        sys.exit(1)
+    except LithosClientError as exc:
+        typer.echo(f"lithos-loom: note_write failed: {exc}", err=True)
+        sys.exit(1)
+
+    obs = cfg.obsidian_sync
+    vault_path = obs.vault_path / obs.projects_dir / resolved_slug / filename
+
+    if output_format == _FORMAT_JSON:
+        typer.echo(
+            json.dumps(
+                {
+                    "id": result.id,
+                    "slug": resolved_slug,
+                    "vault_path": str(vault_path),
+                }
+            )
+        )
+        return
+    if output_format == _FORMAT_TEXT:
+        typer.echo(str(vault_path))
+        return
+    typer.echo(
+        f"lithos-loom: unknown --format {output_format!r} "
+        f"(expected one of: {_FORMAT_TEXT}, {_FORMAT_JSON})",
+        err=True,
+    )
+    sys.exit(2)
+
+
+def _title_from_stem(stem: str) -> str:
+    """Convert a file stem into a human-readable title.
+
+    ``"my-project"`` → ``"My Project"``; ``"foo_bar"`` → ``"Foo Bar"``.
+    Used when frontmatter has no explicit title.
+    """
+    cleaned = re.sub(r"[-_]+", " ", stem).strip()
+    return cleaned.title()
+
+
+def _merge_tags(frontmatter_tags: list[str], extra_csv: str | None) -> list[str]:
+    """Union frontmatter tags + --tags + project-context, preserving
+    order, no duplicates.
+
+    Order matters because the operator-visible tag order in Lithos
+    reflects this list as-is; preserving frontmatter order first
+    (operator already curated it) then appending CLI-extra tags then
+    the required ``project-context`` is the least-surprising sequence.
+    """
+    extra = [part.strip() for part in (extra_csv or "").split(",") if part.strip()]
+    out: list[str] = []
+    for tag in [*frontmatter_tags, *extra, _PROJECT_CONTEXT_TAG]:
+        if tag and tag not in out:
+            out.append(tag)
+    return out
 
 
 def _print_text_rows(rows: list[_ProjectRow]) -> None:
