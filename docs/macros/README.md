@@ -16,7 +16,7 @@ Creates a new Lithos task from a one-dialog form, then inserts a wikilink at cur
 
 1. Calls `lithos-loom project list --format json` to populate the project dropdown.
 2. Calls `lithos-loom obsidian-sync show --format json` to discover the configured `tasks_file` path (defaults to `_lithos/tasks.md` but is operator-configurable per `[obsidian_sync].tasks_file`).
-3. Opens an Obsidian Modal with all six fields visible at once: project, title (defaulted to your current selection), brief, scheduled date, priority, tags.
+3. Opens an Obsidian Modal with all six fields visible at once: project, title (defaulted to your current selection), brief, scheduled date (native HTML5 date picker — click the calendar icon or type), priority, tags.
 4. On submit, shells out to `lithos-loom task create --no-insert ...` which creates the task in Lithos and returns just the task_id.
 5. Inserts a wikilink at cursor pointing at the configured tasks_file:
    ```

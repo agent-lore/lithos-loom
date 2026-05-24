@@ -92,11 +92,19 @@ class CaptureModal extends Modal {
       ta.onChange((v) => (this.result.brief = v));
     });
 
-    new Setting(contentEl)
-      .setName("Scheduled (YYYY-MM-DD, optional)")
-      .addText((t) => {
-        t.onChange((v) => (this.result.scheduled = v));
-      });
+    new Setting(contentEl).setName("Scheduled (optional)").then((s) => {
+      // Native HTML5 date picker — Obsidian runs on Chromium so
+      // `<input type="date">` gives the same calendar widget as the
+      // Tasks plugin's date control. The browser-emitted value is
+      // already `YYYY-MM-DD`, matching what `lithos-loom task
+      // create --scheduled` expects. Operators can click the icon
+      // for the picker or type digits directly.
+      const input = s.controlEl.createEl("input", { type: "date" });
+      input.addEventListener(
+        "change",
+        () => (this.result.scheduled = input.value)
+      );
+    });
 
     new Setting(contentEl).setName("Priority").addDropdown((dd) => {
       ["", "highest", "high", "medium", "low", "lowest"].forEach((p) =>
