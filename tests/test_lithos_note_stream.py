@@ -332,6 +332,91 @@ async def test_stream_publishes_deleted_event() -> None:
     assert payload["id"] == "doc-1"
 
 
+async def test_stream_drops_deleted_event_missing_path() -> None:
+    """``note.deleted`` requires ``path`` at the source boundary
+    because the projection's delete handler can't recover via
+    ``note_read`` (the note is gone) and would strand the local
+    file. A malformed/partial frame must be logged + dropped, not
+    forwarded onto the bus where the delete becomes non-actionable.
+
+    Created/updated tolerate missing-path because the subscriber
+    can enrich via ``note_read(id=...)``; deleted is asymmetric
+    because there's nothing to enrich. Failing closed at the
+    source is cleaner than failing open downstream.
+    """
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.note.deleted"])
+    client = _FakeClient(responses=[[]])
+    aconnect = _FakeAconnect(
+        [
+            [
+                _FakeSse(
+                    event="note.deleted",
+                    data={"id": "doc-1"},  # no path
+                    id="evt-1",
+                ),
+            ]
+        ]
+    )
+    stream = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    await _run_once(stream)
+
+    assert _drain(listener) == []
+
+
+async def test_stream_drops_deleted_event_with_empty_path() -> None:
+    """Same requirement as the missing-path case — an empty string
+    is just as non-actionable for the delete handler."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.note.deleted"])
+    client = _FakeClient(responses=[[]])
+    aconnect = _FakeAconnect(
+        [
+            [
+                _FakeSse(
+                    event="note.deleted",
+                    data={"id": "doc-1", "path": ""},
+                    id="evt-1",
+                ),
+            ]
+        ]
+    )
+    stream = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    await _run_once(stream)
+
+    assert _drain(listener) == []
+
+
+async def test_stream_publishes_created_without_path() -> None:
+    """Inverse-symmetry check: created/updated DO tolerate a
+    missing path because the subscriber can recover via
+    ``note_read(id=...)``. Pins the asymmetry against accidental
+    over-tightening of the source boundary."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.note.created"])
+    client = _FakeClient(responses=[[]])
+    aconnect = _FakeAconnect(
+        [
+            [
+                _FakeSse(
+                    event="note.created",
+                    data={"id": "doc-1", "title": "x"},  # no path
+                    id="evt-1",
+                ),
+            ]
+        ]
+    )
+    stream = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    await _run_once(stream)
+
+    [(event_type, payload)] = _drain(listener)
+    assert event_type == "lithos.note.created"
+    assert payload["id"] == "doc-1"
+
+
 async def test_stream_subscribes_only_to_note_event_types() -> None:
     """The server-side ``?types=`` filter must list exactly the three
     note event types — anything else would either widen scope (task

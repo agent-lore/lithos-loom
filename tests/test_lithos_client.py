@@ -880,6 +880,48 @@ def test_parse_note_read_raises_on_error_envelope() -> None:
     assert exc.value.code == "doc_not_found"
 
 
+def test_parse_note_read_wraps_malformed_version_as_invalid_response() -> None:
+    """A non-numeric ``metadata.version`` (e.g. server returned a
+    string by mistake) must surface as
+    ``LithosClientError("invalid_response", ...)``, not as a bare
+    ``ValueError`` from ``int(...)``. The parser is the boundary
+    between Lithos's loose JSON shape and the client's typed
+    surface — coercion failures must wear the client's envelope so
+    callers can ``except LithosClientError`` uniformly."""
+    result = _content(
+        {
+            "id": "doc-1",
+            "title": "x",
+            "content": "body",
+            "path": "projects/foo/context.md",
+            "metadata": {"version": "abc"},  # bad type
+        }
+    )
+    with pytest.raises(LithosClientError) as exc:
+        _parse_note_read_response(result)
+    assert exc.value.code == "invalid_response"
+
+
+def test_parse_note_read_wraps_malformed_version_list_as_invalid_response() -> None:
+    """Same as above but with ``version`` as a non-empty list —
+    exercises the ``TypeError`` branch of the catch (lists don't
+    coerce to int). Empty list falls back to 0 via the ``or`` chain,
+    which is the degenerate-but-harmless case; non-empty list is
+    the genuinely malformed shape that must surface clean."""
+    result = _content(
+        {
+            "id": "doc-1",
+            "title": "x",
+            "content": "body",
+            "path": "projects/foo/context.md",
+            "metadata": {"version": [1, 2]},
+        }
+    )
+    with pytest.raises(LithosClientError) as exc:
+        _parse_note_read_response(result)
+    assert exc.value.code == "invalid_response"
+
+
 # Pure helper: note list response parsing.
 
 

@@ -921,7 +921,7 @@ def _parse_note(raw: Any, *, body_required: bool) -> Note:
         if not isinstance(metadata, dict):
             metadata = {}
         tags_raw = metadata.get("tags") or raw.get("tags") or []
-        version = metadata.get("version") or raw.get("version") or 0
+        version_raw = metadata.get("version") or raw.get("version") or 0
         body_raw = raw.get("content")
         if body_required and body_raw is None:
             raise LithosClientError(
@@ -931,7 +931,7 @@ def _parse_note(raw: Any, *, body_required: bool) -> Note:
             id=doc_id,
             title=title,
             body=str(body_raw or ""),
-            version=int(version),
+            version=int(version_raw),
             updated_at=_parse_iso_datetime(
                 metadata.get("updated_at") or raw.get("updated_at")
             ),
@@ -944,6 +944,17 @@ def _parse_note(raw: Any, *, body_required: bool) -> Note:
     except KeyError as exc:
         raise LithosClientError(
             "invalid_response", f"note entry missing required field: {exc.args[0]}"
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        # Catches coercion failures from ``int(version_raw)`` /
+        # ``str(...)`` / ``tuple(str(t) for t in tags_raw)`` when the
+        # server returns malformed field types (``version="abc"``,
+        # ``tags={...}`` instead of a list, etc.). Without this the
+        # raw conversion exception would escape, breaking the
+        # otherwise-consistent "bad server shape → typed
+        # LithosClientError" contract the rest of the client uses.
+        raise LithosClientError(
+            "invalid_response", f"malformed note entry: {exc}"
         ) from exc
 
 

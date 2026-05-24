@@ -292,6 +292,27 @@ class LithosNoteStream:
             )
             return False
 
+        # ``note.deleted`` requires ``path`` at the source boundary.
+        # Created/updated subscribers recover the full doc shape via
+        # ``note_read(id=...)``, but a deleted note is gone by the time
+        # the event arrives — the projection's delete handler needs the
+        # original path to know which ``_lithos/projects/<slug>/...``
+        # file to remove. Without path, the subscriber would either
+        # leak the local file or fall back to a slow scan; failing
+        # closed at the source is cleaner.
+        if event_type == "note.deleted":
+            path = data.get("path")
+            if not isinstance(path, str) or not path:
+                logger.warning(
+                    "LithosNoteStream: note.deleted SSE id=%s note=%s "
+                    "missing 'path'; skipping (delete is non-actionable "
+                    "without the original path — local file would be "
+                    "stranded)",
+                    sse_id,
+                    note_id,
+                )
+                return False
+
         logger.debug(
             "LithosNoteStream: received SSE id=%s type=%s note=%s",
             sse_id,
