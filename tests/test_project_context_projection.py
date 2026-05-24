@@ -231,9 +231,13 @@ async def test_skips_when_note_not_found_in_lithos(tmp_path: Path) -> None:
 # ── Sync-state coordination ────────────────────────────────────────────
 
 
-async def test_records_body_hash_and_version_in_sync_state(tmp_path: Path) -> None:
+async def test_records_file_hash_version_and_path_in_sync_state(
+    tmp_path: Path,
+) -> None:
     """The dir-watcher (Slice 5) reads these to suppress self-writes
-    and to provide ``expected_version`` for optimistic locking."""
+    and to provide ``expected_version`` for optimistic locking. The
+    path map drives stale-file cleanup on path migration / filter
+    rejection."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(version=7)
@@ -242,13 +246,16 @@ async def test_records_body_hash_and_version_in_sync_state(tmp_path: Path) -> No
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
-    assert "doc-1" in sync_state.note_content_hashes
+    assert "doc-1" in sync_state.note_file_hashes
     assert sync_state.note_versions["doc-1"] == 7
+    expected_path = _vault_path(tmp_path, "lithos-loom/context.md")
+    assert sync_state.note_projected_paths["doc-1"] == expected_path
 
 
-async def test_skips_write_when_body_hash_matches_last_write(tmp_path: Path) -> None:
-    """Per-doc dedup. Re-firing ``created`` with the same body is a
-    no-op — important for bootstrap on cold restart (N notes →
+async def test_skips_write_when_file_hash_matches_last_write(tmp_path: Path) -> None:
+    """Per-doc dedup uses the whole-file hash (frontmatter + body).
+    Re-firing ``created`` with the same Note → identical render →
+    skip. Important for bootstrap on cold restart (N notes →
     0 disk writes when nothing has changed)."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
@@ -281,6 +288,318 @@ async def test_body_change_writes_new_content(tmp_path: Path) -> None:
 
     assert "v2" in target.read_text()
     assert "v1" not in target.read_text()
+
+
+# ── Frontmatter-only updates (reviewer-finding regression) ─────────────
+#
+# US30 requires the projected frontmatter to mirror Lithos
+# (``lithos_version``, ``lithos_updated_at``, ``status``, ``tags``).
+# A version-bump-only update — same body, different metadata — MUST
+# still rewrite the file. Previously the projection dedup'd on
+# body-hash (frontmatter excluded), so version bumps were silently
+# skipped, leaving stale frontmatter on disk and breaking Slice 5's
+# optimistic-lock contract.
+
+
+async def test_version_bump_with_unchanged_body_rewrites_file(
+    tmp_path: Path,
+) -> None:
+    """A note whose body is unchanged but whose version bumped
+    (Lithos-side edit that didn't touch content but did touch
+    metadata) MUST trigger a rewrite — the projected
+    ``lithos_version`` frontmatter is what Slice 5's note-push
+    uses for optimistic locking. Without this fix, the projection
+    would keep stale frontmatter on disk forever."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(version=1, body="Stable body.")
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(_event("lithos.note.created"), _ctx(lithos))
+    target = _vault_path(tmp_path, "lithos-loom/context.md")
+    assert "lithos_version: 1" in target.read_text()
+    first_mtime = target.stat().st_mtime_ns
+
+    # Version-only bump; body identical.
+    lithos.note_read.return_value = _note(version=2, body="Stable body.")
+    await handler(_event("lithos.note.updated"), _ctx(lithos))
+
+    text = target.read_text()
+    assert "lithos_version: 2" in text, (
+        f"frontmatter should reflect the new version; got: {text}"
+    )
+    assert "Stable body." in text
+    assert target.stat().st_mtime_ns != first_mtime, (
+        "file should have been rewritten on version bump"
+    )
+    assert sync_state.note_versions["doc-1"] == 2
+
+
+async def test_tag_addition_with_unchanged_body_rewrites_file(
+    tmp_path: Path,
+) -> None:
+    """A note that gains a new tag (e.g. operator adds ``track-2``
+    in Lithos) must surface in the projected frontmatter so vault
+    queries can filter on it. Same reason as version-bump: body-only
+    dedup would silently miss this."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(tags=("project-context",))
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(_event("lithos.note.created"), _ctx(lithos))
+    target = _vault_path(tmp_path, "lithos-loom/context.md")
+
+    lithos.note_read.return_value = _note(tags=("project-context", "track-2"))
+    await handler(_event("lithos.note.updated"), _ctx(lithos))
+
+    text = target.read_text()
+    assert "- project-context" in text
+    assert "- track-2" in text
+
+
+async def test_status_change_with_unchanged_body_rewrites_file(
+    tmp_path: Path,
+) -> None:
+    """A note transitioning ``active`` → ``archived`` in Lithos must
+    have the new status reflected in projected frontmatter — the
+    operator's ``status === 'active'`` Dataview queries depend on
+    it."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    # Status changes are encoded directly in _note via the status arg.
+    lithos.note_read.return_value = Note(
+        id="doc-1",
+        title="Lithos Loom",
+        body="Body content.",
+        version=1,
+        updated_at=datetime(2026, 5, 24, 14, 30, tzinfo=UTC),
+        tags=("project-context",),
+        status="active",
+        note_type="concept",
+        path="projects/lithos-loom/context.md",
+        slug="lithos-loom",
+    )
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(_event("lithos.note.created"), _ctx(lithos))
+    target = _vault_path(tmp_path, "lithos-loom/context.md")
+    assert "status: active" in target.read_text()
+
+    lithos.note_read.return_value = Note(
+        id="doc-1",
+        title="Lithos Loom",
+        body="Body content.",
+        version=2,
+        updated_at=datetime(2026, 5, 24, 14, 30, tzinfo=UTC),
+        tags=("project-context",),
+        status="archived",
+        note_type="concept",
+        path="projects/lithos-loom/context.md",
+        slug="lithos-loom",
+    )
+    await handler(_event("lithos.note.updated"), _ctx(lithos))
+
+    text = target.read_text()
+    assert "status: archived" in text
+
+
+# ── Stale-file cleanup (reviewer-finding regression) ───────────────────
+#
+# Three scenarios where a projected file would leak without explicit
+# cleanup: path migration within ``projects/``, tag removal, and
+# path moved out of ``projects/``. Lithos only emits ``note.deleted``
+# for actual deletes, not for moves/retags — so the projection must
+# detect "doc no longer qualifies" itself and clean up.
+
+
+async def test_path_migration_within_projects_removes_old_file(
+    tmp_path: Path,
+) -> None:
+    """Doc moves from ``projects/old-slug/context.md`` to
+    ``projects/new-slug/context.md``. New file appears at the new
+    location; old file is removed. Otherwise the moved doc would
+    have a stale duplicate at the old path."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(
+        path="projects/old-slug/context.md",
+    )
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(
+        _event("lithos.note.created", path="projects/old-slug/context.md"),
+        _ctx(lithos),
+    )
+    old_path = _vault_path(tmp_path, "old-slug/context.md")
+    assert old_path.exists()
+
+    # Doc moves to a new slug.
+    lithos.note_read.return_value = _note(
+        path="projects/new-slug/context.md",
+    )
+    await handler(
+        _event("lithos.note.updated", path="projects/new-slug/context.md"),
+        _ctx(lithos),
+    )
+
+    new_path = _vault_path(tmp_path, "new-slug/context.md")
+    assert new_path.exists(), "new projection must be written"
+    assert not old_path.exists(), (
+        "old projection must be removed — otherwise the moved doc "
+        "would have a stale duplicate"
+    )
+    assert sync_state.note_projected_paths["doc-1"] == new_path
+
+
+async def test_filename_change_within_same_slug_removes_old_file(
+    tmp_path: Path,
+) -> None:
+    """Same slug, different filename
+    (e.g. ``context.md`` → ``overview.md``). Old file removed."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(
+        path="projects/lithos-loom/context.md",
+    )
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(_event("lithos.note.created"), _ctx(lithos))
+    old_path = _vault_path(tmp_path, "lithos-loom/context.md")
+    assert old_path.exists()
+
+    lithos.note_read.return_value = _note(
+        path="projects/lithos-loom/overview.md",
+    )
+    await handler(
+        _event(
+            "lithos.note.updated",
+            path="projects/lithos-loom/overview.md",
+        ),
+        _ctx(lithos),
+    )
+
+    new_path = _vault_path(tmp_path, "lithos-loom/overview.md")
+    assert new_path.exists()
+    assert not old_path.exists()
+
+
+async def test_tag_removed_cleans_up_stale_projection(tmp_path: Path) -> None:
+    """Operator removes the ``project-context`` tag in Lithos — the
+    doc no longer qualifies for projection. The previously-projected
+    file must be removed, otherwise it sits indefinitely.
+
+    Reviewer-finding: previously the handler just returned on filter
+    rejection, leaving the stale file in place."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(tags=("project-context",))
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(_event("lithos.note.created"), _ctx(lithos))
+    target = _vault_path(tmp_path, "lithos-loom/context.md")
+    assert target.exists()
+
+    # Operator removes the project-context tag.
+    lithos.note_read.return_value = _note(tags=("some-other-tag",))
+    await handler(_event("lithos.note.updated"), _ctx(lithos))
+
+    assert not target.exists(), (
+        "stale projection must be cleaned up when the doc no longer "
+        "qualifies (lost project-context tag)"
+    )
+    assert "doc-1" not in sync_state.note_file_hashes
+    assert "doc-1" not in sync_state.note_projected_paths
+
+
+async def test_doc_moved_out_of_projects_cleans_up_stale_projection(
+    tmp_path: Path,
+) -> None:
+    """The doc moves from ``projects/foo/context.md`` to
+    ``observations/inbox/foo.md`` — fails the path-prefix filter
+    at the boundary. The stale projection must be cleaned up."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(path="projects/foo/context.md")
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(
+        _event("lithos.note.created", path="projects/foo/context.md"),
+        _ctx(lithos),
+    )
+    target = _vault_path(tmp_path, "foo/context.md")
+    assert target.exists()
+
+    # Doc moves out of projects/ — sse_path filter rejects at the
+    # boundary. The handler must still know to clean up the prior
+    # projection at the old location.
+    await handler(
+        _event(
+            "lithos.note.updated",
+            path="observations/inbox/foo.md",
+        ),
+        _ctx(lithos),
+    )
+
+    assert not target.exists()
+    assert "doc-1" not in sync_state.note_projected_paths
+
+
+async def test_fetched_path_out_of_projects_cleans_up_stale_projection(
+    tmp_path: Path,
+) -> None:
+    """The post-fetch authoritative path moves out of ``projects/``
+    (the SSE event path was still under projects/ but Lithos's
+    canonical path has migrated). Same cleanup required."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(path="projects/foo/context.md")
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    await handler(
+        _event("lithos.note.created", path="projects/foo/context.md"),
+        _ctx(lithos),
+    )
+    target = _vault_path(tmp_path, "foo/context.md")
+    assert target.exists()
+
+    # SSE event still says projects/, but the freshly fetched note
+    # has been moved (race between SSE buffer and authoritative read).
+    lithos.note_read.return_value = _note(path="observations/foo.md")
+    await handler(
+        _event("lithos.note.updated", path="projects/foo/context.md"),
+        _ctx(lithos),
+    )
+
+    assert not target.exists()
+    assert "doc-1" not in sync_state.note_projected_paths
+
+
+async def test_cleanup_with_no_prior_projection_is_silent_no_op(
+    tmp_path: Path,
+) -> None:
+    """If a filter-rejected event arrives for a doc we've never
+    projected, there's nothing to clean up — no crash, no
+    file-not-found error."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(tags=("some-other-tag",))
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    # Filter rejects on first event — no prior projection on record.
+    await handler(_event("lithos.note.created"), _ctx(lithos))
+
+    # No exception, no state change.
+    assert sync_state.note_projected_paths == {}
 
 
 # ── Slug + path mapping ────────────────────────────────────────────────
@@ -369,11 +688,11 @@ async def test_deleted_forgets_sync_state(tmp_path: Path) -> None:
     handler = make_handler(cfg, sync_state=sync_state)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
-    assert "doc-1" in sync_state.note_content_hashes
+    assert "doc-1" in sync_state.note_file_hashes
 
     await handler(_event("lithos.note.deleted"), _ctx(lithos))
 
-    assert "doc-1" not in sync_state.note_content_hashes
+    assert "doc-1" not in sync_state.note_file_hashes
     assert "doc-1" not in sync_state.note_versions
 
 
@@ -389,7 +708,7 @@ async def test_deleted_missing_file_is_silent(tmp_path: Path) -> None:
     await handler(_event("lithos.note.deleted"), _ctx(lithos))
 
     # No exception, sync_state still clean.
-    assert sync_state.note_content_hashes == {}
+    assert sync_state.note_file_hashes == {}
 
 
 async def test_deleted_does_not_call_note_read(tmp_path: Path) -> None:
@@ -489,7 +808,7 @@ async def test_write_failure_rolls_back_sync_state(tmp_path: Path) -> None:
             await handler(_event("lithos.note.created"), _ctx(lithos))
 
         # State rolled back — re-firing must retry the write.
-        assert "doc-1" not in sync_state.note_content_hashes
+        assert "doc-1" not in sync_state.note_file_hashes
     finally:
         projects_root.chmod(0o755)  # restore for cleanup
 

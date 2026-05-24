@@ -53,6 +53,7 @@ to per-doc projection.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,7 @@ from typing import Any
 from lithos_loom.bus import Event
 from lithos_loom.config import LoomConfig
 from lithos_loom.lithos_client import Note
-from lithos_loom.render_project_context import compute_body_hash, render_doc
+from lithos_loom.render_project_context import render_doc
 from lithos_loom.subscriptions import Handler, SubscriptionContext
 from lithos_loom.subscriptions._atomic_write import write_file_atomic
 from lithos_loom.sync_state import ProjectionSyncState
@@ -151,11 +152,16 @@ def make_handler(
         # entries that lack a path field — re-fetch and check post-read.
         sse_path = str(event.payload.get("path") or "")
         if sse_path and not sse_path.startswith(_PROJECTS_PATH_PREFIX):
-            ctx.logger.debug(
-                "project-context-projection: skipping note %s — path %r "
-                "outside projects/",
+            # The note may have a stale projection on disk from a
+            # previous lifecycle (e.g. doc moved out of projects/).
+            # Clean it up — otherwise the file lingers indefinitely
+            # because Lithos only emits note.deleted for actual
+            # deletes, not for moves/retags.
+            _cleanup_stale_projection(
                 note_id,
-                sse_path,
+                sync_state,
+                ctx,
+                reason=f"sse path {sse_path!r} outside projects/",
             )
             return
 
@@ -174,27 +180,73 @@ def make_handler(
         # Re-check filters on the FRESHLY fetched note. The SSE event's
         # tag set can be stale (bootstrap paths carry partial metadata,
         # tags may have changed). This is the authoritative filter.
+        # A rejection here also triggers cleanup — the doc previously
+        # qualified (we have a projected file) but no longer does, so
+        # the stale projection must be removed.
         if not note.path.startswith(_PROJECTS_PATH_PREFIX):
-            ctx.logger.debug(
-                "project-context-projection: skipping note %s — fetched "
-                "path %r outside projects/",
+            _cleanup_stale_projection(
                 note_id,
-                note.path,
+                sync_state,
+                ctx,
+                reason=f"fetched path {note.path!r} outside projects/",
             )
             return
         if _PROJECT_CONTEXT_TAG not in note.tags:
-            ctx.logger.debug(
-                "project-context-projection: skipping note %s — fetched "
-                "tags %s do not include %r",
+            _cleanup_stale_projection(
                 note_id,
-                list(note.tags),
-                _PROJECT_CONTEXT_TAG,
+                sync_state,
+                ctx,
+                reason=(
+                    f"fetched tags {list(note.tags)} do not include "
+                    f"{_PROJECT_CONTEXT_TAG!r}"
+                ),
             )
             return
 
         await _project_note(note, projects_root, sync_state, ctx)
 
     return handle
+
+
+def _cleanup_stale_projection(
+    note_id: str,
+    sync_state: ProjectionSyncState,
+    ctx: Any,
+    *,
+    reason: str,
+) -> None:
+    """Remove a previously-projected file when the note no longer
+    qualifies for projection (tag removed, path moved out of
+    ``projects/``, etc.).
+
+    Idempotent — if there's no prior projection on record (the doc
+    never qualified, or was already cleaned up), this is a silent
+    no-op. The ``note_projected_paths`` map is the source of truth
+    for "did we ever write this doc."
+    """
+    prior_path = sync_state.note_projected_paths.get(note_id)
+    if prior_path is None:
+        # No prior projection — the doc was never projected (e.g.
+        # an event for a non-project-context doc that we cheaply
+        # filtered at the boundary). Nothing to clean up.
+        ctx.logger.debug(
+            "project-context-projection: skipping note %s — %s "
+            "(no prior projection to clean up)",
+            note_id,
+            reason,
+        )
+        return
+
+    with contextlib.suppress(FileNotFoundError):
+        prior_path.unlink()
+    sync_state.forget_project_context(doc_id=note_id)
+    ctx.logger.info(
+        "project-context-projection: cleaned up stale projection at %s "
+        "(note %s no longer qualifies: %s)",
+        prior_path,
+        note_id,
+        reason,
+    )
 
 
 async def _project_note(
@@ -205,26 +257,29 @@ async def _project_note(
 ) -> None:
     """Render and write a single project-context note to the vault.
 
-    Per-doc dedup: if the body hash matches the projection's last
-    recorded hash for this doc, skip the write entirely. This is
-    what makes bootstrap a near no-op when nothing has changed since
-    last run (N notes → 0 writes if all match).
+    Per-doc dedup uses a **whole-file hash** (not body-only). US30
+    requires frontmatter fields (``lithos_version``, ``status``,
+    ``tags``, ``lithos_updated_at``) to mirror Lithos, so a
+    version-bump or status-flip with unchanged body MUST still
+    rewrite the file. Hashing only the body would silently skip
+    those updates and leave stale frontmatter on disk — breaking
+    Slice 5's optimistic-lock contract (the projection's frontmatter
+    version is what the dir-watcher reads to provide
+    ``expected_version`` for push-back).
+
+    Path migration: if the note's vault path differs from what we
+    last wrote (e.g. doc moved from ``projects/foo/context.md`` to
+    ``projects/bar/context.md``), the old file is unlinked before
+    the new one is written. Without this, the moved doc would
+    appear at both locations in the vault.
 
     Self-write coordination: record_project_context_write fires
     *before* the atomic rename so a concurrent Slice 5 dir-watcher
-    poll that sees the new file also sees the matching hash entry.
+    poll that sees the new file also sees the matching coordination
+    state.
     """
     rendered = render_doc(note)
-    rendered_body_hash = compute_body_hash(rendered)
-
-    last_hash = sync_state.note_content_hashes.get(note.id)
-    if last_hash == rendered_body_hash:
-        ctx.logger.debug(
-            "project-context-projection: skipping note %s — body hash "
-            "matches last write (no-op)",
-            note.id,
-        )
-        return
+    rendered_file_hash = hashlib.sha256(rendered.encode("utf-8")).digest()
 
     # Lithos path is ``projects/<slug>/<filename>.md``; strip the
     # ``projects/`` prefix so the vault path is
@@ -233,13 +288,44 @@ async def _project_note(
     rel_path = note.path[len(_PROJECTS_PATH_PREFIX) :]
     target = projects_root / rel_path
 
+    # Path migration cleanup: if the prior projection lives at a
+    # different vault path (slug renamed, filename changed), unlink
+    # the old file before writing the new one. Otherwise the moved
+    # doc would have a stale duplicate at the old location.
+    prior_path = sync_state.note_projected_paths.get(note.id)
+    if prior_path is not None and prior_path != target:
+        with contextlib.suppress(FileNotFoundError):
+            prior_path.unlink()
+        ctx.logger.info(
+            "project-context-projection: removed stale projection at %s "
+            "(note %s moved to %s)",
+            prior_path,
+            note.id,
+            target,
+        )
+
+    # Whole-file dedup. Skip the write only when the prior projection
+    # is at the SAME path AND the rendered bytes are identical —
+    # otherwise we either need to write (different content) or have
+    # already migrated paths above and must follow through with the
+    # new write.
+    last_hash = sync_state.note_file_hashes.get(note.id)
+    if last_hash == rendered_file_hash and prior_path == target:
+        ctx.logger.debug(
+            "project-context-projection: skipping note %s — rendered file "
+            "matches last write (no-op)",
+            note.id,
+        )
+        return
+
     # Coordination state BEFORE the write — same ordering invariant as
     # the tasks projection so any concurrent dir-watcher poll that
     # sees new bytes also sees matching state.
     sync_state.record_project_context_write(
         doc_id=note.id,
-        body_hash=rendered_body_hash,
+        file_hash=rendered_file_hash,
         version=note.version,
+        projected_path=target,
     )
     try:
         await write_file_atomic(target, rendered)
