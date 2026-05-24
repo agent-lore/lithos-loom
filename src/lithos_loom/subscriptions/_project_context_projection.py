@@ -62,7 +62,7 @@ from typing import Any
 from lithos_loom.bus import Event
 from lithos_loom.config import LoomConfig
 from lithos_loom.lithos_client import Note
-from lithos_loom.render_project_context import render_doc
+from lithos_loom.render_project_context import compute_body_hash, render_doc
 from lithos_loom.subscriptions import Handler, SubscriptionContext
 from lithos_loom.subscriptions._atomic_write import write_file_atomic
 from lithos_loom.sync_state import ProjectionSyncState
@@ -317,6 +317,12 @@ async def _project_note(
     note_for_render = dataclasses.replace(note, path=lithos_path, slug=slug)
     rendered = render_doc(note_for_render)
     rendered_file_hash = hashlib.sha256(rendered.encode("utf-8")).digest()
+    # Body-only hash is what Slice 5's dir-watcher reads as the
+    # baseline for its body-only diff. Recording it here means the
+    # watcher can suppress its own self-write detection on either
+    # body change AND see that frontmatter-only operator edits are
+    # the only thing that should be silently absorbed.
+    rendered_body_hash = compute_body_hash(rendered)
 
     # Lithos path is ``projects/<slug>/<filename>.md``; strip the
     # ``projects/`` prefix so the vault path is
@@ -330,6 +336,7 @@ async def _project_note(
     # prior_path memory is what lets a retried migration still
     # know about the orphan old file).
     prior_hash = sync_state.note_file_hashes.get(note.id)
+    prior_body_hash = sync_state.note_body_hashes.get(note.id)
     prior_version = sync_state.note_versions.get(note.id)
     prior_path = sync_state.note_projected_paths.get(note.id)
 
@@ -348,6 +355,7 @@ async def _project_note(
     sync_state.record_project_context_write(
         doc_id=note.id,
         file_hash=rendered_file_hash,
+        body_hash=rendered_body_hash,
         version=note.version,
         projected_path=target,
     )
@@ -362,8 +370,13 @@ async def _project_note(
             sync_state.forget_project_context(doc_id=note.id)
         else:
             sync_state.note_file_hashes[note.id] = prior_hash
-            # prior_version is paired with prior_hash — both populated or
-            # both absent — so the int cast is safe here.
+            # prior_body_hash + prior_version + prior_path are populated
+            # together with prior_hash — all four are written by
+            # ``record_project_context_write`` in one shot — so the
+            # paired asserts express the invariant rather than guarding
+            # against drift in this method.
+            assert prior_body_hash is not None
+            sync_state.note_body_hashes[note.id] = prior_body_hash
             assert prior_version is not None
             sync_state.note_versions[note.id] = prior_version
             assert prior_path is not None
