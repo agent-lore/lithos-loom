@@ -269,14 +269,21 @@ async def _project_note(
 
     Path migration: if the note's vault path differs from what we
     last wrote (e.g. doc moved from ``projects/foo/context.md`` to
-    ``projects/bar/context.md``), the old file is unlinked before
-    the new one is written. Without this, the moved doc would
-    appear at both locations in the vault.
+    ``projects/bar/context.md``), the OLD file is unlinked only
+    AFTER the new write succeeds. Earlier versions unlinked first
+    and on a write failure the doc disappeared from the vault
+    entirely (reviewer-finding regression on PR #37); the post-
+    success ordering keeps the old file as a fallback when the
+    new write fails.
 
-    Self-write coordination: record_project_context_write fires
+    Self-write coordination: ``record_project_context_write`` fires
     *before* the atomic rename so a concurrent Slice 5 dir-watcher
     poll that sees the new file also sees the matching coordination
-    state.
+    state. On write failure, sync_state is rolled back to its
+    *prior* state (not cleared) — preserving the prior_path memory
+    so the next event can retry the migration with the same
+    cleanup semantics rather than treating it as a fresh
+    projection that wouldn't know about the orphan old file.
     """
     rendered = render_doc(note)
     rendered_file_hash = hashlib.sha256(rendered.encode("utf-8")).digest()
@@ -288,11 +295,55 @@ async def _project_note(
     rel_path = note.path[len(_PROJECTS_PATH_PREFIX) :]
     target = projects_root / rel_path
 
-    # Path migration cleanup: if the prior projection lives at a
-    # different vault path (slug renamed, filename changed), unlink
-    # the old file before writing the new one. Otherwise the moved
-    # doc would have a stale duplicate at the old location.
+    # Snapshot prior state so we can roll back on write failure to
+    # the exact pre-event values (NOT to empty — preserving the
+    # prior_path memory is what lets a retried migration still
+    # know about the orphan old file).
+    prior_hash = sync_state.note_file_hashes.get(note.id)
+    prior_version = sync_state.note_versions.get(note.id)
     prior_path = sync_state.note_projected_paths.get(note.id)
+
+    # Whole-file dedup. Skip only when the prior projection is at
+    # the SAME path AND the rendered bytes are identical.
+    if prior_hash == rendered_file_hash and prior_path == target:
+        ctx.logger.debug(
+            "project-context-projection: skipping note %s — rendered file "
+            "matches last write (no-op)",
+            note.id,
+        )
+        return
+
+    # Coordination state BEFORE the write — any concurrent dir-watcher
+    # poll that sees the new file's bytes must also see matching state.
+    sync_state.record_project_context_write(
+        doc_id=note.id,
+        file_hash=rendered_file_hash,
+        version=note.version,
+        projected_path=target,
+    )
+    try:
+        await write_file_atomic(target, rendered)
+    except Exception:
+        # Roll back to the PRIOR state (not empty). If there was no
+        # prior projection, fully forget. Otherwise restore each
+        # field so the next event sees the old projection and can
+        # retry the migration / write cleanly.
+        if prior_hash is None:
+            sync_state.forget_project_context(doc_id=note.id)
+        else:
+            sync_state.note_file_hashes[note.id] = prior_hash
+            # prior_version is paired with prior_hash — both populated or
+            # both absent — so the int cast is safe here.
+            assert prior_version is not None
+            sync_state.note_versions[note.id] = prior_version
+            assert prior_path is not None
+            sync_state.note_projected_paths[note.id] = prior_path
+        raise
+
+    # Write succeeded. Now safe to remove the old file if this was
+    # a path migration. Doing this AFTER the new write means a
+    # transient failure leaves the vault with the OLD file intact
+    # rather than empty until the next retry.
     if prior_path is not None and prior_path != target:
         with contextlib.suppress(FileNotFoundError):
             prior_path.unlink()
@@ -303,37 +354,6 @@ async def _project_note(
             note.id,
             target,
         )
-
-    # Whole-file dedup. Skip the write only when the prior projection
-    # is at the SAME path AND the rendered bytes are identical —
-    # otherwise we either need to write (different content) or have
-    # already migrated paths above and must follow through with the
-    # new write.
-    last_hash = sync_state.note_file_hashes.get(note.id)
-    if last_hash == rendered_file_hash and prior_path == target:
-        ctx.logger.debug(
-            "project-context-projection: skipping note %s — rendered file "
-            "matches last write (no-op)",
-            note.id,
-        )
-        return
-
-    # Coordination state BEFORE the write — same ordering invariant as
-    # the tasks projection so any concurrent dir-watcher poll that
-    # sees new bytes also sees matching state.
-    sync_state.record_project_context_write(
-        doc_id=note.id,
-        file_hash=rendered_file_hash,
-        version=note.version,
-        projected_path=target,
-    )
-    try:
-        await write_file_atomic(target, rendered)
-    except Exception:
-        # Roll back coordination state on write failure so the next
-        # event retries cleanly rather than thinking the file matched.
-        sync_state.forget_project_context(doc_id=note.id)
-        raise
 
     ctx.logger.info(
         "project-context-projection: wrote %s (slug=%s, version=%d)",

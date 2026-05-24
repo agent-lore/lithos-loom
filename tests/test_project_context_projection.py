@@ -786,9 +786,10 @@ async def test_malformed_payload_warns_and_returns(
 
 
 async def test_write_failure_rolls_back_sync_state(tmp_path: Path) -> None:
-    """If the atomic write raises, the per-doc hash must NOT be
-    recorded — otherwise the next event would see "matches last
-    write" and skip, leaving the disk content stale forever."""
+    """If the atomic write raises on a CREATE (no prior projection),
+    the per-doc hash must NOT be recorded — otherwise the next event
+    would see "matches last write" and skip, leaving the disk
+    content stale forever."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note()
@@ -811,6 +812,124 @@ async def test_write_failure_rolls_back_sync_state(tmp_path: Path) -> None:
         assert "doc-1" not in sync_state.note_file_hashes
     finally:
         projects_root.chmod(0o755)  # restore for cleanup
+
+
+async def test_migration_write_failure_preserves_old_file(
+    tmp_path: Path,
+) -> None:
+    """Reviewer-finding regression: when a path migration's new
+    write fails, the OLD file must remain on disk (not be unlinked
+    pre-write). Earlier ordering unlinked the prior path first, so
+    a transient write failure would leave the vault with neither
+    the old nor new file until some later event re-projects.
+
+    Also pins the sync_state rollback contract: prior state is
+    restored (not cleared), so the next event still knows about
+    the old projection and can retry the migration."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(path="projects/old/context.md")
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    # First write succeeds — projection at projects/old/context.md.
+    await handler(
+        _event("lithos.note.created", path="projects/old/context.md"),
+        _ctx(lithos),
+    )
+    old_path = _vault_path(tmp_path, "old/context.md")
+    assert old_path.exists()
+    assert sync_state.note_projected_paths["doc-1"] == old_path
+    prior_hash = sync_state.note_file_hashes["doc-1"]
+    prior_version = sync_state.note_versions["doc-1"]
+
+    # Now move the doc — but make the new target's parent unwritable
+    # so write_file_atomic raises. ``projects_root`` (the new slug's
+    # parent's parent) is writable, but the new slug dir doesn't
+    # exist yet — chmod the projects_root so mkdir(parents=True) for
+    # the new slug fails.
+    projects_root = tmp_path / "vault" / "_lithos" / "projects"
+    projects_root.chmod(0o500)  # read+exec only, no write
+
+    lithos.note_read.return_value = _note(path="projects/new/context.md")
+    try:
+        with pytest.raises(Exception):  # noqa: B017
+            await handler(
+                _event(
+                    "lithos.note.updated",
+                    path="projects/new/context.md",
+                ),
+                _ctx(lithos),
+            )
+
+        # CRITICAL: old file must still exist. Earlier ordering would
+        # have deleted it before the failed write, leaving the vault
+        # with no projection at all.
+        assert old_path.exists(), (
+            "old projection must remain on disk after a failed "
+            "migration — otherwise the doc vanishes from the vault"
+        )
+
+        # sync_state restored to prior values (not cleared), so the
+        # next event still knows about the old path and can retry
+        # the migration cleanly.
+        assert sync_state.note_projected_paths["doc-1"] == old_path
+        assert sync_state.note_file_hashes["doc-1"] == prior_hash
+        assert sync_state.note_versions["doc-1"] == prior_version
+    finally:
+        projects_root.chmod(0o755)
+
+
+async def test_migration_retried_after_failure_succeeds(
+    tmp_path: Path,
+) -> None:
+    """Sequel to the failure test: after a transient migration
+    failure, the next event with the new path must successfully
+    write the new file AND clean up the old one. Without the
+    prior-state rollback, sync_state would have lost the old path
+    knowledge and the old file would linger as an orphan."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    lithos.note_read.return_value = _note(path="projects/old/context.md")
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    # Initial projection.
+    await handler(
+        _event("lithos.note.created", path="projects/old/context.md"),
+        _ctx(lithos),
+    )
+    old_path = _vault_path(tmp_path, "old/context.md")
+
+    # Force a migration failure.
+    projects_root = tmp_path / "vault" / "_lithos" / "projects"
+    projects_root.chmod(0o500)
+    lithos.note_read.return_value = _note(path="projects/new/context.md")
+    try:
+        with pytest.raises(Exception):  # noqa: B017
+            await handler(
+                _event(
+                    "lithos.note.updated",
+                    path="projects/new/context.md",
+                ),
+                _ctx(lithos),
+            )
+    finally:
+        projects_root.chmod(0o755)
+
+    # Retry the migration — should now succeed cleanly.
+    await handler(
+        _event("lithos.note.updated", path="projects/new/context.md"),
+        _ctx(lithos),
+    )
+
+    new_path = _vault_path(tmp_path, "new/context.md")
+    assert new_path.exists(), "retried migration must write the new file"
+    assert not old_path.exists(), (
+        "retried migration must clean up the old file — the prior-"
+        "state rollback is what makes this work"
+    )
+    assert sync_state.note_projected_paths["doc-1"] == new_path
 
 
 # ── make_handler defensive checks ──────────────────────────────────────
