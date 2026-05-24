@@ -57,11 +57,15 @@ from lithos_loom.config import LogLevel, LoomConfig, SubscriptionConfig, load_co
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
+from lithos_loom.sources.obsidian_dir_watcher import ObsidianDirWatcher
 from lithos_loom.sources.obsidian_fs_watcher import ObsidianFsWatcher
 from lithos_loom.subscriptions import (
     Handler,
     SubscriptionContext,
     build_runners,
+)
+from lithos_loom.subscriptions._note_push import (
+    make_handler as make_note_push_handler,
 )
 from lithos_loom.subscriptions._obsidian_due_date_changed import (
     handle as handle_obsidian_due_date_changed,
@@ -91,6 +95,7 @@ _CHILD_ACTIONS: frozenset[str] = frozenset(
         "obsidian-priority-changed",
         "obsidian-due-date-changed",
         "project-context-projection",
+        "note-push",
     }
 )
 
@@ -185,6 +190,7 @@ async def _amain(cfg: LoomConfig) -> int:
     priority_changed_specs = by_action.get("obsidian-priority-changed", [])
     due_date_changed_specs = by_action.get("obsidian-due-date-changed", [])
     project_context_projection_specs = by_action.get("project-context-projection", [])
+    note_push_specs = by_action.get("note-push", [])
     projection_spec = projection_specs[0] if projection_specs else None
     status_transition_spec = (
         status_transition_specs[0] if status_transition_specs else None
@@ -200,6 +206,7 @@ async def _amain(cfg: LoomConfig) -> int:
         if project_context_projection_specs
         else None
     )
+    note_push_spec = note_push_specs[0] if note_push_specs else None
 
     # status-transition / priority-changed / due-date-changed all need
     # the projection's ``sync_state`` populated for the fs watcher to
@@ -221,6 +228,41 @@ async def _amain(cfg: LoomConfig) -> int:
                 "baseline the fs watcher reads against.",
                 downstream_spec.name,
             )
+
+    # note-push has a softer dependency than the task-side handlers:
+    # without project-context-projection, the dir-watcher still
+    # emits events for pre-existing on-disk docs once they've been
+    # seeded on first-sight (subsequent body edits trip the
+    # observed-hash diff), but two important properties degrade:
+    #
+    # 1. **No baseline pull.** The daemon won't project Lithos-side
+    #    updates to local files, so canonical changes that happen
+    #    via MCP / other agents silently diverge from disk. The next
+    #    operator edit pushes their stale local body OVER those
+    #    upstream changes (no conflict detected because the local
+    #    ``lithos_version`` in frontmatter is still what Lithos has
+    #    on its side as of when this file was last projected).
+    #
+    # 2. **First-sight skip.** A doc that's never been on disk
+    #    before — e.g. a project created upstream via MCP — won't
+    #    materialise locally without project-context-projection, so
+    #    the operator can't push to it from Obsidian either.
+    #
+    # Both degraded modes are real failure modes for the operator;
+    # the previous warning text claimed the handler "will never fire"
+    # which is materially wrong (reviewer finding on PR #46). Reword
+    # to describe the actual risk.
+    if note_push_spec is not None and project_context_projection_spec is None:
+        logger.warning(
+            "obsidian-sync: %r is configured without project-context-projection. "
+            "The dir watcher will still detect edits to pre-existing projected "
+            "files on disk and push them upstream, BUT the daemon will not "
+            "pull canonical Lithos-side changes back to your vault. Operator "
+            "edits can overwrite upstream changes without surfacing a "
+            "conflict. Enable project-context-projection for the full "
+            "bidirectional contract.",
+            note_push_spec.name,
+        )
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -249,18 +291,30 @@ async def _amain(cfg: LoomConfig) -> int:
             tasks_path=obs.vault_path / obs.tasks_file,
             sync_state=sync_state,
         )
+        # Slice 5 US33: spawn the dir-watcher alongside the file-watcher.
+        # SAME sync_state instance — the projection populates the per-doc
+        # body-hash baseline that the dir-watcher reads against, and the
+        # note-push handler updates sync_state after a successful push so
+        # the dir-watcher absorbs the post-push frontmatter rewrite as a
+        # self-write. All three see one coordinator state.
+        dir_watcher = ObsidianDirWatcher(
+            bus=bus,
+            projects_root=obs.vault_path / obs.projects_dir,
+            sync_state=sync_state,
+        )
         tasks: list[asyncio.Task[None]] = [
             asyncio.create_task(fs_watcher.run(), name="obsidian-fs-watcher"),
+            asyncio.create_task(dir_watcher.run(), name="obsidian-dir-watcher"),
         ]
 
         if not child_specs:
             logger.warning(
                 "obsidian-sync: no obsidian-projection, "
                 "obsidian-status-transition, obsidian-priority-changed, "
-                "obsidian-due-date-changed, or "
-                "project-context-projection subscription configured; "
-                "fs watcher runs but emits nothing without projection "
-                "state. Add a [[subscriptions]] block with "
+                "obsidian-due-date-changed, "
+                "project-context-projection, or note-push subscription "
+                "configured; both watchers run but emit nothing without "
+                "projection state. Add a [[subscriptions]] block with "
                 "action='obsidian-projection' to populate it."
             )
             try:
@@ -310,6 +364,14 @@ async def _amain(cfg: LoomConfig) -> int:
             )
             my_handlers["project-context-projection"] = (
                 make_project_context_projection_handler(cfg, sync_state=sync_state)
+            )
+        if note_push_spec is not None:
+            logger.info(
+                "obsidian-sync: wiring subscription %r",
+                note_push_spec.name,
+            )
+            my_handlers["note-push"] = make_note_push_handler(
+                cfg, sync_state=sync_state
             )
 
         # LithosClient is needed for both: the projection wires through

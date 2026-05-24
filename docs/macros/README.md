@@ -5,6 +5,7 @@ User-installed Templater macros that complete the Obsidian-side capture flows fo
 | Macro | Slice | Purpose |
 |-------|-------|---------|
 | [`capture-task.md`](capture-task.md) | Slice 3 (US24-27) | Single-modal form to create a new Lithos task from inside Obsidian. Inserts a wikilink to the projected line at cursor. |
+| [`create-project.md`](create-project.md) | Slice 5 (US36) | Single-modal form to create a new Lithos project-context doc. Inserts a wikilink to the projected vault file at cursor. |
 
 ---
 
@@ -112,3 +113,79 @@ echo "created $task_id"
 ```
 
 `--target-file` and `--no-insert` are mutually exclusive — passing both is a usage error (exit 2).
+
+---
+
+# `create-project.md` — create Lithos project macro
+
+Creates a new Lithos project-context doc from a one-dialog form, then inserts a wikilink at cursor pointing at the projected vault file.
+
+## What it does
+
+1. Calls `lithos-loom obsidian-sync show --format json` to discover the vault root + `projects_dir` so the inserted wikilink resolves to the projected file the daemon will write.
+2. Opens an Obsidian Modal with title + slug + tags + description. The slug field auto-derives from the title (lowercased, alphanumeric-only, hyphens for separators) and re-derives on every title keystroke until the operator edits the slug manually — at which point auto-tracking stops.
+3. Validates the slug client-side against `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$` for instant feedback before any shell-out.
+4. Writes the description to a temp file (so multiline content doesn't go through the shell) and shells out to `lithos-loom project create --format json --body-file <tmpfile> ...`.
+5. Parses the JSON `{id, slug, vault_path}` response and inserts a wikilink at cursor pointing at the projected vault file:
+   ```
+   [[_lithos/projects/<slug>/<slug>-project-context|<title>]]
+   ```
+6. The daemon's `project-context-projection` subscription receives the `note.created` event from Lithos and writes the canonical Markdown into the same vault path independently — within ~250ms.
+
+## Why a wikilink, not the doc content itself?
+
+Same logic as `capture-task` — the daemon's projection is the single source of truth for the vault file. Inserting the content at cursor would create a stale duplicate that doesn't track Lithos updates. The wikilink gives a clickable navigation handle to the canonical doc; clicking opens the projected file, which is editable in Obsidian and pushed back via Slice 5's note-push handler.
+
+## Prerequisites
+
+- The `lithos-loom` daemon is running with both `obsidian-projection` AND `project-context-projection` subscriptions configured. Without the latter, the new doc is created in Lithos but never projected into the vault — the inserted wikilink dangles.
+- The `lithos-loom` binary is on **Obsidian's** launcher PATH (same gotcha as `capture-task`).
+- The [Templater](https://github.com/SilentVoid13/Templater) community plugin is installed and enabled.
+
+## Install
+
+Same shape as `capture-task`:
+
+1. Copy `create-project.md` into your Templater Template Folder:
+   ```bash
+   cp /path/to/lithos-loom/docs/macros/create-project.md <vault>/_meta/templates/
+   ```
+2. Register the template with Templater (`Settings → Templater → Template Hotkeys`).
+3. Bind your hotkey via `Settings → Hotkeys` to **`Templater: Insert create-project`** (not the `Create` variant).
+
+## Behaviour notes
+
+- **Selection-as-title**: highlighting text before invoking the macro pre-fills the title.
+- **Slug auto-tracking**: the slug field updates as you type the title — until you click into the slug field and edit it. After that, the slug stays put.
+- **Title is required**; slug must match the regex above (the modal won't submit otherwise).
+- **`project-context` tag** is added automatically by the CLI; operator-supplied tags are merged with no duplicates.
+- **Errors** (slug collision, invalid input, network failure) surface in a 10-second Notice popup with the stderr message. The macro returns without inserting anything; the tmpfile is cleaned up in either case.
+
+## CLI flag reference
+
+The macro uses `--format json --body-file <tmpfile>` exclusively. For non-macro flows:
+
+```bash
+# Simple case: title only (body left empty, fill in via Obsidian).
+lithos-loom project create --title "My New Project"
+
+# With body inline:
+lithos-loom project create --title "My Project" --body "One-line description"
+
+# With body from file:
+lithos-loom project create --title "My Project" --body-file ./README.md
+
+# JSON output (for scripted callers):
+lithos-loom project create --title "..." --format json
+# → {"id": "...", "slug": "...", "vault_path": "..."}
+```
+
+## `project import` (companion CLI, not exposed as a macro)
+
+For importing an existing local Markdown file:
+
+```bash
+lithos-loom project import /path/to/existing.md
+```
+
+Reads optional YAML frontmatter for `title` / `tags`; refuses to import files that already have a `lithos_id` in frontmatter (they're already projected — would create a duplicate). Same `--slug` / `--tags` / `--format` flags as `project create`.

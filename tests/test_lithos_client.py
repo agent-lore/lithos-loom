@@ -1053,6 +1053,26 @@ def test_parse_write_result_rejects_unknown_status() -> None:
         _parse_write_result(payload)
 
 
+def test_parse_write_result_top_level_shape_returns_none_note() -> None:
+    """Real Lithos returns ``{status, id, path, version, warnings}`` at
+    the top level — NO ``document`` key. ``_parse_write_result`` is
+    pure (only parses what's in the payload), so it returns
+    ``note=None`` for this shape; ``note_write`` is what enriches the
+    result with request-side fields (title/tags/etc) to construct a
+    complete Note. This test pins the parser's contract — anyone
+    refactoring it must keep the parser pure."""
+    payload = {
+        "status": "created",
+        "id": "doc-real-server-id",
+        "path": "projects/foo/foo-project-context.md",
+        "version": 1,
+        "warnings": [],
+    }
+    wr = _parse_write_result(payload)
+    assert wr.status == "created"
+    assert wr.note is None  # parser doesn't see request inputs, can't build a full Note
+
+
 # Async method tests.
 
 
@@ -1097,6 +1117,81 @@ async def test_note_read_propagates_other_errors() -> None:
     with pytest.raises(LithosClientError) as exc:
         await client.note_read(id="doc-1")
     assert exc.value.code == "transport_failure"
+
+
+async def test_note_write_enriches_result_note_from_top_level_response() -> None:
+    """Real Lithos returns ``{status, id, path, version, warnings}`` at
+    the top level — no ``document`` field. ``note_write`` stitches the
+    response's id/path/version with the request's title/tags/etc to
+    construct a complete Note, so ``WriteResult.note`` is populated
+    against a real server (PR #46 reviewer finding regression).
+
+    This test pins the production behaviour end-to-end through the
+    MCP session stub. Without the fix-up in ``note_write``,
+    ``result.note`` would be None and the project-create CLI's
+    ``--format json`` would emit ``"id": ""``."""
+    client, session = _client_with_session(
+        _content(
+            {
+                "status": "created",
+                "id": "doc-real-canonical",
+                "path": "projects/loom/loom-project-context.md",
+                "version": 1,
+                "warnings": [],
+            }
+        )
+    )
+    wr = await client.note_write(
+        title="Loom",
+        content="body content",
+        tags=["project-context", "track-1"],
+        path="projects/loom/loom-project-context.md",
+        status="active",
+    )
+    assert wr.status == "created"
+    assert wr.note is not None
+    # Response-side fields.
+    assert wr.note.id == "doc-real-canonical"
+    assert wr.note.path == "projects/loom/loom-project-context.md"
+    assert wr.note.version == 1
+    assert wr.note.slug == "loom"  # derived from path
+    # Request-side fields stitched in.
+    assert wr.note.title == "Loom"
+    assert wr.note.body == "body content"
+    assert wr.note.tags == ("project-context", "track-1")
+    assert wr.note.status == "active"
+    assert wr.note.note_type == "concept"
+    # updated_at NOT populated — response doesn't carry it.
+    # Callers that need byte-stable lithos_updated_at must re-fetch.
+    assert wr.note.updated_at is None
+
+
+async def test_note_write_top_level_updated_response_also_enriches() -> None:
+    """Same stitching for ``updated`` status."""
+    client, _ = _client_with_session(
+        _content(
+            {
+                "status": "updated",
+                "id": "doc-1",
+                "path": "projects/x/x-project-context.md",
+                "version": 13,
+                "warnings": [],
+            }
+        )
+    )
+    wr = await client.note_write(
+        id="doc-1",
+        title="X",
+        content="new body",
+        tags=["project-context"],
+        expected_version=12,
+    )
+    assert wr.status == "updated"
+    assert wr.note is not None
+    assert wr.note.id == "doc-1"
+    assert wr.note.version == 13
+    assert wr.note.title == "X"
+    assert wr.note.body == "new body"
 
 
 async def test_note_write_create_passes_arguments() -> None:
