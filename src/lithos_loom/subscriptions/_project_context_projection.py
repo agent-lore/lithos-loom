@@ -53,6 +53,7 @@ to per-doc projection.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import logging
 from pathlib import Path
@@ -148,10 +149,24 @@ def make_handler(
 
         # Path-prefix filter at the boundary (D26). The source publishes
         # all note events; we only project docs under ``projects/``.
-        # Source-emitted ``path`` may be empty for bootstrap-via-note_list
-        # entries that lack a path field — re-fetch and check post-read.
+        # We MUST get path from the SSE event because ``lithos_read``
+        # does not return ``path`` in its response (it lives in
+        # ``metadata.namespace`` as the directory only, no filename).
+        # Both event paths that reach us — bootstrap (from
+        # ``note_list``) and live (from ``intake.write``) — populate
+        # ``path`` in the payload. File-watcher-emitted events do not
+        # carry ``id`` so the source drops them before they get here,
+        # which means we'll never see a payload with id-but-no-path.
         sse_path = str(event.payload.get("path") or "")
-        if sse_path and not sse_path.startswith(_PROJECTS_PATH_PREFIX):
+        if not sse_path:
+            ctx.logger.warning(
+                "project-context-projection: payload for %s id=%s has no "
+                "'path' (cannot compute vault target); skipping",
+                event.type,
+                note_id,
+            )
+            return
+        if not sse_path.startswith(_PROJECTS_PATH_PREFIX):
             # The note may have a stale projection on disk from a
             # previous lifecycle (e.g. doc moved out of projects/).
             # Clean it up — otherwise the file lingers indefinitely
@@ -177,20 +192,17 @@ def make_handler(
             )
             return
 
-        # Re-check filters on the FRESHLY fetched note. The SSE event's
-        # tag set can be stale (bootstrap paths carry partial metadata,
-        # tags may have changed). This is the authoritative filter.
-        # A rejection here also triggers cleanup — the doc previously
-        # qualified (we have a projected file) but no longer does, so
-        # the stale projection must be removed.
-        if not note.path.startswith(_PROJECTS_PATH_PREFIX):
-            _cleanup_stale_projection(
-                note_id,
-                sync_state,
-                ctx,
-                reason=f"fetched path {note.path!r} outside projects/",
-            )
-            return
+        # Tag re-check on the freshly fetched note. The SSE event's
+        # tags are not in the payload at all (the bootstrap and intake
+        # paths both publish only ``{id, title, path}``) — this is the
+        # only filter that runs against the canonical Lithos tags.
+        # A rejection triggers cleanup so a tag removal in Lithos
+        # removes the stale projection file on disk.
+        #
+        # Note: we do NOT re-check ``note.path`` because
+        # ``lithos_read`` does not return path (only
+        # ``metadata.namespace``), so ``note.path`` is always empty
+        # after a real read. The SSE path is the authoritative source.
         if _PROJECT_CONTEXT_TAG not in note.tags:
             _cleanup_stale_projection(
                 note_id,
@@ -203,7 +215,7 @@ def make_handler(
             )
             return
 
-        await _project_note(note, projects_root, sync_state, ctx)
+        await _project_note(note, sse_path, projects_root, sync_state, ctx)
 
     return handle
 
@@ -251,11 +263,20 @@ def _cleanup_stale_projection(
 
 async def _project_note(
     note: Note,
+    lithos_path: str,
     projects_root: Path,
     sync_state: ProjectionSyncState,
     ctx: Any,
 ) -> None:
     """Render and write a single project-context note to the vault.
+
+    ``lithos_path`` is the doc's Lithos-canonical path
+    (``projects/<slug>/<filename>.md``) sourced from the SSE event
+    payload rather than from ``note.path`` — ``lithos_read`` does
+    not return ``path`` (only ``metadata.namespace`` which is the
+    directory) so the note we get back from the client has
+    ``path=""``. The SSE-published payload is the only authoritative
+    source for the full path under projection.
 
     Per-doc dedup uses a **whole-file hash** (not body-only). US30
     requires frontmatter fields (``lithos_version``, ``status``,
@@ -285,14 +306,23 @@ async def _project_note(
     cleanup semantics rather than treating it as a fresh
     projection that wouldn't know about the orphan old file.
     """
-    rendered = render_doc(note)
+    # Inject SSE-derived path + slug into the Note so the renderer's
+    # frontmatter carries the ``slug`` field (without this, queries
+    # filtering on ``slug:`` in the vault break — the slug
+    # convention is part of the D25 frontmatter contract).
+    # ``projects/<slug>/...`` → ``<slug>``; lithos_path was already
+    # validated to start with ``projects/`` at the handler boundary,
+    # so the indexing here is safe (split yields at least 2 parts).
+    slug = lithos_path[len(_PROJECTS_PATH_PREFIX) :].split("/", 1)[0]
+    note_for_render = dataclasses.replace(note, path=lithos_path, slug=slug)
+    rendered = render_doc(note_for_render)
     rendered_file_hash = hashlib.sha256(rendered.encode("utf-8")).digest()
 
     # Lithos path is ``projects/<slug>/<filename>.md``; strip the
     # ``projects/`` prefix so the vault path is
     # ``<projects_root>/<slug>/<filename>.md``. This makes the slug +
     # filename map 1:1 across Lithos and vault.
-    rel_path = note.path[len(_PROJECTS_PATH_PREFIX) :]
+    rel_path = lithos_path[len(_PROJECTS_PATH_PREFIX) :]
     target = projects_root / rel_path
 
     # Snapshot prior state so we can roll back on write failure to
@@ -358,7 +388,7 @@ async def _project_note(
     ctx.logger.info(
         "project-context-projection: wrote %s (slug=%s, version=%d)",
         target,
-        note.slug,
+        slug,
         note.version,
     )
 

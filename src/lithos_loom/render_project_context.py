@@ -78,6 +78,16 @@ def render_doc(note: Note) -> str:
     ``note.body`` is empty (a doc with no body still gets the H1
     title; query patterns rely on the title being inside the file,
     not just the frontmatter).
+
+    Defensive against double-title rendering: ``lithos_write`` stores
+    ``content`` verbatim, so an operator who passes
+    ``content="# Title\\n\\nBody"`` ends up with the H1 baked into
+    ``note.body``. The disk-watcher intake path strips it via
+    ``extract_title_from_content``; the MCP write path does not. We
+    treat both inputs identically here — if the body starts with the
+    title's H1, drop it before re-rendering, so the projected file
+    has exactly ONE ``# Title`` regardless of which write path put
+    the doc in Lithos.
     """
     fm = _build_frontmatter(note)
     yaml_block = yaml.safe_dump(
@@ -86,8 +96,34 @@ def render_doc(note: Note) -> str:
         default_flow_style=False,
         allow_unicode=True,
     ).rstrip()
-    body = note.body.rstrip()
+    body = _strip_leading_title(note.body, note.title).rstrip()
     return f"---\n{yaml_block}\n---\n# {note.title}\n\n{body}\n"
+
+
+def _strip_leading_title(body: str, title: str) -> str:
+    """Drop a leading ``# {title}`` line + following blank line from ``body``.
+
+    Returns ``body`` unchanged if the H1 doesn't match the title
+    (operator's body genuinely starts with a different heading). Only
+    a single leading H1 is considered — once we strip it the body is
+    treated as title-less for rendering purposes.
+
+    Comparison is whitespace-stripped on the H1 text but exact on
+    title — different titles (even same slug) should not collide.
+    """
+    if not body:
+        return body
+    expected = f"# {title}"
+    lines = body.split("\n", 2)
+    first = lines[0].rstrip()
+    if first != expected:
+        return body
+    # Drop the H1 line plus a single blank separator if present.
+    if len(lines) >= 3 and lines[1] == "":
+        return lines[2]
+    if len(lines) >= 2:
+        return lines[1]
+    return ""
 
 
 def _build_frontmatter(note: Note) -> dict[str, Any]:

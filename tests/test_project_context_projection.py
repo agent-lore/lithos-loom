@@ -177,6 +177,31 @@ async def test_filters_event_with_path_outside_projects(tmp_path: Path) -> None:
     lithos.note_read.assert_not_awaited()
 
 
+async def test_skips_event_with_missing_path_in_payload(tmp_path: Path) -> None:
+    """A created/updated event whose payload has no ``path`` is
+    non-actionable — we'd have nowhere to put the projected file.
+    Lithos's intake + bootstrap paths both publish ``path``, but
+    fail-closed (log + skip) makes drift visible rather than silently
+    writing to the projects-root."""
+    cfg = _cfg(tmp_path)
+    lithos = AsyncMock()
+    sync_state = ProjectionSyncState()
+    handler = make_handler(cfg, sync_state=sync_state)
+
+    # Build an event with id but no path.
+    event = Event(
+        type="lithos.note.created",
+        timestamp=datetime.now(UTC),
+        payload=MappingProxyType({"id": "doc-1", "title": "Foo"}),
+    )
+    await handler(event, _ctx(lithos))
+
+    lithos.note_read.assert_not_awaited()
+    assert not (tmp_path / "vault").exists() or not any(
+        (tmp_path / "vault" / "_lithos" / "projects").rglob("*.md")
+    )
+
+
 async def test_filters_fetched_note_without_project_context_tag(
     tmp_path: Path,
 ) -> None:
@@ -196,20 +221,41 @@ async def test_filters_fetched_note_without_project_context_tag(
     assert not target.exists()
 
 
-async def test_filters_fetched_note_whose_path_changed(tmp_path: Path) -> None:
-    """Fetched path no longer under ``projects/`` (operator moved
-    the doc) → drop, don't write to a stale slug location."""
+async def test_projects_using_sse_path_when_fetched_note_has_empty_path(
+    tmp_path: Path,
+) -> None:
+    """Real Lithos behaviour: ``lithos_read`` returns the document
+    fields BUT does not include ``path`` in its response (only
+    ``metadata.namespace`` which is the directory, not the full
+    file path). The projection must therefore trust the SSE
+    event's ``path`` as authoritative and not re-check
+    ``note.path`` post-read.
+
+    Pre-fix the handler re-checked ``note.path.startswith(
+    "projects/")`` and, because ``note.path`` was always ``""``
+    after a real read, it triggered the stale-projection cleanup
+    path. With no prior projection on record the cleanup was a
+    silent no-op — projection silently did nothing on every
+    cold-start bootstrap. Regression test for that.
+    """
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    lithos.note_read.return_value = _note(path="observations/inbox/foo.md")
+    # Real-Lithos shape: path is empty in the read response.
+    lithos.note_read.return_value = _note(path="")
     sync_state = ProjectionSyncState()
     handler = make_handler(cfg, sync_state=sync_state)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
-    assert not (tmp_path / "vault").exists() or not any(
-        (tmp_path / "vault" / "_lithos" / "projects").rglob("*.md")
+    target = _vault_path(tmp_path, "lithos-loom/context.md")
+    assert target.exists(), (
+        "projection must succeed using SSE path even when "
+        "note_read returns a note with empty path"
     )
+    body = target.read_text()
+    # Slug from SSE path is preserved in frontmatter — D25 contract.
+    assert "slug: lithos-loom" in body
+    assert "# Lithos Loom" in body
 
 
 async def test_skips_when_note_not_found_in_lithos(tmp_path: Path) -> None:
@@ -545,37 +591,6 @@ async def test_doc_moved_out_of_projects_cleans_up_stale_projection(
             "lithos.note.updated",
             path="observations/inbox/foo.md",
         ),
-        _ctx(lithos),
-    )
-
-    assert not target.exists()
-    assert "doc-1" not in sync_state.note_projected_paths
-
-
-async def test_fetched_path_out_of_projects_cleans_up_stale_projection(
-    tmp_path: Path,
-) -> None:
-    """The post-fetch authoritative path moves out of ``projects/``
-    (the SSE event path was still under projects/ but Lithos's
-    canonical path has migrated). Same cleanup required."""
-    cfg = _cfg(tmp_path)
-    lithos = AsyncMock()
-    lithos.note_read.return_value = _note(path="projects/foo/context.md")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
-
-    await handler(
-        _event("lithos.note.created", path="projects/foo/context.md"),
-        _ctx(lithos),
-    )
-    target = _vault_path(tmp_path, "foo/context.md")
-    assert target.exists()
-
-    # SSE event still says projects/, but the freshly fetched note
-    # has been moved (race between SSE buffer and authoritative read).
-    lithos.note_read.return_value = _note(path="observations/foo.md")
-    await handler(
-        _event("lithos.note.updated", path="projects/foo/context.md"),
         _ctx(lithos),
     )
 
