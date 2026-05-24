@@ -870,6 +870,58 @@ async def test_stream_logs_info_per_published_event(
     assert "abc-123" in msg
 
 
+# ── Reconnect-loop noise (soak regression 2026-05-24) ──────────────────
+
+
+async def test_reconnect_logs_warning_without_traceback_on_transient_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A transient server disconnect must log at WARNING with a one-line
+    message — NOT at ERROR with a full traceback.
+
+    Soak regression: ``LithosEventStream.run`` used ``logger.exception``,
+    which dumps a multi-page traceback on every retry. During a Lithos
+    restart that fires every ``backoff`` seconds for the duration of
+    the outage and buries the actual reconnect timeline. The retry is
+    the *expected* path; reserve ERROR / traceback for genuinely
+    unexpected failures.
+    """
+    import logging
+
+    bus = EventBus()
+    client = _FakeClient(bootstrap=[])
+    # First connection raises mid-bootstrap → triggers the except clause.
+    aconnect = _FakeAconnect(connections=[RuntimeError("server disconnected")])
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    source_logger = "lithos_loom.sources.lithos_event_stream"
+    with caplog.at_level(logging.DEBUG, logger=source_logger):
+        task = asyncio.create_task(source.run())
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    retry_records = [r for r in caplog.records if "retrying after" in r.getMessage()]
+    assert retry_records, "expected at least one 'retrying after' log"
+    for r in retry_records:
+        assert r.levelno == logging.WARNING, (
+            f"reconnect log must be WARNING not {logging.getLevelName(r.levelno)} — "
+            f"full tracebacks every retry overwhelm operator logs during outage"
+        )
+        # exc_info is what would trigger the traceback render in
+        # logger.exception — must NOT be set on the WARNING path.
+        assert r.exc_info is None, (
+            "reconnect WARNING must not carry exc_info (would render full "
+            "traceback under the default formatter, defeating the noise fix)"
+        )
+        msg = r.getMessage()
+        assert "RuntimeError" in msg and "server disconnected" in msg, (
+            f"WARNING must include exception type + message inline so the "
+            f"operator can still see what broke; got: {msg!r}"
+        )
+
+
 # ── httpx timeout for SSE streaming ─────────────────────────────────────
 
 

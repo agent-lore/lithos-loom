@@ -148,11 +148,17 @@ class LithosNoteStream:
                 events_seen = await self._stream_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 events_seen = self._events_this_attempt
-                logger.exception(
-                    "LithosNoteStream: error; retrying after %.3fs",
+                # See LithosEventStream.run() for the WARNING-vs-exception
+                # rationale: reconnect is the *expected* path during a
+                # Lithos restart, full tracebacks every backoff cycle
+                # bury the recovery timeline.
+                logger.warning(
+                    "LithosNoteStream: error; retrying after %.3fs: %s: %s",
                     backoff,
+                    type(exc).__name__,
+                    exc,
                 )
             if events_seen > 0:
                 backoff = self.reconnect_backoff_seconds

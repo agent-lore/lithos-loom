@@ -200,16 +200,25 @@ class LithosEventStream:
                 events_seen = await self._stream_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 # Preserve any progress this attempt made before the
                 # exception (bootstrap publishes + any drained SSE
                 # events) so backoff resets when work happened. Without
                 # this, a successful bootstrap followed by an immediate
                 # stream drop would let backoff ratchet toward the cap.
                 events_seen = self._events_this_attempt
-                logger.exception(
-                    "LithosEventStream: error; retrying after %.3fs",
+                # One-line WARNING with the exception's class + message
+                # is enough signal for a "Lithos went away" scenario —
+                # the reconnect loop is *expected* to absorb this. A
+                # full traceback on every retry buries the actual
+                # reconnect timeline under noise, especially during a
+                # Lithos restart when this fires every ``backoff``
+                # seconds for the duration of the outage.
+                logger.warning(
+                    "LithosEventStream: error; retrying after %.3fs: %s: %s",
                     backoff,
+                    type(exc).__name__,
+                    exc,
                 )
             # Always sleep between reconnect attempts so a clean-but-empty
             # server response can't busy-loop us. Reset backoff only when

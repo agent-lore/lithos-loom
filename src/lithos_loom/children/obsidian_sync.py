@@ -109,6 +109,19 @@ def _configure_logging(level: LogLevel) -> None:
         level=_LEVEL_MAP[level],
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # The MCP SDK's SSE reader (``mcp.client.sse.sse_reader``) logs a
+    # full ERROR-level traceback whenever its persistent session is
+    # torn down — e.g. when Lithos restarts. Our LithosClient's outer
+    # reconnect loop (and the subscription handlers' retry policy) is
+    # what's actually responsible for recovery here; the SDK's
+    # traceback is just noise that buries our own reconnect timeline.
+    # Pin it to CRITICAL so we still see real failures (auth errors,
+    # protocol bugs) but not the routine "peer closed connection"
+    # exceptions that fire every time Lithos cycles. Conservative
+    # version (WARNING) would still let the traceback through; the
+    # SDK doesn't currently log anything informational below ERROR
+    # we'd want to keep.
+    logging.getLogger("mcp.client.sse").setLevel(logging.CRITICAL)
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
