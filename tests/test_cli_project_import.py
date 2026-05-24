@@ -55,18 +55,20 @@ def _canonical_note(doc_id: str = "new-doc") -> Note:
 def _stub_client() -> Any:
     """Build an AsyncMock that masquerades as a LithosClient context manager.
 
-    ``note_write`` returns the production-shaped envelope (``note=None``)
-    because real Lithos doesn't populate a ``document`` field in the
-    success response. The handler re-fetches via ``note_read`` to get
-    the canonical doc id — the stub returns a populated Note from
-    that re-fetch so happy-path tests get a real id back.
+    The stubbed ``note_write`` returns a fully-populated
+    ``WriteResult`` because that's what ``LithosClient.note_write``
+    produces in production after stitching the top-level response's
+    id/path/version with the request inputs (see
+    ``tests/test_lithos_client.py::
+    test_note_write_enriches_result_note_from_top_level_response``).
     """
     client = AsyncMock()
     client.__aenter__.return_value = client
     client.__aexit__.return_value = None
     client.note_list.return_value = []
-    client.note_write.return_value = WriteResult(status="created", note=None)
-    client.note_read.return_value = _canonical_note()
+    client.note_write.return_value = WriteResult(
+        status="created", note=_canonical_note()
+    )
     return client
 
 

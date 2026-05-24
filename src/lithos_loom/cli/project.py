@@ -534,36 +534,26 @@ async def _create_project_async(
             tags=tags,
             note_type="concept",
         )
-        if result.status not in ("created", "updated"):
-            raise LithosClientError(
-                code=result.status,
-                message=result.message
-                or f"note_write returned status={result.status!r}",
-            )
-        # Real Lithos's write envelope is top-level
-        # ``{status, id, path, version, warnings}`` — no ``document``
-        # key, so ``WriteResult.note`` is always None in production
-        # (mirror of the PR #45 reviewer finding for the note-push
-        # path). Re-fetch via ``note_read(path=...)`` so the JSON
-        # output's ``id`` field is the canonical Lithos doc id, not
-        # an empty string. One extra RPC per successful create —
-        # acceptable for an operator-initiated command. The latent
-        # parser bug is filed for a separate PR.
-        canonical = await client.note_read(path=doc_path)
-    if canonical is None:
-        # Doc was created (or already existed and we updated it) but
-        # vanished between the write and the re-fetch. Vanishingly
-        # unlikely outside test environments; surface explicitly so
-        # the operator doesn't get a silent empty id back.
+    if result.status not in ("created", "updated"):
         raise LithosClientError(
-            code="post_write_fetch_missing",
+            code=result.status,
+            message=result.message or f"note_write returned status={result.status!r}",
+        )
+    # ``note_write`` now stitches the top-level response's id/path/
+    # version with the request's title/tags/etc into ``result.note``
+    # (see the note_write fix-up block). ``result.note`` is guaranteed
+    # populated on created/updated outcomes; ``id`` is the canonical
+    # Lithos doc id.
+    if result.note is None:
+        raise LithosClientError(
+            code="invalid_response",
             message=(
-                f"note_write succeeded for {doc_path!r} but the post-write "
-                f"note_read returned None — doc was deleted between the "
-                f"write and the re-fetch?"
+                f"note_write status={result.status!r} for {doc_path!r} but "
+                f"response carried neither a 'document' field nor a top-level "
+                f"id — Lithos may have changed its response shape"
             ),
         )
-    return _CreateProjectResult(id=canonical.id, slug=slug)
+    return _CreateProjectResult(id=result.note.id, slug=slug)
 
 
 def _slugify(value: str) -> str:

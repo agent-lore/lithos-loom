@@ -24,6 +24,7 @@ continues on transient failures.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -681,7 +682,48 @@ class LithosClient:
         if status is not None:
             arguments["status"] = status
         payload = await self._call_for_write_result("lithos_write", arguments)
-        return _parse_write_result(payload)
+        result = _parse_write_result(payload)
+        # Real Lithos's success envelope is top-level
+        # ``{status, id, path, version, warnings}`` (see
+        # lithos/src/lithos/server.py:1327) — NOT the ``{document: {...}}``
+        # shape ``_parse_write_result`` looks for. Without this fix-up,
+        # ``WriteResult.note`` is always ``None`` in production despite
+        # a successful write, and callers that rely on ``result.note.id``
+        # silently get empty strings (PR #45 and PR #46 reviewer
+        # findings).
+        #
+        # The parser stays pure — it parses only what's in the payload.
+        # Here we stitch in the request inputs (title, content, tags,
+        # status, note_type) plus the response's id/path/version to
+        # construct a complete Note. ``updated_at`` stays ``None`` —
+        # the response doesn't carry it; callers that need byte-stable
+        # ``lithos_updated_at`` frontmatter (note-push handler)
+        # re-fetch via ``note_read``.
+        if (
+            result.status in ("created", "updated")
+            and result.note is None
+            and isinstance(payload.get("id"), str)
+            and isinstance(payload.get("version"), int)
+        ):
+            doc_id = str(payload["id"])
+            doc_version = int(payload["version"])
+            doc_path = str(payload.get("path") or "")
+            result = dataclasses.replace(
+                result,
+                note=Note(
+                    id=doc_id,
+                    title=title,
+                    body=content,
+                    version=doc_version,
+                    updated_at=None,
+                    tags=tuple(tags or ()),
+                    status=status,
+                    note_type=note_type,
+                    path=doc_path,
+                    slug=_slug_from_path(doc_path),
+                ),
+            )
+        return result
 
     async def note_list(
         self,
