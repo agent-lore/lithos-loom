@@ -751,12 +751,25 @@ class LithosClient:
         if not agent_id:
             raise LithosClientError("missing_agent", "note_delete needs an agent id")
         try:
-            await self._call("lithos_delete", {"id": id, "agent": agent_id})
-            return True
+            payload = await self._call("lithos_delete", {"id": id, "agent": agent_id})
         except LithosClientError as exc:
             if exc.code == "doc_not_found":
                 return False
             raise
+        # Lithos's contract is ``{"success": True}`` on delete
+        # (lithos/src/lithos/server.py:1434). Be strict about the
+        # success envelope rather than treating any non-error
+        # response as success — without this, a server-side drift
+        # (``{}``, ``{"success": false}``, a non-dict payload)
+        # would silently report a successful delete and leave the
+        # stale doc behind. Raising on shape divergence makes the
+        # contract break visible at the call site.
+        if not isinstance(payload, dict) or payload.get("success") is not True:
+            raise LithosClientError(
+                "invalid_response",
+                f"lithos_delete returned non-success payload: {payload!r}",
+            )
+        return True
 
     async def _call_for_write_result(
         self,

@@ -1344,6 +1344,47 @@ async def test_note_delete_uses_explicit_agent_when_provided() -> None:
     )
 
 
+async def test_note_delete_raises_on_missing_success_field() -> None:
+    """The Lithos contract is ``{"success": True}`` on delete
+    (lithos/src/lithos/server.py:1434). If the response is empty
+    (``{}``) — e.g. server-side drift, a regression on the Lithos
+    side, or a future API change — we MUST raise rather than
+    silently report success. Otherwise a failed cleanup would
+    leave the stale doc in place while Loom told the caller
+    everything was fine."""
+    client, _ = _client_with_session(_content({}))
+    with pytest.raises(LithosClientError) as exc:
+        await client.note_delete(id="doc-1")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_note_delete_raises_on_success_false() -> None:
+    """Explicit ``{"success": False}`` is the unambiguous "I tried
+    and it didn't work" signal — must surface as an error rather
+    than be folded to True (which would mask the cleanup failure)
+    or False (which is reserved for the doc_not_found idempotent
+    path). Treat shape divergence as a typed error."""
+    client, _ = _client_with_session(_content({"success": False}))
+    with pytest.raises(LithosClientError) as exc:
+        await client.note_delete(id="doc-1")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_note_delete_raises_on_non_dict_payload() -> None:
+    """A non-dict response (string, list, etc.) is server-side
+    drift — refuse to interpret it as success."""
+    # Build the CallToolResult directly here — the shared `_content`
+    # helper is typed to `dict` (which is what every other test
+    # needs); the non-dict shape is the regression we're pinning.
+    non_dict_result = CallToolResult(
+        content=[TextContent(type="text", text=json.dumps("ok"))]
+    )
+    client, _ = _client_with_session(non_dict_result)
+    with pytest.raises(LithosClientError) as exc:
+        await client.note_delete(id="doc-1")
+    assert exc.value.code == "invalid_response"
+
+
 async def test_note_delete_requires_agent_id() -> None:
     """Lithos requires ``agent`` for audit-trail purposes. Without
     an explicit kwarg AND no ``agent_id`` on the client, raise a
