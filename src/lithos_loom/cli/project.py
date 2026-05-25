@@ -514,8 +514,22 @@ async def _create_project_async(
 
     Shared with :func:`project_import` so both entry points share the
     same validation + write semantics.
+
+    **Domain exceptions are raised AFTER the ``async with LithosClient``
+    block exits**, not inside it. ``LithosClient.__aexit__`` runs the
+    SSE-transport cleanup inside an ``anyio.create_task_group``; an
+    exception raised inside the block triggers that task group to wrap
+    the original exception in a :class:`BaseExceptionGroup` on
+    cancellation, and the caller's ``except _SlugCollisionError`` clause
+    no longer matches. Capturing the result/collision inside the block
+    and raising outside keeps the typed exceptions catchable. (Before
+    this defer, ``project create`` and ``project import`` printed a raw
+    traceback on collision instead of the intended "slug already exists"
+    message.)
     """
     doc_path = f"{_PROJECTS_PATH_PREFIX}{slug}/{filename}"
+    collision: _SlugCollisionError | None = None
+    result: WriteResult | None = None
     async with LithosClient(
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
@@ -523,17 +537,21 @@ async def _create_project_async(
             path_prefix=f"{_PROJECTS_PATH_PREFIX}{slug}/", limit=1
         )
         if existing:
-            raise _SlugCollisionError(
+            collision = _SlugCollisionError(
                 existing_id=existing[0].id,
                 existing_path=existing[0].path,
             )
-        result: WriteResult = await client.note_write(
-            path=doc_path,
-            title=title,
-            content=content,
-            tags=tags,
-            note_type="concept",
-        )
+        else:
+            result = await client.note_write(
+                path=doc_path,
+                title=title,
+                content=content,
+                tags=tags,
+                note_type="concept",
+            )
+    if collision is not None:
+        raise collision
+    assert result is not None  # narrowed by the else branch above
     if result.status not in ("created", "updated"):
         raise LithosClientError(
             code=result.status,

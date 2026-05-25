@@ -366,6 +366,87 @@ def test_create_rejects_slug_collision(tmp_path: Path) -> None:
     client.note_write.assert_not_called()
 
 
+def test_create_collision_survives_anyio_exception_group_wrap(tmp_path: Path) -> None:
+    """Regression: slug-collision must NOT be raised inside the
+    ``async with LithosClient(...)`` block.
+
+    Production ``LithosClient`` uses ``mcp.client.sse.sse_client`` which
+    runs cleanup inside an ``anyio.create_task_group``. Any exception
+    raised inside the ``async with`` is wrapped in a
+    :class:`BaseExceptionGroup` on cancellation, and the CLI's
+    ``except _SlugCollisionError`` clause no longer matches — the user
+    sees a raw Rich traceback instead of the intended "slug already
+    exists" message. Fix: ``_create_project_async`` defers the raise
+    until AFTER the context manager exits.
+
+    This test simulates the wrap by giving the stub client an
+    ``__aexit__`` that re-raises any incoming exception inside a
+    ``BaseExceptionGroup``. The decisive assertion is that
+    ``__aexit__`` is called with exc=None — i.e. the collision raise
+    happened OUTSIDE the with block, so no wrap occurred. If the
+    defer is ever undone, this assertion fails.
+    """
+    from datetime import UTC, datetime
+
+    cfg_path = _write_config(tmp_path)
+    runner = CliRunner()
+
+    existing_summary = NoteSummary(
+        id="existing-doc-id",
+        title="Existing",
+        version=1,
+        updated_at=datetime(2026, 5, 24, tzinfo=UTC),
+        tags=("project-context",),
+        status="active",
+        note_type="concept",
+        path="projects/my-slug/my-slug-project-context.md",
+        slug="my-slug",
+    )
+
+    async def wrap_exit(
+        exc_type: type | None, exc: BaseException | None, tb: Any
+    ) -> None:
+        # Mirrors anyio.create_task_group's cleanup: if an exception is
+        # propagating out of the ``async with`` block, wrap it in a
+        # BaseExceptionGroup before re-raising. If the block exited
+        # cleanly (exc is None), do nothing.
+        if exc is not None:
+            raise BaseExceptionGroup("simulated anyio wrap", [exc])
+
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.side_effect = wrap_exit
+    client.note_list.return_value = [existing_summary]
+
+    with patch("lithos_loom.cli.project.LithosClient", return_value=client):
+        result = runner.invoke(
+            project_app, ["create", "-c", str(cfg_path), "--title", "My Slug"]
+        )
+
+    # Behavioural assertions: exit 1, clear message, no traceback noise.
+    assert result.exit_code == 1, (
+        f"expected exit 1, got {result.exit_code}; stdout={result.stdout!r}; "
+        f"exception={result.exception!r}"
+    )
+    combined = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
+    assert "already exists" in combined
+    assert "existing-doc-id" in combined
+
+    # Structural assertion: __aexit__ was called with exc=None, meaning
+    # the collision raise happened AFTER the with block. If a future
+    # refactor moves the raise back inside the block, exc would be the
+    # _SlugCollisionError and this would fail.
+    exit_call = client.__aexit__.await_args
+    assert exit_call is not None, "LithosClient.__aexit__ was never awaited"
+    assert exit_call.args[0] is None, (
+        f"expected __aexit__ called with no exception (raise must happen "
+        f"AFTER the async with exits); got exc_type={exit_call.args[0]!r}"
+    )
+
+    # Pre-flight still blocked the actual write.
+    client.note_write.assert_not_called()
+
+
 def test_create_rejects_unreadable_body_file(tmp_path: Path) -> None:
     cfg_path = _write_config(tmp_path)
     nonexistent = tmp_path / "no-such-file.md"
