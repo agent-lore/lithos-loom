@@ -515,43 +515,60 @@ async def _create_project_async(
     Shared with :func:`project_import` so both entry points share the
     same validation + write semantics.
 
-    **Domain exceptions are raised AFTER the ``async with LithosClient``
-    block exits**, not inside it. ``LithosClient.__aexit__`` runs the
-    SSE-transport cleanup inside an ``anyio.create_task_group``; an
-    exception raised inside the block triggers that task group to wrap
-    the original exception in a :class:`BaseExceptionGroup` on
-    cancellation, and the caller's ``except _SlugCollisionError`` clause
-    no longer matches. Capturing the result/collision inside the block
-    and raising outside keeps the typed exceptions catchable. (Before
-    this defer, ``project create`` and ``project import`` printed a raw
-    traceback on collision instead of the intended "slug already exists"
-    message.)
+    **All typed exceptions are raised AFTER the ``async with
+    LithosClient`` block exits**, not inside it. ``LithosClient.__aexit__``
+    runs the SSE-transport cleanup inside an ``anyio.create_task_group``;
+    any exception raised inside the block triggers that task group to
+    wrap the original exception in a :class:`BaseExceptionGroup` on
+    cancellation, and the caller's typed ``except`` clauses
+    (``_SlugCollisionError``, ``OSError``, ``LithosClientError``) no
+    longer match — so the CLI would dump a raw Rich traceback instead
+    of the intended error message.
+
+    Three cases are deferred:
+
+    * ``_SlugCollisionError`` — domain exception we raise ourselves
+      when the pre-flight ``note_list`` finds an existing doc.
+    * ``OSError`` — transport failure (connection refused, DNS, etc.)
+      raised by ``note_list`` / ``note_write`` underneath.
+    * ``LithosClientError`` — Lithos-returned error envelope that the
+      typed-client converts to an exception (e.g. ``content_too_large``,
+      RPC errors, malformed responses).
+
+    All three are caught inside the block, stored as locals, and
+    re-raised once the context closes cleanly.
     """
     doc_path = f"{_PROJECTS_PATH_PREFIX}{slug}/{filename}"
     collision: _SlugCollisionError | None = None
+    deferred_error: OSError | LithosClientError | None = None
     result: WriteResult | None = None
     async with LithosClient(
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
-        existing = await client.note_list(
-            path_prefix=f"{_PROJECTS_PATH_PREFIX}{slug}/", limit=1
-        )
-        if existing:
-            collision = _SlugCollisionError(
-                existing_id=existing[0].id,
-                existing_path=existing[0].path,
+        try:
+            existing = await client.note_list(
+                path_prefix=f"{_PROJECTS_PATH_PREFIX}{slug}/", limit=1
             )
-        else:
-            result = await client.note_write(
-                path=doc_path,
-                title=title,
-                content=content,
-                tags=tags,
-                note_type="concept",
-            )
+            if existing:
+                collision = _SlugCollisionError(
+                    existing_id=existing[0].id,
+                    existing_path=existing[0].path,
+                )
+            else:
+                result = await client.note_write(
+                    path=doc_path,
+                    title=title,
+                    content=content,
+                    tags=tags,
+                    note_type="concept",
+                )
+        except (OSError, LithosClientError) as exc:
+            deferred_error = exc
+    if deferred_error is not None:
+        raise deferred_error
     if collision is not None:
         raise collision
-    assert result is not None  # narrowed by the else branch above
+    assert result is not None  # narrowed by the else / no-error branch above
     if result.status not in ("created", "updated"):
         raise LithosClientError(
             code=result.status,
