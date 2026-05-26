@@ -102,10 +102,27 @@ def _open_task(task_id: str, project_slug: str, title: str = "stub") -> Task:
     )
 
 
+def _resolved_task(
+    task_id: str,
+    project_slug: str,
+    status: str = "completed",
+    title: str = "done",
+) -> Task:
+    return Task(
+        id=task_id,
+        title=title,
+        status=status,
+        tags=(),
+        metadata={"project": project_slug},
+        claims=(),
+    )
+
+
 def _stub_client(
     *,
     existing_project_summaries: list[NoteSummary] | None = None,
     existing_open_tasks: list[Task] | None = None,
+    existing_resolved_tasks: list[Task] | None = None,
     task_create_ids: list[str] | None = None,
     task_create_side_effect: BaseException | None = None,
     task_create_fail_after: int | None = None,
@@ -164,11 +181,14 @@ def _stub_client(
     client.note_read.return_value = note_for_lithos_id
 
     open_tasks = list(existing_open_tasks or [])
+    resolved_tasks = list(existing_resolved_tasks or [])
+    all_tasks = [*open_tasks, *resolved_tasks]
 
     async def task_list(*, status=None, with_claims=False, resolved_since=None):  # type: ignore[no-untyped-def]
         if status == "open":
             return list(open_tasks)
-        return list(open_tasks)
+        # status=None → all tasks (per LithosClient.task_list contract)
+        return list(all_tasks)
 
     client.task_list.side_effect = task_list
 
@@ -246,13 +266,16 @@ def test_greenfield_priority_and_tags_extracted(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     first_call = client.task_create.await_args_list[0].kwargs
     assert first_call["title"] == "Important"
-    assert first_call["tags"] == ["foo"]
+    # User tag preserved + auto-added project routing tag (US88 / D61)
+    assert "foo" in first_call["tags"]
+    assert "project/demo" in first_call["tags"]
     assert first_call["metadata"]["priority"] == "high"
     assert first_call["metadata"]["project"] == "demo"
-    # Second task has no priority
+    # Second task has no priority but still gets the project tag
     second_call = client.task_create.await_args_list[1].kwargs
     assert second_call["title"] == "Normal"
     assert "priority" not in second_call["metadata"]
+    assert "project/demo" in second_call["tags"]
 
 
 # ── 3. Indented children, parallel default ────────────────────────────
@@ -996,7 +1019,8 @@ def test_tasks_only_existing_tasks_blocks_without_force(tmp_path: Path) -> None:
         )
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
-    assert "1 open task" in combined
+    assert "1 existing task" in combined
+    assert "1 open" in combined
     assert "--force-tasks" in combined
     client.task_cancel.assert_not_called()
     client.task_create.assert_not_called()
@@ -1025,3 +1049,179 @@ def test_no_tasks_preserves_tasks_in_body(tmp_path: Path) -> None:
     assert "inline" in body
     assert "another" in body
     client.task_create.assert_not_called()
+
+
+# ── PR #51 review fix: US88 / D61 — auto-add #project/<slug> tag ──────
+
+
+def test_imported_task_always_carries_project_tag(tmp_path: Path) -> None:
+    """Every imported task gets `project/<slug>` in its tags list (US88).
+
+    The auto-add is required even when the source line has no tags and
+    no `#project/<slug>` reference at all — the projection layer uses
+    metadata.project, but Lithos-side task_list tag filters and other
+    Lithos consumers look at the literal tag.
+    """
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "alpha.md"
+    source.write_text("- [ ] First\n- [ ] Second\n", encoding="utf-8")
+    client = _stub_client()
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.stdout
+    for call in client.task_create.await_args_list:
+        assert "project/alpha" in call.kwargs["tags"], (
+            f"task {call.kwargs['title']!r} missing project routing tag"
+        )
+
+
+def test_self_project_tag_in_source_not_duplicated(tmp_path: Path) -> None:
+    """When source already carries `#project/<slug>`, no duplicate tag."""
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "alpha.md"
+    source.write_text("- [ ] Task #project/alpha #extra\n", encoding="utf-8")
+    client = _stub_client()
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.stdout
+    tags = client.task_create.await_args.kwargs["tags"]
+    # Exactly one `project/alpha`, plus the user's `extra` tag
+    assert tags.count("project/alpha") == 1
+    assert "extra" in tags
+
+
+# ── PR #51 review fix: D60 — preflight counts ALL tasks not just open ─
+
+
+def test_tasks_only_refused_when_only_resolved_tasks_exist(tmp_path: Path) -> None:
+    """Project with only completed/cancelled tasks still triggers the refusal.
+
+    Per D60, "tasks for project exist" means ANY tasks — including
+    history. Without --force-tasks, the operator should be required
+    to acknowledge they want to add to a project that has a track
+    record.
+    """
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "new.md"
+    source.write_text("- [ ] new\n", encoding="utf-8")
+    client = _stub_client(
+        existing_project_summaries=[_canonical_summary("existing")],
+        existing_open_tasks=[],
+        existing_resolved_tasks=[
+            _resolved_task("old-1", "existing", status="completed"),
+            _resolved_task("old-2", "existing", status="cancelled"),
+        ],
+    )
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app,
+            [
+                "import",
+                str(source),
+                "-c",
+                str(cfg_path),
+                "--tasks-only",
+                "--slug",
+                "existing",
+            ],
+        )
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
+    assert "2 existing task" in combined
+    assert "0 open" in combined
+    assert "2 resolved (history)" in combined
+    assert "--force-tasks" in combined
+    client.task_cancel.assert_not_called()
+    client.task_create.assert_not_called()
+
+
+def test_force_tasks_skips_already_resolved_tasks(tmp_path: Path) -> None:
+    """--force-tasks cancels only open tasks (E5: no hard-delete in Lithos).
+
+    Completed/cancelled tasks remain as history; the new import
+    creates a fresh open set alongside them. This is the practical
+    interpretation of D60 given Lithos's E5 cancel-only constraint.
+    """
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text("- [ ] new\n", encoding="utf-8")
+    client = _stub_client(
+        existing_project_summaries=[_canonical_summary("existing")],
+        existing_open_tasks=[_open_task("open-1", "existing")],
+        existing_resolved_tasks=[
+            _resolved_task("done-1", "existing"),
+            _resolved_task("done-2", "existing", status="cancelled"),
+        ],
+    )
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app,
+            [
+                "import",
+                str(source),
+                "-c",
+                str(cfg_path),
+                "--tasks-only",
+                "--slug",
+                "existing",
+                "--force-tasks",
+                "--yes",
+            ],
+        )
+    assert result.exit_code == 0, result.stdout
+    # Only the open task was cancelled — the two resolved tasks were skipped
+    assert client.task_cancel.await_count == 1
+    cancelled_ids = [
+        call.kwargs["task_id"] for call in client.task_cancel.await_args_list
+    ]
+    assert cancelled_ids == ["open-1"]
+    assert "done-1" not in cancelled_ids
+    assert "done-2" not in cancelled_ids
+
+
+def test_force_tasks_prompt_shows_history_count(tmp_path: Path) -> None:
+    """Prompt distinguishes "will-be-cancelled" from "preserved as history"."""
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text("- [ ] new\n", encoding="utf-8")
+    client = _stub_client(
+        existing_project_summaries=[_canonical_summary("existing")],
+        existing_open_tasks=[
+            _open_task("open-1", "existing"),
+            _open_task("open-2", "existing"),
+        ],
+        existing_resolved_tasks=[_resolved_task("done-1", "existing")],
+    )
+    runner = CliRunner()
+    with _patched_client(client):
+        # Decline the prompt to keep things isolated; we just want to
+        # see the prompt text.
+        result = runner.invoke(
+            project_app,
+            [
+                "import",
+                str(source),
+                "-c",
+                str(cfg_path),
+                "--tasks-only",
+                "--slug",
+                "existing",
+                "--force-tasks",
+            ],
+            input="n\n",
+        )
+    assert result.exit_code == 0
+    combined = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
+    # Prompt mentions both counts
+    assert "2 open task" in combined
+    assert "1 resolved task" in combined
+    assert "will remain as history" in combined
+    client.task_cancel.assert_not_called()

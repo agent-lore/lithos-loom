@@ -934,21 +934,33 @@ def project_import(
             typer.echo(f"lithos-loom: lithos call failed: {exc}", err=True)
             sys.exit(1)
 
-        if existing_tasks and not force_tasks:
-            typer.echo(
-                f"lithos-loom: project {resolved_slug!r} already has "
-                f"{len(existing_tasks)} open task"
-                f"{'s' if len(existing_tasks) != 1 else ''}; refusing to "
-                f"create more (would duplicate). Re-run with --force-tasks "
-                f"to delete the existing tasks and re-import.",
-                err=True,
-            )
-            sys.exit(1)
+        if existing_tasks:
+            open_count = sum(1 for t in existing_tasks if t.status == "open")
+            resolved_count = len(existing_tasks) - open_count
+            if not force_tasks:
+                breakdown = f"{open_count} open" + (
+                    f" + {resolved_count} resolved (history)" if resolved_count else ""
+                )
+                typer.echo(
+                    f"lithos-loom: project {resolved_slug!r} already has "
+                    f"{len(existing_tasks)} existing task"
+                    f"{'s' if len(existing_tasks) != 1 else ''} on record "
+                    f"({breakdown}); refusing to add more (would duplicate). "
+                    f"Re-run with --force-tasks to cancel open tasks and "
+                    f"re-import (resolved history is preserved).",
+                    err=True,
+                )
+                sys.exit(1)
 
-        if existing_tasks and force_tasks:
+            history_note = (
+                f" ({resolved_count} resolved task"
+                f"{'s' if resolved_count != 1 else ''} will remain as history)"
+                if resolved_count
+                else ""
+            )
             if not yes and not typer.confirm(
-                f"Delete {len(existing_tasks)} existing task"
-                f"{'s' if len(existing_tasks) != 1 else ''} and create "
+                f"Cancel {open_count} open task"
+                f"{'s' if open_count != 1 else ''}{history_note} and create "
                 f"{len(plans)} new ones?",
                 default=False,
             ):

@@ -389,7 +389,7 @@ async def check_tasks_only_preflight(
                     )
 
             if preflight_error is None:
-                existing_tasks = await _list_open_tasks_for_project(client, slug)
+                existing_tasks = await _list_existing_tasks_for_project(client, slug)
         except (OSError, LithosClientError) as exc:
             deferred_error = exc
 
@@ -420,21 +420,33 @@ async def _resolve_project_id(client: LithosClient, slug: str) -> str | None:
     return canonical.id
 
 
-async def _list_open_tasks_for_project(client: LithosClient, slug: str) -> list[Task]:
-    """Return all open tasks whose ``metadata.project == slug``.
+async def _list_existing_tasks_for_project(
+    client: LithosClient, slug: str
+) -> list[Task]:
+    """Return all tasks (any status) whose ``metadata.project == slug``.
 
-    The render layer reads ``metadata["project"]`` (not a tag) for the
-    canonical project association — see ``render.py:119``.
+    Per D60 / US81–82 the existence check that gates ``--tasks-only``
+    refusal counts ALL existing project tasks — open, completed, and
+    cancelled. The render layer reads ``metadata["project"]`` for the
+    canonical project association (``render.py:119``); the actual
+    ``#project/<slug>`` tag is also written to the task at creation
+    time (US88) so Lithos-side ``task_list`` tag filters find them.
     """
-    open_tasks = await client.task_list(status="open")
-    return [task for task in open_tasks if task.metadata.get("project") == slug]
+    all_tasks = await client.task_list()
+    return [task for task in all_tasks if task.metadata.get("project") == slug]
 
 
 # ── E5 + E6: force-tasks cleanup ───────────────────────────────────────
 
 
 async def force_tasks_cleanup(*, cfg: LoomConfig, existing_tasks: list[Task]) -> int:
-    """Cancel every task in ``existing_tasks``. Returns count cancelled.
+    """Cancel every OPEN task in ``existing_tasks``. Returns count cancelled.
+
+    Already-resolved tasks (status=completed or status=cancelled) are
+    skipped — they're history, and Lithos has no hard-delete primitive
+    today (E5). Cancelling a completed task would rewrite history from
+    "done" to "cancelled", which is wrong. The new import creates a
+    fresh set of open tasks; the historical record stays intact.
 
     The interactive confirm prompt is the CLI's responsibility (must
     happen outside the async context); this helper only does the
@@ -447,6 +459,8 @@ async def force_tasks_cleanup(*, cfg: LoomConfig, existing_tasks: list[Task]) ->
     ) as client:
         try:
             for task in existing_tasks:
+                if task.status != "open":
+                    continue
                 await client.task_cancel(
                     task_id=task.id, reason="bulk-import --force-tasks"
                 )
@@ -489,6 +503,7 @@ async def create_tasks(
     first_created: str | None = None
     failure: BaseException | None = None
     n_total = len(sorted_plans)
+    project_tag = f"project/{slug}"
 
     async with LithosClient(
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
@@ -504,10 +519,21 @@ async def create_tasks(
             if plan.parallelizable:
                 metadata["parallelizable"] = True
 
+            # US88 / D61: auto-add the project routing tag if the
+            # source line didn't already carry it. The parser strips
+            # ``#project/<slug>`` from the per-line tag list (since
+            # it's a routing concern, not user metadata), so this is
+            # always the canonical write site for it. Set on the task
+            # entity (not just inferred from metadata) so Lithos-side
+            # ``task_list`` tag-filter queries find these tasks.
+            tags = list(plan.line.tags)
+            if project_tag not in tags:
+                tags.append(project_tag)
+
             try:
                 task_id = await client.task_create(
                     title=plan.line.description or "(no description)",
-                    tags=list(plan.line.tags),
+                    tags=tags,
                     metadata=metadata,
                 )
             except (OSError, LithosClientError) as exc:
