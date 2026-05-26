@@ -645,6 +645,54 @@ def test_dry_run_shows_auto_added_project_tag(tmp_path: Path) -> None:
     assert "#project/alpha" in result.stdout
 
 
+def test_dry_run_greenfield_existing_slug_exits_1(tmp_path: Path) -> None:
+    """Greenfield --dry-run runs the same slug-collision preflight as a real run.
+
+    PRD D72: dry-run should catch "slug already exists" before the operator
+    commits. Without this, the operator sees a clean preview, then the
+    real run fails — wasted cycle.
+    """
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text("- [ ] T\n", encoding="utf-8")
+    client = _stub_client(
+        existing_project_summaries=[_canonical_summary("demo", doc_id="existing-id")]
+    )
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app,
+            ["import", str(source), "-c", str(cfg_path), "--dry-run"],
+        )
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr if hasattr(result, "stderr") else "")
+    assert "already exists" in combined
+    assert "--tasks-only --slug demo" in combined
+    # No mutations (mock has no note_write call attempted)
+    client.note_write.assert_not_called()
+    client.task_create.assert_not_called()
+
+
+def test_dry_run_greenfield_clean_slug_succeeds(tmp_path: Path) -> None:
+    """When slug is free, greenfield --dry-run produces the preview cleanly."""
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text("- [ ] T\n", encoding="utf-8")
+    client = _stub_client(existing_project_summaries=[])
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app,
+            ["import", str(source), "-c", str(cfg_path), "--dry-run"],
+        )
+    assert result.exit_code == 0, result.stdout
+    assert "NO CHANGES MADE" in result.stdout
+    # Pre-flight check happened (note_list called); no mutations
+    assert client.note_list.await_count >= 1
+    client.note_write.assert_not_called()
+    client.task_create.assert_not_called()
+
+
 def test_dry_run_does_not_duplicate_explicit_project_tag(tmp_path: Path) -> None:
     """When source carries `#project/<slug>` explicitly, preview shows it ONCE."""
     cfg_path = _write_config(tmp_path)

@@ -205,7 +205,12 @@ Greenfield-only refusals:
 
 ## `--dry-run`
 
-Prints the full plan and exits without any Lithos mutations. Only Lithos call made is the read-only slug-collision pre-flight (greenfield) or project existence + task-count check (`--tasks-only`).
+Prints the full plan and exits without any Lithos mutations. The same read-only pre-flight as a real run is performed first, so problems surface before you commit:
+
+- **Greenfield**: a `note_list` against `projects/<slug>/` checks for slug collision. Exits 1 with the same "slug already exists; did you mean `--tasks-only --slug X`?" message a real run would give.
+- **`--tasks-only`**: verifies the project exists (with typo-hint on miss per D73), and that any `lithos_id` in frontmatter resolves to the same slug (D71). Exits 1 (project missing) or 2 (lithos_id mismatch) on pre-flight failure.
+
+If the pre-flight passes, the full plan is printed. No `note_write` / `task_create` / `task_cancel` calls are made under any code path.
 
 Output is framed with **`NO CHANGES MADE — re-run without --dry-run to apply`** at the start AND end so it can't be mistaken for a success log.
 

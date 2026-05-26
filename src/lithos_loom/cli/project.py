@@ -605,6 +605,42 @@ async def _create_project_async(
     return _CreateProjectResult(id=result.note.id, slug=slug)
 
 
+async def _check_slug_collision_async(*, cfg: LoomConfig, slug: str) -> None:
+    """Read-only slug-collision pre-flight for ``--dry-run`` greenfield previews.
+
+    Raises :class:`_SlugCollisionError` when a doc already exists at
+    ``projects/<slug>/``; returns normally otherwise. Mirrors the
+    pre-flight half of :func:`_create_project_async` (same exception
+    deferral pattern to avoid anyio task-group wrapping
+    :class:`_SlugCollisionError` / :class:`OSError` /
+    :class:`LithosClientError` in a :class:`BaseExceptionGroup`).
+
+    Honours PRD D72: greenfield ``--dry-run`` runs the same collision
+    check the real run would, so the operator catches "slug already
+    exists" before committing to the real run.
+    """
+    collision: _SlugCollisionError | None = None
+    deferred_error: OSError | LithosClientError | None = None
+    async with LithosClient(
+        cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
+    ) as client:
+        try:
+            existing = await client.note_list(
+                path_prefix=f"{_PROJECTS_PATH_PREFIX}{slug}/", limit=1
+            )
+            if existing:
+                collision = _SlugCollisionError(
+                    existing_id=existing[0].id,
+                    existing_path=existing[0].path,
+                )
+        except (OSError, LithosClientError) as exc:
+            deferred_error = exc
+    if deferred_error is not None:
+        raise deferred_error
+    if collision is not None:
+        raise collision
+
+
 def _slugify(value: str) -> str:
     """Pure slugify: lowercase + ASCII-fold + non-alphanumeric → hyphen.
 
@@ -861,7 +897,11 @@ def project_import(
             sys.exit(2)
         plans = graph_plans
 
-    # --dry-run: optionally verify tasks-only preflight (read-only), then print plan
+    # --dry-run: run the same read-only pre-flight the real run would,
+    # then print the plan (D72). Tasks-only verifies project exists +
+    # lithos_id consistency; greenfield verifies slug doesn't collide.
+    # Both paths exit non-zero on pre-flight failure so the operator
+    # catches the problem before committing.
     if dry_run:
         project_existed = False
         if tasks_only:
@@ -886,6 +926,27 @@ def project_import(
                 sys.exit(1)
             except LithosClientError as exc:
                 typer.echo(f"lithos-loom: lithos call failed: {exc}", err=True)
+                sys.exit(1)
+        else:
+            try:
+                asyncio.run(_check_slug_collision_async(cfg=cfg, slug=resolved_slug))
+            except _SlugCollisionError as exc:
+                typer.echo(
+                    f"lithos-loom: slug {resolved_slug!r} already exists at "
+                    f"doc id {exc.existing_id} ({exc.existing_path}); did you "
+                    f"mean --tasks-only --slug {resolved_slug}?",
+                    err=True,
+                )
+                sys.exit(1)
+            except OSError as exc:
+                typer.echo(
+                    f"lithos-loom: could not reach Lithos at "
+                    f"{cfg.orchestrator.lithos_url} ({exc})",
+                    err=True,
+                )
+                sys.exit(1)
+            except LithosClientError as exc:
+                typer.echo(f"lithos-loom: note_list failed: {exc}", err=True)
                 sys.exit(1)
 
         plan = ImportPlan(
