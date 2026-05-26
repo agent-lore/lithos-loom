@@ -96,10 +96,12 @@ File writes are layered (US14):
    a quiet-KB restart converges to the pre-restart disk content and
    the single coalesced flush is a hash-match, zero writes,
    zero mtime ripples.
-4. **Atomic write.** Write to ``<path>.tmp``, fsync, then
-   ``os.replace`` onto the final path. The ``.tmp`` file is best-
-   effort cleaned up on any failure between write and replace, so a
-   crashed mid-write doesn't litter the vault with ``tasks.md.tmp``.
+4. **Atomic write.** Write to a dot-prefixed ``.<name>.tmp`` sibling,
+   fsync, then ``os.replace`` onto the final path. The temp file is
+   best-effort cleaned up on any failure between write and replace, so
+   a crashed mid-write doesn't litter the vault with ``.tasks.md.tmp``.
+   The leading dot keeps the transient file invisible to Obsidian Sync
+   (lithos-loom#52).
 
 Pending flushes are best-effort under shutdown. When the
 subscription task is cancelled mid-debounce, the in-flight flush
