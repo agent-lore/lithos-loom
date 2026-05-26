@@ -238,7 +238,7 @@ def render_dry_run_plan(plan: ImportPlan, *, project_existed: bool) -> str:
                 f"WOULD CREATE {len(plan.plans)} tasks "
                 f"(top-level: flat; nested: depends_on parent):"
             )
-        for entry in _format_task_tree(plan.plans):
+        for entry in _format_task_tree(plan.plans, slug=plan.slug):
             lines.append(f"  {entry}")
     else:
         lines.append("WOULD CREATE 0 tasks (no `- [ ]` lines in source body)")
@@ -247,13 +247,21 @@ def render_dry_run_plan(plan: ImportPlan, *, project_existed: bool) -> str:
     return "\n".join(lines)
 
 
-def _format_task_tree(plans: list[TaskCreatePlan]) -> list[str]:
+def _format_task_tree(plans: list[TaskCreatePlan], *, slug: str) -> list[str]:
     """Render the task list as an indented tree for --dry-run output.
 
     Children (anything with non-zero indent) are nested under their
     parent for visual clarity. Each line shows description + tags +
     priority + parallelizable flag + depends_on hint.
+
+    The auto-added ``#project/<slug>`` tag (US88 / D61) is included
+    in the rendered tag list so the preview is a faithful reflection
+    of what gets written. The parser strips a matching project tag
+    from ``line.tags`` (its job is cross-project detection) and
+    :func:`create_tasks` re-adds it at write time; here we mirror that
+    re-addition for preview fidelity.
     """
+    project_tag = f"project/{slug}"
     parent_label: dict[int, str] = {}
     counters: dict[int, int] = {}
     out: list[str] = []
@@ -280,7 +288,11 @@ def _format_task_tree(plans: list[TaskCreatePlan]) -> list[str]:
             counters[line.line_number] = 0
             indent_str = "  " * (line.indent and 1)
 
-        tag_part = " " + " ".join(f"#{t}" for t in line.tags) if line.tags else ""
+        # Mirror create_tasks's tag composition: user tags + auto-added project tag.
+        rendered_tags = list(line.tags)
+        if project_tag not in rendered_tags:
+            rendered_tags.append(project_tag)
+        tag_part = " " + " ".join(f"#{t}" for t in rendered_tags)
         priority_part = f" priority={line.priority}" if line.priority else ""
         parallel_part = " parallelizable=true" if plan.parallelizable else ""
         depends_part = ""

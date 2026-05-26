@@ -623,6 +623,44 @@ def test_dry_run_includes_task_metadata(tmp_path: Path) -> None:
     assert "#foo" in result.stdout
 
 
+def test_dry_run_shows_auto_added_project_tag(tmp_path: Path) -> None:
+    """--dry-run must preview the `#project/<slug>` tag that create_tasks adds.
+
+    Without this, the operator sees a plan that doesn't match what gets
+    written (US88 — auto-add — is invisible in the preview). Per PRD
+    line 208 the preview must reflect the full plan.
+    """
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "alpha.md"
+    source.write_text("- [ ] Plain task with no tags\n", encoding="utf-8")
+    client = _stub_client()
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path), "--dry-run"]
+        )
+    assert result.exit_code == 0
+    # The project routing tag appears in the preview even though the
+    # source line had no `#project/...` reference.
+    assert "#project/alpha" in result.stdout
+
+
+def test_dry_run_does_not_duplicate_explicit_project_tag(tmp_path: Path) -> None:
+    """When source carries `#project/<slug>` explicitly, preview shows it ONCE."""
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "alpha.md"
+    source.write_text("- [ ] Task #project/alpha #extra\n", encoding="utf-8")
+    client = _stub_client()
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path), "--dry-run"]
+        )
+    assert result.exit_code == 0
+    assert result.stdout.count("#project/alpha") == 1
+    assert "#extra" in result.stdout
+
+
 # ── 15. --force-tasks interactive prompt ──────────────────────────────
 
 
