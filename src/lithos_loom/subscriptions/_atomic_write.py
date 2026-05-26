@@ -19,13 +19,18 @@ __all__ = ["write_file_atomic"]
 async def write_file_atomic(path: Path, content: str) -> None:
     """Atomically rewrite ``path`` with ``content``.
 
-    Strategy: write to ``<path>.tmp``, fsync, then ``os.replace`` onto
-    the final path. ``os.replace`` is atomic on POSIX. Creates
-    ``path.parent`` if absent. If anything between the temp-write and
-    the replace raises, the temp file is best-effort cleaned up so a
-    failed write doesn't litter the vault with ``<name>.md.tmp``
-    (Copilot review on lithos-loom#17, mirroring
+    Strategy: write to a dot-prefixed sibling ``.<name>.tmp``, fsync,
+    then ``os.replace`` onto the final path. ``os.replace`` is atomic
+    on POSIX. Creates ``path.parent`` if absent. If anything between
+    the temp-write and the replace raises, the temp file is best-effort
+    cleaned up so a failed write doesn't litter the vault with
+    ``.<name>.md.tmp`` (Copilot review on lithos-loom#17, mirroring
     ``write_result_atomically`` in plugin_runner.py).
+
+    The leading dot is load-bearing: Obsidian Sync ignores dot-prefixed
+    files, so the transient temp file never triggers a sync upload/race
+    (lithos-loom#52). The temp file stays in ``path.parent`` so
+    ``os.replace`` is a same-filesystem rename and therefore atomic.
 
     **No internal** ``await`` **points** — load-bearing invariant for
     every projection that uses this. Two properties depend on it:
@@ -55,7 +60,7 @@ async def write_file_atomic(path: Path, content: str) -> None:
     project-context bodies may be larger but still bounded by KB scale).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f".{path.name}.tmp")
     try:
         tmp.write_text(content, encoding="utf-8")
         fd = os.open(tmp, os.O_RDONLY)

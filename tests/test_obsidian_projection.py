@@ -359,11 +359,14 @@ async def test_atomic_write_uses_temp_then_replace(
 
     assert len(calls) == 1
     src, dst = calls[0]
-    assert src.endswith("tasks.md.tmp")
+    # Temp file is a dot-prefixed sibling so Obsidian Sync ignores it
+    # (lithos-loom#52); it must stay in the same dir for an atomic rename.
+    assert os.path.basename(src) == ".tasks.md.tmp"
+    assert os.path.dirname(src) == os.path.dirname(dst)
     assert dst.endswith("tasks.md")
     # Final file exists; tmp file does not linger.
     assert (tmp_path / "_lithos/tasks.md").exists()
-    assert not (tmp_path / "_lithos/tasks.md.tmp").exists()
+    assert not (tmp_path / "_lithos/.tasks.md.tmp").exists()
 
 
 async def test_parent_directory_created_when_absent(tmp_path: Path) -> None:
@@ -511,7 +514,7 @@ async def test_atomic_write_cleans_up_tmp_on_failure(
 
     # The real file was never written, and the tmp file was cleaned up.
     assert not (tmp_path / "_lithos/tasks.md").exists()
-    assert not (tmp_path / "_lithos/tasks.md.tmp").exists()
+    assert not (tmp_path / "_lithos/.tasks.md.tmp").exists()
 
 
 # ── US9 line enrichment: 📅 / #project/ / #lithos/ markers ──────────────
