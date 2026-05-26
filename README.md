@@ -27,6 +27,7 @@ It is the orchestration layer that connects Lithos to coding agents — replacin
 | [`docs/prd/mvp.md`](docs/prd/mvp.md) | **Track 2 MVP PRD** — original coding pipeline, ~35 user stories |
 | [`docs/prd/full.md`](docs/prd/full.md) | Full system PRD — 75 user stories spanning A1–A10 |
 | [`docs/macros/README.md`](docs/macros/README.md) | Slice 3 Obsidian capture macro — install instructions + behaviour notes. The macro source itself lives at [`docs/macros/capture-task.md`](docs/macros/capture-task.md) (copy-it-verbatim into your vault's Templater Template Folder). |
+| [`docs/cli/project-import.md`](docs/cli/project-import.md) | **`lithos-loom project import` reference** — every flag, decision, exit code, and worked example for adopting existing Obsidian project docs into Lithos (greenfield doc + tasks, `--tasks-only`, `--force-tasks`, `--dry-run`). |
 | [`docs/result-schema.json`](docs/result-schema.json) | Versioned JSON Schema for the plugin `result.json` contract |
 
 ## Requirements
@@ -148,7 +149,9 @@ Individual `story-implement` runs *can* be sandboxed in docker (deferred A10 enh
 | `lithos-loom validate-config --dry-run` | Also poll Lithos and print which routes / subscriptions would fire for each open task (US6). |
 | `lithos-loom config --show` | Print the merged effective config (US-4). |
 | `lithos-loom task create --project X --title Y [--brief Z] [--scheduled DATE] [--priority P] [--tags A,B] [--target-file PATH \| --no-insert]` | Create a Lithos task and emit its projected line (Slice 3 US24-27). Used by the Templater capture macro. |
-| `lithos-loom project list [--format text\|json]` | List configured local-TOML project slugs (Slice 3 helper; full US31 lands in Slice 4). |
+| `lithos-loom project list [--format text\|json] [--source lithos\|toml]` | List projects with Lithos-canonical status + TOML-local overlay (Slice 4 US31 / D30). |
+| `lithos-loom project create --title T [--slug S] [--tags A,B] [--body \| --body-file PATH] [--format text\|json]` | Create a new Lithos project-context doc (Slice 5 US36). Used by the `create-project` Templater macro. |
+| `lithos-loom project import <source> [--slug S] [--tags A,B] [--tasks-only] [--no-tasks] [--force-tasks] [--yes] [--dry-run] [--format text\|json]` | Import an existing local Markdown file as a Lithos project, extracting `- [ ]` lines as real Lithos tasks. **Full reference:** [`docs/cli/project-import.md`](docs/cli/project-import.md). |
 | `lithos-loom obsidian-sync show [--format text\|json]` | Print the resolved `[obsidian_sync]` block — vault_path, tasks_file, filter knobs. Used by the capture macro to discover the configured `tasks_file` path at runtime. |
 
 ## Project layout
