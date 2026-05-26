@@ -182,10 +182,16 @@ lithos-loom project create --title "..." --format json
 
 ## `project import` (companion CLI, not exposed as a macro)
 
-For importing an existing local Markdown file:
+For importing an existing local Markdown file as a Lithos project — and extracting its `- [ ]` lines as real Lithos tasks (greenfield doc + tasks, `--tasks-only`, `--force-tasks`, `--dry-run`, mid-batch recovery):
+
+**See the full reference at [`docs/cli/project-import.md`](../cli/project-import.md).**
 
 ```bash
+# Most common: greenfield import of an existing Obsidian project doc.
 lithos-loom project import /path/to/existing.md
+
+# Preview without writing.
+lithos-loom project import /path/to/existing.md --dry-run
 ```
 
-Reads optional YAML frontmatter for `title` / `tags`; refuses to import files that already have a `lithos_id` in frontmatter (they're already projected — would create a duplicate). Same `--slug` / `--tags` / `--format` flags as `project create`.
+Intentionally not exposed as a Templater macro — this is a one-shot adoption tool, not a recurring capture flow.
