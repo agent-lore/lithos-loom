@@ -184,6 +184,14 @@ class ObsidianDirWatcher:
         for path in sorted(self.projects_root.rglob("*.md")):
             if not path.is_file():
                 continue
+            # Skip per-project task-archive files (Slice 6 US45/D31).
+            # They carry no ``lithos_id`` frontmatter (D37), so without
+            # this they'd log a "no lithos_id" WARNING on every first
+            # sight; excluding them here keeps operator edits to archive
+            # files fully inert (no push, no reopen-request finding) and
+            # keeps them out of ``_last_seen_file_hashes`` entirely.
+            if path.name.endswith("-done.md"):
+                continue
             current_files.add(path)
             if await self._poll_one_file(path):
                 published += 1

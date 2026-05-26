@@ -118,7 +118,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -129,6 +129,9 @@ from lithos_loom.config import LoomConfig
 from lithos_loom.lithos_client import Task
 from lithos_loom.render import (
     due_date_str as _due_date_str,
+)
+from lithos_loom.render import (
+    extract_task_ids as _extract_task_ids,
 )
 from lithos_loom.render import (
     render_line as _render_line,
@@ -303,6 +306,18 @@ def make_handler(
     # (if any) wins over the projection's defensive re-read.
     if sync_state.last_written_hash is None:
         sync_state.last_written_hash = _hash_existing_file(tasks_path)
+    # Seed the surfaced-set (Slice 6 task-archive D38) from the task ids
+    # already on disk in tasks.md. A task that was visible before a
+    # restart must still count as operator-surfaced when its
+    # ``completed`` replay arrives this session — otherwise the archiver
+    # would skip archiving work the operator actually saw. The live
+    # render path never produced a ``surfaced`` entry for it (no
+    # ``created`` event replays for an already-resolved task), so the
+    # disk seed is the only signal. Guarded so a child that pre-seeds
+    # the shared state wins over this defensive re-read.
+    if not sync_state.surfaced:
+        for task_id in _surfaced_ids_on_disk(tasks_path):
+            sync_state.surfaced[task_id] = True
     # Pending debounced flush task (None when not debouncing or when
     # the last burst has already flushed). Subsequent events within
     # the debounce window cancel-and-reschedule this task.
@@ -328,11 +343,17 @@ def make_handler(
             )
             return
 
-        # TTL sweep runs at the top of every event handle. Cheap dict
-        # walk; long-quiet daemons get a single sweep-driven file
-        # rewrite on the next event arrival (US13).
+        # Eviction sweep runs at the top of every event handle. Cheap
+        # dict walk; long-quiet daemons get a single sweep-driven file
+        # rewrite on the next event arrival (US13). The archived sweep
+        # here lets an archive of some OTHER task (set by the archiver on
+        # a prior tick) force a flush so its line drops even when this
+        # event didn't change the keyed entry. The same-event
+        # immediate-evict crux (D39) is handled at flush time, where the
+        # archiver's flag is reliably already set.
         today_val = today_provider()
         evicted = _evict_expired(state, today_val, obs.resolved_ttl_days)
+        evicted += _evict_archived(state, sync_state.archived)
 
         prior = state.get(task.id)
 
@@ -392,6 +413,13 @@ def make_handler(
                     # string verbatim.
                     due_date=_due_date_str(task, cfg.routes, today_val),
                 )
+                # Mark the task operator-visible the moment it enters
+                # render state (Slice 6 task-archive D38). Set in
+                # ``handle`` — not ``_flush`` — so a task that opens and
+                # completes within one debounce window (coalesced into a
+                # single flush that never wrote an open line) is still
+                # flagged before its terminal event reaches the archiver.
+                sync_state.surfaced[task.id] = True
             else:
                 state.pop(task.id, None)
 
@@ -449,6 +477,17 @@ def make_handler(
         if it ever fires at the trailing ``sleep(0)`` the rename and
         sync_state update are both already complete and consistent.
         """
+        # Re-run eviction at flush time (Slice 6 D39). This is the
+        # load-bearing eviction for the immediate-evict crux: on a
+        # terminal event, ``handle`` ran the sweep at t0 — before the
+        # task-archive subscription (a sibling handler on the same loop)
+        # had set ``archived[id]`` — so the task survived the handle-time
+        # sweep. By the time this debounced flush runs (~50ms later) the
+        # archiver's synchronous append has completed and the flag is
+        # set, so the just-archived line is dropped in the same write
+        # that the terminal event scheduled. Must precede the
+        # render+hash below so the dropped entry actually changes content.
+        _evict_archived(state, sync_state.archived)
         content = _render_file(state)
         content_hash = hashlib.sha256(content.encode("utf-8")).digest()
         if content_hash == sync_state.last_written_hash:
@@ -600,12 +639,18 @@ def _evict_expired(
     today: date,
     ttl_days: int,
 ) -> list[str]:
-    """Drop state entries whose ``resolved_at < today - ttl_days``.
+    """Drop state entries whose ``resolved_at < today - ttl_days`` (US13).
 
     Open entries (``resolved_at is None``) are never affected.
     Returns the list of evicted task IDs so the caller can decide
     whether the file content moved even when the triggering event
     itself didn't change the keyed entry.
+
+    TTL-only by design — archived-driven eviction lives in
+    :func:`_evict_archived`, which the caller runs alongside this at
+    handle time and again at flush time (Slice 6 D32/D39). Keeping the
+    two evictions in separate single-responsibility functions avoids
+    the "which branch evicted this" ambiguity of a combined predicate.
 
     ``ttl_days`` is validated as ``>= 0`` by the config parser; the
     defensive check below is for direct-callsite robustness.
@@ -616,6 +661,39 @@ def _evict_expired(
     evicted: list[str] = []
     for tid, entry in list(state.items()):
         if entry.resolved_at is not None and entry.resolved_at < cutoff:
+            del state[tid]
+            evicted.append(tid)
+    return evicted
+
+
+def _evict_archived(
+    state: dict[str, _StateEntry], archived: Mapping[str, bool]
+) -> list[str]:
+    """Drop resolved entries the task-archive subscription has archived.
+
+    Returns the list of evicted task IDs (same contract as
+    :func:`_evict_expired`) so handle-time callers can force a flush
+    when an archive of some other task moved the file.
+
+    Runs at BOTH handle time and flush time (Slice 6 D32/D39):
+
+    * At flush time it is load-bearing — by the time a debounced flush
+      fires, the archiver (a sibling handler on the same loop) has set
+      ``archived[id]`` for any task resolved in this same event cycle,
+      so the just-archived line is dropped in the same write the
+      terminal event scheduled.
+    * At handle time it catches the cross-task case: a task archived on
+      a prior tick (its terminal event produced no projection flush —
+      e.g. a duplicate event) is evicted on the next event, and the
+      returned id forces that flush.
+
+    Archived-eviction is deliberately TTL-independent: a task that's
+    been durably archived no longer belongs in the global file
+    regardless of how recently it resolved.
+    """
+    evicted: list[str] = []
+    for tid, entry in list(state.items()):
+        if entry.resolved_at is not None and archived.get(tid):
             del state[tid]
             evicted.append(tid)
     return evicted
@@ -638,6 +716,24 @@ def _render_file(state: dict[str, _StateEntry]) -> str:
         lines.append(state[tid].line)
     lines.append("")
     return "\n".join(lines)
+
+
+def _surfaced_ids_on_disk(path: Path) -> set[str]:
+    """Recover the set of task ids currently written into ``tasks.md``.
+
+    Used by ``make_handler`` to seed ``sync_state.surfaced`` on restart
+    so the task-archive subscription's D38 gate treats tasks that were
+    operator-visible before the restart as surfaced when their
+    ``completed``/``cancelled`` events replay. Returns an empty set when
+    the file is missing / unreadable (cold start) — the live render path
+    then re-populates ``surfaced`` as tasks reappear via bootstrap
+    ``created`` events.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return set()
+    return _extract_task_ids(raw)
 
 
 def _hash_existing_file(path: Path) -> bytes | None:

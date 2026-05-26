@@ -33,6 +33,7 @@ test for :data:`PRIORITY_EMOJI` can pin its inverse.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
@@ -43,8 +44,10 @@ from lithos_loom.subscriptions._human_actionable import human_blocking_route_nam
 
 __all__ = [
     "PRIORITY_EMOJI",
+    "TASK_ID_RE",
     "dep_markers",
     "due_date_str",
+    "extract_task_ids",
     "parse_scheduled_for",
     "priority_marker",
     "render_line",
@@ -53,6 +56,29 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+TASK_ID_RE = re.compile(r"🆔 lithos:(?P<task_id>[A-Za-z0-9_-]+)")
+"""Matches the ``🆔 lithos:<id>`` stable-identifier marker that both
+:func:`render_line` and :func:`render_resolved_line` emit immediately
+after the title. Consumers parse the id back out of an on-disk line to
+recover which Lithos task a projected/archived line belongs to — the
+projection seeds its ``surfaced`` set from ``tasks.md`` on restart, and
+the task-archive subscription dedups against ids already on disk in a
+``<slug>-done.md`` file. The character class matches the same id shape
+``render_line`` writes (Lithos ids are ``[A-Za-z0-9_-]``)."""
+
+
+def extract_task_ids(text: str) -> set[str]:
+    """Return the set of Lithos task ids referenced by ``🆔 lithos:<id>``
+    markers anywhere in ``text``.
+
+    Used to recover task identity from already-written vault content:
+    the projection's restart seed (parse ``tasks.md``) and the
+    task-archive dedup-cache load (parse ``<slug>-done.md``). Lines
+    without the marker contribute nothing, so prose / headers / blank
+    lines are inert."""
+    return {m.group("task_id") for m in TASK_ID_RE.finditer(text)}
 
 
 PRIORITY_EMOJI: dict[str, str] = {

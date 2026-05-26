@@ -82,6 +82,9 @@ from lithos_loom.subscriptions._obsidian_status_transition import (
 from lithos_loom.subscriptions._project_context_projection import (
     make_handler as make_project_context_projection_handler,
 )
+from lithos_loom.subscriptions._task_archive import (
+    make_handler as make_task_archive_handler,
+)
 from lithos_loom.sync_state import ProjectionSyncState
 
 # Actions this child is willing to host. Subscriptions whose ``action``
@@ -96,6 +99,7 @@ _CHILD_ACTIONS: frozenset[str] = frozenset(
         "obsidian-due-date-changed",
         "project-context-projection",
         "note-push",
+        "task-archive",
     }
 )
 
@@ -191,6 +195,7 @@ async def _amain(cfg: LoomConfig) -> int:
     due_date_changed_specs = by_action.get("obsidian-due-date-changed", [])
     project_context_projection_specs = by_action.get("project-context-projection", [])
     note_push_specs = by_action.get("note-push", [])
+    task_archive_specs = by_action.get("task-archive", [])
     projection_spec = projection_specs[0] if projection_specs else None
     status_transition_spec = (
         status_transition_specs[0] if status_transition_specs else None
@@ -207,6 +212,7 @@ async def _amain(cfg: LoomConfig) -> int:
         else None
     )
     note_push_spec = note_push_specs[0] if note_push_specs else None
+    task_archive_spec = task_archive_specs[0] if task_archive_specs else None
 
     # status-transition / priority-changed / due-date-changed all need
     # the projection's ``sync_state`` populated for the fs watcher to
@@ -228,6 +234,19 @@ async def _amain(cfg: LoomConfig) -> int:
                 "baseline the fs watcher reads against.",
                 downstream_spec.name,
             )
+
+    # task-archive (Slice 6) depends on the projection too: the
+    # projection populates ``sync_state.surfaced``, which is the
+    # archiver's D38 "was this task operator-visible" gate. Without it,
+    # nothing ever sets the flag, so the archiver would skip every task.
+    if task_archive_spec is not None and projection_spec is None:
+        logger.warning(
+            "obsidian-sync: %r is configured but no obsidian-projection "
+            "subscription is present. The archiver will load but never "
+            "fire, because the projection is what populates the "
+            "surfaced-task set the archiver gates on.",
+            task_archive_spec.name,
+        )
 
     # note-push has a softer dependency than the task-side handlers:
     # without project-context-projection, the dir-watcher still
@@ -312,10 +331,10 @@ async def _amain(cfg: LoomConfig) -> int:
                 "obsidian-sync: no obsidian-projection, "
                 "obsidian-status-transition, obsidian-priority-changed, "
                 "obsidian-due-date-changed, "
-                "project-context-projection, or note-push subscription "
-                "configured; both watchers run but emit nothing without "
-                "projection state. Add a [[subscriptions]] block with "
-                "action='obsidian-projection' to populate it."
+                "project-context-projection, note-push, or task-archive "
+                "subscription configured; both watchers run but emit "
+                "nothing without projection state. Add a [[subscriptions]] "
+                "block with action='obsidian-projection' to populate it."
             )
             try:
                 await stop_event.wait()
@@ -371,6 +390,15 @@ async def _amain(cfg: LoomConfig) -> int:
                 note_push_spec.name,
             )
             my_handlers["note-push"] = make_note_push_handler(
+                cfg, sync_state=sync_state
+            )
+        if task_archive_spec is not None:
+            logger.info("obsidian-sync: wiring subscription %r", task_archive_spec.name)
+            # SAME sync_state instance: the projection sets surfaced[id]
+            # (the archiver's D38 gate) and reads archived[id] (set here)
+            # for its flush-time eviction. No debounce — the archiver does
+            # a single synchronous O_APPEND per event and never flushes.
+            my_handlers["task-archive"] = make_task_archive_handler(
                 cfg, sync_state=sync_state
             )
 

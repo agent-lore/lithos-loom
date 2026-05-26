@@ -182,6 +182,49 @@ class ProjectionSyncState:
     path, not the OLD one). Cleared by ``forget_project_context``
     on delete + on cleanup-driven-by-filter-rejection."""
 
+    surfaced: dict[str, bool] = field(default_factory=dict)
+    """Per-task "was this task ever written into the global
+    ``_lithos/tasks.md`` projection" flag, keyed by Lithos task id
+    (Slice 6 task-archive). Set ``True`` by the obsidian-projection
+    ``handle`` the moment an open actionable task is added to render
+    state, and seeded at projection-handler init from the task ids
+    already present on disk in ``tasks.md`` (so tasks visible before a
+    restart survive the replay of their ``completed`` event).
+
+    Read by the ``task-archive`` subscription as its D38 gate: a task
+    that resolves without this flag set was never operator-visible
+    (background / route-claimed-only) and is NOT archived. Dropped by
+    the archiver after a successful append (memory stays bounded by the
+    open-task count).
+
+    Caveat: the D38 gate, like every subscription, only sees events the
+    bus actually delivered. If the bus drops a terminal event for the
+    archiver's queue (back-pressure), that task is never archived — the
+    line stays in ``tasks.md`` under the TTL fallback but no done-file
+    entry is written. The D39 no-data-loss contract covers archive-write
+    *failures* (retry/friction), not bus drops."""
+
+    archived: dict[str, bool] = field(default_factory=dict)
+    """Per-task "the task-archive subscription has durably appended this
+    task to its per-project ``<slug>-done.md`` file" flag, keyed by
+    Lithos task id (Slice 6). Set ``True`` by the archiver only after
+    the O_APPEND write succeeds (or when a replayed task is found already
+    on disk).
+
+    Read by the obsidian-projection's flush-time eviction predicate:
+    an archived resolved task is evicted from ``tasks.md`` immediately,
+    rather than lingering for ``resolved_ttl_days``. The TTL remains a
+    fallback so an un-archived resolved task (archive write failed, or
+    the archiver isn't configured) still drops eventually — no permanent
+    linger, no regression when task-archive is disabled.
+
+    Unlike ``surfaced``, this map is NOT pruned: the projection's
+    eviction may consult it on any later flush (a duplicate terminal
+    event can re-add an evicted task to render state), so entries persist
+    for the process lifetime. Growth is bounded by the count of distinct
+    tasks resolved during the session — negligible for the daemon's
+    throughput; revisit only if a soak surfaces real memory pressure."""
+
     def record_projection_write(
         self,
         *,
