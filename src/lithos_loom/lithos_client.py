@@ -24,8 +24,11 @@ continues on transient failures.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -37,6 +40,15 @@ from mcp.client.sse import sse_client
 from mcp.types import CallToolResult
 
 from lithos_loom.errors import LithosClientError
+
+logger = logging.getLogger(__name__)
+
+# Dead-session recovery (#43). When Lithos restarts, the long-lived
+# MCP-over-SSE session held by the daemon's shared client goes dead and
+# every subsequent call_tool fails. ``_invoke`` re-establishes the
+# session and retries, bounded, so the daemon recovers without a restart.
+_MAX_TRANSPORT_ATTEMPTS = 3
+_RECONNECT_BACKOFF_SECONDS = 0.5
 
 __all__ = ["LithosClient", "Note", "NoteSummary", "Task", "WriteResult"]
 
@@ -194,16 +206,146 @@ class LithosClient:
         self._sse_ctx: Any = None
         self._session_ctx: Any = None
         self._session: ClientSession | None = None
+        # Dead-session recovery (#43): serialise reconnects so concurrent
+        # handlers sharing one client re-establish at most once, and use a
+        # generation counter to let a caller tell whether a peer already
+        # reconnected since its own call failed.
+        self._reconnect_lock = asyncio.Lock()
+        self._session_generation = 0
 
     async def __aenter__(self) -> LithosClient:
-        sse_url = f"{self.base_url}/sse"
-        self._sse_ctx = sse_client(sse_url)
-        read, write = await self._sse_ctx.__aenter__()
-        self._session_ctx = ClientSession(read, write)
-        session = await self._session_ctx.__aenter__()
-        await session.initialize()
-        self._session = session
+        await self._establish()
         return self
+
+    async def _establish(self) -> None:
+        """Open a fresh MCP-over-SSE session, replacing any prior one.
+
+        The connect → ``ClientSession`` → ``initialize()`` sequence, factored
+        out of ``__aenter__`` so :meth:`_reconnect` can reuse it after a
+        dead-session failure. Reassigns ``self._session`` in place, so a
+        client shared across the daemon's subscription handlers recovers for
+        all of them without re-wiring.
+
+        On a partial failure (e.g. ``initialize()`` raises after the SSE
+        stream opened) we tear down what we opened before re-raising, so a
+        failed (re)connect never leaks the SSE context — important on the
+        initial ``__aenter__`` path, where there's no retry loop to clean up
+        after us.
+        """
+        try:
+            sse_url = f"{self.base_url}/sse"
+            self._sse_ctx = sse_client(sse_url)
+            read, write = await self._sse_ctx.__aenter__()
+            self._session_ctx = ClientSession(read, write)
+            session = await self._session_ctx.__aenter__()
+            await session.initialize()
+            self._session = session
+        except Exception:
+            await self._teardown_quietly()
+            raise
+
+    async def _teardown_quietly(self) -> None:
+        """Best-effort close of the current (presumed-dead) session + SSE
+        contexts before a reconnect. The streams are already broken, so
+        errors here are expected — suppress them; the fresh
+        :meth:`_establish` is what matters. ``CancelledError`` (a
+        ``BaseException``) is not suppressed."""
+        if self._session_ctx is not None:
+            with contextlib.suppress(Exception):
+                await self._session_ctx.__aexit__(None, None, None)
+        self._session_ctx = None
+        self._session = None
+        if self._sse_ctx is not None:
+            with contextlib.suppress(Exception):
+                await self._sse_ctx.__aexit__(None, None, None)
+        self._sse_ctx = None
+
+    async def _reconnect(self, *, expected_gen: int) -> None:
+        """Re-establish the session, single-flight across concurrent callers.
+
+        ``expected_gen`` is the generation the caller observed before its
+        ``call_tool`` failed. Under the lock we bail if the generation has
+        already advanced — a peer reconnected since, so this caller should
+        just retry against the new session rather than tear it down again.
+        """
+        async with self._reconnect_lock:
+            if self._session_generation != expected_gen:
+                return
+            await self._teardown_quietly()
+            await self._establish()
+            self._session_generation += 1
+
+    async def _invoke(self, tool: str, arguments: dict[str, Any]) -> CallToolResult:
+        """Single chokepoint for every MCP tool call.
+
+        Wraps ``session.call_tool`` with dead-session recovery (#43): on a
+        transport-level failure it re-establishes the session and retries,
+        bounded by :data:`_MAX_TRANSPORT_ATTEMPTS` with a small backoff, then
+        re-raises the last error. Callers layer their own response decoding
+        on the returned :class:`CallToolResult` — domain ``{status:"error"}``
+        envelopes live *in* the result and are raised by those decoders
+        *after* this returns, so the only exceptions seen here are transport
+        / protocol failures from the SDK.
+
+        The catch is intentionally broad (any ``Exception`` except
+        ``CancelledError``): the exact exception the MCP/anyio stack raises on
+        a dropped SSE stream is version-dependent, and a too-narrow filter
+        would silently fail to recover. Bounded retries + per-attempt WARNING
+        logs + re-raise-on-exhaustion keep it from masking a persistent fault.
+
+        At-least-once caveat: the dominant failure — the session died while
+        idle and the next ``call_tool`` fails before the request is
+        transmitted — is safe to retry for reads and writes alike. A write
+        that committed server-side but lost its response to a mid-flight crash
+        could double-apply on retry; Lithos writes are largely tolerant
+        (``note_write`` is optimistic-version-locked, ``task_complete`` /
+        ``task_cancel`` are idempotent, a duplicate ``task_create`` is a
+        recoverable dup), so this isn't gated.
+        """
+        if self._session is None:
+            raise LithosClientError(
+                "client_not_initialised",
+                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
+            )
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_TRANSPORT_ATTEMPTS):
+            session = self._session
+            if session is None:
+                # Transient: a peer is mid-reconnect (between teardown and
+                # establish, both await points). Block on the reconnect lock
+                # until it finishes, then retry — do NOT raise here (the
+                # never-initialised case is handled by the guard above, before
+                # the loop). Generation guard makes this a no-op wait once the
+                # peer's reconnect lands.
+                await self._reconnect(expected_gen=self._session_generation)
+                continue
+            gen = self._session_generation
+            try:
+                return await session.call_tool(tool, arguments=arguments)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — see docstring
+                last_exc = exc
+                if attempt == _MAX_TRANSPORT_ATTEMPTS - 1:
+                    break
+                logger.warning(
+                    "LithosClient: call_tool(%s) failed (%r); re-establishing "
+                    "session (attempt %d/%d)",
+                    tool,
+                    exc,
+                    attempt + 1,
+                    _MAX_TRANSPORT_ATTEMPTS,
+                )
+                await asyncio.sleep(_RECONNECT_BACKOFF_SECONDS)
+                await self._reconnect(expected_gen=gen)
+        if last_exc is not None:
+            raise last_exc
+        # Every attempt hit the transient-None path without ever landing a
+        # live session — surface a clean error rather than looping forever.
+        raise LithosClientError(
+            "session_unavailable",
+            "LithosClient could not re-establish a session after reconnect",
+        )
 
     async def __aexit__(
         self,
@@ -229,14 +371,10 @@ class LithosClient:
         Returns the decoded JSON payload (typically a ``dict``). Domain
         errors with a ``{status: "error", code, message}`` envelope raise
         :class:`LithosClientError`; transport-level failures from the
-        ``mcp`` SDK propagate untouched.
+        ``mcp`` SDK are recovered (dead-session reconnect) by
+        :meth:`_invoke`, or propagate if recovery is exhausted.
         """
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
-        result = await self._session.call_tool(tool, arguments=arguments)
+        result = await self._invoke(tool, arguments)
         payload = _payload_from_result(result)
         if isinstance(payload, dict):
             _raise_if_error_envelope(payload)
@@ -259,17 +397,12 @@ class LithosClient:
         contract so loom can roll out ahead of a staging Lithos that
         doesn't yet recognise the kwarg.
         """
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
         arguments: dict[str, Any] = {"with_claims": with_claims}
         if status is not None:
             arguments["status"] = status
         if resolved_since is not None:
             arguments["resolved_since"] = resolved_since.isoformat()
-        result = await self._session.call_tool("lithos_task_list", arguments=arguments)
+        result = await self._invoke("lithos_task_list", arguments)
         return _parse_task_list_response(result)
 
     async def finding_post(
@@ -288,11 +421,6 @@ class LithosClient:
         ``[Friction]`` posting and Lithos will surface it cluster-wide via
         finding listings rather than per-task.
         """
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
         agent_id = agent or self.agent_id
         if not agent_id:
             raise LithosClientError(
@@ -311,9 +439,7 @@ class LithosClient:
         }
         if knowledge_id is not None:
             arguments["knowledge_id"] = knowledge_id
-        result = await self._session.call_tool(
-            "lithos_finding_post", arguments=arguments
-        )
+        result = await self._invoke("lithos_finding_post", arguments)
         payload = _payload_from_result(result)
         if isinstance(payload, dict):
             _raise_if_error_envelope(payload)
@@ -541,14 +667,7 @@ class LithosClient:
         claim serialization cost, and uses an explicit
         ``task_not_found`` error envelope instead of an empty list.
         """
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
-        result = await self._session.call_tool(
-            "lithos_task_status", arguments={"task_id": task_id}
-        )
+        result = await self._invoke("lithos_task_status", {"task_id": task_id})
         try:
             tasks = _parse_task_list_response(result)
         except LithosClientError as exc:
@@ -571,14 +690,7 @@ class LithosClient:
         ``metadata.priority`` comparisons — and reserve
         :meth:`task_status` for callers that need claims.
         """
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
-        result = await self._session.call_tool(
-            "lithos_task_get", arguments={"task_id": task_id}
-        )
+        result = await self._invoke("lithos_task_get", {"task_id": task_id})
         try:
             return _parse_task_get_response(result)
         except LithosClientError as exc:
@@ -605,11 +717,6 @@ class LithosClient:
         have one, path otherwise" (the projection layer always has
         the id; the doctor may have only the path).
         """
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
         if id is None and path is None:
             raise LithosClientError(
                 "invalid_input", "note_read requires one of id= or path="
@@ -619,7 +726,7 @@ class LithosClient:
             arguments["id"] = id
         if path is not None:
             arguments["path"] = path
-        result = await self._session.call_tool("lithos_read", arguments=arguments)
+        result = await self._invoke("lithos_read", arguments)
         try:
             return _parse_note_read_response(result)
         except LithosClientError as exc:
@@ -748,17 +855,12 @@ class LithosClient:
         pagination would change observability without changing
         contract.
         """
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
         arguments: dict[str, Any] = {"limit": limit}
         if path_prefix is not None:
             arguments["path_prefix"] = path_prefix
         if tags is not None:
             arguments["tags"] = tags
-        result = await self._session.call_tool("lithos_list", arguments=arguments)
+        result = await self._invoke("lithos_list", arguments)
         return _parse_note_list_response(result)
 
     async def note_delete(
@@ -822,12 +924,7 @@ class LithosClient:
         ``version_conflict`` / ``slug_collision`` envelopes — the
         caller (:meth:`note_write`) needs to see them as data. Other
         error envelopes still raise."""
-        if self._session is None:
-            raise LithosClientError(
-                "client_not_initialised",
-                "LithosClient not initialised; use 'async with LithosClient(...) as c'",
-            )
-        result = await self._session.call_tool(tool, arguments=arguments)
+        result = await self._invoke(tool, arguments)
         payload = _payload_from_result(result)
         if not isinstance(payload, dict):
             raise LithosClientError(

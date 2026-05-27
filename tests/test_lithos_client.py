@@ -8,6 +8,7 @@ parse helpers so we don't have to spin up a real Lithos to verify shape.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import AsyncMock
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp.types import CallToolResult, TextContent
 
+from lithos_loom import lithos_client as lithos_client_mod
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import (
     LithosClient,
@@ -1501,3 +1503,153 @@ def test_write_result_default_warnings_is_empty_tuple() -> None:
     code can ``if not wr.warnings:`` test cleanly."""
     wr = WriteResult(status="created")
     assert wr.warnings == ()
+
+
+# ── Dead-session recovery (#43) ────────────────────────────────────────
+
+
+class _DeadError(Exception):
+    """Stand-in for the transport/protocol error the MCP SDK raises when
+    the SSE stream is dead (the exact type is version-dependent; _invoke
+    catches broadly)."""
+
+
+@pytest.fixture(autouse=True)
+def _zero_reconnect_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the reconnect tests snappy — no real backoff sleep."""
+    monkeypatch.setattr(lithos_client_mod, "_RECONNECT_BACKOFF_SECONDS", 0)
+
+
+def _live_session(payload: dict[str, Any]) -> AsyncMock:
+    session = AsyncMock()
+    session.call_tool.return_value = _content(payload)
+    return session
+
+
+def _dead_session() -> AsyncMock:
+    session = AsyncMock()
+    session.call_tool.side_effect = _DeadError("still dead")
+    return session
+
+
+def _patch_establish(client: LithosClient, sessions: list[AsyncMock]) -> list[int]:
+    """Replace ``client._establish`` so each reconnect installs the next
+    queued session. Returns a list that records each establish call."""
+    calls: list[int] = []
+
+    async def _establish() -> None:
+        calls.append(1)
+        client._session = sessions.pop(0)  # type: ignore[assignment]
+
+    client._establish = _establish  # type: ignore[method-assign]
+    return calls
+
+
+async def test_invoke_reconnects_then_succeeds_through_bypass_method() -> None:
+    """A dead session on a method that bypasses _call (note_read) is
+    transparently re-established and the call retried."""
+    client = LithosClient(base_url="http://example.test:8765")
+    client._session = _dead_session()  # type: ignore[assignment]
+    fresh = _live_session(
+        {
+            "id": "d1",
+            "title": "Doc One",
+            "content": "# Doc One\n\nBody.",
+            "path": "projects/x/x.md",
+            "metadata": {"version": 3},
+        }
+    )
+    establish_calls = _patch_establish(client, [fresh])
+
+    note = await client.note_read(id="d1")
+
+    assert note is not None and note.id == "d1"
+    assert len(establish_calls) == 1  # reconnected exactly once
+    fresh.call_tool.assert_awaited_once()  # retried on the fresh session
+
+
+async def test_invoke_reraises_after_exhausting_attempts() -> None:
+    """Persistent transport failure → the last error propagates after
+    _MAX_TRANSPORT_ATTEMPTS, no infinite loop."""
+    client = LithosClient(base_url="http://example.test:8765")
+    client._session = _dead_session()  # type: ignore[assignment]
+    # Every reconnect installs another dead session.
+    establish_calls = _patch_establish(client, [_dead_session() for _ in range(5)])
+
+    with pytest.raises(_DeadError, match="still dead"):
+        await client.task_list()
+
+    # 3 attempts total → 2 reconnects between them.
+    assert len(establish_calls) == 2
+
+
+async def test_invoke_single_flight_reconnect_under_concurrency() -> None:
+    """Two concurrent calls that BOTH fail mid-flight against the same dead
+    session re-establish only once (lock + generation guard), then both
+    succeed on the fresh session."""
+    client = LithosClient(base_url="http://example.test:8765")
+
+    dead = AsyncMock()
+
+    async def _yield_then_die(*_a: Any, **_k: Any) -> Any:
+        # Yield so both gathered tasks enter call_tool and are in-flight
+        # before either raises — this exercises the genuine concurrent
+        # failure path (both capture the same generation, then race to
+        # reconnect), which a synchronously-raising mock would not.
+        await asyncio.sleep(0)
+        raise _DeadError("dead")
+
+    dead.call_tool.side_effect = _yield_then_die
+    client._session = dead  # type: ignore[assignment]
+    fresh = _live_session({"tasks": []})
+    # Only one fresh session is queued — if reconnect fired twice the
+    # second establish would IndexError on the empty list.
+    establish_calls = _patch_establish(client, [fresh])
+
+    results = await asyncio.gather(client.task_list(), client.task_list())
+
+    assert results == [[], []]
+    assert len(establish_calls) == 1
+
+
+async def test_aexit_closes_contexts_after_reconnect() -> None:
+    """``__aexit__`` closes whatever session/SSE contexts are current —
+    including ones installed by a reconnect — and clears the handles."""
+    client = LithosClient(base_url="http://example.test:8765")
+    session_ctx = AsyncMock()
+    sse_ctx = AsyncMock()
+    # Simulate post-reconnect state (a fresh _establish would have set these).
+    client._session_ctx = session_ctx
+    client._sse_ctx = sse_ctx
+    client._session = AsyncMock()  # type: ignore[assignment]
+
+    await client.__aexit__(None, None, None)
+
+    session_ctx.__aexit__.assert_awaited_once()
+    sse_ctx.__aexit__.assert_awaited_once()
+    assert client._session is None
+    assert client._session_ctx is None
+    assert client._sse_ctx is None
+
+
+async def test_invoke_does_not_swallow_cancellation() -> None:
+    """A cancelled call_tool propagates without attempting a reconnect."""
+    client = LithosClient(base_url="http://example.test:8765")
+    cancelling = AsyncMock()
+    cancelling.call_tool.side_effect = asyncio.CancelledError()
+    client._session = cancelling  # type: ignore[assignment]
+    establish_calls = _patch_establish(client, [])
+
+    with pytest.raises(asyncio.CancelledError):
+        await client.task_list()
+
+    assert establish_calls == []  # no reconnect on cancellation
+
+
+async def test_invoke_raises_when_never_initialised() -> None:
+    """Calling before ``async with`` (no session) raises the
+    client_not_initialised envelope, not a reconnect attempt."""
+    client = LithosClient(base_url="http://example.test:8765")
+    with pytest.raises(LithosClientError) as ei:
+        await client.task_list()
+    assert ei.value.code == "client_not_initialised"
