@@ -40,7 +40,7 @@ asyncio (no locks needed).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -224,6 +224,22 @@ class ProjectionSyncState:
     for the process lifetime. Growth is bounded by the count of distinct
     tasks resolved during the session — negligible for the daemon's
     throughput; revisit only if a soak surfaces real memory pressure."""
+
+    request_projection_flush: Callable[[], Awaitable[None]] | None = None
+    """Hook the obsidian-projection installs so a sibling handler can
+    ask it to (re-)flush ``tasks.md`` (Slice 6 D39). Set by the
+    projection's ``make_handler`` to its debounced flush-scheduler;
+    ``None`` until then (and when no projection is wired).
+
+    The task-archive subscription calls this *after* it sets
+    ``archived[id]``, so the resulting flush is guaranteed to see the
+    flag and evict the line — making eviction causally follow archiving
+    instead of relying on the archiver winning a race against the
+    projection's own debounce timer. (Both handlers share one event
+    loop; the archiver's append is synchronous, so the projection
+    usually evicts on its own scheduled flush, but under a backlog or a
+    slow disk the archiver can finish after that flush has already run —
+    this hook closes that window.)"""
 
     def record_projection_write(
         self,

@@ -123,20 +123,28 @@ def _load_done_ids(path: Path) -> set[str]:
 
 
 def _append_line(path: Path, line: str) -> None:
-    """Append ``line`` (plus newline) to ``path`` via a single O_APPEND write.
+    """Append ``line`` (plus newline) to ``path`` via O_APPEND.
 
     Creates the parent directory and the file if absent. O_APPEND makes
-    the write atomic with respect to concurrent appenders (POSIX) for the
-    short line sizes here, and — unlike the projection's temp+rename — no
-    transient sibling file is produced, so there's nothing for Obsidian
-    Sync to trip on (the done file itself IS meant to sync). Raises
-    ``OSError`` on any I/O failure so the caller can leave the archived
-    flag unset and let the runner's retry/friction policy take over.
+    each write append at the current end of file, and — unlike the
+    projection's temp+rename — no transient sibling file is produced, so
+    there's nothing for Obsidian Sync to trip on (the done file itself IS
+    meant to sync).
+
+    ``os.write`` may perform a short write (POSIX permits writing fewer
+    bytes than requested), so we loop until the whole buffer is flushed —
+    otherwise a partial write would leave a truncated archive line while
+    the caller goes on to mark the task archived, breaking the D39
+    no-data-loss contract. Raises ``OSError`` on any I/O failure so the
+    caller leaves the archived flag unset and the runner's retry/friction
+    policy takes over.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        os.write(fd, (line + "\n").encode("utf-8"))
+        view = memoryview((line + "\n").encode("utf-8"))
+        while view:
+            view = view[os.write(fd, view) :]
     finally:
         os.close(fd)
 
@@ -217,6 +225,7 @@ def make_handler(
                 "task-archive: %s already in %s; skipping append", task.id, done_path
             )
             sync_state.archived[task.id] = True
+            await _request_projection_evict()
             return
 
         status = "completed" if event.type.endswith("completed") else "cancelled"
@@ -235,5 +244,14 @@ def make_handler(
         # this task now that it's terminal + archived.
         sync_state.surfaced.pop(task.id, None)
         ctx.logger.info("task-archive: appended %s to %s", task.id, done_path.name)
+        # Ask the projection to flush now that ``archived`` is set, so the
+        # line is evicted from tasks.md causally (not racing the debounce
+        # timer). No-op when no projection is wired (D39).
+        await _request_projection_evict()
+
+    async def _request_projection_evict() -> None:
+        reflush = sync_state.request_projection_flush
+        if reflush is not None:
+            await reflush()
 
     return handle

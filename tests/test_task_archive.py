@@ -10,6 +10,7 @@ eviction coupling with the projection is covered in
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Mapping
@@ -27,6 +28,9 @@ from lithos_loom.config import (
     OrchestratorConfig,
 )
 from lithos_loom.subscriptions import SubscriptionContext, _task_archive
+from lithos_loom.subscriptions._obsidian_projection import (
+    make_handler as make_projection_handler,
+)
 from lithos_loom.subscriptions._task_archive import make_handler
 from lithos_loom.sync_state import ProjectionSyncState
 
@@ -78,6 +82,23 @@ def _terminal_event(
         type="lithos.task.completed" if completed else "lithos.task.cancelled",
         timestamp=datetime.now(UTC),
         payload=payload,
+    )
+
+
+def _open_event(
+    task_id: str, *, title: str = "Ship it", project: str = "demo"
+) -> Event:
+    return Event(
+        type="lithos.task.created",
+        timestamp=datetime.now(UTC),
+        payload={
+            "id": task_id,
+            "title": title,
+            "status": "open",
+            "tags": [],
+            "metadata": {"project": project},
+            "claims": [],
+        },
     )
 
 
@@ -268,3 +289,98 @@ async def test_non_terminal_event_ignored(tmp_path: Path) -> None:
     await handler(evt, _ctx())
     assert not _done_file(tmp_path, "demo").exists()
     assert "t8" not in state.archived
+
+
+# ── F2: partial os.write must not truncate the archive line ────────────
+
+
+async def test_append_loops_on_partial_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """os.write may return a short count; _append_line must loop so the
+    line is never truncated, and archived is only set after it fully
+    lands (D39)."""
+    real_write = os.write
+
+    def _short_write(fd: int, data: Any) -> int:
+        b = bytes(data)
+        # Force a short write only for our archive line, 4 bytes at a time.
+        if b"lithos:" in b and len(b) > 4:
+            return real_write(fd, b[:4])
+        return real_write(fd, data)
+
+    monkeypatch.setattr(_task_archive.os, "write", _short_write)
+
+    state = _surfaced("t9")
+    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    await handler(
+        _terminal_event(task_id="t9", title="A reasonably long title"), _ctx()
+    )
+
+    content = _done_file(tmp_path, "demo").read_text()
+    assert (
+        "- [x] A reasonably long title 🆔 lithos:t9 #project/demo ✅ 2026-05-20"
+        in content
+    )
+    assert content.endswith("\n")
+    assert state.archived["t9"] is True
+
+
+# ── F1: eviction follows archiving causally, even if flush ran first ───
+
+
+async def test_archiver_reflush_evicts_when_projection_flushed_first(
+    tmp_path: Path,
+) -> None:
+    """If the projection renders the [x] line and flushes BEFORE the
+    archiver appends, the archiver's reflush still evicts the line — it
+    doesn't linger until an unrelated future event (D39 / review F1)."""
+    state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    # debounce=0 → projection flushes inline, so the [x] line is on disk
+    # before the archiver runs. The archiver's request_projection_flush
+    # call must still drive the eviction.
+    projection = make_projection_handler(cfg, sync_state=state)
+    archiver = make_handler(cfg, sync_state=state)
+    tasks_file = tmp_path / "_lithos/tasks.md"
+
+    await projection(_open_event("x"), _ctx())
+    assert "🆔 lithos:x" in tasks_file.read_text()  # surfaced + on disk
+    await projection(_terminal_event(task_id="x"), _ctx())
+    # Projection wrote the [x] line; archived not set yet → still present.
+    assert "🆔 lithos:x" in tasks_file.read_text()
+
+    # Archiver runs after the flush: append + set archived + reflush.
+    await archiver(_terminal_event(task_id="x"), _ctx())
+
+    assert "🆔 lithos:x" not in tasks_file.read_text(), "reflush should evict the line"
+    assert _done_file(tmp_path, "demo").read_text().count("🆔 lithos:x") == 1
+
+
+# ── F3: created+completed within one debounce window is not archived ───
+
+
+async def test_fast_open_complete_within_window_not_archived(tmp_path: Path) -> None:
+    """A task whose open line was never written (created + completed
+    coalesced inside one debounce window) is not surfaced, so the
+    archiver correctly skips it — surfaced means 'written to tasks.md'
+    (D38), not 'entered render state' (review F3)."""
+    state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    projection = make_projection_handler(cfg, sync_state=state, debounce_seconds=0.05)
+    archiver = make_handler(cfg, sync_state=state)
+
+    # Created then completed before the 50ms flush fires: no write yet.
+    await projection(_open_event("fast"), _ctx())
+    await projection(_terminal_event(task_id="fast"), _ctx())
+    # Archiver sees the completed event before any flush has set surfaced.
+    await archiver(_terminal_event(task_id="fast"), _ctx())
+    assert "fast" not in state.surfaced
+    assert not _done_file(tmp_path, "demo").exists()
+    assert "fast" not in state.archived
+
+    # Let the coalesced flush fire; the projection writes the [x] line and
+    # only now flags surfaced — but the archiver already (correctly) ran
+    # and skipped, so no archive line is ever produced.
+    await asyncio.sleep(0.1)
+    assert not _done_file(tmp_path, "demo").exists()

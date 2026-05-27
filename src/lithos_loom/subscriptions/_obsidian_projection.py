@@ -413,13 +413,6 @@ def make_handler(
                     # string verbatim.
                     due_date=_due_date_str(task, cfg.routes, today_val),
                 )
-                # Mark the task operator-visible the moment it enters
-                # render state (Slice 6 task-archive D38). Set in
-                # ``handle`` — not ``_flush`` — so a task that opens and
-                # completes within one debounce window (coalesced into a
-                # single flush that never wrote an open line) is still
-                # flagged before its terminal event reaches the archiver.
-                sync_state.surfaced[task.id] = True
             else:
                 state.pop(task.id, None)
 
@@ -528,6 +521,19 @@ def make_handler(
             task_priority_markers=priority_markers,
             task_due_date_markers=due_date_markers,
         )
+        # Mark every task just written to disk as surfaced (Slice 6
+        # task-archive D38). Set HERE — on the successful write — not in
+        # ``handle``, so the flag means exactly "this task's line was
+        # written into tasks.md", matching D38/US41's "operator-visible"
+        # rule. A task that opened and resolved inside one debounce window
+        # without its open line ever being written is therefore not
+        # flagged, and the archiver correctly skips it (the same
+        # acceptable lossiness D38 already documents for never-surfaced
+        # work). The hash-skip early-return above is fine: identical
+        # content means these ids were already written (and flagged) by
+        # the prior write or seeded from disk at init.
+        for tid in state:
+            sync_state.surfaced[tid] = True
         # Cancellation point for clean shutdown between events; safe
         # to fire here because both the rename AND the sync_state
         # update are already complete.
@@ -566,6 +572,12 @@ def make_handler(
             with contextlib.suppress(asyncio.CancelledError):
                 await pending_flush
         pending_flush = asyncio.create_task(_delayed_flush())
+
+    # Expose the flush-scheduler so the task-archive subscription can ask
+    # for a (re-)flush right after it sets ``archived[id]`` — eviction
+    # then causally follows archiving rather than racing the debounce
+    # timer (Slice 6 D39). Shared instance, so the archiver picks it up.
+    sync_state.request_projection_flush = _schedule_flush
 
     return handle
 
