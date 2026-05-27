@@ -459,27 +459,75 @@ class LithosClient:
         """Claim ``aspect`` of ``task_id``. Returns the claim's ``expires_at``.
 
         Raises :class:`LithosClientError` with ``code="claim_failed"`` when
-        the aspect is already claimed (or the task isn't open). Callers
-        treat that as "skip — another runner won the race".
+        the aspect is already claimed **by another agent** (or the task isn't
+        open). Callers treat that as "skip — another runner won the race".
+
+        Idempotent under the transport-retry layer (#43). ``_invoke`` may
+        re-issue this claim after a transport failure, and a claim that
+        committed server-side before its response was lost would then come
+        back ``claim_failed`` — *because we already hold it*. To avoid
+        turning our own committed claim into a visible ``claim_failed`` (which
+        would make RouteRunner silently skip work it owns until the TTL
+        lapses), a ``claim_failed`` is disambiguated against the task's actual
+        claims: if **we** hold this aspect, the claim effectively succeeded
+        and we return its expiry; only a claim held by a *different* agent
+        re-raises ``claim_failed``.
         """
         agent_id = agent or self.agent_id
         if not agent_id:
             raise LithosClientError("missing_agent", "task_claim needs an agent id")
-        payload = await self._call(
-            "lithos_task_claim",
-            {
-                "task_id": task_id,
-                "aspect": aspect,
-                "agent": agent_id,
-                "ttl_minutes": ttl_minutes,
-            },
-        )
+        try:
+            payload = await self._call(
+                "lithos_task_claim",
+                {
+                    "task_id": task_id,
+                    "aspect": aspect,
+                    "agent": agent_id,
+                    "ttl_minutes": ttl_minutes,
+                },
+            )
+        except LithosClientError as exc:
+            if exc.code != "claim_failed":
+                raise
+            held = await self._claim_expiry_if_held(task_id, aspect, agent_id)
+            if held is not None:
+                logger.info(
+                    "task_claim: %s aspect %r reported claim_failed but is already "
+                    "held by %s (treating as success — likely a retried claim "
+                    "whose first response was lost)",
+                    task_id,
+                    aspect,
+                    agent_id,
+                )
+                return held
+            raise
         expires = payload.get("expires_at") if isinstance(payload, dict) else None
         if not isinstance(expires, str):
             raise LithosClientError(
                 "invalid_response", "task_claim response missing expires_at"
             )
         return expires
+
+    async def _claim_expiry_if_held(
+        self, task_id: str, aspect: str, agent_id: str
+    ) -> str | None:
+        """Return our own claim's ``expires_at`` for ``aspect`` if ``agent_id``
+        already holds it on ``task_id``, else ``None``.
+
+        Disambiguates a ``claim_failed`` that is actually our own
+        committed-but-response-lost claim (#43). Returns ``""`` when we hold
+        the claim but Lithos omitted ``expires_at`` (we still own it — the
+        caller only needs to know the claim is ours). A missing task or any
+        non-matching/other-agent claim returns ``None`` → genuine failure.
+        """
+        task = await self.task_status(task_id=task_id)
+        if task is None:
+            return None
+        for claim in task.claims:
+            if claim.get("agent") == agent_id and claim.get("aspect") == aspect:
+                expires = claim.get("expires_at")
+                return expires if isinstance(expires, str) else ""
+        return None
 
     async def task_renew(
         self,

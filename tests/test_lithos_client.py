@@ -503,6 +503,45 @@ def _client_with_session(response: Any) -> tuple[LithosClient, AsyncMock]:
     return client, fake_session
 
 
+def _client_with_router(by_tool: dict[str, Any]) -> tuple[LithosClient, AsyncMock]:
+    """A client whose ``call_tool`` returns a different result per tool name —
+    needed once a method makes more than one tool call (e.g. ``task_claim``'s
+    ``claim_failed`` ownership re-check fetches ``lithos_task_status``)."""
+    client = LithosClient(
+        base_url="http://example.test:8765", agent_id="lithos-orchestrator-test"
+    )
+    fake_session = AsyncMock()
+
+    async def _route(tool: str, *, arguments: dict[str, Any] | None = None) -> Any:
+        if tool not in by_tool:
+            raise AssertionError(f"unexpected tool call: {tool!r}")
+        return by_tool[tool]
+
+    fake_session.call_tool.side_effect = _route
+    client._session = fake_session  # type: ignore[assignment]
+    return client, fake_session
+
+
+def _task_with_claims(claims: list[dict[str, Any]]) -> CallToolResult:
+    return _content(
+        {
+            "tasks": [
+                {
+                    "id": "t-1",
+                    "title": "x",
+                    "status": "open",
+                    "tags": [],
+                    "metadata": {},
+                    "claims": claims,
+                }
+            ]
+        }
+    )
+
+
+_CLAIM_FAILED = {"status": "error", "code": "claim_failed", "message": "aspect taken"}
+
+
 async def test_task_claim_returns_expires_at_and_passes_arguments() -> None:
     client, session = _client_with_session(
         _content({"success": True, "expires_at": "2026-05-13T12:00:00Z"})
@@ -520,9 +559,83 @@ async def test_task_claim_returns_expires_at_and_passes_arguments() -> None:
     )
 
 
-async def test_task_claim_raises_claim_failed_when_aspect_taken() -> None:
-    client, _ = _client_with_session(
-        _content({"status": "error", "code": "claim_failed", "message": "aspect taken"})
+async def test_task_claim_reraises_when_another_agent_holds_it() -> None:
+    """Genuine race-loss: the aspect is held by a DIFFERENT agent, so the
+    ownership re-check confirms it's not ours → claim_failed propagates."""
+    client, _ = _client_with_router(
+        {
+            "lithos_task_claim": _content(_CLAIM_FAILED),
+            "lithos_task_status": _task_with_claims(
+                [
+                    {
+                        "agent": "other-runner",
+                        "aspect": "impl",
+                        "expires_at": "2026-05-20",
+                    }
+                ]
+            ),
+        }
+    )
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_claim(task_id="t-1", aspect="impl")
+    assert exc.value.code == "claim_failed"
+
+
+async def test_task_claim_treats_self_held_claim_failed_as_success() -> None:
+    """#43: a claim_failed for an aspect WE already hold (a retried claim
+    whose first response was lost) is treated as success — returns the held
+    claim's expiry rather than raising, so RouteRunner doesn't skip work it
+    owns."""
+    client, _ = _client_with_router(
+        {
+            "lithos_task_claim": _content(_CLAIM_FAILED),
+            "lithos_task_status": _task_with_claims(
+                [
+                    {
+                        "agent": "lithos-orchestrator-test",
+                        "aspect": "impl",
+                        "expires_at": "2026-05-20T12:00:00Z",
+                    }
+                ]
+            ),
+        }
+    )
+    expires = await client.task_claim(task_id="t-1", aspect="impl")
+    assert expires == "2026-05-20T12:00:00Z"
+
+
+async def test_task_claim_reraises_when_we_hold_a_different_aspect() -> None:
+    """We hold a claim, but on a different aspect → not ours for THIS aspect
+    → claim_failed propagates (no false success)."""
+    client, _ = _client_with_router(
+        {
+            "lithos_task_claim": _content(_CLAIM_FAILED),
+            "lithos_task_status": _task_with_claims(
+                [
+                    {
+                        "agent": "lithos-orchestrator-test",
+                        "aspect": "review-human",
+                        "expires_at": "2026-05-20",
+                    }
+                ]
+            ),
+        }
+    )
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_claim(task_id="t-1", aspect="impl")
+    assert exc.value.code == "claim_failed"
+
+
+async def test_task_claim_reraises_claim_failed_when_task_gone() -> None:
+    """claim_failed + the task no longer exists (task_status → not found) →
+    nothing of ours to find → claim_failed propagates."""
+    client, _ = _client_with_router(
+        {
+            "lithos_task_claim": _content(_CLAIM_FAILED),
+            "lithos_task_status": _content(
+                {"status": "error", "code": "task_not_found", "message": "gone"}
+            ),
+        }
     )
     with pytest.raises(LithosClientError) as exc:
         await client.task_claim(task_id="t-1", aspect="impl")
