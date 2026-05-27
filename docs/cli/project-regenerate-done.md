@@ -67,7 +67,7 @@ If the rebuild finds **zero** resolved tasks for the slug and a done file alread
 | `--slug` / `-s` | (required) | Project slug. Must match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`. |
 | `--dry-run` | off | Print the line count + the lines that would be written, then exit. No writes, no prompt. |
 | `--yes` / `-y` | off | Skip the overwrite confirmation prompt. |
-| `--format` / `-f` | `text` | `text` prints the written path; `json` prints `{slug, path, lines_written}`. |
+| `--format` / `-f` | `text` | `text` prints the written path (or a human message); `json` prints a single-line object on every 0-exit path — `{slug, path, action, count, written}`, where `action` is one of `written` / `dry-run` / `noop` / `aborted`, `count` is the number of resolved-task lines, and `written` says whether the file was changed. |
 | `--config` / `-c` | discovered | Explicit TOML config path. |
 
 The confirmation prompt (`Overwrite … (N line(s))? [y/N]`) only fires when the done file **already exists** and `--yes` was not passed; a first-time write has nothing to clobber and proceeds silently.

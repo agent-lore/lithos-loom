@@ -163,8 +163,63 @@ def test_json_output(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["slug"] == "demo"
-    assert payload["lines_written"] == 1
+    assert payload["action"] == "written"
+    assert payload["count"] == 1
+    assert payload["written"] is True
     assert payload["path"].endswith("demo/demo-done.md")
+
+
+def test_json_dry_run_emits_json_not_banner(tmp_path: Path) -> None:
+    """--format json honors json on the dry-run path (no human banner)."""
+    cfg = _write_config(tmp_path)
+    client = _stub_client(completed=[_task("t1"), _task("t2")], cancelled=[])
+    result = _run(
+        ["regenerate-done", "-s", "demo", "--dry-run", "-f", "json", "-c", str(cfg)],
+        client,
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "NO CHANGES MADE" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "dry-run"
+    assert payload["count"] == 2
+    assert payload["written"] is False
+    assert not _done_path(tmp_path, "demo").exists()
+
+
+def test_json_noop_emits_json(tmp_path: Path) -> None:
+    """Zero tasks + no file in json mode → a parseable noop object on stdout."""
+    cfg = _write_config(tmp_path)
+    client = _stub_client(completed=[], cancelled=[])
+    result = _run(
+        ["regenerate-done", "-s", "demo", "-f", "json", "-c", str(cfg)], client
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "noop"
+    assert payload["count"] == 0
+    assert payload["written"] is False
+    assert not _done_path(tmp_path, "demo").exists()
+
+
+def test_json_aborted_emits_json(tmp_path: Path) -> None:
+    """Declining the overwrite prompt in json mode → a parseable aborted object."""
+    cfg = _write_config(tmp_path)
+    done = _done_path(tmp_path, "demo")
+    done.parent.mkdir(parents=True, exist_ok=True)
+    done.write_text("- [x] stale 🆔 lithos:old ✅ 2026-01-01\n", encoding="utf-8")
+
+    client = _stub_client(completed=[_task("t1")], cancelled=[])
+    result = _run(
+        ["regenerate-done", "-s", "demo", "-f", "json", "-c", str(cfg)],
+        client,
+        stdin="n\n",
+    )
+    assert result.exit_code == 0, result.stdout
+    # The prompt text + JSON share stdout; the last non-empty line is the JSON.
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["action"] == "aborted"
+    assert payload["written"] is False
+    assert "lithos:old" in done.read_text(encoding="utf-8")
 
 
 def test_same_id_in_both_lists_deduped(tmp_path: Path) -> None:

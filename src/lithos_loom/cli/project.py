@@ -1263,6 +1263,24 @@ def project_regenerate_done(
     # is already ``_SLUG_RE``-validated above, so the path is safe.
     done_path = obs.vault_path / obs.projects_dir / slug / f"{slug}-done.md"
 
+    is_json = output_format == _FORMAT_JSON
+
+    def _emit_json(action: str, *, count: int, written: bool) -> None:
+        # Single-line JSON envelope shared by every 0-exit path so
+        # scripted callers get a parseable result on the no-write paths
+        # (dry-run / no-op / aborted) too, not just on a real write.
+        typer.echo(
+            json.dumps(
+                {
+                    "slug": slug,
+                    "path": str(done_path),
+                    "action": action,
+                    "count": count,
+                    "written": written,
+                }
+            )
+        )
+
     try:
         lines = asyncio.run(collect_resolved_lines(cfg=cfg, slug=slug))
     except OSError as exc:
@@ -1277,15 +1295,21 @@ def project_regenerate_done(
         sys.exit(1)
 
     if dry_run:
-        typer.echo(render_dry_run(slug, done_path, lines))
+        if is_json:
+            _emit_json("dry-run", count=len(lines), written=False)
+        else:
+            typer.echo(render_dry_run(slug, done_path, lines))
         return
 
     file_exists = done_path.exists()
     if not lines and not file_exists:
-        typer.echo(
-            f"lithos-loom: no resolved tasks for {slug!r}; nothing to write",
-            err=True,
-        )
+        if is_json:
+            _emit_json("noop", count=0, written=False)
+        else:
+            typer.echo(
+                f"lithos-loom: no resolved tasks for {slug!r}; nothing to write",
+                err=True,
+            )
         return
 
     if file_exists and not yes:
@@ -1299,7 +1323,10 @@ def project_regenerate_done(
             f"{action} {done_path.name} (currently {n} line(s))?",
             default=False,
         ):
-            typer.echo("aborted; no changes made", err=True)
+            if is_json:
+                _emit_json("aborted", count=len(lines), written=False)
+            else:
+                typer.echo("aborted; no changes made", err=True)
             return
 
     try:
@@ -1308,15 +1335,7 @@ def project_regenerate_done(
         typer.echo(f"lithos-loom: could not write {done_path} ({exc})", err=True)
         sys.exit(1)
 
-    if output_format == _FORMAT_JSON:
-        typer.echo(
-            json.dumps(
-                {
-                    "slug": slug,
-                    "path": str(done_path),
-                    "lines_written": len(lines),
-                }
-            )
-        )
+    if is_json:
+        _emit_json("written", count=len(lines), written=True)
         return
     typer.echo(str(done_path))
