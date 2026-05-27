@@ -2281,3 +2281,116 @@ async def test_resolved_state_entry_has_none_priority(
         _ctx(),
     )
     assert sync_state.task_priority_markers == {"rp": None}
+
+
+# ── Slice 6 task-archive coupling: surfaced + archived-driven eviction ──
+
+
+async def test_surfaced_flag_set_on_open_actionable_line(tmp_path: Path) -> None:
+    """The projection marks a task surfaced the moment it writes its open
+    line — the task-archive D38 gate reads this."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, sync_state=sync_state)
+    await handler(
+        _event("lithos.task.created", task_id="vis", title="Review PR"), _ctx()
+    )
+    assert sync_state.surfaced.get("vis") is True
+
+
+async def test_surfaced_flag_not_set_for_non_actionable(tmp_path: Path) -> None:
+    """Autonomous-route work never reaches the operator's view, so it
+    never gets a surfaced flag (→ the archiver later skips it)."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    routes = (
+        RouteConfig(
+            name="auto",
+            command="echo",
+            match=RouteMatch(tags=("trigger:auto",)),
+            human_blocking=False,
+        ),
+    )
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path, routes=routes)
+    handler = make_handler(cfg, sync_state=sync_state)
+    await handler(
+        _event("lithos.task.created", task_id="bg", tags=("trigger:auto",)), _ctx()
+    )
+    assert "bg" not in sync_state.surfaced
+
+
+async def test_surfaced_seeded_from_existing_tasks_file_on_init(tmp_path: Path) -> None:
+    """On restart the projection seeds ``surfaced`` from the task ids
+    already on disk, so a replayed terminal event for a task visible
+    before the restart still passes the archiver's D38 gate."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    tasks_path = tmp_path / "_lithos/tasks.md"
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks_path.write_text(
+        "%% header %%\n\n"
+        "- [ ] Open one 🆔 lithos:t1\n"
+        "- [x] Done two 🆔 lithos:t2 ✅ 2026-05-19\n"
+    )
+    sync_state = ProjectionSyncState()
+    make_handler(_cfg(tmp_path), sync_state=sync_state)
+    assert sync_state.surfaced == {"t1": True, "t2": True}
+
+
+async def test_init_seed_does_not_clobber_preseeded_surfaced(tmp_path: Path) -> None:
+    """A child that pre-seeds the shared state wins over the defensive
+    disk re-read (guard mirrors the last_written_hash seed)."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    tasks_path = tmp_path / "_lithos/tasks.md"
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks_path.write_text("- [ ] On disk 🆔 lithos:disk\n")
+    sync_state = ProjectionSyncState()
+    sync_state.surfaced["preseed"] = True
+    make_handler(_cfg(tmp_path), sync_state=sync_state)
+    assert sync_state.surfaced == {"preseed": True}
+
+
+async def test_archived_flag_evicts_resolved_line_within_ttl(tmp_path: Path) -> None:
+    """D32: a resolved task flagged ``archived`` is evicted on the next
+    flush even though it's well within ``resolved_ttl_days`` — that's
+    what makes the global file 'only what's still actionable'."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)  # ttl = 7
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    # Complete X today → lingers in file (within TTL).
+    await handler(
+        _resolved_event("lithos.task.completed", task_id="x", title="t", when=_TODAY),
+        _ctx(),
+    )
+    assert "lithos:x" in (tmp_path / "_lithos/tasks.md").read_text()
+    # The archiver (sibling handler) archived it.
+    sync_state.archived["x"] = True
+    # Any subsequent event flush drops the archived line.
+    await handler(_event("lithos.task.created", task_id="y", title="new"), _ctx())
+    text = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "lithos:x" not in text, "archived resolved task should be evicted within TTL"
+    assert "lithos:y" in text
+
+
+async def test_unarchived_resolved_line_stays_within_ttl(tmp_path: Path) -> None:
+    """Fallback (no regression): a resolved task that was NOT archived
+    (archive write failed, or archiver disabled) still lingers under the
+    TTL — it is not dropped early."""
+    from lithos_loom.sync_state import ProjectionSyncState
+
+    sync_state = ProjectionSyncState()
+    cfg = _cfg(tmp_path)  # ttl = 7
+    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    await handler(
+        _resolved_event("lithos.task.completed", task_id="x", title="t", when=_TODAY),
+        _ctx(),
+    )
+    # No archived flag set; an unrelated event must NOT evict X.
+    await handler(_event("lithos.task.created", task_id="y", title="new"), _ctx())
+    assert "lithos:x" in (tmp_path / "_lithos/tasks.md").read_text()

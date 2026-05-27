@@ -430,6 +430,59 @@ async def test_file_with_no_frontmatter_is_skipped(
     assert any("no lithos_id" in r.message for r in caplog.records)
 
 
+async def test_done_file_excluded_from_walk(
+    bus: EventBus,
+    sub: Subscription,
+    projects_root: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Slice 6 US45/D31: per-project ``-done.md`` archive files are
+    skipped entirely — no emit, no 'no lithos_id' WARNING (they carry
+    no frontmatter by design), and not tracked in the seen-hashes map."""
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    sync_state = ProjectionSyncState()
+    done = projects_root / "lithos-loom" / "lithos-loom-done.md"
+    done.parent.mkdir(parents=True, exist_ok=True)
+    done.write_text(
+        "- [x] Ship it 🆔 lithos:t1 #project/lithos-loom ✅ 2026-05-20\n",
+        encoding="utf-8",
+    )
+
+    watcher = ObsidianDirWatcher(
+        bus=bus, projects_root=projects_root, sync_state=sync_state
+    )
+    assert await watcher.poll_once() == 0
+    assert _drain(sub) == []
+    # No "no lithos_id" noise for the archive file.
+    assert not any("no lithos_id" in r.message for r in caplog.records)
+    # And it never entered the per-file hash map.
+    assert done not in watcher._last_seen_file_hashes
+
+
+async def test_done_file_edit_stays_inert(
+    bus: EventBus, sub: Subscription, projects_root: Path
+) -> None:
+    """Editing a ``-done.md`` file (operator untick / cosmetic fix)
+    never produces an obsidian.note.modified event."""
+    sync_state = ProjectionSyncState()
+    done = projects_root / "lithos-loom" / "lithos-loom-done.md"
+    done.parent.mkdir(parents=True, exist_ok=True)
+    done.write_text("- [x] One 🆔 lithos:t1 ✅ 2026-05-20\n", encoding="utf-8")
+    watcher = ObsidianDirWatcher(
+        bus=bus, projects_root=projects_root, sync_state=sync_state
+    )
+    assert await watcher.poll_once() == 0
+    # Operator edits the archive file.
+    done.write_text(
+        "- [ ] One 🆔 lithos:t1\n- [x] Two 🆔 lithos:t2 ✅ 2026-05-21\n",
+        encoding="utf-8",
+    )
+    assert await watcher.poll_once() == 0
+    assert _drain(sub) == []
+
+
 async def test_malformed_frontmatter_is_skipped(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:

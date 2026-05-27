@@ -131,9 +131,14 @@ tags = ["trigger:story-review-human"]
 # SIGTERM in US7; US8 onwards adds the projection subscription, US15
 # adds the `lithos-loom doctor` vault probe.
 #
-# tasks_file is relative to vault_path. resolved_ttl_days controls how
-# long completed/cancelled tasks linger in tasks_file before being
-# dropped (US13).
+# tasks_file is relative to vault_path. resolved_ttl_days has a dual
+# role: it's the max time a completed/cancelled task lingers in
+# tasks_file before being dropped (US13), AND the bootstrap-replay
+# window the task-archive subscription (below) looks back over on
+# restart. With task-archive enabled, a resolved task is normally
+# evicted from tasks_file the moment it's archived (well before the TTL);
+# the TTL is the fallback for tasks that weren't archived (archive write
+# failed, or task-archive isn't configured).
 #
 # Projection filter knobs (operator-level):
 #   include_blocked — project tasks whose metadata.depends_on is set
@@ -196,6 +201,35 @@ tags = ["trigger:story-review-human"]
 # name = "note-push"
 # on = ["obsidian.note.modified"]
 # action = "note-push"
+# on_persistent_failure = "friction"
+# [subscriptions.retry]
+# attempts = 5
+# backoff = "exponential"
+# initial_delay_seconds = 0.5
+# max_delay_seconds = 30.0
+
+# ── Slice 6: per-project task archive (Lithos → vault, append-only) ────
+#
+# Subscribes to lithos.task.{completed,cancelled}. For each terminal
+# task the operator had surfaced in tasks.md, appends a Tasks-plugin
+# line to <vault>/<projects_dir>/<slug>/<slug>-done.md (a durable,
+# grep-/Dataview-queryable per-project history) and lets the projection
+# evict the line from the global tasks.md immediately. Tasks with no /
+# unknown metadata.project land in <projects_dir>/_unassigned/.
+#
+# Done files are vault-only, append-only, never regenerated — the dir
+# watcher excludes the -done.md suffix so operator edits to them are
+# inert. Deleting a done file loses that project's archived history
+# (re-created with just new lines on the next completion).
+#
+# Requires the obsidian-projection subscription above — the projection
+# is what marks tasks "surfaced" (the archiver only archives tasks the
+# operator saw) and what performs the eviction. The daemon logs a
+# startup warning if task-archive is configured without it.
+# [[subscriptions]]
+# name = "task-archive"
+# on = ["lithos.task.completed", "lithos.task.cancelled"]
+# action = "task-archive"
 # on_persistent_failure = "friction"
 # [subscriptions.retry]
 # attempts = 5

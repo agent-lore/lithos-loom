@@ -127,6 +127,18 @@ def _priority_changed_subscription(
     )
 
 
+def _task_archive_subscription(
+    name: str = "obsidian-task-archive",
+) -> SubscriptionConfig:
+    return SubscriptionConfig(
+        name=name,
+        event_types=("lithos.task.completed", "lithos.task.cancelled"),
+        action="task-archive",
+        retry=RetryPolicy(attempts=1, initial_delay_seconds=0.0, max_delay_seconds=0.0),
+        on_persistent_failure="ignore",
+    )
+
+
 def _event(
     event_type: str,
     *,
@@ -134,18 +146,23 @@ def _event(
     title: str = "test task",
     tags: tuple[str, ...] = (),
     metadata: Mapping[str, Any] | None = None,
+    status: str = "open",
+    resolved_at: str | None = None,
 ) -> Event:
+    payload: dict[str, Any] = {
+        "id": task_id,
+        "title": title,
+        "status": status,
+        "tags": list(tags),
+        "metadata": dict(metadata or {}),
+        "claims": [],
+    }
+    if resolved_at is not None:
+        payload["resolved_at"] = resolved_at
     return Event(
         type=event_type,
         timestamp=datetime.now(UTC),
-        payload={
-            "id": task_id,
-            "title": title,
-            "status": "open",
-            "tags": list(tags),
-            "metadata": dict(metadata or {}),
-            "claims": [],
-        },
+        payload=payload,
     )
 
 
@@ -488,7 +505,8 @@ async def test_obsidian_sync_child_idles_when_no_obsidian_subscription(
     assert any(
         "no obsidian-projection, obsidian-status-transition, "
         "obsidian-priority-changed, obsidian-due-date-changed, "
-        "project-context-projection, or note-push subscription configured"
+        "project-context-projection, note-push, or task-archive "
+        "subscription configured"
         in m
         and "both watchers run but emit nothing" in m
         for m in warn_msgs
@@ -652,6 +670,112 @@ async def test_obsidian_sync_child_refuses_duplicate_obsidian_projection_specs(
     error_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert any("refusing to wire" in m for m in error_msgs), error_msgs
     assert stub_io == [], "source should not be constructed when refusing"
+
+
+# ── Slice 6: task-archive handler wiring ───────────────────────────────
+
+
+async def test_obsidian_sync_child_wires_task_archive_and_evicts(
+    tmp_path: Path, stub_io: list[EventBus]
+) -> None:
+    """End-to-end through _amain with projection + task-archive sharing
+    one sync_state. A surfaced task that completes is appended to its
+    per-project done file (D39) AND evicted from the global tasks.md on
+    the projection's next flush (D32) — the cross-handler coupling."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(_projection_subscription(), _task_archive_subscription()),
+    )
+    tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+    done_file = (
+        cfg.obsidian_sync.vault_path  # type: ignore[union-attr]
+        / "_lithos/projects/demo/demo-done.md"
+    )
+
+    async def _drive() -> None:
+        await asyncio.sleep(0.1)
+        bus = stub_io[-1]
+        # 1. Surface the task (projection writes the open line + flags it).
+        await bus.publish(
+            _event(
+                "lithos.task.created",
+                task_id="t1",
+                title="Ship it",
+                metadata={"project": "demo"},
+            )
+        )
+        await asyncio.sleep(0.2)
+        assert "🆔 lithos:t1" in tasks_file.read_text(encoding="utf-8")
+        # 2. Complete it: archiver appends + flags archived; projection's
+        #    debounced flush then evicts the line.
+        await bus.publish(
+            _event(
+                "lithos.task.completed",
+                task_id="t1",
+                title="Ship it",
+                status="completed",
+                metadata={"project": "demo"},
+                resolved_at="2026-05-20T12:00:00+00:00",
+            )
+        )
+        await asyncio.sleep(0.25)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    driver = asyncio.create_task(_drive())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=4.0)
+    finally:
+        await _cancel_and_drain(driver)
+    assert rc == 0
+
+    assert done_file.exists(), "task-archive did not write the per-project done file"
+    done = done_file.read_text(encoding="utf-8")
+    assert "- [x] Ship it 🆔 lithos:t1 #project/demo ✅ 2026-05-20" in done
+    # Evicted from the global file (D32 immediate evict once archived).
+    assert "🆔 lithos:t1" not in tasks_file.read_text(encoding="utf-8")
+
+
+async def test_task_archive_without_projection_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
+) -> None:
+    """task-archive depends on the projection to populate ``surfaced``;
+    configured alone it loads but never fires — warn at startup."""
+    cfg = _cfg_with_obsidian(tmp_path, subscriptions=(_task_archive_subscription(),))
+    source_logger = "lithos_loom.children.obsidian_sync"
+    sender = asyncio.create_task(_sigterm_soon())
+    try:
+        with caplog.at_level(logging.WARNING, logger=source_logger):
+            rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    finally:
+        await _cancel_and_drain(sender)
+    assert rc == 0
+    warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "obsidian-task-archive" in m
+        and "no obsidian-projection" in m
+        and "surfaced-task set" in m
+        for m in warn_msgs
+    ), warn_msgs
+
+
+async def test_obsidian_sync_child_refuses_duplicate_task_archive_specs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stub_io: list[EventBus]
+) -> None:
+    """Two task-archive specs would share one stateful handler — refuse
+    at startup (same dup-guard as obsidian-projection)."""
+    cfg = _cfg_with_obsidian(
+        tmp_path,
+        subscriptions=(
+            _task_archive_subscription("first"),
+            _task_archive_subscription("second"),
+        ),
+    )
+    source_logger = "lithos_loom.children.obsidian_sync"
+    with caplog.at_level(logging.ERROR, logger=source_logger):
+        rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    assert rc == 1
+    error_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("refusing to wire" in m for m in error_msgs), error_msgs
 
 
 # ── US17: status-transition handler wiring ─────────────────────────────
