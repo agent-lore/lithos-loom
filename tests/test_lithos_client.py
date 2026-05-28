@@ -1805,3 +1805,28 @@ async def test_invoke_propagates_cancellation_nested_in_exception_group() -> Non
         await client.task_list()
 
     assert establish_calls == []  # no reconnect — cancellation propagates
+
+
+async def test_teardown_quietly_does_not_aexit_dead_contexts() -> None:
+    """Soak 2026-05-29: calling ``__aexit__`` on a dead MCP session from a
+    reconnect path cancels the calling task's anyio scope (the SDK's
+    internal TaskGroup was opened inside that task's stack), which took
+    down the obsidian-sync child. ``_teardown_quietly`` must drop refs
+    only — the SDK's clean-shutdown semantics belong to ``__aexit__`` on
+    the original ``async with`` site, not to a mid-flight reconnect.
+    Connection sockets are reclaimed by GC; cleaner cleanup of an already
+    dead resource isn't worth taking down the daemon."""
+    client = LithosClient(base_url="http://example.test:8765")
+    session_ctx = AsyncMock()
+    sse_ctx = AsyncMock()
+    client._session_ctx = session_ctx
+    client._sse_ctx = sse_ctx
+    client._session = AsyncMock()  # type: ignore[assignment]
+
+    await client._teardown_quietly()
+
+    session_ctx.__aexit__.assert_not_awaited()
+    sse_ctx.__aexit__.assert_not_awaited()
+    assert client._session is None
+    assert client._session_ctx is None
+    assert client._sse_ctx is None

@@ -241,52 +241,70 @@ class LithosClient:
             self._session = session
         except BaseExceptionGroup:
             # anyio may surface partial-connect failures inside an
-            # ExceptionGroup (see _teardown_quietly's docstring). Handled
-            # separately from bare Exception so an ordinary connect/init
-            # error keeps its original type — wrapping it in a group via
-            # ``except*`` would degrade caller-side diagnostics.
-            # CancelledError (a BaseException) still propagates: a bare
-            # CancelledError isn't a group, and a group containing one
-            # would be caught here but re-raised as-is, preserving cancel.
-            await self._teardown_quietly()
+            # ExceptionGroup. Handled separately from bare Exception so an
+            # ordinary connect/init error keeps its original type —
+            # wrapping it in a group via ``except*`` would degrade
+            # caller-side diagnostics.
+            await self._cleanup_partial_connect()
             raise
         except Exception:
-            await self._teardown_quietly()
+            await self._cleanup_partial_connect()
             raise
 
-    async def _teardown_quietly(self) -> None:
-        """Best-effort close of the current (presumed-dead) session + SSE
-        contexts before a reconnect. The streams are already broken, so
-        errors here are expected — swallow them; the fresh
-        :meth:`_establish` is what matters.
+    async def _cleanup_partial_connect(self) -> None:
+        """Tear down a partially-opened session inside ``_establish``'s
+        except branch.
 
-        ``except* Exception`` catches both bare Exception-derived errors
-        and ones nested inside an ``ExceptionGroup`` / ``BaseExceptionGroup``
-        — anyio (which the MCP SDK uses) wraps cancel-scope failures into
-        groups, and a bare ``contextlib.suppress(Exception)`` does NOT
-        catch a ``BaseExceptionGroup`` (it's a ``BaseException``). Letting
-        such a group leak out of teardown crashes the daemon child
-        (soak 2026-05-28; lithos-loom precedent: PR #50).
-        ``CancelledError`` (a ``BaseException``) is not in the matched
-        subset, so cancellation still propagates naturally."""
-        # NOTE: cannot use ``contextlib.suppress(Exception)`` (SIM105) here —
-        # it does NOT catch ``BaseExceptionGroup``, which is the exact thing
-        # anyio raises during MCP/SSE teardown and the reason this method
-        # exists. ``except*`` is the only construct that swallows the
-        # Exception-derived subset of a group while letting CancelledError
-        # propagate via the residual subgroup.
+        Unlike :meth:`_teardown_quietly` (which runs from a reconnect
+        triggered by some *other* task's failed call), we're in the same
+        task that opened these contexts, so calling ``__aexit__`` here is
+        safe — the anyio cancel scopes the SDK opened live in our stack
+        and exiting them won't cancel anyone else. Best-effort: errors
+        during cleanup are subordinate to the original exception we're
+        about to re-raise. ``except* Exception`` swallows Exception-derived
+        errors (bare or in an ExceptionGroup) while letting a
+        CancelledError-bearing residual subgroup propagate, so true
+        cancellation still wins over the original re-raise.
+        """
         if self._session_ctx is not None:
             try:  # noqa: SIM105 — contextlib.suppress(Exception) misses BaseExceptionGroup
                 await self._session_ctx.__aexit__(None, None, None)
             except* Exception:
                 pass
-        self._session_ctx = None
+            self._session_ctx = None
         self._session = None
         if self._sse_ctx is not None:
             try:  # noqa: SIM105 — contextlib.suppress(Exception) misses BaseExceptionGroup
                 await self._sse_ctx.__aexit__(None, None, None)
             except* Exception:
                 pass
+            self._sse_ctx = None
+
+    async def _teardown_quietly(self) -> None:
+        """Drop references to the dead session + SSE contexts before a reconnect.
+
+        We deliberately do NOT call ``__aexit__`` on the dead contexts. The
+        MCP SDK's ``sse_client`` and ``ClientSession`` each manage internal
+        anyio ``TaskGroup`` background tasks; the cancel scopes those task
+        groups own were opened inside *this* task's stack on the original
+        ``_establish``. Exiting them here (from a reconnect triggered by
+        ``_invoke``) makes anyio cancel those scopes, and that cancellation
+        propagates UP into the caller's task — observed in the 2026-05-28
+        soak as a ``CancelledError: Cancelled via cancel scope ... by
+        <Task pending name='lithos-note-stream' ...>`` that took down the
+        obsidian-sync child. ``except* Exception`` doesn't help because the
+        cancellation IS the scope-exit signal on the calling task, not an
+        exception inside the ``__aexit__`` body.
+
+        The connection is already gone (server restarted, sockets dead), so
+        the underlying network resources will be reclaimed by Python's GC
+        when the references drop. This is best-effort cleanup of an
+        already-dead resource — clean-shutdown semantics live in
+        :meth:`__aexit__`, which runs from the original ``async with`` site
+        where the scopes were opened.
+        """
+        self._session_ctx = None
+        self._session = None
         self._sse_ctx = None
 
     async def _reconnect(self, *, expected_gen: int) -> None:
