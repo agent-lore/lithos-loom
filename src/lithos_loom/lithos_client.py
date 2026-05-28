@@ -25,7 +25,6 @@ continues on transient failures.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import json
 import logging
@@ -240,24 +239,47 @@ class LithosClient:
             session = await self._session_ctx.__aenter__()
             await session.initialize()
             self._session = session
-        except Exception:
+        except* Exception:
+            # anyio may surface partial-connect failures inside an
+            # ExceptionGroup (see _teardown_quietly's docstring). Catching
+            # bare Exception alone would let a BaseExceptionGroup escape
+            # without cleanup. CancelledError still propagates.
             await self._teardown_quietly()
             raise
 
     async def _teardown_quietly(self) -> None:
         """Best-effort close of the current (presumed-dead) session + SSE
         contexts before a reconnect. The streams are already broken, so
-        errors here are expected — suppress them; the fresh
-        :meth:`_establish` is what matters. ``CancelledError`` (a
-        ``BaseException``) is not suppressed."""
+        errors here are expected — swallow them; the fresh
+        :meth:`_establish` is what matters.
+
+        ``except* Exception`` catches both bare Exception-derived errors
+        and ones nested inside an ``ExceptionGroup`` / ``BaseExceptionGroup``
+        — anyio (which the MCP SDK uses) wraps cancel-scope failures into
+        groups, and a bare ``contextlib.suppress(Exception)`` does NOT
+        catch a ``BaseExceptionGroup`` (it's a ``BaseException``). Letting
+        such a group leak out of teardown crashes the daemon child
+        (soak 2026-05-28; lithos-loom precedent: PR #50).
+        ``CancelledError`` (a ``BaseException``) is not in the matched
+        subset, so cancellation still propagates naturally."""
+        # NOTE: cannot use ``contextlib.suppress(Exception)`` (SIM105) here —
+        # it does NOT catch ``BaseExceptionGroup``, which is the exact thing
+        # anyio raises during MCP/SSE teardown and the reason this method
+        # exists. ``except*`` is the only construct that swallows the
+        # Exception-derived subset of a group while letting CancelledError
+        # propagate via the residual subgroup.
         if self._session_ctx is not None:
-            with contextlib.suppress(Exception):
+            try:  # noqa: SIM105 — contextlib.suppress(Exception) misses BaseExceptionGroup
                 await self._session_ctx.__aexit__(None, None, None)
+            except* Exception:
+                pass
         self._session_ctx = None
         self._session = None
         if self._sse_ctx is not None:
-            with contextlib.suppress(Exception):
+            try:  # noqa: SIM105 — contextlib.suppress(Exception) misses BaseExceptionGroup
                 await self._sse_ctx.__aexit__(None, None, None)
+            except* Exception:
+                pass
         self._sse_ctx = None
 
     async def _reconnect(self, *, expected_gen: int) -> None:
@@ -307,7 +329,7 @@ class LithosClient:
                 "client_not_initialised",
                 "LithosClient not initialised; use 'async with LithosClient(...) as c'",
             )
-        last_exc: Exception | None = None
+        last_exc: BaseException | None = None  # may be BaseExceptionGroup
         for attempt in range(_MAX_TRANSPORT_ATTEMPTS):
             session = self._session
             if session is None:
@@ -324,20 +346,32 @@ class LithosClient:
                 return await session.call_tool(tool, arguments=arguments)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 — see docstring
+            except BaseExceptionGroup as group:
+                # anyio (inside the MCP SDK) commonly wraps SSE-stream-closed
+                # failures in a group. If a CancelledError is anywhere in the
+                # tree, propagate the cancellation subgroup instead of
+                # retrying. Otherwise treat the remainder as a transport
+                # failure (soak 2026-05-28).
+                cancel_subgroup, rest = group.split(asyncio.CancelledError)
+                if cancel_subgroup is not None:
+                    raise cancel_subgroup from group
+                last_exc = rest if rest is not None else group
+            except Exception as exc:  # noqa: BLE001 — see _invoke docstring
                 last_exc = exc
-                if attempt == _MAX_TRANSPORT_ATTEMPTS - 1:
-                    break
-                logger.warning(
-                    "LithosClient: call_tool(%s) failed (%r); re-establishing "
-                    "session (attempt %d/%d)",
-                    tool,
-                    exc,
-                    attempt + 1,
-                    _MAX_TRANSPORT_ATTEMPTS,
-                )
-                await asyncio.sleep(_RECONNECT_BACKOFF_SECONDS)
-                await self._reconnect(expected_gen=gen)
+            # Transport-failure handling (shared between the bare and grouped
+            # paths): retry up to _MAX_TRANSPORT_ATTEMPTS, with reconnect.
+            if attempt == _MAX_TRANSPORT_ATTEMPTS - 1:
+                break
+            logger.warning(
+                "LithosClient: call_tool(%s) failed (%r); re-establishing "
+                "session (attempt %d/%d)",
+                tool,
+                last_exc,
+                attempt + 1,
+                _MAX_TRANSPORT_ATTEMPTS,
+            )
+            await asyncio.sleep(_RECONNECT_BACKOFF_SECONDS)
+            await self._reconnect(expected_gen=gen)
         if last_exc is not None:
             raise last_exc
         # Every attempt hit the transient-None path without ever landing a

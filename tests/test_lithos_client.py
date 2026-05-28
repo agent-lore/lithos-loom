@@ -1766,3 +1766,42 @@ async def test_invoke_raises_when_never_initialised() -> None:
     with pytest.raises(LithosClientError) as ei:
         await client.task_list()
     assert ei.value.code == "client_not_initialised"
+
+
+async def test_invoke_recovers_when_call_tool_raises_exception_group() -> None:
+    """Soak 2026-05-28: the MCP SDK's anyio internals wrap SSE-stream-closed
+    failures in an ``ExceptionGroup`` (or ``BaseExceptionGroup``). Without
+    special handling, a bare ``except Exception`` would let the group escape
+    (BaseExceptionGroup is a BaseException), killing the daemon child. The
+    transport-failure catch must recover from grouped errors just like bare
+    ones."""
+    client = LithosClient(base_url="http://example.test:8765")
+    dead = AsyncMock()
+    dead.call_tool.side_effect = ExceptionGroup(
+        "anyio task group", [_DeadError("sse stream closed")]
+    )
+    client._session = dead  # type: ignore[assignment]
+    fresh = _live_session({"tasks": []})
+    establish_calls = _patch_establish(client, [fresh])
+
+    tasks = await client.task_list()
+
+    assert tasks == []
+    assert len(establish_calls) == 1  # reconnected once, then retried
+
+
+async def test_invoke_propagates_cancellation_nested_in_exception_group() -> None:
+    """A ``BaseExceptionGroup`` containing a ``CancelledError`` must propagate
+    the cancellation (don't swallow it as a 'transport failure')."""
+    client = LithosClient(base_url="http://example.test:8765")
+    mixed = AsyncMock()
+    mixed.call_tool.side_effect = BaseExceptionGroup(
+        "shutdown", [asyncio.CancelledError(), _DeadError("partial")]
+    )
+    client._session = mixed  # type: ignore[assignment]
+    establish_calls = _patch_establish(client, [])
+
+    with pytest.raises(BaseExceptionGroup):
+        await client.task_list()
+
+    assert establish_calls == []  # no reconnect — cancellation propagates
