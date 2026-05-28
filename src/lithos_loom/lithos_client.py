@@ -239,11 +239,18 @@ class LithosClient:
             session = await self._session_ctx.__aenter__()
             await session.initialize()
             self._session = session
-        except* Exception:
+        except BaseExceptionGroup:
             # anyio may surface partial-connect failures inside an
-            # ExceptionGroup (see _teardown_quietly's docstring). Catching
-            # bare Exception alone would let a BaseExceptionGroup escape
-            # without cleanup. CancelledError still propagates.
+            # ExceptionGroup (see _teardown_quietly's docstring). Handled
+            # separately from bare Exception so an ordinary connect/init
+            # error keeps its original type — wrapping it in a group via
+            # ``except*`` would degrade caller-side diagnostics.
+            # CancelledError (a BaseException) still propagates: a bare
+            # CancelledError isn't a group, and a group containing one
+            # would be caught here but re-raised as-is, preserving cancel.
+            await self._teardown_quietly()
+            raise
+        except Exception:
             await self._teardown_quietly()
             raise
 
