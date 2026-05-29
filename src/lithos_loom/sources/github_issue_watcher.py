@@ -359,6 +359,12 @@ class GitHubIssueWatcher:
             if result.status in ("created", "updated") and result.note is not None:
                 self._coord_doc_id = result.note.id
                 self._coord_doc_version = result.note.version
+                logger.info(
+                    "github-watcher: coord doc %s → v%d (%d cursor(s))",
+                    result.status,
+                    result.note.version,
+                    len(self._cursors),
+                )
                 return
             if result.status == "version_conflict":
                 if attempts >= _MAX_COORD_DOC_CAS_ATTEMPTS:
@@ -449,7 +455,12 @@ class GitHubIssueWatcher:
                 backoff = min(backoff * 2, self.max_reconnect_backoff_seconds)
 
     async def _poll_all_repos(self) -> None:
-        for slug, repo in list(self._watch_list.items()):
+        items = list(self._watch_list.items())
+        if not items:
+            logger.debug("github-watcher: poll cycle skipped; watch list empty")
+            return
+        logger.info("github-watcher: poll cycle starting (%d repo(s))", len(items))
+        for slug, repo in items:
             await self._poll_one_repo(slug=slug, repo=repo)
 
     async def _poll_one_repo(self, *, slug: str, repo: str) -> None:
@@ -503,11 +514,29 @@ class GitHubIssueWatcher:
             )
             return
 
+        prior_cursor = since
         for issue in issues:
             await self._publish_issue(slug=slug, issue=issue)
 
         if issues:
-            self._cursors[repo] = max(iss.updated_at for iss in issues)
+            new_cursor = max(iss.updated_at for iss in issues)
+            self._cursors[repo] = new_cursor
+            logger.info(
+                "github-watcher: %s — %d issue(s) %s (state=%s, cursor %s → %s)",
+                repo,
+                len(issues),
+                "bootstrapped" if prior_cursor is None else "delta",
+                state,
+                _isoformat(prior_cursor) if prior_cursor is not None else "<first-run>",
+                _isoformat(new_cursor),
+            )
+        else:
+            logger.info(
+                "github-watcher: %s — no changes (state=%s, since=%s)",
+                repo,
+                state,
+                _isoformat(prior_cursor) if prior_cursor is not None else "<first-run>",
+            )
 
     async def _publish_issue(self, *, slug: str, issue: Issue) -> None:
         await self.bus.publish(

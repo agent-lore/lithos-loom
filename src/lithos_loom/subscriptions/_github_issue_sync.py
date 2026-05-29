@@ -223,21 +223,46 @@ async def _reconcile_existing(
     if issue.state != "closed":
         # Still open on GH; nothing to mirror in 7.1 (title / body drift
         # sync is deferred to 7.2).
+        ctx.logger.debug(
+            "github-issue-sync: %s/#%d still open — no-op for task %s",
+            issue.repo,
+            issue.number,
+            task.id,
+        )
         return
 
     if task.status != "open":
         # Already terminal in Lithos. Idempotent skip — re-emitting an
         # event for a closed-on-GH issue that's already closed in Lithos
         # is the common steady-state case.
+        ctx.logger.debug(
+            "github-issue-sync: %s/#%d closed and task %s already %s — no-op",
+            issue.repo,
+            issue.number,
+            task.id,
+            task.status,
+        )
         return
 
     if issue.state_reason == "completed":
+        ctx.logger.info(
+            "github-issue-sync: completing task %s (closed via %s/#%d)",
+            task.id,
+            issue.repo,
+            issue.number,
+        )
         await _safe_call(
             ctx,
             ctx.lithos.task_complete(task_id=task.id, agent=ctx.agent_id),
             describe=f"complete task {task.id}",
         )
     elif issue.state_reason == "not_planned":
+        ctx.logger.info(
+            "github-issue-sync: cancelling task %s (closed as not_planned via %s/#%d)",
+            task.id,
+            issue.repo,
+            issue.number,
+        )
         await _safe_call(
             ctx,
             ctx.lithos.task_cancel(

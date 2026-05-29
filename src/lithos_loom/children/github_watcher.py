@@ -49,6 +49,12 @@ _LEVEL_MAP: dict[LogLevel, int] = {
     "error": logging.ERROR,
 }
 
+# Mirror route_runner: httpx logs every HTTP request at INFO — every
+# Lithos MCP POST AND every GitHub API GET/PATCH — which drowns out the
+# watcher's own per-cycle progress messages. At ``debug`` the operator
+# asked for the firehose; otherwise pin to WARNING.
+_NOISY_LIBRARY_LOGGERS = ("httpx", "httpx_sse")
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +63,12 @@ def _configure_logging(level: LogLevel) -> None:
         level=_LEVEL_MAP[level],
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if level == "debug":
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+    else:
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
     # Same noise suppression as obsidian-sync — the MCP SDK logs a
     # full traceback every Lithos reconnect.
     logging.getLogger("mcp.client.sse").setLevel(logging.CRITICAL)
