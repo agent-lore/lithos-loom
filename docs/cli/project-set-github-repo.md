@@ -94,4 +94,4 @@ github watching enabled on projects/lithos-loom/lithos-loom-project-context.md
 ## See also
 
 - [`docs/SPECIFICATION.md`](../SPECIFICATION.md) §2.2 — full data flow for the GitHub issue mirror.
-- [`docs/prd/github-issue-watcher.md`](../prd/github-issue-watcher.md) — design decisions D45 (storage), D46 (linkage marker), D47 (closure mapping), D50 (per-host gate).
+- [`docs/prd/archive/github-issue-watcher.md`](../prd/archive/github-issue-watcher.md) — design decisions D45 (storage), D46 (linkage marker), D47 (closure mapping), D50 (per-host gate), plus Slice 7.2 stories #71–#75 covering bidirectional close + drift sync.
