@@ -107,7 +107,7 @@ Each child runs its own EventBus instance. There is no inter-child IPC; both chi
 `ObsidianDirWatcher` polls `<vault>/<projects_dir>/**/*.md` (default 250ms), computes body-only hash, and emits `obsidian.note.modified` when divergent. `note-push` calls `lithos_write(id=..., expected_version=...)`. On `version_conflict`, the conflict resolver moves the operator's body to `<vault>/_lithos/conflicts/<slug>.<file>.<ts>.md`, pulls canonical to the original path, and logs a `[Friction]` WARNING.
 
 **Task lifecycle (route-runner).**
-`LithosEventStream` (running in the route-runner child) emits `lithos.task.*` events. Each `[[routes]]` stanza registers a claim-bound subscriber that matches by tag intersection and claims via `lithos_task_claim`. On claim, the runner spawns the plugin subprocess, periodically renews the claim, and waits for `result.json`. It then reads only the `status` field:
+`LithosEventStream` (running in the route-runner child) emits `lithos.task.*` events. Each `[[routes]]` stanza registers a claim-bound subscriber against `lithos.task.created` and `lithos.task.released` (only) that requires every tag in `match.tags` to be present on the task (same semantic as the bus matcher and `is_human_actionable`). `lithos.task.updated` is **not** subscribed to today — editing a task's tags after creation does not re-trigger route pickup. On match, the runner claims via `lithos_task_claim`, spawns the plugin subprocess, periodically renews the claim, and waits for `result.json`. It then reads only the `status` field:
 
 - `succeeded` → `lithos_task_complete`.
 - `failed` → `lithos_task_release` + `[BlockerFailed]` finding (the error message is pulled from `error.message` if present).
@@ -151,7 +151,7 @@ agent_id      = "lithos-orchestrator-<host>"  # claim attribution; must be uniqu
 lithos_url    = "http://localhost:8765"        # Lithos MCP-over-SSE endpoint
 work_dir      = "/tmp/lithos-loom"             # per-task staging tree
 max_concurrency        = 4                     # global concurrent plugin runs
-log_level              = "info"                # debug | info | warn | error
+log_level              = "info"                # debug | info | warning | error
 retain_failed_workdirs = true                  # keep failed work-dirs for triage
 
 # ── Projects (host-local automation registry) ─────────────────────────
@@ -169,11 +169,14 @@ codex_config  = "/home/you/.codex-lithos"      # optional, parsed but unused tod
 
 # ── Routes (claim-bound subscribers) ──────────────────────────────────
 #
-# Each [[routes]] stanza is a claim-bound subscriber: it matches `task.*`
-# events by tag intersection, claims the task, invokes `command` as a
-# subprocess, and reads only `status` from the resulting result.json to
-# decide whether to complete or release (see §5). Other result.json
-# fields are schema-validated but not yet applied.
+# Each [[routes]] stanza is a claim-bound subscriber that listens to
+# lithos.task.created and lithos.task.released (only). A task matches
+# when every tag in match.tags is present on the task. The runner claims
+# matching tasks, invokes `command` as a subprocess, and reads only
+# `status` from the resulting result.json to decide whether to complete
+# or release (see §5). Other result.json fields are schema-validated
+# but not yet applied. Tag edits on an existing task arrive as
+# task.updated, which the runner does NOT subscribe to.
 #
 # Substitution tokens in `command`:
 #   {{task_json}}    — path to the task envelope JSON (read-only)

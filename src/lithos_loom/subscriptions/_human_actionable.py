@@ -99,7 +99,12 @@ def would_be_actionable(
     if task_tag_set & set(cfg.exclude_tags):
         return False
 
-    claimable_routes = [r for r in routes if set(r.match.tags) & task_tag_set]
+    # A route is "claimable" only when every tag in its match block is
+    # present on the task — the same all-tags semantic the bus enforces
+    # against ``[[routes]]`` subscriptions. Any-overlap (set & set) would
+    # mark multi-tag-route tasks as claimable when they actually wouldn't
+    # be claimed, hiding them from Obsidian without ever processing them.
+    claimable_routes = [r for r in routes if set(r.match.tags).issubset(task_tag_set)]
 
     # First disjunct: not claimable by any route → would project as orphan.
     if not claimable_routes:

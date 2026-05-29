@@ -5,7 +5,7 @@
 A workflow orchestration daemon for [Lithos](https://github.com/agent-lore/lithos) tasks. Two surfaces:
 
 - **Obsidian bridge.** Projects open Lithos tasks into an Obsidian-Tasks-compatible inbox; pushes Obsidian-side status / priority / due-date edits back to Lithos; bidirectionally syncs project-context docs; Templater macros + CLI for capture and project import.
-- **Route-runner.** Subscribes to Lithos's SSE event stream, matches `task.*` events by tag against TOML-configured routes, claims tasks collision-safely, and dispatches subprocess plugins. The runner reads `status` from each plugin's `result.json` (other fields like `metadata_updates` and `artifacts` are schema-validated but not yet applied). Scaffolding for `prd-decompose`, `story-implement`, `story-review-human` is present; bodies are stubs.
+- **Route-runner.** Subscribes to Lithos's SSE event stream, matches `lithos.task.created` and `lithos.task.released` against TOML-configured routes (a task must carry every tag in the route's `match.tags`), claims tasks collision-safely, and dispatches subprocess plugins. The runner reads `status` from each plugin's `result.json` (other fields like `metadata_updates` and `artifacts` are schema-validated but not yet applied). Scaffolding for `prd-decompose`, `story-implement`, `story-review-human` is present; bodies are stubs. Tag edits on existing tasks (`task.updated`) do not currently re-trigger route matching.
 
 Loom replaces [Ralph++](https://github.com/snarktank/ralph) as the user's coding orchestration approach; useful Ralph++ pieces (worktree creation, agent subprocess runner with stream-json, commit detection) are salvaged into `src/lithos_loom/runner/`.
 
