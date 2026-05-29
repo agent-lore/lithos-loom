@@ -33,8 +33,15 @@ from lithos_loom.config import LogLevel, LoomConfig, load_config
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.sources.github_issue_watcher import GitHubIssueWatcher
+from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
 from lithos_loom.subscriptions import SubscriptionContext
+from lithos_loom.subscriptions._github_issue_push import (
+    EVENT_TYPES as LITHOS_TASK_EVENT_TYPES,
+)
+from lithos_loom.subscriptions._github_issue_push import (
+    make_handler as make_github_issue_push_handler,
+)
 from lithos_loom.subscriptions._github_issue_sync import (
     EVENT_TYPE as GITHUB_ISSUE_EVENT_TYPE,
 )
@@ -133,20 +140,38 @@ async def _amain(cfg: LoomConfig) -> int:
                 events_url=events_url,
             )
 
+            # LithosEventStream is the Slice 7.2 push half: it surfaces
+            # task.{completed,cancelled,updated} onto the in-process bus
+            # so the push handler can mirror those into the linked GH
+            # issue. No bootstrap_resolved_window — terminal events that
+            # fire during daemon downtime are reconciled by the
+            # GH→Lithos polling path on next start, not replayed here.
+            event_stream = LithosEventStream(
+                client=lithos,
+                bus=bus,
+                events_url=events_url,
+            )
+
             ctx = SubscriptionContext(
                 lithos=lithos,
                 logger=logging.getLogger("lithos_loom.subscriptions"),
                 agent_id=cfg.orchestrator.agent_id,
             )
             sync_handler = make_github_issue_sync_handler(github)
-            sub = bus.subscribe(
+            push_handler = make_github_issue_push_handler(github)
+            sync_sub = bus.subscribe(
                 event_types=(GITHUB_ISSUE_EVENT_TYPE,),
                 name="github-issue-sync",
                 queue_size=512,
             )
+            push_sub = bus.subscribe(
+                event_types=LITHOS_TASK_EVENT_TYPES,
+                name="github-issue-push",
+                queue_size=512,
+            )
 
-            async def consume() -> None:
-                """Drain the bus subscription, dispatch one event at a time.
+            async def consume_sync() -> None:
+                """Drain the GH→Lithos subscription, dispatch one event at a time.
 
                 Hand-rolled rather than using ``SubscriptionRunner`` because
                 that takes a ``SubscriptionConfig`` (TOML-driven retry policy)
@@ -155,16 +180,31 @@ async def _amain(cfg: LoomConfig) -> int:
                 handler swallows its own errors as [Friction] logs.
                 """
                 while True:
-                    event = await sub.queue.get()
+                    event = await sync_sub.queue.get()
                     try:
                         await sync_handler(event, ctx)
                     except Exception:
-                        logger.exception("github-watcher: subscription handler raised")
+                        logger.exception(
+                            "github-watcher: sync subscription handler raised"
+                        )
+
+            async def consume_push() -> None:
+                """Drain the Lithos→GH subscription. Same hand-rolled shape."""
+                while True:
+                    event = await push_sub.queue.get()
+                    try:
+                        await push_handler(event, ctx)
+                    except Exception:
+                        logger.exception(
+                            "github-watcher: push subscription handler raised"
+                        )
 
             tasks: list[asyncio.Task[None]] = [
                 asyncio.create_task(note_stream.run(), name="lithos-note-stream"),
+                asyncio.create_task(event_stream.run(), name="lithos-event-stream"),
                 asyncio.create_task(watcher.run(), name="github-issue-watcher"),
-                asyncio.create_task(consume(), name="github-issue-sync-consumer"),
+                asyncio.create_task(consume_sync(), name="github-issue-sync-consumer"),
+                asyncio.create_task(consume_push(), name="github-issue-push-consumer"),
             ]
             try:
                 await stop_event.wait()

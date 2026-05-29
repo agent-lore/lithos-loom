@@ -88,6 +88,22 @@ async def test_github_watcher_child_module_is_importable() -> None:
     assert callable(mod.main)
 
 
+async def test_github_watcher_child_wires_both_directions() -> None:
+    """Slice 7.2: child imports both the GH→Lithos sync handler and the
+    Lithos→GH push handler. A regression here (e.g. circular import or
+    rename without updating the child) would crash at module load."""
+    import lithos_loom.children.github_watcher as mod
+
+    # Both handler factories must be in scope on the module.
+    assert callable(mod.make_github_issue_sync_handler)
+    assert callable(mod.make_github_issue_push_handler)
+    # And both event-type constants used by the bus subscribe calls.
+    assert mod.GITHUB_ISSUE_EVENT_TYPE == "github.issue.seen"
+    assert "lithos.task.completed" in mod.LITHOS_TASK_EVENT_TYPES
+    assert "lithos.task.cancelled" in mod.LITHOS_TASK_EVENT_TYPES
+    assert "lithos.task.updated" in mod.LITHOS_TASK_EVENT_TYPES
+
+
 def test_configure_logging_silences_mcp_sse_at_critical() -> None:
     """At any level, the MCP SDK's per-reconnect tracebacks are pinned to CRITICAL.
 
