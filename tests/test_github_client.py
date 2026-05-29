@@ -26,6 +26,7 @@ import respx
 from lithos_loom.github_client import (
     GitHubAuthError,
     GitHubClient,
+    GitHubError,
     GitHubRepoNotFoundError,
     Issue,
     _parse_issues_response,
@@ -521,6 +522,158 @@ async def test_get_issue_404_returns_none() -> None:
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
         assert await client.get_issue("x/y", 999) is None
+
+
+# ── update_issue_fields (Slice 7.2) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_issue_fields_title_only() -> None:
+    """Lithos→GH title push: PATCH carries only the title field, nothing else."""
+    route = respx.patch("https://api.github.com/repos/x/y/issues/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 42,
+                "title": "renamed",
+                "body": "b",
+                "state": "open",
+                "state_reason": None,
+                "labels": [],
+                "user": {"login": "alice"},
+                "updated_at": "2026-05-29T12:00:00Z",
+                "html_url": "u",
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        issue = await client.update_issue_fields("x/y", 42, title="renamed")
+    import json as _json
+
+    assert _json.loads(route.calls[0].request.content) == {"title": "renamed"}
+    assert issue is not None
+    assert issue.title == "renamed"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_issue_fields_state_only_with_reason() -> None:
+    """Lithos→GH close mirror: state="closed" + state_reason in one PATCH."""
+    route = respx.patch("https://api.github.com/repos/x/y/issues/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 42,
+                "title": "t",
+                "body": "b",
+                "state": "closed",
+                "state_reason": "completed",
+                "labels": [],
+                "user": {"login": "alice"},
+                "updated_at": "2026-05-29T12:00:00Z",
+                "html_url": "u",
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        issue = await client.update_issue_fields(
+            "x/y", 42, state="closed", state_reason="completed"
+        )
+    import json as _json
+
+    assert _json.loads(route.calls[0].request.content) == {
+        "state": "closed",
+        "state_reason": "completed",
+    }
+    assert issue is not None
+    assert issue.state == "closed"
+    assert issue.state_reason == "completed"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_issue_fields_combined_payload() -> None:
+    """All three fields in one PATCH — verifying nothing extra leaks in."""
+    route = respx.patch("https://api.github.com/repos/x/y/issues/7").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 7,
+                "title": "renamed",
+                "body": "b",
+                "state": "closed",
+                "state_reason": "not_planned",
+                "labels": [],
+                "user": {"login": "alice"},
+                "updated_at": "2026-05-29T12:00:00Z",
+                "html_url": "u",
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.update_issue_fields(
+            "x/y",
+            7,
+            title="renamed",
+            state="closed",
+            state_reason="not_planned",
+        )
+    import json as _json
+
+    assert _json.loads(route.calls[0].request.content) == {
+        "title": "renamed",
+        "state": "closed",
+        "state_reason": "not_planned",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_issue_fields_no_fields_is_noop() -> None:
+    """Defensive: calling with every kwarg None must not issue a request.
+
+    Avoids a wasted API call (and a wasted rate-limit slot) for handlers
+    that compute "nothing changed" and call through anyway. The issue is
+    re-fetched and returned (None signals "no PATCH and no fetch").
+    """
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        result = await client.update_issue_fields("x/y", 42)
+    assert result is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_issue_fields_422_raises() -> None:
+    """GitHub rejects an unknown state_reason with HTTP 422 (Unprocessable).
+
+    Mapped to GitHubError so the handler can log + skip rather than crash.
+    """
+    respx.patch("https://api.github.com/repos/x/y/issues/42").mock(
+        return_value=httpx.Response(
+            422, json={"message": "Validation Failed: bad state_reason"}
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubError):
+            await client.update_issue_fields("x/y", 42, state_reason="garbage")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_issue_fields_404_raises_repo_not_found() -> None:
+    """Issue deleted by operator → typed RepoNotFoundError so the handler skips."""
+    respx.patch("https://api.github.com/repos/x/y/issues/42").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubRepoNotFoundError):
+            await client.update_issue_fields("x/y", 42, state="closed")
 
 
 # ── Test plumbing ─────────────────────────────────────────────────────

@@ -323,6 +323,46 @@ class GitHubClient:
         )
         _raise_for_status(response, repo=repo)
 
+    async def update_issue_fields(
+        self,
+        repo: str,
+        number: int,
+        *,
+        title: str | None = None,
+        state: str | None = None,
+        state_reason: str | None = None,
+    ) -> Issue | None:
+        """PATCH the issue with only the non-None fields. Slice-7.2 surface.
+
+        Used by the Lithos→GH push handler:
+
+        - title push (operator renamed the Lithos task) → ``title=...``
+        - close mirror (Lithos task completed / cancelled) →
+          ``state="closed"`` + ``state_reason="completed"|"not_planned"``
+
+        Returns the post-PATCH Issue (so callers can verify state), or
+        ``None`` when no fields were supplied (defensive no-op so handlers
+        that pre-compute "nothing changed" don't burn a request).
+
+        ``body`` updates remain on :meth:`update_issue_body` — that path
+        also re-fetches before writing to dodge clobbering operator edits
+        of the linkage marker (D46). Title / state writes touch
+        independent fields and have no marker-collision risk.
+        """
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if state is not None:
+            payload["state"] = state
+        if state_reason is not None:
+            payload["state_reason"] = state_reason
+        if not payload:
+            return None
+        response = await self._patch(f"/repos/{repo}/issues/{number}", json=payload)
+        _raise_for_status(response, repo=repo)
+        parsed = _parse_issues_response([response.json()], repo=repo)
+        return parsed[0] if parsed else None
+
 
 # ── Response error handling ───────────────────────────────────────────
 
