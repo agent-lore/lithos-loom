@@ -23,8 +23,8 @@ Status: Aligned with Implementation
 2. **Real-time co-editing.** File-based, poll-driven; latency target is ≤500ms end-to-end for projection + push.
 3. **Replacing Lithos as the source of truth.** Lithos owns the corpus and the task lifecycle. The vault is a projection plus a write surface for specific edits.
 4. **Cross-host coordination.** The vault host is the only host running `obsidian-sync`; other hosts run headless route-runners. Loom does not coordinate across hosts via shared state.
-5. **Reopening a completed task.** Lithos has no `task_reopen` primitive. Untick (`[x] → [ ]`) posts a `[ReopenRequested]` finding instead, until upstream ships the primitive.
-6. **Generating PRDs, reviewing diffs, brain-driven decisions.** These are roadmap items (see `docs/prd/full.md`); the implemented surface stops at the orchestration spine plus the Obsidian bridge.
+5. **Reopening a completed task.** Lithos exposes no `task_reopen` primitive. Untick (`[x] → [ ]`) posts a `[ReopenRequested]` finding instead.
+6. **Plugin bodies for PRD decomposition, story implementation, story review.** Scaffolding exists in `src/lithos_loom/plugins/`; the implemented surface stops at the orchestration spine plus the Obsidian bridge. Generating PRDs, reviewing diffs, and brain-driven decisions are not implemented today.
 
 ### 1.3 Compatibility Policy (Pre-1.0)
 
@@ -107,7 +107,14 @@ Each child runs its own EventBus instance. There is no inter-child IPC; both chi
 `ObsidianDirWatcher` polls `<vault>/<projects_dir>/**/*.md` (default 250ms), computes body-only hash, and emits `obsidian.note.modified` when divergent. `note-push` calls `lithos_write(id=..., expected_version=...)`. On `version_conflict`, the conflict resolver moves the operator's body to `<vault>/_lithos/conflicts/<slug>.<file>.<ts>.md`, pulls canonical to the original path, and logs a `[Friction]` WARNING.
 
 **Task lifecycle (route-runner).**
-`LithosEventStream` (running in the route-runner child) emits `lithos.task.*` events. Each `[[routes]]` stanza registers a claim-bound subscriber that matches by tag intersection and claims via `lithos_task_claim`. On claim, the runner spawns the plugin subprocess, waits for `result.json`, applies `metadata_updates` via `lithos_task_update`, uploads any artifacts, posts findings, and completes or releases the task. On plugin timeout, the runner sends SIGTERM with a 5s grace before SIGKILL.
+`LithosEventStream` (running in the route-runner child) emits `lithos.task.*` events. Each `[[routes]]` stanza registers a claim-bound subscriber that matches by tag intersection and claims via `lithos_task_claim`. On claim, the runner spawns the plugin subprocess, periodically renews the claim, and waits for `result.json`. It then reads only the `status` field:
+
+- `succeeded` → `lithos_task_complete`.
+- `failed` → `lithos_task_release` + `[BlockerFailed]` finding (the error message is pulled from `error.message` if present).
+- `interrupted` → `lithos_task_release`, no finding.
+- Unknown / missing status → `lithos_task_release` + `[BlockerFailed]`.
+
+Other `result.json` fields (`metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable`) are schema-validated but currently ignored. On plugin timeout, the runner sends SIGTERM with a grace period before SIGKILL.
 
 ### 2.3 Restart and Recovery
 
@@ -118,7 +125,7 @@ Loom has no persistent event log. On restart:
 - `obsidian-projection` writes the full file from scratch on every flush. Idempotent re-runs are no-ops thanks to atomic-write + content-hash dedup.
 - `project-context-projection` re-reads each doc and rewrites if the full-file hash differs.
 - `note-push` and `obsidian-status-transition` pre-check Lithos state before mutating (re-firing an already-completed task is a no-op).
-- The route-runner reclaims any stale claims at startup via `lithos_task_release` for claims owned by the current `orchestrator.agent_id` whose plugin is no longer running.
+- The route-runner does NOT reclaim stale claims from a previous process at startup. Stale claims age out via Lithos's own claim-expiry mechanism; a future run picks the task back up when the claim TTL elapses.
 
 Subscriptions are idempotent by construction; replay is safe.
 
@@ -152,13 +159,13 @@ retain_failed_workdirs = true                  # keep failed work-dirs for triag
 # Projects exist in Lithos when a project-context doc lives at
 # `knowledge/projects/<slug>/`. This TOML registers host-local automation
 # config for projects this host should act on. `repo` is the only
-# required field; `claude_config` and `codex_config` are read by Track 2
-# plugins.
+# required field. `claude_config` and `codex_config` are parsed and
+# stored but not yet consumed by any shipped plugin body.
 
 [projects.<slug>]
 repo          = "/abs/path/to/repo"
-claude_config = "/home/you/.claude-lithos"     # optional, Track 2
-codex_config  = "/home/you/.codex-lithos"      # optional, Track 2
+claude_config = "/home/you/.claude-lithos"     # optional, parsed but unused today
+codex_config  = "/home/you/.codex-lithos"      # optional, parsed but unused today
 
 # ── Routes (claim-bound subscribers) ──────────────────────────────────
 #
@@ -238,7 +245,7 @@ All commands accept `--config / -c <path>` to override discovery. JSON-emitting 
 
 ### 4.1 `lithos-loom run`
 
-Starts the daemon: supervisor + per-domain children. Foregrounded process; SIGINT / SIGTERM trigger graceful shutdown (children stop, claims for in-flight tasks are released, supervisor exits).
+Starts the daemon: supervisor + per-domain children. Foregrounded process; SIGINT / SIGTERM trigger graceful shutdown — the supervisor signals children to stop, in-flight plugin subprocesses are cancelled, and the supervisor waits up to a timeout before SIGKILLing any child that didn't exit. Cancelled plugins that don't write a result file trigger the contract-violation release path; claims may also be left to age out via Lithos's claim TTL.
 
 ```
 lithos-loom run [-c config.toml]
@@ -382,7 +389,7 @@ Plugins are subprocesses invoked by a route-runner. They receive a small CLI sur
 <command> --task-json <path> --work-dir <path> --result-file <path>
 ```
 
-- `--task-json`: read-only JSON file containing the full `lithos_task_status(task_id)` payload plus the resolved project entry from the local TOML (the `[projects.<slug>]` block matched by `task.metadata.project`).
+- `--task-json`: read-only JSON file. Today its contents are `{"task": <event-payload>}` — the bus event's payload (a Lithos task envelope) wrapped under a single `task` key. The resolved project entry from the local TOML is **not** included today; if a plugin needs it, the plugin must load the TOML itself or have it baked into the route's `command`.
 - `--work-dir`: per-task staging directory at `<orchestrator.work_dir>/<task_id>/`. The plugin owns the tree; the runner reads only the result file.
 - `--result-file`: path the plugin must write atomically (temp file + fsync + rename). Partial files must never be observable.
 
@@ -390,7 +397,7 @@ Substitution tokens (`{{task_json}}`, `{{work_dir}}`, `{{result_file}}`) in the 
 
 ### 5.2 Result Schema
 
-The full schema is at `docs/result-schema.json` (JSON Schema Draft 2020-12). Required fields: `schema_version` (const 1), `task_id`, `status`, `exit_code`. Optional: `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error`.
+The full schema is at `docs/result-schema.json` (JSON Schema Draft 2020-12). Required fields: `schema_version` (const 1), `task_id`, `status`, `exit_code`.
 
 ```json
 {
@@ -409,24 +416,23 @@ The full schema is at `docs/result-schema.json` (JSON Schema Draft 2020-12). Req
 }
 ```
 
-### 5.3 Exit Code Convention
+**What the runner does with each field today:**
 
-| Code | Meaning | Runner behaviour |
-|---|---|---|
-| `0` | Succeeded. `status` must be `succeeded`. | Apply metadata updates, upload artifacts, post findings, complete task. |
-| `1` | Generic failure. Consult `error.retriable`. | Post `[BlockerFailed]` finding, release claim. |
-| `20` | Bad input / config. | Treat as non-retriable. Post `[BlockerFailed]`, release. |
-| `30` | Interrupted by signal. | Release claim, leave task open. No finding. |
+| Field | Status |
+|---|---|
+| `schema_version`, `task_id`, `status` | Required by schema; `status` drives the runner's branch (see §2.2). |
+| `error.message` | Used as the `[BlockerFailed]` finding text when `status == "failed"`. |
+| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error.code`, `error.retriable` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
 
-### 5.4 Runner Lifecycle
+### 5.3 Runner Lifecycle
 
-The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, it sends SIGTERM and waits 5 seconds; if the plugin hasn't exited, it sends SIGKILL. Result-file absence after exit is treated as a contract violation: the runner posts `[BlockerFailed] route <name>: plugin contract violation: did not write <path>` and releases the claim.
+The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, it sends SIGTERM and waits a grace period; if the plugin hasn't exited, it sends SIGKILL. Result-file absence after exit is treated as a contract violation: the runner posts `[BlockerFailed] route <name>: plugin contract violation: <detail>` and releases the claim.
 
 `retain_failed_workdirs = true` keeps the work directory for triage on failure; on success the work-dir is removed.
 
-### 5.5 Bundled Plugins (scaffolded)
+### 5.4 Bundled Plugins (scaffolded)
 
-`prd-decompose`, `story-implement`, `story-review-human` are present under `src/lithos_loom/plugins/` as Python modules with prompt files. Their bodies are not part of the implemented surface; the scaffolding lets the routes parse and the plugin contract be exercised end-to-end with stub `result.json` files. The route-runner code path is the load-bearing piece; plugin bodies land later.
+`prd-decompose`, `story-implement`, `story-review-human` are present under `src/lithos_loom/plugins/` as Python modules with prompt files. Their bodies are stubs; they do not yet produce real `result.json` output. The route-runner code path is the load-bearing piece exercised by tests.
 
 ---
 
@@ -437,9 +443,9 @@ The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, 
 ```python
 @dataclass(frozen=True)
 class Event:
-    type: str            # dotted name: "lithos.task.created", "obsidian.note.modified"
-    payload: dict        # event-type-specific; see §6.4
-    source: str          # source identity for trace
+    type: str                   # dotted name, e.g. "lithos.task.created"
+    timestamp: datetime         # UTC; when the source published the event
+    payload: Mapping[str, Any]  # event-type-specific; see §6.4
 ```
 
 Events are passed by reference through the in-process bus. Subscribers must not mutate the payload.
@@ -461,21 +467,23 @@ Each `[[subscriptions]]` stanza may carry both filters; an event passes when bot
 
 ### 6.4 Event Catalog
 
-| Event type | Source | Payload (shape) |
+Payloads are dicts; the exact key set depends on the source. Task-event payloads are the Lithos task envelope as returned by `lithos_task_list` / `task_status` (fields like `id`, `title`, `status`, `tags`, `metadata`, `claims`, and lifecycle timestamps such as `resolved_at`). Note bootstrap events are intentionally minimal (`{id, title, path}`); subscriptions that need the full body or tags re-fetch via `lithos_read`. Subscriptions should treat payloads as opaque dicts and look up specific keys defensively — additional fields may be present and field absence depends on the underlying Lithos response.
+
+| Event type | Source | Payload notes |
 |---|---|---|
-| `lithos.task.created` | LithosEventStream | `{id, title, status, tags, claim, metadata, created_at, updated_at, ...}` (full task envelope) |
-| `lithos.task.updated` | LithosEventStream | full task envelope (post-edit) |
-| `lithos.task.claimed` | LithosEventStream | full task envelope + `claim.{agent_id, route_name, claimed_at, expires_at}` |
-| `lithos.task.released` | LithosEventStream | full task envelope, `claim = null` |
-| `lithos.task.completed` | LithosEventStream | full task envelope + `resolved_at` |
-| `lithos.task.cancelled` | LithosEventStream | full task envelope + `resolved_at` |
-| `lithos.note.created` | LithosNoteStream | `{id, path, title, tags, status, version, updated_at}` (note summary; full body fetched via `lithos_read` on demand) |
-| `lithos.note.updated` | LithosNoteStream | note summary |
-| `lithos.note.deleted` | LithosNoteStream | `{id, path}` |
-| `obsidian.task.status_changed` | ObsidianFSWatcher | `{task_id, prior_status, new_status, line_number}` where status is one of `[ ]`, `[x]`, `[-]`, `[/]`, `[>]` |
-| `obsidian.task.priority_changed` | ObsidianFSWatcher | `{task_id, prior_priority, new_priority}` where priority is `highest|high|medium|low|lowest|null` |
-| `obsidian.task.due_date_changed` | ObsidianFSWatcher | `{task_id, prior_date, new_date}` |
-| `obsidian.note.modified` | ObsidianDirWatcher | `{doc_id, slug, path, body, body_hash, local_version}` |
+| `lithos.task.created` | LithosEventStream | Lithos task envelope. |
+| `lithos.task.updated` | LithosEventStream | Lithos task envelope (post-edit). |
+| `lithos.task.claimed` | LithosEventStream | Lithos task envelope; `claims` lists the active claim. |
+| `lithos.task.released` | LithosEventStream | Lithos task envelope after release. |
+| `lithos.task.completed` | LithosEventStream | Lithos task envelope; `resolved_at` populated. |
+| `lithos.task.cancelled` | LithosEventStream | Lithos task envelope; `resolved_at` populated. |
+| `lithos.note.created` | LithosNoteStream | Bootstrap: `{id, title, path}`. Subscriptions that need more re-fetch via `lithos_read`. |
+| `lithos.note.updated` | LithosNoteStream | Same shape as `created`. |
+| `lithos.note.deleted` | LithosNoteStream | `{id, path}`. |
+| `obsidian.task.status_changed` | ObsidianFSWatcher | Carries the prior and new status markers (`[ ]`, `[x]`, `[-]`, `[/]`, `[>]`) and the task id parsed from `🆔 lithos:<id>`. |
+| `obsidian.task.priority_changed` | ObsidianFSWatcher | Carries prior and new priority (one of `highest|high|medium|low|lowest|null`). |
+| `obsidian.task.due_date_changed` | ObsidianFSWatcher | Carries prior and new `YYYY-MM-DD` date strings (either side may be absent). |
+| `obsidian.note.modified` | ObsidianDirWatcher | Carries the doc id parsed from frontmatter, the modified body, and the local `lithos_version`. |
 
 ### 6.5 Sources
 
@@ -514,14 +522,13 @@ Third-party handlers can be registered via Python entry points. Each handler rec
 ```
 <vault_path>/
 ├── <tasks_file>                              # default: _lithos/tasks.md
-└── <projects_dir>/                           # default: _lithos/projects/
-    ├── <slug>/
-    │   ├── <slug>-project-context.md         # canonical project doc (per Lithos KB convention)
-    │   ├── <other-file>.md                   # any additional project-context-tagged doc
-    │   └── <slug>-done.md                    # task-archive's append-only history (vault-only)
-    ├── _unassigned/
-    │   └── _unassigned-done.md               # archive bucket for tasks with missing metadata.project
-    └── _lithos-loom-internal/                # daemon-owned coordination docs (deferred)
+├── <projects_dir>/                           # default: _lithos/projects/
+│   ├── <slug>/
+│   │   ├── <slug>-project-context.md         # canonical project doc (per Lithos KB convention)
+│   │   ├── <other-file>.md                   # any additional project-context-tagged doc
+│   │   └── <slug>-done.md                    # task-archive's append-only history (vault-only)
+│   └── _unassigned/
+│       └── _unassigned-done.md               # archive bucket for tasks with missing metadata.project
 └── _lithos/conflicts/                        # note-push conflict snapshots
 ```
 
@@ -529,24 +536,32 @@ All writes use a dot-prefixed temp file (`.<filename>.tmp.<rand>`) plus `os.repl
 
 ### 7.2 Tasks-Plugin Line Shape
 
+Open-task line:
+
 ```markdown
-- [ ] <title> [⏫] 🆔 lithos:<id> [⛔ lithos:<dep_id>...] [📅 YYYY-MM-DD] #project/<slug> [#lithos/<route-name>] [#<tag>...]
+- [ ] <title> 🆔 lithos:<id> [#project/<slug>] [#lithos/<route-name>] [⛔ lithos:<dep_id>...] [🔺⏫🔼🔽⏬] [📅 YYYY-MM-DD]
 ```
 
-Field order is operator-readable; the Tasks plugin parses positionally-flexibly.
+Resolved-task line (completed / cancelled):
+
+```markdown
+- [x] <title> 🆔 lithos:<id> [#project/<slug>] ✅ YYYY-MM-DD
+- [-] <title> 🆔 lithos:<id> [#project/<slug>] ❌ YYYY-MM-DD
+```
+
+The renderer always emits fields in this exact order. Priority, deps, and due-date markers are dropped on resolved lines; the resolved-date marker is always last so the Tasks plugin's `sort by done date` / `done after` filters parse correctly. Operator-side tags from `task.tags` are NOT rendered today.
 
 | Token | Meaning | Source | Direction |
 |---|---|---|---|
 | `[ ]` / `[x]` / `[-]` | Status: open / completed / cancelled | `task.status` | Bidirectional. `[/]` and `[>]` are detected on read, no-op on write. |
-| `🔺⏫🔼🔽⏬` | Priority (highest / high / medium / low / lowest) | `task.metadata.priority` | Bidirectional. Absent emoji = no priority. |
 | `🆔 lithos:<id>` | Task ID | `task.id` | One-way (identity; never edited by operator). |
+| `#project/<slug>` | Project tag | `task.metadata.project` | One-way. |
+| `#lithos/<route-name>` | Active human-blocking claim's route | route lookup based on the active claim | One-way; surfaces while a human-blocking route holds the claim. |
 | `⛔ lithos:<dep_id>` | One marker per `metadata.depends_on` entry | `task.metadata.depends_on[]` | One-way (Lithos canonical). |
+| `🔺⏫🔼🔽⏬` | Priority (highest / high / medium / low / lowest) | `task.metadata.priority` | Bidirectional. Absent emoji = no priority. |
 | `📅 YYYY-MM-DD` | Due date | `metadata.scheduled_for` if set; else `today` for human-blocking tasks; else absent | Bidirectional via `metadata.scheduled_for`. |
 | `✅ YYYY-MM-DD` | Completed date | `task.resolved_at` | One-way; only rendered for `[x]` lines within TTL. |
 | `❌ YYYY-MM-DD` | Cancelled date | `task.resolved_at` | One-way; only rendered for `[-]` lines within TTL. |
-| `#project/<slug>` | Project tag | `task.metadata.project` | One-way. |
-| `#lithos/<route-name>` | Active claim's route | `task.claim.route_name` | One-way; surfaces while the claim holds. |
-| `#<tag>` | Lithos task tags | `task.tags` (excluding `trigger:*` route tags) | One-way (Lithos canonical). |
 
 ### 7.3 Projection Filter
 
@@ -572,20 +587,19 @@ Frontmatter envelope:
 ---
 lithos_id: <uuid>
 lithos_version: <int>
-lithos_updated_at: <ISO 8601>
-slug: <directory-name>
-status: active | archived
-tags:
+lithos_updated_at: <ISO 8601>   # omitted when the note has no updated_at
+slug: <directory-name>          # omitted when the note has no slug
+status: <whatever Lithos returned>   # omitted when null; common values: active, archived, quarantined
+tags:                           # omitted when empty
   - project-context
   - ...
-title: <title>
 ---
 # <title>
 
 <body>
 ```
 
-The body below the frontmatter is the Lithos doc body. Frontmatter is daemon-managed; operator edits to frontmatter fields are not pushed back. Body edits are pushed via `note-push` (see §7.5).
+Key order is stable (`lithos_id` → `lithos_version` → `lithos_updated_at` → `slug` → `status` → `tags`). Optional rows are omitted entirely rather than rendered as `null` or `[]`. `status` is whatever Lithos returned for the note — Loom passes it through verbatim. The body below the frontmatter is the Lithos doc body, prefixed with `# <title>`. Frontmatter is daemon-managed; operator edits to frontmatter fields are not pushed back. Body edits are pushed via `note-push` (see §7.5).
 
 Filename migration: if Lithos changes the doc's title (changing the slug), the projection writes the new path first, then unlinks the old path. Order matters — a failed new write leaves both copies on disk rather than losing the content.
 
@@ -626,20 +640,13 @@ The done file is **vault-only and append-only** — the dir-watcher excludes the
 
 ## 8. Finding Prefixes
 
-Loom posts findings with stable prefixes so operators (and `lithos-lens`) can grep machine-parseably:
+Loom posts findings with stable prefixes so operators (and `lithos-lens`) can grep machine-parseably. The prefixes emitted today:
 
 | Prefix | Posted by | Meaning |
 |---|---|---|
-| `[Friction]` | any subscription | Persistent failure of a side effect (retry exhausted) OR a notable operator-visible event (e.g. note-push conflict). Always WARNING-level. |
-| `[ReopenRequested]` | `obsidian-status-transition` | An operator unticked a completed task; Lithos has no reopen primitive yet, so this signals the intent. |
-| `[BlockerFailed]` | route-runner | Plugin failed; the claim was released. Surfaces in lithos-lens "needs attention" filters. |
-| `[Plan]` | reserved (Track 2) | A plugin's pre-flight summary of what it intends. |
-| `[Drift]` | reserved (Track 2) | A plugin's post-run comparison of what it built vs the brief. |
-| `[Recovery]` | reserved (Track 2) | Crash-recovery breadcrumb pointing at the last checkpoint. |
-| `[ReviewPending]` / `[ReviewMerged]` / `[ReviewRejected]` | reserved (Track 2) | PR-review lifecycle on `story-implement` work. |
-| `[Cost]` | reserved (Track 2) | Per-task cost / token / turn count. |
-
-The `reserved` rows are claimed by plugins not yet implemented; operators should not invent collisions.
+| `[Friction]` | any subscription | Persistent failure of a side effect (retry exhausted) OR a notable operator-visible event (e.g. note-push conflict). |
+| `[ReopenRequested]` | `obsidian-status-transition` | An operator unticked a completed task; Lithos has no reopen primitive, so this signals the intent. |
+| `[BlockerFailed]` | route-runner | Plugin failed, timed out, violated the contract, or returned an unknown status. The claim was released. |
 
 ---
 
@@ -693,8 +700,6 @@ Loom requires a Lithos server exposing the MCP-over-SSE surface plus these primi
 
 Slug = directory name under `knowledge/projects/<slug>/`. Lithos enforces uniqueness with a `slug_collision` envelope; Loom relies on this rather than a frontmatter field.
 
-Pending upstream: `lithos_task_reopen` (`agent-lore/lithos#243`) would replace the `[ReopenRequested]` finding workaround.
-
 ---
 
 ## 11. Multi-Host Deployment
@@ -713,19 +718,18 @@ Obsidian Sync (the app) handles delivering the vault to the operator's secondary
 
 ---
 
-## 12. Out of Scope
+## 12. Not Implemented
 
-The following are explicitly not part of the implemented surface:
+The following are absent from the current surface. Some are explicit non-goals; others are queued in `docs/prd/`. Listed here so readers don't go looking.
 
-- **Track 2 plugin bodies** (`prd-decompose`, `story-implement`, `story-review-human`). Scaffolding is present; plugin logic is not.
-- **A1–A10 roadmap items**: plugin SDK, `prd-generate`, agent-driven reviews, brain (`decide-next`), crash recovery beyond source-replay, `merge-stories`, A2A endpoint, multi-host PRD-affinity, GitHub webhooks, docker sandbox. See `docs/prd/full.md` for details.
-- **GitHub issue watcher.** Inbound mirror of GH issues into Lithos tasks is queued; see `docs/prd/github-issue-watcher.md`.
-- **`task_reopen`.** Awaiting upstream Lithos primitive.
+- **Plugin bodies for `prd-decompose`, `story-implement`, `story-review-human`.** Scaffolding under `src/lithos_loom/plugins/`; no real logic.
+- **Application of `result.json` fields beyond `status`.** `metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable` are schema-validated but not used by the runner today (§5.2).
+- **Resolved project entry in `task.json`.** Plugins receive `{"task": <payload>}` only.
+- **Startup reclaim of stale claims.** Claims age out via Lithos's own TTL; the route-runner does not actively release them on startup.
 - **Hot-reload of TOML config.** Operator restarts the daemon.
 - **Persistent event log.** Restart relies on source re-authority + subscriber idempotency.
-- **Cost / token tracking.** Reserved finding prefix exists; emission does not.
-- **Hardened concurrency semantics across hosts.** Claim-based competition via Lithos is sufficient for the current scale.
-- **Containerised daemon.** Loom runs as a host process. Lithos and adjacent services may run in docker; Loom's host coupling (worktrees, CLI auth in `~/`, Templater macro on Obsidian Desktop's PATH) makes containerisation unhelpful.
+- **Containerised daemon.** Loom runs as a host process; Lithos and adjacent services may run in docker.
+- **Other planned work** (`prd-generate`, agent-driven reviews, brain, `merge-stories`, A2A endpoint, GitHub issue watcher, multi-host PRD-affinity, docker sandbox, cost tracking). See `docs/prd/` for PRDs.
 
 ---
 

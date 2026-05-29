@@ -3,7 +3,7 @@
 Workflow orchestration daemon for [Lithos](https://github.com/agent-lore/lithos) tasks. Two surfaces:
 
 - **Obsidian bridge.** Projects open Lithos tasks into an Obsidian-Tasks-compatible inbox; pushes tick / priority / due-date / body edits back to Lithos; bidirectionally syncs project-context docs; Templater macros + CLI for capture, project create, and project import.
-- **Route-runner.** Polls Lithos for open tasks, matches by tag against TOML-configured routes, claims them collision-safely, and dispatches subprocess plugins. Scaffolding for `prd-decompose`, `story-implement`, `story-review-human` is in place; plugin bodies are queued.
+- **Route-runner.** Subscribes to Lithos's SSE event stream, matches `task.*` events by tag against TOML-configured routes, claims tasks collision-safely, and dispatches subprocess plugins. Plugin scaffolding for `prd-decompose`, `story-implement`, `story-review-human` is in place; bodies are stubs.
 
 It is the orchestration layer that connects Lithos to coding agents — replacing the [Ralph++](https://github.com/snarktank/ralph) approach with a fine-grained, fault-tolerant pipeline whose state lives in Lithos and whose hot state lives on the host filesystem.
 

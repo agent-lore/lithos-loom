@@ -10,7 +10,7 @@ falling back to plain ``config.toml``. This lets a single workstation host multi
 Loom configurations (e.g. one targeting a production Lithos, one targeting a
 local-development Lithos) and switch between them by exporting one env var.
 
-The TOML schema follows ``docs/prd/mvp.md`` US-4:
+The TOML schema is documented in ``docs/SPECIFICATION.md`` §3.1; the shape is:
 
     [orchestrator]
     agent_id = "lithos-orchestrator-<host>"
@@ -137,7 +137,7 @@ class RouteConfig:
     Obsidian view; routes with ``human_blocking=False`` are treated as
     autonomous (the daemon will handle them; hide from operator).
     """
-    max_runtime_seconds: int | None = None  # US-34
+    max_runtime_seconds: int | None = None
 
 
 @dataclass(frozen=True)
