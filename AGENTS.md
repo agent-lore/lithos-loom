@@ -50,3 +50,17 @@ Runs:
 All three must pass. CI runs the same on every PR.
 
 When changing the plugin contract, update `docs/result-schema.json` AND `tests/test_plugin_runner.py`. When changing config schema, update `examples/lithos-loom.toml` AND `tests/test_config.py`. When adding a new plugin, ship it under `src/lithos_loom/plugins/<name>/` with a `__main__.py` entry point and add an example route stanza to `examples/lithos-loom.toml`. When changing any operator-visible surface (CLI flag, projection rule, event name, finding prefix), update `docs/SPECIFICATION.md` in the same diff.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues at `agent-lore/lithos-loom`. Use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). `wontfix` already exists on the repo; the other four will be created on first triage. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root (neither exists yet; created lazily as terms and decisions accumulate). See `docs/agents/domain.md`.
