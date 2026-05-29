@@ -96,6 +96,10 @@ def _stub_lithos() -> AsyncMock:
 def _stub_github() -> AsyncMock:
     gh = AsyncMock()
     gh.update_issue_body = AsyncMock()
+    # Default: no fresh body available → marker writer falls back to the
+    # poll-event body. Tests that exercise the race-narrowing fetch
+    # override this with their own get_issue return value.
+    gh.get_issue = AsyncMock(return_value=None)
     return gh
 
 
@@ -418,3 +422,69 @@ async def test_marker_preserves_existing_body_text() -> None:
     assert "<!-- lithos:task-x -->" in body
     # Marker lands at the tail.
     assert body.rstrip().endswith("<!-- lithos:task-x -->")
+
+
+# ── Race-narrowing fetch before marker PATCH ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_marker_write_uses_fresh_body_from_get_issue() -> None:
+    """Regression for PR-review finding 2: the marker writer was applying
+    the marker to the poll-event body and PATCHing the full result. If
+    the operator edited the body between poll and PATCH, their edit was
+    overwritten. The writer must re-fetch via get_issue first.
+    """
+    from lithos_loom.github_client import Issue as IssueShape
+
+    lithos = _stub_lithos()
+    lithos.task_create = AsyncMock(return_value="task-x")
+    github = _stub_github()
+    # Simulate operator editing the body between poll and PATCH: the
+    # poll event carries "original body"; get_issue returns the freshly
+    # edited "EDITED" version.
+    fresh = IssueShape(
+        repo="agent-lore/lithos-loom",
+        number=42,
+        title="Test issue",
+        body="EDITED by operator",
+        state="open",
+        state_reason=None,
+        labels=("bug",),
+        author="alice",
+        updated_at=datetime(2026, 5, 29, 12, 0, 1, tzinfo=UTC),
+        html_url="https://github.com/agent-lore/lithos-loom/issues/42",
+    )
+    github.get_issue = AsyncMock(return_value=fresh)
+    handler = make_handler(github)
+
+    await handler(_event(body="original body from poll"), _ctx(lithos))
+
+    github.get_issue.assert_awaited_once()
+    body_written = github.update_issue_body.await_args.args[2]
+    # Operator's edit is preserved in the patched body.
+    assert "EDITED by operator" in body_written
+    # The stale poll-event body is NOT what we wrote.
+    assert "original body from poll" not in body_written
+    # Canonical marker still lands.
+    assert "<!-- lithos:task-x -->" in body_written
+
+
+@pytest.mark.asyncio
+async def test_marker_write_falls_back_to_event_body_when_refetch_fails() -> None:
+    """If get_issue raises or returns None, we still write the marker —
+    using the stale poll-event body is better than skipping the marker
+    entirely (which would trigger orphan-marker recovery next poll)."""
+    from lithos_loom.github_client import GitHubAuthError
+
+    lithos = _stub_lithos()
+    lithos.task_create = AsyncMock(return_value="task-x")
+    github = _stub_github()
+    github.get_issue = AsyncMock(side_effect=GitHubAuthError("403 denied"))
+    handler = make_handler(github)
+
+    await handler(_event(body="from poll event"), _ctx(lithos))
+
+    github.update_issue_body.assert_awaited_once()
+    body_written = github.update_issue_body.await_args.args[2]
+    assert "from poll event" in body_written
+    assert "<!-- lithos:task-x -->" in body_written

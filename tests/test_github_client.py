@@ -241,7 +241,7 @@ async def test_resolve_gh_token_raises_when_gh_missing() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_list_open_issues_since_happy_path() -> None:
+async def test_list_issues_since_happy_path() -> None:
     route = respx.get(
         "https://api.github.com/repos/agent-lore/lithos-loom/issues"
     ).mock(
@@ -265,7 +265,7 @@ async def test_list_open_issues_since_happy_path() -> None:
     repo = "agent-lore/lithos-loom"
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
-        issues = await client.list_open_issues_since(repo, since=None)
+        issues = await client.list_issues_since(repo, since=None)
     assert len(issues) == 1
     assert issues[0].number == 1
     # Bearer token plumbed through.
@@ -274,19 +274,35 @@ async def test_list_open_issues_since_happy_path() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_list_open_issues_since_sends_iso_cursor() -> None:
+async def test_list_issues_since_sends_iso_cursor() -> None:
     route = respx.get("https://api.github.com/repos/x/y/issues").mock(
         return_value=httpx.Response(200, json=[])
     )
     cursor = datetime(2026, 5, 29, tzinfo=UTC)
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
-        await client.list_open_issues_since("x/y", since=cursor)
+        await client.list_issues_since("x/y", since=cursor)
     request_url = str(route.calls[0].request.url)
     assert (
         "since=2026-05-29T00%3A00%3A00%2B00%3A00" in request_url
         or "since=2026-05-29T00:00:00" in request_url
     )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_issues_since_defaults_to_state_all() -> None:
+    """Regression for PR-review finding 1: previous default state="open"
+    silently suppressed all close-event polls, so the GH→Lithos close
+    mirror never fired. Default must be state="all"."""
+    route = respx.get("https://api.github.com/repos/x/y/issues").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.list_issues_since("x/y", since=None)
+    request_url = str(route.calls[0].request.url)
+    assert "state=all" in request_url
 
 
 @pytest.mark.asyncio
@@ -298,7 +314,7 @@ async def test_list_open_issues_404_raises_repo_not_found() -> None:
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
         with pytest.raises(GitHubRepoNotFoundError, match="missing/repo"):
-            await client.list_open_issues_since("missing/repo", since=None)
+            await client.list_issues_since("missing/repo", since=None)
 
 
 @pytest.mark.asyncio
@@ -310,7 +326,7 @@ async def test_list_open_issues_401_raises_auth_error() -> None:
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
         with pytest.raises(GitHubAuthError):
-            await client.list_open_issues_since("x/y", since=None)
+            await client.list_issues_since("x/y", since=None)
 
 
 @pytest.mark.asyncio
@@ -344,7 +360,7 @@ async def test_list_open_issues_rate_limit_sleeps_then_retries() -> None:
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
         with patch("lithos_loom.github_client.asyncio.sleep", _fake_sleep):
-            issues = await client.list_open_issues_since("x/y", since=None)
+            issues = await client.list_issues_since("x/y", since=None)
     assert issues == []
     assert len(sleep_calls) == 1
     # Slept for ~30s (within a small tolerance).
@@ -370,7 +386,7 @@ async def test_list_open_issues_403_without_rate_limit_raises() -> None:
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
         with pytest.raises(GitHubAuthError):
-            await client.list_open_issues_since("x/y", since=None)
+            await client.list_issues_since("x/y", since=None)
 
 
 @pytest.mark.asyncio

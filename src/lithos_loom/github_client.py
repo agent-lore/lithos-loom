@@ -241,17 +241,29 @@ class GitHubClient:
         url = f"{self.base_url}{path}"
         return await self.http.patch(url, json=json, headers=self._headers())
 
-    async def list_open_issues_since(
-        self, repo: str, *, since: datetime | None
+    async def list_issues_since(
+        self,
+        repo: str,
+        *,
+        since: datetime | None,
+        state: str = "all",
     ) -> list[Issue]:
-        """Fetch open issues updated at-or-after ``since`` (ISO-8601 UTC).
+        """Fetch issues updated at-or-after ``since`` (ISO-8601 UTC).
+
+        Default ``state="all"`` so close events surface to the watcher —
+        without it the source would never see a state transition from
+        open to closed, and the close-mirror branches in the
+        subscription handler would never fire (review finding on the
+        Slice 7.1 PR). The handler skips closed issues that don't
+        carry a linkage marker, so historic closures are still not
+        backfilled.
 
         Pull requests are filtered out at parse time. The endpoint is
-        sorted ``updated asc`` so the watcher can advance its cursor to the
-        max ``updated_at`` seen this poll.
+        sorted ``updated asc`` so the watcher can advance its cursor to
+        the max ``updated_at`` seen this poll.
         """
         params: dict[str, Any] = {
-            "state": "open",
+            "state": state,
             "sort": "updated",
             "direction": "asc",
             "per_page": 100,

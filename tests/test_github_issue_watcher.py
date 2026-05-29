@@ -124,7 +124,7 @@ def _make_issue(
 def _fake_github_client() -> Any:
     """An AsyncMock shaped like the GitHubClient surface the watcher uses."""
     gh = AsyncMock()
-    gh.list_open_issues_since = AsyncMock(return_value=[])
+    gh.list_issues_since = AsyncMock(return_value=[])
     return gh
 
 
@@ -274,7 +274,7 @@ async def test_poll_one_repo_publishes_issue_events() -> None:
     sub = bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
     issue = _make_issue(number=42)
     github = _fake_github_client()
-    github.list_open_issues_since = AsyncMock(return_value=[issue])
+    github.list_issues_since = AsyncMock(return_value=[issue])
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
     watcher._watch_list = {"lithos-loom": "agent-lore/lithos-loom"}
 
@@ -291,6 +291,30 @@ async def test_poll_one_repo_publishes_issue_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_poll_one_repo_surfaces_closed_issue_state_to_handler() -> None:
+    """Regression for PR-review finding 1: the source was hard-coded to
+    state="open", so close events never reached the subscription handler
+    and the GH→Lithos close mirror was effectively unimplemented.
+
+    The watcher must surface state="closed" issues (with their
+    state_reason) so the handler can drive task_complete / task_cancel.
+    """
+    bus = EventBus()
+    sub = bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    closed = _make_issue(number=99, state="closed", state_reason="completed")
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[closed])
+    watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    assert sub.queue.qsize() == 1
+    event = sub.queue.get_nowait()
+    assert event.payload["state"] == "closed"
+    assert event.payload["state_reason"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_poll_one_repo_advances_cursor_to_latest_when_multiple_issues() -> None:
     bus = EventBus()
     bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
@@ -299,7 +323,7 @@ async def test_poll_one_repo_advances_cursor_to_latest_when_multiple_issues() ->
     )
     late = _make_issue(number=2, updated_at=datetime(2026, 5, 29, 13, 0, 0, tzinfo=UTC))
     github = _fake_github_client()
-    github.list_open_issues_since = AsyncMock(return_value=[early, late])
+    github.list_issues_since = AsyncMock(return_value=[early, late])
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
 
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
@@ -311,13 +335,13 @@ async def test_poll_one_repo_uses_existing_cursor_as_since_param() -> None:
     bus = EventBus()
     bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
     github = _fake_github_client()
-    github.list_open_issues_since = AsyncMock(return_value=[])
+    github.list_issues_since = AsyncMock(return_value=[])
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
     prior = datetime(2026, 5, 29, 8, 0, 0, tzinfo=UTC)
     watcher._cursors["agent-lore/lithos-loom"] = prior
 
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
-    call = github.list_open_issues_since.await_args
+    call = github.list_issues_since.await_args
     assert call is not None
     assert call.kwargs["since"] == prior
 
@@ -326,7 +350,7 @@ async def test_poll_one_repo_uses_existing_cursor_as_since_param() -> None:
 async def test_poll_one_repo_drops_repo_on_404() -> None:
     """D49: an unmapped/missing repo drops + logs a [Friction] line."""
     github = _fake_github_client()
-    github.list_open_issues_since = AsyncMock(
+    github.list_issues_since = AsyncMock(
         side_effect=GitHubRepoNotFoundError("missing/repo")
     )
     bus = EventBus()
@@ -348,7 +372,7 @@ async def test_poll_one_repo_drops_repo_on_404() -> None:
 @pytest.mark.asyncio
 async def test_poll_one_repo_swallows_auth_error() -> None:
     github = _fake_github_client()
-    github.list_open_issues_since = AsyncMock(
+    github.list_issues_since = AsyncMock(
         side_effect=GitHubAuthError("401 Bad credentials")
     )
     bus = EventBus()
@@ -401,16 +425,22 @@ async def test_persist_cursors_writes_coord_doc_via_cas() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persist_cursors_handles_version_conflict() -> None:
-    """First call conflicts; the watcher re-reads + the cursor we hold wins
-    next pass (last-write-wins per repo, by design)."""
-    fresh_body = format_cursors(
-        {"agent-lore/lithos-loom": datetime(2026, 5, 28, tzinfo=UTC)}
-    )
-    fresh_note = Note(
+async def test_persist_cursors_merges_pending_advances_on_version_conflict() -> None:
+    """Regression for PR-review finding 3: a single version_conflict
+    used to overwrite ``_cursors`` from the remote and return, dropping
+    every cursor advance the current poll observed. The fix merges our
+    pending cursors back over the remote view (latest wins per repo),
+    then retries the write so the merged cursors actually persist.
+    """
+    # Remote coord doc holds an older cursor for repo A and an unrelated
+    # cursor for repo B (concurrent writer landed for B).
+    older_a = datetime(2026, 5, 28, tzinfo=UTC)
+    other_b = datetime(2026, 5, 29, 8, 0, 0, tzinfo=UTC)
+    remote_body = format_cursors({"owner/a": older_a, "owner/b": other_b})
+    remote_note = Note(
         id="coord-id",
         title="GitHub Watcher State",
-        body=fresh_body,
+        body=remote_body,
         version=9,
         updated_at=None,
         tags=(),
@@ -419,20 +449,81 @@ async def test_persist_cursors_handles_version_conflict() -> None:
         path="projects/_lithos-loom-internal/github-watcher-state.md",
         slug="_lithos-loom-internal",
     )
-    lithos = _fake_lithos_client(
-        note_read_return=fresh_note,
-        write_result=WriteResult(status="version_conflict", current_version=9),
+    # Our just-observed advance for A is later than remote's A; we hold
+    # no opinion on B.
+    fresher_a = datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
+
+    lithos = _fake_lithos_client(note_read_return=remote_note)
+    # First write: conflict. Second write: success.
+    final_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body="",
+        version=10,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    lithos.note_write = AsyncMock(
+        side_effect=[
+            WriteResult(status="version_conflict", current_version=9),
+            WriteResult(status="updated", note=final_note),
+        ]
+    )
+
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
+    watcher._coord_doc_id = "coord-id"
+    watcher._coord_doc_version = 7
+    watcher._cursors = {"owner/a": fresher_a}
+
+    await watcher._persist_cursors()
+
+    # Second write happened (so cursors actually landed in Lithos).
+    assert lithos.note_write.await_count == 2
+    second = lithos.note_write.await_args_list[1].kwargs
+    # Used the fresh version from the conflict response.
+    assert second["expected_version"] == 9
+    # Merge: our advance for A wins, remote's B is preserved.
+    body_written = second["content"]
+    assert f"owner/a {fresher_a.isoformat()}" in body_written
+    assert f"owner/b {other_b.isoformat()}" in body_written
+    # In-memory cursors reflect the merge.
+    assert watcher._cursors == {"owner/a": fresher_a, "owner/b": other_b}
+    assert watcher._coord_doc_version == 10
+
+
+@pytest.mark.asyncio
+async def test_persist_cursors_gives_up_after_max_cas_attempts() -> None:
+    """Three back-to-back conflicts surface a warning and bail without
+    spinning forever; the next poll will retry."""
+    remote_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body="",
+        version=9,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    lithos = _fake_lithos_client(note_read_return=remote_note)
+    lithos.note_write = AsyncMock(
+        return_value=WriteResult(status="version_conflict", current_version=9)
     )
     watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
     watcher._coord_doc_id = "coord-id"
     watcher._coord_doc_version = 7
-    watcher._cursors = {"agent-lore/lithos-loom": datetime(2026, 5, 29, tzinfo=UTC)}
+    watcher._cursors = {"owner/a": datetime(2026, 5, 29, tzinfo=UTC)}
 
     await watcher._persist_cursors()
 
-    # On version_conflict the watcher re-reads — coord doc version
-    # advances and cursors get refreshed from remote.
-    assert watcher._coord_doc_version == 9
+    # Exhausted at _MAX_COORD_DOC_CAS_ATTEMPTS=3 attempts, returns cleanly.
+    assert lithos.note_write.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -592,7 +683,7 @@ async def test_poll_all_repos_iterates_watch_list() -> None:
     def fake_list(repo: str, *, since: datetime | None) -> list[Issue]:
         return [_make_issue(number=1, repo=repo)]
 
-    github.list_open_issues_since = AsyncMock(side_effect=fake_list)
+    github.list_issues_since = AsyncMock(side_effect=fake_list)
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
     watcher._watch_list = {
         "a": "owner/a",
@@ -601,7 +692,7 @@ async def test_poll_all_repos_iterates_watch_list() -> None:
 
     await watcher._poll_all_repos()
 
-    assert github.list_open_issues_since.await_count == 2
+    assert github.list_issues_since.await_count == 2
     assert sub.queue.qsize() == 2
 
 
@@ -611,7 +702,7 @@ async def test_poll_loop_persists_cursors_after_pass() -> None:
     bus = EventBus()
     bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
     github = _fake_github_client()
-    github.list_open_issues_since = AsyncMock(
+    github.list_issues_since = AsyncMock(
         return_value=[_make_issue(number=1, repo="owner/a")]
     )
     lithos = _fake_lithos_client(

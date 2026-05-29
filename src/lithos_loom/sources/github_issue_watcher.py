@@ -80,6 +80,7 @@ _COORD_DOC_BODY_HEADER = (
     "Format: one line per watched repo, '<owner>/<name> <ISO-8601 cursor>'.\n"
 )
 _BUS_QUEUE_SIZE = 256
+_MAX_COORD_DOC_CAS_ATTEMPTS = 3
 
 
 class WatcherLithosClient(Protocol):
@@ -326,48 +327,70 @@ class GitHubIssueWatcher:
     async def _persist_cursors(self) -> None:
         """CAS-write the coord doc with the current cursor map.
 
-        On version_conflict, re-read the doc and merge our cursors over
-        whatever the conflicting writer left — last-cursor-wins per
-        repo. A second conflict is logged but doesn't crash the poll.
+        On version_conflict, merge our pending advances with the
+        remote's cursors per-repo (latest timestamp wins) and retry
+        with the fresh version. A handful of retries are allowed before
+        giving up so a noisy concurrent writer doesn't block forever —
+        the poll loop will retry whole-pass next interval anyway.
         """
-        body = format_cursors(self._cursors)
-        try:
-            result = await self.lithos.note_write(
-                agent=self.agent_id,
-                id=self._coord_doc_id,
-                path=self.coord_doc_path if self._coord_doc_id is None else None,
-                title=_COORD_DOC_TITLE,
-                content=body,
-                expected_version=self._coord_doc_version,
-                note_type="concept",
-                tags=["lithos-loom-internal", "github-watcher-state"],
-            )
-        except (OSError, LithosClientError) as exc:
+        attempts = 0
+        while True:
+            attempts += 1
+            body = format_cursors(self._cursors)
+            try:
+                result = await self.lithos.note_write(
+                    agent=self.agent_id,
+                    id=self._coord_doc_id,
+                    path=self.coord_doc_path if self._coord_doc_id is None else None,
+                    title=_COORD_DOC_TITLE,
+                    content=body,
+                    expected_version=self._coord_doc_version,
+                    note_type="concept",
+                    tags=["lithos-loom-internal", "github-watcher-state"],
+                )
+            except (OSError, LithosClientError) as exc:
+                logger.warning(
+                    "github-watcher: coord doc write failed (%s: %s); "
+                    "cursors will retry next poll",
+                    type(exc).__name__,
+                    exc,
+                )
+                return
+            if result.status in ("created", "updated") and result.note is not None:
+                self._coord_doc_id = result.note.id
+                self._coord_doc_version = result.note.version
+                return
+            if result.status == "version_conflict":
+                if attempts >= _MAX_COORD_DOC_CAS_ATTEMPTS:
+                    logger.warning(
+                        "github-watcher: coord doc CAS exhausted after %d "
+                        "version_conflicts; pending cursor advances will "
+                        "retry next poll",
+                        attempts,
+                    )
+                    return
+                logger.info(
+                    "github-watcher: coord doc version_conflict; merging + retry "
+                    "(attempt %d/%d)",
+                    attempts,
+                    _MAX_COORD_DOC_CAS_ATTEMPTS,
+                )
+                # Hold our pending advances; the load step will replace
+                # ``_cursors`` with the remote view, then we re-merge so
+                # the just-observed advances aren't lost.
+                pending = dict(self._cursors)
+                await self._load_cursors_from_coord_doc()
+                for repo, ts in pending.items():
+                    remote_ts = self._cursors.get(repo)
+                    if remote_ts is None or ts > remote_ts:
+                        self._cursors[repo] = ts
+                continue
             logger.warning(
-                "github-watcher: coord doc write failed (%s: %s); "
-                "cursors will retry next poll",
-                type(exc).__name__,
-                exc,
+                "github-watcher: unexpected coord doc write status %r: %s",
+                result.status,
+                result.message,
             )
             return
-        if result.status in ("created", "updated") and result.note is not None:
-            self._coord_doc_id = result.note.id
-            self._coord_doc_version = result.note.version
-            return
-        if result.status == "version_conflict":
-            logger.info(
-                "github-watcher: coord doc version_conflict; re-reading + retrying"
-            )
-            self._coord_doc_version = result.current_version
-            await self._load_cursors_from_coord_doc()
-            # Merge: our cursors override the remote's (we just saw fresher
-            # issue data) — last-write-wins per repo.
-            return
-        logger.warning(
-            "github-watcher: unexpected coord doc write status %r: %s",
-            result.status,
-            result.message,
-        )
 
     # ── Refresh loop (bus subscriber) ─────────────────────────────────
 
@@ -439,7 +462,7 @@ class GitHubIssueWatcher:
         """
         since = self._cursors.get(repo)
         try:
-            issues = await self.github.list_open_issues_since(repo, since=since)
+            issues = await self.github.list_issues_since(repo, since=since)
         except GitHubRepoNotFoundError:
             logger.warning(
                 "[Friction] github-watcher: repo %s not found; "

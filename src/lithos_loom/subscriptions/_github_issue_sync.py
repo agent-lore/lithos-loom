@@ -308,12 +308,40 @@ async def _apply_marker_safe(
 ) -> None:
     """Write the canonical marker to the issue body, swallowing GH errors.
 
+    Re-fetches the issue body via ``github.get_issue`` immediately before
+    the PATCH so an operator edit during the poll-to-PATCH window
+    survives. GitHub's ``PATCH /issues/{n}`` is full-body replacement
+    with no optimistic locking — the race window can't be closed, but
+    fetching just before writing shrinks it from "one poll interval +
+    handler latency" to "single round-trip latency".
+
+    If the re-fetch fails (404, transport) we fall back to the body
+    carried in the event payload — losing an operator-edit window is
+    better than not writing the marker at all (which would cause the
+    next poll to walk the orphan-marker recovery path and produce a
+    duplicate write attempt).
+
     A marker-write failure is recoverable — the next poll's matching-URL
     branch will retry. We don't propagate the error because that would
     surface the issue to retry logic that would just re-do the
     already-successful task_create.
     """
-    new_body = apply_marker(issue.body, task_id)
+    body_source = issue.body
+    try:
+        fresh = await github.get_issue(issue.repo, issue.number)
+    except GitHubError as exc:
+        ctx.logger.debug(
+            "github-issue-sync: get_issue for marker write on %s/#%d "
+            "failed (%s); using poll-event body",
+            issue.repo,
+            issue.number,
+            exc,
+        )
+    else:
+        if fresh is not None:
+            body_source = fresh.body
+
+    new_body = apply_marker(body_source, task_id)
     try:
         await github.update_issue_body(issue.repo, issue.number, new_body)
     except GitHubError as exc:
