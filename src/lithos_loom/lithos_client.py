@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import json
 import logging
@@ -59,6 +60,24 @@ class _ShutdownSentinel:
 
 
 _SHUTDOWN: Final = _ShutdownSentinel()
+
+
+_invoke_retried: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "lithos_client_invoke_retried", default=False
+)
+"""Per-task flag set True by :meth:`LithosClient._invoke` if the call needed
+a transport retry (#43). Callers that need to disambiguate
+"server-committed-but-response-lost" from "first-attempt failure" check
+this immediately after ``_invoke`` returns or raises — currently only
+:meth:`LithosClient.task_claim`, whose ``claim_failed`` ownership
+re-check is gated on retry-occurred to avoid falsely treating an
+unrelated same-agent collision as our own committed claim (PR #60
+review, 2026-05-29).
+
+Reset at the start of every ``_invoke`` call, so the flag only reflects
+the most recent call's retry state. Read into a local *before* any
+follow-up ``_invoke`` (e.g. ``task_status``), which would clobber it.
+"""
 
 
 @dataclass
@@ -512,6 +531,10 @@ class LithosClient:
                 "client_not_initialised",
                 "LithosClient not initialised; use 'async with LithosClient(...) as c'",
             )
+        # Reset the per-task retry flag so this call's reading of it reflects
+        # only this call's retry state. See :data:`_invoke_retried` for the
+        # rationale (task_claim ownership re-check disambiguation).
+        _invoke_retried.set(False)
         last_exc: BaseException | None = None  # may be BaseExceptionGroup
         for attempt in range(_MAX_TRANSPORT_ATTEMPTS):
             session = self._session
@@ -553,6 +576,10 @@ class LithosClient:
             )
             await asyncio.sleep(_RECONNECT_BACKOFF_SECONDS)
             await self._request_reconnect(expected_gen=gen)
+            # Mark retry as having happened before the next call_tool attempt,
+            # so a write that committed-but-response-lost (claim_failed et al.)
+            # can be reconciled by the caller's idempotency check.
+            _invoke_retried.set(True)
         if last_exc is not None:
             raise last_exc
         # Every attempt hit the transient-None path without ever landing a
@@ -700,16 +727,28 @@ class LithosClient:
         the aspect is already claimed **by another agent** (or the task isn't
         open). Callers treat that as "skip — another runner won the race".
 
-        Idempotent under the transport-retry layer (#43). ``_invoke`` may
-        re-issue this claim after a transport failure, and a claim that
-        committed server-side before its response was lost would then come
-        back ``claim_failed`` — *because we already hold it*. To avoid
-        turning our own committed claim into a visible ``claim_failed`` (which
-        would make RouteRunner silently skip work it owns until the TTL
-        lapses), a ``claim_failed`` is disambiguated against the task's actual
-        claims: if **we** hold this aspect, the claim effectively succeeded
-        and we return its expiry; only a claim held by a *different* agent
-        re-raises ``claim_failed``.
+        Idempotent under the transport-retry layer (#43), but ONLY when
+        ``_invoke`` actually retried this call. ``_invoke`` may re-issue
+        this claim after a transport failure, and a claim that committed
+        server-side before its response was lost would then come back
+        ``claim_failed`` — *because we already hold it*. To avoid turning
+        our own committed claim into a visible ``claim_failed`` (which would
+        make RouteRunner silently skip work it owns until the TTL lapses),
+        a retry-induced ``claim_failed`` is disambiguated against the
+        task's actual claims: if **we** hold this aspect, the claim
+        effectively succeeded and we return its expiry.
+
+        **Critical**: the ownership re-check is gated on
+        :data:`_invoke_retried`. On a *first-attempt* ``claim_failed`` we
+        re-raise immediately, because the only way our ``agent_id`` could
+        be the holder without us having retried is if a *different* Loom
+        process is sharing this ``agent_id`` and already holds the claim
+        — and silently "succeeding" in that case would let both processes
+        run the plugin (PR #60 review, 2026-05-29). Operators are still
+        free to use process-unique ``agent_id`` values to avoid the
+        ambiguity entirely; this gate just removes the regression where
+        the retry-recovery path made the shared-``agent_id`` mistake more
+        dangerous than it was without #43.
         """
         agent_id = agent or self.agent_id
         if not agent_id:
@@ -727,12 +766,21 @@ class LithosClient:
         except LithosClientError as exc:
             if exc.code != "claim_failed":
                 raise
+            # Capture the retry flag BEFORE the next ``_invoke`` (via
+            # ``_claim_expiry_if_held`` → ``task_status``) resets it.
+            retried = _invoke_retried.get()
+            if not retried:
+                # First-attempt claim_failed: a same-``agent_id`` holder must
+                # be a *different* process, since we never sent a prior
+                # request that could have committed and lost its response.
+                # Propagate as a real collision.
+                raise
             held = await self._claim_expiry_if_held(task_id, aspect, agent_id)
             if held is not None:
                 logger.info(
-                    "task_claim: %s aspect %r reported claim_failed but is already "
-                    "held by %s (treating as success — likely a retried claim "
-                    "whose first response was lost)",
+                    "task_claim: %s aspect %r reported claim_failed on retry "
+                    "but is already held by %s (treating as success — likely a "
+                    "retried claim whose first response was lost)",
                     task_id,
                     aspect,
                     agent_id,

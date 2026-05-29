@@ -582,14 +582,17 @@ async def test_task_claim_reraises_when_another_agent_holds_it() -> None:
     assert exc.value.code == "claim_failed"
 
 
-async def test_task_claim_treats_self_held_claim_failed_as_success() -> None:
-    """#43: a claim_failed for an aspect WE already hold (a retried claim
-    whose first response was lost) is treated as success — returns the held
-    claim's expiry rather than raising, so RouteRunner doesn't skip work it
-    owns."""
+async def test_task_claim_propagates_first_attempt_self_held_claim_failed() -> None:
+    """PR #60 review (2026-05-29): on a *first-attempt* claim_failed, the
+    ownership re-check is **skipped** — a same-``agent_id`` holder must be
+    a different Loom process (no retry → no committed-but-response-lost
+    request of ours). Silently treating it as success would let both
+    processes proceed past task_claim and run the plugin in parallel."""
     client, _ = _client_with_router(
         {
             "lithos_task_claim": _content(_CLAIM_FAILED),
+            # Re-check would happily report our agent as the holder — proving
+            # the re-check ISN'T consulted on first-attempt failure.
             "lithos_task_status": _task_with_claims(
                 [
                     {
@@ -601,8 +604,56 @@ async def test_task_claim_treats_self_held_claim_failed_as_success() -> None:
             ),
         }
     )
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_claim(task_id="t-1", aspect="impl")
+    assert exc.value.code == "claim_failed"
+
+
+async def test_task_claim_treats_self_held_claim_failed_as_success_on_retry() -> None:
+    """#43 + PR #60 review (2026-05-29): the ownership re-check IS consulted
+    when ``_invoke`` actually retried this call. This is the "we claimed,
+    response was lost mid-flight, we retried, server reports claim_failed
+    because we already hold it" path — return the held expiry rather than
+    visibly failing (which would make RouteRunner skip work it owns).
+
+    Simulated by raising a transport error on the first ``call_tool`` so
+    ``_invoke`` reconnects, then returning ``claim_failed`` on the retry."""
+    client = LithosClient(
+        base_url="http://example.test:8765", agent_id="lithos-orchestrator-test"
+    )
+    fake_session = AsyncMock()
+    claim_attempts = 0
+
+    async def _route(tool: str, *, arguments: dict[str, Any] | None = None) -> Any:
+        nonlocal claim_attempts
+        if tool == "lithos_task_claim":
+            claim_attempts += 1
+            if claim_attempts == 1:
+                raise _DeadError("sse stream closed mid-claim")
+            return _content(_CLAIM_FAILED)
+        if tool == "lithos_task_status":
+            return _task_with_claims(
+                [
+                    {
+                        "agent": "lithos-orchestrator-test",
+                        "aspect": "impl",
+                        "expires_at": "2026-05-20T12:00:00Z",
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected tool call: {tool!r}")
+
+    fake_session.call_tool.side_effect = _route
+    client._session = fake_session  # type: ignore[assignment]
+    # _invoke needs a way to reconnect; install a no-op _establish that
+    # keeps the same session installed (the reconnect itself is a side
+    # effect we don't care about for this test).
+    _patch_establish(client, [fake_session])
+
     expires = await client.task_claim(task_id="t-1", aspect="impl")
+
     assert expires == "2026-05-20T12:00:00Z"
+    assert claim_attempts == 2  # first call transport-failed, retry got claim_failed
 
 
 async def test_task_claim_reraises_when_we_hold_a_different_aspect() -> None:
