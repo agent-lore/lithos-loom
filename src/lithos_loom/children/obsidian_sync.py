@@ -101,6 +101,13 @@ _LEVEL_MAP: dict[LogLevel, int] = {
     "error": logging.ERROR,
 }
 
+# Mirror route_runner + github_watcher: httpx logs every HTTP request at
+# INFO — every MCP POST plus the SSE GET — which drowns out the
+# projection / dir-watcher / handler lifecycle the operator is watching
+# for. At ``debug`` the operator asked for the firehose; otherwise pin
+# to WARNING so the application logs aren't lost in the noise.
+_NOISY_LIBRARY_LOGGERS = ("httpx", "httpx_sse")
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,6 +116,12 @@ def _configure_logging(level: LogLevel) -> None:
         level=_LEVEL_MAP[level],
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if level == "debug":
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+    else:
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
     # The MCP SDK's SSE reader (``mcp.client.sse.sse_reader``) logs a
     # full ERROR-level traceback whenever its persistent session is
     # torn down — e.g. when Lithos restarts. Our LithosClient's outer

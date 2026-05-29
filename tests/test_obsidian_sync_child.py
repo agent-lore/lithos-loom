@@ -1838,3 +1838,26 @@ def test_configure_logging_pins_mcp_sse_logger_to_critical() -> None:
         f"mcp.client.sse logger must be pinned to CRITICAL to suppress "
         f"SDK tracebacks on Lithos restart; got {actual}"
     )
+
+
+def test_configure_logging_silences_httpx_at_info_level() -> None:
+    """Soak 2026-05-29: the obsidian-sync child was emitting one
+    INFO-level httpx line per MCP POST during bootstrap (one per
+    projected note, plus one per ongoing event), drowning the
+    projection / handler logs. Mirror the route-runner +
+    github-watcher suppression.
+    """
+    logging.getLogger("httpx").setLevel(logging.NOTSET)
+    logging.getLogger("httpx_sse").setLevel(logging.NOTSET)
+    obs_sync_mod._configure_logging("info")
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpx_sse").level == logging.WARNING
+
+
+def test_configure_logging_leaves_httpx_alone_at_debug_level() -> None:
+    """At debug, the operator asked for the firehose — don't filter."""
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpx_sse").setLevel(logging.WARNING)
+    obs_sync_mod._configure_logging("debug")
+    assert logging.getLogger("httpx").level == logging.NOTSET
+    assert logging.getLogger("httpx_sse").level == logging.NOTSET
