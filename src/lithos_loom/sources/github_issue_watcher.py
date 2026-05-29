@@ -384,12 +384,21 @@ class GitHubIssueWatcher:
         with the fresh version. A handful of retries are allowed before
         giving up so a noisy concurrent writer doesn't block forever —
         the poll loop will retry whole-pass next interval anyway.
+
+        The unchanged-cursors check runs at the TOP of every CAS
+        iteration (not just at entry) so the conflict-then-merge path
+        also short-circuits when the remote already held what we would
+        have written — otherwise ``continue`` would bypass the entry
+        guard and pointlessly bump the coord-doc version on the retry
+        (PR-review finding round 2).
         """
-        if self._cursors == self._last_persisted_cursors:
-            logger.debug("github-watcher: coord doc write skipped — cursors unchanged")
-            return
         attempts = 0
         while True:
+            if self._cursors == self._last_persisted_cursors:
+                logger.debug(
+                    "github-watcher: coord doc write skipped — cursors unchanged"
+                )
+                return
             attempts += 1
             body = format_cursors(self._cursors)
             try:

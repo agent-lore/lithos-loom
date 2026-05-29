@@ -733,6 +733,56 @@ async def test_persist_cursors_writes_again_when_cursor_advances() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persist_cursors_skips_retry_when_conflict_resolves_to_unchanged() -> (
+    None
+):
+    """PR-review finding (round 2 on PR #64): the no-op short-circuit
+    was at function entry, OUTSIDE the CAS loop. On version_conflict
+    the watcher re-reads the remote, merges, then ``continue``s back to
+    the top of ``while True`` — bypassing the entry guard. If the
+    remote already held the same (or newer) cursors than the watcher
+    wanted to write, the merge produced no change, but the retry
+    iteration wrote anyway and bumped the coord-doc version. The
+    in-loop check at the top of every iteration catches this.
+    """
+    cursor = datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
+    remote_body = format_cursors({"agent-lore/lithos-loom": cursor})
+    remote_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body=remote_body,
+        version=9,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    lithos = _fake_lithos_client(note_read_return=remote_note)
+    # First write: version_conflict. If the bug returns, a second write
+    # would hit this side_effect list and pass.
+    lithos.note_write = AsyncMock(
+        side_effect=[
+            WriteResult(status="version_conflict", current_version=9),
+            WriteResult(status="updated", note=remote_note),
+        ]
+    )
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
+    watcher._coord_doc_id = "coord-id"
+    watcher._coord_doc_version = 7
+    # Entry guard would not fire: empty _last_persisted_cursors != our
+    # cursor map. Only the in-loop check after the merge can save us.
+    watcher._cursors = {"agent-lore/lithos-loom": cursor}
+
+    await watcher._persist_cursors()
+
+    # Exactly one write: the conflict-then-merge collapsed our pending
+    # advance into "no change vs remote", and the retry was skipped.
+    assert lithos.note_write.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_load_cursors_marks_them_as_already_persisted() -> None:
     """A fresh load from the coord doc means the remote already holds
     what we just read — the first poll-cycle's persist must not write
