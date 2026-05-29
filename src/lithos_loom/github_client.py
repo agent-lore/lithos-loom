@@ -149,6 +149,19 @@ def apply_marker(body: str | None, task_id: str) -> str:
     return f"{text}\n\n{canonical}"
 
 
+def strip_marker(body: str | None) -> str:
+    """Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.
+
+    Slice 7.2 mirrors GH issue body → Lithos task description. The Loom-
+    managed marker is bookkeeping noise from the operator's perspective
+    and must not bleed into the projected task surface, so it is stripped
+    before comparison + write.
+    """
+    if not body:
+        return ""
+    return _MARKER_RE.sub("", body).strip()
+
+
 # ── gh auth token resolver ────────────────────────────────────────────
 
 

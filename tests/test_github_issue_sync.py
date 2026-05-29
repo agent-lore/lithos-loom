@@ -64,14 +64,21 @@ def _task(
     task_id: str = "task-123",
     status: str = "open",
     url: str = "https://github.com/agent-lore/lithos-loom/issues/42",
+    title: str = "Test issue",
+    description: str | None = "issue body",
+    tags: tuple[str, ...] = ("bug", GITHUB_ISSUE_TAG),
+    metadata: dict[str, Any] | None = None,
 ) -> Task:
+    if metadata is None:
+        metadata = {"github_issue_url": url, "project": "lithos-loom"}
     return Task(
         id=task_id,
-        title="Test issue",
+        title=title,
         status=status,
-        tags=("bug", GITHUB_ISSUE_TAG),
-        metadata={"github_issue_url": url, "project": "lithos-loom"},
+        tags=tags,
+        metadata=metadata,
         claims=(),
+        description=description,
     )
 
 
@@ -90,6 +97,8 @@ def _stub_lithos() -> AsyncMock:
     client.task_list = AsyncMock(return_value=[])
     client.task_complete = AsyncMock()
     client.task_cancel = AsyncMock()
+    client.task_update = AsyncMock()
+    client.finding_post = AsyncMock(return_value="finding-1")
     return client
 
 
@@ -488,3 +497,329 @@ async def test_marker_write_falls_back_to_event_body_when_refetch_fails() -> Non
     body_written = github.update_issue_body.await_args.args[2]
     assert "from poll event" in body_written
     assert "<!-- lithos:task-x -->" in body_written
+
+
+# ── Slice 7.2: GH→Lithos drift sync ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_drift_title_change_pushes_to_lithos() -> None:
+    """GH title differs from Lithos task title → task_update(title=...)."""
+    lithos = _stub_lithos()
+    existing = _task(
+        task_id="task-123",
+        status="open",
+        title="Old title",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(body="issue body\n<!-- lithos:task-123 -->", title="New title"),
+        _ctx(lithos),
+    )
+    lithos.task_update.assert_awaited_once()
+    update_kwargs = lithos.task_update.await_args.kwargs
+    assert update_kwargs["task_id"] == "task-123"
+    assert update_kwargs["title"] == "New title"
+
+
+@pytest.mark.asyncio
+async def test_drift_body_change_pushes_description_without_marker() -> None:
+    """GH body differs from Lithos task description; marker is stripped before write."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="open",
+        description="old body",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    new_body = "fresh issue body\n\n<!-- lithos:task-123 -->"
+    await handler(
+        _event(body=new_body),
+        _ctx(lithos),
+    )
+    lithos.task_update.assert_awaited_once()
+    kwargs = lithos.task_update.await_args.kwargs
+    assert kwargs["description"] == "fresh issue body"
+    # Marker MUST NOT leak into the Lithos task description.
+    assert "<!-- lithos" not in kwargs["description"]
+
+
+@pytest.mark.asyncio
+async def test_drift_label_added_mirrors_to_tags_and_snapshot() -> None:
+    """GH adds a label → Lithos tag added, github_labels snapshot bumped."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="open",
+        tags=("bug", GITHUB_ISSUE_TAG),
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(body="b\n<!-- lithos:task-123 -->", labels=["bug", "needs-info"]),
+        _ctx(lithos),
+    )
+    lithos.task_update.assert_awaited_once()
+    kwargs = lithos.task_update.await_args.kwargs
+    assert "needs-info" in kwargs["tags"]
+    assert "bug" in kwargs["tags"]
+    assert GITHUB_ISSUE_TAG in kwargs["tags"]
+    assert kwargs["metadata"]["github_labels"] == ["bug", "needs-info"]
+
+
+@pytest.mark.asyncio
+async def test_drift_label_removed_drops_tag_but_preserves_operator_tags() -> None:
+    """GH removes a label; operator-added Lithos tags survive."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="open",
+        # "operator-added-tag" was never in any GH snapshot — must survive.
+        tags=("bug", "ui", "operator-added-tag", GITHUB_ISSUE_TAG),
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug", "ui"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    # GH dropped "ui".
+    await handler(
+        _event(body="b\n<!-- lithos:task-123 -->", labels=["bug"]),
+        _ctx(lithos),
+    )
+    lithos.task_update.assert_awaited_once()
+    kwargs = lithos.task_update.await_args.kwargs
+    new_tags = set(kwargs["tags"])
+    assert "ui" not in new_tags
+    assert "bug" in new_tags
+    assert "operator-added-tag" in new_tags
+    assert GITHUB_ISSUE_TAG in new_tags
+    assert kwargs["metadata"]["github_labels"] == ["bug"]
+
+
+@pytest.mark.asyncio
+async def test_drift_no_changes_skips_task_update() -> None:
+    """Steady-state poll: nothing changed → zero task_update calls."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="open",
+        title="Test issue",
+        description="issue body",
+        tags=("bug", GITHUB_ISSUE_TAG),
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(body="issue body\n\n<!-- lithos:task-123 -->"),
+        _ctx(lithos),
+    )
+    lithos.task_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_drift_combined_changes_one_task_update_call() -> None:
+    """Efficiency: title + body + labels all changed → single task_update."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="open",
+        title="old",
+        description="old body",
+        tags=("bug", GITHUB_ISSUE_TAG),
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(
+            title="new",
+            body="new body\n<!-- lithos:task-123 -->",
+            labels=["bug", "needs-info"],
+        ),
+        _ctx(lithos),
+    )
+    assert lithos.task_update.await_count == 1
+    kwargs = lithos.task_update.await_args.kwargs
+    assert kwargs["title"] == "new"
+    assert kwargs["description"] == "new body"
+    assert "needs-info" in kwargs["tags"]
+    assert kwargs["metadata"]["github_labels"] == ["bug", "needs-info"]
+
+
+# ── Slice 7.2: state-snapshot tracking + reopen finding ───────────────
+
+
+@pytest.mark.asyncio
+async def test_open_to_closed_writes_snapshot_and_mirrors_close() -> None:
+    """GH closes an open task; state_snapshot transitions to 'closed' and the
+    close mirror still fires in the same poll."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="open",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(
+            body="issue body\n\n<!-- lithos:task-123 -->",
+            state="closed",
+            state_reason="completed",
+        ),
+        _ctx(lithos),
+    )
+    # Snapshot drift bumped → task_update with snapshot.
+    lithos.task_update.assert_awaited_once()
+    kwargs = lithos.task_update.await_args.kwargs
+    assert kwargs["metadata"]["github_state_snapshot"] == "closed"
+    # Close mirror fired in the same poll.
+    lithos.task_complete.assert_awaited_once_with(
+        task_id="task-123", agent="lithos-loom-agent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reopen_after_close_posts_finding_once() -> None:
+    """closed→open on a completed task posts the finding once.
+
+    PRD #75 + Q1: dedup via metadata.github_state_snapshot.
+    """
+    lithos = _stub_lithos()
+    existing = _task(
+        status="completed",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "closed",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    # Poll 1: GH reopened.
+    await handler(
+        _event(
+            body="issue body\n\n<!-- lithos:task-123 -->",
+            state="open",
+        ),
+        _ctx(lithos),
+    )
+    lithos.finding_post.assert_awaited_once()
+    finding_kwargs = lithos.finding_post.await_args.kwargs
+    assert finding_kwargs["task_id"] == "task-123"
+    assert "[ReopenRequested]" in finding_kwargs["summary"]
+    # Snapshot must transition to "open" so a second poll doesn't re-fire.
+    update_kwargs = lithos.task_update.await_args.kwargs
+    assert update_kwargs["metadata"]["github_state_snapshot"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_reopen_with_snapshot_already_open_does_not_repost() -> None:
+    """Second poll after a reopen: snapshot already 'open' → no duplicate finding."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="completed",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(body="b\n\n<!-- lithos:task-123 -->", state="open"),
+        _ctx(lithos),
+    )
+    lithos.finding_post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reopen_on_legacy_task_without_snapshot_fires_finding() -> None:
+    """A 7.1-era task has no github_state_snapshot yet. Treat missing as 'unknown'
+    and fire the finding on first detection of completed+gh.open."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="completed",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            # NB: no github_state_snapshot key.
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(body="b\n<!-- lithos:task-123 -->", state="open"),
+        _ctx(lithos),
+    )
+    lithos.finding_post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_initialises_state_snapshot_in_metadata() -> None:
+    """7.2 task-create now stamps github_state_snapshot=<issue.state> at birth."""
+    lithos = _stub_lithos()
+    handler = make_handler(_stub_github())
+    await handler(_event(), _ctx(lithos))
+    kwargs = lithos.task_create.await_args.kwargs
+    assert kwargs["metadata"]["github_state_snapshot"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_drift_runs_before_close_in_same_poll() -> None:
+    """Title rename + GH close arriving together: both drift and close fire."""
+    lithos = _stub_lithos()
+    existing = _task(
+        status="open",
+        title="old title",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(
+            body="b\n\n<!-- lithos:task-123 -->",
+            title="new title",
+            state="closed",
+            state_reason="completed",
+        ),
+        _ctx(lithos),
+    )
+    # Drift applied: title pushed.
+    update_kwargs = lithos.task_update.await_args.kwargs
+    assert update_kwargs["title"] == "new title"
+    assert update_kwargs["metadata"]["github_state_snapshot"] == "closed"
+    # Close also fired.
+    lithos.task_complete.assert_awaited_once()

@@ -42,7 +42,12 @@ from typing import Any
 
 from lithos_loom.bus import Event
 from lithos_loom.errors import LithosClientError
-from lithos_loom.github_client import GitHubClient, GitHubError, apply_marker
+from lithos_loom.github_client import (
+    GitHubClient,
+    GitHubError,
+    apply_marker,
+    strip_marker,
+)
 from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions import Handler, SubscriptionContext
 
@@ -219,16 +224,51 @@ async def _reconcile(
 async def _reconcile_existing(
     issue: _ParsedIssue, task: Task, ctx: SubscriptionContext
 ) -> None:
-    """Apply GH state to a known Lithos task. Idempotent."""
-    if issue.state != "closed":
-        # Still open on GH; nothing to mirror in 7.1 (title / body drift
-        # sync is deferred to 7.2).
-        ctx.logger.debug(
-            "github-issue-sync: %s/#%d still open — no-op for task %s",
+    """Apply GH state to a known Lithos task. Idempotent.
+
+    Slice 7.2 layers three branches on top of the original close mirror:
+
+    1. **Drift sync** (always runs): title / body / labels / state-snapshot.
+       Builds a single merged ``task_update`` payload so a steady-state poll
+       costs zero round-trips and a poll that observes multiple drifts costs
+       exactly one.
+    2. **Reopen finding**: terminal Lithos task + GH-open + snapshot bump
+       fires ``[ReopenRequested]`` once. The snapshot transition (handled
+       in step 1) is what de-dupes subsequent polls.
+    3. **Close mirror** (Slice 7.1, preserved): GH-closed + Lithos-open
+       triggers ``task_complete`` / ``task_cancel`` based on ``state_reason``.
+
+    Reopen detection must compare the *current* snapshot value, so it
+    inspects ``task.metadata`` BEFORE drift sync rewrites it.
+    """
+    # Reopen detection reads the snapshot before drift sync mutates it.
+    prior_snapshot = task.metadata.get("github_state_snapshot")
+    if (
+        task.status in ("completed", "cancelled")
+        and issue.state == "open"
+        and prior_snapshot != "open"
+    ):
+        ctx.logger.info(
+            "github-issue-sync: reopen detected on %s/#%d (task %s)",
             issue.repo,
             issue.number,
             task.id,
         )
+        await _safe_call(
+            ctx,
+            ctx.lithos.finding_post(
+                task_id=task.id,
+                summary=(
+                    f"[ReopenRequested] GH issue {issue.repo}#{issue.number} reopened"
+                ),
+                agent=ctx.agent_id,
+            ),
+            describe=f"post ReopenRequested finding for {task.id}",
+        )
+
+    await _sync_drift(issue, task, ctx)
+
+    if issue.state != "closed":
         return
 
     if task.status != "open":
@@ -282,6 +322,93 @@ async def _reconcile_existing(
         )
 
 
+# ── Slice 7.2: drift sync helpers ─────────────────────────────────────
+
+
+async def _sync_drift(
+    issue: _ParsedIssue, task: Task, ctx: SubscriptionContext
+) -> None:
+    """Mirror GH-side drift (title / body / labels) into Lithos.
+
+    Build a single merged ``task_update`` payload to keep steady-state
+    polls cheap. The state-snapshot field rides on the same write so the
+    reopen-finding de-dupe stays consistent without an extra round-trip.
+    """
+    updates: dict[str, Any] = {}
+    metadata_updates: dict[str, Any] = {}
+
+    if issue.title != task.title:
+        updates["title"] = issue.title
+
+    body_sans_marker = strip_marker(issue.body)
+    current_desc = (task.description or "").strip()
+    if body_sans_marker != current_desc:
+        updates["description"] = body_sans_marker
+
+    raw_snapshot = task.metadata.get("github_labels") or ()
+    old_snapshot: list[str] = [str(label) for label in raw_snapshot]
+    new_labels = list(issue.labels)
+    if set(old_snapshot) != set(new_labels):
+        new_tags = _merge_tags_preserving_operator_adds(
+            list(task.tags), old_snapshot, new_labels
+        )
+        if set(new_tags) != set(task.tags):
+            updates["tags"] = new_tags
+        metadata_updates["github_labels"] = new_labels
+
+    if task.metadata.get("github_state_snapshot") != issue.state:
+        metadata_updates["github_state_snapshot"] = issue.state
+
+    if metadata_updates:
+        updates["metadata"] = metadata_updates
+
+    if not updates:
+        return
+
+    await _safe_call(
+        ctx,
+        ctx.lithos.task_update(
+            task_id=task.id,
+            agent=ctx.agent_id,
+            **updates,
+        ),
+        describe=f"drift-sync task {task.id}",
+    )
+
+
+def _merge_tags_preserving_operator_adds(
+    current: list[str],
+    old_snapshot: list[str],
+    new_labels: list[str],
+) -> list[str]:
+    """Reconcile Lithos task tags against a GH label diff.
+
+    - Remove tags that were in the *prior* GH snapshot but are no longer
+      in GH's current label list (GH-side removals propagate).
+    - Add tags that are in GH's current label list but not yet on the task
+      (GH-side additions propagate).
+    - Preserve everything else — operator-added Lithos tags survive
+      because they were never in any GH snapshot.
+
+    Order-stable: existing tags keep their relative position; new GH
+    labels append at the end.
+    """
+    removed = set(old_snapshot) - set(new_labels)
+    seen: set[str] = set()
+    result: list[str] = []
+    for tag in current:
+        if tag in removed or tag in seen:
+            continue
+        result.append(tag)
+        seen.add(tag)
+    for tag in new_labels:
+        if tag in seen:
+            continue
+        result.append(tag)
+        seen.add(tag)
+    return result
+
+
 async def _create_task_and_mark(
     issue: _ParsedIssue, ctx: SubscriptionContext, github: GitHubClient
 ) -> None:
@@ -297,6 +424,11 @@ async def _create_task_and_mark(
         "github_issue_url": issue.html_url,
         "github_issue_number": issue.number,
         "github_labels": list(issue.labels),
+        # Slice 7.2: bootstrap the snapshot so the reopen-finding de-dupe
+        # has a baseline. Without it, a legacy migration path treats a
+        # missing snapshot as "unknown" and could fire one spurious
+        # finding on the first poll after close→reopen.
+        "github_state_snapshot": issue.state,
     }
     tags = list(issue.labels) + [GITHUB_ISSUE_TAG]
     try:
