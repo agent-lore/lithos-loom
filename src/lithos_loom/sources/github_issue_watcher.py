@@ -455,14 +455,28 @@ class GitHubIssueWatcher:
     async def _poll_one_repo(self, *, slug: str, repo: str) -> None:
         """Fetch issues for one repo, emit events, advance the cursor.
 
+        Two distinct paths:
+
+        - **Bootstrap** (no cursor yet for this repo): walks every open
+          issue with ``state="open"``, fully paginated. This matches
+          PRD US-56's "walk every open issue on daemon start" guarantee
+          and avoids burning through closed history one 100-issue page
+          per poll interval on a repo with hundreds of resolved issues.
+        - **Incremental** (cursor present): uses ``state="all"`` since
+          the cursor, fully paginated. State transitions (open → closed)
+          surface alongside fresh opens because GH advances
+          ``updated_at`` on close, so the cursor-based delta catches
+          them.
+
         Errors are absorbed: a 404 drops the repo from the watch list
         (the project doc still owns the mapping; next refresh will
         re-add it if the operator fixes the typo). Auth/rate-limit
         errors are logged but don't propagate — the next pass retries.
         """
         since = self._cursors.get(repo)
+        state = "open" if since is None else "all"
         try:
-            issues = await self.github.list_issues_since(repo, since=since)
+            issues = await self.github.list_issues_since(repo, since=since, state=state)
         except GitHubRepoNotFoundError:
             logger.warning(
                 "[Friction] github-watcher: repo %s not found; "

@@ -291,6 +291,47 @@ async def test_poll_one_repo_publishes_issue_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_poll_one_repo_bootstrap_uses_state_open() -> None:
+    """Regression for PR-review finding (round 3): without a cursor,
+    bootstrap must list open issues only — using state=all means the
+    paginated listing leads with the oldest closed history and the
+    watcher spends multiple poll cycles burning through historic
+    closures before reaching live open issues, breaking PRD US-56.
+    """
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[])
+    watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+    # No cursor for the repo → bootstrap path.
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    call = github.list_issues_since.await_args
+    assert call is not None
+    assert call.kwargs["since"] is None
+    assert call.kwargs["state"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_poll_one_repo_incremental_uses_state_all() -> None:
+    """With a cursor present, the poll must use state=all so state
+    transitions (open→closed) on previously-seen issues surface."""
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[])
+    watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+    watcher._cursors["agent-lore/lithos-loom"] = datetime(2026, 5, 29, tzinfo=UTC)
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    call = github.list_issues_since.await_args
+    assert call is not None
+    assert call.kwargs["state"] == "all"
+
+
+@pytest.mark.asyncio
 async def test_poll_one_repo_surfaces_closed_issue_state_to_handler() -> None:
     """Regression for PR-review finding 1: the source was hard-coded to
     state="open", so close events never reached the subscription handler
@@ -298,6 +339,7 @@ async def test_poll_one_repo_surfaces_closed_issue_state_to_handler() -> None:
 
     The watcher must surface state="closed" issues (with their
     state_reason) so the handler can drive task_complete / task_cancel.
+    Incremental poll path (cursor present), which uses state="all".
     """
     bus = EventBus()
     sub = bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
@@ -305,6 +347,9 @@ async def test_poll_one_repo_surfaces_closed_issue_state_to_handler() -> None:
     github = _fake_github_client()
     github.list_issues_since = AsyncMock(return_value=[closed])
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+    # Cursor present → incremental (state="all") path, which is where
+    # closes naturally surface.
+    watcher._cursors["agent-lore/lithos-loom"] = datetime(2026, 5, 29, tzinfo=UTC)
 
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
 
@@ -680,7 +725,9 @@ async def test_poll_all_repos_iterates_watch_list() -> None:
     sub = bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
     github = _fake_github_client()
 
-    def fake_list(repo: str, *, since: datetime | None) -> list[Issue]:
+    def fake_list(
+        repo: str, *, since: datetime | None, state: str = "all"
+    ) -> list[Issue]:
         return [_make_issue(number=1, repo=repo)]
 
     github.list_issues_since = AsyncMock(side_effect=fake_list)

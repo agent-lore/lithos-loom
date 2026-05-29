@@ -222,7 +222,17 @@ class GitHubClient:
     async def _get(
         self, path: str, *, params: dict[str, Any] | None = None
     ) -> httpx.Response:
-        url = f"{self.base_url}{path}"
+        return await self._get_url(f"{self.base_url}{path}", params=params)
+
+    async def _get_url(
+        self, url: str, *, params: dict[str, Any] | None = None
+    ) -> httpx.Response:
+        """GET an already-absolute URL with rate-limit retry.
+
+        Used for pagination: GitHub's ``Link: rel="next"`` URLs are
+        absolute and carry their own query string, so they bypass the
+        ``base_url`` + ``path`` concatenation.
+        """
         attempts = 0
         while True:
             attempts += 1
@@ -248,19 +258,27 @@ class GitHubClient:
         since: datetime | None,
         state: str = "all",
     ) -> list[Issue]:
-        """Fetch issues updated at-or-after ``since`` (ISO-8601 UTC).
+        """Fetch issues updated at-or-after ``since``, paginating until exhausted.
 
-        Default ``state="all"`` so close events surface to the watcher —
-        without it the source would never see a state transition from
-        open to closed, and the close-mirror branches in the
-        subscription handler would never fire (review finding on the
-        Slice 7.1 PR). The handler skips closed issues that don't
-        carry a linkage marker, so historic closures are still not
-        backfilled.
+        Drains every page by following the ``Link: rel="next"`` header.
+        Without this, a repo with more than 100 issues in scope would
+        return only the oldest 100 per call — and because the endpoint
+        sorts ``updated asc``, the watcher would burn one poll interval
+        per page before reaching live state (PR-review finding on Slice
+        7.1: cold start on a repo with hundreds of historical issues
+        could spend many minutes crawling closed history before
+        importing current open ones).
+
+        ``state="all"`` (default) surfaces close transitions so the
+        handler's close-mirror branches fire. Bootstrap callers
+        intentionally pass ``state="open"`` to skip closed history on
+        first run; subsequent incremental polls (with a cursor) use
+        ``state="all"`` so closes on previously-seen open issues
+        surface.
 
         Pull requests are filtered out at parse time. The endpoint is
         sorted ``updated asc`` so the watcher can advance its cursor to
-        the max ``updated_at`` seen this poll.
+        the max ``updated_at`` seen this call.
         """
         params: dict[str, Any] = {
             "state": state,
@@ -270,9 +288,19 @@ class GitHubClient:
         }
         if since is not None:
             params["since"] = _isoformat_utc(since)
-        response = await self._get(f"/repos/{repo}/issues", params=params)
-        _raise_for_status(response, repo=repo)
-        return _parse_issues_response(response.json(), repo=repo)
+
+        all_issues: list[Issue] = []
+        url: str | None = f"{self.base_url}/repos/{repo}/issues"
+        page_params: dict[str, Any] | None = params
+        while url is not None:
+            response = await self._get_url(url, params=page_params)
+            _raise_for_status(response, repo=repo)
+            all_issues.extend(_parse_issues_response(response.json(), repo=repo))
+            url = _parse_next_link(response.headers.get("Link"))
+            # Pagination URLs already encode the query string, so subsequent
+            # pages must not double-up the params.
+            page_params = None
+        return all_issues
 
     async def get_issue(self, repo: str, number: int) -> Issue | None:
         """Fetch a single issue. Returns ``None`` if the issue was deleted (404)."""
@@ -352,3 +380,25 @@ def _isoformat_utc(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC).isoformat()
+
+
+# RFC 5988-style Link header values look like:
+#   <https://api.github.com/...?page=2>; rel="next", <...>; rel="last"
+# We only care about the next-page URL — the iteration loop in
+# ``list_issues_since`` doesn't need ``last`` because it stops when
+# ``next`` is absent.
+_LINK_RE = re.compile(r"<([^>]+)>;\s*rel=\"([^\"]+)\"")
+
+
+def _parse_next_link(header_value: str | None) -> str | None:
+    """Extract the ``rel="next"`` URL from a GitHub ``Link`` header.
+
+    Returns None when the header is missing or has no next link
+    (i.e. we've reached the last page).
+    """
+    if not header_value:
+        return None
+    for match in _LINK_RE.finditer(header_value):
+        if match.group(2) == "next":
+            return match.group(1)
+    return None

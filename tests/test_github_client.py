@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -303,6 +304,85 @@ async def test_list_issues_since_defaults_to_state_all() -> None:
         await client.list_issues_since("x/y", since=None)
     request_url = str(route.calls[0].request.url)
     assert "state=all" in request_url
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_issues_since_paginates_via_link_header() -> None:
+    """Regression for PR-review finding (round 3): without pagination,
+    a repo with >100 issues in scope would return only the oldest 100,
+    leaving the source to crawl one page per poll interval before
+    reaching live state. The watcher must drain every page via
+    ``Link: rel="next"``.
+    """
+
+    def _issue(num: int) -> dict[str, Any]:
+        return {
+            "number": num,
+            "title": f"issue {num}",
+            "body": "",
+            "state": "open",
+            "state_reason": None,
+            "labels": [],
+            "user": {"login": "alice"},
+            "updated_at": "2026-05-29T12:00:00Z",
+            "html_url": f"https://github.com/x/y/issues/{num}",
+        }
+
+    page1_url = "https://api.github.com/repos/x/y/issues"
+    page2_url = "https://api.github.com/repos/x/y/issues?page=2"
+    page3_url = "https://api.github.com/repos/x/y/issues?page=3"
+
+    respx.get(page1_url, params={"state": "all"}).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"Link": f'<{page2_url}>; rel="next", <{page3_url}>; rel="last"'},
+            json=[_issue(1), _issue(2)],
+        )
+    )
+    respx.get(page2_url).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"Link": f'<{page3_url}>; rel="next"'},
+            json=[_issue(3), _issue(4)],
+        )
+    )
+    respx.get(page3_url).mock(
+        return_value=httpx.Response(200, json=[_issue(5)]),
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        issues = await client.list_issues_since("x/y", since=None)
+
+    assert [i.number for i in issues] == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_issues_since_stops_when_no_next_link() -> None:
+    """Single-page response: no Link header → no further requests."""
+    route = respx.get("https://api.github.com/repos/x/y/issues").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.list_issues_since("x/y", since=None)
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_issues_since_passes_state_param() -> None:
+    """The bootstrap path passes state="open" explicitly."""
+    route = respx.get("https://api.github.com/repos/x/y/issues").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.list_issues_since("x/y", since=None, state="open")
+    request_url = str(route.calls[0].request.url)
+    assert "state=open" in request_url
 
 
 @pytest.mark.asyncio
