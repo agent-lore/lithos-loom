@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -578,3 +579,67 @@ async def test_emitted_event_timestamp_uses_now_provider(
     assert await watcher.poll_once() == 1
     events = _drain(sub)
     assert events[0].timestamp == fixed
+
+
+# ── Soak 2026-05-29: projects-root absence visibility ──────────────────
+
+
+async def test_poll_warns_once_when_projects_root_missing(
+    tmp_path: Path,
+    bus: EventBus,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A misconfigured projects_dir looked identical to a healthy quiet
+    vault before this warning. One-shot warning surfaces the misconfig."""
+    missing_root = tmp_path / "vault" / "nope" / "projects"
+    watcher = ObsidianDirWatcher(
+        bus=bus,
+        projects_root=missing_root,
+        sync_state=ProjectionSyncState(),
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="lithos_loom.sources.obsidian_dir_watcher"
+    ):
+        await watcher.poll_once()
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        "projects dir" in m and str(missing_root) in m and "does not exist" in m
+        for m in msgs
+    ), f"expected one-shot missing-root warning naming the path; got {msgs}"
+
+    # Subsequent polls without the dir appearing must not re-warn.
+    caplog.clear()
+    with caplog.at_level(
+        logging.WARNING, logger="lithos_loom.sources.obsidian_dir_watcher"
+    ):
+        await watcher.poll_once()
+        await watcher.poll_once()
+    repeat = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("does not exist" in m for m in repeat), (
+        f"missing-root warning must be one-shot; got repeated: {repeat}"
+    )
+
+
+async def test_poll_info_logs_when_projects_root_appears(
+    tmp_path: Path,
+    bus: EventBus,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the projects dir appears after a missing-warning, the watcher
+    logs once at INFO so the operator sees the recovery."""
+    root = tmp_path / "vault" / "lazy" / "projects"
+    watcher = ObsidianDirWatcher(
+        bus=bus, projects_root=root, sync_state=ProjectionSyncState()
+    )
+    await watcher.poll_once()  # warns
+
+    root.mkdir(parents=True)
+    caplog.clear()
+    with caplog.at_level(
+        logging.INFO, logger="lithos_loom.sources.obsidian_dir_watcher"
+    ):
+        await watcher.poll_once()
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("now present" in m and str(root) in m for m in msgs), (
+        f"expected appearance INFO log; got {msgs}"
+    )

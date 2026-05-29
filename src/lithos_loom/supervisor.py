@@ -232,7 +232,11 @@ def default_categories() -> list[CategorySpec]:
     The route-runner category runs when routes are configured. The
     obsidian-sync category runs when ``[obsidian_sync]`` is present in
     the loaded config — operators deploy the section on the vault host
-    and omit it on headless hosts.
+    and omit it on headless hosts. The github-watcher category runs
+    when ``[github_watcher]`` is present AND ``enabled = true`` — the
+    presence-plus-flag combo lets an operator park the section in
+    their config while turned off, mirroring the watch toggle on the
+    project doc itself.
     """
     return [
         CategorySpec(
@@ -244,5 +248,12 @@ def default_categories() -> list[CategorySpec]:
             name="obsidian-sync",
             module="lithos_loom.children.obsidian_sync",
             enabled=lambda cfg: cfg.obsidian_sync is not None,
+        ),
+        CategorySpec(
+            name="github-watcher",
+            module="lithos_loom.children.github_watcher",
+            enabled=lambda cfg: (
+                cfg.github_watcher is not None and cfg.github_watcher.enabled
+            ),
         ),
     ]

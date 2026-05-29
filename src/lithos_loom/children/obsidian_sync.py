@@ -101,6 +101,13 @@ _LEVEL_MAP: dict[LogLevel, int] = {
     "error": logging.ERROR,
 }
 
+# Mirror route_runner + github_watcher: httpx logs every HTTP request at
+# INFO — every MCP POST plus the SSE GET — which drowns out the
+# projection / dir-watcher / handler lifecycle the operator is watching
+# for. At ``debug`` the operator asked for the firehose; otherwise pin
+# to WARNING so the application logs aren't lost in the noise.
+_NOISY_LIBRARY_LOGGERS = ("httpx", "httpx_sse")
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,6 +116,12 @@ def _configure_logging(level: LogLevel) -> None:
         level=_LEVEL_MAP[level],
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if level == "debug":
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+    else:
+        for name in _NOISY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
     # The MCP SDK's SSE reader (``mcp.client.sse.sse_reader``) logs a
     # full ERROR-level traceback whenever its persistent session is
     # torn down — e.g. when Lithos restarts. Our LithosClient's outer
@@ -159,6 +172,18 @@ async def _amain(cfg: LoomConfig) -> int:
     # routes; a future subscription-runner child for generic actions
     # like `noop`).
     child_specs = tuple(s for s in cfg.subscriptions if s.action in _CHILD_ACTIONS)
+    # Surface skipped specs at INFO so a typo like ``obsidian-projecton``
+    # doesn't look identical to "configured but inert" in the log. The
+    # action name is included so the operator can spot a misspelled
+    # action immediately.
+    skipped = [s for s in cfg.subscriptions if s.action not in _CHILD_ACTIONS]
+    for spec in skipped:
+        logger.info(
+            "obsidian-sync: subscription %r action=%r not hosted by this "
+            "child (handled elsewhere or unknown action)",
+            spec.name,
+            spec.action,
+        )
     # Fail fast on duplicate specs of the same action. The projection
     # handler is stateful (per-handler state dict + per-handler
     # tasks_file path) so two specs would race on the same file. The

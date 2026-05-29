@@ -398,3 +398,37 @@ def test_obsidian_sync_enabled_when_section_present(tmp_path: Path) -> None:
     cfg = _obs_sync_cfg(tmp_path)
     obs_spec = next(c for c in default_categories() if c.name == "obsidian-sync")
     assert obs_spec.enabled(cfg) is True
+
+
+def test_default_categories_includes_github_watcher_spec(tmp_path: Path) -> None:
+    names = [c.name for c in default_categories()]
+    assert "github-watcher" in names
+
+
+def test_github_watcher_disabled_when_section_absent(tmp_path: Path) -> None:
+    cfg = _minimal_cfg(tmp_path)
+    spec = next(c for c in default_categories() if c.name == "github-watcher")
+    assert spec.enabled(cfg) is False
+
+
+def test_github_watcher_disabled_when_section_present_but_disabled(
+    tmp_path: Path,
+) -> None:
+    """Operator parked the section in config but flipped enabled=false."""
+    from lithos_loom.config import GitHubWatcherConfig
+
+    cfg = _minimal_cfg(tmp_path)
+    cfg_disabled = replace(cfg, github_watcher=GitHubWatcherConfig(enabled=False))
+    spec = next(c for c in default_categories() if c.name == "github-watcher")
+    assert spec.enabled(cfg_disabled) is False
+
+
+def test_github_watcher_enabled_when_section_present_and_enabled(
+    tmp_path: Path,
+) -> None:
+    from lithos_loom.config import GitHubWatcherConfig
+
+    cfg = _minimal_cfg(tmp_path)
+    cfg_enabled = replace(cfg, github_watcher=GitHubWatcherConfig(enabled=True))
+    spec = next(c for c in default_categories() if c.name == "github-watcher")
+    assert spec.enabled(cfg_enabled) is True

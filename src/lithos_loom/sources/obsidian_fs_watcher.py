@@ -179,6 +179,14 @@ class ObsidianFsWatcher:
         # let layer 3 emit). Without this, a flip-then-flip-back was
         # silently absorbed by the layer-2 hash compare.
         self._last_processed_write_version: int = 0
+        # One-shot file-absence tracking. ``_read_file`` returns None
+        # when the tasks file is missing or unreadable, and the poll
+        # loop silently degrades to "no events". Without a log, a
+        # misconfigured ``tasks_file`` or vault_path looks identical
+        # to a healthy quiet vault. Flip on first observed absence
+        # (warning), flip back when the file reappears (info), and
+        # warn again on a subsequent disappearance.
+        self._file_absent: bool = False
 
     async def run(self) -> None:
         """Poll forever. Cancellable.
@@ -237,6 +245,22 @@ class ObsidianFsWatcher:
         events; the two corresponding handlers run independently.
         """
         raw = _read_file(self.tasks_path)
+        if raw is None:
+            if not self._file_absent:
+                logger.warning(
+                    "ObsidianFsWatcher: tasks file %s is missing or unreadable "
+                    "— check obsidian_sync.vault_path / tasks_file. The "
+                    "watcher will keep polling and resume emitting events "
+                    "when the file appears.",
+                    self.tasks_path,
+                )
+                self._file_absent = True
+        elif self._file_absent:
+            logger.info(
+                "ObsidianFsWatcher: tasks file %s now present; resuming",
+                self.tasks_path,
+            )
+            self._file_absent = False
         current_hash = hashlib.sha256(raw).digest() if raw is not None else None
 
         # Layer 1: nothing changed since last poll. Single hash compare,

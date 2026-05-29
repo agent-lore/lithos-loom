@@ -30,12 +30,22 @@ import json
 import re
 import sys
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import typer
 
+from lithos_loom.cli._github_metadata import (
+    GITHUB_REPO_TAG_PREFIX,
+    GITHUB_WATCH_TAG,
+    GithubMetadataError,
+    extract_github_repo,
+    is_github_watching,
+    mutate_project_context_tags,
+    validate_github_repo,
+)
 from lithos_loom.cli._project_import_bulk import (
     ImportPlan,
     PartialImportError,
@@ -1332,3 +1342,170 @@ def project_regenerate_done(
         _emit_json("written", count=len(lines), written=True)
         return
     typer.echo(str(done_path))
+
+
+# ── github-watcher per-project configuration (Slice 7.1) ───────────────
+
+
+@project_app.command("set-github-repo")
+def project_set_github_repo(
+    slug: str = typer.Argument(..., help="Project slug under projects/."),
+    repo: str = typer.Argument(..., help="GitHub repo in owner/name form."),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit TOML config path.",
+    ),
+) -> None:
+    """Bind a GitHub repo to a Lithos project for the issue watcher.
+
+    Writes the canonical project-context doc with a single
+    ``github-repo:<owner>/<name>`` tag. Replaces any existing
+    ``github-repo:*`` tag on the doc so a re-run is idempotent
+    (operator may have made a typo and wants to fix it).
+
+    The watcher does NOT begin polling until ``enable-github <slug>``
+    flips on the ``github-watch`` tag. Separating the two lets the
+    operator stage configuration before turning it on.
+    """
+    try:
+        cfg = load_config(config)
+        normalised_repo = validate_github_repo(repo)
+    except (LithosLoomError, GithubMetadataError) as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        sys.exit(2 if isinstance(exc, GithubMetadataError) else 1)
+
+    new_repo_tag = f"{GITHUB_REPO_TAG_PREFIX}{normalised_repo}"
+
+    def mutator(tags: list[str]) -> list[str]:
+        kept = [t for t in tags if not t.startswith(GITHUB_REPO_TAG_PREFIX)]
+        kept.append(new_repo_tag)
+        return kept
+
+    _run_github_metadata_mutation(
+        cfg=cfg,
+        slug=slug,
+        mutator=mutator,
+        action_summary=f"set github repo to {normalised_repo}",
+        success_message=lambda result: (
+            f"github repo set to {normalised_repo} on {result.path}"
+            if result.changed
+            else f"github repo already set to {normalised_repo} on {result.path}"
+        ),
+    )
+
+
+@project_app.command("enable-github")
+def project_enable_github(
+    slug: str = typer.Argument(..., help="Project slug under projects/."),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit TOML config path.",
+    ),
+) -> None:
+    """Turn on the issue watcher for a project.
+
+    Adds the ``github-watch`` tag to the canonical project-context doc.
+    Requires a ``github-repo:*`` tag to be already present so the
+    watcher has a repo to poll.
+    """
+    try:
+        cfg = load_config(config)
+    except LithosLoomError as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        sys.exit(1)
+
+    def mutator(tags: list[str]) -> list[str]:
+        if extract_github_repo(tags) is None:
+            raise GithubMetadataError(
+                f"slug {slug!r} has no github-repo tag — "
+                "run `lithos-loom project set-github-repo <slug> <owner/name>` first"
+            )
+        if is_github_watching(tags):
+            return tags
+        return [*tags, GITHUB_WATCH_TAG]
+
+    _run_github_metadata_mutation(
+        cfg=cfg,
+        slug=slug,
+        mutator=mutator,
+        action_summary="enable github watching",
+        success_message=lambda result: (
+            f"github watching enabled on {result.path}"
+            if result.changed
+            else f"github watching already enabled on {result.path}"
+        ),
+    )
+
+
+@project_app.command("disable-github")
+def project_disable_github(
+    slug: str = typer.Argument(..., help="Project slug under projects/."),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit TOML config path.",
+    ),
+) -> None:
+    """Pause the issue watcher for a project without losing the repo mapping.
+
+    Removes the ``github-watch`` tag. The ``github-repo:*`` tag is
+    preserved so re-enabling later doesn't need ``set-github-repo``.
+    """
+    try:
+        cfg = load_config(config)
+    except LithosLoomError as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        sys.exit(1)
+
+    def mutator(tags: list[str]) -> list[str]:
+        return [t for t in tags if t != GITHUB_WATCH_TAG]
+
+    _run_github_metadata_mutation(
+        cfg=cfg,
+        slug=slug,
+        mutator=mutator,
+        action_summary="disable github watching",
+        success_message=lambda result: (
+            f"github watching disabled on {result.path}"
+            if result.changed
+            else f"github watching already disabled on {result.path}"
+        ),
+    )
+
+
+def _run_github_metadata_mutation(
+    *,
+    cfg: LoomConfig,
+    slug: str,
+    mutator: Callable[[list[str]], list[str]],
+    action_summary: str,
+    success_message: Callable[[Any], str],
+) -> None:
+    """Shared exit-handling wrapper for the three github CLI subcommands."""
+    if not _SLUG_RE.match(slug):
+        typer.echo(
+            f"lithos-loom: invalid slug {slug!r}; must match {_SLUG_RE.pattern}",
+            err=True,
+        )
+        sys.exit(2)
+    try:
+        result = asyncio.run(
+            mutate_project_context_tags(
+                cfg=cfg,
+                slug=slug,
+                mutator=mutator,
+                action_summary=action_summary,
+            )
+        )
+    except GithubMetadataError as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        sys.exit(2)
+    except (OSError, LithosClientError) as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        sys.exit(1)
+    typer.echo(success_message(result))
