@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -633,25 +633,16 @@ def _optional_float(
 
 
 def _apply_env_overrides(cfg: LoomConfig) -> LoomConfig:
-    """Apply env-var overrides for the small set of always-overridable fields."""
+    """Apply env-var overrides for the small set of always-overridable fields.
+
+    Uses ``dataclasses.replace`` rather than re-constructing both dataclasses
+    explicitly so a future field added to ``LoomConfig`` or
+    ``OrchestratorConfig`` can't be silently dropped here.
+    """
     url = os.environ.get("LITHOS_URL", "")
     if not url:
         return cfg
-    return LoomConfig(
-        orchestrator=OrchestratorConfig(
-            agent_id=cfg.orchestrator.agent_id,
-            lithos_url=url,
-            work_dir=cfg.orchestrator.work_dir,
-            max_concurrency=cfg.orchestrator.max_concurrency,
-            log_level=cfg.orchestrator.log_level,
-            retain_failed_workdirs=cfg.orchestrator.retain_failed_workdirs,
-        ),
-        projects=cfg.projects,
-        routes=cfg.routes,
-        subscriptions=cfg.subscriptions,
-        source_path=cfg.source_path,
-        environment=cfg.environment,
-    )
+    return replace(cfg, orchestrator=replace(cfg.orchestrator, lithos_url=url))
 
 
 def _required_str(d: dict[str, Any], key: str, path: Path, scope: str) -> str:

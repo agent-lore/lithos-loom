@@ -169,11 +169,11 @@ codex_config  = "/home/you/.codex-lithos"      # optional, parsed but unused tod
 
 # ── Routes (claim-bound subscribers) ──────────────────────────────────
 #
-# Each [[routes]] stanza is a claim-bound subscriber: it matches by tag
-# intersection on `lithos.task.created` / `_updated` / `_claimed`, claims
-# the task, invokes the command as a subprocess, parses the resulting
-# result.json, applies metadata updates + artifacts + findings, and
-# completes or releases.
+# Each [[routes]] stanza is a claim-bound subscriber: it matches `task.*`
+# events by tag intersection, claims the task, invokes `command` as a
+# subprocess, and reads only `status` from the resulting result.json to
+# decide whether to complete or release (see §5). Other result.json
+# fields are schema-validated but not yet applied.
 #
 # Substitution tokens in `command`:
 #   {{task_json}}    — path to the task envelope JSON (read-only)
@@ -403,18 +403,20 @@ The full schema is at `docs/result-schema.json` (JSON Schema Draft 2020-12). Req
 {
   "schema_version": 1,
   "task_id": "uuid",
-  "status": "succeeded" | "failed" | "interrupted",
+  "status": "succeeded",
   "exit_code": 0,
   "started_at": "2026-05-29T10:00:00Z",
   "finished_at": "2026-05-29T10:05:00Z",
   "worktree": "/abs/path or null",
   "artifacts": { "key": "rel/path or /abs/path" },
-  "commits": ["40-char-sha", ...],
-  "spawned_tasks": ["task_id", ...],
+  "commits": ["40-char-sha"],
+  "spawned_tasks": ["task_id"],
   "metadata_updates": { "pr_url": "https://..." },
-  "error": { "code": "...", "message": "...", "retriable": false }
+  "error": null
 }
 ```
+
+For a failed run, replace `status` with `"failed"` (or `"interrupted"`) and set `error` to an object with the required keys `category` (one of `config`, `environment`, `input`, `agent`, `git`, `github`, `lithos`, `internal`) and `message`, plus the optional boolean `retriable`. No other `error` keys are accepted.
 
 **What the runner does with each field today:**
 
@@ -422,7 +424,7 @@ The full schema is at `docs/result-schema.json` (JSON Schema Draft 2020-12). Req
 |---|---|
 | `schema_version`, `task_id`, `status` | Required by schema; `status` drives the runner's branch (see §2.2). |
 | `error.message` | Used as the `[BlockerFailed]` finding text when `status == "failed"`. |
-| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error.code`, `error.retriable` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
+| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error.category`, `error.retriable` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
 
 ### 5.3 Runner Lifecycle
 
@@ -511,7 +513,7 @@ Subscriptions resolve their `action` field against the `lithos_loom.subscription
 | `note-push` | `_note_push` | `obsidian.note.modified` | `lithos_write(id, content, expected_version)`; on conflict, runs the conflict resolver. |
 | `task-archive` | `_task_archive` | `lithos.task.completed` / `lithos.task.cancelled` | Appends a Tasks-plugin line to `<vault>/<projects_dir>/<slug>/<slug>-done.md` (O_APPEND); marks the task as archived so the projection evicts it on next flush. |
 
-Third-party handlers can be registered via Python entry points. Each handler receives an `Event` and a `SubscriptionContext` (shared `LithosClient`, filesystem helpers, retry-aware sleep, scoped logger).
+Third-party handlers can be registered via Python entry points. Each handler receives an `Event` and a `SubscriptionContext` carrying a shared `LithosClient`, a scoped `logging.Logger`, and the orchestrator's `agent_id`.
 
 ---
 
@@ -664,7 +666,7 @@ CLI commands use a unified exit code convention:
 
 ### 9.1 Common Validation Failures
 
-- **`unknown project '<slug>'`** (exit 2, `task create`): the `--project` value isn't in Lithos. Returned by `task create`'s pre-flight `lithos_list(path_prefix='projects/<slug>/')` lookup.
+- **`unknown project '<slug>'`** (exit 2, `task create`): the `--project` value isn't in the union of (a) slugs from `lithos_list(path_prefix='projects/', tags=['project-context'])` and (b) the TOML `[projects.<slug>]` registry. The TOML side lets a host run capture against a slug that hasn't yet been promoted to a project-context doc in Lithos.
 - **`unknown priority '<value>'`** (exit 2, `task create`): `--priority` must be one of `highest|high|medium|low|lowest`.
 - **`--target-file and --no-insert are mutually exclusive`** (exit 2, `task create`).
 - **`slug '<X>' already exists at doc <id>`** (exit 1, `project create`): refuses to overwrite. Use `project import --tasks-only --slug <X>` if you wanted to add tasks instead.
@@ -695,7 +697,7 @@ Loom requires a Lithos server exposing the MCP-over-SSE surface plus these primi
 | `lithos_write(id=..., expected_version=...)` | Note push with optimistic locking; `version_conflict` envelope drives the conflict resolver. |
 | `lithos_read`, `lithos_list(path_prefix=...)`, `lithos_delete` | Project-context projection + CLI surface. |
 | `task.metadata` field on tasks | All `metadata.*` references throughout (priority, scheduled_for, project, depends_on, parallelizable, etc.). |
-| `task.updated` event with full envelope | The projection consumes the post-edit envelope directly without re-fetching. |
+| `task.updated` event (minimal `{task_id}` payload) | Cache-invalidation signal; `LithosEventStream` force-refreshes via `task_list(status='open')` to pick up the new field values. Other task events are served from cache where possible. |
 | `note.created` / `note.updated` / `note.deleted` events on `GET /events` SSE | Project-context projection. |
 
 Slug = directory name under `knowledge/projects/<slug>/`. Lithos enforces uniqueness with a `slug_collision` envelope; Loom relies on this rather than a frontmatter field.
