@@ -1,9 +1,9 @@
 # `lithos-loom project set-github-repo` / `enable-github` / `disable-github`
 
 Three sibling subcommands that configure the per-project GitHub issue
-watcher (Slice 7.1 — see [`docs/SPECIFICATION.md`](../SPECIFICATION.md)
-§2.2 and §4.10–§4.12). They manage two tags on the canonical
-project-context doc (`projects/<slug>/<slug>-project-context.md`):
+watcher — see [`docs/SPECIFICATION.md`](../SPECIFICATION.md) §2.2 and
+§4.10–§4.12. They manage two tags on the canonical project-context
+doc (`projects/<slug>/<slug>-project-context.md`):
 
 - **`github-repo:<owner>/<name>`** — exactly one per project; carries
   the repo mapping. Replaces an existing tag on re-run so a typo is
