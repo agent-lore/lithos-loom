@@ -14,9 +14,11 @@ Decision order (cheapest tests first):
    ``metadata.depends_on`` list → False.
 2. Operator tag denylist: if any of ``task.tags`` is in
    ``cfg.exclude_tags`` → False.
-3. Open orphan task: ``task.status == "open"`` AND no route's
-   ``match.tags`` overlap the task's tags → True. Nothing automated
-   will pick it up.
+3. Open orphan task: ``task.status == "open"`` AND no configured route
+   is claimable against the task — a route is claimable only when every
+   tag in its ``match.tags`` is present on the task, matching the
+   all-tags semantic the bus matcher enforces. Nothing automated will
+   pick it up → True.
 4. Claimed by a human_blocking route: any entry in ``task.claims``
    whose ``aspect`` field equals the ``name`` of a route configured
    with ``human_blocking = true`` → True. The route-runner sets
