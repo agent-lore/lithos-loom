@@ -1355,3 +1355,64 @@ def test_line_regex_compiles_and_pattern_visible() -> None:
 
     assert isinstance(mod._LINE_RE, re.Pattern)
     assert isinstance(mod._TASK_ID_RE, re.Pattern)
+
+
+# ── Soak 2026-05-29: file-absence visibility ────────────────────────────
+
+
+async def test_poll_warns_once_when_tasks_file_missing(
+    bus: EventBus,
+    tasks_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Misconfigured tasks_file / vault_path looks identical to a healthy
+    quiet vault in the log without this warning. Operator needs to see
+    the absence the first time it's observed."""
+    sync_state = ProjectionSyncState()
+    # tasks_path is below tmp_path / "vault" / ... — that path does NOT
+    # exist for this fixture, so _read_file returns None.
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    with caplog.at_level(
+        logging.WARNING, logger="lithos_loom.sources.obsidian_fs_watcher"
+    ):
+        await watcher.poll_once()
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("missing or unreadable" in m and str(tasks_path) in m for m in msgs), (
+        f"expected one-shot absence warning naming the file; got {msgs}"
+    )
+
+    # Second poll without the file appearing must not re-warn.
+    caplog.clear()
+    with caplog.at_level(
+        logging.WARNING, logger="lithos_loom.sources.obsidian_fs_watcher"
+    ):
+        await watcher.poll_once()
+    repeat = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("missing or unreadable" in m for m in repeat), (
+        f"absence warning must be one-shot — got repeated: {repeat}"
+    )
+
+
+async def test_poll_info_logs_when_tasks_file_returns(
+    bus: EventBus,
+    tasks_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the file appears after a missing-warning, the watcher logs
+    once at INFO so the operator sees the recovery."""
+    sync_state = ProjectionSyncState()
+    watcher = ObsidianFsWatcher(bus=bus, tasks_path=tasks_path, sync_state=sync_state)
+    # First poll: file absent → warn.
+    await watcher.poll_once()
+
+    # Now create the file.
+    _write_tasks_file(tasks_path, ["- [ ] something 🆔 lithos:x"])
+    caplog.clear()
+    with caplog.at_level(
+        logging.INFO, logger="lithos_loom.sources.obsidian_fs_watcher"
+    ):
+        await watcher.poll_once()
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("now present" in m and str(tasks_path) in m for m in msgs), (
+        f"expected appearance INFO log; got {msgs}"
+    )

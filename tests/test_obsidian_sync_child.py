@@ -573,6 +573,20 @@ async def test_obsidian_sync_child_ignores_non_obsidian_subscription_actions(
     assert "obs-tasks" in wiring
     assert "noop-smoke" not in wiring
 
+    # Soak 2026-05-29 review: an INFO line should also surface the
+    # skipped action so a typo like `obsidian-projecton` doesn't read as
+    # "configured but inert" — the operator can spot the misspelling
+    # immediately.
+    skipped_log = next(
+        (m for m in info_msgs if "not hosted by this child" in m and "noop-smoke" in m),
+        None,
+    )
+    assert skipped_log is not None, (
+        f"skipped subscription must surface at INFO with its name + "
+        f"action so typos are diagnosable; got {info_msgs}"
+    )
+    assert "noop" in skipped_log
+
 
 async def test_obsidian_sync_child_spawns_fs_watcher_that_emits_user_edits(
     tmp_path: Path, stub_io: list[EventBus]

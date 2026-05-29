@@ -134,6 +134,12 @@ class ObsidianDirWatcher:
         # re-emit the same body transition. Mirror of
         # ``_observed_markers`` in the single-file watcher.
         self._observed_body_hashes: dict[str, bytes] = {}
+        # One-shot tracking for "projects_root not on disk yet". Without
+        # this, a missing directory looks identical to "vault exists but
+        # has no project docs" in the log — both produce zero events
+        # forever. Warn once on first observed absence, info-log once on
+        # first appearance, warn again on subsequent disappearance.
+        self._root_missing: bool = False
 
     async def run(self) -> None:
         """Poll forever. Cancellable.
@@ -176,7 +182,23 @@ class ObsidianDirWatcher:
         being mirrored to Lithos.
         """
         if not self.projects_root.exists():
+            if not self._root_missing:
+                logger.warning(
+                    "ObsidianDirWatcher: projects dir %s does not exist yet — "
+                    "either obsidian_sync.projects_dir is misconfigured, or "
+                    "no project-context doc has been projected yet. The "
+                    "watcher will keep polling and pick up files when the "
+                    "directory appears.",
+                    self.projects_root,
+                )
+                self._root_missing = True
             return 0
+        if self._root_missing:
+            logger.info(
+                "ObsidianDirWatcher: projects dir %s now present; resuming",
+                self.projects_root,
+            )
+            self._root_missing = False
 
         published = 0
         current_files: set[Path] = set()

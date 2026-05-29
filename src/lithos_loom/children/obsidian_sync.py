@@ -172,6 +172,18 @@ async def _amain(cfg: LoomConfig) -> int:
     # routes; a future subscription-runner child for generic actions
     # like `noop`).
     child_specs = tuple(s for s in cfg.subscriptions if s.action in _CHILD_ACTIONS)
+    # Surface skipped specs at INFO so a typo like ``obsidian-projecton``
+    # doesn't look identical to "configured but inert" in the log. The
+    # action name is included so the operator can spot a misspelled
+    # action immediately.
+    skipped = [s for s in cfg.subscriptions if s.action not in _CHILD_ACTIONS]
+    for spec in skipped:
+        logger.info(
+            "obsidian-sync: subscription %r action=%r not hosted by this "
+            "child (handled elsewhere or unknown action)",
+            spec.name,
+            spec.action,
+        )
     # Fail fast on duplicate specs of the same action. The projection
     # handler is stateful (per-handler state dict + per-handler
     # tasks_file path) so two specs would race on the same file. The
