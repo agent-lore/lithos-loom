@@ -220,6 +220,12 @@ class GitHubIssueWatcher:
     """``{owner/name: updated_at}`` — most-recent issue updated-at seen
     for each repo. Used as the GitHub ``since=`` param for incremental
     polls."""
+    _last_persisted_cursors: dict[str, datetime] = field(default_factory=dict)
+    """Snapshot of the cursor map at the time of the last successful
+    coord-doc write (or coord-doc load on startup). Without this, every
+    poll cycle re-wrote the coord doc even when no cursor had advanced —
+    a Lithos write per minute, two SSE note.updated events per minute,
+    and a steady version-counter creep that operators saw in soak."""
     _coord_doc_id: str | None = None
     _coord_doc_version: int | None = None
     _coord_doc_subscription: Subscription | None = None
@@ -353,6 +359,10 @@ class GitHubIssueWatcher:
         self._coord_doc_id = note.id
         self._coord_doc_version = note.version
         self._cursors = parse_cursors(note.body)
+        # The remote already holds what we just loaded — track it as
+        # "already persisted" so the first poll-cycle's write is skipped
+        # when no cursor advanced.
+        self._last_persisted_cursors = dict(self._cursors)
         logger.info(
             "github-watcher: loaded %d cursor(s) from coord doc v%d",
             len(self._cursors),
@@ -362,12 +372,22 @@ class GitHubIssueWatcher:
     async def _persist_cursors(self) -> None:
         """CAS-write the coord doc with the current cursor map.
 
+        Short-circuits when no cursor has advanced since the last
+        successful write — otherwise every poll cycle would re-write
+        the same content, bumping the Lithos version and firing two
+        SSE note.updated events per minute even when GitHub returned
+        nothing new (soak observation: coord doc climbed to v60+ in
+        under an hour with no GH activity).
+
         On version_conflict, merge our pending advances with the
         remote's cursors per-repo (latest timestamp wins) and retry
         with the fresh version. A handful of retries are allowed before
         giving up so a noisy concurrent writer doesn't block forever —
         the poll loop will retry whole-pass next interval anyway.
         """
+        if self._cursors == self._last_persisted_cursors:
+            logger.debug("github-watcher: coord doc write skipped — cursors unchanged")
+            return
         attempts = 0
         while True:
             attempts += 1
@@ -394,6 +414,7 @@ class GitHubIssueWatcher:
             if result.status in ("created", "updated") and result.note is not None:
                 self._coord_doc_id = result.note.id
                 self._coord_doc_version = result.note.version
+                self._last_persisted_cursors = dict(self._cursors)
                 logger.info(
                     "github-watcher: coord doc %s → v%d (%d cursor(s))",
                     result.status,
