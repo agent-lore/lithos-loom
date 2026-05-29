@@ -45,6 +45,8 @@ from lithos_loom.errors import ConfigError
 
 __all__ = [
     "DEFAULT_CONFIG_FILENAME",
+    "DEFAULT_GITHUB_WATCHER_COORD_DOC",
+    "DEFAULT_GITHUB_WATCHER_POLL_INTERVAL",
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_OBSIDIAN_PROJECTS_DIR",
@@ -52,6 +54,7 @@ __all__ = [
     "DEFAULT_OBSIDIAN_TASKS_FILE",
     "DEFAULT_WORK_DIR",
     "Backoff",
+    "GitHubWatcherConfig",
     "LogLevel",
     "LoomConfig",
     "ObsidianSyncConfig",
@@ -87,6 +90,10 @@ DEFAULT_LOG_LEVEL: LogLevel = "info"
 DEFAULT_OBSIDIAN_TASKS_FILE = Path("_lithos/tasks.md")
 DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS = 7
 DEFAULT_OBSIDIAN_PROJECTS_DIR = Path("_lithos/projects")
+DEFAULT_GITHUB_WATCHER_POLL_INTERVAL = 60
+DEFAULT_GITHUB_WATCHER_COORD_DOC = (
+    "projects/_lithos-loom-internal/github-watcher-state.md"
+)
 
 
 def parse_log_level(value: str) -> LogLevel:
@@ -203,12 +210,32 @@ class ObsidianSyncConfig:
 
 
 @dataclass(frozen=True)
+class GitHubWatcherConfig:
+    """Per-host gate for the github-issue-watcher child.
+
+    Presence of this section with ``enabled = true`` declares "this host
+    runs the watcher". Only one host should have it enabled at a time
+    (D50); multi-host coordination is the operator's responsibility.
+
+    ``coord_doc_path`` is the Lithos doc the watcher uses to persist its
+    per-repo ``updated_at`` cursors. Defaults to a daemon-owned doc under
+    ``projects/_lithos-loom-internal/`` so the project-context-projection
+    picks it up read-only for visibility.
+    """
+
+    enabled: bool = False
+    poll_interval_seconds: int = DEFAULT_GITHUB_WATCHER_POLL_INTERVAL
+    coord_doc_path: str = DEFAULT_GITHUB_WATCHER_COORD_DOC
+
+
+@dataclass(frozen=True)
 class LoomConfig:
     orchestrator: OrchestratorConfig
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     routes: tuple[RouteConfig, ...] = ()
     subscriptions: tuple[SubscriptionConfig, ...] = ()
     obsidian_sync: ObsidianSyncConfig | None = None
+    github_watcher: GitHubWatcherConfig | None = None
     source_path: Path | None = None
     environment: str | None = None
 
@@ -304,6 +331,7 @@ def load_config(path: Path | None = None) -> LoomConfig:
     routes = _parse_routes(raw.get("routes", []), config_path)
     subscriptions = _parse_subscriptions(raw.get("subscriptions", []), config_path)
     obsidian_sync = _parse_obsidian_sync(raw.get("obsidian_sync"), config_path)
+    github_watcher = _parse_github_watcher(raw.get("github_watcher"), config_path)
 
     cfg = LoomConfig(
         orchestrator=orchestrator,
@@ -311,6 +339,7 @@ def load_config(path: Path | None = None) -> LoomConfig:
         routes=routes,
         subscriptions=subscriptions,
         obsidian_sync=obsidian_sync,
+        github_watcher=github_watcher,
         source_path=config_path,
         environment=environment,
     )
@@ -575,6 +604,68 @@ def _parse_obsidian_sync(data: Any, config_path: Path) -> ObsidianSyncConfig | N
         include_blocked=include_blocked,
         exclude_tags=tuple(exclude_tags_raw),
         projects_dir=projects_dir,
+    )
+
+
+_GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
+    {"enabled", "poll_interval_seconds", "coord_doc_path"}
+)
+
+
+def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig | None:
+    """Parse the optional ``[github_watcher]`` section.
+
+    Absence of the section means no watcher child is spawned on this host.
+    The supervisor's spawn gate further requires ``enabled = true`` so an
+    operator can park the section in the file while turned off.
+    """
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError(f"{config_path}: [github_watcher] must be a table")
+
+    unknown = set(data.keys()) - _GITHUB_WATCHER_KEYS
+    if unknown:
+        raise ConfigError(
+            f"{config_path}: [github_watcher] has unknown key(s) "
+            f"{sorted(unknown)}; valid keys: {sorted(_GITHUB_WATCHER_KEYS)}"
+        )
+
+    enabled = _optional_bool(data, "enabled", False, config_path, "github_watcher")
+
+    poll_interval = _optional_int(
+        data,
+        "poll_interval_seconds",
+        DEFAULT_GITHUB_WATCHER_POLL_INTERVAL,
+        config_path,
+        "github_watcher",
+    )
+    if poll_interval < 1:
+        raise ConfigError(
+            f"{config_path}: github_watcher.poll_interval_seconds must be >= 1 "
+            f"(got {poll_interval})"
+        )
+
+    coord_doc_raw = data.get("coord_doc_path", DEFAULT_GITHUB_WATCHER_COORD_DOC)
+    if not isinstance(coord_doc_raw, str) or not coord_doc_raw:
+        raise ConfigError(
+            f"{config_path}: github_watcher.coord_doc_path must be a non-empty string"
+        )
+    # The coord doc lives in Lithos under projects/<...>/<file>.md; reject
+    # paths with absolute prefixes or '..' parts that wouldn't address a
+    # Lithos doc.
+    coord_doc_path = Path(coord_doc_raw)
+    has_dotdot = any(part == ".." for part in coord_doc_path.parts)
+    if coord_doc_path.is_absolute() or has_dotdot:
+        raise ConfigError(
+            f"{config_path}: github_watcher.coord_doc_path must be a relative "
+            f"Lithos doc path and may not contain '..' (got {coord_doc_raw!r})"
+        )
+
+    return GitHubWatcherConfig(
+        enabled=enabled,
+        poll_interval_seconds=poll_interval,
+        coord_doc_path=coord_doc_raw,
     )
 
 

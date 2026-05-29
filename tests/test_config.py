@@ -8,6 +8,8 @@ from textwrap import dedent
 import pytest
 
 from lithos_loom.config import (
+    DEFAULT_GITHUB_WATCHER_COORD_DOC,
+    DEFAULT_GITHUB_WATCHER_POLL_INTERVAL,
     DEFAULT_MAX_CONCURRENCY,
     DEFAULT_OBSIDIAN_PROJECTS_DIR,
     DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS,
@@ -506,3 +508,180 @@ def test_obsidian_sync_exclude_tags_must_be_string_list(
     )
     with pytest.raises(ConfigError, match="exclude_tags entries must be non-empty"):
         load_config()
+
+
+# ── [github_watcher] section (Slice 7.1) ───────────────────────────────
+
+
+def test_github_watcher_absent_yields_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No [github_watcher] section → cfg.github_watcher is None.
+
+    Mirrors the obsidian_sync spawn-gate pattern: the supervisor only
+    forks the watcher child when the section is present AND enabled=true.
+    """
+    _write_config(tmp_path, monkeypatch, "")
+    cfg = load_config()
+    assert cfg.github_watcher is None
+
+
+def test_github_watcher_minimal_parses_with_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty [github_watcher] table is valid — all fields have defaults."""
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.enabled is False
+    poll = cfg.github_watcher.poll_interval_seconds
+    assert poll == DEFAULT_GITHUB_WATCHER_POLL_INTERVAL
+    assert cfg.github_watcher.coord_doc_path == DEFAULT_GITHUB_WATCHER_COORD_DOC
+
+
+def test_github_watcher_full_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            enabled = true
+            poll_interval_seconds = 30
+            coord_doc_path = "projects/_internal/gh-state.md"
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.enabled is True
+    assert cfg.github_watcher.poll_interval_seconds == 30
+    assert cfg.github_watcher.coord_doc_path == "projects/_internal/gh-state.md"
+
+
+def test_github_watcher_rejects_unknown_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            enabled = true
+            poll_interval = 30
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="github_watcher.*poll_interval"):
+        load_config()
+
+
+def test_github_watcher_enabled_must_be_bool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            enabled = "yes"
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="github_watcher.enabled"):
+        load_config()
+
+
+def test_github_watcher_poll_interval_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            poll_interval_seconds = 0
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="poll_interval_seconds must be >= 1"):
+        load_config()
+
+
+def test_github_watcher_coord_doc_path_must_be_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            coord_doc_path = "/etc/passwd"
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="must be a relative"):
+        load_config()
+
+
+def test_github_watcher_coord_doc_path_must_be_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            coord_doc_path = 42
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="coord_doc_path must be a non-empty string"):
+        load_config()
+
+
+def test_lithos_url_env_override_preserves_github_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression-style guard mirroring the obsidian_sync preservation test.
+
+    `_apply_env_overrides` uses `dataclasses.replace`, so adding new top-level
+    LoomConfig fields automatically survives the env override. This test
+    locks that behaviour in for the new github_watcher field.
+    """
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        dedent(
+            """
+            [orchestrator]
+            agent_id = "lithos-orchestrator-test"
+            lithos_url = "http://config:8765"
+
+            [github_watcher]
+            enabled = true
+            """
+        )
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    monkeypatch.setenv("LITHOS_URL", "http://override:9999")
+
+    cfg = load_config()
+
+    assert cfg.orchestrator.lithos_url == "http://override:9999"
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.enabled is True
