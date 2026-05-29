@@ -286,8 +286,12 @@ async def test_poll_one_repo_publishes_issue_events() -> None:
     assert event.payload["slug"] == "lithos-loom"
     assert event.payload["repo"] == "agent-lore/lithos-loom"
     assert event.payload["number"] == 42
-    # Cursor advanced to the issue's updated_at.
-    assert watcher._cursors["agent-lore/lithos-loom"] == issue.updated_at
+    # Cursor advanced PAST the issue's updated_at (GitHub's `since` is
+    # inclusive, so the next poll would re-fetch the boundary issue
+    # forever without the +1s nudge).
+    assert watcher._cursors["agent-lore/lithos-loom"] == issue.updated_at + timedelta(
+        seconds=1
+    )
 
 
 @pytest.mark.asyncio
@@ -372,7 +376,41 @@ async def test_poll_one_repo_advances_cursor_to_latest_when_multiple_issues() ->
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
 
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
-    assert watcher._cursors["agent-lore/lithos-loom"] == late.updated_at
+    # Cursor is max(updated_at) + 1s; see _CURSOR_ADVANCE rationale.
+    assert watcher._cursors["agent-lore/lithos-loom"] == late.updated_at + timedelta(
+        seconds=1
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_one_repo_cursor_advances_past_boundary_to_break_replay_loop() -> (
+    None
+):
+    """Soak 2026-05-29: GitHub's `since=` filter is inclusive, so
+    persisting the exact observed-max ``updated_at`` re-fetched the
+    same boundary issue every poll forever (visible in the soak log as
+    ``cursor T → T``). The cursor advance must move strictly past the
+    boundary so a second poll with no new activity returns nothing.
+    """
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    boundary = _make_issue(
+        number=42, updated_at=datetime(2026, 5, 29, 19, 7, 35, tzinfo=UTC)
+    )
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[boundary])
+    watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+    # Cursor sits exactly at the boundary issue's updated_at — replays
+    # the exact state the soak log showed.
+    watcher._cursors["agent-lore/lithos-loom"] = boundary.updated_at
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    # Cursor moved strictly past the boundary — next poll's since=
+    # would no longer pull the boundary issue back.
+    assert watcher._cursors["agent-lore/lithos-loom"] > boundary.updated_at, (
+        "cursor must advance past the boundary to break the inclusive-since replay loop"
+    )
 
 
 @pytest.mark.asyncio
