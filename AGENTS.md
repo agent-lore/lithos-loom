@@ -2,10 +2,11 @@
 
 ## What this is
 
-A workflow orchestration daemon for [Lithos](https://github.com/agent-lore/lithos) tasks. Two surfaces:
+A workflow orchestration daemon for [Lithos](https://github.com/agent-lore/lithos) tasks. Three surfaces:
 
 - **Obsidian bridge.** Projects open Lithos tasks into an Obsidian-Tasks-compatible inbox; pushes Obsidian-side status / priority / due-date edits back to Lithos; bidirectionally syncs project-context docs; Templater macros + CLI for capture and project import.
 - **Route-runner.** Subscribes to Lithos's SSE event stream, matches `lithos.task.created` and `lithos.task.released` against TOML-configured routes (a task must carry every tag in the route's `match.tags`), claims tasks collision-safely, and dispatches subprocess plugins. The runner reads `status` from each plugin's `result.json` (other fields like `metadata_updates` and `artifacts` are schema-validated but not yet applied). Scaffolding for `prd-decompose`, `story-implement`, `story-review-human` is present; bodies are stubs. Tag edits on existing tasks (`task.updated`) do not currently re-trigger route matching.
+- **GitHub issue watcher.** Polls every project-context doc tagged `github-watch` for new and updated open issues on its mapped GitHub repo, materialises each unseen issue as a Lithos task carrying `metadata.github_issue_url`, and mirrors GH closure to `lithos_task_complete` / `lithos_task_cancel`. Per-project mapping is set via `lithos-loom project set-github-repo <slug> <owner/name>` and toggled via `enable-github` / `disable-github`. Auth is `gh auth token` at startup — host must have `gh` on PATH with the operator logged in. Per-host gate is `[github_watcher] enabled = true`. Per-project exclude filters and bidirectional close (Lithos → GH) are deferred to Slice 7.2.
 
 Loom replaces [Ralph++](https://github.com/snarktank/ralph) as the user's coding orchestration approach; useful Ralph++ pieces (worktree creation, agent subprocess runner with stream-json, commit detection) are salvaged into `src/lithos_loom/runner/`.
 
@@ -30,6 +31,7 @@ Loom replaces [Ralph++](https://github.com/snarktank/ralph) as the user's coding
 | [`docs/result-schema.json`](docs/result-schema.json) | Versioned JSON Schema for the plugin `result.json` contract. |
 | [`docs/cli/project-import.md`](docs/cli/project-import.md) | Full reference for `lithos-loom project import`. |
 | [`docs/cli/project-regenerate-done.md`](docs/cli/project-regenerate-done.md) | Full reference for `lithos-loom project regenerate-done`. |
+| [`docs/cli/project-set-github-repo.md`](docs/cli/project-set-github-repo.md) | Full reference for `lithos-loom project set-github-repo` / `enable-github` / `disable-github`. |
 | [`docs/macros/README.md`](docs/macros/README.md) | Templater macro install + behaviour notes. |
 | [`docs/prd/mvp.md`](docs/prd/mvp.md) | Plugin-body contract for `prd-decompose` / `story-implement` / `story-review-human` (orchestration shipped, bodies queued). |
 | [`docs/prd/full.md`](docs/prd/full.md) | Roadmap for the larger automated workflow system. |

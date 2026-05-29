@@ -51,46 +51,46 @@ Loom is structured as `sources → bus → subscribers`. Sources publish typed e
 │  │  - Propagates SIGTERM, waits on exit                             │  │
 │  └────────────┬─────────────────────────────────────┬───────────────┘  │
 │               │                                     │                  │
-│  ┌────────────▼──────────────┐         ┌────────────▼─────────────┐    │
-│  │ route-runner child         │         │ obsidian-sync child       │    │
-│  │  (enabled when [[routes]]) │         │  (enabled when           │    │
-│  │                            │         │   [obsidian_sync]        │    │
-│  │  Sources:                  │         │   is present)            │    │
-│  │   LithosEventStream        │         │                          │    │
-│  │                            │         │  Sources:                │    │
-│  │  Subscribers:              │         │   LithosEventStream      │    │
-│  │   one RouteRunner per      │         │   LithosNoteStream       │    │
-│  │   [[routes]] stanza        │         │   ObsidianFSWatcher      │    │
-│  │   (claim-bound)            │         │   ObsidianDirWatcher     │    │
-│  │                            │         │                          │    │
-│  │                            │         │  Subscribers (per        │    │
-│  │                            │         │   configured action):    │    │
-│  │                            │         │   obsidian-projection    │    │
-│  │                            │         │   obsidian-status-       │    │
-│  │                            │         │     transition           │    │
-│  │                            │         │   obsidian-priority-     │    │
-│  │                            │         │     changed              │    │
-│  │                            │         │   obsidian-due-date-     │    │
-│  │                            │         │     changed              │    │
-│  │                            │         │   project-context-       │    │
-│  │                            │         │     projection           │    │
-│  │                            │         │   note-push              │    │
-│  │                            │         │   task-archive           │    │
-│  │                            │         │   noop                   │    │
-│  │                            │         │                          │    │
-│  │  In-process EventBus       │         │  In-process EventBus     │    │
-│  └─────────────┬──────────────┘         └────────┬─────────────────┘    │
-│                │                                 │                      │
-└────────────────┼─────────────────────────────────┼──────────────────────┘
-                 │                                 │
-                 ▼                                 ▼
-       ┌─────────────────┐                ┌────────────────┐
-       │ Lithos          │                │ Obsidian vault │
-       │  /sse  /events  │                │  (fs)          │
-       └─────────────────┘                └────────────────┘
+│  ┌────────────▼──────────────┐  ┌────────────▼─────────────┐  ┌───────▼───────────┐  │
+│  │ route-runner child         │  │ obsidian-sync child       │  │ github-watcher    │  │
+│  │  (enabled when [[routes]]) │  │  (enabled when           │  │  child (enabled   │  │
+│  │                            │  │   [obsidian_sync]        │  │  when             │  │
+│  │  Sources:                  │  │   is present)            │  │  [github_watcher] │  │
+│  │   LithosEventStream        │  │                          │  │  enabled=true)    │  │
+│  │                            │  │  Sources:                │  │                   │  │
+│  │  Subscribers:              │  │   LithosEventStream      │  │  Sources:         │  │
+│  │   one RouteRunner per      │  │   LithosNoteStream       │  │   LithosNoteStream│  │
+│  │   [[routes]] stanza        │  │   ObsidianFSWatcher      │  │   GitHubIssue     │  │
+│  │   (claim-bound)            │  │   ObsidianDirWatcher     │  │     Watcher       │  │
+│  │                            │  │                          │  │                   │  │
+│  │                            │  │  Subscribers (per        │  │  Subscribers      │  │
+│  │                            │  │   configured action):    │  │   (auto-wired):   │  │
+│  │                            │  │   obsidian-projection    │  │   github-issue-   │  │
+│  │                            │  │   obsidian-status-       │  │     sync          │  │
+│  │                            │  │     transition           │  │                   │  │
+│  │                            │  │   obsidian-priority-     │  │                   │  │
+│  │                            │  │     changed              │  │                   │  │
+│  │                            │  │   obsidian-due-date-     │  │                   │  │
+│  │                            │  │     changed              │  │                   │  │
+│  │                            │  │   project-context-       │  │                   │  │
+│  │                            │  │     projection           │  │                   │  │
+│  │                            │  │   note-push              │  │                   │  │
+│  │                            │  │   task-archive           │  │                   │  │
+│  │                            │  │   noop                   │  │                   │  │
+│  │                            │  │                          │  │                   │  │
+│  │  In-process EventBus       │  │  In-process EventBus     │  │  In-proc EventBus │  │
+│  └─────────────┬──────────────┘  └────────┬─────────────────┘  └─────────┬─────────┘  │
+│                │                          │                              │            │
+└────────────────┼──────────────────────────┼──────────────────────────────┼────────────┘
+                 │                          │                              │
+                 ▼                          ▼                              ▼
+       ┌─────────────────┐         ┌────────────────┐           ┌────────────────────┐
+       │ Lithos          │         │ Obsidian vault │           │ GitHub REST API    │
+       │  /sse  /events  │         │  (fs)          │           │  api.github.com    │
+       └─────────────────┘         └────────────────┘           └────────────────────┘
 ```
 
-Each child runs its own EventBus instance. There is no inter-child IPC; both children independently consume Lithos SSE. Restart safety relies on sources being re-authoritative (no persistent event log) and subscribers being idempotent.
+Each child runs its own EventBus instance. There is no inter-child IPC; all three children independently consume Lithos SSE. Restart safety relies on sources being re-authoritative (no persistent event log) and subscribers being idempotent.
 
 ### 2.2 Data Flow
 
@@ -115,6 +115,20 @@ Each child runs its own EventBus instance. There is no inter-child IPC; both chi
 - Unknown / missing status → `lithos_task_release` + `[BlockerFailed]`.
 
 Other `result.json` fields (`metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable`) are schema-validated but currently ignored. On plugin timeout, the runner sends SIGTERM with a grace period before SIGKILL.
+
+**GitHub issue mirror (GitHub → Lithos).**
+`GitHubIssueWatcher` (running in the github-watcher child) polls every repo flagged for watching on its `[github_watcher].poll_interval_seconds` cadence (default 60s). Watch eligibility is derived from project-context tags: a doc with both a `github-watch` tag and a `github-repo:<owner>/<name>` tag enrols its slug → repo mapping. The watcher subscribes to `lithos.note.{created,updated}` on the in-process bus so a `project enable-github <slug>` mid-run takes effect without a daemon restart. Per-repo `updated_at` cursors persist in a daemon-owned Lithos doc (default `projects/_lithos-loom-internal/github-watcher-state.md`, configurable) so cold restart doesn't re-walk every open issue. Each open issue surfaced this poll publishes one `github.issue.seen` event onto the in-process bus; the auto-wired `github-issue-sync` subscriber resolves an `<!-- lithos:<task_id> -->` linkage marker in the issue body, then takes one of these branches:
+
+- Marker → open Lithos task: no-op (steady state).
+- Marker → open Lithos task, GH closed-completed: `lithos_task_complete`.
+- Marker → open Lithos task, GH closed-not_planned: `lithos_task_cancel`.
+- Marker → terminal Lithos task: no-op (idempotent close mirror).
+- Marker → missing task (operator force-deleted): create a fresh task; the marker writer overwrites the stale id.
+- No marker, Lithos task carries `metadata.github_issue_url` for this URL: re-write the canonical marker on GitHub. No duplicate task.
+- No marker, no matching task, GH open: `lithos_task_create` with `title=issue.title`, `description=issue.body`, `tags=issue.labels + ["github-issue"]`, `metadata={project, github_issue_url, github_issue_number, github_labels}`. Then write the canonical `<!-- lithos:<task_id> -->` marker into the issue body via `PATCH /repos/{owner}/{repo}/issues/{n}`.
+- No marker, no matching task, GH closed: skip (historic closures are not backfilled).
+
+Pull requests are filtered at parse time (presence of GitHub's `pull_request` field on the row). A 404 on a watched repo drops it from the in-memory watch list with a `[Friction]` log line; the next bus-driven refresh re-adds the slug if the operator fixes the typo. GitHub rate-limit responses (403 with `X-RateLimit-Remaining: 0`) trigger a sleep until `X-RateLimit-Reset`; a 403 with non-zero remaining surfaces as auth/permission error rather than retried indefinitely.
 
 ### 2.3 Restart and Recovery
 
@@ -232,6 +246,25 @@ projects_dir      = "_lithos/projects"           # relative to vault_path
 resolved_ttl_days = 7                            # see §6.3 task-archive interaction
 include_blocked   = true                         # project tasks with metadata.depends_on
 exclude_tags      = ["debug:trace"]              # suppress projection for these tags
+
+# ── GitHub issue watcher (per-host gate) ──────────────────────────────
+#
+# Presence of this block AND `enabled = true` is the spawn gate for the
+# github-watcher child. Only one host should have this enabled at a time
+# (no Lithos-coordinated election; pick one host manually). The watcher
+# uses `gh auth token` at startup to resolve a bearer token, so the host
+# must have `gh` on PATH with the operator already logged in.
+#
+# Per-project enablement lives as tags on the project-context doc; manage
+# via `lithos-loom project set-github-repo <slug> <owner/name>` and
+# `lithos-loom project enable-github <slug>` (§4).
+
+[github_watcher]
+enabled               = false                                  # spawn gate
+poll_interval_seconds = 60                                     # incremental polls
+coord_doc_path        = "projects/_lithos-loom-internal/github-watcher-state.md"
+# Lithos doc the watcher uses to persist per-repo updated_at cursors.
+# Must be a relative Lithos doc path (no leading `/`, no `..`).
 ```
 
 ### 3.2 Validation
@@ -372,7 +405,33 @@ Differs from the live `task-archive` subscription: the archive subscription only
 
 Full reference: `docs/cli/project-regenerate-done.md`.
 
-### 4.10 `lithos-loom obsidian-sync show`
+### 4.10 `lithos-loom project set-github-repo`
+
+```
+lithos-loom project set-github-repo <slug> <owner/name> [-c config.toml]
+```
+
+Binds a GitHub repo to a Lithos project for the issue watcher. Replaces any existing `github-repo:*` tag on the canonical project-context doc so re-running with a different repo fixes typos without losing other tags. Input is validated against GitHub's `owner/name` rules at CLI time — a malformed value exits 2 before any Lithos write.
+
+The watcher does not begin polling until `enable-github <slug>` flips on the `github-watch` tag.
+
+### 4.11 `lithos-loom project enable-github`
+
+```
+lithos-loom project enable-github <slug> [-c config.toml]
+```
+
+Adds the `github-watch` tag to the project-context doc, enabling polling for the project. Requires a `github-repo:*` tag to already be present (exit 2 if not, with the actionable error pointing at `set-github-repo`).
+
+### 4.12 `lithos-loom project disable-github`
+
+```
+lithos-loom project disable-github <slug> [-c config.toml]
+```
+
+Removes the `github-watch` tag. The `github-repo:*` tag is preserved so re-enabling later doesn't need `set-github-repo`. Disabling stops new polls for the project at most one poll interval later (in-flight events for that slug still drain).
+
+### 4.13 `lithos-loom obsidian-sync show`
 
 ```
 lithos-loom obsidian-sync show [-f text|json] [-c config.toml]
@@ -489,6 +548,7 @@ Payloads are dicts; the exact key set depends on the source. Task-event payloads
 | `obsidian.task.priority_changed` | ObsidianFSWatcher | Carries prior and new priority (one of `highest|high|medium|low|lowest|null`). |
 | `obsidian.task.due_date_changed` | ObsidianFSWatcher | Carries prior and new `YYYY-MM-DD` date strings (either side may be absent). |
 | `obsidian.note.modified` | ObsidianDirWatcher | Carries the doc id parsed from frontmatter, the modified body, and the local `lithos_version`. |
+| `github.issue.seen` | GitHubIssueWatcher | `{slug, repo, number, title, body, state, state_reason, labels, author, html_url, updated_at}`. One per issue per poll. The subscription decides create / update / close from the marker + state combo. |
 
 ### 6.5 Sources
 
@@ -497,9 +557,10 @@ Sources are async coroutines spawned by their owning child. They consume externa
 | Source | Spawned by | Bootstrap | Reconnect |
 |---|---|---|---|
 | `LithosEventStream` | route-runner + obsidian-sync (independently) | `lithos_task_list(status='open', with_claims=true)` → re-emit `lithos.task.created` per task. | Exponential backoff with `Last-Event-ID` resume. |
-| `LithosNoteStream` | obsidian-sync (when `project-context-projection` is configured) | `lithos_list(path_prefix='projects/', tags=['project-context'])` → re-emit `lithos.note.created` per match. | Exponential backoff with `Last-Event-ID` resume. |
+| `LithosNoteStream` | obsidian-sync (when `project-context-projection` is configured) + github-watcher | `lithos_list(path_prefix='projects/', tags=['project-context'])` → re-emit `lithos.note.created` per match. | Exponential backoff with `Last-Event-ID` resume. |
 | `ObsidianFSWatcher` | obsidian-sync | Polls `<vault>/<tasks_file>` on a 250ms cadence; emits when a line diverges from the last-known state. | n/a (polling). |
 | `ObsidianDirWatcher` | obsidian-sync (when `note-push` is configured) | Walks `<vault>/<projects_dir>/**/*.md` on the same cadence; computes body-only hashes. | n/a. Excludes files ending in `-done.md` (the per-project archive). |
+| `GitHubIssueWatcher` | github-watcher | Reads `note_list(tags=['github-watch'])` to build the slug → repo watch list; loads per-repo `updated_at` cursors from `coord_doc_path`. | n/a (polling). Per-repo 404 drops the slug with a `[Friction]` log; 403 + `X-RateLimit-Remaining: 0` sleeps until `X-RateLimit-Reset`. |
 
 ### 6.6 Subscription Action Registry
 
@@ -515,6 +576,7 @@ Subscriptions resolve their `action` field against the `lithos_loom.subscription
 | `project-context-projection` | `_project_context_projection` | `lithos.note.*` | Re-fetches via `lithos_read`, writes `<vault>/<projects_dir>/<slug>/<filename>.md` atomically. |
 | `note-push` | `_note_push` | `obsidian.note.modified` | `lithos_write(id, content, expected_version)`; on conflict, runs the conflict resolver. |
 | `task-archive` | `_task_archive` | `lithos.task.completed` / `lithos.task.cancelled` | Appends a Tasks-plugin line to `<vault>/<projects_dir>/<slug>/<slug>-done.md` (O_APPEND); marks the task as archived so the projection evicts it on next flush. |
+| `github-issue-sync` | `_github_issue_sync` | `github.issue.seen` | Auto-wired by the github-watcher child (not declared in `[[subscriptions]]`). Resolves the `<!-- lithos:<id> -->` marker, then creates / closes / no-ops as described in §2.2. Per-project exclude filters are deferred. |
 
 Third-party handlers can be registered via Python entry points. Each handler receives an `Event` and a `SubscriptionContext` carrying a shared `LithosClient`, a scoped `logging.Logger`, and the orchestrator's `agent_id`.
 
