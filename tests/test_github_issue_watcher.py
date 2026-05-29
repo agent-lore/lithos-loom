@@ -626,6 +626,57 @@ async def test_bootstrap_loads_watch_list_and_subscribes_bus() -> None:
     )
 
 
+_WATCHER_LOGGER = "lithos_loom.sources.github_issue_watcher"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_logs_watching_count_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for soak-time review: an operator with `enabled = true`
+    and any watched project needs to see "watching N repo(s)" once at
+    INFO so the daemon's state is unambiguous at startup."""
+    import logging as _logging
+
+    bus = EventBus()
+    lithos = _fake_lithos_client(
+        note_list_return=[
+            _summary(slug="x", repo="agent-lore/x", watching=True),
+            _summary(slug="y", repo="agent-lore/y", watching=True),
+        ],
+    )
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos, bus=bus)
+    with caplog.at_level(_logging.INFO, logger=_WATCHER_LOGGER):
+        await watcher._bootstrap()
+    assert any("watching 2 repo(s)" in record.message for record in caplog.records), (
+        caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_logs_empty_watch_list_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: empty watch list at startup must surface at INFO, with
+    actionable guidance — otherwise the "enabled but nothing tagged"
+    state reads identically to a stuck daemon (silent for every poll
+    cycle that follows)."""
+    import logging as _logging
+
+    bus = EventBus()
+    lithos = _fake_lithos_client(note_list_return=[])
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos, bus=bus)
+    with caplog.at_level(_logging.INFO, logger=_WATCHER_LOGGER):
+        await watcher._bootstrap()
+    assert any(
+        "no watched repos configured" in record.message for record in caplog.records
+    ), caplog.text
+    # And the message names the actionable CLI command.
+    assert any("set-github-repo" in record.message for record in caplog.records), (
+        caplog.text
+    )
+
+
 @pytest.mark.asyncio
 async def test_refresh_loop_reacts_to_project_doc_changes() -> None:
     """Publishing a lithos.note.updated for a project path triggers refresh."""

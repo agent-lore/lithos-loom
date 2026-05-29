@@ -230,8 +230,30 @@ class GitHubIssueWatcher:
             raise
 
     async def _bootstrap(self) -> None:
-        """One-shot startup: load watch list + open the bus subscription."""
+        """One-shot startup: load watch list + open the bus subscription.
+
+        Logs the initial watch list size at INFO so an operator who set
+        ``enabled = true`` but hasn't yet tagged any project can see the
+        "watching nothing" state explicitly — without this they'd see
+        the startup banner, the coord-doc check, and then nothing for
+        every poll cycle, which reads identically to a stuck daemon.
+        Subsequent transitions are covered by ``_refresh_watch_list``'s
+        added/removed log.
+        """
         await self._refresh_watch_list()
+        if self._watch_list:
+            logger.info(
+                "github-watcher: watching %d repo(s): %s",
+                len(self._watch_list),
+                sorted(self._watch_list.values()),
+            )
+        else:
+            logger.info(
+                "github-watcher: no watched repos configured — tag a "
+                "project-context doc with `github-watch` + "
+                "`github-repo:owner/name` to enable (see `lithos-loom "
+                "project set-github-repo` / `enable-github`)"
+            )
         await self._load_cursors_from_coord_doc()
         # Subscribe BEFORE the first poll so any project-doc changes
         # during the first cycle don't get missed.
