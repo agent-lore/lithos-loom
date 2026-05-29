@@ -25,6 +25,7 @@ continues on transient failures.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -32,7 +33,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import TracebackType
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -48,6 +49,33 @@ logger = logging.getLogger(__name__)
 # session and retries, bounded, so the daemon recovers without a restart.
 _MAX_TRANSPORT_ATTEMPTS = 3
 _RECONNECT_BACKOFF_SECONDS = 0.5
+
+
+class _ShutdownSentinel:
+    """Type-safe sentinel queued by :meth:`LithosClient.__aexit__` to tell
+    the keeper to stop. Using a class (vs ``None``) keeps the queue's type
+    annotation precise: ``Queue[_ReconnectRequest | _ShutdownSentinel]``.
+    """
+
+
+_SHUTDOWN: Final = _ShutdownSentinel()
+
+
+@dataclass
+class _ReconnectRequest:
+    """One reconnect ask from a caller to the keeper.
+
+    ``expected_gen`` is the session generation the caller observed before
+    its ``call_tool`` failed. The keeper compares against the current
+    generation under serial processing — if a peer already reconnected,
+    this request is a no-op and just signals ``done`` so the caller can
+    retry against the already-fresh session.
+    """
+
+    expected_gen: int
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    error: BaseException | None = None
+
 
 __all__ = ["LithosClient", "Note", "NoteSummary", "Task", "WriteResult"]
 
@@ -205,16 +233,140 @@ class LithosClient:
         self._sse_ctx: Any = None
         self._session_ctx: Any = None
         self._session: ClientSession | None = None
-        # Dead-session recovery (#43): serialise reconnects so concurrent
-        # handlers sharing one client re-establish at most once, and use a
-        # generation counter to let a caller tell whether a peer already
-        # reconnected since its own call failed.
+        # Dead-session recovery (#43): the keeper task (spawned in
+        # ``__aenter__``) owns session lifecycle (open / close) — the MCP
+        # SDK's anyio cancel scopes are pinned to whichever task entered
+        # them, so all teardown + re-establish MUST run in that task. Other
+        # tasks dispatch reconnect requests via ``_reconnect_queue`` and
+        # await an ``_ReconnectRequest.done`` event. The generation counter
+        # makes concurrent requests single-flight (peer already reconnected
+        # → skip).
+        #
+        # Normal ``call_tool`` calls still go direct from any caller task —
+        # the MCP SDK's ClientSession multiplexes via request IDs, so
+        # concurrent in-flight calls are safe; only the open/close edges
+        # need the keeper.
         self._reconnect_lock = asyncio.Lock()
         self._session_generation = 0
+        self._keeper_task: asyncio.Task[None] | None = None
+        self._reconnect_queue: (
+            asyncio.Queue[_ReconnectRequest | _ShutdownSentinel] | None
+        ) = None
+        self._ready_event: asyncio.Event | None = None
+        self._startup_error: BaseException | None = None
+        # True once ``__aenter__`` has been called — distinguishes the
+        # test-bypass path (set ``_session`` directly, no keeper) from a
+        # production client whose keeper has died (then we fail loudly
+        # rather than silently fall back to the unsafe inline reconnect).
+        self._aenter_called: bool = False
 
     async def __aenter__(self) -> LithosClient:
-        await self._establish()
+        self._aenter_called = True
+        self._reconnect_queue = asyncio.Queue()
+        self._ready_event = asyncio.Event()
+        self._keeper_task = asyncio.create_task(
+            self._keeper_loop(), name="lithos-client-keeper"
+        )
+        await self._ready_event.wait()
+        if self._startup_error is not None:
+            err = self._startup_error
+            # Keeper has already exited; await it to surface any unraisable
+            # warnings before propagating the original error.
+            with contextlib.suppress(BaseException):
+                await self._keeper_task
+            self._keeper_task = None
+            raise err
         return self
+
+    async def _keeper_loop(self) -> None:
+        """Own the MCP session for the client's lifetime.
+
+        Runs the initial ``_establish`` (so the anyio cancel scopes opened
+        by ``sse_client`` / ``ClientSession`` belong to *this* task), then
+        services reconnect requests from :attr:`_reconnect_queue` one at a
+        time. Each reconnect tears down the old session and opens a fresh
+        one — both safe because we're back in the task that originally
+        opened the scopes (see :meth:`_teardown_in_keeper` for why this
+        matters).
+
+        On shutdown sentinel: drain pending requests so blocked callers
+        don't hang, then tear down the live session.
+        """
+        assert self._reconnect_queue is not None
+        assert self._ready_event is not None
+        try:
+            await self._establish()
+        except BaseException as exc:  # noqa: BLE001 — surface via startup_error
+            self._startup_error = exc
+            self._ready_event.set()
+            return
+        self._ready_event.set()
+        try:
+            while True:
+                request = await self._reconnect_queue.get()
+                if isinstance(request, _ShutdownSentinel):
+                    break
+                if self._session_generation != request.expected_gen:
+                    # Peer already reconnected since this caller's call
+                    # failed — no-op, caller will retry against the
+                    # already-fresh session.
+                    request.done.set()
+                    continue
+                try:
+                    await self._teardown_in_keeper()
+                    await self._establish()
+                    self._session_generation += 1
+                except BaseException as exc:  # noqa: BLE001 — surface via request
+                    request.error = exc
+                finally:
+                    request.done.set()
+        finally:
+            self._drain_pending_reconnects()
+            await self._teardown_in_keeper()
+
+    def _drain_pending_reconnects(self) -> None:
+        """Fail any reconnect requests still in the queue after shutdown so
+        callers blocked on ``request.done.wait()`` don't hang forever."""
+        if self._reconnect_queue is None:
+            return
+        shutdown_err = LithosClientError(
+            "session_unavailable",
+            "LithosClient keeper exited before processing reconnect",
+        )
+        while True:
+            try:
+                request = self._reconnect_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if isinstance(request, _ShutdownSentinel):
+                continue
+            request.error = shutdown_err
+            request.done.set()
+
+    async def _teardown_in_keeper(self) -> None:
+        """Tear down the current session + SSE contexts. Safe because the
+        keeper is the same task that opened them — calling ``__aexit__``
+        from any other task would raise ``RuntimeError: Attempted to exit
+        cancel scope in a different task than it was entered in`` (soak
+        2026-05-29; see also :meth:`_keeper_loop` docstring).
+
+        Errors during teardown are swallowed: the connection is already
+        dead (caller wouldn't have requested a reconnect otherwise), and
+        the fresh ``_establish`` that follows is what matters.
+        """
+        if self._session_ctx is not None:
+            try:  # noqa: SIM105 — contextlib.suppress(Exception) misses BaseExceptionGroup
+                await self._session_ctx.__aexit__(None, None, None)
+            except* Exception:
+                pass
+            self._session_ctx = None
+        self._session = None
+        if self._sse_ctx is not None:
+            try:  # noqa: SIM105 — contextlib.suppress(Exception) misses BaseExceptionGroup
+                await self._sse_ctx.__aexit__(None, None, None)
+            except* Exception:
+                pass
+            self._sse_ctx = None
 
     async def _establish(self) -> None:
         """Open a fresh MCP-over-SSE session, replacing any prior one.
@@ -280,45 +432,51 @@ class LithosClient:
                 pass
             self._sse_ctx = None
 
-    async def _teardown_quietly(self) -> None:
-        """Drop references to the dead session + SSE contexts before a reconnect.
+    async def _request_reconnect(self, *, expected_gen: int) -> None:
+        """Request a reconnect.
 
-        We deliberately do NOT call ``__aexit__`` on the dead contexts. The
-        MCP SDK's ``sse_client`` and ``ClientSession`` each manage internal
-        anyio ``TaskGroup`` background tasks; the cancel scopes those task
-        groups own were opened inside *this* task's stack on the original
-        ``_establish``. Exiting them here (from a reconnect triggered by
-        ``_invoke``) makes anyio cancel those scopes, and that cancellation
-        propagates UP into the caller's task — observed in the 2026-05-28
-        soak as a ``CancelledError: Cancelled via cancel scope ... by
-        <Task pending name='lithos-note-stream' ...>`` that took down the
-        obsidian-sync child. ``except* Exception`` doesn't help because the
-        cancellation IS the scope-exit signal on the calling task, not an
-        exception inside the ``__aexit__`` body.
+        Production path (``__aenter__`` has run, keeper alive): queue a
+        request to the keeper and wait — the keeper does the teardown +
+        re-establish in its own task, where the anyio scopes belong.
 
-        The connection is already gone (server restarted, sockets dead), so
-        the underlying network resources will be reclaimed by Python's GC
-        when the references drop. This is best-effort cleanup of an
-        already-dead resource — clean-shutdown semantics live in
-        :meth:`__aexit__`, which runs from the original ``async with`` site
-        where the scopes were opened.
+        Test path (``__aenter__`` never called, ``_session`` injected
+        directly): fall back to inline reconnect. Safe in tests because
+        mock sessions don't have real anyio cancel scopes.
+
+        Production with dead keeper: fail loudly rather than silently
+        falling back to the inline path — the inline path is unsafe in
+        production and would re-introduce the 2026-05-28 RuntimeError.
         """
-        self._session_ctx = None
-        self._session = None
-        self._sse_ctx = None
+        if self._keeper_task is not None and not self._keeper_task.done():
+            assert self._reconnect_queue is not None
+            request = _ReconnectRequest(expected_gen=expected_gen)
+            await self._reconnect_queue.put(request)
+            await request.done.wait()
+            if request.error is not None:
+                raise request.error
+            return
+        if self._aenter_called:
+            raise LithosClientError(
+                "session_unavailable",
+                "LithosClient keeper has exited; client is no longer usable",
+            )
+        await self._reconnect_inline(expected_gen=expected_gen)
 
-    async def _reconnect(self, *, expected_gen: int) -> None:
-        """Re-establish the session, single-flight across concurrent callers.
+    async def _reconnect_inline(self, *, expected_gen: int) -> None:
+        """Reconnect from the caller's task (TESTS ONLY).
 
-        ``expected_gen`` is the generation the caller observed before its
-        ``call_tool`` failed. Under the lock we bail if the generation has
-        already advanced — a peer reconnected since, so this caller should
-        just retry against the new session rather than tear it down again.
+        Used by the test-bypass path where ``__aenter__`` is skipped and
+        ``_session`` is set directly. Drops refs (rather than calling
+        ``__aexit__`` on real SDK contexts, which is the failure mode the
+        keeper exists to avoid) and calls ``_establish``. Single-flight via
+        :attr:`_reconnect_lock` so concurrent callers reconnect once.
         """
         async with self._reconnect_lock:
             if self._session_generation != expected_gen:
                 return
-            await self._teardown_quietly()
+            self._session_ctx = None
+            self._session = None
+            self._sse_ctx = None
             await self._establish()
             self._session_generation += 1
 
@@ -349,7 +507,7 @@ class LithosClient:
         ``task_cancel`` are idempotent, a duplicate ``task_create`` is a
         recoverable dup), so this isn't gated.
         """
-        if self._session is None:
+        if self._session is None and not self._aenter_called:
             raise LithosClientError(
                 "client_not_initialised",
                 "LithosClient not initialised; use 'async with LithosClient(...) as c'",
@@ -358,13 +516,11 @@ class LithosClient:
         for attempt in range(_MAX_TRANSPORT_ATTEMPTS):
             session = self._session
             if session is None:
-                # Transient: a peer is mid-reconnect (between teardown and
-                # establish, both await points). Block on the reconnect lock
-                # until it finishes, then retry — do NOT raise here (the
-                # never-initialised case is handled by the guard above, before
-                # the loop). Generation guard makes this a no-op wait once the
-                # peer's reconnect lands.
-                await self._reconnect(expected_gen=self._session_generation)
+                # Transient: keeper is mid-reconnect (between teardown and
+                # establish, both await points). Request a reconnect — the
+                # keeper's generation guard makes this a near-no-op if the
+                # reconnect is already in flight.
+                await self._request_reconnect(expected_gen=self._session_generation)
                 continue
             gen = self._session_generation
             try:
@@ -396,7 +552,7 @@ class LithosClient:
                 _MAX_TRANSPORT_ATTEMPTS,
             )
             await asyncio.sleep(_RECONNECT_BACKOFF_SECONDS)
-            await self._reconnect(expected_gen=gen)
+            await self._request_reconnect(expected_gen=gen)
         if last_exc is not None:
             raise last_exc
         # Every attempt hit the transient-None path without ever landing a
@@ -412,6 +568,29 @@ class LithosClient:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Shut down the client.
+
+        Production path (keeper alive): queue a shutdown sentinel and
+        await the keeper — it tears down the session in its own task,
+        where the anyio scopes belong. Calling ``__aexit__`` on the
+        contexts from this task would raise ``RuntimeError: Attempted to
+        exit cancel scope in a different task than it was entered in``
+        (the keeper task opened them, not us).
+
+        Test path (no keeper): fall back to direct ``__aexit__`` on
+        whatever contexts are pinned — safe because mock contexts don't
+        have real anyio scopes. Preserves backward-compat with tests that
+        bypass ``__aenter__`` and set ``_session_ctx`` / ``_sse_ctx``
+        directly.
+        """
+        if self._keeper_task is not None and not self._keeper_task.done():
+            assert self._reconnect_queue is not None
+            self._reconnect_queue.put_nowait(_SHUTDOWN)
+            with contextlib.suppress(Exception, BaseExceptionGroup):
+                await self._keeper_task  # keeper errors surface via request.error
+            self._keeper_task = None
+            return
+        # Test / pre-init path — close any directly-installed contexts.
         try:
             if self._session_ctx is not None:
                 await self._session_ctx.__aexit__(exc_type, exc, tb)
