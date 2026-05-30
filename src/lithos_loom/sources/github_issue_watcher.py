@@ -152,12 +152,18 @@ class WatcherLithosClient(Protocol):
 # ── Cursor doc parser ──────────────────────────────────────────────────
 
 
+_STUCK_PREFIX = "stuck:"
+
+
 def parse_cursors(body: str) -> dict[str, datetime]:
     """Parse the coord doc body into a ``{repo: cursor}`` map.
 
     Tolerates blank lines, comment lines (anything not matching the
     ``owner/name <iso>`` shape is skipped with a debug log) and either
     UTC ``Z`` or explicit ``+00:00`` timezone suffixes.
+
+    Stuck-issue rows (``stuck:owner/name#42``) are recognised but
+    skipped here — parse them with :func:`parse_stuck`.
 
     Returns an empty dict for a fresh / unparseable doc — that's
     indistinguishable from "first poll" and the caller falls through
@@ -167,6 +173,8 @@ def parse_cursors(body: str) -> dict[str, datetime]:
     for raw_line in body.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or line.startswith("Daemon"):
+            continue
+        if line.startswith(_STUCK_PREFIX):
             continue
         parts = line.split(maxsplit=1)
         if len(parts) != 2:
@@ -183,11 +191,50 @@ def parse_cursors(body: str) -> dict[str, datetime]:
     return out
 
 
-def format_cursors(cursors: dict[str, datetime]) -> str:
-    """Render a cursor map into the canonical coord doc body."""
+def parse_stuck(body: str) -> dict[str, set[int]]:
+    """Parse ``stuck:owner/name#<number>`` rows out of the coord doc.
+
+    PR-review finding 3 (round 5, 2026-05-30): the stuck-issue set is
+    persisted alongside cursors so a daemon restart between an
+    incomplete reconciliation (e.g. ``task_create`` succeeded, marker
+    PATCH failed) and the next retry doesn't lose the repair record.
+    """
+    out: dict[str, set[int]] = {}
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(_STUCK_PREFIX):
+            continue
+        rest = line[len(_STUCK_PREFIX) :]
+        if "#" not in rest:
+            continue
+        repo, num_str = rest.rsplit("#", 1)
+        if "/" not in repo:
+            continue
+        try:
+            number = int(num_str)
+        except ValueError:
+            continue
+        out.setdefault(repo, set()).add(number)
+    return out
+
+
+def format_cursors(
+    cursors: dict[str, datetime],
+    stuck: dict[str, set[int]] | None = None,
+) -> str:
+    """Render the coord doc body.
+
+    Cursors render as ``owner/name <iso>`` rows; stuck-issue entries
+    (optional) render as ``stuck:owner/name#<number>`` rows beneath
+    them. Sorted output keeps diffs minimal across writes.
+    """
     lines = [_COORD_DOC_BODY_HEADER]
     for repo in sorted(cursors):
         lines.append(f"{repo} {_isoformat(cursors[repo])}")
+    if stuck:
+        for repo in sorted(stuck):
+            for number in sorted(stuck[repo]):
+                lines.append(f"{_STUCK_PREFIX}{repo}#{number}")
     lines.append("")  # trailing newline
     return "\n".join(lines)
 
@@ -205,6 +252,20 @@ def _isoformat(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC).isoformat()
+
+
+def _copy_stuck(stuck: dict[str, set[int]]) -> dict[str, set[int]]:
+    """Deep-copy a stuck-issue map so the persisted snapshot doesn't
+    alias the live one.
+
+    PR-review finding 3 (round 5, 2026-05-30): the unchanged-content
+    short-circuit compares the current map against the persisted
+    snapshot. A shallow ``dict(stuck)`` would let live ``stuck[repo]``
+    mutations leak into the snapshot via shared ``set`` references —
+    next persist would then see "unchanged" and skip the write even
+    when an issue was added or drained.
+    """
+    return {repo: set(numbers) for repo, numbers in stuck.items()}
 
 
 # ── Source ─────────────────────────────────────────────────────────────
@@ -269,9 +330,17 @@ class GitHubIssueWatcher:
     by number lets the next poll retry via ``get_issue`` directly,
     independent of the cursor / state-filter combination.
 
-    In-memory only; daemon restart loses this state. Restart then
-    catches open-stuck issues via the regular bootstrap walk; closed-
-    stuck issues are a known limitation."""
+    PR-review finding 3 (round 5, 2026-05-30): persisted in the coord
+    doc as ``stuck:<owner>/<name>#<number>`` rows so daemon restart
+    preserves the repair record. Drained on successful retry, on GH
+    404 (issue deleted), or never on permanent auth — credentials
+    might be rotated."""
+    _last_persisted_stuck: dict[str, set[int]] = field(default_factory=dict)
+    """Snapshot of :attr:`_stuck_issues` at the time of the last
+    successful coord-doc write. Paired with
+    :attr:`_last_persisted_cursors` for the unchanged-content
+    short-circuit so a steady-state poll cycle that observed no new
+    stuck entries doesn't keep re-writing the same body."""
     _coord_doc_id: str | None = None
     _coord_doc_version: int | None = None
     _coord_doc_subscription: Subscription | None = None
@@ -441,13 +510,23 @@ class GitHubIssueWatcher:
         self._coord_doc_id = note.id
         self._coord_doc_version = note.version
         self._cursors = parse_cursors(note.body)
+        # PR-review finding 3 (round 5, 2026-05-30): also reload the
+        # persisted stuck-issue set so a daemon restart between a partial
+        # task_create + marker_write and the next retry pass still
+        # surfaces the stuck issue by-number on the first poll after
+        # boot. Without this, restart loses the in-memory set and a
+        # closed-before-restart issue stays orphaned forever.
+        self._stuck_issues = parse_stuck(note.body)
         # The remote already holds what we just loaded — track it as
         # "already persisted" so the first poll-cycle's write is skipped
         # when no cursor advanced.
         self._last_persisted_cursors = dict(self._cursors)
+        self._last_persisted_stuck = _copy_stuck(self._stuck_issues)
         logger.info(
-            "github-watcher: loaded %d cursor(s) from coord doc v%d",
+            "github-watcher: loaded %d cursor(s) and %d stuck issue(s) from "
+            "coord doc v%d",
             len(self._cursors),
+            sum(len(s) for s in self._stuck_issues.values()),
             note.version,
         )
 
@@ -485,13 +564,16 @@ class GitHubIssueWatcher:
         deletions = set(self._last_persisted_cursors) - set(self._cursors)
         attempts = 0
         while True:
-            if self._cursors == self._last_persisted_cursors:
+            cursors_unchanged = self._cursors == self._last_persisted_cursors
+            stuck_unchanged = self._stuck_issues == self._last_persisted_stuck
+            if cursors_unchanged and stuck_unchanged:
                 logger.debug(
-                    "github-watcher: coord doc write skipped — cursors unchanged"
+                    "github-watcher: coord doc write skipped — cursors and "
+                    "stuck-set unchanged"
                 )
                 return
             attempts += 1
-            body = format_cursors(self._cursors)
+            body = format_cursors(self._cursors, self._stuck_issues)
             try:
                 result = await self.lithos.note_write(
                     agent=self.agent_id,
@@ -515,11 +597,14 @@ class GitHubIssueWatcher:
                 self._coord_doc_id = result.note.id
                 self._coord_doc_version = result.note.version
                 self._last_persisted_cursors = dict(self._cursors)
+                self._last_persisted_stuck = _copy_stuck(self._stuck_issues)
+                stuck_count = sum(len(s) for s in self._stuck_issues.values())
                 logger.info(
-                    "github-watcher: coord doc %s → v%d (%d cursor(s))",
+                    "github-watcher: coord doc %s → v%d (%d cursor(s), %d stuck)",
                     result.status,
                     result.note.version,
                     len(self._cursors),
+                    stuck_count,
                 )
                 return
             if result.status == "version_conflict":
@@ -537,15 +622,22 @@ class GitHubIssueWatcher:
                     attempts,
                     _MAX_COORD_DOC_CAS_ATTEMPTS,
                 )
-                # Hold our pending advances; the load step will replace
-                # ``_cursors`` with the remote view, then we re-merge so
-                # the just-observed advances aren't lost.
+                # Hold our pending advances + stuck-issue set; the load
+                # step will replace ``_cursors`` and ``_stuck_issues``
+                # with the remote view, then we re-merge so the just-
+                # observed advances aren't lost.
                 pending = dict(self._cursors)
+                pending_stuck = _copy_stuck(self._stuck_issues)
                 await self._load_cursors_from_coord_doc()
                 for repo, ts in pending.items():
                     remote_ts = self._cursors.get(repo)
                     if remote_ts is None or ts > remote_ts:
                         self._cursors[repo] = ts
+                # Merge pending stuck entries: union per repo. Remote may
+                # have stuck entries from another writer we want to keep,
+                # and we may have new ones from this poll.
+                for repo, numbers in pending_stuck.items():
+                    self._stuck_issues.setdefault(repo, set()).update(numbers)
                 # Re-apply intended deletions captured at function entry
                 # (PR-review finding 1, round 5, 2026-05-30). Without
                 # this, a cursor we explicitly popped is restored by
@@ -653,18 +745,17 @@ class GitHubIssueWatcher:
         for number in list(stuck):
             try:
                 issue = await self.github.get_issue(repo, number)
-            except (GitHubAuthError, GitHubRepoNotFoundError) as exc:
-                logger.warning(
-                    "[Friction] github-watcher: re-fetch of stuck %s/#%d hit "
-                    "permanent error (%s: %s); dropping from stuck set",
-                    repo,
-                    number,
-                    type(exc).__name__,
-                    exc,
-                )
-                stuck.discard(number)
-                continue
             except GitHubError as exc:
+                # PR-review finding 2 (round 5, 2026-05-30): auth errors
+                # used to drop the entry here. They aren't actually
+                # permanent — the operator might rotate `gh auth` and
+                # come back. Keep the entry; only ``None`` (issue
+                # genuinely deleted on GH, returned by ``get_issue``
+                # short-circuit on 404) or a successful dispatch retires
+                # the entry. ``get_issue`` itself never raises
+                # ``GitHubRepoNotFoundError`` — the 404 short-circuits
+                # to ``None`` — so all subclasses here are effectively
+                # transient.
                 logger.warning(
                     "github-watcher: re-fetch of stuck %s/#%d transient (%s: %s); "
                     "leaving in stuck set",

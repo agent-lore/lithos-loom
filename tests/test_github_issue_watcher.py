@@ -30,6 +30,7 @@ from lithos_loom.sources.github_issue_watcher import (
     WatchedRepo,
     format_cursors,
     parse_cursors,
+    parse_stuck,
 )
 
 # ── Cursor doc format ─────────────────────────────────────────────────
@@ -616,6 +617,62 @@ async def test_stuck_issue_dropped_when_gh_returns_404() -> None:
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
 
     assert "agent-lore/lithos-loom" not in watcher._stuck_issues
+
+
+@pytest.mark.asyncio
+async def test_stuck_issue_auth_error_does_not_drop_entry() -> None:
+    """PR-review finding 2 (round 5, 2026-05-30): an auth failure on
+    get_issue used to drop the stuck entry as if it were permanent.
+    Credentials can be rotated later — the entry must stay so the
+    eventual recovery picks it up. Only None (issue genuinely deleted
+    on GH) or a successful dispatch retires the entry."""
+    from lithos_loom.github_client import GitHubAuthError
+
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[])
+    github.get_issue = AsyncMock(side_effect=GitHubAuthError("403 denied"))
+
+    async def dispatch_ok(_: Any) -> None:
+        return None
+
+    watcher = _make_watcher(
+        github=github,
+        lithos=_fake_lithos_client(),
+        bus=bus,
+        dispatch=dispatch_ok,
+    )
+    watcher._stuck_issues["agent-lore/lithos-loom"] = {42}
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    # Stuck entry preserved despite the auth error — operator might
+    # repair credentials and the next poll picks it up.
+    assert 42 in watcher._stuck_issues["agent-lore/lithos-loom"]
+
+
+@pytest.mark.asyncio
+async def test_stuck_issues_persist_and_reload_through_coord_doc() -> None:
+    """PR-review finding 3 (round 5, 2026-05-30): the stuck-issue set
+    rides on the coord doc so daemon restart preserves repair records.
+    Without persistence, an issue stuck between an incomplete
+    task_create + marker write and the next retry can be lost when
+    the daemon restarts."""
+    body = format_cursors(
+        {"owner/x": datetime(2026, 5, 29, tzinfo=UTC)},
+        stuck={"owner/x": {42, 99}, "owner/y": {7}},
+    )
+    assert "stuck:owner/x#42" in body
+    assert "stuck:owner/x#99" in body
+    assert "stuck:owner/y#7" in body
+    # And it round-trips through the parser.
+    assert parse_stuck(body) == {
+        "owner/x": {42, 99},
+        "owner/y": {7},
+    }
+    # Cursors are still parseable too — stuck rows are ignored by parse_cursors.
+    assert parse_cursors(body) == {"owner/x": datetime(2026, 5, 29, tzinfo=UTC)}
 
 
 @pytest.mark.asyncio
