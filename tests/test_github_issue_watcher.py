@@ -539,6 +539,119 @@ async def test_poll_one_repo_does_not_advance_cursor_when_first_issue_fails() ->
 
 
 @pytest.mark.asyncio
+async def test_stuck_issue_retried_by_number_next_poll() -> None:
+    """PR-review finding 2 (round 4, 2026-05-30): an issue that failed
+    dispatch during bootstrap (cursor None) and then closes on GH
+    before the next poll would disappear from the next state="open"
+    walk. The watcher now re-fetches stuck issues by number via
+    ``get_issue`` so the close-before-retry race no longer strands the
+    linked Lithos task.
+    """
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    open_issue = _make_issue(
+        number=42, updated_at=datetime(2026, 5, 29, 10, 0, 0, tzinfo=UTC)
+    )
+    closed_issue = _make_issue(
+        number=42,
+        state="closed",
+        state_reason="completed",
+        updated_at=datetime(2026, 5, 29, 11, 0, 0, tzinfo=UTC),
+    )
+    github = _fake_github_client()
+    # First poll fetches open, dispatch fails, issue gets stuck.
+    # Second poll's retry-by-number sees the closed state.
+    github.list_issues_since = AsyncMock(side_effect=[[open_issue], []])
+    github.get_issue = AsyncMock(return_value=closed_issue)
+
+    attempt_count = 0
+
+    async def flaky_dispatch(event: Any) -> None:
+        nonlocal attempt_count
+        attempt_count += 1
+        # First call (during initial bootstrap) raises.
+        # Second call (the by-number retry) succeeds.
+        if attempt_count == 1:
+            raise RuntimeError("transient")
+
+    watcher = _make_watcher(
+        github=github,
+        lithos=_fake_lithos_client(),
+        bus=bus,
+        dispatch=flaky_dispatch,
+    )
+
+    # First poll: bootstrap, fails, issue 42 is stuck.
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+    assert 42 in watcher._stuck_issues.get("agent-lore/lithos-loom", set())
+
+    # Second poll: get_issue returns closed state, dispatch succeeds,
+    # stuck set drains.
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+    github.get_issue.assert_awaited_with("agent-lore/lithos-loom", 42)
+    assert watcher._stuck_issues.get("agent-lore/lithos-loom", set()) == set()
+
+
+@pytest.mark.asyncio
+async def test_stuck_issue_dropped_when_gh_returns_404() -> None:
+    """Operator deleted the issue between polls. get_issue returns None;
+    the stuck entry drops without further retry."""
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[])
+    github.get_issue = AsyncMock(return_value=None)
+
+    async def dispatch_ok(_: Any) -> None:
+        return None
+
+    watcher = _make_watcher(
+        github=github,
+        lithos=_fake_lithos_client(),
+        bus=bus,
+        dispatch=dispatch_ok,
+    )
+    watcher._stuck_issues["agent-lore/lithos-loom"] = {42}
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    assert "agent-lore/lithos-loom" not in watcher._stuck_issues
+
+
+@pytest.mark.asyncio
+async def test_stuck_issue_still_failing_defers_new_fetch() -> None:
+    """If a stuck retry still fails, the watcher skips the regular fetch
+    so we don't accumulate fresh stuck entries on top of the unresolved
+    ones."""
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[])
+    github.get_issue = AsyncMock(
+        return_value=_make_issue(
+            number=42, updated_at=datetime(2026, 5, 29, tzinfo=UTC)
+        )
+    )
+
+    async def still_failing(_: Any) -> None:
+        raise RuntimeError("still down")
+
+    watcher = _make_watcher(
+        github=github,
+        lithos=_fake_lithos_client(),
+        bus=bus,
+        dispatch=still_failing,
+    )
+    watcher._stuck_issues["agent-lore/lithos-loom"] = {42}
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    # 42 stays in the stuck set; regular fetch was skipped this poll.
+    assert 42 in watcher._stuck_issues["agent-lore/lithos-loom"]
+    github.list_issues_since.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_poll_one_repo_boundary_replay_is_accepted() -> None:
     """The cursor is held at the boundary timestamp rather than nudged
     past it. PR-review finding 3 (2026-05-30): the earlier +1s nudge

@@ -256,6 +256,22 @@ class GitHubIssueWatcher:
     poll cycle re-wrote the coord doc even when no cursor had advanced —
     a Lithos write per minute, two SSE note.updated events per minute,
     and a steady version-counter creep that operators saw in soak."""
+    _stuck_issues: dict[str, set[int]] = field(default_factory=dict)
+    """``{repo: {issue_number, ...}}`` — per-repo set of issues whose
+    inline dispatch raised during a recent poll.
+
+    PR-review finding 2 (round 4, 2026-05-30): the bootstrap path uses
+    ``state="open"``. If the first issue in a bootstrap walk fails to
+    dispatch (e.g. marker PATCH 5xx after task_create succeeded) the
+    cursor stays ``None``; the GH issue can close before the retry,
+    after which the next bootstrap walk no longer surfaces it and the
+    linked Lithos task is permanently orphaned. Tracking the failure
+    by number lets the next poll retry via ``get_issue`` directly,
+    independent of the cursor / state-filter combination.
+
+    In-memory only; daemon restart loses this state. Restart then
+    catches open-stuck issues via the regular bootstrap walk; closed-
+    stuck issues are a known limitation."""
     _coord_doc_id: str | None = None
     _coord_doc_version: int | None = None
     _coord_doc_subscription: Subscription | None = None
@@ -602,6 +618,73 @@ class GitHubIssueWatcher:
         for slug, watched in items:
             await self._poll_one_repo(slug=slug, repo=watched.repo)
 
+    async def _retry_stuck_issues(self, *, slug: str, repo: str) -> bool:
+        """Retry issues whose dispatch failed in a previous poll.
+
+        Returns ``True`` if every stuck issue dispatched cleanly (or was
+        deleted on GH), ``False`` if anything is still stuck. Callers
+        defer the normal cursor-based fetch on ``False`` so a persistent
+        failure doesn't accumulate fresh entries on top of the unresolved
+        ones.
+
+        Each issue is re-fetched via ``get_issue`` instead of relying on
+        the cursor + state filter — the bootstrap path (state="open")
+        wouldn't surface an issue that closed since the previous
+        attempt, but the per-issue PATCH-equivalent ``GET`` does.
+        """
+        stuck = self._stuck_issues.get(repo)
+        if not stuck:
+            return True
+        for number in list(stuck):
+            try:
+                issue = await self.github.get_issue(repo, number)
+            except (GitHubAuthError, GitHubRepoNotFoundError) as exc:
+                logger.warning(
+                    "[Friction] github-watcher: re-fetch of stuck %s/#%d hit "
+                    "permanent error (%s: %s); dropping from stuck set",
+                    repo,
+                    number,
+                    type(exc).__name__,
+                    exc,
+                )
+                stuck.discard(number)
+                continue
+            except GitHubError as exc:
+                logger.warning(
+                    "github-watcher: re-fetch of stuck %s/#%d transient (%s: %s); "
+                    "leaving in stuck set",
+                    repo,
+                    number,
+                    type(exc).__name__,
+                    exc,
+                )
+                return False
+            if issue is None:
+                # GH issue deleted in the interim — nothing to reconcile.
+                logger.info(
+                    "github-watcher: stuck %s/#%d gone on GH; dropping from stuck set",
+                    repo,
+                    number,
+                )
+                stuck.discard(number)
+                continue
+            try:
+                await self._publish_issue(slug=slug, issue=issue)
+            except Exception as exc:
+                logger.warning(
+                    "[Friction] github-watcher: stuck %s/#%d dispatch still "
+                    "fails (%s: %s); will retry next poll",
+                    repo,
+                    number,
+                    type(exc).__name__,
+                    exc,
+                )
+                return False
+            stuck.discard(number)
+        if not stuck:
+            self._stuck_issues.pop(repo, None)
+        return True
+
     async def _poll_one_repo(self, *, slug: str, repo: str) -> None:
         """Fetch issues for one repo, emit events, advance the cursor.
 
@@ -622,7 +705,19 @@ class GitHubIssueWatcher:
         (the project doc still owns the mapping; next refresh will
         re-add it if the operator fixes the typo). Auth/rate-limit
         errors are logged but don't propagate — the next pass retries.
+
+        PR-review finding 2 (round 4, 2026-05-30): before the regular
+        fetch, retry any issues that failed dispatch in a previous poll
+        via ``get_issue`` directly. The bootstrap path uses
+        ``state="open"`` and would lose a closed-before-retry issue
+        otherwise; retrying by number is cursor-independent and survives
+        the close transition.
         """
+        if not await self._retry_stuck_issues(slug=slug, repo=repo):
+            # A stuck issue still failed; defer the new-fetch this poll
+            # so we don't keep racking up additional stuck entries while
+            # the underlying problem persists.
+            return
         since = self._cursors.get(repo)
         state = "open" if since is None else "all"
         try:
@@ -668,9 +763,11 @@ class GitHubIssueWatcher:
                 await self._publish_issue(slug=slug, issue=issue)
             except Exception as exc:
                 dispatch_failed_at = issue.updated_at
+                self._stuck_issues.setdefault(repo, set()).add(issue.number)
                 logger.warning(
                     "[Friction] github-watcher: dispatch for %s/#%d failed "
-                    "(%s: %s); holding cursor at %s so the next poll retries",
+                    "(%s: %s); holding cursor at %s and tagging issue for "
+                    "by-number retry next poll",
                     repo,
                     issue.number,
                     type(exc).__name__,
