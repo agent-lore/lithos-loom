@@ -380,16 +380,24 @@ async def _sync_drift(
     polls cheap. The state-snapshot field rides on the same write so the
     reopen-finding de-dupe stays consistent without an extra round-trip.
 
-    Runs on both open and terminal tasks per SPEC §2.2 + PRD story #71.
-    A round-6 self-review pass restricted full drift to open tasks
-    defensively (in case Lithos rejects task_update on terminal tasks),
-    but the reviewer correctly pointed out (round 7, 2026-05-30) that
-    this broke the documented contract — a reopened issue with a
-    drifted title would leave the operator looking at the stale name.
-    If Lithos's task_update actually rejects terminal-task field
-    changes the propagate-on-failure contract will freeze the cursor
-    loudly in soak and we'll address it then.
+    Skipped entirely for terminal tasks (status ``completed`` /
+    ``cancelled``). Pinned via soak 2026-05-30: Lithos ``task_update``
+    returns ``task_not_found`` for terminal tasks (upstream
+    `agent-lore/lithos#303`), so the per-poll boundary replay of a
+    just-closed issue would otherwise re-attempt and re-log
+    ``[Friction]`` every cycle. Until #303 lands, the metadata
+    snapshot (and thus reopen-finding dedup on terminal tasks) is
+    frozen at the value it had when the task went terminal — a known
+    limit documented in the lithos-schema-status memory note.
     """
+    if task.status != "open":
+        ctx.logger.debug(
+            "github-issue-sync: drift sync skipped for terminal task %s "
+            "(Lithos #303: task_update rejects terminal tasks)",
+            task.id,
+        )
+        return
+
     updates: dict[str, Any] = {}
     metadata_updates: dict[str, Any] = {}
 
