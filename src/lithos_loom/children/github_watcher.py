@@ -210,11 +210,19 @@ async def _amain(cfg: LoomConfig) -> int:
                 Push handler raises on transient GH errors (5xx, network,
                 rate-limit exhausted). Permanent errors (auth, 404) are
                 logged + swallowed inside the handler. Here we retry
-                transient failures up to 3 attempts with exponential
-                backoff before logging [Friction] and dropping — beats
-                losing a close-mirror event to a Cloudflare hiccup.
+                transient failures with exponential backoff capped at
+                ``_RETRY_MAX_DELAY_SECONDS``. With 8 attempts and a 60s
+                cap the total wait before drop is ~250 seconds (~4
+                minutes) — wide enough to absorb realistic short outages
+                and GH 5xx flares (PR-review finding 3, round 4,
+                2026-05-30: round-3's 3-attempt cap discarded events
+                after only ~6 seconds, which lost work to anything
+                longer than a transient hiccup). Outages longer than
+                this fall through to the next ``LithosEventStream``
+                bootstrap replay window on daemon restart.
                 """
-                max_attempts = 3
+                max_attempts = 8
+                max_delay_seconds = 60
                 while True:
                     event = await push_sub.queue.get()
                     for attempt in range(1, max_attempts + 1):
@@ -226,14 +234,17 @@ async def _amain(cfg: LoomConfig) -> int:
                                 logger.warning(
                                     "[Friction] github-watcher: push handler "
                                     "exhausted %d attempts on %s "
-                                    "(%s: %s); dropping",
+                                    "(%s: %s); dropping (outage outlasts "
+                                    "retry budget — next daemon restart "
+                                    "within resolved_replay_days will "
+                                    "replay this event)",
                                     max_attempts,
                                     event.type,
                                     type(exc).__name__,
                                     exc,
                                 )
                                 break
-                            delay = 2**attempt
+                            delay = min(2**attempt, max_delay_seconds)
                             logger.info(
                                 "github-watcher: push handler attempt %d/%d "
                                 "failed (%s); retrying in %ds",

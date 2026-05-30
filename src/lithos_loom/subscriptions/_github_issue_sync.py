@@ -530,10 +530,13 @@ async def _apply_marker_safe(
     next poll to walk the orphan-marker recovery path and produce a
     duplicate write attempt).
 
-    A marker-write failure is recoverable — the next poll's matching-URL
-    branch will retry. We don't propagate the error because that would
-    surface the issue to retry logic that would just re-do the
-    already-successful task_create.
+    A marker-write failure now propagates (PR-review finding 1, round 3,
+    2026-05-30). The watcher's inline dispatcher freezes the cursor at
+    the prior issue's ``updated_at`` and the next poll re-fetches this
+    issue — its URL-match recovery branch finds the existing task and
+    re-writes the marker without creating a duplicate. The earlier
+    swallow advanced the cursor past the unmarked issue and stranded
+    the link.
     """
     body_source = issue.body
     try:
