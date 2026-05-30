@@ -47,6 +47,7 @@ __all__ = [
     "DEFAULT_CONFIG_FILENAME",
     "DEFAULT_GITHUB_WATCHER_COORD_DOC",
     "DEFAULT_GITHUB_WATCHER_POLL_INTERVAL",
+    "DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS",
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_OBSIDIAN_PROJECTS_DIR",
@@ -94,6 +95,7 @@ DEFAULT_GITHUB_WATCHER_POLL_INTERVAL = 60
 DEFAULT_GITHUB_WATCHER_COORD_DOC = (
     "projects/_lithos-loom-internal/github-watcher-state.md"
 )
+DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS = 7
 
 
 def parse_log_level(value: str) -> LogLevel:
@@ -226,6 +228,16 @@ class GitHubWatcherConfig:
     enabled: bool = False
     poll_interval_seconds: int = DEFAULT_GITHUB_WATCHER_POLL_INTERVAL
     coord_doc_path: str = DEFAULT_GITHUB_WATCHER_COORD_DOC
+    resolved_replay_days: int = DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS
+    """How far back the LithosEventStream replays terminal task events at
+    bootstrap. Closes a Lithos task while the watcher is down → the next
+    daemon start replays the ``task.completed`` event and the push handler
+    closes the corresponding GH issue. The handler is idempotent so a
+    too-large window only costs extra harmless re-checks; the default
+    (7 days) tracks the obsidian-sync TTL convention. Set to 0 to disable
+    replay (push handler only fires for events that arrive while the
+    watcher is live).
+    """
 
 
 @dataclass(frozen=True)
@@ -608,7 +620,7 @@ def _parse_obsidian_sync(data: Any, config_path: Path) -> ObsidianSyncConfig | N
 
 
 _GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
-    {"enabled", "poll_interval_seconds", "coord_doc_path"}
+    {"enabled", "poll_interval_seconds", "coord_doc_path", "resolved_replay_days"}
 )
 
 
@@ -662,10 +674,24 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
             f"Lithos doc path and may not contain '..' (got {coord_doc_raw!r})"
         )
 
+    resolved_replay_days = _optional_int(
+        data,
+        "resolved_replay_days",
+        DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS,
+        config_path,
+        "github_watcher",
+    )
+    if resolved_replay_days < 0:
+        raise ConfigError(
+            f"{config_path}: github_watcher.resolved_replay_days must be >= 0 "
+            f"(got {resolved_replay_days})"
+        )
+
     return GitHubWatcherConfig(
         enabled=enabled,
         poll_interval_seconds=poll_interval,
         coord_doc_path=coord_doc_raw,
+        resolved_replay_days=resolved_replay_days,
     )
 
 

@@ -243,30 +243,45 @@ async def _reconcile_existing(
     """
     # Reopen detection reads the snapshot before drift sync mutates it.
     prior_snapshot = task.metadata.get("github_state_snapshot")
-    if (
+    reopen_fired = (
         task.status in ("completed", "cancelled")
         and issue.state == "open"
         and prior_snapshot != "open"
-    ):
+    )
+    # When reopen fires and the finding_post fails (transient Lithos
+    # error, MCP outage) we must NOT let drift sync advance
+    # github_state_snapshot to "open" — otherwise the next poll's
+    # ``prior_snapshot != "open"`` guard short-circuits and the finding
+    # is silently lost (PR-review finding 4, 2026-05-30). Default to
+    # "snapshot may advance"; only veto when the finding actually fails.
+    freeze_snapshot = False
+    if reopen_fired:
         ctx.logger.info(
             "github-issue-sync: reopen detected on %s/#%d (task %s)",
             issue.repo,
             issue.number,
             task.id,
         )
-        await _safe_call(
-            ctx,
-            ctx.lithos.finding_post(
+        try:
+            await ctx.lithos.finding_post(
                 task_id=task.id,
                 summary=(
                     f"[ReopenRequested] GH issue {issue.repo}#{issue.number} reopened"
                 ),
                 agent=ctx.agent_id,
-            ),
-            describe=f"post ReopenRequested finding for {task.id}",
-        )
+            )
+        except (LithosClientError, OSError) as exc:
+            ctx.logger.warning(
+                "[Friction] github-issue-sync: ReopenRequested finding_post for %s "
+                "failed (%s); leaving github_state_snapshot=%r so the next poll "
+                "retries",
+                task.id,
+                exc,
+                prior_snapshot,
+            )
+            freeze_snapshot = True
 
-    await _sync_drift(issue, task, ctx)
+    await _sync_drift(issue, task, ctx, freeze_state_snapshot=freeze_snapshot)
 
     if issue.state != "closed":
         return
@@ -326,13 +341,23 @@ async def _reconcile_existing(
 
 
 async def _sync_drift(
-    issue: _ParsedIssue, task: Task, ctx: SubscriptionContext
+    issue: _ParsedIssue,
+    task: Task,
+    ctx: SubscriptionContext,
+    *,
+    freeze_state_snapshot: bool = False,
 ) -> None:
     """Mirror GH-side drift (title / body / labels) into Lithos.
 
     Build a single merged ``task_update`` payload to keep steady-state
     polls cheap. The state-snapshot field rides on the same write so the
     reopen-finding de-dupe stays consistent without an extra round-trip.
+
+    ``freeze_state_snapshot=True`` is set by ``_reconcile_existing`` only
+    when a reopen finding_post just failed: holding the snapshot at its
+    prior value (typically ``"closed"``) keeps the next poll's
+    closed-to-open guard true, so the finding gets retried instead of
+    permanently de-duped against a stale snapshot bump.
     """
     updates: dict[str, Any] = {}
     metadata_updates: dict[str, Any] = {}
@@ -356,7 +381,10 @@ async def _sync_drift(
             updates["tags"] = new_tags
         metadata_updates["github_labels"] = new_labels
 
-    if task.metadata.get("github_state_snapshot") != issue.state:
+    if (
+        not freeze_state_snapshot
+        and task.metadata.get("github_state_snapshot") != issue.state
+    ):
         metadata_updates["github_state_snapshot"] = issue.state
 
     if metadata_updates:

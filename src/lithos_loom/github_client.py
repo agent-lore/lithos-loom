@@ -246,10 +246,43 @@ class GitHubClient:
         absolute and carry their own query string, so they bypass the
         ``base_url`` + ``path`` concatenation.
         """
+        return await self._request_with_rate_limit_retry(
+            "GET", url, params=params, json=None
+        )
+
+    async def _patch(self, path: str, *, json: dict[str, Any]) -> httpx.Response:
+        url = f"{self.base_url}{path}"
+        return await self._request_with_rate_limit_retry(
+            "PATCH", url, params=None, json=json
+        )
+
+    async def _request_with_rate_limit_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None,
+        json: dict[str, Any] | None,
+    ) -> httpx.Response:
+        """Issue a request, sleeping until ``X-RateLimit-Reset`` on 403+remaining=0.
+
+        Shared by GET (issue listing, single-issue fetch) and PATCH
+        (marker write, title update, close mirror) because PRD #70
+        requires graceful backoff for *all* GitHub operations — the
+        earlier code only retried GETs and converted rate-limited
+        PATCHes into dropped auth-style failures (PR-review finding 5,
+        2026-05-30).
+        """
         attempts = 0
         while True:
             attempts += 1
-            response = await self.http.get(url, params=params, headers=self._headers())
+            response = await self.http.request(
+                method,
+                url,
+                params=params,
+                json=json,
+                headers=self._headers(),
+            )
             if response.status_code != 403:
                 return response
             # 403 is overloaded: rate-limit signal vs permission-denied. Distinguish
@@ -259,10 +292,6 @@ class GitHubClient:
             if attempts > self._max_rate_limit_retries:
                 raise GitHubRateLimitError(f"rate limit retries exhausted for {url}")
             await _wait_for_rate_limit_reset(response)
-
-    async def _patch(self, path: str, *, json: dict[str, Any]) -> httpx.Response:
-        url = f"{self.base_url}{path}"
-        return await self.http.patch(url, json=json, headers=self._headers())
 
     async def list_issues_since(
         self,

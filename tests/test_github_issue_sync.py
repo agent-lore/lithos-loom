@@ -762,6 +762,43 @@ async def test_reopen_with_snapshot_already_open_does_not_repost() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reopen_finding_failure_does_not_advance_state_snapshot() -> None:
+    """PR-review finding 4 (2026-05-30): a transient finding_post failure
+    must NOT update github_state_snapshot, otherwise the next poll's
+    closed-to-open guard short-circuits and the finding is permanently
+    de-duped against a snapshot bump that wasn't earned.
+    """
+    lithos = _stub_lithos()
+    existing = _task(
+        status="completed",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "closed",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    lithos.finding_post = AsyncMock(
+        side_effect=LithosClientError("transport_error", "MCP outage")
+    )
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(body="b\n<!-- lithos:task-123 -->", state="open"),
+        _ctx(lithos),
+    )
+    # Finding was attempted...
+    lithos.finding_post.assert_awaited_once()
+    # ...and any drift sync that fired did NOT include a snapshot bump,
+    # so the next poll's reopen guard still fires.
+    if lithos.task_update.await_count > 0:
+        kwargs = lithos.task_update.await_args.kwargs
+        metadata = kwargs.get("metadata", {})
+        assert "github_state_snapshot" not in metadata, (
+            "snapshot must stay at 'closed' when finding_post failed"
+        )
+
+
+@pytest.mark.asyncio
 async def test_reopen_on_legacy_task_without_snapshot_fires_finding() -> None:
     """A 7.1-era task has no github_state_snapshot yet. Treat missing as 'unknown'
     and fire the finding on first detection of completed+gh.open."""

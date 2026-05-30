@@ -24,6 +24,7 @@ import logging
 import signal
 import sys
 from collections.abc import Sequence
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -140,16 +141,27 @@ async def _amain(cfg: LoomConfig) -> int:
                 events_url=events_url,
             )
 
-            # LithosEventStream is the Slice 7.2 push half: it surfaces
+            # LithosEventStream is the push half: it surfaces
             # task.{completed,cancelled,updated} onto the in-process bus
             # so the push handler can mirror those into the linked GH
-            # issue. No bootstrap_resolved_window — terminal events that
-            # fire during daemon downtime are reconciled by the
-            # GH→Lithos polling path on next start, not replayed here.
+            # issue. Replay recently-resolved tasks at bootstrap so a
+            # Lithos task that closed (or got renamed) while the watcher
+            # was down still gets mirrored to GH on restart. The GH→Lithos
+            # polling direction is one-way (it can detect a Lithos task
+            # gone terminal but doesn't itself close the GH issue — it
+            # only posts a [ReopenRequested] finding on the reverse). The
+            # push handler is idempotent (refetches before PATCH), so a
+            # too-large window only costs harmless re-checks.
+            replay_window = (
+                timedelta(days=gh_cfg.resolved_replay_days)
+                if gh_cfg.resolved_replay_days > 0
+                else None
+            )
             event_stream = LithosEventStream(
                 client=lithos,
                 bus=bus,
                 events_url=events_url,
+                bootstrap_resolved_window=replay_window,
             )
 
             ctx = SubscriptionContext(

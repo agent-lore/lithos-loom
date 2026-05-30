@@ -286,12 +286,11 @@ async def test_poll_one_repo_publishes_issue_events() -> None:
     assert event.payload["slug"] == "lithos-loom"
     assert event.payload["repo"] == "agent-lore/lithos-loom"
     assert event.payload["number"] == 42
-    # Cursor advanced PAST the issue's updated_at (GitHub's `since` is
-    # inclusive, so the next poll would re-fetch the boundary issue
-    # forever without the +1s nudge).
-    assert watcher._cursors["agent-lore/lithos-loom"] == issue.updated_at + timedelta(
-        seconds=1
-    )
+    # Cursor sits exactly at the boundary issue's updated_at; the +1s
+    # nudge that used to live here was removed because it silently
+    # dropped same-second sibling updates (PR-review finding 3,
+    # 2026-05-30). Idempotent replay is the safer tradeoff.
+    assert watcher._cursors["agent-lore/lithos-loom"] == issue.updated_at
 
 
 @pytest.mark.asyncio
@@ -376,21 +375,22 @@ async def test_poll_one_repo_advances_cursor_to_latest_when_multiple_issues() ->
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
 
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
-    # Cursor is max(updated_at) + 1s; see _CURSOR_ADVANCE rationale.
-    assert watcher._cursors["agent-lore/lithos-loom"] == late.updated_at + timedelta(
-        seconds=1
-    )
+    # PR-review finding 3 (2026-05-30): cursor is exactly max(updated_at).
+    # The earlier +1s nudge silently dropped any *other* issue updated
+    # within the same wall second; correctness beats one extra idempotent
+    # task_list call.
+    assert watcher._cursors["agent-lore/lithos-loom"] == late.updated_at
 
 
 @pytest.mark.asyncio
-async def test_poll_one_repo_cursor_advances_past_boundary_to_break_replay_loop() -> (
-    None
-):
-    """Soak 2026-05-29: GitHub's `since=` filter is inclusive, so
-    persisting the exact observed-max ``updated_at`` re-fetched the
-    same boundary issue every poll forever (visible in the soak log as
-    ``cursor T → T``). The cursor advance must move strictly past the
-    boundary so a second poll with no new activity returns nothing.
+async def test_poll_one_repo_boundary_replay_is_accepted() -> None:
+    """The cursor is held at the boundary timestamp rather than nudged
+    past it. PR-review finding 3 (2026-05-30): the earlier +1s nudge
+    avoided a single idempotent re-fetch but dropped same-second sibling
+    updates outright. Same-second drops are a correctness failure for an
+    inbound mirror; idempotent replay is not. The handler short-circuits
+    on the marker → open-task path so the cost is at most one extra
+    Lithos round-trip per repo per poll.
     """
     bus = EventBus()
     bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
@@ -400,17 +400,13 @@ async def test_poll_one_repo_cursor_advances_past_boundary_to_break_replay_loop(
     github = _fake_github_client()
     github.list_issues_since = AsyncMock(return_value=[boundary])
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
-    # Cursor sits exactly at the boundary issue's updated_at — replays
-    # the exact state the soak log showed.
     watcher._cursors["agent-lore/lithos-loom"] = boundary.updated_at
 
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
 
-    # Cursor moved strictly past the boundary — next poll's since=
-    # would no longer pull the boundary issue back.
-    assert watcher._cursors["agent-lore/lithos-loom"] > boundary.updated_at, (
-        "cursor must advance past the boundary to break the inclusive-since replay loop"
-    )
+    # Cursor stays at the boundary — same-second sibling updates still
+    # get pulled on the next poll.
+    assert watcher._cursors["agent-lore/lithos-loom"] == boundary.updated_at
 
 
 @pytest.mark.asyncio

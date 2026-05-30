@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from lithos_loom.bus import Event, EventBus, Subscription
@@ -82,18 +82,15 @@ _COORD_DOC_BODY_HEADER = (
 _BUS_QUEUE_SIZE = 256
 _MAX_COORD_DOC_CAS_ATTEMPTS = 3
 
-# GitHub's ``since=`` filter is inclusive (>=), so persisting the
-# observed-max ``updated_at`` verbatim means every subsequent poll
-# re-fetches that same boundary issue forever (the handler then no-ops
-# on the marker → open-task path, but it still costs API + Lithos
-# round-trips). One-second nudge moves the cursor past the boundary.
-# Race: an issue updated within the same wall-second AFTER our last
-# pagination completes but BEFORE we persist the cursor would be
-# missed. Acceptable for the inbound MVP — pagination drains the full
-# updated-at-asc page set per poll, so the window is small. A precise
-# fix would track the set of issue numbers seen at the boundary
-# timestamp; deferred unless soak surfaces drops.
-_CURSOR_ADVANCE = timedelta(seconds=1)
+# GitHub's ``since=`` filter is inclusive (>=). We persist the
+# observed-max ``updated_at`` verbatim and accept that the boundary
+# issue is re-fetched on the next poll: the sync handler is idempotent
+# (marker → open-task path no-ops, drift compare short-circuits) so a
+# bounded replay costs at most one extra task_list call per repo per
+# poll. The earlier ``+1 second`` nudge avoided that cost but
+# silently dropped any *other* issue updated within the same wall
+# second as the boundary — the wrong tradeoff for a correctness-
+# critical inbound mirror (PR-review finding 3).
 
 
 class WatcherLithosClient(Protocol):
@@ -584,7 +581,7 @@ class GitHubIssueWatcher:
             await self._publish_issue(slug=slug, issue=issue)
 
         if issues:
-            new_cursor = max(iss.updated_at for iss in issues) + _CURSOR_ADVANCE
+            new_cursor = max(iss.updated_at for iss in issues)
             self._cursors[repo] = new_cursor
             logger.info(
                 "github-watcher: %s — %d issue(s) %s (state=%s, cursor %s → %s)",

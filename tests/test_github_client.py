@@ -665,6 +665,58 @@ async def test_update_issue_fields_422_raises() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_patch_rate_limited_sleeps_then_retries() -> None:
+    """PR-review finding 5 (2026-05-30): PATCH used to skip the rate-limit
+    retry that GETs already had, turning a 403 + remaining=0 into a hard
+    GitHubAuthError. PRD story #70 requires graceful backoff for all
+    operations. Marker writes, title pushes, and close mirrors must all
+    sleep until X-RateLimit-Reset and retry once.
+    """
+    reset_epoch = int((datetime.now(UTC) + timedelta(seconds=30)).timestamp())
+    respx.patch("https://api.github.com/repos/x/y/issues/42").mock(
+        side_effect=[
+            httpx.Response(
+                403,
+                headers={
+                    "x-ratelimit-remaining": "0",
+                    "x-ratelimit-reset": str(reset_epoch),
+                },
+                json={"message": "rate limit"},
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "number": 42,
+                    "title": "t",
+                    "body": "b",
+                    "state": "closed",
+                    "state_reason": "completed",
+                    "labels": [],
+                    "user": {"login": "alice"},
+                    "updated_at": "2026-05-29T12:00:00Z",
+                    "html_url": "u",
+                },
+            ),
+        ]
+    )
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with patch("lithos_loom.github_client.asyncio.sleep", _fake_sleep):
+            issue = await client.update_issue_fields(
+                "x/y", 42, state="closed", state_reason="completed"
+            )
+    assert issue is not None
+    assert issue.state == "closed"
+    assert len(sleep_calls) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_update_issue_fields_404_raises_repo_not_found() -> None:
     """Issue deleted by operator → typed RepoNotFoundError so the handler skips."""
     respx.patch("https://api.github.com/repos/x/y/issues/42").mock(
