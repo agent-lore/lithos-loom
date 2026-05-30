@@ -43,6 +43,8 @@ from typing import Any, Protocol
 from lithos_loom.bus import Event, EventBus, Subscription
 from lithos_loom.cli._github_metadata import (
     GITHUB_WATCH_TAG,
+    extract_exclude_authors,
+    extract_exclude_labels,
     extract_github_repo,
 )
 from lithos_loom.errors import LithosClientError
@@ -58,10 +60,29 @@ from lithos_loom.lithos_client import Note, NoteSummary, WriteResult
 __all__ = [
     "GITHUB_ISSUE_EVENT_TYPE",
     "GitHubIssueWatcher",
+    "WatchedRepo",
     "WatcherLithosClient",
     "format_cursors",
     "parse_cursors",
 ]
+
+
+@dataclass(frozen=True)
+class WatchedRepo:
+    """Per-project watcher state derived from the project-context doc.
+
+    ``repo`` is the ``owner/name`` mapping; ``exclude_labels`` and
+    ``exclude_authors`` are the tag-derived import filters that the
+    sync handler uses to drop noise from automated issue creators
+    (dependabot, renovate) before ``task_create``. The filters are
+    immutable per refresh cycle so a concurrent watch-list rebuild
+    can't reshape them under a running poll.
+    """
+
+    repo: str
+    exclude_labels: tuple[str, ...] = ()
+    exclude_authors: tuple[str, ...] = ()
+
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +227,9 @@ class GitHubIssueWatcher:
     _sleep: Any = field(default=asyncio.sleep)
 
     # State derived at bootstrap.
-    _watch_list: dict[str, str] = field(default_factory=dict)
-    """``{slug: owner/name}`` — the repos the watcher polls.
+    _watch_list: dict[str, WatchedRepo] = field(default_factory=dict)
+    """``{slug: WatchedRepo}`` — the repos the watcher polls plus their
+    import-time exclude filters.
 
     Rebuilt at bootstrap and on every relevant bus event so an operator
     toggling ``github-watch`` on a project doc takes effect within a
@@ -261,7 +283,7 @@ class GitHubIssueWatcher:
             logger.info(
                 "github-watcher: watching %d repo(s): %s",
                 len(self._watch_list),
-                sorted(self._watch_list.values()),
+                sorted(w.repo for w in self._watch_list.values()),
             )
         else:
             logger.info(
@@ -304,7 +326,7 @@ class GitHubIssueWatcher:
             )
             return
 
-        new_list: dict[str, str] = {}
+        new_list: dict[str, WatchedRepo] = {}
         for summary in summaries:
             slug = summary.slug
             if not slug:
@@ -318,14 +340,27 @@ class GitHubIssueWatcher:
                     GITHUB_WATCH_TAG,
                 )
                 continue
-            new_list[slug] = repo
+            new_list[slug] = WatchedRepo(
+                repo=repo,
+                exclude_labels=tuple(extract_exclude_labels(summary.tags)),
+                exclude_authors=tuple(extract_exclude_authors(summary.tags)),
+            )
         added = set(new_list) - set(self._watch_list)
         removed = set(self._watch_list) - set(new_list)
-        if added or removed:
+        # Filter drift on existing slugs (e.g. operator added a new
+        # `github-exclude-label:` tag) — surface that too so it's
+        # visible at INFO when the next poll starts honouring it.
+        retagged = {
+            slug
+            for slug in new_list.keys() & self._watch_list.keys()
+            if new_list[slug] != self._watch_list[slug]
+        }
+        if added or removed or retagged:
             logger.info(
-                "github-watcher: watch list refresh — added=%s removed=%s",
+                "github-watcher: watch list refresh — added=%s removed=%s retagged=%s",
                 sorted(added),
                 sorted(removed),
+                sorted(retagged),
             )
         self._watch_list = new_list
 
@@ -522,8 +557,8 @@ class GitHubIssueWatcher:
             logger.debug("github-watcher: poll cycle skipped; watch list empty")
             return
         logger.info("github-watcher: poll cycle starting (%d repo(s))", len(items))
-        for slug, repo in items:
-            await self._poll_one_repo(slug=slug, repo=repo)
+        for slug, watched in items:
+            await self._poll_one_repo(slug=slug, repo=watched.repo)
 
     async def _poll_one_repo(self, *, slug: str, repo: str) -> None:
         """Fetch issues for one repo, emit events, advance the cursor.
@@ -601,6 +636,12 @@ class GitHubIssueWatcher:
             )
 
     async def _publish_issue(self, *, slug: str, issue: Issue) -> None:
+        watched = self._watch_list.get(slug)
+        # The slug being absent here is a defensive guard — _poll_all_repos
+        # iterates the watch list, so a race with refresh is the only way
+        # to land here. Treat as "no filters" rather than crashing.
+        exclude_labels = list(watched.exclude_labels) if watched else []
+        exclude_authors = list(watched.exclude_authors) if watched else []
         await self.bus.publish(
             Event(
                 type=GITHUB_ISSUE_EVENT_TYPE,
@@ -617,6 +658,8 @@ class GitHubIssueWatcher:
                     "author": issue.author,
                     "html_url": issue.html_url,
                     "updated_at": _isoformat(issue.updated_at),
+                    "exclude_labels": exclude_labels,
+                    "exclude_authors": exclude_authors,
                 },
             )
         )

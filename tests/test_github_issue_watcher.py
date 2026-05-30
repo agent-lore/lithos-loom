@@ -27,6 +27,7 @@ from lithos_loom.lithos_client import Note, NoteSummary, WriteResult
 from lithos_loom.sources.github_issue_watcher import (
     GITHUB_ISSUE_EVENT_TYPE,
     GitHubIssueWatcher,
+    WatchedRepo,
     format_cursors,
     parse_cursors,
 )
@@ -185,8 +186,8 @@ async def test_refresh_watch_list_picks_up_watched_projects() -> None:
     watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
     await watcher._refresh_watch_list()
     assert watcher._watch_list == {
-        "lithos-loom": "agent-lore/lithos-loom",
-        "lithos": "agent-lore/lithos",
+        "lithos-loom": WatchedRepo(repo="agent-lore/lithos-loom"),
+        "lithos": WatchedRepo(repo="agent-lore/lithos"),
     }
     # Watch-tag filter actually flows into the query.
     call = lithos.note_list.await_args
@@ -205,7 +206,7 @@ async def test_refresh_watch_list_skips_projects_without_repo_tag() -> None:
     )
     watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
     await watcher._refresh_watch_list()
-    assert watcher._watch_list == {"lithos": "agent-lore/lithos"}
+    assert watcher._watch_list == {"lithos": WatchedRepo(repo="agent-lore/lithos")}
 
 
 @pytest.mark.asyncio
@@ -218,12 +219,16 @@ async def test_refresh_watch_list_preserves_state_on_transport_failure() -> None
     )
     watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
     await watcher._refresh_watch_list()
-    assert watcher._watch_list == {"lithos-loom": "agent-lore/lithos-loom"}
+    assert watcher._watch_list == {
+        "lithos-loom": WatchedRepo(repo="agent-lore/lithos-loom")
+    }
     # Second call raises transport error.
     lithos.note_list.side_effect = OSError("connection refused")
     await watcher._refresh_watch_list()
     # State preserved.
-    assert watcher._watch_list == {"lithos-loom": "agent-lore/lithos-loom"}
+    assert watcher._watch_list == {
+        "lithos-loom": WatchedRepo(repo="agent-lore/lithos-loom")
+    }
 
 
 # ── _load_cursors_from_coord_doc ──────────────────────────────────────
@@ -276,7 +281,7 @@ async def test_poll_one_repo_publishes_issue_events() -> None:
     github = _fake_github_client()
     github.list_issues_since = AsyncMock(return_value=[issue])
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
-    watcher._watch_list = {"lithos-loom": "agent-lore/lithos-loom"}
+    watcher._watch_list = {"lithos-loom": WatchedRepo(repo="agent-lore/lithos-loom")}
 
     await watcher._poll_one_repo(slug="lithos-loom", repo="agent-lore/lithos-loom")
 
@@ -435,8 +440,8 @@ async def test_poll_one_repo_drops_repo_on_404() -> None:
     bus = EventBus()
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
     watcher._watch_list = {
-        "ghost": "missing/repo",
-        "real": "agent-lore/lithos-loom",
+        "ghost": WatchedRepo(repo="missing/repo"),
+        "real": WatchedRepo(repo="agent-lore/lithos-loom"),
     }
     watcher._cursors["missing/repo"] = datetime(2026, 5, 28, tzinfo=UTC)
 
@@ -822,7 +827,7 @@ async def test_bootstrap_loads_watch_list_and_subscribes_bus() -> None:
     )
     watcher = _make_watcher(github=_fake_github_client(), lithos=lithos, bus=bus)
     await watcher._bootstrap()
-    assert watcher._watch_list == {"x": "agent-lore/x"}
+    assert watcher._watch_list == {"x": WatchedRepo(repo="agent-lore/x")}
     assert watcher._coord_doc_subscription is not None
     # Subscribed to lithos.note.* events.
     assert watcher._coord_doc_subscription.event_types == frozenset(
@@ -988,8 +993,8 @@ async def test_poll_all_repos_iterates_watch_list() -> None:
     github.list_issues_since = AsyncMock(side_effect=fake_list)
     watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
     watcher._watch_list = {
-        "a": "owner/a",
-        "b": "owner/b",
+        "a": WatchedRepo(repo="owner/a"),
+        "b": WatchedRepo(repo="owner/b"),
     }
 
     await watcher._poll_all_repos()
@@ -1034,7 +1039,7 @@ async def test_poll_loop_persists_cursors_after_pass() -> None:
 
     watcher = _make_watcher(github=github, lithos=lithos, bus=bus)
     watcher._sleep = fake_sleep
-    watcher._watch_list = {"a": "owner/a"}
+    watcher._watch_list = {"a": WatchedRepo(repo="owner/a")}
 
     with pytest.raises(StopAsyncIteration):
         await watcher._poll_loop()
@@ -1074,7 +1079,7 @@ async def test_poll_loop_backs_off_on_exception() -> None:
     # Force a crash inside the poll pass.
     lithos.note_write.side_effect = RuntimeError("boom")
     watcher = _make_watcher(github=github, lithos=lithos, bus=bus)
-    watcher._watch_list = {"a": "owner/a"}
+    watcher._watch_list = {"a": WatchedRepo(repo="owner/a")}
     watcher._cursors = {"owner/a": datetime(2026, 5, 29, tzinfo=UTC)}
 
     sleep_calls: list[float] = []

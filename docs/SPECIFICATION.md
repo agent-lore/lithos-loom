@@ -128,6 +128,13 @@ Other `result.json` fields (`metadata_updates`, `artifacts`, `commits`, `spawned
 - No marker, no matching task, GH open: `lithos_task_create` with `title=issue.title`, `description=issue.body`, `tags=issue.labels + ["github-issue"]`, `metadata={project, github_issue_url, github_issue_number, github_labels, github_state_snapshot=issue.state}`. Then write the canonical `<!-- lithos:<task_id> -->` marker into the issue body via `PATCH /repos/{owner}/{repo}/issues/{n}` — fetched fresh via `get_issue` immediately before the PATCH so an operator edit during the poll-to-PATCH window survives.
 - No marker, no matching task, GH closed: skip (historic closures are not backfilled).
 
+**Per-project exclude filters.** The watcher ships each event with the project's import-time filters, sourced from these tag conventions on the project-context doc:
+
+- `github-exclude-label:<name>` — drop the issue at import time if it carries this label.
+- `github-exclude-author:<login>` — drop if the GH author login matches (e.g. `dependabot[bot]`).
+
+Filters apply only on the create branch (no marker + no matching URL + GH open). Already-linked tasks are unaffected if an exclude tag is added after import — the PRD explicitly locks "exclude is only at import time" so the operator never has a once-imported task quietly stranded.
+
 **Drift sync** (GH → Lithos, Slice 7.2). Every poll that matches a known Lithos task layers three checks on top of the close mirror:
 
 - **Title drift** — `issue.title != task.title` → `task_update(title=issue.title)`.

@@ -10,6 +10,11 @@ doc (`projects/<slug>/<slug>-project-context.md`):
   fixable.
 - **`github-watch`** — presence enables the watcher's polling for the
   project. Removing it pauses watching without losing the repo mapping.
+- **`github-exclude-label:<name>`** (zero or more) — drop matching
+  issues at import time. Edit the tag list directly via MCP / Lithos to
+  add or remove these; no dedicated CLI command yet.
+- **`github-exclude-author:<login>`** (zero or more) — same shape;
+  drop issues opened by these GitHub logins (e.g. `dependabot[bot]`).
 
 The host-side watcher subprocess is gated separately by
 `[github_watcher].enabled` in TOML; the CLI does not start or stop the

@@ -39,6 +39,9 @@ def _event(
     labels: list[str] | None = None,
     slug: str = "lithos-loom",
     html_url: str = "https://github.com/agent-lore/lithos-loom/issues/42",
+    author: str = "alice",
+    exclude_labels: list[str] | None = None,
+    exclude_authors: list[str] | None = None,
 ) -> Event:
     return Event(
         type=EVENT_TYPE,
@@ -52,9 +55,11 @@ def _event(
             "state": state,
             "state_reason": state_reason,
             "labels": labels or ["bug"],
-            "author": "alice",
+            "author": author,
             "html_url": html_url,
             "updated_at": "2026-05-29T12:00:00+00:00",
+            "exclude_labels": exclude_labels or [],
+            "exclude_authors": exclude_authors or [],
         },
     )
 
@@ -497,6 +502,88 @@ async def test_marker_write_falls_back_to_event_body_when_refetch_fails() -> Non
     body_written = github.update_issue_body.await_args.args[2]
     assert "from poll event" in body_written
     assert "<!-- lithos:task-x -->" in body_written
+
+
+# ── Exclude filters (PRD story #64) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_excluded_label_skips_task_create() -> None:
+    """PR-review finding 6 (2026-05-30): a new issue carrying a project-
+    excluded label is dropped at import time before task_create."""
+    lithos = _stub_lithos()
+    github = _stub_github()
+    handler = make_handler(github)
+    await handler(
+        _event(
+            body="no marker",
+            labels=["automated", "bug"],
+            exclude_labels=["automated"],
+        ),
+        _ctx(lithos),
+    )
+    lithos.task_create.assert_not_awaited()
+    github.update_issue_body.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_excluded_author_skips_task_create() -> None:
+    """Dependabot-style automated issues are dropped at import time by
+    matching the GH author login against the project's exclude list."""
+    lithos = _stub_lithos()
+    github = _stub_github()
+    handler = make_handler(github)
+    await handler(
+        _event(
+            body="no marker",
+            author="dependabot[bot]",
+            exclude_authors=["dependabot[bot]"],
+        ),
+        _ctx(lithos),
+    )
+    lithos.task_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exclude_filter_does_not_block_already_linked_task() -> None:
+    """PRD: exclude is *only* at import time. An issue that was already
+    imported, then later had an excluded label added, must still drift-
+    sync (and close-mirror) — we don't strand the existing task."""
+    lithos = _stub_lithos()
+    existing = _task(
+        task_id="task-old",
+        status="open",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    await handler(
+        _event(
+            body="text\n<!-- lithos:task-old -->",
+            labels=["automated", "bug"],
+            exclude_labels=["automated"],
+        ),
+        _ctx(lithos),
+    )
+    # Drift still fires; the task is not abandoned.
+    lithos.task_update.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_exclude_filter_proceeds_as_normal() -> None:
+    """Sanity: an empty exclude list does not block the create path."""
+    lithos = _stub_lithos()
+    github = _stub_github()
+    handler = make_handler(github)
+    await handler(
+        _event(body="no marker", labels=["bug"]),
+        _ctx(lithos),
+    )
+    lithos.task_create.assert_awaited_once()
 
 
 # ── Slice 7.2: GH→Lithos drift sync ───────────────────────────────────

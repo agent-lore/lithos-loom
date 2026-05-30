@@ -25,14 +25,16 @@ State on the Lithos task:
       project: <slug>,
       github_issue_url: <url>,
       github_issue_number: N,
-      github_labels: [<labels>],  # snapshotted for future drift sync
+      github_labels: [<labels>],            # snapshotted for drift sync
+      github_state_snapshot: <issue.state>, # snapshotted for reopen dedup
     }
 
 The exclude-filter knobs (``github_issue_exclude_labels`` /
-``..._authors``) from the PRD are deferred to Slice 7.2 alongside the
-label-drift sync — their storage shape (tag-name escaping for labels
-containing colons / brackets) is non-trivial and isn't blocking the
-inbound-mirror MVP.
+``..._authors``) are sourced from per-project tag prefixes
+(``github-exclude-label:<name>`` / ``github-exclude-author:<login>``)
+and shipped on every event payload by the watcher. The handler applies
+them only at import time — already-linked tasks survive an after-the-
+fact filter add (PRD: "exclude is only at import time").
 """
 
 from __future__ import annotations
@@ -104,6 +106,8 @@ class _ParsedIssue:
     __slots__ = (
         "author",
         "body",
+        "exclude_authors",
+        "exclude_labels",
         "html_url",
         "labels",
         "number",
@@ -127,6 +131,8 @@ class _ParsedIssue:
         labels: list[str],
         author: str,
         html_url: str,
+        exclude_labels: list[str] | None = None,
+        exclude_authors: list[str] | None = None,
     ) -> None:
         self.slug = slug
         self.repo = repo
@@ -138,6 +144,8 @@ class _ParsedIssue:
         self.labels = labels
         self.author = author
         self.html_url = html_url
+        self.exclude_labels = exclude_labels or []
+        self.exclude_authors = exclude_authors or []
 
     @classmethod
     def from_payload(cls, payload: Any) -> _ParsedIssue | None:
@@ -153,6 +161,8 @@ class _ParsedIssue:
                 labels=list(payload.get("labels") or ()),
                 author=str(payload.get("author") or ""),
                 html_url=str(payload["html_url"]),
+                exclude_labels=list(payload.get("exclude_labels") or ()),
+                exclude_authors=list(payload.get("exclude_authors") or ()),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -218,7 +228,35 @@ async def _reconcile(
         )
         return
 
+    # Apply per-project exclude filters at import time only. Already-linked
+    # tasks (marker present, or matching URL above) bypass the filter — the
+    # PRD locks "exclude is only at import time".
+    excluded_reason = _matched_exclude_filter(issue)
+    if excluded_reason is not None:
+        ctx.logger.info(
+            "github-issue-sync: skipping %s/#%d on import (%s)",
+            issue.repo,
+            issue.number,
+            excluded_reason,
+        )
+        return
+
     await _create_task_and_mark(issue, ctx, github)
+
+
+def _matched_exclude_filter(issue: _ParsedIssue) -> str | None:
+    """Return a human-readable reason if ``issue`` matches a project filter.
+
+    Returns ``None`` when no filter matches (the create path proceeds).
+    Author check beats label check so the log line names the more
+    specific signal when both fire (e.g. dependabot AND label 'automated').
+    """
+    if issue.author and issue.author in issue.exclude_authors:
+        return f"excluded author {issue.author!r}"
+    matched_labels = [lbl for lbl in issue.labels if lbl in issue.exclude_labels]
+    if matched_labels:
+        return f"excluded label(s) {matched_labels!r}"
+    return None
 
 
 async def _reconcile_existing(
