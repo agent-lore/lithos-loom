@@ -36,10 +36,20 @@ __all__ = ["EVENT_TYPES", "make_handler"]
 logger = logging.getLogger(__name__)
 
 EVENT_TYPES: tuple[str, ...] = (
+    "lithos.task.created",
     "lithos.task.completed",
     "lithos.task.cancelled",
     "lithos.task.updated",
 )
+"""Bus event types this handler consumes.
+
+PR-review finding 4 (round 3, 2026-05-30) added ``lithos.task.created``:
+when the daemon restarts, ``LithosEventStream`` replays the open-task
+snapshot as ``task.created`` events. A title that was renamed on the
+Lithos side while the watcher was down only surfaces there — without
+this entry the rename would be overwritten by the next GH→Lithos poll.
+The handler treats ``created`` exactly like ``updated`` for the title
+branch (compare, PATCH GH on drift)."""
 
 
 def make_handler(github: GitHubClient) -> Handler:
@@ -75,7 +85,8 @@ def make_handler(github: GitHubClient) -> Handler:
 
         if event.type in ("lithos.task.completed", "lithos.task.cancelled"):
             await _mirror_close(event, payload, repo, number, github, ctx)
-        elif event.type == "lithos.task.updated":
+        elif event.type in ("lithos.task.updated", "lithos.task.created"):
+            # ``created`` is bootstrap replay — same title-compare logic.
             await _mirror_title(payload, repo, number, github, ctx)
 
     return handle

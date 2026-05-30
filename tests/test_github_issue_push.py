@@ -250,6 +250,34 @@ async def test_malformed_url_in_metadata_is_skipped() -> None:
 @pytest.mark.asyncio
 async def test_event_types_constant_exposed() -> None:
     """The child wires its bus subscription against EVENT_TYPES."""
+    assert "lithos.task.created" in EVENT_TYPES
     assert "lithos.task.completed" in EVENT_TYPES
     assert "lithos.task.cancelled" in EVENT_TYPES
     assert "lithos.task.updated" in EVENT_TYPES
+
+
+@pytest.mark.asyncio
+async def test_created_event_with_title_drift_patches_gh() -> None:
+    """PR-review finding 4 (round 3, 2026-05-30): bootstrap replays the
+    open-task snapshot as ``lithos.task.created``. If a Lithos title was
+    renamed while the watcher was down, that rename only surfaces on
+    restart via this event type — the push handler must mirror it to
+    GH so the next inbound poll doesn't overwrite the Lithos rename.
+    """
+    github = _stub_github(issue=_issue(title="old title"))
+    handler = make_handler(github)
+    payload = _payload(title="new title", status="open")
+    await handler(_event("lithos.task.created", payload), _ctx())
+    github.update_issue_fields.assert_awaited_once_with(
+        "agent-lore/lithos-loom", 42, title="new title"
+    )
+
+
+@pytest.mark.asyncio
+async def test_created_event_with_no_title_drift_is_noop() -> None:
+    """Steady-state bootstrap replay: open task title matches GH → no PATCH."""
+    github = _stub_github(issue=_issue(title="same title"))
+    handler = make_handler(github)
+    payload = _payload(title="same title", status="open")
+    await handler(_event("lithos.task.created", payload), _ctx())
+    github.update_issue_fields.assert_not_awaited()

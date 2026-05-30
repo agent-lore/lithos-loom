@@ -373,6 +373,31 @@ class GitHubIssueWatcher:
                 sorted(removed),
                 sorted(retagged),
             )
+        # PR-review finding 5 (round 3, 2026-05-30): when a slug's filter
+        # set changes the cursor for its repo must be reset, otherwise
+        # previously-skipped issues (whose ``updated_at`` is older than
+        # the cursor) stay invisible until somebody edits them on
+        # GitHub. Relaxing an exclude tag should immediately surface
+        # the matching open issues. We drop cursors for both retagged
+        # AND removed slugs (a re-add would otherwise resume from the
+        # last cursor and miss issues the operator excluded then
+        # re-enabled). Idempotent: the handler short-circuits on
+        # already-linked tasks via marker / URL match, so the
+        # full-rewalk cost is at most one task_get + one URL search
+        # per issue.
+        cursor_reset_repos: set[str] = set()
+        for slug in retagged:
+            cursor_reset_repos.add(new_list[slug].repo)
+        for slug in removed:
+            cursor_reset_repos.add(self._watch_list[slug].repo)
+        for repo in cursor_reset_repos:
+            if repo in self._cursors:
+                logger.info(
+                    "github-watcher: resetting cursor for %s after filter change "
+                    "so re-included issues surface",
+                    repo,
+                )
+                self._cursors.pop(repo, None)
         self._watch_list = new_list
 
     # ── Coord doc cursors ─────────────────────────────────────────────

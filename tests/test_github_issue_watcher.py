@@ -81,12 +81,23 @@ def test_parse_cursors_accepts_z_suffix() -> None:
 # ── Test plumbing ─────────────────────────────────────────────────────
 
 
-def _summary(*, slug: str, repo: str | None, watching: bool) -> NoteSummary:
+def _summary(
+    *,
+    slug: str,
+    repo: str | None,
+    watching: bool,
+    exclude_labels: tuple[str, ...] = (),
+    exclude_authors: tuple[str, ...] = (),
+) -> NoteSummary:
     tags: list[str] = ["project-context"]
     if repo is not None:
         tags.append(f"{GITHUB_REPO_TAG_PREFIX}{repo}")
     if watching:
         tags.append(GITHUB_WATCH_TAG)
+    for label in exclude_labels:
+        tags.append(f"github-exclude-label:{label}")
+    for author in exclude_authors:
+        tags.append(f"github-exclude-author:{author}")
     return NoteSummary(
         id=f"doc-{slug}",
         title=slug.title(),
@@ -209,6 +220,67 @@ async def test_refresh_watch_list_skips_projects_without_repo_tag() -> None:
     watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
     await watcher._refresh_watch_list()
     assert watcher._watch_list == {"lithos": WatchedRepo(repo="agent-lore/lithos")}
+
+
+@pytest.mark.asyncio
+async def test_refresh_resets_cursor_when_exclude_filter_changes() -> None:
+    """PR-review finding 5 (round 3, 2026-05-30): when the operator
+    relaxes a ``github-exclude-label:`` tag, the watcher must drop the
+    repo cursor so previously-skipped issues re-surface. Otherwise the
+    cursor sits past their ``updated_at`` and the next poll won't see
+    them until someone edits them on GitHub.
+    """
+    lithos = _fake_lithos_client(
+        note_list_return=[
+            _summary(
+                slug="lithos-loom",
+                repo="agent-lore/lithos-loom",
+                watching=True,
+                exclude_labels=("automated",),
+            )
+        ]
+    )
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
+    await watcher._refresh_watch_list()
+    # Watcher polled for a while; cursor is set.
+    watcher._cursors["agent-lore/lithos-loom"] = datetime(2026, 5, 29, tzinfo=UTC)
+
+    # Operator removes the exclude tag.
+    lithos.note_list = AsyncMock(
+        return_value=[
+            _summary(
+                slug="lithos-loom",
+                repo="agent-lore/lithos-loom",
+                watching=True,
+                exclude_labels=(),
+            )
+        ]
+    )
+    await watcher._refresh_watch_list()
+
+    # Cursor reset — next poll bootstrap-walks open issues so the
+    # previously-excluded ones surface.
+    assert "agent-lore/lithos-loom" not in watcher._cursors
+
+
+@pytest.mark.asyncio
+async def test_refresh_resets_cursor_when_repo_unwatched_and_rewatched() -> None:
+    """Removing the watch enrolment and re-adding it later must not
+    silently resume from the stale cursor — operator might have meant
+    a clean re-bootstrap."""
+    lithos = _fake_lithos_client(
+        note_list_return=[
+            _summary(slug="lithos-loom", repo="agent-lore/lithos-loom", watching=True)
+        ]
+    )
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
+    await watcher._refresh_watch_list()
+    watcher._cursors["agent-lore/lithos-loom"] = datetime(2026, 5, 29, tzinfo=UTC)
+
+    # Disable watching.
+    lithos.note_list = AsyncMock(return_value=[])
+    await watcher._refresh_watch_list()
+    assert "agent-lore/lithos-loom" not in watcher._cursors
 
 
 @pytest.mark.asyncio
