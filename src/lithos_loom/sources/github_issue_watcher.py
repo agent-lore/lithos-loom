@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -219,6 +220,16 @@ class GitHubIssueWatcher:
     poll_interval_seconds: int
     coord_doc_path: str
     agent_id: str
+    # Inline dispatcher for the GH→Lithos sync handler. When set, the
+    # watcher calls it per issue and ties cursor advancement to the
+    # dispatcher's success — see ``_poll_one_repo`` and PR-review
+    # finding 1 (2026-05-30). When ``None`` the watcher falls back to
+    # publishing on the bus only (legacy path, used by tests that assert
+    # on queue contents). Production wiring always injects a real
+    # dispatcher; without one, a cursor advance gets out ahead of any
+    # downstream reconciliation and dropped-queue events strand
+    # permanently.
+    dispatch: Callable[[Event], Awaitable[None]] | None = None
     # Backoff used after a polling-loop iteration that raised. Mirrors
     # :class:`LithosNoteStream` shape.
     reconnect_backoff_seconds: float = 1.0
@@ -612,12 +623,34 @@ class GitHubIssueWatcher:
             return
 
         prior_cursor = since
+        # GitHub returns issues sorted by ``updated_at`` ascending
+        # (``sort=updated&direction=asc`` in list_issues_since). Walk in
+        # order so a mid-batch dispatch failure leaves the cursor at the
+        # latest *successfully reconciled* issue rather than skipping
+        # ahead — PR-review finding 1 (2026-05-30) was that the prior
+        # max-after-the-loop pattern allowed bus drops AND handler
+        # failures to permanently strand events.
+        max_committed: datetime | None = None
+        dispatch_failed_at: datetime | None = None
         for issue in issues:
-            await self._publish_issue(slug=slug, issue=issue)
+            try:
+                await self._publish_issue(slug=slug, issue=issue)
+            except Exception as exc:
+                dispatch_failed_at = issue.updated_at
+                logger.warning(
+                    "[Friction] github-watcher: dispatch for %s/#%d failed "
+                    "(%s: %s); holding cursor at %s so the next poll retries",
+                    repo,
+                    issue.number,
+                    type(exc).__name__,
+                    exc,
+                    _isoformat(max_committed) if max_committed else "<unchanged>",
+                )
+                break
+            max_committed = issue.updated_at
 
-        if issues:
-            new_cursor = max(iss.updated_at for iss in issues)
-            self._cursors[repo] = new_cursor
+        if max_committed is not None:
+            self._cursors[repo] = max_committed
             logger.info(
                 "github-watcher: %s — %d issue(s) %s (state=%s, cursor %s → %s)",
                 repo,
@@ -625,7 +658,16 @@ class GitHubIssueWatcher:
                 "bootstrapped" if prior_cursor is None else "delta",
                 state,
                 _isoformat(prior_cursor) if prior_cursor is not None else "<first-run>",
-                _isoformat(new_cursor),
+                _isoformat(max_committed),
+            )
+        elif issues and dispatch_failed_at is not None:
+            # First issue failed — cursor unchanged so the next poll
+            # re-fetches and retries.
+            logger.info(
+                "github-watcher: %s — first dispatch failed at %s; "
+                "cursor unchanged (will retry next poll)",
+                repo,
+                _isoformat(dispatch_failed_at),
             )
         else:
             logger.info(
@@ -636,30 +678,41 @@ class GitHubIssueWatcher:
             )
 
     async def _publish_issue(self, *, slug: str, issue: Issue) -> None:
+        """Build the event for ``issue`` and dispatch.
+
+        When :attr:`dispatch` is injected (production), call it inline
+        and propagate any exception so the caller can hold the cursor at
+        the prior successful issue. When ``None`` (legacy / tests that
+        assert on bus queue contents), publish onto the in-process bus
+        which silently drops on queue-full — *not* a path the production
+        wiring should rely on for correctness.
+        """
         watched = self._watch_list.get(slug)
         # The slug being absent here is a defensive guard — _poll_all_repos
         # iterates the watch list, so a race with refresh is the only way
         # to land here. Treat as "no filters" rather than crashing.
         exclude_labels = list(watched.exclude_labels) if watched else []
         exclude_authors = list(watched.exclude_authors) if watched else []
-        await self.bus.publish(
-            Event(
-                type=GITHUB_ISSUE_EVENT_TYPE,
-                timestamp=issue.updated_at,
-                payload={
-                    "slug": slug,
-                    "repo": issue.repo,
-                    "number": issue.number,
-                    "title": issue.title,
-                    "body": issue.body,
-                    "state": issue.state,
-                    "state_reason": issue.state_reason,
-                    "labels": list(issue.labels),
-                    "author": issue.author,
-                    "html_url": issue.html_url,
-                    "updated_at": _isoformat(issue.updated_at),
-                    "exclude_labels": exclude_labels,
-                    "exclude_authors": exclude_authors,
-                },
-            )
+        event = Event(
+            type=GITHUB_ISSUE_EVENT_TYPE,
+            timestamp=issue.updated_at,
+            payload={
+                "slug": slug,
+                "repo": issue.repo,
+                "number": issue.number,
+                "title": issue.title,
+                "body": issue.body,
+                "state": issue.state,
+                "state_reason": issue.state_reason,
+                "labels": list(issue.labels),
+                "author": issue.author,
+                "html_url": issue.html_url,
+                "updated_at": _isoformat(issue.updated_at),
+                "exclude_labels": exclude_labels,
+                "exclude_authors": exclude_authors,
+            },
         )
+        if self.dispatch is not None:
+            await self.dispatch(event)
+            return
+        await self.bus.publish(event)

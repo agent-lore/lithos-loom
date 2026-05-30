@@ -44,7 +44,7 @@ from lithos_loom.subscriptions._github_issue_push import (
     make_handler as make_github_issue_push_handler,
 )
 from lithos_loom.subscriptions._github_issue_sync import (
-    EVENT_TYPE as GITHUB_ISSUE_EVENT_TYPE,
+    EVENT_TYPE as GITHUB_ISSUE_EVENT_TYPE,  # noqa: F401 — re-exported for the child wiring smoke test
 )
 from lithos_loom.subscriptions._github_issue_sync import (
     make_handler as make_github_issue_sync_handler,
@@ -123,6 +123,30 @@ async def _amain(cfg: LoomConfig) -> int:
             ) as lithos,
         ):
             github = await GitHubClient.create(http=http)
+            ctx = SubscriptionContext(
+                lithos=lithos,
+                logger=logging.getLogger("lithos_loom.subscriptions"),
+                agent_id=cfg.orchestrator.agent_id,
+            )
+            sync_handler = make_github_issue_sync_handler(github)
+
+            async def dispatch_to_sync_handler(event: object) -> None:
+                """Inline dispatch path for the GH→Lithos sync handler.
+
+                Bypasses the bus so a queue-full drop can't lose work and
+                the watcher source can hold its cursor at the last
+                successfully reconciled issue (PR-review finding 1,
+                2026-05-30). The handler still posts [Friction] logs
+                internally for recoverable problems; any unhandled
+                exception bubbles up, the watcher logs it, and the
+                cursor freezes — the next poll re-fetches from the
+                stuck boundary.
+                """
+                from lithos_loom.bus import Event as _Event
+
+                assert isinstance(event, _Event)
+                await sync_handler(event, ctx)
+
             watcher = GitHubIssueWatcher(
                 github=github,
                 lithos=lithos,
@@ -130,6 +154,7 @@ async def _amain(cfg: LoomConfig) -> int:
                 poll_interval_seconds=gh_cfg.poll_interval_seconds,
                 coord_doc_path=gh_cfg.coord_doc_path,
                 agent_id=cfg.orchestrator.agent_id,
+                dispatch=dispatch_to_sync_handler,
             )
 
             # LithosNoteStream feeds the watcher's _refresh_loop so an
@@ -164,41 +189,12 @@ async def _amain(cfg: LoomConfig) -> int:
                 bootstrap_resolved_window=replay_window,
             )
 
-            ctx = SubscriptionContext(
-                lithos=lithos,
-                logger=logging.getLogger("lithos_loom.subscriptions"),
-                agent_id=cfg.orchestrator.agent_id,
-            )
-            sync_handler = make_github_issue_sync_handler(github)
             push_handler = make_github_issue_push_handler(github)
-            sync_sub = bus.subscribe(
-                event_types=(GITHUB_ISSUE_EVENT_TYPE,),
-                name="github-issue-sync",
-                queue_size=512,
-            )
             push_sub = bus.subscribe(
                 event_types=LITHOS_TASK_EVENT_TYPES,
                 name="github-issue-push",
                 queue_size=512,
             )
-
-            async def consume_sync() -> None:
-                """Drain the GH→Lithos subscription, dispatch one event at a time.
-
-                Hand-rolled rather than using ``SubscriptionRunner`` because
-                that takes a ``SubscriptionConfig`` (TOML-driven retry policy)
-                we don't have here — the watcher action isn't declared in
-                ``[[subscriptions]]``; it's auto-wired by this child. The
-                handler swallows its own errors as [Friction] logs.
-                """
-                while True:
-                    event = await sync_sub.queue.get()
-                    try:
-                        await sync_handler(event, ctx)
-                    except Exception:
-                        logger.exception(
-                            "github-watcher: sync subscription handler raised"
-                        )
 
             async def consume_push() -> None:
                 """Drain the Lithos→GH subscription. Same hand-rolled shape."""
@@ -215,7 +211,6 @@ async def _amain(cfg: LoomConfig) -> int:
                 asyncio.create_task(note_stream.run(), name="lithos-note-stream"),
                 asyncio.create_task(event_stream.run(), name="lithos-event-stream"),
                 asyncio.create_task(watcher.run(), name="github-issue-watcher"),
-                asyncio.create_task(consume_sync(), name="github-issue-sync-consumer"),
                 asyncio.create_task(consume_push(), name="github-issue-push-consumer"),
             ]
             try:

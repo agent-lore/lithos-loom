@@ -135,6 +135,8 @@ Other `result.json` fields (`metadata_updates`, `artifacts`, `commits`, `spawned
 
 Filters apply only on the create branch (no marker + no matching URL + GH open). Already-linked tasks are unaffected if an exclude tag is added after import — the PRD explicitly locks "exclude is only at import time" so the operator never has a once-imported task quietly stranded.
 
+**Dispatch contract.** The watcher source dispatches each issue inline to the `github-issue-sync` handler before advancing the persistent cursor — the bus path is reserved for tests that assert on queue contents. Cursor advancement is per-issue: the watcher walks GitHub's `updated_at`-ascending list, advances the in-memory cursor to each issue's timestamp only after dispatch succeeds, and halts the loop on the first exception so the next poll re-fetches starting from the failed boundary. The push direction (`lithos.task.*` → GH) still uses the bus because `LithosEventStream` already serves multiple subscribers across child processes.
+
 **Drift sync** (GH → Lithos, Slice 7.2). Every poll that matches a known Lithos task layers three checks on top of the close mirror:
 
 - **Title drift** — `issue.title != task.title` → `task_update(title=issue.title)`.

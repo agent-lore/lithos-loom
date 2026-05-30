@@ -149,6 +149,7 @@ def _make_watcher(
     github: Any,
     lithos: Any,
     bus: EventBus | None = None,
+    dispatch: Any = None,
 ) -> GitHubIssueWatcher:
     return GitHubIssueWatcher(
         github=cast(GitHubClient, github),
@@ -157,6 +158,7 @@ def _make_watcher(
         poll_interval_seconds=60,
         coord_doc_path="projects/_lithos-loom-internal/github-watcher-state.md",
         agent_id="test-agent",
+        dispatch=dispatch,
     )
 
 
@@ -385,6 +387,83 @@ async def test_poll_one_repo_advances_cursor_to_latest_when_multiple_issues() ->
     # within the same wall second; correctness beats one extra idempotent
     # task_list call.
     assert watcher._cursors["agent-lore/lithos-loom"] == late.updated_at
+
+
+@pytest.mark.asyncio
+async def test_poll_one_repo_holds_cursor_when_dispatch_fails_mid_batch() -> None:
+    """PR-review finding 1 (2026-05-30): with the bus path, a queue-full
+    drop or a handler exception silently advanced the cursor past
+    issues that were never reconciled. With an injected inline
+    dispatcher the watcher walks issues in updated_at-asc order and
+    holds the cursor at the last successfully dispatched issue's
+    timestamp; the failed issue's updated_at is re-fetched next poll.
+    """
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    first = _make_issue(
+        number=1, updated_at=datetime(2026, 5, 29, 10, 0, 0, tzinfo=UTC)
+    )
+    second = _make_issue(
+        number=2, updated_at=datetime(2026, 5, 29, 11, 0, 0, tzinfo=UTC)
+    )
+    third = _make_issue(
+        number=3, updated_at=datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
+    )
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[first, second, third])
+
+    dispatched: list[int] = []
+
+    async def flaky_dispatch(event: Any) -> None:
+        n = event.payload["number"]
+        dispatched.append(n)
+        if n == 2:
+            raise RuntimeError("Lithos went away")
+
+    watcher = _make_watcher(
+        github=github,
+        lithos=_fake_lithos_client(),
+        bus=bus,
+        dispatch=flaky_dispatch,
+    )
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    # Issue 1 dispatched, issue 2 failed → loop stopped; issue 3 never tried.
+    assert dispatched == [1, 2]
+    # Cursor sits at the latest successful issue (1), not the failed one
+    # (2) and not the latest seen (3) — next poll re-fetches 2 onward.
+    assert watcher._cursors["agent-lore/lithos-loom"] == first.updated_at
+
+
+@pytest.mark.asyncio
+async def test_poll_one_repo_does_not_advance_cursor_when_first_issue_fails() -> None:
+    """First-issue dispatch failure: cursor stays at its prior value
+    (or absent) so the next poll re-fetches the same boundary.
+    """
+    bus = EventBus()
+    bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    issue = _make_issue(
+        number=1, updated_at=datetime(2026, 5, 29, 10, 0, 0, tzinfo=UTC)
+    )
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(return_value=[issue])
+
+    async def failing_dispatch(_: Any) -> None:
+        raise RuntimeError("Lithos went away")
+
+    watcher = _make_watcher(
+        github=github,
+        lithos=_fake_lithos_client(),
+        bus=bus,
+        dispatch=failing_dispatch,
+    )
+    prior = datetime(2026, 5, 1, tzinfo=UTC)
+    watcher._cursors["agent-lore/lithos-loom"] = prior
+
+    await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
+
+    assert watcher._cursors["agent-lore/lithos-loom"] == prior
 
 
 @pytest.mark.asyncio
