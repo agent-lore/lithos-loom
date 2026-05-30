@@ -644,9 +644,27 @@ async def _safe_call(ctx: SubscriptionContext, coro: Any, *, describe: str) -> N
     must surface to the watcher's inline dispatcher so the cursor
     freezes and the next poll retries. The [Friction] log line stays
     for the operator-grep convention.
+
+    Soak observation (2026-05-30): Lithos's ``task_update`` returns
+    ``task_not_found`` for tasks whose status is terminal
+    (``completed`` / ``cancelled``) — even though ``task_get`` happily
+    returns them. A poll that fetches a closed GH issue paired with a
+    just-completed Lithos task (the operator ticked it in Obsidian,
+    which closed both sides) then loops forever: drift-sync raises,
+    cursor freezes, stuck retry re-hits the same wall. Treat
+    ``task_not_found`` as **non-fatal**: log [Friction] but don't
+    raise, so the dispatcher advances the cursor and the stuck entry
+    drains. The spec's "drift sync always runs" contract holds at the
+    handler-call level; whether Lithos accepts the write is a server
+    concern we surface but don't loop on.
     """
     try:
         await coro
-    except (LithosClientError, OSError) as exc:
+    except LithosClientError as exc:
+        ctx.logger.warning("[Friction] github-issue-sync: %s failed: %s", describe, exc)
+        if exc.code == "task_not_found":
+            return
+        raise
+    except OSError as exc:
         ctx.logger.warning("[Friction] github-issue-sync: %s failed: %s", describe, exc)
         raise

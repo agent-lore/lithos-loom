@@ -916,6 +916,47 @@ async def test_reopen_on_legacy_task_without_snapshot_fires_finding() -> None:
 
 
 @pytest.mark.asyncio
+async def test_drift_sync_swallows_task_not_found_without_freezing_cursor() -> None:
+    """Soak observation (2026-05-30): Lithos's task_update returns
+    ``task_not_found`` for terminal tasks even though task_get returns
+    them. A closed GH issue paired with a just-completed Lithos task
+    (operator ticked in Obsidian → completed both sides) used to
+    freeze the watcher's cursor forever via the propagate-on-failure
+    contract. Swallow ``task_not_found`` specifically so the cursor
+    advances and the stuck-retry path can drain.
+    """
+    lithos = _stub_lithos()
+    existing = _task(
+        task_id="task-terminal",
+        status="completed",
+        title="old title",
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/66",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "open",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    lithos.task_update = AsyncMock(
+        side_effect=LithosClientError("task_not_found", "Task task-terminal not found")
+    )
+    handler = make_handler(_stub_github())
+
+    # Must NOT raise — cursor must advance for the watcher's dispatcher.
+    await handler(
+        _event(
+            body="updated body\n<!-- lithos:task-terminal -->",
+            title="renamed",
+            state="closed",
+            state_reason="completed",
+        ),
+        _ctx(lithos),
+    )
+    # The drift was attempted but Lithos rejected → logged + swallowed.
+    lithos.task_update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_drift_on_terminal_task_mirrors_full_state() -> None:
     """SPEC §2.2 + PRD story #71: drift sync runs on terminal tasks too.
     The operator should not see stale title/body/labels on a reopened
