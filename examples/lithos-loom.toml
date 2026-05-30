@@ -269,3 +269,9 @@ tags = ["trigger:story-review-human"]
 # enabled               = true
 # poll_interval_seconds = 60
 # coord_doc_path        = "projects/_lithos-loom-internal/github-watcher-state.md"
+# resolved_replay_days  = 7
+# # How far back the embedded LithosEventStream replays resolved task
+# # events at bootstrap. A task closed (or renamed) while the watcher
+# # was down still mirrors to GH on restart via the replay. The push
+# # handler is idempotent (refetches GH before PATCH) so a too-large
+# # window only costs harmless re-checks. Set to 0 to disable replay.

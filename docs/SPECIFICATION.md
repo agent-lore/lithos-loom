@@ -292,6 +292,13 @@ poll_interval_seconds = 60                                     # incremental pol
 coord_doc_path        = "projects/_lithos-loom-internal/github-watcher-state.md"
 # Lithos doc the watcher uses to persist per-repo updated_at cursors.
 # Must be a relative Lithos doc path (no leading `/`, no `..`).
+resolved_replay_days  = 7
+# How far back the embedded LithosEventStream replays resolved task
+# events at bootstrap. A Lithos task that closes (or gets renamed) while
+# the watcher is down is mirrored to GH on restart via the replay; the
+# push handler is idempotent (refetches GH before PATCH) so a too-large
+# window only costs harmless re-checks. Set to 0 to disable replay (the
+# push handler then only fires for events that arrive live).
 ```
 
 ### 3.2 Validation
