@@ -901,6 +901,70 @@ async def test_persist_cursors_merges_pending_advances_on_version_conflict() -> 
 
 
 @pytest.mark.asyncio
+async def test_persist_cursors_keeps_stuck_deletions_through_version_conflict() -> None:
+    """PR-review finding 3 (round 6, 2026-05-30): a stuck row drained
+    locally must stay deleted even when a CAS conflict reloads the
+    remote stuck-set that still carries it. Without the per-number
+    tombstone, the union-merge re-adds the row from the remote and
+    the next write resurrects it.
+    """
+    T1 = datetime(2026, 5, 29, tzinfo=UTC)
+    # Remote coord doc still has stuck entry that we already drained locally.
+    remote_body = format_cursors({"owner/x": T1}, stuck={"owner/x": {42, 99}})
+    remote_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body=remote_body,
+        version=9,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    final_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body="",
+        version=10,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    lithos = _fake_lithos_client(note_read_return=remote_note)
+    lithos.note_write = AsyncMock(
+        side_effect=[
+            WriteResult(status="version_conflict", current_version=9),
+            WriteResult(status="updated", note=final_note),
+        ]
+    )
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
+    watcher._coord_doc_id = "coord-id"
+    watcher._coord_doc_version = 7
+    watcher._cursors = {"owner/x": T1}
+    watcher._last_persisted_cursors = {"owner/x": T1}
+    # We had {42, 99} stuck persisted; we just drained #42 locally,
+    # leaving #99. Remote still carries both.
+    watcher._stuck_issues = {"owner/x": {99}}
+    watcher._last_persisted_stuck = {"owner/x": {42, 99}}
+
+    await watcher._persist_cursors()
+
+    body_written = lithos.note_write.await_args_list[1].kwargs["content"]
+    # #42 is gone from the persisted body — the local drain survived
+    # the CAS conflict.
+    assert "stuck:owner/x#42" not in body_written
+    # #99 is still there.
+    assert "stuck:owner/x#99" in body_written
+    # In-memory matches.
+    assert watcher._stuck_issues == {"owner/x": {99}}
+
+
+@pytest.mark.asyncio
 async def test_persist_cursors_keeps_deletions_through_version_conflict() -> None:
     """PR-review finding 1 (round 5, 2026-05-30): a cursor we intend to
     delete must not silently come back when a version_conflict triggers

@@ -562,6 +562,20 @@ class GitHubIssueWatcher:
         # Snapshot the intended deletions BEFORE the first write so
         # subsequent reload+merge cycles can replay them deterministically.
         deletions = set(self._last_persisted_cursors) - set(self._cursors)
+        # PR-review finding 3 (round 6, 2026-05-30): same pattern for
+        # stuck-issue rows. A stuck entry drained locally (issue's
+        # by-number retry succeeded, or GH returned 404) was getting
+        # resurrected when a CAS conflict reloaded the remote stuck set
+        # and merged pending entries — the remote row was preserved
+        # because we only union, never subtract. Capture per-repo
+        # number-level tombstones at entry and apply them after the
+        # reload+merge.
+        stuck_deletions: dict[str, set[int]] = {}
+        for repo, numbers in self._last_persisted_stuck.items():
+            current = self._stuck_issues.get(repo, set())
+            removed = numbers - current
+            if removed:
+                stuck_deletions[repo] = removed
         attempts = 0
         while True:
             cursors_unchanged = self._cursors == self._last_persisted_cursors
@@ -644,6 +658,17 @@ class GitHubIssueWatcher:
                 # reload and silently lives on in the next write.
                 for repo in deletions:
                     self._cursors.pop(repo, None)
+                # Same tombstone re-application for stuck entries —
+                # PR-review finding 3, round 6, 2026-05-30. Without
+                # this, draining a row locally and then hitting a CAS
+                # conflict resurrects the row from the remote view.
+                for repo, numbers in stuck_deletions.items():
+                    remote_set = self._stuck_issues.get(repo)
+                    if remote_set is None:
+                        continue
+                    remote_set.difference_update(numbers)
+                    if not remote_set:
+                        self._stuck_issues.pop(repo, None)
                 continue
             logger.warning(
                 "github-watcher: unexpected coord doc write status %r: %s",
