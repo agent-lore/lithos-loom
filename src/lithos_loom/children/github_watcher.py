@@ -339,9 +339,10 @@ async def _amain(cfg: LoomConfig) -> int:
                                     "[Friction] github-watcher: push handler "
                                     "exhausted %d attempts on %s "
                                     "(%s: %s); dropping (outage outlasts "
-                                    "retry budget — next daemon restart "
-                                    "within resolved_replay_days will "
-                                    "replay this event)",
+                                    "retry budget — periodic reconcile "
+                                    "sweep within reconcile_interval_minutes "
+                                    "or next daemon restart within "
+                                    "resolved_replay_days will replay it)",
                                     max_attempts,
                                     event.type,
                                     type(exc).__name__,
