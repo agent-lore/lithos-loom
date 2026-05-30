@@ -844,6 +844,69 @@ async def test_persist_cursors_merges_pending_advances_on_version_conflict() -> 
 
 
 @pytest.mark.asyncio
+async def test_persist_cursors_keeps_deletions_through_version_conflict() -> None:
+    """PR-review finding 1 (round 5, 2026-05-30): a cursor we intend to
+    delete must not silently come back when a version_conflict triggers
+    reload-then-merge. Without tracking deletion tombstones, the reload
+    re-populates ``_cursors`` from the remote (which still contains the
+    row we wanted gone) and the next write persists the stale row.
+
+    Scenario: in-memory has dropped repo X (operator disabled watching).
+    Remote coord doc still has X→T1. The persist conflicts, reloads X
+    back, merges pending (empty) — without the fix, X resurrects.
+    """
+    T1 = datetime(2026, 5, 28, tzinfo=UTC)
+    remote_body = format_cursors({"owner/x": T1})
+    remote_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body=remote_body,
+        version=9,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    final_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body="",
+        version=10,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    lithos = _fake_lithos_client(note_read_return=remote_note)
+    lithos.note_write = AsyncMock(
+        side_effect=[
+            WriteResult(status="version_conflict", current_version=9),
+            WriteResult(status="updated", note=final_note),
+        ]
+    )
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
+    watcher._coord_doc_id = "coord-id"
+    watcher._coord_doc_version = 7
+    # Operator just disabled watching for X — in-memory is empty, but the
+    # _last_persisted snapshot still carries X (it was persisted earlier).
+    watcher._cursors = {}
+    watcher._last_persisted_cursors = {"owner/x": T1}
+
+    await watcher._persist_cursors()
+
+    # Two writes: first conflicted, second succeeded with X *gone*.
+    assert lithos.note_write.await_count == 2
+    body_written = lithos.note_write.await_args_list[1].kwargs["content"]
+    assert "owner/x" not in body_written
+    # In-memory state confirms the deletion stuck.
+    assert "owner/x" not in watcher._cursors
+
+
+@pytest.mark.asyncio
 async def test_persist_cursors_gives_up_after_max_cas_attempts() -> None:
     """Three back-to-back conflicts surface a warning and bail without
     spinning forever; the next poll will retry."""

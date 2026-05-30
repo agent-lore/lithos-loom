@@ -474,6 +474,15 @@ class GitHubIssueWatcher:
         guard and pointlessly bump the coord-doc version on the retry
         (PR-review finding round 2).
         """
+        # PR-review finding 1 (round 5, 2026-05-30): track which repos we
+        # *intend to delete* this persist call so the version_conflict
+        # reload-then-merge path can re-apply the deletions. Without
+        # tombstones, a refresh that popped a cursor would lose that
+        # intent on conflict because reload re-populates ``_cursors``
+        # from the remote (which still contains the row we wanted gone).
+        # Snapshot the intended deletions BEFORE the first write so
+        # subsequent reload+merge cycles can replay them deterministically.
+        deletions = set(self._last_persisted_cursors) - set(self._cursors)
         attempts = 0
         while True:
             if self._cursors == self._last_persisted_cursors:
@@ -537,6 +546,12 @@ class GitHubIssueWatcher:
                     remote_ts = self._cursors.get(repo)
                     if remote_ts is None or ts > remote_ts:
                         self._cursors[repo] = ts
+                # Re-apply intended deletions captured at function entry
+                # (PR-review finding 1, round 5, 2026-05-30). Without
+                # this, a cursor we explicitly popped is restored by
+                # reload and silently lives on in the next write.
+                for repo in deletions:
+                    self._cursors.pop(repo, None)
                 continue
             logger.warning(
                 "github-watcher: unexpected coord doc write status %r: %s",

@@ -515,7 +515,7 @@ async def _apply_marker_safe(
     task_id: str,
     ctx: SubscriptionContext,
 ) -> None:
-    """Write the canonical marker to the issue body, swallowing GH errors.
+    """Write the canonical marker to the issue body; propagates GH errors.
 
     Re-fetches the issue body via ``github.get_issue`` immediately before
     the PATCH so an operator edit during the poll-to-PATCH window
