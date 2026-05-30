@@ -24,13 +24,13 @@ import logging
 import signal
 import sys
 from collections.abc import Callable, Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
 
-from lithos_loom.bus import EventBus
+from lithos_loom.bus import Event, EventBus
 from lithos_loom.config import LogLevel, LoomConfig, load_config
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.lithos_client import LithosClient
@@ -98,23 +98,23 @@ async def _run_reconcile_pass(
 ) -> None:
     """Single pass of the periodic Lithos→GH reconciliation sweep.
 
-    Pulls open tasks (all) plus completed + cancelled tasks resolved
-    within ``resolved_window`` (typically the same window as
-    ``LithosEventStream.bootstrap_resolved_window`` so the recovery
-    surface matches operator expectations), filters to those carrying
-    ``metadata.github_issue_url``, and dispatches each through the
-    push handler. The handler short-circuits when GH already matches
-    the Lithos state, so the sweep is cheap in steady state.
+    Surfaces:
 
-    Synthetic events route through ``_mirror_title`` for open tasks
-    and ``_mirror_close`` for terminal tasks via the same event-type
-    branch the LithosEventStream replay uses (``lithos.task.created``
-    for open, ``lithos.task.completed`` / ``cancelled`` for terminal).
+    - **Open** tasks (always): dispatches a synthetic ``task.updated``
+      so title drift is mirrored.
+    - **Terminal** tasks (completed + cancelled) resolved within
+      ``resolved_window``: dispatches ``task.updated`` (title drift)
+      *and* the matching close event so a long outage that lost both
+      a rename and a completion still gets both halves mirrored.
+      Skipped entirely when ``resolved_window`` is ``None`` (operator
+      set ``resolved_replay_days = 0`` to opt out of resolved replay
+      — PR-review finding 1, round 6, 2026-05-30: a ``None`` window
+      previously meant "no time bound" and the sweep walked every
+      terminal task ever, growing unboundedly with each cycle).
+
+    The push handler is idempotent (re-fetches GH before each PATCH)
+    so the sweep is a no-op when everything is already in sync.
     """
-    from datetime import UTC, datetime
-
-    from lithos_loom.bus import Event
-
     handler = cast("Callable[[Event, SubscriptionContext], Any]", push_handler)
     now = datetime.now(UTC)
 
@@ -153,9 +153,17 @@ async def _run_reconcile_pass(
     for task in open_tasks:
         if task.metadata.get("github_issue_url"):
             counts["open"] += 1
-            await _dispatch_one(task, "lithos.task.created")
+            await _dispatch_one(task, "lithos.task.updated")
 
-    since = now - resolved_window if resolved_window is not None else None
+    if resolved_window is None:
+        logger.info(
+            "github-watcher: reconcile sweep replayed %d open GH-linked "
+            "task(s); resolved-task sweep disabled (resolved_replay_days=0)",
+            counts["open"],
+        )
+        return
+
+    since = now - resolved_window
     for terminal_status, event_type in (
         ("completed", "lithos.task.completed"),
         ("cancelled", "lithos.task.cancelled"),
@@ -164,6 +172,14 @@ async def _run_reconcile_pass(
         for task in tasks:
             if task.metadata.get("github_issue_url"):
                 counts[terminal_status] += 1
+                # PR-review finding 2, round 6, 2026-05-30: dispatch
+                # ``task.updated`` *before* the close event so title
+                # drift on a terminal task is reconciled even when the
+                # original rename was dropped during a long outage.
+                # The handler is idempotent for either event in
+                # isolation; running both pays one extra get_issue per
+                # task in steady state but closes the title-drift gap.
+                await _dispatch_one(task, "lithos.task.updated")
                 await _dispatch_one(task, event_type)
 
     logger.info(

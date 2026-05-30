@@ -108,7 +108,11 @@ async def test_reconcile_pass_redispatches_gh_linked_tasks() -> None:
     """PR-review finding 4 (round 5, 2026-05-30): the periodic
     reconciliation pass scans Lithos for tasks carrying
     metadata.github_issue_url and re-dispatches them through the push
-    handler. GH-unlinked tasks must be skipped — they're noise."""
+    handler. GH-unlinked tasks must be skipped — they're noise.
+
+    Round 6 update: terminal tasks now also fire ``task.updated`` so a
+    rename dropped during a long outage gets reconciled alongside the
+    close event."""
     import logging
     from datetime import UTC, datetime, timedelta
     from typing import Any
@@ -167,8 +171,62 @@ async def test_reconcile_pass_redispatches_gh_linked_tasks() -> None:
         ctx=ctx,
         resolved_window=timedelta(days=7),
     )
+    # Open task → one updated event (title sync).
+    # Terminal task → updated + close so title drift is reconciled too.
     # GH-unlinked task was filtered out.
-    assert handler_calls == ["lithos.task.created", "lithos.task.completed"]
+    assert handler_calls == [
+        "lithos.task.updated",  # open_linked
+        "lithos.task.updated",  # completed_linked title
+        "lithos.task.completed",  # completed_linked close
+    ]
+
+
+async def test_reconcile_pass_skips_terminal_scan_when_window_disabled() -> None:
+    """PR-review finding 1 (round 6, 2026-05-30): resolved_replay_days=0
+    means "operator opted out of resolved replay". The sweep used to
+    treat that as resolved_since=None and walk *every* terminal task
+    ever, which grows unboundedly. The terminal scans must skip
+    entirely while the open-task title sweep still runs.
+    """
+    import logging
+    from typing import Any
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.children.github_watcher import _run_reconcile_pass
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.subscriptions import SubscriptionContext
+
+    open_linked = Task(
+        id="task-a",
+        title="Linked",
+        status="open",
+        tags=("github-issue",),
+        metadata={"github_issue_url": "https://github.com/x/y/issues/1"},
+        claims=(),
+    )
+    lithos = AsyncMock()
+    lithos.task_list = AsyncMock(return_value=[open_linked])
+    handler_calls: list[str] = []
+
+    async def push_handler(event: Any, _ctx: Any) -> None:
+        handler_calls.append(event.type)
+
+    ctx = SubscriptionContext(
+        lithos=lithos,
+        logger=logging.getLogger("test-reconcile"),
+        agent_id="test-agent",
+    )
+    await _run_reconcile_pass(
+        lithos=lithos,
+        push_handler=push_handler,
+        ctx=ctx,
+        resolved_window=None,
+    )
+    # Only the open-task scan ran; no completed / cancelled queries.
+    assert lithos.task_list.await_count == 1
+    assert lithos.task_list.await_args.kwargs["status"] == "open"
+    # And only the open task's title sync fired.
+    assert handler_calls == ["lithos.task.updated"]
 
 
 def test_configure_logging_silences_mcp_sse_at_critical() -> None:
