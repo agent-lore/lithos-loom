@@ -366,22 +366,30 @@ async def test_malformed_payload_is_logged_not_raised() -> None:
 
 
 @pytest.mark.asyncio
-async def test_marker_write_failure_after_create_is_swallowed() -> None:
-    """Task created, GH PATCH fails → log + move on (next poll retries)."""
+async def test_marker_write_failure_after_create_propagates() -> None:
+    """PR-review finding 1 (round 3, 2026-05-30): a marker write failure
+    after task_create succeeds now propagates so the watcher's
+    dispatcher freezes the cursor; the next poll's URL-match recovery
+    re-writes the marker. Swallowing it advanced the cursor and left
+    the issue permanently unmarked.
+    """
     lithos = _stub_lithos()
     lithos.task_create = AsyncMock(return_value="task-new")
     github = _stub_github()
     github.update_issue_body.side_effect = GitHubAuthError("403 denied")
     handler = make_handler(github)
 
-    # Should not raise.
-    await handler(_event(), _ctx(lithos))
-    lithos.task_create.assert_awaited_once()
+    with pytest.raises(GitHubAuthError):
+        await handler(_event(), _ctx(lithos))
 
 
 @pytest.mark.asyncio
-async def test_task_create_failure_is_logged_not_raised() -> None:
-    """Lithos refuses task_create → log [Friction], no marker write."""
+async def test_task_create_failure_propagates_to_dispatcher() -> None:
+    """PR-review finding 1 (round 3, 2026-05-30): a failed task_create
+    used to be swallowed as [Friction] and the handler returned
+    normally — the watcher then advanced past the issue and stranded
+    it permanently. Propagation lets the dispatcher freeze the cursor.
+    """
     lithos = _stub_lithos()
     lithos.task_create = AsyncMock(
         side_effect=LithosClientError("invalid_input", "missing field")
@@ -389,22 +397,26 @@ async def test_task_create_failure_is_logged_not_raised() -> None:
     github = _stub_github()
     handler = make_handler(github)
 
-    await handler(_event(), _ctx(lithos))
+    with pytest.raises(LithosClientError):
+        await handler(_event(), _ctx(lithos))
+    # Marker write never reached because create raised first.
     github.update_issue_body.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_orphan_marker_path_swallows_lithos_list_failure() -> None:
-    """A transport failure on task_list shouldn't crash; just no recovery this poll."""
+async def test_orphan_marker_path_propagates_lithos_list_failure() -> None:
+    """PR-review finding 2 (round 3, 2026-05-30): a failed task_list during
+    URL-match recovery used to be swallowed and the handler fell through
+    to ``task_create``, producing a duplicate task on transient transport
+    errors. Now it propagates so the dispatcher freezes the cursor."""
     lithos = _stub_lithos()
     lithos.task_list = AsyncMock(side_effect=OSError("connection refused"))
     handler = make_handler(_stub_github())
 
-    # An open issue with no marker → handler would search via URL and fall
-    # through to create. Without a matching task in any list, it creates.
-    await handler(_event(body="no marker"), _ctx(lithos))
-    # No matching URL found across any status → fresh create.
-    lithos.task_create.assert_awaited_once()
+    with pytest.raises(OSError, match="connection refused"):
+        await handler(_event(body="no marker"), _ctx(lithos))
+    # Critical: NO duplicate task created when transient lookup failed.
+    lithos.task_create.assert_not_awaited()
 
 
 # ── Tag carry-over ────────────────────────────────────────────────────
@@ -849,11 +861,12 @@ async def test_reopen_with_snapshot_already_open_does_not_repost() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reopen_finding_failure_does_not_advance_state_snapshot() -> None:
-    """PR-review finding 4 (2026-05-30): a transient finding_post failure
-    must NOT update github_state_snapshot, otherwise the next poll's
-    closed-to-open guard short-circuits and the finding is permanently
-    de-duped against a snapshot bump that wasn't earned.
+async def test_reopen_finding_failure_propagates_and_skips_snapshot_update() -> None:
+    """PR-review finding 1 (round 3, 2026-05-30): finding_post failure
+    in the reopen branch now propagates so the dispatcher freezes the
+    cursor. Because the handler exits early on the raise, drift sync
+    never runs and github_state_snapshot stays at its prior value —
+    the next poll's closed-to-open guard re-fires.
     """
     lithos = _stub_lithos()
     existing = _task(
@@ -869,20 +882,15 @@ async def test_reopen_finding_failure_does_not_advance_state_snapshot() -> None:
         side_effect=LithosClientError("transport_error", "MCP outage")
     )
     handler = make_handler(_stub_github())
-    await handler(
-        _event(body="b\n<!-- lithos:task-123 -->", state="open"),
-        _ctx(lithos),
-    )
-    # Finding was attempted...
-    lithos.finding_post.assert_awaited_once()
-    # ...and any drift sync that fired did NOT include a snapshot bump,
-    # so the next poll's reopen guard still fires.
-    if lithos.task_update.await_count > 0:
-        kwargs = lithos.task_update.await_args.kwargs
-        metadata = kwargs.get("metadata", {})
-        assert "github_state_snapshot" not in metadata, (
-            "snapshot must stay at 'closed' when finding_post failed"
+
+    with pytest.raises(LithosClientError):
+        await handler(
+            _event(body="b\n<!-- lithos:task-123 -->", state="open"),
+            _ctx(lithos),
         )
+    lithos.finding_post.assert_awaited_once()
+    # Drift sync never ran → no task_update fired, snapshot untouched.
+    lithos.task_update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
