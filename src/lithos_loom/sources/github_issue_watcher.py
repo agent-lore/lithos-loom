@@ -373,28 +373,26 @@ class GitHubIssueWatcher:
                 sorted(removed),
                 sorted(retagged),
             )
-        # PR-review finding 5 (round 3, 2026-05-30): when a slug's filter
-        # set changes the cursor for its repo must be reset, otherwise
-        # previously-skipped issues (whose ``updated_at`` is older than
-        # the cursor) stay invisible until somebody edits them on
-        # GitHub. Relaxing an exclude tag should immediately surface
-        # the matching open issues. We drop cursors for both retagged
-        # AND removed slugs (a re-add would otherwise resume from the
-        # last cursor and miss issues the operator excluded then
-        # re-enabled). Idempotent: the handler short-circuits on
-        # already-linked tasks via marker / URL match, so the
-        # full-rewalk cost is at most one task_get + one URL search
-        # per issue.
+        # PR-review finding 5 (round 3, 2026-05-30) + finding 1 (round 4,
+        # 2026-05-30): cursor must be reset whenever a slug's enrolment
+        # changes (retagged filter, slug removed, slug newly added).
+        # Without an add-side reset, a disable → restart → re-enable
+        # cycle leaves a stale cursor in the coord doc that re-loads as
+        # if no time had passed; issues created during the disabled
+        # window can be missed. With it, a freshly re-watched slug
+        # bootstraps cleanly.
         cursor_reset_repos: set[str] = set()
         for slug in retagged:
             cursor_reset_repos.add(new_list[slug].repo)
         for slug in removed:
             cursor_reset_repos.add(self._watch_list[slug].repo)
+        for slug in added:
+            cursor_reset_repos.add(new_list[slug].repo)
         for repo in cursor_reset_repos:
             if repo in self._cursors:
                 logger.info(
-                    "github-watcher: resetting cursor for %s after filter change "
-                    "so re-included issues surface",
+                    "github-watcher: resetting cursor for %s after watch-list "
+                    "change so re-included issues surface",
                     repo,
                 )
                 self._cursors.pop(repo, None)
@@ -570,9 +568,17 @@ class GitHubIssueWatcher:
             try:
                 await self._poll_all_repos()
                 # Single coord doc write after the full pass — one round-
-                # trip per poll, not one per repo.
-                if self._cursors:
-                    await self._persist_cursors()
+                # trip per poll, not one per repo. PR-review finding 1
+                # (round 4, 2026-05-30): always call through, even with
+                # an empty cursor map. The previous `if self._cursors:`
+                # guard short-circuited persistence after every slug got
+                # removed, leaving stale rows in the coord doc; on
+                # restart the daemon then resumed from those stale
+                # cursors and could miss issues created during the
+                # disabled window. _persist_cursors itself short-circuits
+                # via the unchanged-cursors check, so an empty map that's
+                # already on disk stays a no-op.
+                await self._persist_cursors()
                 backoff = self.reconnect_backoff_seconds
                 await self._sleep(self.poll_interval_seconds)
             except asyncio.CancelledError:

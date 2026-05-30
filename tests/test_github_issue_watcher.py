@@ -833,6 +833,45 @@ async def test_persist_cursors_is_noop_when_unchanged_since_last_write() -> None
 
 
 @pytest.mark.asyncio
+async def test_persist_cursors_writes_empty_map_when_slug_removed() -> None:
+    """PR-review finding 1 (round 4, 2026-05-30): when the last watched
+    slug is disabled, the in-memory cursor map empties — but the coord
+    doc still holds the prior cursor rows. Without persisting the
+    empty map, a daemon restart re-loads the stale rows; a subsequent
+    re-enable resumes from the stale timestamp and can miss issues
+    created during the disabled window.
+    """
+    written_note = Note(
+        id="coord-id",
+        title="GitHub Watcher State",
+        body="",
+        version=3,
+        updated_at=None,
+        tags=(),
+        status="active",
+        note_type="concept",
+        path="projects/_lithos-loom-internal/github-watcher-state.md",
+        slug="_lithos-loom-internal",
+    )
+    lithos = _fake_lithos_client(
+        write_result=WriteResult(status="updated", note=written_note)
+    )
+    watcher = _make_watcher(github=_fake_github_client(), lithos=lithos)
+    watcher._coord_doc_id = "coord-id"
+    watcher._coord_doc_version = 2
+    # Coord doc had a cursor; the watch list was just cleared, dropping
+    # the in-memory cursor too.
+    watcher._last_persisted_cursors = {"x/y": datetime(2026, 5, 29, tzinfo=UTC)}
+    watcher._cursors = {}
+
+    await watcher._persist_cursors()
+    # Coord doc rewritten with the empty cursor map — stale row is gone.
+    assert lithos.note_write.await_count == 1
+    write_kwargs = lithos.note_write.await_args.kwargs
+    assert "x/y" not in write_kwargs["content"]
+
+
+@pytest.mark.asyncio
 async def test_persist_cursors_writes_again_when_cursor_advances() -> None:
     """After the no-op short-circuit lands, a subsequent cursor advance
     must still trigger a write — otherwise the watcher would silently
