@@ -366,9 +366,10 @@ async def _amain(cfg: LoomConfig) -> int:
 
                 PR-review finding 4 (round 5, 2026-05-30): closes the
                 "outage outlasts the in-memory retry budget" gap. The
-                push consumer's 8-attempt / ~4-minute backoff drops
-                events that survive longer outages; without this loop
-                they only recover on next daemon restart inside the
+                push consumer's 8-attempt / ~3-minute backoff (waits
+                2/4/8/16/32/60/60 s ≈ 182 s total) drops events that
+                survive longer outages; without this loop they only
+                recover on next daemon restart inside the
                 ``resolved_replay_days`` window. Every
                 ``reconcile_interval_minutes`` the loop scans Lithos
                 for open + recently-resolved tasks carrying

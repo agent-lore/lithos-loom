@@ -244,11 +244,12 @@ class GitHubWatcherConfig:
     """Cadence of the periodic Lithos→GH reconciliation sweep.
 
     PR-review finding 4 (round 5, 2026-05-30): the push consumer's
-    in-memory retry budget tops out at ~4 minutes. A GH outage longer
-    than that drops the event entirely, with recovery only on next
-    daemon restart inside ``resolved_replay_days``. The sweep closes
-    that gap while the daemon keeps running: every interval (default
-    60 min), scan Lithos for open + recently-resolved tasks carrying
+    in-memory retry budget tops out at ~3 minutes (waits
+    2/4/8/16/32/60/60 s ≈ 182 s). A GH outage longer than that drops
+    the event entirely, with recovery only on next daemon restart
+    inside ``resolved_replay_days``. The sweep closes that gap while
+    the daemon keeps running: every interval (default 60 min), scan
+    Lithos for open + recently-resolved tasks carrying
     ``metadata.github_issue_url`` and replay each one through the push
     handler. The handler is idempotent (re-fetches GH before PATCH)
     so the sweep is harmless when everything is already in sync. Set

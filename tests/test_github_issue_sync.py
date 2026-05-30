@@ -916,14 +916,11 @@ async def test_reopen_on_legacy_task_without_snapshot_fires_finding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_drift_on_terminal_task_only_updates_snapshot() -> None:
-    """Self-review (round 6 self-review, 2026-05-30): drift sync on
-    terminal tasks (``completed`` / ``cancelled``) must NOT push title /
-    description / tags changes — Lithos's task_update semantics on
-    terminal tasks aren't documented to accept those fields, and a
-    rejection would [Friction]-raise and freeze the watcher's cursor.
-    Only the github_state_snapshot field (reopen-finding dedup signal)
-    keeps flowing.
+async def test_drift_on_terminal_task_mirrors_full_state() -> None:
+    """SPEC §2.2 + PRD story #71: drift sync runs on terminal tasks too.
+    The operator should not see stale title/body/labels on a reopened
+    issue. Round-6 self-review briefly restricted this defensively;
+    round-7 review flagged the contract drift and reverted.
     """
     lithos = _stub_lithos()
     existing = _task(
@@ -949,20 +946,17 @@ async def test_drift_on_terminal_task_only_updates_snapshot() -> None:
         ),
         _ctx(lithos),
     )
-    # The reopen finding fires...
+    # Reopen finding fires.
     lithos.finding_post.assert_awaited_once()
-    # ...and the only task_update we do is the snapshot bump.
+    # And the drift task_update carries the full payload.
     lithos.task_update.assert_awaited_once()
     kwargs = lithos.task_update.await_args.kwargs
-    assert "title" not in kwargs
-    assert "description" not in kwargs
-    assert "tags" not in kwargs
-    metadata = kwargs.get("metadata", {})
-    assert metadata.get("github_state_snapshot") == "open"
-    # Labels snapshot stays where it was — operator doesn't see archived
-    # tags drift, and the next reopen of the issue (if it ever happens
-    # via upstream task_reopen) starts from a clean snapshot.
-    assert "github_labels" not in metadata
+    assert kwargs["title"] == "renamed"
+    assert kwargs["description"] == "new body"
+    assert "needs-info" in kwargs["tags"]
+    metadata = kwargs["metadata"]
+    assert metadata["github_state_snapshot"] == "open"
+    assert metadata["github_labels"] == ["bug", "needs-info"]
 
 
 @pytest.mark.asyncio
