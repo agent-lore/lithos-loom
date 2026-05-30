@@ -40,6 +40,7 @@ fact filter add (PRD: "exclude is only at import time").
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from lithos_loom.bus import Event
@@ -379,29 +380,45 @@ async def _sync_drift(
     Build a single merged ``task_update`` payload to keep steady-state
     polls cheap. The state-snapshot field rides on the same write so the
     reopen-finding de-dupe stays consistent without an extra round-trip.
+
+    Self-review (round 6 self-review, 2026-05-30) — Lithos's task_update
+    semantics on terminal tasks (``completed`` / ``cancelled``) are not
+    documented to accept title / description / tags changes. If Lithos
+    rejects, the [Friction]-then-raise contract would freeze the cursor
+    forever for any open GH issue paired with a terminal Lithos task
+    whose drift differs. Restrict full drift to open tasks; on terminal
+    tasks the only field that needs to keep flowing is
+    ``github_state_snapshot`` — that's the dedup signal for the reopen
+    finding and the operator never sees other fields on archived tasks
+    anyway.
     """
     updates: dict[str, Any] = {}
     metadata_updates: dict[str, Any] = {}
 
-    if issue.title != task.title:
-        updates["title"] = issue.title
+    if task.status == "open":
+        if issue.title != task.title:
+            updates["title"] = issue.title
 
-    body_sans_marker = strip_marker(issue.body)
-    current_desc = (task.description or "").strip()
-    if body_sans_marker != current_desc:
-        updates["description"] = body_sans_marker
+        body_sans_marker = strip_marker(issue.body)
+        current_desc = (task.description or "").strip()
+        if body_sans_marker != current_desc:
+            updates["description"] = body_sans_marker
 
-    raw_snapshot = task.metadata.get("github_labels") or ()
-    old_snapshot: list[str] = [str(label) for label in raw_snapshot]
-    new_labels = list(issue.labels)
-    if set(old_snapshot) != set(new_labels):
-        new_tags = _merge_tags_preserving_operator_adds(
-            list(task.tags), old_snapshot, new_labels
-        )
-        if set(new_tags) != set(task.tags):
-            updates["tags"] = new_tags
-        metadata_updates["github_labels"] = new_labels
+        raw_snapshot = task.metadata.get("github_labels") or ()
+        old_snapshot: list[str] = [str(label) for label in raw_snapshot]
+        new_labels = list(issue.labels)
+        if set(old_snapshot) != set(new_labels):
+            new_tags = _merge_tags_preserving_operator_adds(
+                list(task.tags), old_snapshot, new_labels
+            )
+            if set(new_tags) != set(task.tags):
+                updates["tags"] = new_tags
+            metadata_updates["github_labels"] = new_labels
 
+    # State snapshot updates regardless of task status: it's the
+    # reopen-finding dedup signal and must roll forward for terminal
+    # tasks too. ``metadata=...`` is the only payload field always
+    # safe on a terminal task.
     if task.metadata.get("github_state_snapshot") != issue.state:
         metadata_updates["github_state_snapshot"] = issue.state
 
@@ -597,8 +614,24 @@ async def _fetch_task(ctx: SubscriptionContext, task_id: str) -> Task | None:
         raise
 
 
+_URL_LOOKUP_RESOLVED_WINDOW = timedelta(days=30)
+"""Cutoff for the cancelled / completed scan in :func:`_find_task_by_url`.
+
+Self-review (round 6 self-review, 2026-05-30): ``task_list`` returns
+*every* matching task with no pagination on the Lithos client. A
+workspace with O(10,000) cancelled tasks could send a huge payload per
+URL-match query on the marker-recovery branch and trigger MCP timeouts.
+30 days is generous for the operator-deleted-marker recovery use case:
+an operator who deletes a marker on an issue that was completed >30
+days ago is almost certainly intentionally creating a fresh link.
+Tighter than ``resolved_replay_days`` because the watcher's other
+recovery surfaces handle the recent window; this one only catches
+hand-edits.
+"""
+
+
 async def _find_task_by_url(ctx: SubscriptionContext, url: str) -> Task | None:
-    """Scan open + closed tasks for one whose metadata carries ``url``.
+    """Scan open + recently-closed tasks for one whose metadata carries ``url``.
 
     PR-review finding 2 (round 3, 2026-05-30): a failed ``task_list``
     no longer falls through to ``None``. Propagation freezes the
@@ -606,13 +639,19 @@ async def _find_task_by_url(ctx: SubscriptionContext, url: str) -> Task | None:
     lookup — a swallowed error here would let the create branch fire
     and produce a duplicate task.
 
-    Used only on the operator-deleted-marker recovery path, so the
-    linear cost is bounded — open-task counts in the operator's
-    workspace are typically O(10–100), and closed-task scan is only
-    triggered when the open scan misses.
+    Self-review (round 6, 2026-05-30): the cancelled / completed scans
+    are bounded by :data:`_URL_LOOKUP_RESOLVED_WINDOW` so a long-lived
+    workspace with tens of thousands of resolved tasks doesn't push a
+    huge response per event. Open tasks always scan fully because
+    open-task counts are typically O(10–100).
     """
-    for status in ("open", "completed", "cancelled"):
-        tasks = await ctx.lithos.task_list(status=status)
+    open_tasks = await ctx.lithos.task_list(status="open")
+    for task in open_tasks:
+        if task.metadata.get("github_issue_url") == url:
+            return task
+    since = datetime.now(UTC) - _URL_LOOKUP_RESOLVED_WINDOW
+    for status in ("completed", "cancelled"):
+        tasks = await ctx.lithos.task_list(status=status, resolved_since=since)
         for task in tasks:
             if task.metadata.get("github_issue_url") == url:
                 return task

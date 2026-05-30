@@ -314,14 +314,15 @@ async def _amain(cfg: LoomConfig) -> int:
                 rate-limit exhausted). Permanent errors (auth, 404) are
                 logged + swallowed inside the handler. Here we retry
                 transient failures with exponential backoff capped at
-                ``_RETRY_MAX_DELAY_SECONDS``. With 8 attempts and a 60s
-                cap the total wait before drop is ~250 seconds (~4
-                minutes) — wide enough to absorb realistic short outages
-                and GH 5xx flares (PR-review finding 3, round 4,
-                2026-05-30: round-3's 3-attempt cap discarded events
-                after only ~6 seconds, which lost work to anything
-                longer than a transient hiccup). Outages longer than
-                this fall through to the next ``LithosEventStream``
+                ``max_delay_seconds``. With 8 attempts and a 60s cap the
+                inter-attempt waits are 2, 4, 8, 16, 32, 60, 60s
+                (182s ≈ 3 minutes total before drop) — wide enough to
+                absorb realistic short outages and GH 5xx flares
+                (PR-review finding 3, round 4, 2026-05-30: round-3's
+                3-attempt cap discarded events after only ~6 seconds,
+                which lost work to anything longer than a transient
+                hiccup). Outages longer than this fall through to the
+                periodic reconciliation sweep + ``LithosEventStream``
                 bootstrap replay window on daemon restart.
                 """
                 max_attempts = 8

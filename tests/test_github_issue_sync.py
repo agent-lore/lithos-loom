@@ -916,6 +916,56 @@ async def test_reopen_on_legacy_task_without_snapshot_fires_finding() -> None:
 
 
 @pytest.mark.asyncio
+async def test_drift_on_terminal_task_only_updates_snapshot() -> None:
+    """Self-review (round 6 self-review, 2026-05-30): drift sync on
+    terminal tasks (``completed`` / ``cancelled``) must NOT push title /
+    description / tags changes — Lithos's task_update semantics on
+    terminal tasks aren't documented to accept those fields, and a
+    rejection would [Friction]-raise and freeze the watcher's cursor.
+    Only the github_state_snapshot field (reopen-finding dedup signal)
+    keeps flowing.
+    """
+    lithos = _stub_lithos()
+    existing = _task(
+        status="completed",
+        title="old title",
+        description="old body",
+        tags=("bug", GITHUB_ISSUE_TAG),
+        metadata={
+            "github_issue_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+            "github_labels": ["bug"],
+            "github_state_snapshot": "closed",
+        },
+    )
+    lithos.task_get = AsyncMock(return_value=existing)
+    handler = make_handler(_stub_github())
+    # GH issue has drifted on every field AND reopened.
+    await handler(
+        _event(
+            body="new body\n<!-- lithos:task-123 -->",
+            title="renamed",
+            labels=["bug", "needs-info"],
+            state="open",
+        ),
+        _ctx(lithos),
+    )
+    # The reopen finding fires...
+    lithos.finding_post.assert_awaited_once()
+    # ...and the only task_update we do is the snapshot bump.
+    lithos.task_update.assert_awaited_once()
+    kwargs = lithos.task_update.await_args.kwargs
+    assert "title" not in kwargs
+    assert "description" not in kwargs
+    assert "tags" not in kwargs
+    metadata = kwargs.get("metadata", {})
+    assert metadata.get("github_state_snapshot") == "open"
+    # Labels snapshot stays where it was — operator doesn't see archived
+    # tags drift, and the next reopen of the issue (if it ever happens
+    # via upstream task_reopen) starts from a clean snapshot.
+    assert "github_labels" not in metadata
+
+
+@pytest.mark.asyncio
 async def test_create_initialises_state_snapshot_in_metadata() -> None:
     """7.2 task-create now stamps github_state_snapshot=<issue.state> at birth."""
     lithos = _stub_lithos()
