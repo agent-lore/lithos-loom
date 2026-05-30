@@ -28,7 +28,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from lithos_loom.bus import Event
-from lithos_loom.github_client import GitHubClient, GitHubError
+from lithos_loom.github_client import (
+    GitHubAuthError,
+    GitHubClient,
+    GitHubRepoNotFoundError,
+)
 from lithos_loom.subscriptions import Handler, SubscriptionContext
 
 __all__ = ["EVENT_TYPES", "make_handler"]
@@ -108,17 +112,9 @@ async def _mirror_close(
         "completed" if event.type == "lithos.task.completed" else "not_planned"
     )
 
-    try:
-        current = await github.get_issue(repo, number)
-    except GitHubError as exc:
-        ctx.logger.warning(
-            "[Friction] github-issue-push: get_issue %s/#%d failed: %s",
-            repo,
-            number,
-            exc,
-        )
+    current = await _fetch_or_skip(github, repo, number, "close mirror", ctx)
+    if current is _SKIP:
         return
-
     if current is None:
         ctx.logger.info(
             "github-issue-push: %s/#%d no longer exists; skipping close mirror",
@@ -144,17 +140,15 @@ async def _mirror_close(
         state_reason,
         payload.get("id"),
     )
-    try:
-        await github.update_issue_fields(
-            repo, number, state="closed", state_reason=state_reason
-        )
-    except GitHubError as exc:
-        ctx.logger.warning(
-            "[Friction] github-issue-push: close PATCH for %s/#%d failed: %s",
-            repo,
-            number,
-            exc,
-        )
+    await _patch_or_skip(
+        github,
+        repo,
+        number,
+        "close",
+        ctx,
+        state="closed",
+        state_reason=state_reason,
+    )
 
 
 async def _mirror_title(
@@ -169,17 +163,9 @@ async def _mirror_title(
     if not isinstance(lithos_title, str) or not lithos_title:
         return
 
-    try:
-        current = await github.get_issue(repo, number)
-    except GitHubError as exc:
-        ctx.logger.warning(
-            "[Friction] github-issue-push: get_issue %s/#%d for title sync failed: %s",
-            repo,
-            number,
-            exc,
-        )
+    current = await _fetch_or_skip(github, repo, number, "title sync", ctx)
+    if current is _SKIP:
         return
-
     if current is None:
         ctx.logger.debug(
             "github-issue-push: %s/#%d gone; skipping title sync", repo, number
@@ -198,13 +184,83 @@ async def _mirror_title(
         lithos_title,
         payload.get("id"),
     )
+    await _patch_or_skip(github, repo, number, "title", ctx, title=lithos_title)
+
+
+# ── Error classification ──────────────────────────────────────────────
+
+
+# Sentinel returned by helper functions when a *permanent* error (auth,
+# 404) means the handler should skip rather than retry. Distinct from
+# ``None`` (issue deleted, treated as a legitimate no-op).
+_SKIP: Any = object()
+
+
+async def _fetch_or_skip(
+    github: GitHubClient,
+    repo: str,
+    number: int,
+    operation: str,
+    ctx: SubscriptionContext,
+) -> Any:
+    """get_issue with permanent vs transient classification.
+
+    PR-review finding 3 (round 3, 2026-05-30): the previous code
+    swallowed every ``GitHubError`` as [Friction] and returned, which
+    discarded events even when the failure was transient (5xx, network
+    blip). Now permanent failures (auth / not found) log + return the
+    ``_SKIP`` sentinel; transient failures propagate so the consumer
+    loop retries with backoff.
+    """
     try:
-        await github.update_issue_fields(repo, number, title=lithos_title)
-    except GitHubError as exc:
+        return await github.get_issue(repo, number)
+    except (GitHubAuthError, GitHubRepoNotFoundError) as exc:
         ctx.logger.warning(
-            "[Friction] github-issue-push: title PATCH for %s/#%d failed: %s",
+            "[Friction] github-issue-push: %s on %s/#%d hit permanent error "
+            "(%s: %s); dropping event",
+            operation,
             repo,
             number,
+            type(exc).__name__,
+            exc,
+        )
+        return _SKIP
+
+
+async def _patch_or_skip(
+    github: GitHubClient,
+    repo: str,
+    number: int,
+    operation: str,
+    ctx: SubscriptionContext,
+    *,
+    title: str | None = None,
+    state: str | None = None,
+    state_reason: str | None = None,
+) -> None:
+    """update_issue_fields with permanent vs transient classification.
+
+    Forwards only the non-None kwargs so the call signature matches what
+    the handler's branches send (title-only for renames, state+reason
+    for closes) — keeps the assertions in tests precise.
+    """
+    kwargs: dict[str, str] = {}
+    if title is not None:
+        kwargs["title"] = title
+    if state is not None:
+        kwargs["state"] = state
+    if state_reason is not None:
+        kwargs["state_reason"] = state_reason
+    try:
+        await github.update_issue_fields(repo, number, **kwargs)
+    except (GitHubAuthError, GitHubRepoNotFoundError) as exc:
+        ctx.logger.warning(
+            "[Friction] github-issue-push: %s PATCH for %s/#%d hit permanent "
+            "error (%s: %s); dropping event",
+            operation,
+            repo,
+            number,
+            type(exc).__name__,
             exc,
         )
 

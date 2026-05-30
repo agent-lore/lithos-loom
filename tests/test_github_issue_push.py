@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from lithos_loom.bus import Event
-from lithos_loom.github_client import GitHubAuthError, Issue
+from lithos_loom.github_client import GitHubAuthError, GitHubError, Issue
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._github_issue_push import EVENT_TYPES, make_handler
 
@@ -167,13 +167,41 @@ async def test_completed_event_skips_when_gh_issue_deleted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_mirror_swallows_gh_errors_as_friction() -> None:
-    """A GH 5xx or auth error during close shouldn't crash the runner."""
+async def test_close_mirror_swallows_permanent_gh_errors() -> None:
+    """Permanent GitHub errors (auth, repo not found) are logged + dropped —
+    no point retrying a permission denial."""
     github = _stub_github(issue=_issue(state="open"))
     github.update_issue_fields = AsyncMock(side_effect=GitHubAuthError("403"))
     handler = make_handler(github)
-    # Must not raise.
+    # Must not raise on permanent errors.
     await handler(_event("lithos.task.completed", _payload()), _ctx())
+
+
+@pytest.mark.asyncio
+async def test_close_mirror_propagates_transient_gh_errors() -> None:
+    """PR-review finding 3 (round 3, 2026-05-30): transient errors
+    (5xx, network blips) must propagate so the consumer loop can retry
+    with backoff. The previous code swallowed every GitHubError
+    indiscriminately, turning a Cloudflare hiccup into a permanently
+    lost close-mirror event.
+    """
+    github = _stub_github(issue=_issue(state="open"))
+    github.update_issue_fields = AsyncMock(
+        side_effect=GitHubError("500 internal server error")
+    )
+    handler = make_handler(github)
+    with pytest.raises(GitHubError):
+        await handler(_event("lithos.task.completed", _payload()), _ctx())
+
+
+@pytest.mark.asyncio
+async def test_close_mirror_propagates_transient_get_issue_failure() -> None:
+    """get_issue failing with a transient error also propagates."""
+    github = _stub_github()
+    github.get_issue = AsyncMock(side_effect=GitHubError("502 bad gateway"))
+    handler = make_handler(github)
+    with pytest.raises(GitHubError):
+        await handler(_event("lithos.task.completed", _payload()), _ctx())
 
 
 # ── Title sync branch ─────────────────────────────────────────────────

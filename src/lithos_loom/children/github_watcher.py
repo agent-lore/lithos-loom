@@ -190,22 +190,59 @@ async def _amain(cfg: LoomConfig) -> int:
             )
 
             push_handler = make_github_issue_push_handler(github)
+            # PR-review finding 3 (round 3, 2026-05-30): the previous
+            # 512-slot queue would drop events deterministically on a
+            # large terminal-event burst (bootstrap of a busy KB). 8192
+            # is generous enough to absorb realistic bursts while staying
+            # well under the bus's bounded-queue invariant. Pair with
+            # transient-vs-permanent error classification + retry below
+            # so transient GH failures (5xx, network blips) don't get
+            # discarded.
             push_sub = bus.subscribe(
                 event_types=LITHOS_TASK_EVENT_TYPES,
                 name="github-issue-push",
-                queue_size=512,
+                queue_size=8192,
             )
 
             async def consume_push() -> None:
-                """Drain the Lithos→GH subscription. Same hand-rolled shape."""
+                """Drain the Lithos→GH subscription with transient-error retry.
+
+                Push handler raises on transient GH errors (5xx, network,
+                rate-limit exhausted). Permanent errors (auth, 404) are
+                logged + swallowed inside the handler. Here we retry
+                transient failures up to 3 attempts with exponential
+                backoff before logging [Friction] and dropping — beats
+                losing a close-mirror event to a Cloudflare hiccup.
+                """
+                max_attempts = 3
                 while True:
                     event = await push_sub.queue.get()
-                    try:
-                        await push_handler(event, ctx)
-                    except Exception:
-                        logger.exception(
-                            "github-watcher: push subscription handler raised"
-                        )
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            await push_handler(event, ctx)
+                            break
+                        except Exception as exc:
+                            if attempt >= max_attempts:
+                                logger.warning(
+                                    "[Friction] github-watcher: push handler "
+                                    "exhausted %d attempts on %s "
+                                    "(%s: %s); dropping",
+                                    max_attempts,
+                                    event.type,
+                                    type(exc).__name__,
+                                    exc,
+                                )
+                                break
+                            delay = 2**attempt
+                            logger.info(
+                                "github-watcher: push handler attempt %d/%d "
+                                "failed (%s); retrying in %ds",
+                                attempt,
+                                max_attempts,
+                                type(exc).__name__,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
 
             tasks: list[asyncio.Task[None]] = [
                 asyncio.create_task(note_stream.run(), name="lithos-note-stream"),
