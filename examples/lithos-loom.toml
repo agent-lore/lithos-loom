@@ -275,3 +275,10 @@ tags = ["trigger:story-review-human"]
 # # was down still mirrors to GH on restart via the replay. The push
 # # handler is idempotent (refetches GH before PATCH) so a too-large
 # # window only costs harmless re-checks. Set to 0 to disable replay.
+# reconcile_interval_minutes = 60
+# # Cadence of the periodic Lithos→GH reconciliation sweep. The push
+# # consumer's in-memory retry budget tops out at ~4 minutes; outages
+# # longer than that drop events that only recover on next restart.
+# # The sweep closes that gap while the daemon keeps running — every
+# # interval it re-dispatches GH-linked Lithos tasks through the push
+# # handler. Set to 0 to disable.

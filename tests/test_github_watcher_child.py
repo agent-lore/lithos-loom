@@ -104,6 +104,73 @@ async def test_github_watcher_child_wires_both_directions() -> None:
     assert "lithos.task.updated" in mod.LITHOS_TASK_EVENT_TYPES
 
 
+async def test_reconcile_pass_redispatches_gh_linked_tasks() -> None:
+    """PR-review finding 4 (round 5, 2026-05-30): the periodic
+    reconciliation pass scans Lithos for tasks carrying
+    metadata.github_issue_url and re-dispatches them through the push
+    handler. GH-unlinked tasks must be skipped — they're noise."""
+    import logging
+    from datetime import UTC, datetime, timedelta
+    from typing import Any
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.children.github_watcher import _run_reconcile_pass
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.subscriptions import SubscriptionContext
+
+    open_linked = Task(
+        id="task-a",
+        title="Linked",
+        status="open",
+        tags=("github-issue",),
+        metadata={"github_issue_url": "https://github.com/x/y/issues/1"},
+        claims=(),
+    )
+    open_unlinked = Task(
+        id="task-b",
+        title="No GH link",
+        status="open",
+        tags=(),
+        metadata={"project": "other"},
+        claims=(),
+    )
+    completed_linked = Task(
+        id="task-c",
+        title="Done linked",
+        status="completed",
+        tags=("github-issue",),
+        metadata={"github_issue_url": "https://github.com/x/y/issues/2"},
+        claims=(),
+        resolved_at=datetime(2026, 5, 29, tzinfo=UTC),
+    )
+    lithos = AsyncMock()
+    lithos.task_list = AsyncMock(
+        side_effect=[
+            [open_linked, open_unlinked],  # open
+            [completed_linked],  # completed
+            [],  # cancelled
+        ]
+    )
+    handler_calls: list[str] = []
+
+    async def push_handler(event: Any, _ctx: Any) -> None:
+        handler_calls.append(event.type)
+
+    ctx = SubscriptionContext(
+        lithos=lithos,
+        logger=logging.getLogger("test-reconcile"),
+        agent_id="test-agent",
+    )
+    await _run_reconcile_pass(
+        lithos=lithos,
+        push_handler=push_handler,
+        ctx=ctx,
+        resolved_window=timedelta(days=7),
+    )
+    # GH-unlinked task was filtered out.
+    assert handler_calls == ["lithos.task.created", "lithos.task.completed"]
+
+
 def test_configure_logging_silences_mcp_sse_at_critical() -> None:
     """At any level, the MCP SDK's per-reconnect tracebacks are pinned to CRITICAL.
 

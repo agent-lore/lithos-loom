@@ -47,6 +47,7 @@ __all__ = [
     "DEFAULT_CONFIG_FILENAME",
     "DEFAULT_GITHUB_WATCHER_COORD_DOC",
     "DEFAULT_GITHUB_WATCHER_POLL_INTERVAL",
+    "DEFAULT_GITHUB_WATCHER_RECONCILE_INTERVAL_MINUTES",
     "DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS",
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_MAX_CONCURRENCY",
@@ -96,6 +97,7 @@ DEFAULT_GITHUB_WATCHER_COORD_DOC = (
     "projects/_lithos-loom-internal/github-watcher-state.md"
 )
 DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS = 7
+DEFAULT_GITHUB_WATCHER_RECONCILE_INTERVAL_MINUTES = 60
 
 
 def parse_log_level(value: str) -> LogLevel:
@@ -237,6 +239,20 @@ class GitHubWatcherConfig:
     (7 days) tracks the obsidian-sync TTL convention. Set to 0 to disable
     replay (push handler only fires for events that arrive while the
     watcher is live).
+    """
+    reconcile_interval_minutes: int = DEFAULT_GITHUB_WATCHER_RECONCILE_INTERVAL_MINUTES
+    """Cadence of the periodic Lithos→GH reconciliation sweep.
+
+    PR-review finding 4 (round 5, 2026-05-30): the push consumer's
+    in-memory retry budget tops out at ~4 minutes. A GH outage longer
+    than that drops the event entirely, with recovery only on next
+    daemon restart inside ``resolved_replay_days``. The sweep closes
+    that gap while the daemon keeps running: every interval (default
+    60 min), scan Lithos for open + recently-resolved tasks carrying
+    ``metadata.github_issue_url`` and replay each one through the push
+    handler. The handler is idempotent (re-fetches GH before PATCH)
+    so the sweep is harmless when everything is already in sync. Set
+    to 0 to disable the sweep entirely.
     """
 
 
@@ -620,7 +636,13 @@ def _parse_obsidian_sync(data: Any, config_path: Path) -> ObsidianSyncConfig | N
 
 
 _GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
-    {"enabled", "poll_interval_seconds", "coord_doc_path", "resolved_replay_days"}
+    {
+        "enabled",
+        "poll_interval_seconds",
+        "coord_doc_path",
+        "resolved_replay_days",
+        "reconcile_interval_minutes",
+    }
 )
 
 
@@ -687,11 +709,25 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
             f"(got {resolved_replay_days})"
         )
 
+    reconcile_interval = _optional_int(
+        data,
+        "reconcile_interval_minutes",
+        DEFAULT_GITHUB_WATCHER_RECONCILE_INTERVAL_MINUTES,
+        config_path,
+        "github_watcher",
+    )
+    if reconcile_interval < 0:
+        raise ConfigError(
+            f"{config_path}: github_watcher.reconcile_interval_minutes must be "
+            f">= 0 (got {reconcile_interval})"
+        )
+
     return GitHubWatcherConfig(
         enabled=enabled,
         poll_interval_seconds=poll_interval,
         coord_doc_path=coord_doc_raw,
         resolved_replay_days=resolved_replay_days,
+        reconcile_interval_minutes=reconcile_interval,
     )
 
 

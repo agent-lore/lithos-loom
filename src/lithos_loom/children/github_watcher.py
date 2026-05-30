@@ -23,9 +23,10 @@ import contextlib
 import logging
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 
@@ -86,6 +87,92 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="lithos_loom.children.github_watcher")
     parser.add_argument("--config", type=Path, default=None)
     return parser.parse_args(argv)
+
+
+async def _run_reconcile_pass(
+    *,
+    lithos: LithosClient,
+    push_handler: object,
+    ctx: SubscriptionContext,
+    resolved_window: timedelta | None,
+) -> None:
+    """Single pass of the periodic Lithos→GH reconciliation sweep.
+
+    Pulls open tasks (all) plus completed + cancelled tasks resolved
+    within ``resolved_window`` (typically the same window as
+    ``LithosEventStream.bootstrap_resolved_window`` so the recovery
+    surface matches operator expectations), filters to those carrying
+    ``metadata.github_issue_url``, and dispatches each through the
+    push handler. The handler short-circuits when GH already matches
+    the Lithos state, so the sweep is cheap in steady state.
+
+    Synthetic events route through ``_mirror_title`` for open tasks
+    and ``_mirror_close`` for terminal tasks via the same event-type
+    branch the LithosEventStream replay uses (``lithos.task.created``
+    for open, ``lithos.task.completed`` / ``cancelled`` for terminal).
+    """
+    from datetime import UTC, datetime
+
+    from lithos_loom.bus import Event
+
+    handler = cast("Callable[[Event, SubscriptionContext], Any]", push_handler)
+    now = datetime.now(UTC)
+
+    async def _dispatch_one(task: Any, event_type: str) -> None:
+        event = Event(
+            type=event_type,
+            timestamp=now,
+            payload={
+                "id": task.id,
+                "title": task.title,
+                "status": task.status,
+                "tags": list(task.tags),
+                "metadata": dict(task.metadata),
+                "claims": [dict(c) for c in task.claims],
+                "resolved_at": (
+                    task.resolved_at.isoformat()
+                    if task.resolved_at is not None
+                    else None
+                ),
+            },
+        )
+        try:
+            await handler(event, ctx)
+        except Exception as exc:
+            logger.warning(
+                "[Friction] github-watcher: reconcile-sweep dispatch for "
+                "task %s (%s) failed: %s: %s",
+                task.id,
+                event_type,
+                type(exc).__name__,
+                exc,
+            )
+
+    counts = {"open": 0, "completed": 0, "cancelled": 0}
+    open_tasks = await lithos.task_list(status="open")
+    for task in open_tasks:
+        if task.metadata.get("github_issue_url"):
+            counts["open"] += 1
+            await _dispatch_one(task, "lithos.task.created")
+
+    since = now - resolved_window if resolved_window is not None else None
+    for terminal_status, event_type in (
+        ("completed", "lithos.task.completed"),
+        ("cancelled", "lithos.task.cancelled"),
+    ):
+        tasks = await lithos.task_list(status=terminal_status, resolved_since=since)
+        for task in tasks:
+            if task.metadata.get("github_issue_url"):
+                counts[terminal_status] += 1
+                await _dispatch_one(task, event_type)
+
+    logger.info(
+        "github-watcher: reconcile sweep replayed %d open / %d completed / "
+        "%d cancelled GH-linked task(s)",
+        counts["open"],
+        counts["completed"],
+        counts["cancelled"],
+    )
 
 
 async def _amain(cfg: LoomConfig) -> int:
@@ -255,11 +342,62 @@ async def _amain(cfg: LoomConfig) -> int:
                             )
                             await asyncio.sleep(delay)
 
+            reconcile_seconds = gh_cfg.reconcile_interval_minutes * 60
+
+            async def periodic_reconcile() -> None:
+                """Re-dispatch every GH-linked Lithos task through the push handler.
+
+                PR-review finding 4 (round 5, 2026-05-30): closes the
+                "outage outlasts the in-memory retry budget" gap. The
+                push consumer's 8-attempt / ~4-minute backoff drops
+                events that survive longer outages; without this loop
+                they only recover on next daemon restart inside the
+                ``resolved_replay_days`` window. Every
+                ``reconcile_interval_minutes`` the loop scans Lithos
+                for open + recently-resolved tasks carrying
+                ``metadata.github_issue_url`` and replays each one
+                through the push handler. The handler is idempotent
+                (re-fetches GH before PATCH) so the sweep is a no-op
+                when everything is already in sync.
+
+                Skipped entirely when ``reconcile_interval_minutes`` is
+                zero (operator opted out).
+                """
+                if reconcile_seconds <= 0:
+                    logger.info(
+                        "github-watcher: periodic reconcile disabled "
+                        "(reconcile_interval_minutes=0)"
+                    )
+                    return
+                # First fire: wait a full interval so the bootstrap
+                # replay from LithosEventStream has time to settle
+                # before we redundantly re-scan everything.
+                await asyncio.sleep(reconcile_seconds)
+                window = (
+                    timedelta(days=gh_cfg.resolved_replay_days)
+                    if gh_cfg.resolved_replay_days > 0
+                    else None
+                )
+                while True:
+                    try:
+                        await _run_reconcile_pass(
+                            lithos=lithos,
+                            push_handler=push_handler,
+                            ctx=ctx,
+                            resolved_window=window,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "github-watcher: periodic reconcile pass raised"
+                        )
+                    await asyncio.sleep(reconcile_seconds)
+
             tasks: list[asyncio.Task[None]] = [
                 asyncio.create_task(note_stream.run(), name="lithos-note-stream"),
                 asyncio.create_task(event_stream.run(), name="lithos-event-stream"),
                 asyncio.create_task(watcher.run(), name="github-issue-watcher"),
                 asyncio.create_task(consume_push(), name="github-issue-push-consumer"),
+                asyncio.create_task(periodic_reconcile(), name="github-push-reconcile"),
             ]
             try:
                 await stop_event.wait()

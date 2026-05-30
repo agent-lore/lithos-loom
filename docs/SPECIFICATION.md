@@ -137,7 +137,7 @@ Filters apply only on the create branch (no marker + no matching URL + GH open).
 
 **Dispatch contract (GH → Lithos).** The watcher source dispatches each issue inline to the `github-issue-sync` handler before advancing the persistent cursor — the bus path is reserved for tests that assert on queue contents. Cursor advancement is per-issue: the watcher walks GitHub's `updated_at`-ascending list, advances the in-memory cursor to each issue's timestamp only after dispatch succeeds, and halts the loop on the first exception so the next poll re-fetches starting from the failed boundary. Issues that failed dispatch are tracked in an in-memory `_stuck_issues: dict[str, set[int]]` and retried by direct `github.get_issue` lookup at the top of the next poll — that path is independent of the cursor and the `state=` filter, so a bootstrap walk that's about to lose a closed-before-retry issue still gets it. Restart loses the stuck set; open-stuck issues are caught on the next bootstrap, closed-stuck issues are a known loss window.
 
-**Dispatch contract (Lithos → GH).** The push direction uses the bus because `LithosEventStream` already serves multiple subscribers across child processes. The consumer loop classifies handler exceptions: permanent errors (`GitHubAuthError`, `GitHubRepoNotFoundError`) log `[Friction]` and drop without retry; other `GitHubError` subclasses (transients — 5xx, network blips, rate-limit exhausted) retry with exponential backoff capped at 60s, up to 8 attempts (~4 minutes total). Outages outlasting that drop `[Friction]` and surface again only via `LithosEventStream`'s `bootstrap_resolved_window` replay on next daemon restart — operators with long outages should plan a restart inside `resolved_replay_days` to recover.
+**Dispatch contract (Lithos → GH).** The push direction uses the bus because `LithosEventStream` already serves multiple subscribers across child processes. The consumer loop classifies handler exceptions: permanent errors (`GitHubAuthError`, `GitHubRepoNotFoundError`) log `[Friction]` and drop without retry; other `GitHubError` subclasses (transients — 5xx, network blips, rate-limit exhausted) retry with exponential backoff capped at 60s, up to 8 attempts (~4 minutes total). Outages outlasting that budget are caught by the **periodic reconciliation sweep**: every `[github_watcher].reconcile_interval_minutes` (default 60) the child re-fetches open Lithos tasks plus completed + cancelled tasks resolved within `resolved_replay_days`, filters to those carrying `metadata.github_issue_url`, and re-dispatches each one through the push handler. The handler is idempotent (re-fetches GH before PATCH) so the sweep is a no-op in steady state. The sweep keeps recovery cadence within the configured interval even without a daemon restart; set to 0 to disable.
 
 **Drift sync** (GH → Lithos, Slice 7.2). Every poll that matches a known Lithos task layers three checks on top of the close mirror:
 
@@ -301,6 +301,12 @@ resolved_replay_days  = 7
 # push handler is idempotent (refetches GH before PATCH) so a too-large
 # window only costs harmless re-checks. Set to 0 to disable replay (the
 # push handler then only fires for events that arrive live).
+reconcile_interval_minutes = 60
+# Cadence of the periodic Lithos→GH reconciliation sweep. Catches drift
+# left over from outages longer than the in-memory retry budget — every
+# interval the child scans Lithos for open + recently-resolved tasks
+# carrying metadata.github_issue_url and replays each through the push
+# handler. Set to 0 to disable the sweep.
 ```
 
 ### 3.2 Validation
