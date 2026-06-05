@@ -1488,7 +1488,11 @@ def _parse_note(raw: Any, *, body_required: bool) -> Note:
             body=str(body_raw or ""),
             version=int(version_raw),
             updated_at=_parse_iso_datetime(
-                metadata.get("updated_at") or raw.get("updated_at")
+                # ``lithos_read`` envelopes carry ``updated_at``;
+                # ``lithos_list`` items name the same field ``updated``.
+                metadata.get("updated_at")
+                or raw.get("updated_at")
+                or raw.get("updated")
             ),
             tags=tuple(str(t) for t in tags_raw),
             status=_optional_str(metadata.get("status") or raw.get("status")),

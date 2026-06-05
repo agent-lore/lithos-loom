@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -774,6 +774,29 @@ class GitHubIssueWatcher:
         for slug, repo in pairs:
             await self._poll_one_repo(slug=slug, repo=repo)
 
+    def _drop_repo(self, *, slug: str, repo: str) -> None:
+        """Remove a single repo from a project's watch entry (e.g. on a
+        404) without disturbing the project's other repos.
+
+        A project may map several repos; a 404 on one must not stop
+        polling the siblings. Drops the repo from the entry's ``repos``
+        tuple (removing the slug entirely only when it was the last
+        repo) and clears that repo's cursor + stuck state. The next
+        ``_refresh_watch_list`` re-reads the canonical metadata, so a
+        repo that 404s but is still mapped will be re-added and
+        re-attempted — same transient-drop behaviour as before, now
+        scoped to the offending repo.
+        """
+        watched = self._watch_list.get(slug)
+        if watched is not None:
+            remaining = tuple(r for r in watched.repos if r != repo)
+            if remaining:
+                self._watch_list[slug] = replace(watched, repos=remaining)
+            else:
+                self._watch_list.pop(slug, None)
+        self._cursors.pop(repo, None)
+        self._stuck_issues.pop(repo, None)
+
     async def _retry_stuck_issues(self, *, slug: str, repo: str) -> bool:
         """Retry issues whose dispatch failed in a previous poll.
 
@@ -884,8 +907,7 @@ class GitHubIssueWatcher:
                 repo,
                 slug,
             )
-            self._watch_list.pop(slug, None)
-            self._cursors.pop(repo, None)
+            self._drop_repo(slug=slug, repo=repo)
             return
         except GitHubAuthError as exc:
             logger.warning(

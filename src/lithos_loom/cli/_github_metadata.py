@@ -119,7 +119,9 @@ def validate_github_repo(value: str) -> str:
 def _str_list(value: Any) -> list[str]:
     """Coerce a stored metadata value into an order-preserving, de-duped
     list of non-empty strings. Tolerates a bare string (treated as a
-    one-element list) and non-list junk (treated as empty)."""
+    one-element list) and non-list junk (treated as empty). Non-string
+    list elements are ignored rather than coerced — a stray ``None`` or
+    ``int`` from a hand-edited doc must not become a phantom repo/label."""
     if isinstance(value, str):
         items: list[Any] = [value]
     elif isinstance(value, list):
@@ -129,10 +131,10 @@ def _str_list(value: Any) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for item in items:
-        text = str(item)
-        if text and text not in seen:
-            result.append(text)
-            seen.add(text)
+        if not isinstance(item, str) or not item or item in seen:
+            continue
+        result.append(item)
+        seen.add(item)
     return result
 
 
@@ -146,7 +148,11 @@ def extract_github_repos(metadata: dict[str, Any]) -> list[str]:
 
 
 def is_github_watching(metadata: dict[str, Any]) -> bool:
-    return bool(metadata.get(GITHUB_WATCH_KEY))
+    # Strict identity, not truthiness: a hand-edited doc storing the
+    # string "false" (or any non-bool) must NOT read as enabled. The
+    # watcher's discovery filter (metadata_match) is likewise
+    # type-sensitive, so only a real ``True`` enrols a project.
+    return metadata.get(GITHUB_WATCH_KEY) is True
 
 
 def extract_exclude_labels(metadata: dict[str, Any]) -> list[str]:

@@ -615,6 +615,42 @@ async def test_poll_one_repo_does_not_advance_cursor_when_first_issue_fails() ->
 
 
 @pytest.mark.asyncio
+async def test_poll_one_repo_404_drops_only_that_repo() -> None:
+    """A 404 on one repo of a multi-repo project must drop only that
+    repo (and its cursor) — the project's other repos keep being
+    polled."""
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(side_effect=GitHubRepoNotFoundError("gone"))
+    watcher = _make_watcher(github=github, lithos=_fake_lithos_client())
+    watcher._watch_list = {
+        "kindred-code": WatchedRepo(repos=("kindred/web", "kindred/gone"))
+    }
+    watcher._cursors["kindred/gone"] = datetime(2026, 5, 29, tzinfo=UTC)
+    watcher._cursors["kindred/web"] = datetime(2026, 5, 28, tzinfo=UTC)
+
+    await watcher._poll_one_repo(slug="kindred-code", repo="kindred/gone")
+
+    # Only the 404 repo is dropped; the sibling and its cursor survive.
+    assert watcher._watch_list == {"kindred-code": WatchedRepo(repos=("kindred/web",))}
+    assert "kindred/gone" not in watcher._cursors
+    assert watcher._cursors["kindred/web"] == datetime(2026, 5, 28, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_poll_one_repo_404_on_last_repo_drops_slug() -> None:
+    """When the 404 repo was the project's only repo, the slug is
+    dropped entirely."""
+    github = _fake_github_client()
+    github.list_issues_since = AsyncMock(side_effect=GitHubRepoNotFoundError("gone"))
+    watcher = _make_watcher(github=github, lithos=_fake_lithos_client())
+    watcher._watch_list = {"solo": WatchedRepo(repos=("owner/only",))}
+
+    await watcher._poll_one_repo(slug="solo", repo="owner/only")
+
+    assert watcher._watch_list == {}
+
+
+@pytest.mark.asyncio
 async def test_stuck_issue_retried_by_number_next_poll() -> None:
     """PR-review finding 2 (round 4, 2026-05-30): an issue that failed
     dispatch during bootstrap (cursor None) and then closes on GH

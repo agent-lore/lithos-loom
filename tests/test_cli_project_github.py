@@ -620,7 +620,9 @@ def _legacy_summary(*, slug: str, tags: tuple[str, ...]) -> NoteSummary:
     )
 
 
-def _legacy_note(*, slug: str, tags: tuple[str, ...]) -> Note:
+def _legacy_note(
+    *, slug: str, tags: tuple[str, ...], metadata: dict[str, Any] | None = None
+) -> Note:
     return Note(
         id=f"doc-{slug}",
         title=slug.title(),
@@ -632,7 +634,7 @@ def _legacy_note(*, slug: str, tags: tuple[str, ...]) -> Note:
         note_type="concept",
         path=f"projects/{slug}/{slug}-project-context.md",
         slug=slug,
-        metadata={},
+        metadata=metadata or {},
     )
 
 
@@ -714,3 +716,95 @@ def test_migrate_github_tags_noop_when_no_legacy_tags(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     client.note_write.assert_not_called()
     assert "nothing to do" in result.stdout
+
+
+def test_migrate_github_tags_merges_with_existing_metadata(tmp_path: Path) -> None:
+    """Mixed-state doc: an operator added a second repo via add-github-repo
+    (writing metadata) before migration ran. Migration must UNION the
+    tag-derived repo with the existing metadata, not clobber it."""
+    cfg_path = _write_config(tmp_path)
+    legacy_tags = (
+        "project-context",
+        "github-repo:agent-lore/lithos-loom",
+        "github-watch",
+    )
+    # Existing metadata already carries the legacy repo PLUS a post-deploy add.
+    note = _legacy_note(
+        slug="my-slug",
+        tags=legacy_tags,
+        metadata={GITHUB_REPOS_KEY: ["agent-lore/lithos-loom", "agent-lore/new-repo"]},
+    )
+    client = _migration_client(
+        summaries=[_legacy_summary(slug="my-slug", tags=legacy_tags)],
+        notes_by_path={note.path: note},
+    )
+    runner = CliRunner()
+
+    with patch(
+        "lithos_loom.cli._github_tag_migration.LithosClient", return_value=client
+    ):
+        result = runner.invoke(
+            project_app, ["migrate-github-tags", "-c", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.stdout
+    written = client.note_write.await_args.kwargs["metadata"]
+    # The post-deploy repo is preserved; the legacy repo is not duplicated.
+    assert written[GITHUB_REPOS_KEY] == [
+        "agent-lore/lithos-loom",
+        "agent-lore/new-repo",
+    ]
+
+
+def test_migrate_github_tags_existing_disable_wins_over_watch_tag(
+    tmp_path: Path,
+) -> None:
+    """A post-deploy `disable-github` (metadata github_watch_enabled=False)
+    must not be re-enabled by a stale `github-watch` tag."""
+    cfg_path = _write_config(tmp_path)
+    legacy_tags = ("project-context", "github-repo:o/r", "github-watch")
+    note = _legacy_note(
+        slug="my-slug",
+        tags=legacy_tags,
+        metadata={GITHUB_REPOS_KEY: ["o/r"], GITHUB_WATCH_KEY: False},
+    )
+    client = _migration_client(
+        summaries=[_legacy_summary(slug="my-slug", tags=legacy_tags)],
+        notes_by_path={note.path: note},
+    )
+    runner = CliRunner()
+
+    with patch(
+        "lithos_loom.cli._github_tag_migration.LithosClient", return_value=client
+    ):
+        result = runner.invoke(
+            project_app, ["migrate-github-tags", "-c", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.stdout
+    written = client.note_write.await_args.kwargs["metadata"]
+    assert written[GITHUB_WATCH_KEY] is False
+
+
+def test_migrate_github_tags_filters_to_project_context(tmp_path: Path) -> None:
+    """The scan is scoped to project-context docs so github-* tags on an
+    unrelated doc under projects/ are never stripped."""
+    cfg_path = _write_config(tmp_path)
+    client = _migration_client(summaries=[], notes_by_path={})
+    runner = CliRunner()
+
+    with patch(
+        "lithos_loom.cli._github_tag_migration.LithosClient", return_value=client
+    ):
+        runner.invoke(project_app, ["migrate-github-tags", "-c", str(cfg_path)])
+    assert client.note_list.await_args.kwargs["tags"] == ["project-context"]
+
+
+def test_is_github_watching_rejects_non_bool() -> None:
+    """A hand-edited string `"false"` must not read as enabled."""
+    assert is_github_watching({GITHUB_WATCH_KEY: "false"}) is False
+    assert is_github_watching({GITHUB_WATCH_KEY: 1}) is False
+
+
+def test_extract_github_repos_ignores_non_string_junk() -> None:
+    """Non-string list elements are dropped, not coerced to "None"/"123"."""
+    meta = {GITHUB_REPOS_KEY: ["o/r", None, 42, "o/r", ""]}
+    assert extract_github_repos(meta) == ["o/r"]

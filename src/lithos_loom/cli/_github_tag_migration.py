@@ -22,6 +22,10 @@ from lithos_loom.cli._github_metadata import (
     GITHUB_EXCLUDE_LABELS_KEY,
     GITHUB_REPOS_KEY,
     GITHUB_WATCH_KEY,
+    extract_exclude_authors,
+    extract_exclude_labels,
+    extract_github_repos,
+    is_github_watching,
 )
 from lithos_loom.config import LoomConfig
 from lithos_loom.errors import LithosClientError
@@ -32,6 +36,10 @@ _OLD_REPO_PREFIX = "github-repo:"
 _OLD_WATCH_TAG = "github-watch"
 _OLD_EXCLUDE_LABEL_PREFIX = "github-exclude-label:"
 _OLD_EXCLUDE_AUTHOR_PREFIX = "github-exclude-author:"
+
+# Only project-context docs carry github-watcher config; scope the scan
+# so we never strip github-* tags off an unrelated doc under projects/.
+_PROJECT_CONTEXT_TAG = "project-context"
 
 _MAX_CAS_ATTEMPTS = 3
 
@@ -101,15 +109,55 @@ def _read_legacy_tags(tags: tuple[str, ...] | list[str]) -> _LegacyConfig:
     )
 
 
-def _derive_metadata(legacy: _LegacyConfig) -> dict[str, object]:
+@dataclass(frozen=True)
+class _MergedConfig:
+    repos: list[str]
+    watch_enabled: bool
+    exclude_labels: list[str]
+    exclude_authors: list[str]
+
+
+def _merge_config(legacy: _LegacyConfig, existing: dict[str, object]) -> _MergedConfig:
+    """Merge the tag-derived config with any github metadata already on
+    the doc, existing metadata winning where it conflicts.
+
+    A doc can be in a mixed state: an operator may have run
+    ``add-github-repo`` / ``enable-github`` / ``disable-github`` (writing
+    metadata) after the daemon was upgraded but before this migration
+    ran. Rebuilding purely from tags would clobber those edits, so:
+
+    - ``repos``: union (existing first, then tag repos not already
+      present) — never drops a repo the operator added post-upgrade.
+    - ``watch_enabled``: existing value wins when the key is present (a
+      post-upgrade ``disable-github`` must not be re-enabled by a stale
+      ``github-watch`` tag); otherwise the tag value.
+    - exclude lists: union.
+    """
+    return _MergedConfig(
+        repos=_dedup([*extract_github_repos(existing), *legacy.repos]),
+        watch_enabled=(
+            is_github_watching(existing)
+            if GITHUB_WATCH_KEY in existing
+            else legacy.watch_enabled
+        ),
+        exclude_labels=_dedup(
+            [*extract_exclude_labels(existing), *legacy.exclude_labels]
+        ),
+        exclude_authors=_dedup(
+            [*extract_exclude_authors(existing), *legacy.exclude_authors]
+        ),
+    )
+
+
+def _to_write_metadata(merged: _MergedConfig) -> dict[str, object]:
     meta: dict[str, object] = {
-        GITHUB_REPOS_KEY: legacy.repos,
-        GITHUB_WATCH_KEY: legacy.watch_enabled,
+        GITHUB_REPOS_KEY: merged.repos,
+        GITHUB_WATCH_KEY: merged.watch_enabled,
     }
-    if legacy.exclude_labels:
-        meta[GITHUB_EXCLUDE_LABELS_KEY] = legacy.exclude_labels
-    if legacy.exclude_authors:
-        meta[GITHUB_EXCLUDE_AUTHORS_KEY] = legacy.exclude_authors
+    if merged.exclude_labels:
+        meta[GITHUB_EXCLUDE_LABELS_KEY] = merged.exclude_labels
+    if merged.exclude_authors:
+        meta[GITHUB_EXCLUDE_AUTHORS_KEY] = merged.exclude_authors
     return meta
 
 
@@ -128,7 +176,11 @@ async def migrate_github_tags(*, cfg: LoomConfig, dry_run: bool) -> list[Migrati
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
         try:
-            summaries = await client.note_list(path_prefix="projects/", limit=1000)
+            summaries = await client.note_list(
+                path_prefix="projects/",
+                tags=[_PROJECT_CONTEXT_TAG],
+                limit=1000,
+            )
             for summary in summaries:
                 legacy = _read_legacy_tags(summary.tags)
                 if not legacy.has_any:
@@ -159,15 +211,15 @@ async def _migrate_one(
         if not legacy.has_any:
             # Raced with another migrator (or already clean) — nothing to do.
             return None
-        meta = _derive_metadata(legacy)
+        merged = _merge_config(legacy, dict(note.metadata))
         if dry_run:
             return MigrationItem(
                 slug=slug,
                 path=note.path,
-                repos=legacy.repos,
-                watch_enabled=legacy.watch_enabled,
-                exclude_labels=legacy.exclude_labels,
-                exclude_authors=legacy.exclude_authors,
+                repos=merged.repos,
+                watch_enabled=merged.watch_enabled,
+                exclude_labels=merged.exclude_labels,
+                exclude_authors=merged.exclude_authors,
                 status="would-migrate",
             )
         write_result = await client.note_write(
@@ -175,7 +227,7 @@ async def _migrate_one(
             title=note.title,
             content=note.body,
             tags=legacy.kept_tags,
-            metadata=meta,
+            metadata=_to_write_metadata(merged),
             expected_version=note.version,
             note_type=note.note_type or "concept",
         )
@@ -183,10 +235,10 @@ async def _migrate_one(
             return MigrationItem(
                 slug=slug,
                 path=note.path,
-                repos=legacy.repos,
-                watch_enabled=legacy.watch_enabled,
-                exclude_labels=legacy.exclude_labels,
-                exclude_authors=legacy.exclude_authors,
+                repos=merged.repos,
+                watch_enabled=merged.watch_enabled,
+                exclude_labels=merged.exclude_labels,
+                exclude_authors=merged.exclude_authors,
                 status="migrated",
             )
         if write_result.status == "version_conflict":
