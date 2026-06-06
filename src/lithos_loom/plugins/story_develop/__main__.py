@@ -96,12 +96,13 @@ def _run_standalone(args: argparse.Namespace) -> int:
 
     # If --task-id given, fetch from Lithos
     description = args.description
-    title = args.description  # standalone: title = description
+    # Standalone: default title to the free-text description when provided.
+    # If we're running offline with only --task-id, fall back to a stable title.
+    title = args.description or (f"Task {args.task_id}" if args.task_id else "")
     if args.task_id and not args.no_lithos:
         # TODO: fetch from Lithos via lithos_url
         title = f"Task {args.task_id}"
         description = description or f"(fetched from Lithos task {args.task_id})"
-
     work_dir = (
         Path(args.work_dir)
         if args.work_dir
