@@ -51,10 +51,13 @@ def parse_claude_result(stdout: str, *, exit_code: int, stderr: str) -> CoderTur
         raw = None
 
     is_error = bool(raw.get("is_error")) if raw else True
-    session_id = str(raw.get("session_id", "")) if raw else ""
-    result_text = str(raw.get("result", "")) if raw else ""
-    cost_usd = float(raw.get("total_cost_usd", 0.0) or 0.0) if raw else 0.0
-    succeeded = exit_code == 0 and raw is not None and not is_error
+    # ``or ""`` normalises an explicit JSON ``null`` to "" (not the string "None").
+    session_id = str(raw.get("session_id") or "") if raw else ""
+    result_text = str(raw.get("result") or "") if raw else ""
+    cost_usd = float(raw.get("total_cost_usd") or 0.0) if raw else 0.0
+    # A non-empty session_id is required for success so later resume turns (T3)
+    # always have a handle to resume.
+    succeeded = exit_code == 0 and raw is not None and not is_error and bool(session_id)
 
     return CoderTurnResult(
         exit_code=exit_code,

@@ -57,6 +57,10 @@ def develop(config: DevelopConfig, *, coder_timeout: int = 3600) -> DevelopResul
     The worktree and per-run state are preserved on exit (success or failure)
     for inspection; only the container is torn down.
     """
+    if config.coder != "claude":  # codex/other coders arrive with T5/T6
+        raise ValueError(
+            f"unsupported coder tool for T1: {config.coder!r} (only 'claude')"
+        )
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
 

@@ -49,3 +49,19 @@ def test_parse_empty_output_fails_safely() -> None:
     r = parse_claude_result("", exit_code=0, stderr="")
     assert r.succeeded is False
     assert r.raw is None
+
+
+def test_parse_requires_session_id_for_success() -> None:
+    payload = json.dumps({"type": "result", "is_error": False, "result": "OK"})
+    r = parse_claude_result(payload, exit_code=0, stderr="")
+    assert r.succeeded is False  # no session_id -> not a usable success
+    assert r.session_id == ""
+
+
+def test_parse_normalises_null_fields_not_to_literal_none() -> None:
+    payload = json.dumps(
+        {"type": "result", "is_error": False, "result": None, "session_id": "s1"}
+    )
+    r = parse_claude_result(payload, exit_code=0, stderr="")
+    assert r.result_text == ""  # not "None"
+    assert r.succeeded is True

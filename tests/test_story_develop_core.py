@@ -138,3 +138,15 @@ def test_develop_fails_with_no_changes(
     result = develop_mod.develop(config)
     assert result.status == "failed"
     assert "no commit" in result.message
+
+
+def test_develop_rejects_unsupported_coder(tmp_git_repo: Path, tmp_path: Path) -> None:
+    cfg = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        coder="codex",
+        claude_config_dir=tmp_path / "fake-claude",
+    )
+    with pytest.raises(ValueError, match="unsupported coder"):
+        develop_mod.develop(cfg)

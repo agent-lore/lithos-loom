@@ -28,7 +28,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--repo", required=True, type=Path, help="Path to the project repo")
     p.add_argument("--description", required=True, help="Free-text task description")
-    p.add_argument("--coder", default=DEFAULT_CODER_TOOL, help="Coding agent tool")
+    p.add_argument(
+        "--coder",
+        default=DEFAULT_CODER_TOOL,
+        choices=["claude"],  # only claude in T1; codex arrives with T5/T6
+        help="Coding agent tool",
+    )
     p.add_argument("--image", default=DEFAULT_IMAGE, help="Agent container image")
     p.add_argument("--branch", default="main", help="Base branch for the worktree")
     p.add_argument(

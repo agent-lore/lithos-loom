@@ -54,6 +54,33 @@ def test_commit_all_commits_when_dirty_and_noops_when_clean(tmp_git_repo: Path) 
     assert git.has_uncommitted_changes(tmp_git_repo) is False
 
 
+def test_commit_all_excludes_even_already_staged_paths(tmp_git_repo: Path) -> None:
+    # An excluded path that was already staged before commit_all must still be
+    # kept out of the commit (defends the .handoff/ guarantee).
+    (tmp_git_repo / ".handoff").mkdir()
+    (tmp_git_repo / ".handoff" / "note.md").write_text("scaffolding")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=tmp_git_repo, check=True, capture_output=True
+    )
+    (tmp_git_repo / "real.txt").write_text("code")
+    sha = git.commit_all(tmp_git_repo, "feat", exclude=[".handoff"])
+    assert sha is not None
+    tree = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "real.txt" in tree
+    assert ".handoff" not in tree
+
+
+def test_commit_all_returns_none_when_only_excluded_changes(tmp_git_repo: Path) -> None:
+    (tmp_git_repo / ".handoff").mkdir()
+    (tmp_git_repo / ".handoff" / "note.md").write_text("scaffolding")
+    assert git.commit_all(tmp_git_repo, "feat", exclude=[".handoff"]) is None
+
+
 def test_raises_on_bad_repo(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         git.base_sha(tmp_path)  # not a git repo

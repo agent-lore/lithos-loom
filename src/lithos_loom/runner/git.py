@@ -60,6 +60,11 @@ def commit_all(
     """
     pathspec = [".", *(f":(exclude){p}" for p in exclude)]
     _git(worktree, "add", "-A", "--", *pathspec)
+    # Defensively unstage excluded paths too, in case something was already
+    # staged before this call (the agent is told not to, but must not be able
+    # to leak .handoff/ into the deliverable commit).
+    for p in exclude:
+        _git(worktree, "reset", "-q", "--", p)
     if not _git(worktree, "diff", "--cached", "--name-only"):
         return None
     _git(worktree, "commit", "-m", message)
