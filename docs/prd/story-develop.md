@@ -371,10 +371,12 @@ src/lithos_loom/runner/   # fill existing stubs: worktree.py, git.py
 
 ## Phased build
 
-- **Phase 0 — feasibility gate** ([doc](story-develop-feasibility-gate.md)). Pass/fail spikes
-  for: codex headless `--resume` restores context; skills/agents load under headless `-p`;
-  transcript persistence location + per-run redirect; usage-limit signal detection from
-  exit/stderr. **The project is conditional on this passing.**
+- **Phase 0 — feasibility gate** ([doc](story-develop-feasibility-gate.md)). **PASSED
+  2026-06-11:** G1 (resume restores context) and G3 (transcript redirect + per-run isolation)
+  PASS for both claude and codex; G2 (skills/agents headless) PASS; G4 (usage-limit signal)
+  PARTIAL — structured exit-code/JSON channel confirmed, exact limit strings to be captured
+  in Phase 1 with a safe-default fallback. Operational findings (session-handle control,
+  `CODEX_HOME`, stdin redirect, free `total_cost_usd`) feed `turns.py`/`containers.py`.
 - **Phase 1 — core loop (standalone, single reviewer).** Standalone flags + `--develop-config`
   in `__main__`; run-state tree + container lifecycle + `develop()` round loop; `turns.py` +
   `containers.py`; `handoff.py` with the structured finding block + `FORMAT.md`; per-round

@@ -9,6 +9,45 @@
 > conditional on all four passing** (or on a documented fallback being acceptable). Run the
 > spikes inside `ralph-sandbox` so the environment matches the real plugin.
 
+## Results — 2026-06-11 (run on host; tools `claude 2.1.170`, `codex-cli 0.137.0`)
+
+**Verdict: GATE PASSES.** G1–G3 PASS for both tools; G4's *detection channel* is confirmed
+structured (no scraping) but the exact limit-signal strings must be captured opportunistically
+(Phase-1 task, fallback recorded). Run on the host with redirected config dirs rather than
+inside `ralph-sandbox`; the tool *behaviour* validated here (resume, config redirect, skills)
+is identical in-container — only the bind-mounts differ, which is mechanical.
+
+| Gate | Verdict | Evidence |
+|---|---|---|
+| **G1** resume restores context | **PASS** (both) | Claude: `--session-id <uuid>` then `-p --resume <uuid>` recalled the planted fact (`4242`). Codex: `codex exec` → captured `thread_id` from the `thread.started` `--json` event → `codex exec resume <id>` recalled it (`7373`). |
+| **G2** skills/agents headless | **PASS** (both) | Claude: a canary skill in `$CLAUDE_CONFIG_DIR/skills/` loaded and the `Skill` tool fired under `-p` (returned the canary token). Codex (no skill concept): honored a project `AGENTS.md` instruction under headless `exec`. |
+| **G3** transcript redirect + isolation | **PASS** (both) | `CLAUDE_CONFIG_DIR` redirects transcripts to `<dir>/projects/<cwd-hash>/<uuid>.jsonl`; `CODEX_HOME` redirects to `<dir>/sessions/YYYY/MM/DD/rollout-…-<thread_id>.jsonl`. Both are **combined dirs** (auth + transcripts together), but auth is a **single file** (`.credentials.json` / `auth.json`), so the per-run dir stays writable for transcripts while that one file is **bind-mounted** in — keeping retained run-state credential-free without copying. |
+| **G4** usage-limit signal | **PARTIAL** | *Channel* confirmed: both tools fail with a **non-zero exit + structured JSON** (claude result object carries `is_error`/`api_error_status`/`subtype`; codex `--json` emits a failure event) — classification needs no ANSI scraping. *Not* triggered (would burn real quota); exact limit strings to be captured when a limit naturally occurs, via the harness below. **Fallback if unclassifiable:** a narrow scrape of just the limit banner. |
+
+### Operational findings to fold into Phase 1 (`turns.py` / `containers.py`)
+
+- **stdin:** both tools block ~3s waiting on stdin even when the prompt is an arg — redirect
+  `< /dev/null`.
+- **Claude session handle:** we *control* it via `--session-id <uuid>` (no parsing needed);
+  resume with `-r/--resume <uuid>`.
+- **Codex session handle:** capture `thread_id` from the `thread.started` event in `--json`;
+  resume with `codex exec resume <thread_id>`. **`resume` has a narrower flag set than
+  `exec`** (no `-C/--cd`) — `cd` into the worktree instead of passing `-C`.
+- **Codex env var is `CODEX_HOME`** (not `CODEX_CONFIG_DIR`, which `ralph-sandbox` currently
+  sets — fix in `containers.py`). Site per-run `CODEX_HOME` **under the work-dir, not
+  `/tmp`** (codex warns/degrades trying to create helper binaries under a `/tmp` home).
+- **Cost ceiling is free:** claude `-p` returns `total_cost_usd`; codex returns per-turn
+  `usage` token counts → `max_cost_usd` (decision #8) needs no estimation.
+- **Bonus:** claude has `--fallback-model` (auto-switch model on overload) — orthogonal to
+  usage-limit handling but worth knowing for the degradation story.
+
+### G4 capture harness (Phase 1)
+
+When a real limit occurs, save the failing invocation's exit code + full stdout JSON / stderr
+as a fixture and write the classifier against it. Until then, treat a non-zero exit whose
+JSON/error payload is *not* a recognised category as a generic `agent` failure (not
+`usage_limited`), so the system degrades safely rather than mis-pausing.
+
 ## G1 — Codex headless `--resume` restores context
 
 **Why it matters:** decision #3 assumes a turn is `<tool> --resume <id> -p <prompt>` into a
