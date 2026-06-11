@@ -78,6 +78,18 @@ loss of clean exit-code detection.
   `resume_after`, session ids), free the slot, and later resume from the transcript after the
   container was torn down. The live container is a within-run fidelity/perf boost; the
   transcript is the durable context.
+  - **This only holds if the transcript has a concrete, isolated home.** Decision: a
+    per-run, per-agent state dir on the host work-dir
+    (`<work_dir>/<run_id>/agents/<agent>/`), mounted into the agent's container at the tool's
+    expected config path, with the operator's **auth mounted separately read-only** so the
+    writable transcript dir never holds long-lived credentials. `run_id` namespacing isolates
+    concurrent runs; GC = delete `<work_dir>/<run_id>/` after a retention window; teardown
+    (end-of-run *or* daemon checkpoint) preserves it because it is on the host. A
+    reviewer tool-switch gets a fresh state dir (different tool, no transcript inheritance) +
+    an explicit reseed payload. See the PRD's *Run-state & session durability* and
+    *Reviewer replacement payload* sections. **Confirming that each tool lets us split
+    "auth read path" from "transcript write path" is a Phase-0 feasibility-gate item;** if a
+    tool insists on one combined dir, we copy a minimal auth-only config per run.
 - **Cost.** The operator loses "attach and watch the agent think in real time." A tee'd
   `stream-json` log per agent recovers most of it; on stop-without-approval, standalone mode
   still offers an attach/intervene escape hatch.

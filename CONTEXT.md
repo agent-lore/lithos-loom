@@ -22,11 +22,18 @@ dialogue-based** cycle.
 - **round** — one coder turn followed by all active reviewers' turns. Rounds are numbered
   (`round_01`, …). The cycle iterates rounds until approval or max-rounds.
 - **handoff** — the structured-markdown "sign-off" file an agent writes to `.handoff/` to
-  pass a turn. The *only* thing that crosses between agents; working noise stays in the
-  agent's tmux pane. Doubles as the durable conversation record.
+  pass a turn. The *only* thing that crosses between agents; working noise stays inside the
+  agent's own container / tee'd log (not a tmux pane — see [[architecture_bus_reframe]] and
+  ADR 0002). Doubles as the durable conversation record. Carries a machine-parseable
+  **findings block**, not just prose.
+- **finding** — an addressable review item inside a handoff: a stable `finding_id` (carried
+  forward across rounds), `severity` (critical/major/minor), `status`
+  (open/fixed/accepted/disputed/needs-clarification), target `files`, the reviewer's
+  `rationale`, and the coder's per-finding `coder_response`. Finding identity (not text
+  matching) is what makes the stall and dispute guards reliable.
 - **LGTM** — a reviewer's approval signal in its handoff `Status:` field. The cycle
   **completes** (is **approved**) only when *all* active reviewers signal LGTM in the same
-  round.
+  round, OR their highest open finding is below that reviewer's `block_threshold`.
 - **session persistence** — each agent keeps its full conversation context across rounds.
   Mechanism (ADR 0002): a long-lived per-agent **container**, with each turn run as
   `docker exec … --resume <session-id> -p …` — context restored from the on-disk transcript,

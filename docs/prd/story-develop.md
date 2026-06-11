@@ -1,11 +1,14 @@
 # PRD: `story-develop` plugin — automated conversational code review
 
-> **Status:** Approved design, not yet implemented.
+> **Status:** Approved design, not yet implemented. Revised 2026-06-11 after review.
 > **Date:** 2026-06-11
 > **Deciders:** Dave Snowdon
 >
 > Self-contained — no external document is required to implement this; all needed
 > background is inlined.
+>
+> **Gating:** the whole project is conditional on the
+> [feasibility gate](story-develop-feasibility-gate.md) passing first.
 
 ## Context & background
 
@@ -46,18 +49,21 @@ security) only for stories that warrant them — most don't.
 
 - A **standalone CLI** that runs implement → review → dialogue → complete and hands back
   reviewed, ready-to-merge code on a branch — useful **today**, with no Loom daemon, event
-  bus, or config infrastructure required.
+  bus, or claim infrastructure required. (It does need a minimal local config — see
+  decision #6 — not zero config.)
 - Reuse `ralph-sandbox` and salvage Ralph++ Python rather than writing net-new.
 - Graceful **usage-limit** degradation; bounded, safe **autonomous** termination.
-- A **zero-retrofit seam** into the Loom daemon: the same `develop()` core sits behind both
-  the standalone CLI entry and the daemon's `--task-json/--work-dir/--result-file` contract.
+- A **daemon seam** where the same `develop()` core sits behind both the standalone CLI and
+  the daemon's `--task-json/--work-dir/--result-file` contract. Getting it *running* under
+  the daemon is small wiring; **graceful auto-resume of usage-limit interruptions is a real
+  contract change**, scoped honestly in Phase 3 — not "zero-retrofit".
 
 ## Non-goals (v1)
 
 - The Loom daemon itself (SSE, claims, routes); we only add the `--task-json` entry later.
 - A heuristic "router" agent that auto-selects reviewers (seam designed, not built).
 - Daemon auto-re-dispatch of usage-limit-interrupted runs (plugin emits the signal; the
-  daemon consuming it is a future feature).
+  daemon consuming it is a Phase-3 contract change, below).
 - Building new agent container images beyond what `ralph-sandbox` provides.
 
 ## Decisions
@@ -67,14 +73,15 @@ security) only for stories that warrant them — most don't.
 
 2. **Execution = per-agent long-lived Docker containers.** One container **per agent**
    (1 coder + N reviewers), each started once at run begin and **kept alive across all
-   rounds** so worktree state, warm caches, and each agent's session persist. Separate
-   containers are required, not optional: coder mounts the worktree **read-write** while
-   reviewers mount it **read-only**; each holds an independent session; agents may use
-   different tools/images; and a reviewer tool-switch (see #4) replaces only that one
-   container. Reuses `ralph-sandbox`'s image, config-dir mounts, and security profile;
-   the multi-container orchestration on top is **net-new**. Model-provider network egress
-   stays open (it must); the **push/PR capability is withheld from agents** and performed
-   host-side instead.
+   rounds** so worktree state, warm caches, and each agent's session persist. The container
+   is **not** cycled per turn. Separate containers are required, not optional: coder mounts
+   the worktree **read-write** while reviewers mount it **read-only**; each holds an
+   independent session; agents may use different tools/images; and a reviewer tool-switch
+   (see #4) replaces only that one container. Reuses `ralph-sandbox`'s image, config-dir
+   mounts, and security profile; the multi-container orchestration on top is **net-new**.
+   Model-provider network egress stays open (it must); the **push/PR capability is withheld
+   from agents** and performed host-side instead. Full mount/credential/network posture:
+   see [Security & threat model](#security--threat-model).
 
 3. **Session mechanism = resumable per-turn exec into the live container.** A turn is
    `docker exec <agent-container> claude --resume <session-id> -p "<prompt>"` (Codex
@@ -82,83 +89,168 @@ security) only for stories that warrant them — most don't.
    on-disk session transcript. NOT a live tmux REPL driven by `send-keys`. This keeps the
    container warm (per #2) **and** gives **clean per-turn detection** of completion /
    usage-limit / malformed-handoff from **process exit code + stderr** — no ANSI scraping.
-   `--resume` is also what makes daemon checkpoint-and-exit (#5) recoverable across a
-   container teardown, so the transcript is the durable context and the live container is
-   the within-run fidelity/perf boost. Rationale and trade-offs: see
-   [ADR 0002](../adr/0002-story-develop-session-mechanism.md).
+   Rationale and trade-offs: [ADR 0002](../adr/0002-story-develop-session-mechanism.md).
+   Where the transcript physically lives, how it is namespaced per run, and how it survives
+   teardown: see [Run-state & session durability](#run-state--session-durability) — this is
+   the project's biggest technical risk and a feasibility-gate item.
    - **Consequence:** there is no filesystem watch-loop, no filename-based routing, and no
      **handoff-forgery surface** — authorship is by *which container was exec'd*, not by
      trusting a filename. A silent agent is a subprocess timeout; a malformed handoff means
      validate the one expected file, then re-prompt that agent.
-   - **Validation spike (Phase 1, do first):** confirm Codex headless `--resume`/equivalent
-     restores context AND that skills/agents load under headless `-p`. Claude Code confirmed
-     (Skill tool available headless; resolves from the mounted config dir). If `--resume`
-     proves insufficient, fall back to a persistent interactive process (costing exit-code
-     detection).
 
 4. **Usage-limit reaction = role-aware hybrid.** Classify `usage_limited` from exit code +
    stderr. **Coder** → pause-and-wait for the window reset (cap `max_pause_minutes`, then
    switch-with-reseed or checkpoint). **Reviewer** → switch to the next tool in a per-project
-   `fallback_chain` immediately (replace its container, reseed from handoff history); pause
-   only if no alternate exists. Switching the coder is the last resort because its in-session
-   context is the thing we are protecting.
+   `fallback_chain` immediately; pause only if no alternate exists. Switching the coder is
+   the last resort because its in-session context is the thing we are protecting. A
+   **replacement reviewer starts cold**, so it is reseeded with a full payload, not just
+   handoff text — see [Reviewer replacement payload](#reviewer-replacement-payload).
 
 5. **Pause = mode-dependent.** **Standalone:** block with a live countdown, keep the coder
    container warm, resume the same session on reset. **Daemon:** checkpoint-and-exit with
    `status:"interrupted"`, `error.category:"usage_limited"`, `resume_after:<ts>` + session
-   ids; tear down (frees the slot). Resume state is ~free — session ids + handoffs are on
-   disk. Daemon auto-re-dispatch is a future feature; until then `interrupted` = operator
-   re-runs.
+   ids; tear down (frees the slot). Today the runner treats `interrupted` as a plain release
+   that a future run re-picks-up; the `resume_after`/re-dispatch behaviour is a Phase-3
+   contract change (below). Resume state is ~free — session ids + handoffs are on disk.
 
-6. **Reviewer selection = explicit list + default.** Default: **one** `code-quality`
-   reviewer. Specialised reviewers opt-in per run: standalone `--reviewer <name>`
-   (repeatable) / `--develop-config <file>`; daemon per-project available pool + per-task
-   `metadata.reviewers` (or tags) choosing which run; absent → project default. A future
-   router agent populates the same list.
+6. **Reviewer selection = explicit list + default, config in metadata with per-task
+   override.** Default: **one** `code-quality` reviewer. Specialised reviewers opt-in:
+   - **Standalone:** a minimal local **`--develop-config <file>`** (TOML/YAML) holding the
+     reviewer list, tools, images, prompts, and `fallback_chain`; plus `--reviewer <name>`
+     (repeatable) for quick one-offs. v1 is *low*-config, not *zero*-config.
+   - **Daemon:** the project's **available reviewer pool + defaults live in project-context
+     doc metadata** (consistent with [ADR 0001](../adr/0001-github-watch-config-storage.md)).
+     A **per-task override** (`metadata.reviewers` / tags on the task) selects which run for
+     that task; absent → the project default. Because `--task-json` does not carry the
+     resolved project config today, the daemon-mode plugin **loads this config itself**
+     (Phase-3 contract note).
+   - A future router agent populates the same list.
 
 7. **Approval = severity-thresholded, per reviewer.** A reviewer passes a round if it
    signals **LGTM** *or* its highest open finding is below its `block_threshold` (default
-   `major`; security typically `minor`). Sub-threshold findings are **recorded** (summary /
-   PR / Lithos finding) but non-blocking. The run is **approved** when *all* active reviewers
-   pass in the **same** round. Reuses Ralph++ `parse_max_severity` / `severity_at_or_above`.
-   This kills nitpick non-convergence and lets security be strict while code-quality is
-   lenient.
+   `major`; security typically `minor`). Sub-threshold findings are **recorded** but
+   non-blocking. The run is **approved** when *all* active reviewers pass in the **same**
+   round. Reuses Ralph++ `parse_max_severity` / `severity_at_or_above`, applied over the
+   structured finding records (see [Handoff schema](#handoff-schema--finding-identity)).
 
-8. **Termination = guarded.** `max_rounds` + a **`max_cost_usd`** ceiling + a lightweight
-   **stall guard** (the coder's round commit makes no change, OR a reviewer's blocking
-   findings are unchanged, across 2 consecutive rounds → stop) + a coder **`disputed`**
-   affordance (a finding marked disputed-with-rationale that persists 2 rounds → emit a
-   `[ReviewDispute]` human breadcrumb and stop, rather than grind to max). On any
-   stop-without-approval: **standalone** offers the operator an attach/intervene escape
-   hatch; **daemon** writes `failed` + the conversation log + the finding.
+8. **Termination = guarded, keyed off finding identity.** `max_rounds` + a **`max_cost_usd`**
+   ceiling + a **stall guard** + a **dispute** affordance. The guards key off the **canonical
+   finding identity** (`finding_id`), not fuzzy text matching:
+   - *Stall* = the coder's round commit is empty **or** the set of *blocking* `finding_id`s
+     with unchanged `status` is identical across 2 consecutive rounds → stop.
+   - *Dispute* = a finding the coder marks `disputed` (with rationale) that the reviewer
+     keeps `open`/`blocking` for 2 rounds → emit a `[ReviewDispute]` human breadcrumb and
+     stop, rather than grind to max.
+   On any stop-without-approval: **standalone** offers the operator an attach/intervene
+   escape hatch; **daemon** writes `failed` + the conversation log + the finding.
 
 9. **Delivery = per-round commits; branch + log always; PR opt-in.** The coder commits **per
-   round** (locally; **push is host-side only**, never from an agent). Always produced: the
-   committed branch + an ordered **conversation log** (all handoffs) + a summary. Standalone
-   `--open-pr` pushes the branch and opens a PR via host `gh` (default **off**). Daemon:
-   write `result.json` + post a findings summary back to Lithos; PR-opening and
-   retag-for-human governed by config. Per-round commits also feed the stall guard (#8) and
-   give round-over-round diffs for free.
+   round** (locally; **push is host-side only**, never from an agent). Per-round commits are
+   intentional: Dave squash-merges branches into `main`, so the noisy round history never
+   reaches `main`, and the per-round commits make in-flight reverts easy. Always produced:
+   the committed branch + an ordered **conversation log** (all handoffs) + a summary.
+   Standalone `--open-pr` pushes the branch and opens a PR via host `gh` (default **off**).
+   Daemon: write `result.json` + post a findings summary back to Lithos; PR-opening and
+   retag-for-human governed by config.
 
-10. **Tests & mounts = coder runs tests, reviewers read-only, host gate.** The coder (RW)
-    runs the project's auto-detected tests and **records results in its handoff**. Reviewers
-    mount **read-only** and review the diff + recorded output. The plugin optionally re-runs
-    tests **host-side on each round commit** as an objective, agent-free gate (cheap,
-    trustworthy). A specialised reviewer that must execute a tool declares a command run
-    against a throwaway clone.
+10. **Tests = coder runs them; objective gate runs in a fresh throwaway container.** The
+    coder (RW) runs the project's auto-detected tests and **records results in its handoff**.
+    Reviewers mount **read-only** and review the diff + recorded output. The plugin's
+    objective gate re-runs tests on each round commit in a **fresh, throwaway container**
+    checked out at that commit — *host-orchestrated, container-executed* (running untrusted
+    repo tests on the bare host would defeat the sandbox). A specialised reviewer that must
+    execute a tool declares a command run the same way.
 
 11. **Lithos I/O = plugin owns it directly.** With `--task-id` (and not `--no-lithos`) the
     plugin fetches the task itself and posts findings + a conversation-log summary back
-    (`lithos_finding_post` / `task_update`). `result.json` still carries `status` for the
-    daemon (which does not apply side effects yet), so there is no double-application.
-    Standalone therefore gets a full Lithos round-trip **today**; daemon reuses the identical
-    path. Honors `--no-lithos` for pure-offline runs.
+    (`lithos_finding_post` / `task_update`). This is *deliberately* plugin-side so it needs
+    **no daemon change** — the runner does not apply `result.json` side effects today, so
+    there is no double-application. `result.json` still carries `status` for the daemon.
+    Standalone gets a full Lithos round-trip **today**. Honors `--no-lithos`.
 
 12. **Acceptance criteria = shared, optional.** Optional `--acceptance-criteria <text|file>`;
     with `--task-id`, pull AC from the task body/metadata; else fall back to `--description`.
     Whatever "definition of done" exists is injected into the coder **and every reviewer**
-    prompt as one source of truth, so reviewers judge against the AC (taste-level notes fall
-    below `block_threshold`).
+    prompt as one source of truth (and into the reviewer-replacement payload, #4).
+
+## Handoff schema & finding identity
+
+The single-file-per-turn handoff must carry **structured, addressable findings** — a prose
+blob would collapse the "conversation" back into a telephone game. Each handoff is markdown
+with a machine-parseable findings block:
+
+```markdown
+## Status: FINDINGS | LGTM
+## Summary
+<one paragraph; coder turns also include test results>
+
+## Findings
+- finding_id: f-<stable-hash>      # stable across rounds for the same issue
+  severity: critical | major | minor
+  status: open | fixed | accepted | disputed | needs-clarification
+  files: ["path:line", ...]
+  rationale: <reviewer's reason, or refinement of a prior vague finding>
+  coder_response: <coder's reply: what changed, or why disputed/needs-clarification>
+```
+
+- `finding_id` is assigned by the reviewer on first raise and **reused** on every subsequent
+  round for the same issue (the reviewer is instructed to carry IDs forward); this is what
+  makes the stall/dispute guards (#8) reliable.
+- The coder threads replies **per finding** (`status` + `coder_response`), not as one lump —
+  this is the "dialogue" the design promises.
+- `is_lgtm` / `parse_max_severity` operate over this block, not a free-text scan.
+- Validation rejects a handoff missing the block or carrying unknown `status`/`severity`;
+  the plugin re-prompts that same agent (cheap, since detection is exit-code-based).
+
+## Run-state & session durability
+
+The persistence claim in decision #3 only holds if the transcript has a concrete, isolated
+home. Intended design (and a **feasibility-gate** item, since exact tool behaviour must be
+confirmed):
+
+- **Per-run, per-agent state dir** on the host under the work-dir:
+  `<work_dir>/<run_id>/agents/<agent_name>/` holding that agent's session transcript(s),
+  keyed by the tool's `session-id`. Mounted into the agent's container at the tool's expected
+  path (e.g. via `CLAUDE_CONFIG_DIR` / Codex equivalent pointed at the per-run dir).
+- **Auth is mounted separately and read-only** (the operator's real token), so the writable
+  transcript dir never needs to hold long-lived credentials. The gate must confirm each tool
+  lets us *split* "where auth is read" from "where transcripts are written"; if a tool
+  insists on one combined config dir, we copy a minimal auth-only config per run instead.
+- **Isolation:** `run_id` namespacing means two concurrent runs (or two tasks) never share a
+  transcript; **GC** is "delete `<work_dir>/<run_id>/` after a retention window".
+- **Survival across teardown:** because the dir is on the host work-dir, end-of-run teardown
+  and daemon checkpoint-and-exit both preserve it; a later resume re-mounts it and
+  `--resume <session-id>` reloads context.
+- **Reviewer replacement** (tool switch) does **not** inherit the limited tool's transcript
+  (different tool); it gets a fresh state dir + the reseed payload below.
+
+## Reviewer replacement payload
+
+When a reviewer is switched out (usage limit, #4), the replacement starts cold and is seeded
+with, not just prior handoffs: the **current diff** (round commit range), the **acceptance
+criteria**, the **full prior findings list with `status`** (so accepted/fixed items aren't
+re-litigated), and the **outgoing reviewer's latest rationale**. This keeps judgments
+consistent across the switch rather than restarting review from scratch each round.
+
+## Security & threat model
+
+This automation runs arbitrary coding agents against local repos, so the posture is explicit:
+
+- **Mounted into agent containers:** the worktree (coder RW, reviewers RO); the per-run
+  transcript dir (RW); the tool **auth** config **read-only**. The provider API token is the
+  primary exfil-sensitive item and is the main reason egress matters.
+- **Deliberately *not* available to agents:** `gh`/push credentials and SSH keys (push/PR is
+  host-side only); the operator's home beyond the auth config; any host path outside the
+  worktree + per-run dirs. `cap_drop: ALL`, `no-new-privileges:true`.
+- **Network:** agents are LLMs and *require* egress to their model provider — they cannot be
+  fully network-isolated, reviewers included. v1 allows open egress, which is **strictly
+  better than the status quo** (today these agents run on the bare host, unsandboxed).
+  **Phase-2 hardening:** an egress allowlist restricted to provider domains.
+- **Test execution** runs in a fresh throwaway container (#10), never on the bare host, so
+  untrusted repo code is never executed in the host context.
+- Residual risk to accept explicitly: a malicious/compromised agent with a mounted provider
+  token + open egress could exfiltrate that token. The allowlist (Phase 2) is the mitigation;
+  v1 ships with eyes open because it does not widen the risk Dave already takes manually.
 
 ## Architecture
 
@@ -167,54 +259,38 @@ security) only for stories that warrant them — most don't.
 
 `develop()`:
 1. Resolve config + acceptance criteria; create a per-task git worktree off `--branch`
-   (default `main`).
+   (default `main`); create the per-run state tree.
 2. Seed `.handoff/` with `FORMAT.md`.
 3. **Start long-lived containers:** one coder container (RW worktree) + one per reviewer
-   (RO worktree), each launched idle with the tool available for `docker exec`.
+   (RO worktree), each launched idle with the tool available for `docker exec`, auth mounted
+   RO, per-run transcript dir mounted RW.
 4. **Round loop** (explicit orchestration — no watch loop):
    - **Coder turn:** `docker exec` the coder (`--resume` after round 1); it implements/fixes,
      runs tests, commits, writes `round_NN_coder_done.md`. Validate the handoff; on malformed
      → re-prompt the same container.
    - **Reviewer turns:** `docker exec` each reviewer (RO) → `round_NN_review_<name>.md`.
-   - Evaluate: severity-threshold approval, stall guard, dispute escalation,
-     round/cost/time ceilings, and usage-limit reactions (pause coder / switch reviewer).
-   - Optional host-side test gate on the round commit.
+   - Evaluate: severity-threshold approval, stall/dispute guards (by `finding_id`),
+     round/cost/time ceilings, usage-limit reactions (pause coder / switch reviewer).
+   - Objective test gate on the round commit (throwaway container).
 5. **Terminate:** success (commit / log / PR-or-result / Lithos post) | failed | interrupted,
-   per mode. Tear down all containers; preserve the conversation log.
+   per mode. Tear down all containers; preserve the conversation log + per-run state.
 
 Per-agent container commands are built by an adapted Ralph++ `docker run` builder (per-agent,
 **not** compose). Turns are sequential within a run; multiple concurrent runs each get their
-own worktree, containers, and `run_id`.
-
-### Handoff format
-
-Each agent writes a structured-markdown sign-off to `.handoff/round_NN_<role>[_<name>].md`:
-
-```markdown
-## Status: FINDINGS | LGTM
-
-## Summary
-Brief description of what was reviewed/changed (coder also: test results).
-
-## Findings (if status is FINDINGS)
-### Finding 1: [severity: critical|major|minor]
-Description...
-```
-
-The coder may additionally mark a reviewer finding `disputed` with a rationale (feeds #8).
+own worktree, containers, `run_id`, and state tree.
 
 ## File layout
 
 ```
 src/lithos_loom/plugins/story_develop/
     __main__.py     # argparse, dual-mode detect, build DevelopConfig -> develop()
-    develop.py      # core: worktree, container lifecycle, round loop, termination
-    turns.py        # docker exec a coder/reviewer turn; resumable session ids; exit parsing
+    develop.py      # core: worktree, run-state, container lifecycle, round loop, termination
+    turns.py        # docker exec a turn; resumable session ids; exit-code/limit parsing
     containers.py   # per-agent long-lived container launch/exec/teardown (adapt ralph_pp)
-    handoff.py      # write FORMAT.md; parse/validate handoff; reuse base.py severity/LGTM
+    handoff.py      # FORMAT.md; structured-finding parse/validate; reuse base.py severity/LGTM
     limits.py       # usage_limited classification + role-aware reaction (pause/switch)
     lithos_io.py    # fetch task / post findings+summary (gated by --no-lithos)
-    config.py       # DevelopConfig, reviewer config, --develop-config loader
+    config.py       # DevelopConfig, reviewer config, --develop-config + metadata loaders
     prompts/        # FORMAT.md, coder_init.md, reviewer_round.md, coder_fix.md
 src/lithos_loom/runner/   # fill existing stubs: worktree.py, git.py
 ```
@@ -222,52 +298,62 @@ src/lithos_loom/runner/   # fill existing stubs: worktree.py, git.py
 ## Salvage map (from `~/agents/ralph-dev`)
 
 - `ralph_pp/tools/base.py` → `ToolResult`, `is_lgtm`, `parse_max_severity`,
-  `severity_at_or_above` (≈ verbatim).
+  `severity_at_or_above` (adapted to the structured finding block).
 - `ralph_pp/tools/cli_tool.py` → subprocess invocation, ARG_MAX/stdin handling, exit-code
   capture → basis for `turns.py` (adapted to `docker exec`).
 - `ralph_pp/sandbox.py` + `ralph_pp/steps/sandbox.py` → `docker run` command building.
 - `ralph_pp/steps/worktree.py` → disposable worktree create/cleanup → `runner/worktree.py`.
 - `ralph_pp/steps/_git.py` → base SHA / commits-since / dirty → `runner/git.py`.
 - `ralph_pp/detection.py` → `detect_test_commands` for the test gate.
-- `ralph-sandbox` `docker-compose.*.yml` → mount/cap_drop/no-new-privileges model mirrored
-  into `containers.py`.
+- `ralph-sandbox` `docker-compose.*.yml` → mount/cap_drop/no-new-privileges model.
 
 ## Phased build
 
-- **Phase 1 — core loop (standalone, single reviewer).** Validation spike (Codex headless
-  `--resume` + skills) FIRST. Standalone flags in `__main__`; container lifecycle +
-  `develop()` round loop; `turns.py` + `containers.py`; `handoff.py` + `FORMAT.md`;
-  per-round commit + host test gate; fill `runner/worktree.py` + `runner/git.py`.
+- **Phase 0 — feasibility gate** ([doc](story-develop-feasibility-gate.md)). Pass/fail spikes
+  for: codex headless `--resume` restores context; skills/agents load under headless `-p`;
+  transcript persistence location + per-run redirect; usage-limit signal detection from
+  exit/stderr. **The project is conditional on this passing.**
+- **Phase 1 — core loop (standalone, single reviewer).** Standalone flags + `--develop-config`
+  in `__main__`; run-state tree + container lifecycle + `develop()` round loop; `turns.py` +
+  `containers.py`; `handoff.py` with the structured finding block + `FORMAT.md`; per-round
+  commit + throwaway-container test gate; fill `runner/worktree.py` + `runner/git.py`.
   Deliverable: `python -m lithos_loom.plugins.story_develop --repo X --description Y` spins
   up coder + reviewer containers, iterates to approval, leaves a branch.
 - **Phase 2 — multi-reviewer + resilience + polish.** N reviewers (consolidated default);
-  per-reviewer severity thresholds; `--develop-config`; usage-limit role-aware reaction +
-  countdown + reviewer container-replace; stall guard + dispute escalation + `max_cost_usd`;
-  `--acceptance-criteria`; `--open-pr`; `lithos_io.py` (fetch/post); operator attach escape
-  hatch.
-- **Phase 3 — daemon integration (trivial).** `--task-json/--work-dir/--result-file`; atomic
-  `result.json` conforming to `docs/result-schema.json`; checkpoint-and-exit interrupted
-  path; route stanza in `examples/lithos-loom.toml`; plugin-runner integration test.
+  per-reviewer severity thresholds; usage-limit role-aware reaction + countdown + reviewer
+  container-replace + reseed payload; stall/dispute guards by `finding_id` + `max_cost_usd`;
+  `--acceptance-criteria`; `--open-pr`; `lithos_io.py`; egress allowlist hardening; operator
+  attach escape hatch.
+- **Phase 3 — daemon integration (contract changes, not "trivial").** Required changes:
+  - `--task-json/--work-dir/--result-file` entry; atomic `result.json`.
+  - **`result-schema.json`:** add a `resume_after` (and session-id) surface for
+    `usage_limited` interruptions.
+  - **`route_runner._apply_result`:** teach `interrupted` + `resume_after` to schedule a
+    re-dispatch instead of a plain release.
+  - **Config loading:** daemon-mode plugin loads its reviewer config from project-context
+    metadata itself (since `--task-json` doesn't carry resolved project config).
+  - Route stanza in `examples/lithos-loom.toml`; plugin-runner integration test; update
+    `docs/SPECIFICATION.md` + `docs/result-schema.json` + `tests/`.
 
 ## Open questions (deferred, non-blocking)
 
-- Daemon-mode reviewer-config home: Loom TOML `[projects.*.develop]` vs **project-context-doc
-  metadata** to match [ADR 0001](../adr/0001-github-watch-config-storage.md) (github-watcher
-  precedent). Decide in Phase 3.
 - Whether `story-develop` supersedes the `story-implement` / `story-review-human` stubs or
   coexists as the conversational path.
-- Project test suites needing secrets/env inside the sandbox (egress/env passthrough policy).
+- Project test suites needing secrets/env inside the throwaway test container (passthrough
+  policy).
 
 ## Verification
 
-- **Spike:** in `ralph-sandbox`, run `codex` headless resume across two invocations; confirm
-  context restoration + a skill invocation both work; same for `claude -p --resume`.
-- **Unit:** handoff parse/validate; severity-threshold approval; `usage_limited`
-  classification from sample stderr; stall guard (unchanged round commit); reviewer-selection
-  resolution. Port Ralph++ `test_lgtm.py`, `test_severity.py`, `test_worktree.py`.
+- **Gate (Phase 0):** the four pass/fail spikes above; the project does not proceed until
+  they pass.
+- **Unit:** structured-handoff parse/validate (incl. malformed + unknown status); severity
+  -threshold approval; `usage_limited` classification from sample stderr; stall/dispute by
+  `finding_id`; reviewer-selection resolution (metadata + per-task override). Port Ralph++
+  `test_lgtm.py`, `test_severity.py`, `test_worktree.py`.
 - **Integration (standalone):** real run against a throwaway repo + trivial task; assert a
-  branch with per-round commits, a conversation log, approval, and a clean host test gate;
-  a forced-limit case (mock stderr) exercising coder-pause and reviewer-switch.
+  branch with per-round commits, a conversation log, approval, and a clean throwaway-container
+  test gate; a forced-limit case (mock stderr) exercising coder-pause and reviewer-switch +
+  reseed; a resume-after-teardown case asserting transcript survival.
 - **Pre-merge:** `make check` (ruff + ruff format + pyright + pytest) green; update
   `docs/result-schema.json` + `tests/test_plugin_runner.py` on contract changes;
   `examples/lithos-loom.toml` + `tests/test_config.py` on config-schema changes; update
