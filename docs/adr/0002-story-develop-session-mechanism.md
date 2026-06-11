@@ -89,7 +89,10 @@ loss of clean exit-code detection.
     an explicit reseed payload. See the PRD's *Run-state & session durability* and
     *Reviewer replacement payload* sections. **Confirming that each tool lets us split
     "auth read path" from "transcript write path" is a Phase-0 feasibility-gate item;** if a
-    tool insists on one combined dir, we copy a minimal auth-only config per run.
+    tool insists on one combined dir, we copy a minimal auth-only config per run under
+    explicit credential controls (`0700`/`0600`, securely deleted on every teardown including
+    failure/checkpoint, never part of retained debug/resume state — see the PRD security and
+    run-state sections).
 - **Cost.** The operator loses "attach and watch the agent think in real time." A tee'd
   `stream-json` log per agent recovers most of it; on stop-without-approval, standalone mode
   still offers an attach/intervene escape hatch.

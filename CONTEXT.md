@@ -23,9 +23,8 @@ dialogue-based** cycle.
   (`round_01`, …). The cycle iterates rounds until approval or max-rounds.
 - **handoff** — the structured-markdown "sign-off" file an agent writes to `.handoff/` to
   pass a turn. The *only* thing that crosses between agents; working noise stays inside the
-  agent's own container / tee'd log (not a tmux pane — see [[architecture_bus_reframe]] and
-  ADR 0002). Doubles as the durable conversation record. Carries a machine-parseable
-  **findings block**, not just prose.
+  agent's own container / tee'd log (not a tmux pane — see ADR 0002). Doubles as the durable
+  conversation record. Carries a machine-parseable **findings block**, not just prose.
 - **finding** — an addressable review item inside a handoff: a stable `finding_id` (carried
   forward across rounds), `severity` (critical/major/minor), `status`
   (open/fixed/accepted/disputed/needs-clarification), target `files`, the reviewer's

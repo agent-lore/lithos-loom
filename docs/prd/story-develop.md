@@ -185,22 +185,40 @@ with a machine-parseable findings block:
 <one paragraph; coder turns also include test results>
 
 ## Findings
-- finding_id: f-<stable-hash>      # stable across rounds for the same issue
+- finding_id: f-001               # PLUGIN-assigned; reviewers reference, never invent
   severity: critical | major | minor
-  status: open | fixed | accepted | disputed | needs-clarification
+  status: open | fixed | accepted | disputed | needs-clarification | superseded | merged
   files: ["path:line", ...]
   rationale: <reviewer's reason, or refinement of a prior vague finding>
   coder_response: <coder's reply: what changed, or why disputed/needs-clarification>
+  supersedes: [f-007]             # only when splitting an existing finding
+  merged_into: f-002              # only when merging into another
 ```
 
-- `finding_id` is assigned by the reviewer on first raise and **reused** on every subsequent
-  round for the same issue (the reviewer is instructed to carry IDs forward); this is what
-  makes the stall/dispute guards (#8) reliable.
 - The coder threads replies **per finding** (`status` + `coder_response`), not as one lump —
   this is the "dialogue" the design promises.
 - `is_lgtm` / `parse_max_severity` operate over this block, not a free-text scan.
-- Validation rejects a handoff missing the block or carrying unknown `status`/`severity`;
-  the plugin re-prompts that same agent (cheap, since detection is exit-code-based).
+- Validation rejects a handoff missing the block, carrying unknown `status`/`severity`, or
+  (see lifecycle) inventing/dropping ids; the plugin re-prompts that same agent (cheap, since
+  detection is exit-code-based).
+
+### Finding lifecycle (plugin-enforced)
+
+Leaving id stability to prompt discipline would let a rephrase silently reset the
+stall/dispute guards. Instead the **plugin owns id assignment and carries findings forward**:
+
+- **Ids are plugin-assigned**, monotonic per run (`f-001`, `f-002`, …) — never a
+  reviewer-computed hash, so rewording cannot change an id.
+- Each round the plugin **injects the reviewer's prior open findings (id + text + status)**
+  into its prompt. The reviewer must, for each, either **update the existing `finding_id`'s
+  status** or leave it; it may not silently drop one (a dropped prior finding is reconciled
+  as still-`open` and flagged).
+- A **genuinely new** issue is returned without an id and the **plugin assigns** the next id.
+- **Split:** reviewer marks the old id `status: superseded` and returns new findings each
+  carrying `supersedes: [<old-id>]` (plugin assigns their ids). **Merge:** reviewer marks
+  the absorbed ids `status: merged` with `merged_into: <kept-id>`.
+- The stall/dispute guards (#8) operate over this **reconciled, id-stable** set — a
+  `superseded`/`merged` chain counts as continuity, not as "resolved then reappeared".
 
 ## Run-state & session durability
 
@@ -214,8 +232,16 @@ confirmed):
   path (e.g. via `CLAUDE_CONFIG_DIR` / Codex equivalent pointed at the per-run dir).
 - **Auth is mounted separately and read-only** (the operator's real token), so the writable
   transcript dir never needs to hold long-lived credentials. The gate must confirm each tool
-  lets us *split* "where auth is read" from "where transcripts are written"; if a tool
-  insists on one combined config dir, we copy a minimal auth-only config per run instead.
+  lets us *split* "where auth is read" from "where transcripts are written".
+- **Combined-config fallback (credential controls).** If a tool insists on one combined
+  config dir (G3 fail), we copy a minimal auth-only config per run — which puts a credential
+  inside the run-state dir, so it is governed explicitly: the dir is `0700` / files `0600`,
+  owned by the run user; the credential file is **always securely deleted on teardown,
+  including on failure and on daemon checkpoint-and-exit** — i.e. it is excluded from the
+  state we deliberately *retain* for debugging/resume (transcripts, handoffs, commits).
+  **Retained interruption/failure state never contains credentials**; on resume, fresh auth
+  is re-injected from the operator's real config. This combined path is last-resort; the
+  split-dir design is preferred precisely to avoid it.
 - **Isolation:** `run_id` namespacing means two concurrent runs (or two tasks) never share a
   transcript; **GC** is "delete `<work_dir>/<run_id>/` after a retention window".
 - **Survival across teardown:** because the dir is on the host work-dir, end-of-run teardown
@@ -248,9 +274,45 @@ This automation runs arbitrary coding agents against local repos, so the posture
   **Phase-2 hardening:** an egress allowlist restricted to provider domains.
 - **Test execution** runs in a fresh throwaway container (#10), never on the bare host, so
   untrusted repo code is never executed in the host context.
+- **Credential-at-rest:** in the preferred split-dir design the writable run-state never
+  holds auth. The combined-config fallback is the one path that writes a credential to the
+  run-state dir, and is governed by the controls in
+  [Run-state & session durability](#run-state--session-durability): `0700`/`0600`, owned by
+  the run user, and **securely deleted on every teardown — including failure and
+  checkpoint** — so retained debug/resume state is never credential-bearing.
 - Residual risk to accept explicitly: a malicious/compromised agent with a mounted provider
-  token + open egress could exfiltrate that token. The allowlist (Phase 2) is the mitigation;
-  v1 ships with eyes open because it does not widen the risk Dave already takes manually.
+  token + open egress could exfiltrate that token *while running*. The allowlist (Phase 2) is
+  the mitigation; v1 ships with eyes open because it does not widen the risk Dave already
+  takes manually.
+
+## Daemon config lookup contract
+
+How a daemon-mode run resolves its reviewer config from project-context metadata (decision
+#6). This reuses the convention Loom already relies on — a task carries
+`task.metadata["project"]` (a slug; see `render.py`, `_task_archive.py`), and the canonical
+doc is `projects/<slug>/<slug>-project-context.md` (mirroring
+`_project_import_bulk._resolve_context_doc`):
+
+1. **Slug:** read `task.metadata["project"]`. **Absent →** use built-in defaults (single
+   `code-quality` reviewer), proceed, and post a `[Friction]` breadcrumb. A missing link
+   must **not** block development.
+2. **Doc:** `lithos_read("projects/<slug>/<slug>-project-context.md")`; on miss, fall back to
+   the lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`
+   (same fallback the importer uses). **No doc →** defaults + `[Friction]`, as above.
+3. **Config keys** (typed JSON metadata, ADR-0001 style):
+
+   | Key | Type | Meaning |
+   |---|---|---|
+   | `develop_reviewers` | `list[obj]` | Available pool: `{name, tool, image?, system_prompt?, block_threshold?}` |
+   | `develop_coder` | `obj` | `{tool, image?}` (default `claude`) |
+   | `develop_fallback_chain` | `list[str]` | Tool names for usage-limit switching |
+   | `develop_max_rounds` / `develop_max_cost_usd` | `int` / `number` | Ceilings (optional) |
+
+4. **Per-task override:** `task.metadata["reviewers"]` (`list[str]`) selects a subset of the
+   pool for that task; absent → the project default set. An unknown name → `[Friction]` +
+   skip that name (don't fail the run).
+5. **Stale link:** if the doc exists but carries no `develop_*` keys, treat as "defaults for
+   this project" (not an error) — so enabling `story-develop` on a project is purely additive.
 
 ## Architecture
 

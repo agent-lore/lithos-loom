@@ -45,8 +45,11 @@ is read. **PASS** if auth-read and transcript-write can be split and the transcr
 a container teardown + remount + `--resume`. **FAIL** if a tool forces one combined dir with
 no redirect.
 
-**On fail:** copy a minimal auth-only config into the per-run dir each run (accept the
-credential-on-disk-per-run tradeoff), or revisit the daemon-resume design.
+**On fail:** copy a minimal auth-only config into the per-run dir each run under the
+credential controls defined in the PRD (`0700`/`0600`, owned by the run user, **securely
+deleted on every teardown including failure/checkpoint**, never part of retained
+debug/resume state), or revisit the daemon-resume design. If this fallback is taken, record
+the secure-deletion behaviour as a Phase-1 test.
 
 ## G4 — Usage-limit signal detection from exit/stderr
 
