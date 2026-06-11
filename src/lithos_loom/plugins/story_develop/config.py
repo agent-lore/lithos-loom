@@ -13,6 +13,9 @@ from pathlib import Path
 
 # Image + container constants (ralph-sandbox; see ADR 0002 / feasibility gate).
 DEFAULT_CODER_TOOL = "claude"
+DEFAULT_REVIEWER_TOOL = "claude"
+DEFAULT_REVIEWER_NAME = "code-quality"
+DEFAULT_BLOCK_THRESHOLD = "major"  # findings below this don't block (see handoff.py)
 DEFAULT_IMAGE = "ralph-sandbox:latest"
 WORKSPACE_MOUNT = "/workspace"
 CLAUDE_CONFIG_MOUNT = "/claude_config"
@@ -44,9 +47,23 @@ class DevelopConfig:
     coder: str = DEFAULT_CODER_TOOL
     image: str = DEFAULT_IMAGE
     base_branch: str = "main"
+    # T2: a single reviewer. Multi-reviewer config arrives with T6.
+    reviewer: str = DEFAULT_REVIEWER_NAME
+    reviewer_tool: str = DEFAULT_REVIEWER_TOOL
+    block_threshold: str = DEFAULT_BLOCK_THRESHOLD
+    acceptance_criteria: str | None = None
     run_id: str = field(default_factory=_short_run_id)
     # Host path to the operator's claude config dir (source of the auth file).
     claude_config_dir: Path = field(default_factory=lambda: Path.home() / ".claude")
+
+    @property
+    def effective_acceptance_criteria(self) -> str:
+        """The "definition of done" shown to the reviewer.
+
+        T2 falls back to the task description; an explicit ``--acceptance-criteria``
+        surface is wired in T8/T12.
+        """
+        return self.acceptance_criteria or self.description
 
     @property
     def run_dir(self) -> Path:
@@ -57,6 +74,10 @@ class DevelopConfig:
     def coder_config_dir(self) -> Path:
         """Per-run coder config dir (CLAUDE_CONFIG_DIR target; holds transcript)."""
         return self.run_dir / "agents" / "coder" / "claude_config"
+
+    def reviewer_config_dir(self, name: str) -> Path:
+        """Per-run, per-reviewer config dir (its own CLAUDE_CONFIG_DIR / transcript)."""
+        return self.run_dir / "agents" / f"review-{name}" / "claude_config"
 
     @property
     def worktree_parent(self) -> Path:
