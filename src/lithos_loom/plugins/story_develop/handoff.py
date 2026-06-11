@@ -9,8 +9,6 @@ from __future__ import annotations
 from importlib import resources
 from pathlib import Path
 
-from .config import HANDOFF_DIRNAME
-
 _PROMPTS = "lithos_loom.plugins.story_develop.prompts"
 
 
@@ -24,12 +22,12 @@ def coder_handoff_name(round_no: int) -> str:
     return f"round_{round_no:02d}_coder_done.md"
 
 
-def seed_handoff_dir(worktree: Path) -> Path:
-    """Create ``<worktree>/.handoff/`` and write ``FORMAT.md`` into it.
+def seed_handoff_dir(handoff_dir: Path) -> Path:
+    """Create *handoff_dir* and write ``FORMAT.md`` into it.
 
-    Returns the handoff directory path.
+    *handoff_dir* lives outside the git worktree and is mounted into the
+    container at ``/workspace/.handoff``. Returns the directory path.
     """
-    handoff_dir = worktree / HANDOFF_DIRNAME
     handoff_dir.mkdir(parents=True, exist_ok=True)
     (handoff_dir / "FORMAT.md").write_text(load_prompt("FORMAT.md"), encoding="utf-8")
     return handoff_dir

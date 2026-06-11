@@ -63,6 +63,7 @@ def develop(config: DevelopConfig, *, coder_timeout: int = 3600) -> DevelopResul
         )
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
+    handoff.seed_handoff_dir(config.handoff_dir)
 
     wt = worktree.create(
         config.repo,
@@ -72,7 +73,6 @@ def develop(config: DevelopConfig, *, coder_timeout: int = 3600) -> DevelopResul
     )
     branch = wt.name
     base = git.base_sha(wt)
-    handoff.seed_handoff_dir(wt)
     logger.info("story-develop %s: worktree %s (branch %s)", config.run_id, wt, branch)
 
     name = containers.container_name(config.run_id, "coder")
@@ -81,8 +81,10 @@ def develop(config: DevelopConfig, *, coder_timeout: int = 3600) -> DevelopResul
         image=config.image,
         worktree=wt,
         config_dir=config.coder_config_dir,
+        handoff_dir=config.handoff_dir,
         auth_source_dir=config.claude_config_dir,
         auth_files=containers.resolve_auth_files(config, CLAUDE_AUTH_FILES),
+        skills_dir=config.operator_skills_dir,
     )
 
     turn: CoderTurnResult | None = None
@@ -104,13 +106,19 @@ def develop(config: DevelopConfig, *, coder_timeout: int = 3600) -> DevelopResul
     finally:
         containers.stop_container(name)
 
-    handoff_path = wt / HANDOFF_DIRNAME / handoff.coder_handoff_name(1)
+    handoff_path = config.handoff_dir / handoff.coder_handoff_name(1)
     handoff_present = handoff_path.is_file()
-    # Keep the .handoff/ scaffolding out of the deliverable branch (PRD #9).
-    git.commit_all(
-        wt, f"story-develop: {config.description}", exclude=[HANDOFF_DIRNAME]
-    )
-    commits = git.commits_since(wt, base)
+
+    # Only promote work to the branch when the turn succeeded AND signed off.
+    # On failure the worktree changes are left uncommitted (inspectable, not
+    # promoted). The .handoff/ exclude is belt-and-suspenders — the handoff dir
+    # already lives outside the worktree (PRD #9).
+    commits: list[str] = []
+    if (turn and turn.succeeded) and handoff_present:
+        git.commit_all(
+            wt, f"story-develop: {config.description}", exclude=[HANDOFF_DIRNAME]
+        )
+        commits = git.commits_since(wt, base)
 
     ok = bool(turn and turn.succeeded) and handoff_present and bool(commits)
     if ok:

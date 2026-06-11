@@ -38,15 +38,27 @@ def build_run_command(
     image: str,
     worktree: Path,
     config_dir: Path,
+    handoff_dir: Path,
     auth_source_dir: Path,
     auth_files: Sequence[str],
+    skills_dir: Path | None = None,
     read_only_worktree: bool = False,
 ) -> list[str]:
     """Build the ``docker run`` argv for a long-lived idle agent container.
 
     The container does nothing but ``sleep`` — turns are injected later via
-    :func:`build_exec_command`. *auth_files* are bind-mounted individually from
-    *auth_source_dir*; the caller passes only files that actually exist.
+    :func:`build_exec_command`.
+
+    Mounts:
+
+    * the worktree at ``/workspace`` (RW, or RO for reviewers);
+    * *handoff_dir* at ``/workspace/.handoff`` (RW) — a separate dir outside the
+      worktree, so the worktree stays git-clean;
+    * *config_dir* (per-run) at ``/claude_config`` (RW, holds the transcript);
+    * each of *auth_files* individually from *auth_source_dir* (RW, token
+      refresh) — never the whole config dir;
+    * *skills_dir* at ``/claude_config/skills`` (RO) when provided, so
+      operator-installed skills are available (feasibility gate G2).
     """
     workspace_mount = f"{worktree}:{WORKSPACE_MOUNT}"
     if read_only_worktree:
@@ -67,10 +79,14 @@ def build_run_command(
         "-v",
         workspace_mount,
         "-v",
+        f"{handoff_dir}:{WORKSPACE_MOUNT}/.handoff",
+        "-v",
         f"{config_dir}:{CLAUDE_CONFIG_MOUNT}",
     ]
     for fname in auth_files:
         cmd += ["-v", f"{auth_source_dir / fname}:{CLAUDE_CONFIG_MOUNT}/{fname}"]
+    if skills_dir is not None:
+        cmd += ["-v", f"{skills_dir}:{CLAUDE_CONFIG_MOUNT}/skills:ro"]
     cmd += ["-e", f"CLAUDE_CONFIG_DIR={CLAUDE_CONFIG_MOUNT}"]
     cmd += ["--entrypoint", "sleep", image, "infinity"]
     return cmd

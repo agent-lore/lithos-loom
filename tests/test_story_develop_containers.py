@@ -15,6 +15,7 @@ def _run_cmd(**over) -> list[str]:
         image="ralph-sandbox:latest",
         worktree=Path("/work/run/worktree/branch"),
         config_dir=Path("/work/run/agents/coder/claude_config"),
+        handoff_dir=Path("/work/run/handoff"),
         auth_source_dir=Path("/home/u/.claude"),
         auth_files=[".credentials.json"],
     )
@@ -29,13 +30,24 @@ def test_run_command_hardened_profile_and_mounts() -> None:
     # hardened
     assert cmd[cmd.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges:true" in cmd
-    # worktree RW, config dir, single auth file bind, CLAUDE_CONFIG_DIR
+    # worktree RW, handoff dir OUTSIDE the worktree, config dir, single auth file
     assert "/work/run/worktree/branch:/workspace" in cmd
+    assert "/work/run/handoff:/workspace/.handoff" in cmd
     assert "/work/run/agents/coder/claude_config:/claude_config" in cmd
     assert "/home/u/.claude/.credentials.json:/claude_config/.credentials.json" in cmd
     assert "CLAUDE_CONFIG_DIR=/claude_config" in cmd
     # idle entrypoint with the image and arg trailing
     assert cmd[-4:] == ["--entrypoint", "sleep", "ralph-sandbox:latest", "infinity"]
+
+
+def test_run_command_mounts_skills_read_only_when_present() -> None:
+    cmd = _run_cmd(skills_dir=Path("/home/u/.claude/skills"))
+    assert "/home/u/.claude/skills:/claude_config/skills:ro" in cmd
+
+
+def test_run_command_omits_skills_when_absent() -> None:
+    cmd = _run_cmd(skills_dir=None)
+    assert not any(a.endswith(":/claude_config/skills:ro") for a in cmd)
 
 
 def test_run_command_readonly_worktree() -> None:

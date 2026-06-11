@@ -62,3 +62,22 @@ class DevelopConfig:
     def worktree_parent(self) -> Path:
         """Where the run's worktree directory is created."""
         return self.run_dir / "worktree"
+
+    @property
+    def handoff_dir(self) -> Path:
+        """Per-run handoff dir, mounted into the container at ``/workspace/.handoff``.
+
+        Lives *outside* the git worktree so the worktree stays clean (the
+        handoff is a separate artifact, not part of the deliverable branch).
+        """
+        return self.run_dir / "handoff"
+
+    @property
+    def operator_skills_dir(self) -> Path | None:
+        """Operator's ``~/.claude/skills`` if present (mounted read-only).
+
+        Restores the feasibility-gate G2 behaviour: operator-installed skills
+        are available to the agent inside the per-run ``CLAUDE_CONFIG_DIR``.
+        """
+        skills = self.claude_config_dir / "skills"
+        return skills if skills.is_dir() else None

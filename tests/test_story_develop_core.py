@@ -14,7 +14,7 @@ import pytest
 
 from lithos_loom.plugins.story_develop import containers
 from lithos_loom.plugins.story_develop import develop as develop_mod
-from lithos_loom.plugins.story_develop.config import HANDOFF_DIRNAME, DevelopConfig
+from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.turns import CoderTurnResult
 
 
@@ -40,6 +40,7 @@ def config(tmp_git_repo: Path, tmp_path: Path) -> DevelopConfig:
 
 def _install_fake_coder(
     monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
     *,
     write_handoff: bool,
     write_source: bool,
@@ -56,7 +57,8 @@ def _install_fake_coder(
         if write_source:
             (wt / "greeting.txt").write_text("hello\n")
         if write_handoff:
-            (wt / HANDOFF_DIRNAME / "round_01_coder_done.md").write_text(
+            # the coder writes to the handoff dir (mounted outside the worktree)
+            (config.handoff_dir / "round_01_coder_done.md").write_text(
                 "## Status: LGTM\n## Summary\nWrote greeting.txt; tests pass.\n"
             )
         return CoderTurnResult(
@@ -77,11 +79,21 @@ def _install_fake_coder(
     return state
 
 
+def _commit_count_since_base(result) -> int:
+    out = subprocess.run(
+        ["git", "rev-list", "--count", f"{result.base_sha}..HEAD"],
+        cwd=result.worktree,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return int(out or 0)
+
+
 def test_develop_success(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
     state = _install_fake_coder(
-        monkeypatch, write_handoff=True, write_source=True, ok=True
+        monkeypatch, config, write_handoff=True, write_source=True, ok=True
     )
     result = develop_mod.develop(config)
 
@@ -101,43 +113,59 @@ def test_develop_success(
         text=True,
     )
     assert show.returncode == 0 and show.stdout == "hello\n"
-    # the .handoff/ scaffolding must NOT be in the deliverable commit
-    handoff_in_tree = subprocess.run(
-        ["git", "show", "HEAD:.handoff/round_01_coder_done.md"],
+    # the handoff is a separate artifact (outside the worktree) — not committed,
+    # and the worktree is left clean (no untracked .handoff/).
+    assert (config.handoff_dir / "round_01_coder_done.md").is_file()
+    porcelain = subprocess.run(
+        ["git", "status", "--porcelain"],
         cwd=result.worktree,
         capture_output=True,
         text=True,
-    )
-    assert handoff_in_tree.returncode != 0
+    ).stdout
+    assert porcelain == ""
 
 
-def test_develop_fails_without_handoff(
+def test_develop_fails_without_handoff_and_does_not_commit(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    _install_fake_coder(monkeypatch, write_handoff=False, write_source=True, ok=True)
+    _install_fake_coder(
+        monkeypatch, config, write_handoff=False, write_source=True, ok=True
+    )
     result = develop_mod.develop(config)
     assert result.status == "failed"
     assert not result.handoff_present
     assert "no coder handoff" in result.message
+    # failure must NOT promote partial work to the branch...
+    assert result.commits == []
+    assert _commit_count_since_base(result) == 0
+    # ...but the changes remain in the worktree for inspection
+    assert (result.worktree / "greeting.txt").is_file()
 
 
-def test_develop_fails_when_turn_errors(
+def test_develop_fails_when_turn_errors_and_does_not_commit(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    _install_fake_coder(monkeypatch, write_handoff=True, write_source=True, ok=False)
+    _install_fake_coder(
+        monkeypatch, config, write_handoff=True, write_source=True, ok=False
+    )
     result = develop_mod.develop(config)
     assert result.status == "failed"
     assert "coder turn failed" in result.message
+    assert result.commits == []
+    assert _commit_count_since_base(result) == 0
 
 
 def test_develop_fails_with_no_changes(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
     # handoff but no source change -> no commit -> failed
-    _install_fake_coder(monkeypatch, write_handoff=True, write_source=False, ok=True)
+    _install_fake_coder(
+        monkeypatch, config, write_handoff=True, write_source=False, ok=True
+    )
     result = develop_mod.develop(config)
     assert result.status == "failed"
     assert "no commit" in result.message
+    assert _commit_count_since_base(result) == 0
 
 
 def test_develop_rejects_unsupported_coder(tmp_git_repo: Path, tmp_path: Path) -> None:
