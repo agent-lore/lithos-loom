@@ -77,10 +77,17 @@ security) only for stories that warrant them — most don't.
    is **not** cycled per turn. Separate containers are required, not optional: coder mounts
    the worktree **read-write** while reviewers mount it **read-only**; each holds an
    independent session; agents may use different tools/images; and a reviewer tool-switch
-   (see #4) replaces only that one container. Reuses `ralph-sandbox`'s image, config-dir
-   mounts, and security profile; the multi-container orchestration on top is **net-new**.
-   Model-provider network egress stays open (it must); the **push/PR capability is withheld
-   from agents** and performed host-side instead. Full mount/credential/network posture:
+   (see #4) replaces only that one container. Reuses `ralph-sandbox`'s **image and security
+   profile**, but **not** its config-dir mount: ralph-sandbox bind-mounts the operator's whole
+   `~/.claude` / `~/.codex` (RW) into its single container, which doesn't survive going
+   multi-agent — a reviewer is RO on the code yet must *write* its own transcript, same-tool
+   agents and concurrent runs would race on shared mutable config (`.claude.json`), and the
+   whole-dir mount needlessly exposes the operator's entire cross-project history + tokens.
+   Instead each agent gets a **per-run, per-agent config dir** with only its **auth file**
+   bind-mounted in (see [Run-state & session durability](#run-state--session-durability)).
+   The multi-container orchestration on top is **net-new**. Model-provider network egress
+   stays open (it must); the **push/PR capability is withheld from agents** and performed
+   host-side instead. Full mount/credential/network posture:
    see [Security & threat model](#security--threat-model).
 
 3. **Session mechanism = resumable per-turn exec into the live container.** A turn is
@@ -223,25 +230,30 @@ stall/dispute guards. Instead the **plugin owns id assignment and carries findin
 ## Run-state & session durability
 
 The persistence claim in decision #3 only holds if the transcript has a concrete, isolated
-home. Intended design (and a **feasibility-gate** item, since exact tool behaviour must be
-confirmed):
+home. Design (**validated by the [feasibility gate](story-develop-feasibility-gate.md) G3**):
 
 - **Per-run, per-agent state dir** on the host under the work-dir:
   `<work_dir>/<run_id>/agents/<agent_name>/` holding that agent's session transcript(s),
-  keyed by the tool's `session-id`. Mounted into the agent's container at the tool's expected
-  path (e.g. via `CLAUDE_CONFIG_DIR` / Codex equivalent pointed at the per-run dir).
-- **Auth is mounted separately and read-only** (the operator's real token), so the writable
-  transcript dir never needs to hold long-lived credentials. The gate must confirm each tool
-  lets us *split* "where auth is read" from "where transcripts are written".
-- **Combined-config fallback (credential controls).** If a tool insists on one combined
-  config dir (G3 fail), we copy a minimal auth-only config per run — which puts a credential
-  inside the run-state dir, so it is governed explicitly: the dir is `0700` / files `0600`,
-  owned by the run user; the credential file is **always securely deleted on teardown,
-  including on failure and on daemon checkpoint-and-exit** — i.e. it is excluded from the
-  state we deliberately *retain* for debugging/resume (transcripts, handoffs, commits).
-  **Retained interruption/failure state never contains credentials**; on resume, fresh auth
-  is re-injected from the operator's real config. This combined path is last-resort; the
-  split-dir design is preferred precisely to avoid it.
+  keyed by the tool's `session-id`. Mounted into the agent's container at the tool's config
+  path via `CLAUDE_CONFIG_DIR` (claude) / **`CODEX_HOME`** (codex — *not* `CODEX_CONFIG_DIR`,
+  which ralph-sandbox sets and codex ignores). Site it **under the work-dir, not `/tmp`**
+  (codex degrades trying to create helper binaries under a `/tmp` home). G3 confirmed both
+  tools redirect their transcripts to this dir.
+- **Auth = bind-mount the single auth file, no copy.** Both tools keep auth in *one file*
+  (`~/.claude/.credentials.json`, `~/.codex/auth.json`) inside an otherwise-combined config
+  dir. So the per-run dir stays writable for transcripts while **only that one auth file is
+  bind-mounted in from the operator's real config** — the credential is never copied into,
+  and never persists in, retained run-state. Mount it **read-write to the real file** (not
+  read-only): both tools periodically refresh their OAuth token by rewriting this file, and a
+  RW bind-mount lets the refresh propagate back to the operator's real login without ever
+  placing a credential in the run-state dir. (A RO mount would break long-run token refresh.)
+- **Combined-config fallback (last resort, credential controls).** Only if some future tool
+  *cannot* be pointed at a separate dir at all would we copy a minimal auth-only config per
+  run; that copy would then be governed explicitly — dir `0700` / files `0600`, owned by the
+  run user, **securely deleted on every teardown including failure and daemon
+  checkpoint-and-exit**, never part of retained debug/resume state, with fresh auth
+  re-injected on resume. **Not needed for claude or codex** (G3 passed); recorded for
+  completeness.
 - **Isolation:** `run_id` namespacing means two concurrent runs (or two tasks) never share a
   transcript; **GC** is "delete `<work_dir>/<run_id>/` after a retention window".
 - **Survival across teardown:** because the dir is on the host work-dir, end-of-run teardown
@@ -263,8 +275,10 @@ consistent across the switch rather than restarting review from scratch each rou
 This automation runs arbitrary coding agents against local repos, so the posture is explicit:
 
 - **Mounted into agent containers:** the worktree (coder RW, reviewers RO); the per-run
-  transcript dir (RW); the tool **auth** config **read-only**. The provider API token is the
-  primary exfil-sensitive item and is the main reason egress matters.
+  transcript dir (RW); and **only the single auth file** bind-mounted from the operator's
+  real config (RW, so token refresh propagates — see run-state) — *not* the whole `~/.claude`
+  / `~/.codex`. The provider API token is the primary exfil-sensitive item and is the main
+  reason egress matters.
 - **Deliberately *not* available to agents:** `gh`/push credentials and SSH keys (push/PR is
   host-side only); the operator's home beyond the auth config; any host path outside the
   worktree + per-run dirs. `cap_drop: ALL`, `no-new-privileges:true`.
@@ -274,12 +288,10 @@ This automation runs arbitrary coding agents against local repos, so the posture
   **Phase-2 hardening:** an egress allowlist restricted to provider domains.
 - **Test execution** runs in a fresh throwaway container (#10), never on the bare host, so
   untrusted repo code is never executed in the host context.
-- **Credential-at-rest:** in the preferred split-dir design the writable run-state never
-  holds auth. The combined-config fallback is the one path that writes a credential to the
-  run-state dir, and is governed by the controls in
-  [Run-state & session durability](#run-state--session-durability): `0700`/`0600`, owned by
-  the run user, and **securely deleted on every teardown — including failure and
-  checkpoint** — so retained debug/resume state is never credential-bearing.
+- **Credential-at-rest:** none. Auth is a **bind-mounted file**, so the writable run-state dir
+  never holds a credential — there is nothing to shred for claude/codex. The copy-then-shred
+  controls in [Run-state & session durability](#run-state--session-durability) apply only to
+  the hypothetical last-resort tool that can't be pointed at a separate dir.
 - Residual risk to accept explicitly: a malicious/compromised agent with a mounted provider
   token + open egress could exfiltrate that token *while running*. The allowlist (Phase 2) is
   the mitigation; v1 ships with eyes open because it does not widen the risk Dave already
@@ -367,7 +379,10 @@ src/lithos_loom/runner/   # fill existing stubs: worktree.py, git.py
 - `ralph_pp/steps/worktree.py` → disposable worktree create/cleanup → `runner/worktree.py`.
 - `ralph_pp/steps/_git.py` → base SHA / commits-since / dirty → `runner/git.py`.
 - `ralph_pp/detection.py` → `detect_test_commands` for the test gate.
-- `ralph-sandbox` `docker-compose.*.yml` → mount/cap_drop/no-new-privileges model.
+- `ralph-sandbox` `docker-compose.*.yml` → `cap_drop: ALL` / `no-new-privileges` security
+  model and image only. **Not** its config mount: replace the whole-`~/.claude` bind with a
+  per-run dir + single auth-file mount, and use `CODEX_HOME` (ralph-sandbox's `CODEX_CONFIG_DIR`
+  is ignored by codex).
 
 ## Phased build
 

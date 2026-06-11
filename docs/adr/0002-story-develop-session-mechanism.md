@@ -78,21 +78,22 @@ loss of clean exit-code detection.
   `resume_after`, session ids), free the slot, and later resume from the transcript after the
   container was torn down. The live container is a within-run fidelity/perf boost; the
   transcript is the durable context.
-  - **This only holds if the transcript has a concrete, isolated home.** Decision: a
-    per-run, per-agent state dir on the host work-dir
-    (`<work_dir>/<run_id>/agents/<agent>/`), mounted into the agent's container at the tool's
-    expected config path, with the operator's **auth mounted separately read-only** so the
-    writable transcript dir never holds long-lived credentials. `run_id` namespacing isolates
-    concurrent runs; GC = delete `<work_dir>/<run_id>/` after a retention window; teardown
-    (end-of-run *or* daemon checkpoint) preserves it because it is on the host. A
-    reviewer tool-switch gets a fresh state dir (different tool, no transcript inheritance) +
-    an explicit reseed payload. See the PRD's *Run-state & session durability* and
-    *Reviewer replacement payload* sections. **Confirming that each tool lets us split
-    "auth read path" from "transcript write path" is a Phase-0 feasibility-gate item;** if a
-    tool insists on one combined dir, we copy a minimal auth-only config per run under
-    explicit credential controls (`0700`/`0600`, securely deleted on every teardown including
-    failure/checkpoint, never part of retained debug/resume state — see the PRD security and
-    run-state sections).
+  - **This only holds if the transcript has a concrete, isolated home.** Decision (validated
+    by the Phase-0 feasibility gate, G1/G3): a per-run, per-agent state dir on the host
+    work-dir (`<work_dir>/<run_id>/agents/<agent>/`), mounted into the agent's container at
+    the tool's config path (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`). This **replaces**
+    ralph-sandbox's whole-`~/.claude` mount, which is single-tenant: reviewers are RO on code
+    yet must write a transcript, same-tool/concurrent agents race on shared mutable config,
+    and the whole-dir mount over-exposes the operator's history + tokens. **Auth is the single
+    auth file bind-mounted in (RW, so OAuth token refresh propagates back to the operator's
+    real login), not copied** — so the writable run-state never holds a credential. `run_id`
+    namespacing isolates concurrent runs; GC = delete `<work_dir>/<run_id>/`; teardown
+    (end-of-run *or* daemon checkpoint) preserves it because it is on the host. A reviewer
+    tool-switch gets a fresh state dir (different tool, no transcript inheritance) + an
+    explicit reseed payload. The gate confirmed both claude and codex redirect transcripts and
+    resume cleanly; the copy-then-shred path is a last resort only for a hypothetical tool
+    that cannot be pointed at a separate dir. See the PRD's *Run-state & session durability*
+    and *Reviewer replacement payload* sections.
 - **Cost.** The operator loses "attach and watch the agent think in real time." A tee'd
   `stream-json` log per agent recovers most of it; on stop-without-approval, standalone mode
   still offers an attach/intervene escape hatch.
