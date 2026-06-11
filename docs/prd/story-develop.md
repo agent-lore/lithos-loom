@@ -125,12 +125,14 @@ security) only for stories that warrant them — most don't.
    - **Standalone:** a minimal local **`--develop-config <file>`** (TOML/YAML) holding the
      reviewer list, tools, images, prompts, and `fallback_chain`; plus `--reviewer <name>`
      (repeatable) for quick one-offs. v1 is *low*-config, not *zero*-config.
-   - **Daemon:** the project's **available reviewer pool + defaults live in project-context
-     doc metadata** (consistent with [ADR 0001](../adr/0001-github-watch-config-storage.md)).
-     A **per-task override** (`metadata.reviewers` / tags on the task) selects which run for
-     that task; absent → the project default. Because `--task-json` does not carry the
-     resolved project config today, the daemon-mode plugin **loads this config itself**
-     (Phase-3 contract note).
+   - **Daemon:** the project's **available reviewer pool (`develop_reviewers`) and its default
+     subset (`develop_default_reviewers`) live in project-context doc metadata** (consistent
+     with [ADR 0001](../adr/0001-github-watch-config-storage.md)). A **per-task override**
+     (`metadata.reviewers` / tags) selects which run for that task; absent → the project
+     default subset; absent *that* → the single built-in `code-quality` reviewer (never the
+     whole pool). Because `--task-json` does not carry the resolved project config today, the
+     daemon-mode plugin **loads this config itself** (Phase-3 contract note). Full rules:
+     [Daemon config lookup contract](#daemon-config-lookup-contract).
    - A future router agent populates the same list.
 
 7. **Approval = severity-thresholded, per reviewer.** A reviewer passes a round if it
@@ -292,6 +294,14 @@ This automation runs arbitrary coding agents against local repos, so the posture
   never holds a credential — there is nothing to shred for claude/codex. The copy-then-shred
   controls in [Run-state & session durability](#run-state--session-durability) apply only to
   the hypothetical last-resort tool that can't be pointed at a separate dir.
+- **RW auth-file tradeoff (explicit):** mounting the auth file **read-write** (for token
+  refresh) gives the agent **write** access to the operator's real credential file — so the
+  *integrity/availability* of that file is in the agent's blast radius (it could corrupt or
+  delete it, forcing a re-login). We accept this: **secrecy is not reduced further** (the
+  agent already legitimately reads and uses that token to make API calls), and an
+  integrity/availability hit is recoverable by re-authenticating. If that tradeoff ever
+  becomes unacceptable, the fallback is a RO mount + accepting periodic refresh failures, or a
+  short-lived scoped token minted per run.
 - Residual risk to accept explicitly: a malicious/compromised agent with a mounted provider
   token + open egress could exfiltrate that token *while running*. The allowlist (Phase 2) is
   the mitigation; v1 ships with eyes open because it does not widen the risk Dave already
@@ -316,15 +326,20 @@ doc is `projects/<slug>/<slug>-project-context.md` (mirroring
    | Key | Type | Meaning |
    |---|---|---|
    | `develop_reviewers` | `list[obj]` | Available pool: `{name, tool, image?, system_prompt?, block_threshold?}` |
+   | `develop_default_reviewers` | `list[str]` | Names from the pool that run when a task doesn't override. **Absent → the single built-in `code-quality` reviewer** (never "all of the pool"). |
    | `develop_coder` | `obj` | `{tool, image?}` (default `claude`) |
    | `develop_fallback_chain` | `list[str]` | Tool names for usage-limit switching |
    | `develop_max_rounds` / `develop_max_cost_usd` | `int` / `number` | Ceilings (optional) |
 
-4. **Per-task override:** `task.metadata["reviewers"]` (`list[str]`) selects a subset of the
-   pool for that task; absent → the project default set. An unknown name → `[Friction]` +
+4. **Per-task override:** `task.metadata["reviewers"]` (`list[str]`) selects which reviewers
+   run for that task (from the pool); **absent → `develop_default_reviewers`, and if that too
+   is absent → the single built-in `code-quality` reviewer.** An unknown name → `[Friction]` +
    skip that name (don't fail the run).
-5. **Stale link:** if the doc exists but carries no `develop_*` keys, treat as "defaults for
-   this project" (not an error) — so enabling `story-develop` on a project is purely additive.
+5. **Stale link:** if the doc exists but carries no `develop_*` keys, treat as "built-in
+   defaults for this project" (single `code-quality` reviewer; not an error) — so enabling
+   `story-develop` on a project is purely additive. Note that a populated `develop_reviewers`
+   pool **without** `develop_default_reviewers` still defaults to the single built-in reviewer,
+   never the whole pool — opting a reviewer *into the pool* does not auto-run it.
 
 ## Architecture
 
@@ -336,8 +351,8 @@ doc is `projects/<slug>/<slug>-project-context.md` (mirroring
    (default `main`); create the per-run state tree.
 2. Seed `.handoff/` with `FORMAT.md`.
 3. **Start long-lived containers:** one coder container (RW worktree) + one per reviewer
-   (RO worktree), each launched idle with the tool available for `docker exec`, auth mounted
-   RO, per-run transcript dir mounted RW.
+   (RO worktree), each launched idle with the tool available for `docker exec`, the single
+   auth file bind-mounted RW (token-refresh; see run-state), per-run transcript dir mounted RW.
 4. **Round loop** (explicit orchestration — no watch loop):
    - **Coder turn:** `docker exec` the coder (`--resume` after round 1); it implements/fixes,
      runs tests, commits, writes `round_NN_coder_done.md`. Validate the handoff; on malformed
@@ -386,12 +401,14 @@ src/lithos_loom/runner/   # fill existing stubs: worktree.py, git.py
 
 ## Phased build
 
-- **Phase 0 — feasibility gate** ([doc](story-develop-feasibility-gate.md)). **PASSED
-  2026-06-11:** G1 (resume restores context) and G3 (transcript redirect + per-run isolation)
-  PASS for both claude and codex; G2 (skills/agents headless) PASS; G4 (usage-limit signal)
-  PARTIAL — structured exit-code/JSON channel confirmed, exact limit strings to be captured
-  in Phase 1 with a safe-default fallback. Operational findings (session-handle control,
-  `CODEX_HOME`, stdin redirect, free `total_cost_usd`) feed `turns.py`/`containers.py`.
+- **Phase 0 — feasibility gate** ([doc](story-develop-feasibility-gate.md)). **CONDITIONALLY
+  PASSED 2026-06-11:** the blocking gates G1 (resume restores context), G2 (skills/agents
+  headless) and G3 (transcript redirect + per-run isolation) all PASS for both claude and
+  codex; G4 (usage-limit signal) is **DEFERRED** — structured exit-code/JSON detection channel
+  confirmed, but exact limit strings are captured in Phase 1 under a safe-default fallback
+  (unrecognised failure → generic `agent` error, not `usage_limited`). Operational findings
+  (session-handle control, `CODEX_HOME`, stdin redirect, free `total_cost_usd`) feed
+  `turns.py`/`containers.py`.
 - **Phase 1 — core loop (standalone, single reviewer).** Standalone flags + `--develop-config`
   in `__main__`; run-state tree + container lifecycle + `develop()` round loop; `turns.py` +
   `containers.py`; `handoff.py` with the structured finding block + `FORMAT.md`; per-round

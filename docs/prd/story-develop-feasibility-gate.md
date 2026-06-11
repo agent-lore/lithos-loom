@@ -11,11 +11,15 @@
 
 ## Results — 2026-06-11 (run on host; tools `claude 2.1.170`, `codex-cli 0.137.0`)
 
-**Verdict: GATE PASSES.** G1–G3 PASS for both tools; G4's *detection channel* is confirmed
-structured (no scraping) but the exact limit-signal strings must be captured opportunistically
-(Phase-1 task, fallback recorded). Run on the host with redirected config dirs rather than
-inside `ralph-sandbox`; the tool *behaviour* validated here (resume, config redirect, skills)
-is identical in-container — only the bind-mounts differ, which is mechanical.
+**Verdict: CONDITIONALLY PASSES — G1–G3 PASS; G4 DEFERRED under a documented fallback.** The
+three gates that *block* the design (resume restores context, skills/agents headless,
+transcript redirect + isolation) all PASS for both tools, so the design is cleared to proceed.
+G4 is **not** claimed as a pass: only its *detection channel* (structured non-zero-exit + JSON,
+no scraping) is confirmed; the exact limit-signal strings are captured in Phase 1, and until
+then the documented safe-default fallback (treat an unrecognised failure as a generic `agent`
+error, not `usage_limited`) governs behaviour. Run on the host with redirected config dirs
+rather than inside `ralph-sandbox`; the tool *behaviour* validated here (resume, config
+redirect, skills) is identical in-container — only the bind-mounts differ, which is mechanical.
 
 | Gate | Verdict | Evidence |
 |---|---|---|
@@ -76,7 +80,8 @@ invocation; reassess whether the affected tool is viable in that role.
 
 **Why it matters:** [run-state durability](story-develop.md#run-state--session-durability)
 and the daemon checkpoint/resume claim require knowing *where* each tool writes its
-transcript and whether we can **namespace it per run** while mounting **auth read-only**.
+transcript and whether we can **namespace it per run** while keeping the **auth credential out
+of the writable run-state** (mounting just the auth file rather than copying the whole config).
 
 **Check:** identify the transcript path each tool writes; confirm it can be redirected to a
 per-run dir (e.g. via `CLAUDE_CONFIG_DIR` / Codex equivalent) **separately** from where auth
@@ -106,6 +111,15 @@ contained exception, or treat limits as generic failures (losing graceful degrad
 
 ## Exit criteria
 
-Proceed to Phase 1 only when G1–G4 are **PASS**, or each **FAIL** has a fallback recorded
-above that Dave accepts. Capture the actual observed paths, exit codes, and stderr strings
-in this doc as the spikes run — they become fixtures for the Phase-1 unit tests.
+Phase 1 proceeds when **both** of these hold (they do, as of 2026-06-11):
+
+1. The **blocking** gates **G1, G2, G3 are PASS** for every tool used as coder or reviewer.
+   These gate the design; a real FAIL here stops the project until reworked.
+2. Any **non-blocking** gate (currently only **G4**) is either PASS **or DEFERRED** with a
+   safe-default fallback recorded above that Dave accepts. "DEFERRED" is a distinct outcome
+   from PASS and from FAIL: the capability isn't proven yet, but a documented behaviour keeps
+   the system safe until it is.
+
+Capture the actual observed paths, exit codes, and stderr strings in this doc as the spikes
+run — they become fixtures for the Phase-1 unit tests. (G4's strings are the outstanding
+capture; see the harness above.)

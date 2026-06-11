@@ -27,7 +27,8 @@ dialogue-based** cycle.
   conversation record. Carries a machine-parseable **findings block**, not just prose.
 - **finding** — an addressable review item inside a handoff: a stable `finding_id` (carried
   forward across rounds), `severity` (critical/major/minor), `status`
-  (open/fixed/accepted/disputed/needs-clarification), target `files`, the reviewer's
+  (open/fixed/accepted/disputed/needs-clarification, plus superseded/merged for the
+  plugin-enforced split/merge lifecycle), target `files`, the reviewer's
   `rationale`, and the coder's per-finding `coder_response`. Finding identity (not text
   matching) is what makes the stall and dispute guards reliable.
 - **LGTM** — a reviewer's approval signal in its handoff `Status:` field. The cycle
