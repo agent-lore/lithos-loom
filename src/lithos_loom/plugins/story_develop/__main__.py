@@ -57,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
 
+    if not args.description.strip():
+        print("error: --description must not be empty", file=sys.stderr)
+        return 2
+
     repo = args.repo.expanduser().resolve()
     if not (repo / ".git").exists():
         print(f"error: {repo} is not a git repository", file=sys.stderr)
