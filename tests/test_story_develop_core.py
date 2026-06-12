@@ -1,12 +1,15 @@
-"""Orchestration tests for ``develop()`` (T2: coder + one reviewer pass).
+"""Orchestration tests for ``develop()`` (T3: implement → review → fix loop).
 
 Real git/worktree against a temp repo; the containers + turns are monkeypatched
-so no Docker or agent is needed. A single fake ``run_turn`` plays both roles,
-branching on the container name, and writes the appropriate handoff files.
+so no Docker or agent is needed. A single fake ``run_turn`` plays both roles and
+all rounds, branching on the container name and parsing the round number out of
+the prompt, and writing the appropriate handoff files. Reviewer behaviour per
+round is scripted via the ``reviews`` list.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -38,16 +41,10 @@ def _worktree_from_run_cmd(run_cmd) -> Path:
     raise AssertionError("no /workspace mount in run cmd")
 
 
-@pytest.fixture
-def config(tmp_git_repo: Path, tmp_path: Path) -> DevelopConfig:
-    cfg_dir = tmp_path / "fake-claude"
-    cfg_dir.mkdir()
-    return DevelopConfig(
-        repo=tmp_git_repo,
-        description="Add a greeting file",
-        work_dir=tmp_path / "work",
-        claude_config_dir=cfg_dir,
-    )
+def _round_from(prompt: str, kind: str) -> int:
+    m = re.search(rf"round_(\d+)_{kind}", prompt)
+    assert m is not None, f"no {kind} round marker in prompt:\n{prompt}"
+    return int(m.group(1))
 
 
 def _install_fakes(
@@ -55,29 +52,37 @@ def _install_fakes(
     config: DevelopConfig,
     *,
     coder_ok: bool = True,
-    write_handoff: bool = True,
     write_source: bool = True,
-    review_first: str | None = _LGTM,
-    review_retry: str | None = None,
-    reviewer_ok: bool = True,
-    retry_ok: bool = True,
+    write_coder_handoff: bool = True,
+    reviews: list[dict] | None = None,
 ) -> dict:
-    state: dict = {"stopped": []}
+    """Install fake container + turn machinery.
+
+    ``reviews`` scripts the reviewer per round (0-based; the last entry repeats
+    for any further rounds). Each entry: ``{text, ok, retry_text, retry_ok}``.
+    ``text`` is what the first review turn writes (None = write nothing);
+    ``retry_text`` is what the malformed-handoff re-prompt writes.
+    """
+    reviews = reviews if reviews is not None else [{"text": _LGTM}]
+    state: dict = {"stopped": [], "coder_calls": [], "review_calls": []}
 
     def fake_start(run_cmd) -> str:
         state["worktree"] = _worktree_from_run_cmd(run_cmd)
         return "cid"
 
-    review_path = config.handoff_dir / handoff.reviewer_handoff_name(1, config.reviewer)
+    def _entry(rnd: int) -> dict:
+        return reviews[min(rnd - 1, len(reviews) - 1)]
 
     def fake_run_turn(*, container, prompt, session_id, resume=False, timeout):
         wt = state["worktree"]
         if "-coder" in container:
+            rnd = _round_from(prompt, "coder_done")
+            state["coder_calls"].append((rnd, resume))
             if write_source:
-                (wt / "greeting.txt").write_text("hello\n")
-            if write_handoff:
-                (config.handoff_dir / handoff.coder_handoff_name(1)).write_text(
-                    "## Status: LGTM\n## Summary\nWrote greeting.txt; tests pass.\n"
+                (wt / "greeting.txt").write_text(f"hello round {rnd}\n")
+            if write_coder_handoff:
+                (config.handoff_dir / handoff.coder_handoff_name(rnd)).write_text(
+                    f"## Status: LGTM\n## Summary\nRound {rnd}: did the work.\n"
                 )
             return TurnResult(
                 exit_code=0 if coder_ok else 1,
@@ -89,10 +94,19 @@ def _install_fakes(
                 stderr="",
             )
         # reviewer turn
-        text = review_retry if resume else review_first
+        rnd = _round_from(prompt, "review")
+        is_correction = "was not valid" in prompt
+        state["review_calls"].append((rnd, resume, is_correction))
+        entry = _entry(rnd)
+        review_path = config.handoff_dir / handoff.reviewer_handoff_name(
+            rnd, config.reviewer
+        )
+        if is_correction:
+            text, ok = entry.get("retry_text"), entry.get("retry_ok", True)
+        else:
+            text, ok = entry.get("text"), entry.get("ok", True)
         if text is not None:
             review_path.write_text(text)
-        ok = retry_ok if resume else reviewer_ok
         return TurnResult(
             exit_code=0 if ok else 1,
             succeeded=ok,
@@ -111,6 +125,18 @@ def _install_fakes(
     return state
 
 
+@pytest.fixture
+def config(tmp_git_repo: Path, tmp_path: Path) -> DevelopConfig:
+    cfg_dir = tmp_path / "fake-claude"
+    cfg_dir.mkdir()
+    return DevelopConfig(
+        repo=tmp_git_repo,
+        description="Add a greeting file",
+        work_dir=tmp_path / "work",
+        claude_config_dir=cfg_dir,
+    )
+
+
 def _commit_count_since_base(result) -> int:
     out = subprocess.run(
         ["git", "rev-list", "--count", f"{result.base_sha}..HEAD"],
@@ -121,22 +147,27 @@ def _commit_count_since_base(result) -> int:
     return int(out or 0)
 
 
-def test_success_with_lgtm_review(
+# --- happy paths ------------------------------------------------------------
+
+
+def test_approved_in_round_one_on_lgtm(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    state = _install_fakes(monkeypatch, config, review_first=_LGTM)
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
     result = develop_mod.develop(config)
 
-    assert result.status == "succeeded"
+    assert result.status == "approved"
+    assert result.approved is True and result.succeeded is True
+    assert result.rounds == 1
     assert len(result.commits) == 1
-    assert result.review is not None
-    assert result.review.status == "LGTM"
-    assert result.review.passed is True
-    assert result.review.max_severity is None
-    # both containers (coder + reviewer) were torn down
+    assert result.review is not None and result.review.status == "LGTM"
+    # both containers torn down
     assert any("-coder" in n for n in state["stopped"])
     assert any("-review-" in n for n in state["stopped"])
-    # worktree clean; committed file present
+    # only one round of each agent; both started fresh (no resume)
+    assert state["coder_calls"] == [(1, False)]
+    assert state["review_calls"] == [(1, False, False)]
+    # committed file present
     assert (
         subprocess.run(
             ["git", "show", "HEAD:greeting.txt"],
@@ -144,80 +175,164 @@ def test_success_with_lgtm_review(
             capture_output=True,
             text=True,
         ).stdout
-        == "hello\n"
+        == "hello round 1\n"
     )
 
 
-def test_findings_major_blocks(
+def test_below_threshold_findings_pass_immediately(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    _install_fakes(monkeypatch, config, review_first=_FINDINGS_MAJOR)
+    _install_fakes(monkeypatch, config, reviews=[{"text": _FINDINGS_MINOR}])
     result = develop_mod.develop(config)
-    assert result.status == "succeeded"  # T2 verdict is informational, not gating
-    assert result.review is not None
-    assert result.review.status == "FINDINGS"
-    assert result.review.max_severity == "major"
-    assert result.review.passed is False  # major >= block_threshold (major)
-    assert result.review.findings_count == 1
+    assert result.status == "approved"  # minor < major threshold
+    assert result.rounds == 1
+    assert result.review is not None and result.review.max_severity == "minor"
+    assert result.review.passed is True
 
 
-def test_findings_below_threshold_passes(
+def test_findings_then_fix_then_approved(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    _install_fakes(monkeypatch, config, review_first=_FINDINGS_MINOR)
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}],
+    )
     result = develop_mod.develop(config)
-    assert result.review is not None
-    assert result.review.status == "FINDINGS"
-    assert result.review.max_severity == "minor"
-    assert result.review.passed is True  # minor < major threshold
+
+    assert result.status == "approved"
+    assert result.rounds == 2
+    assert len(result.commits) == 2  # a commit per round (distinct content)
+    # round 2 resumed BOTH sessions — the headline session-persistence proof
+    assert state["coder_calls"] == [(1, False), (2, True)]
+    assert state["review_calls"] == [(1, False, False), (2, True, False)]
+    assert result.review is not None and result.review.status == "LGTM"
+
+
+# --- bounded termination ----------------------------------------------------
+
+
+def test_max_rounds_stops_unapproved(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    cfg = DevelopConfig(
+        repo=config.repo,
+        description=config.description,
+        work_dir=config.work_dir,
+        claude_config_dir=config.claude_config_dir,
+        max_rounds=2,
+    )
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _FINDINGS_MAJOR}])
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "max_rounds"
+    assert result.succeeded is False
+    assert result.rounds == 2
+    assert len(result.commits) == 2
+    assert result.review is not None and result.review.status == "FINDINGS"
+    assert result.review.passed is False
+    assert "max_rounds" in result.message
+
+
+# --- malformed / failed review handling -------------------------------------
 
 
 def test_malformed_review_is_reprompted_and_recovers(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    _install_fakes(monkeypatch, config, review_first=_GARBAGE, review_retry=_LGTM)
+    state = _install_fakes(
+        monkeypatch, config, reviews=[{"text": _GARBAGE, "retry_text": _LGTM}]
+    )
     result = develop_mod.develop(config)
-    assert result.review is not None
-    assert result.review.status == "LGTM"  # the re-prompt fixed it
+    assert result.status == "approved"  # the re-prompt fixed it
+    # the correction was a resumed turn on the same reviewer session
+    assert state["review_calls"] == [(1, False, False), (1, True, True)]
 
 
 def test_review_invalid_when_never_well_formed(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    _install_fakes(monkeypatch, config, review_first=_GARBAGE, review_retry=_GARBAGE)
+    _install_fakes(
+        monkeypatch, config, reviews=[{"text": _GARBAGE, "retry_text": _GARBAGE}]
+    )
     result = develop_mod.develop(config)
-    assert result.review is not None
-    assert result.review.status == "invalid"
+    assert result.status == "failed"
+    assert result.review is not None and result.review.status == "invalid"
     assert result.review.passed is False
 
 
 def test_review_invalid_when_turn_fails_even_with_parseable_file(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    # A failed reviewer turn that left a *valid* handoff must NOT be accepted
-    # (exit-code contract). review_first is well-formed LGTM, but reviewer_ok=False.
-    _install_fakes(monkeypatch, config, review_first=_LGTM, reviewer_ok=False)
+    # A failed reviewer turn that left a *valid* handoff must NOT be accepted.
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM, "ok": False}])
     result = develop_mod.develop(config)
-    assert result.review is not None
-    assert result.review.status == "invalid"
-    assert result.review.passed is False
+    assert result.status == "failed"
+    assert result.review is not None and result.review.status == "invalid"
 
 
 def test_review_invalid_when_retry_turn_fails(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    # First turn succeeds but malformed -> re-prompt; the retry turn fails even
-    # though a valid file now exists -> still invalid.
     _install_fakes(
         monkeypatch,
         config,
-        review_first=_GARBAGE,
-        review_retry=_LGTM,
-        retry_ok=False,
+        reviews=[{"text": _GARBAGE, "retry_text": _LGTM, "retry_ok": False}],
     )
     result = develop_mod.develop(config)
-    assert result.review is not None
-    assert result.review.status == "invalid"
+    assert result.status == "failed"
+    assert result.review is not None and result.review.status == "invalid"
+
+
+# --- coder failure modes (no review, no commit) -----------------------------
+
+
+def test_failed_when_coder_turn_fails(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    state = _install_fakes(monkeypatch, config, coder_ok=False)
+    result = develop_mod.develop(config)
+    assert result.status == "failed"
+    assert result.review is None  # never got to review
+    assert state["review_calls"] == []
+    assert result.commits == []
+    assert _commit_count_since_base(result) == 0
+
+
+def test_failed_when_coder_makes_no_commit(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    _install_fakes(monkeypatch, config, write_source=False)
+    result = develop_mod.develop(config)
+    assert result.status == "failed"
+    assert result.review is None
+    assert _commit_count_since_base(result) == 0
+
+
+# --- artifacts --------------------------------------------------------------
+
+
+def test_conversation_log_written_per_round(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}],
+    )
+    result = develop_mod.develop(config)
+    assert result.conversation_log is not None
+    log = result.conversation_log.read_text()
+    assert "## Round 1" in log and "## Round 2" in log
+    # both the coder's and the reviewer's handoffs are inlined
+    assert "Coder" in log and f"Reviewer [{config.reviewer}]" in log
+    # handoff bodies are blockquoted so their own "## Status" headings don't
+    # become siblings of the log's "## Round N" structure
+    assert "> ## Status:" in log
+    assert "\n## Status:" not in log
+
+
+# --- validation -------------------------------------------------------------
 
 
 def test_develop_rejects_invalid_reviewer_name(
@@ -234,27 +349,6 @@ def test_develop_rejects_invalid_reviewer_name(
         develop_mod.develop(cfg)
 
 
-def test_no_review_when_coder_fails(
-    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
-) -> None:
-    _install_fakes(monkeypatch, config, coder_ok=False)
-    result = develop_mod.develop(config)
-    assert result.status == "failed"
-    assert result.review is None
-    assert result.commits == []
-    assert _commit_count_since_base(result) == 0
-
-
-def test_no_review_when_coder_makes_no_commit(
-    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
-) -> None:
-    _install_fakes(monkeypatch, config, write_source=False)
-    result = develop_mod.develop(config)
-    assert result.status == "failed"
-    assert result.review is None
-    assert _commit_count_since_base(result) == 0
-
-
 def test_develop_rejects_unsupported_coder(tmp_git_repo: Path, tmp_path: Path) -> None:
     cfg = DevelopConfig(
         repo=tmp_git_repo,
@@ -264,4 +358,16 @@ def test_develop_rejects_unsupported_coder(tmp_git_repo: Path, tmp_path: Path) -
         claude_config_dir=tmp_path / "fake-claude",
     )
     with pytest.raises(ValueError, match="unsupported tool"):
+        develop_mod.develop(cfg)
+
+
+def test_develop_rejects_bad_max_rounds(tmp_git_repo: Path, tmp_path: Path) -> None:
+    cfg = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        max_rounds=0,
+        claude_config_dir=tmp_path / "fake-claude",
+    )
+    with pytest.raises(ValueError, match="max_rounds"):
         develop_mod.develop(cfg)

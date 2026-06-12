@@ -36,3 +36,9 @@ def test_main_rejects_invalid_reviewer_name(tmp_git_repo: Path, capsys) -> None:
     )
     assert rc == 2
     assert "invalid --reviewer" in capsys.readouterr().err
+
+
+def test_main_rejects_bad_max_rounds(tmp_git_repo: Path, capsys) -> None:
+    rc = main(["--repo", str(tmp_git_repo), "--description", "x", "--max-rounds", "0"])
+    assert rc == 2
+    assert "--max-rounds must be >= 1" in capsys.readouterr().err

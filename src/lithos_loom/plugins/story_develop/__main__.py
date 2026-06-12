@@ -1,12 +1,14 @@
-"""story-develop entry point (T2 — standalone only).
+"""story-develop entry point (T3 — standalone only).
 
 Standalone mode::
 
     python -m lithos_loom.plugins.story_develop \\
         --repo ~/projects/foo --description "Add a CLI flag"
 
-Runs one coder turn followed by one reviewer pass and prints the verdict (no
-fix-and-re-review loop yet — that is T3). Daemon mode
+Runs the implement → review → fix loop: a coder implements the task, a reviewer
+reviews it, and the coder fixes and the reviewer re-reviews each round until the
+reviewer approves (LGTM or below the block threshold) or ``--max-rounds`` is
+hit. Leaves a branch with per-round commits and a conversation log. Daemon mode
 (``--task-json/--work-dir/--result-file``) arrives with T10. The shared core is
 :func:`lithos_loom.plugins.story_develop.develop.develop`.
 """
@@ -23,6 +25,7 @@ from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     DEFAULT_CODER_TOOL,
     DEFAULT_IMAGE,
+    DEFAULT_MAX_ROUNDS,
     DEFAULT_REVIEWER_NAME,
     DevelopConfig,
     is_valid_reviewer_name,
@@ -33,7 +36,8 @@ from .develop import develop
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m lithos_loom.plugins.story_develop",
-        description="Run the story-develop cycle (T2: one coder + one reviewer pass).",
+        description="Run the story-develop loop (coder implements; reviewer reviews; "
+        "iterate to approval or --max-rounds).",
     )
     p.add_argument("--repo", required=True, type=Path, help="Path to the project repo")
     p.add_argument("--description", required=True, help="Free-text task description")
@@ -53,6 +57,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_BLOCK_THRESHOLD,
         choices=["critical", "major", "minor"],
         help="Findings below this severity do not block",
+    )
+    p.add_argument(
+        "--max-rounds",
+        type=int,
+        default=DEFAULT_MAX_ROUNDS,
+        help="Max implement→review→fix rounds before stopping unapproved",
     )
     p.add_argument("--image", default=DEFAULT_IMAGE, help="Agent container image")
     p.add_argument("--branch", default="main", help="Base branch for the worktree")
@@ -92,6 +102,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    if args.max_rounds < 1:
+        print("error: --max-rounds must be >= 1", file=sys.stderr)
+        return 2
+
     repo = args.repo.expanduser().resolve()
     if not (repo / ".git").exists():
         print(f"error: {repo} is not a git repository", file=sys.stderr)
@@ -110,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         coder=args.coder,
         reviewer=args.reviewer,
         block_threshold=args.block_threshold,
+        max_rounds=args.max_rounds,
         image=args.image,
         base_branch=args.branch,
     )
@@ -124,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"story-develop run {result.run_id}: {result.status.upper()}")
     print(f"  branch:   {result.branch}")
     print(f"  worktree: {result.worktree}")
+    print(f"  rounds:   {result.rounds}")
     print(f"  commits:  {len(result.commits)}")
     if result.review is not None:
         r = result.review
@@ -131,8 +147,16 @@ def main(argv: list[str] | None = None) -> int:
         gate = "passes threshold" if r.passed else "BLOCKS"
         print(f"  review:   [{r.reviewer}] {r.status} — {gate}{sev}")
         print(f"            {r.findings_count} finding(s)")
+    if result.conversation_log is not None:
+        print(f"  log:      {result.conversation_log}")
     print(f"  cost:     ${result.total_cost_usd:.4f}")
     print(f"  {result.message}")
+    if result.status == "max_rounds":
+        print(
+            "\n  Not approved within max-rounds. Inspect the branch + conversation "
+            "log above;\n  re-run with a higher --max-rounds, or attach to the "
+            "worktree to intervene."
+        )
     return 0 if result.succeeded else 1
 
 

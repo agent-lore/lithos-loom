@@ -112,6 +112,54 @@ def reviewer_handoff_name(round_no: int, reviewer: str) -> str:
     return f"round_{round_no:02d}_review_{reviewer}.md"
 
 
+def _read_or_missing(path: Path) -> str:
+    """Body of a handoff file, or a placeholder if it was never written."""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "_(no handoff file was written)_"
+
+
+def _blockquote(text: str) -> str:
+    """Quote *text* so its own ``##`` headings nest under the log's structure.
+
+    Handoffs are markdown with top-level ``## Status`` / ``## Summary`` headings;
+    inlined raw they would become siblings of the log's ``## Round N`` headings.
+    A blockquote keeps them visually subordinate, and (unlike a code fence)
+    cannot collide with fences inside the handoff body.
+    """
+    return "\n".join(f"> {line}".rstrip() for line in text.splitlines())
+
+
+def conversation_log(handoff_dir: Path, rounds: int, reviewer: str) -> str:
+    """Assemble an ordered, human-readable log of every round's handoffs.
+
+    For each round 1..*rounds* it inlines the coder's done-handoff followed by
+    the reviewer's review, so the whole implement→review→fix dialogue reads top
+    to bottom. Missing files (e.g. a round where the coder turn failed) are
+    rendered as a placeholder rather than omitted, so gaps stay visible.
+    Handoff bodies are blockquoted so their own headings don't break the log's
+    ``## Round N`` structure.
+    """
+    parts = ["# story-develop conversation log", ""]
+    for r in range(1, rounds + 1):
+        coder_name = coder_handoff_name(r)
+        review_name = reviewer_handoff_name(r, reviewer)
+        parts += [
+            f"## Round {r}",
+            "",
+            f"### Coder — `{coder_name}`",
+            "",
+            _blockquote(_read_or_missing(handoff_dir / coder_name)),
+            "",
+            f"### Reviewer [{reviewer}] — `{review_name}`",
+            "",
+            _blockquote(_read_or_missing(handoff_dir / review_name)),
+            "",
+        ]
+    return "\n".join(parts) + "\n"
+
+
 def seed_handoff_dir(handoff_dir: Path) -> Path:
     """Create *handoff_dir* and write ``FORMAT.md`` into it.
 
