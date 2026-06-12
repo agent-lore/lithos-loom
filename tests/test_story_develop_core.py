@@ -660,6 +660,43 @@ def test_reviewer_limit_budget_exhausted_interrupts(
     assert "reviewer usage-limited" in result.message
 
 
+def test_duplicate_primary_in_fallback_chain_does_not_self_switch(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    # --reviewer-fallback claude --reviewer-fallback codex: the duplicated
+    # primary must not trap the reviewer in a claude->claude self-switch loop
+    # that never reaches codex.
+    cfg = replace(config, reviewer_fallback_chain=("claude", "codex"))
+    monkeypatch.setattr(develop_mod, "_tool_supported", lambda t: True)
+    state = _install_fakes(
+        monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 1}]
+    )
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved"
+    assert state["starts"] == 3  # exactly ONE replacement, straight to codex
+    assert state["tools"][-1] == "codex"
+    state_file = json.loads((cfg.run_dir / "state.json").read_text())
+    assert state_file["reviewer_tool"] == "codex"
+
+
+def test_develop_rejects_bad_pause_poll(tmp_git_repo: Path, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    base = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        claude_config_dir=tmp_path / "fake-claude",
+    )
+    with pytest.raises(ValueError, match="pause_poll_minutes"):
+        develop_mod.develop(replace(base, pause_poll_minutes=0))
+    with pytest.raises(ValueError, match="max_pause_minutes"):
+        develop_mod.develop(replace(base, max_pause_minutes=-1))
+
+
 def test_state_json_written_on_success(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

@@ -150,6 +150,14 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --max-rounds must be >= 1", file=sys.stderr)
         return 2
 
+    if args.pause_poll_minutes < 1:
+        print("error: --pause-poll-minutes must be >= 1", file=sys.stderr)
+        return 2
+
+    if args.max_pause_minutes < 0:
+        print("error: --max-pause-minutes must be >= 0", file=sys.stderr)
+        return 2
+
     repo = args.repo.expanduser().resolve()
     if not (repo / ".git").exists():
         print(f"error: {repo} is not a git repository", file=sys.stderr)

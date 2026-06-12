@@ -517,6 +517,16 @@ def develop(
         )
     if config.max_rounds < 1:
         raise ValueError(f"max_rounds must be >= 1 (got {config.max_rounds})")
+    if config.pause_poll_minutes < 1:
+        # 0 would spin forever on zero-second "pauses"; negative would crash
+        # time.sleep(). The budget (max_pause_minutes) MAY be 0 ("never wait").
+        raise ValueError(
+            f"pause_poll_minutes must be >= 1 (got {config.pause_poll_minutes})"
+        )
+    if config.max_pause_minutes < 0:
+        raise ValueError(
+            f"max_pause_minutes must be >= 0 (got {config.max_pause_minutes})"
+        )
 
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     config.reviewer_config_dir(config.reviewer).mkdir(parents=True, exist_ok=True)
@@ -559,7 +569,13 @@ def develop(
     coder_cost = 0.0
     review_cost = 0.0
     budget = _PauseBudget(config.max_pause_minutes * 60)
-    reviewer_chain = (config.reviewer_tool, *config.reviewer_fallback_chain)
+    # Order-preserving dedupe: a fallback chain that repeats the primary tool
+    # (e.g. --reviewer-fallback claude --reviewer-fallback codex) must not
+    # trap the reviewer in a claude->claude self-switch loop that never
+    # reaches the later entries or the pause path.
+    reviewer_chain = tuple(
+        dict.fromkeys((config.reviewer_tool, *config.reviewer_fallback_chain))
+    )
     reviewer_tool_now = config.reviewer_tool
 
     try:
