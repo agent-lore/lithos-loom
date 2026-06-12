@@ -1,0 +1,22 @@
+# Example reviewer panel for `story-develop --develop-config <this file>`.
+#
+# Each [[reviewers]] table defines one reviewer: its persona (name +
+# system_prompt), its strictness (block_threshold — findings AT or ABOVE this
+# severity block approval; below it they are recorded but non-blocking), and
+# its tooling (tool + fallback_chain for usage-limit switching).
+#
+# The run is approved only when ALL reviewers pass their OWN threshold in the
+# same round.
+
+[[reviewers]]
+name = "code-quality"
+block_threshold = "major"
+
+[[reviewers]]
+name = "security"
+block_threshold = "minor"  # security is strict: any minor finding blocks
+system_prompt = """
+Review as a security specialist: injection, authn/authz, secret handling,
+unsafe deserialization, path traversal, SSRF, and dependency risks. Judge the
+change's blast radius, not just its diff.
+"""

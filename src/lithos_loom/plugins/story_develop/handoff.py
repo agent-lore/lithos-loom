@@ -13,6 +13,7 @@ back to the agent as a correction prompt.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -131,20 +132,19 @@ def _blockquote(text: str) -> str:
     return "\n".join(f"> {line}".rstrip() for line in text.splitlines())
 
 
-def conversation_log(handoff_dir: Path, rounds: int, reviewer: str) -> str:
+def conversation_log(handoff_dir: Path, rounds: int, reviewers: Sequence[str]) -> str:
     """Assemble an ordered, human-readable log of every round's handoffs.
 
     For each round 1..*rounds* it inlines the coder's done-handoff followed by
-    the reviewer's review, so the whole implement→review→fix dialogue reads top
-    to bottom. Missing files (e.g. a round where the coder turn failed) are
-    rendered as a placeholder rather than omitted, so gaps stay visible.
-    Handoff bodies are blockquoted so their own headings don't break the log's
-    ``## Round N`` structure.
+    each reviewer's review (panel order), so the whole implement→review→fix
+    dialogue reads top to bottom. Missing files (e.g. a round where the coder
+    turn failed) are rendered as a placeholder rather than omitted, so gaps
+    stay visible. Handoff bodies are blockquoted so their own headings don't
+    break the log's ``## Round N`` structure.
     """
     parts = ["# story-develop conversation log", ""]
     for r in range(1, rounds + 1):
         coder_name = coder_handoff_name(r)
-        review_name = reviewer_handoff_name(r, reviewer)
         parts += [
             f"## Round {r}",
             "",
@@ -152,11 +152,15 @@ def conversation_log(handoff_dir: Path, rounds: int, reviewer: str) -> str:
             "",
             _blockquote(_read_or_missing(handoff_dir / coder_name)),
             "",
-            f"### Reviewer [{reviewer}] — `{review_name}`",
-            "",
-            _blockquote(_read_or_missing(handoff_dir / review_name)),
-            "",
         ]
+        for reviewer in reviewers:
+            review_name = reviewer_handoff_name(r, reviewer)
+            parts += [
+                f"### Reviewer [{reviewer}] — `{review_name}`",
+                "",
+                _blockquote(_read_or_missing(handoff_dir / review_name)),
+                "",
+            ]
     return "\n".join(parts) + "\n"
 
 

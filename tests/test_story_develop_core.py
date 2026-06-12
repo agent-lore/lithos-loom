@@ -57,7 +57,7 @@ def _install_fakes(
     coder_ok: bool = True,
     write_source: bool = True,
     write_coder_handoff: bool = True,
-    reviews: list[dict] | None = None,
+    reviews: list[dict] | dict[str, list[dict]] | None = None,
     source_rounds: set[int] | None = None,
     gates: list[bool | str] | None = None,
     coder_results: list[str] | None = None,
@@ -111,8 +111,11 @@ def _install_fakes(
             stderr="",
         )
 
-    def _entry(rnd: int) -> dict:
-        return reviews[min(rnd - 1, len(reviews) - 1)]
+    def _entry(rnd: int, rev_name: str) -> dict:
+        # `reviews` is a list (shared by all reviewers — the single-reviewer
+        # style) or a dict keyed by reviewer name (multi-reviewer scripting).
+        seq = reviews[rev_name] if isinstance(reviews, dict) else reviews
+        return seq[min(rnd - 1, len(seq) - 1)]
 
     def fake_run_turn(
         *, container, prompt, session_id, resume=False, timeout, tool="claude"
@@ -152,23 +155,22 @@ def _install_fakes(
                 raw={"is_error": not coder_ok},
                 stderr="",
             )
-        # reviewer turn
+        # reviewer turn — derive WHICH reviewer from the container name
+        rev_name = container.split("-review-", 1)[1]
         if "review" in prompt and re.search(r"round_\d+_review", prompt):
             rnd = _round_from(prompt, "review")
-            state["last_review_round"] = rnd
+            state[f"last_review_round_{rev_name}"] = rnd
         else:  # continuation retry carries no filename marker
-            rnd = state.get("last_review_round", 1)
+            rnd = state.get(f"last_review_round_{rev_name}", 1)
         is_correction = "was not valid" in prompt
         state["review_calls"].append((rnd, resume, is_correction))
         state["review_prompts"].append(prompt)
-        entry = _entry(rnd)
-        attempts = state["review_attempts"].get(rnd, 0)
-        state["review_attempts"][rnd] = attempts + 1
+        entry = _entry(rnd, rev_name)
+        attempts = state["review_attempts"].get((rnd, rev_name), 0)
+        state["review_attempts"][(rnd, rev_name)] = attempts + 1
         if attempts < entry.get("limit_first", 0):
             return _limit_turn(session_id)
-        review_path = config.handoff_dir / handoff.reviewer_handoff_name(
-            rnd, config.reviewer
-        )
+        review_path = config.handoff_dir / handoff.reviewer_handoff_name(rnd, rev_name)
         if is_correction:
             text, ok = entry.get("retry_text"), entry.get("retry_ok", True)
         else:
@@ -540,6 +542,151 @@ def test_gate_disabled_by_config(
     assert state["gate_calls"] == []
 
 
+# --- multi-reviewer panel (T6) ------------------------------------------------
+
+
+def _panel_config(config: DevelopConfig, *specs) -> DevelopConfig:
+    from dataclasses import replace
+
+    return replace(config, reviewers=tuple(specs))
+
+
+def test_panel_both_lgtm_approved_round_one(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    cfg = _panel_config(
+        config,
+        ReviewerSpec(name="code-quality", block_threshold="major"),
+        ReviewerSpec(
+            name="security",
+            block_threshold="minor",
+            system_prompt="Hunt for injection, authz and secret handling issues.",
+        ),
+    )
+    state = _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews={"code-quality": [{"text": _LGTM}], "security": [{"text": _LGTM}]},
+    )
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved"
+    assert result.rounds == 1
+    assert [r.reviewer for r in result.reviews] == ["code-quality", "security"]
+    assert all(r.passed for r in result.reviews)
+    assert state["starts"] == 3  # coder + 2 reviewer containers
+    # each reviewer wrote its own handoff file
+    assert (cfg.handoff_dir / "round_01_review_code-quality.md").is_file()
+    assert (cfg.handoff_dir / "round_01_review_security.md").is_file()
+    # the security reviewer's prompt carried its focus brief
+    security_prompt = state["review_prompts"][1]
+    assert "Your focus" in security_prompt and "injection" in security_prompt
+    # conversation log includes both panel members
+    assert result.conversation_log is not None
+    log = result.conversation_log.read_text()
+    assert "Reviewer [code-quality]" in log and "Reviewer [security]" in log
+    # state.json records both reviewers
+    data = json.loads((cfg.run_dir / "state.json").read_text())
+    assert set(data["reviewers"]) == {"code-quality", "security"}
+
+
+def test_panel_per_reviewer_thresholds(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    # The SAME minor finding: code-quality (threshold major) passes;
+    # security (threshold minor) blocks -> round 2 needed.
+    cfg = _panel_config(
+        config,
+        ReviewerSpec(name="code-quality", block_threshold="major"),
+        ReviewerSpec(name="security", block_threshold="minor"),
+    )
+    state = _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews={
+            "code-quality": [{"text": _FINDINGS_MINOR}, {"text": _LGTM}],
+            "security": [{"text": _FINDINGS_MINOR}, {"text": _LGTM}],
+        },
+    )
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved"
+    assert result.rounds == 2
+    # round 1 verdicts: same severity, different thresholds
+    # (final_reviews only holds round 2; check via the coder's fix prompt)
+    fix_prompt = state["coder_prompts"][1]
+    # consolidated findings, labelled per reviewer, ids qualified
+    assert "From the code-quality reviewer" in fix_prompt
+    assert "From the security reviewer" in fix_prompt
+    assert "[security/f-001]" in fix_prompt
+
+
+def test_panel_approval_requires_all_pass_same_round(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    # cq blocks r1 / passes r2+; security passes r1, blocks r2, passes r3.
+    # Approval must only land in round 3 when BOTH pass together.
+    cfg = _panel_config(
+        config,
+        ReviewerSpec(name="cq", block_threshold="major"),
+        ReviewerSpec(name="security", block_threshold="minor"),
+    )
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews={
+            "cq": [{"text": _FINDINGS_MAJOR}, {"text": _LGTM}, {"text": _LGTM}],
+            "security": [{"text": _LGTM}, {"text": _FINDINGS_MINOR}, {"text": _LGTM}],
+        },
+    )
+    result = develop_mod.develop(cfg)
+    assert result.status == "approved"
+    assert result.rounds == 3
+
+
+def test_panel_invalid_reviewer_fails_run(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    cfg = _panel_config(
+        config,
+        ReviewerSpec(name="cq"),
+        ReviewerSpec(name="security"),
+    )
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews={
+            "cq": [{"text": _LGTM}],
+            "security": [{"text": _GARBAGE, "retry_text": _GARBAGE}],
+        },
+    )
+    result = develop_mod.develop(cfg)
+    assert result.status == "failed"
+    assert "security" in result.message and "invalid" in result.message
+
+
+def test_panel_duplicate_names_rejected(tmp_git_repo: Path, tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    cfg = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        reviewers=(ReviewerSpec(name="cq"), ReviewerSpec(name="cq")),
+        claude_config_dir=tmp_path / "fake-claude",
+    )
+    with pytest.raises(ValueError, match="duplicate reviewer names"):
+        develop_mod.develop(cfg)
+
+
 # --- usage limits (T5) -------------------------------------------------------
 
 
@@ -628,7 +775,7 @@ def test_reviewer_limit_switches_to_fallback_tool(
     # would raise there until T6 — never silently run claude as "codex")
     assert state["tools"][-1] == "codex"
     state_file = json.loads((cfg.run_dir / "state.json").read_text())
-    assert state_file["reviewer_tool"] == "codex"
+    assert state_file["reviewers"][cfg.reviewer]["tool"] == "codex"
 
 
 def test_reviewer_limit_skips_unsupported_fallback_and_pauses(
@@ -679,7 +826,7 @@ def test_duplicate_primary_in_fallback_chain_does_not_self_switch(
     assert state["starts"] == 3  # exactly ONE replacement, straight to codex
     assert state["tools"][-1] == "codex"
     state_file = json.loads((cfg.run_dir / "state.json").read_text())
-    assert state_file["reviewer_tool"] == "codex"
+    assert state_file["reviewers"][cfg.reviewer]["tool"] == "codex"
 
 
 def test_develop_rejects_bad_pause_poll(tmp_git_repo: Path, tmp_path: Path) -> None:
@@ -733,7 +880,7 @@ def test_develop_rejects_unsupported_coder(tmp_git_repo: Path, tmp_path: Path) -
         coder="codex",
         claude_config_dir=tmp_path / "fake-claude",
     )
-    with pytest.raises(ValueError, match="unsupported tool"):
+    with pytest.raises(ValueError, match="unsupported coder tool"):
         develop_mod.develop(cfg)
 
 

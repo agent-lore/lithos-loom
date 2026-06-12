@@ -51,6 +51,106 @@ def _short_run_id() -> str:
 
 
 @dataclass(frozen=True)
+class ReviewerSpec:
+    """One named reviewer: its persona, strictness, and tooling (T6).
+
+    ``block_threshold`` is per-reviewer — security typically blocks at
+    ``minor`` while code-quality blocks at ``major`` (PRD decision #7).
+    ``system_prompt`` is an optional focus brief injected into the reviewer's
+    prompts. ``fallback_chain`` lists alternate tools tried when this
+    reviewer's tool is usage-limited (T5).
+    """
+
+    name: str
+    tool: str = DEFAULT_REVIEWER_TOOL
+    block_threshold: str = DEFAULT_BLOCK_THRESHOLD
+    system_prompt: str | None = None
+    fallback_chain: tuple[str, ...] = ()
+
+
+_VALID_THRESHOLDS = ("critical", "major", "minor")
+
+
+def load_develop_config(path: Path) -> tuple[ReviewerSpec, ...]:
+    """Parse a ``--develop-config`` TOML file into reviewer specs.
+
+    Schema::
+
+        [[reviewers]]
+        name = "code-quality"          # required, safe slug
+        block_threshold = "major"      # optional
+        tool = "claude"                # optional
+        system_prompt = "Focus on..."  # optional
+        fallback_chain = ["codex"]     # optional
+
+    Raises :class:`ValueError` with an operator-actionable message on any
+    schema problem — never half-loads.
+    """
+    import tomllib
+
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"cannot read develop config {path}: {exc}") from exc
+
+    raw = data.get("reviewers")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{path}: expected at least one [[reviewers]] table")
+    specs: list[ReviewerSpec] = []
+    seen: set[str] = set()
+    for i, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: reviewers[{i}] is not a table")
+        unknown = set(entry) - {
+            "name",
+            "tool",
+            "block_threshold",
+            "system_prompt",
+            "fallback_chain",
+        }
+        if unknown:
+            raise ValueError(
+                f"{path}: reviewers[{i}] has unknown keys {sorted(unknown)}"
+            )
+        name = entry.get("name", "")
+        if not isinstance(name, str) or not is_valid_reviewer_name(name):
+            raise ValueError(
+                f"{path}: reviewers[{i}].name {name!r} must be a lowercase "
+                "alphanumeric-and-hyphens slug"
+            )
+        if name in seen:
+            raise ValueError(f"{path}: duplicate reviewer name {name!r}")
+        seen.add(name)
+        threshold = entry.get("block_threshold", DEFAULT_BLOCK_THRESHOLD)
+        if threshold not in _VALID_THRESHOLDS:
+            raise ValueError(
+                f"{path}: reviewers[{i}].block_threshold must be one of "
+                f"{_VALID_THRESHOLDS} (got {threshold!r})"
+            )
+        chain = entry.get("fallback_chain", [])
+        if not isinstance(chain, list) or not all(isinstance(t, str) for t in chain):
+            raise ValueError(
+                f"{path}: reviewers[{i}].fallback_chain must be a list of strings"
+            )
+        system_prompt = entry.get("system_prompt")
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            raise ValueError(f"{path}: reviewers[{i}].system_prompt must be a string")
+        tool = entry.get("tool", DEFAULT_REVIEWER_TOOL)
+        if not isinstance(tool, str):
+            raise ValueError(f"{path}: reviewers[{i}].tool must be a string")
+        specs.append(
+            ReviewerSpec(
+                name=name,
+                tool=tool,
+                block_threshold=threshold,
+                system_prompt=system_prompt,
+                fallback_chain=tuple(chain),
+            )
+        )
+    return tuple(specs)
+
+
+@dataclass(frozen=True)
 class DevelopConfig:
     """Everything ``develop()`` needs for one run.
 
@@ -64,10 +164,13 @@ class DevelopConfig:
     coder: str = DEFAULT_CODER_TOOL
     image: str = DEFAULT_IMAGE
     base_branch: str = "main"
-    # T2: a single reviewer. Multi-reviewer config arrives with T6.
+    # Single-reviewer convenience fields (the T2-era surface; still the
+    # default path). T6: `reviewers` holds full multi-reviewer specs and,
+    # when non-empty, takes precedence — see `effective_reviewers`.
     reviewer: str = DEFAULT_REVIEWER_NAME
     reviewer_tool: str = DEFAULT_REVIEWER_TOOL
     block_threshold: str = DEFAULT_BLOCK_THRESHOLD
+    reviewers: tuple[ReviewerSpec, ...] = ()
     # T3: how many implement→review→fix rounds before we stop unapproved.
     max_rounds: int = DEFAULT_MAX_ROUNDS
     # T4: objective test gate per round commit (throwaway container).
@@ -85,6 +188,24 @@ class DevelopConfig:
     run_id: str = field(default_factory=_short_run_id)
     # Host path to the operator's claude config dir (source of the auth file).
     claude_config_dir: Path = field(default_factory=lambda: Path.home() / ".claude")
+
+    @property
+    def effective_reviewers(self) -> tuple[ReviewerSpec, ...]:
+        """The run's reviewer panel.
+
+        Explicit ``reviewers`` specs win; otherwise the single-reviewer
+        convenience fields are folded into one spec (the T2-era behaviour).
+        """
+        if self.reviewers:
+            return self.reviewers
+        return (
+            ReviewerSpec(
+                name=self.reviewer,
+                tool=self.reviewer_tool,
+                block_threshold=self.block_threshold,
+                fallback_chain=self.reviewer_fallback_chain,
+            ),
+        )
 
     @property
     def effective_acceptance_criteria(self) -> str:

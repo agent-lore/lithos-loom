@@ -2,7 +2,7 @@ You are the **{reviewer}** reviewer in an automated develop cycle, continuing
 the **same session** in which you last reviewed this work. This is round
 {round_no}. The coding agent has responded to your findings and may have pushed
 new commits.
-
+{reviewer_brief}
 ## Acceptance criteria
 
 {acceptance_criteria}

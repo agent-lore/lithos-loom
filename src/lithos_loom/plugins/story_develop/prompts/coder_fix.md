@@ -1,16 +1,16 @@
 You are the coding agent in an automated develop cycle, continuing the **same
-session** in which you implemented this task. A reviewer has reviewed your work
-and raised findings. This is round {round_no}.
+session** in which you implemented this task. Your work has been reviewed and
+findings were raised. This is round {round_no}.
 
 ## Acceptance criteria
 
 {acceptance_criteria}
 
-## The {reviewer} reviewer's findings
+## Reviewer findings
 
 {findings}
 
-The reviewer's full write-up is at `/workspace/.handoff/{review_file}`.
+The full write-ups are in `/workspace/.handoff/` ({review_files}).
 {test_gate_note}
 ## Your job
 
