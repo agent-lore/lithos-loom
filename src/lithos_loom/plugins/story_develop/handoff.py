@@ -120,6 +120,17 @@ def _read_or_missing(path: Path) -> str:
         return "_(no handoff file was written)_"
 
 
+def _blockquote(text: str) -> str:
+    """Quote *text* so its own ``##`` headings nest under the log's structure.
+
+    Handoffs are markdown with top-level ``## Status`` / ``## Summary`` headings;
+    inlined raw they would become siblings of the log's ``## Round N`` headings.
+    A blockquote keeps them visually subordinate, and (unlike a code fence)
+    cannot collide with fences inside the handoff body.
+    """
+    return "\n".join(f"> {line}".rstrip() for line in text.splitlines())
+
+
 def conversation_log(handoff_dir: Path, rounds: int, reviewer: str) -> str:
     """Assemble an ordered, human-readable log of every round's handoffs.
 
@@ -127,6 +138,8 @@ def conversation_log(handoff_dir: Path, rounds: int, reviewer: str) -> str:
     the reviewer's review, so the whole implement→review→fix dialogue reads top
     to bottom. Missing files (e.g. a round where the coder turn failed) are
     rendered as a placeholder rather than omitted, so gaps stay visible.
+    Handoff bodies are blockquoted so their own headings don't break the log's
+    ``## Round N`` structure.
     """
     parts = ["# story-develop conversation log", ""]
     for r in range(1, rounds + 1):
@@ -137,11 +150,11 @@ def conversation_log(handoff_dir: Path, rounds: int, reviewer: str) -> str:
             "",
             f"### Coder — `{coder_name}`",
             "",
-            _read_or_missing(handoff_dir / coder_name),
+            _blockquote(_read_or_missing(handoff_dir / coder_name)),
             "",
             f"### Reviewer [{reviewer}] — `{review_name}`",
             "",
-            _read_or_missing(handoff_dir / review_name),
+            _blockquote(_read_or_missing(handoff_dir / review_name)),
             "",
         ]
     return "\n".join(parts) + "\n"

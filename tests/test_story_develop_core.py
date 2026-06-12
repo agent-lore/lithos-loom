@@ -326,6 +326,10 @@ def test_conversation_log_written_per_round(
     assert "## Round 1" in log and "## Round 2" in log
     # both the coder's and the reviewer's handoffs are inlined
     assert "Coder" in log and f"Reviewer [{config.reviewer}]" in log
+    # handoff bodies are blockquoted so their own "## Status" headings don't
+    # become siblings of the log's "## Round N" structure
+    assert "> ## Status:" in log
+    assert "\n## Status:" not in log
 
 
 # --- validation -------------------------------------------------------------
