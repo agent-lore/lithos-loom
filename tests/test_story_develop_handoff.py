@@ -109,3 +109,18 @@ def test_severity_at_or_above() -> None:
 
 def test_reviewer_handoff_name() -> None:
     assert reviewer_handoff_name(1, "security") == "round_01_review_security.md"
+
+
+def test_headers_with_trailing_colon_are_tolerated() -> None:
+    # "## Findings:" / "## Summary:" (trailing colon) is a common variant and
+    # must not break section lookup (Copilot review on PR #75).
+    text = (
+        "## Status: FINDINGS\n"
+        "## Summary:\nNeeds a guard.\n"
+        "## Findings:\n"
+        "- finding_id: f-1\n  severity: major\n  status: open\n"
+    )
+    h = parse_review_handoff(text)
+    assert h.status == "FINDINGS"
+    assert h.summary == "Needs a guard."
+    assert len(h.findings) == 1 and h.findings[0].severity == "major"

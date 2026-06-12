@@ -138,7 +138,8 @@ def _sections(text: str) -> dict[str, str]:
     for line in text.splitlines():
         m = _HEADER_RE.match(line)
         if m:
-            header = m.group(1).strip().lower()
+            # normalise a trailing colon: "## Findings:" -> "findings" (tolerant).
+            header = re.sub(r"\s*:\s*$", "", m.group(1).strip().lower())
             current = header
             sections.setdefault(header, [])
         elif current is not None:
