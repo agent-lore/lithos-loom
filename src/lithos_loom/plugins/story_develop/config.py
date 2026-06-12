@@ -29,6 +29,7 @@ DEFAULT_CODER_TOOL = "claude"
 DEFAULT_REVIEWER_TOOL = "claude"
 DEFAULT_REVIEWER_NAME = "code-quality"
 DEFAULT_BLOCK_THRESHOLD = "major"  # findings below this don't block (see handoff.py)
+DEFAULT_MAX_ROUNDS = 5  # T3 loop bound; stall/dispute/cost guards arrive with T7
 DEFAULT_IMAGE = "ralph-sandbox:latest"
 WORKSPACE_MOUNT = "/workspace"
 CLAUDE_CONFIG_MOUNT = "/claude_config"
@@ -64,6 +65,8 @@ class DevelopConfig:
     reviewer: str = DEFAULT_REVIEWER_NAME
     reviewer_tool: str = DEFAULT_REVIEWER_TOOL
     block_threshold: str = DEFAULT_BLOCK_THRESHOLD
+    # T3: how many implement→review→fix rounds before we stop unapproved.
+    max_rounds: int = DEFAULT_MAX_ROUNDS
     acceptance_criteria: str | None = None
     run_id: str = field(default_factory=_short_run_id)
     # Host path to the operator's claude config dir (source of the auth file).

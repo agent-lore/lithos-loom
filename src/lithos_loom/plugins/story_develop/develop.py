@@ -1,11 +1,21 @@
-"""``develop()`` core — T2: coder turn + one reviewer pass (verdict only).
+"""``develop()`` core — T3: the full implement → review → fix → approve loop.
 
-    worktree -> coder container -> commit -> reviewer container -> verdict.
+    worktree
+      -> start coder (RW) + reviewer (RO) containers, both long-lived
+      -> round 1: coder implements, commit, reviewer reviews
+      -> round N: coder fixes (resume), commit, reviewer re-reviews (resume)
+      -> stop when the reviewer passes (approved) or max_rounds is hit
+      -> tear both containers down; leave the branch + a conversation log.
 
-Still a single round: the reviewer's findings are parsed and a verdict is
-computed/printed, but there is no fix-and-re-review loop yet (that is T3). The
-side-effecting bits (container start/exec/stop) live in :mod:`containers` /
+The two agents keep their sessions **across rounds** (ADR 0002): each round is a
+fresh ``docker exec`` that resumes the on-disk session, so the coder remembers
+what it tried and the reviewer remembers what it objected to — the whole point
+of the conversational model over Ralph++'s fire-and-forget loop.
+
+The side-effecting bits (container start/exec/stop) live in :mod:`containers` /
 :mod:`turns` so this orchestration is unit-testable by monkeypatching them.
+Stall / dispute / cost guards are deliberately *not* here — they arrive with T7;
+T3's only loop bound is ``max_rounds``.
 """
 
 from __future__ import annotations
@@ -24,14 +34,14 @@ from .config import (
     is_valid_reviewer_name,
 )
 from .handoff import Finding, HandoffError, ReviewHandoff
-from .turns import TurnResult, run_turn
+from .turns import run_turn
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class ReviewOutcome:
-    """The result of the (single, T2) reviewer pass."""
+    """The result of a single reviewer pass in one round."""
 
     reviewer: str
     status: str  # "LGTM" | "FINDINGS" | "invalid"
@@ -49,24 +59,35 @@ class ReviewOutcome:
 class DevelopResult:
     """Outcome of a ``develop()`` run."""
 
-    status: str  # "succeeded" | "failed"  (coder-based in T2; T3 gates on review)
+    status: str  # "approved" | "max_rounds" | "failed"
     run_id: str
     worktree: Path
     branch: str
     base_sha: str
     commits: list[str]
+    rounds: int
     handoff_present: bool
     coder_cost_usd: float
+    review_cost_usd: float
     message: str
-    review: ReviewOutcome | None = None
+    review: ReviewOutcome | None = None  # the final round's review
+    conversation_log: Path | None = None
+
+    @property
+    def approved(self) -> bool:
+        return self.status == "approved"
 
     @property
     def succeeded(self) -> bool:
-        return self.status == "succeeded"
+        """True only when the reviewer approved (drives the CLI exit code)."""
+        return self.status == "approved"
 
     @property
     def total_cost_usd(self) -> float:
-        return self.coder_cost_usd + (self.review.cost_usd if self.review else 0.0)
+        return self.coder_cost_usd + self.review_cost_usd
+
+
+# --- prompt / rendering helpers --------------------------------------------
 
 
 def _render(template: str, **values: str) -> str:
@@ -75,6 +96,20 @@ def _render(template: str, **values: str) -> str:
     for key, value in values.items():
         out = out.replace("{" + key + "}", value)
     return out
+
+
+def _render_findings(findings: list[Finding]) -> str:
+    """Render a reviewer's findings as a compact block for the coder's prompt."""
+    if not findings:
+        return "(no structured findings were listed)"
+    lines: list[str] = []
+    for f in findings:
+        files = ", ".join(f.files) if f.files else "(unspecified)"
+        lines.append(f"- [{f.finding_id}] severity={f.severity} status={f.status}")
+        lines.append(f"  files: {files}")
+        if f.rationale:
+            lines.append(f"  rationale: {f.rationale}")
+    return "\n".join(lines)
 
 
 def _build_run_cmd(
@@ -106,9 +141,9 @@ def _read_review(path: Path) -> tuple[ReviewHandoff | None, str | None]:
         return None, str(exc)
 
 
-def _coder_summary(config: DevelopConfig) -> str:
-    """Best-effort read of the coder's handoff summary, to seed the reviewer."""
-    path = config.handoff_dir / handoff.coder_handoff_name(1)
+def _coder_summary(config: DevelopConfig, round_no: int) -> str:
+    """Best-effort read of the coder's round-*round_no* summary (seeds review)."""
+    path = config.handoff_dir / handoff.coder_handoff_name(round_no)
     try:
         return handoff.parse_review_handoff(
             path.read_text(encoding="utf-8")
@@ -117,69 +152,69 @@ def _coder_summary(config: DevelopConfig) -> str:
         return "(coder summary unavailable)"
 
 
-def _run_review(config: DevelopConfig, wt: Path, *, timeout: int) -> ReviewOutcome:
-    """Run one reviewer pass: review the commit, parse the verdict, re-prompt once
-    if the handoff is malformed."""
+# --- per-turn drivers -------------------------------------------------------
+
+
+def _review_turn(
+    config: DevelopConfig,
+    *,
+    container: str,
+    session_id: str,
+    round_no: int,
+    resume: bool,
+    prompt: str,
+    timeout: int,
+) -> ReviewOutcome:
+    """Run one reviewer turn against an already-running reviewer container.
+
+    Re-prompts the *same* session once if the handoff is malformed. The handoff
+    is only authoritative if the turn that produced it SUCCEEDED (clean exit +
+    structured result) — a failed turn that happens to leave a parseable file is
+    rejected, preserving the exit-code contract (ADR 0002).
+    """
     reviewer = config.reviewer
-    cfg_dir = config.reviewer_config_dir(reviewer)
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    name, run_cmd = _build_run_cmd(
-        config, agent=f"review-{reviewer}", config_dir=cfg_dir, wt=wt, read_only=True
-    )
-    review_file = handoff.reviewer_handoff_name(1, reviewer)
+    review_file = handoff.reviewer_handoff_name(round_no, reviewer)
     review_path = config.handoff_dir / review_file
-    session_id = str(uuid.uuid4())
     cost = 0.0
     parsed: ReviewHandoff | None = None
     err: str | None = "reviewer did not run"
 
-    try:
-        containers.start_container(run_cmd)
-        logger.info(
-            "story-develop %s: reviewer container %s started", config.run_id, name
-        )
-        prompt = _render(
-            handoff.load_prompt("reviewer_round.md"),
-            reviewer=reviewer,
-            acceptance_criteria=config.effective_acceptance_criteria,
-            coder_summary=_coder_summary(config),
-            review_file=review_file,
-        )
-        turn = run_turn(
-            container=name, prompt=prompt, session_id=session_id, timeout=timeout
-        )
-        cost += turn.cost_usd
-        # A handoff is only authoritative if the turn that produced it SUCCEEDED
-        # (clean exit + structured result). A failed turn that happens to leave a
-        # parseable file must not be accepted — it defeats the exit-code contract.
-        if not turn.succeeded:
-            err = f"reviewer turn failed (exit {turn.exit_code})"
-        else:
-            parsed, err = _read_review(review_path)
-            if parsed is None:
-                # Malformed handoff: re-prompt the same reviewer (resume session).
-                correction = (
-                    f"Your review at .handoff/{review_file} was not valid: {err}. "
-                    f"Please rewrite only that file per /workspace/.handoff/FORMAT.md."
-                )
-                retry = run_turn(
-                    container=name,
-                    prompt=correction,
-                    session_id=session_id,
-                    resume=True,
-                    timeout=timeout,
-                )
-                cost += retry.cost_usd
-                if retry.succeeded:
-                    parsed, err = _read_review(review_path)
-                else:
-                    err = f"reviewer retry turn failed (exit {retry.exit_code})"
-    finally:
-        containers.stop_container(name)
+    turn = run_turn(
+        container=container,
+        prompt=prompt,
+        session_id=session_id,
+        resume=resume,
+        timeout=timeout,
+    )
+    cost += turn.cost_usd
+    if not turn.succeeded:
+        err = f"reviewer turn failed (exit {turn.exit_code})"
+    else:
+        parsed, err = _read_review(review_path)
+        if parsed is None:
+            correction = (
+                f"Your review at .handoff/{review_file} was not valid: {err}. "
+                f"Please rewrite only that file per /workspace/.handoff/FORMAT.md."
+            )
+            retry = run_turn(
+                container=container,
+                prompt=correction,
+                session_id=session_id,
+                resume=True,
+                timeout=timeout,
+            )
+            cost += retry.cost_usd
+            if retry.succeeded:
+                parsed, err = _read_review(review_path)
+            else:
+                err = f"reviewer retry turn failed (exit {retry.exit_code})"
 
     if parsed is None:
         logger.warning(
-            "story-develop %s: reviewer handoff invalid: %s", config.run_id, err
+            "story-develop %s: round %d reviewer handoff invalid: %s",
+            config.run_id,
+            round_no,
+            err,
         )
         return ReviewOutcome(
             reviewer=reviewer,
@@ -198,24 +233,35 @@ def _run_review(config: DevelopConfig, wt: Path, *, timeout: int) -> ReviewOutco
     )
 
 
-def develop(
-    config: DevelopConfig, *, coder_timeout: int = 3600, reviewer_timeout: int = 3600
-) -> DevelopResult:
-    """Run the T2 cycle (coder + one reviewer pass) and return a result.
+# --- orchestration ----------------------------------------------------------
 
-    The worktree and per-run state are preserved on exit (success or failure)
-    for inspection; only the containers are torn down.
+
+def develop(
+    config: DevelopConfig,
+    *,
+    coder_timeout: int = 3600,
+    reviewer_timeout: int = 3600,
+) -> DevelopResult:
+    """Run the T3 develop loop and return a result.
+
+    The worktree, per-run state, and conversation log are preserved on exit
+    (approved, max_rounds, or failed) for inspection; only the containers are
+    torn down.
     """
     if config.coder != "claude" or config.reviewer_tool != "claude":
         raise ValueError(
-            "unsupported tool for T2: only 'claude' (codex arrives with T5/T6)"
+            "unsupported tool for T3: only 'claude' (codex arrives with T5/T6)"
         )
     if not is_valid_reviewer_name(config.reviewer):
         raise ValueError(
             f"invalid reviewer name {config.reviewer!r}: must be lowercase "
             "alphanumerics + hyphens (e.g. 'code-quality')"
         )
+    if config.max_rounds < 1:
+        raise ValueError(f"max_rounds must be >= 1 (got {config.max_rounds})")
+
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
+    config.reviewer_config_dir(config.reviewer).mkdir(parents=True, exist_ok=True)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     handoff.seed_handoff_dir(config.handoff_dir)
 
@@ -229,79 +275,187 @@ def develop(
     base = git.base_sha(wt)
     logger.info("story-develop %s: worktree %s (branch %s)", config.run_id, wt, branch)
 
-    # --- coder phase -------------------------------------------------------
-    name, run_cmd = _build_run_cmd(
+    coder_name, coder_cmd = _build_run_cmd(
         config,
         agent="coder",
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,
     )
-    turn: TurnResult | None = None
+    reviewer_name, reviewer_cmd = _build_run_cmd(
+        config,
+        agent=f"review-{config.reviewer}",
+        config_dir=config.reviewer_config_dir(config.reviewer),
+        wt=wt,
+        read_only=True,
+    )
+    coder_session = str(uuid.uuid4())
+    reviewer_session = str(uuid.uuid4())
+
+    status = "failed"
+    failure_reason = "no rounds ran"
+    final_review: ReviewOutcome | None = None
+    rounds_completed = 0
+    coder_cost = 0.0
+    review_cost = 0.0
+
     try:
-        containers.start_container(run_cmd)
-        logger.info("story-develop %s: coder container %s started", config.run_id, name)
-        prompt = _render(
-            handoff.load_prompt("coder_init.md"),
-            description=config.description,
-            handoff_file=handoff.coder_handoff_name(1),
+        containers.start_container(coder_cmd)
+        containers.start_container(reviewer_cmd)
+        logger.info(
+            "story-develop %s: coder %s + reviewer %s started",
+            config.run_id,
+            coder_name,
+            reviewer_name,
         )
-        turn = run_turn(
-            container=name,
-            prompt=prompt,
-            session_id=str(uuid.uuid4()),
-            timeout=coder_timeout,
-        )
-    finally:
-        containers.stop_container(name)
 
-    handoff_present = (config.handoff_dir / handoff.coder_handoff_name(1)).is_file()
-    commits: list[str] = []
-    if (turn and turn.succeeded) and handoff_present:
-        git.commit_all(
-            wt, f"story-develop: {config.description}", exclude=[HANDOFF_DIRNAME]
-        )
-        commits = git.commits_since(wt, base)
+        for round_no in range(1, config.max_rounds + 1):
+            rounds_completed = round_no
+            # --- coder turn ------------------------------------------------
+            if round_no == 1:
+                coder_prompt = _render(
+                    handoff.load_prompt("coder_init.md"),
+                    description=config.description,
+                    handoff_file=handoff.coder_handoff_name(1),
+                )
+                coder_resume = False
+            else:
+                assert final_review is not None  # set by the prior round's review
+                coder_prompt = _render(
+                    handoff.load_prompt("coder_fix.md"),
+                    round_no=str(round_no),
+                    reviewer=config.reviewer,
+                    acceptance_criteria=config.effective_acceptance_criteria,
+                    findings=_render_findings(final_review.findings),
+                    review_file=handoff.reviewer_handoff_name(
+                        round_no - 1, config.reviewer
+                    ),
+                    handoff_file=handoff.coder_handoff_name(round_no),
+                )
+                coder_resume = True
 
-    coder_ok = bool(turn and turn.succeeded) and handoff_present and bool(commits)
-
-    # --- review phase (only when there is a commit to review) --------------
-    review: ReviewOutcome | None = None
-    if coder_ok:
-        review = _run_review(config, wt, timeout=reviewer_timeout)
-
-    # --- result ------------------------------------------------------------
-    if coder_ok:
-        assert review is not None  # always set when coder_ok
-        sev = f" (max {review.max_severity})" if review.max_severity else ""
-        gate = "passes" if review.passed else "blocks"
-        total = (turn.cost_usd if turn else 0.0) + review.cost_usd
-        message = (
-            f"coder produced {len(commits)} commit(s) on {branch}; "
-            f"review[{review.reviewer}]={review.status} ({gate}){sev}; "
-            f"cost ${total:.4f}"
-        )
-    else:
-        reasons = []
-        if not (turn and turn.succeeded):
-            reasons.append(
-                f"coder turn failed (exit {turn.exit_code if turn else 'n/a'})"
+            coder_turn = run_turn(
+                container=coder_name,
+                prompt=coder_prompt,
+                session_id=coder_session,
+                resume=coder_resume,
+                timeout=coder_timeout,
             )
-        if not handoff_present:
-            reasons.append("no coder handoff file")
-        if not commits:
-            reasons.append("no commit produced")
-        message = "; ".join(reasons)
+            coder_cost += coder_turn.cost_usd
+            done_present = (
+                config.handoff_dir / handoff.coder_handoff_name(round_no)
+            ).is_file()
+            if not (coder_turn.succeeded and done_present):
+                reasons = []
+                if not coder_turn.succeeded:
+                    reasons.append(f"coder turn failed (exit {coder_turn.exit_code})")
+                if not done_present:
+                    reasons.append("no coder handoff file")
+                failure_reason = f"round {round_no}: " + "; ".join(reasons)
+                status = "failed"
+                break
+
+            new_commit = git.commit_all(
+                wt,
+                f"story-develop r{round_no}: {config.description}",
+                exclude=[HANDOFF_DIRNAME],
+            )
+            if round_no == 1 and new_commit is None:
+                failure_reason = "round 1: coder produced no commit"
+                status = "failed"
+                break
+
+            # --- reviewer turn --------------------------------------------
+            if round_no == 1:
+                review_prompt = _render(
+                    handoff.load_prompt("reviewer_round.md"),
+                    reviewer=config.reviewer,
+                    acceptance_criteria=config.effective_acceptance_criteria,
+                    coder_summary=_coder_summary(config, 1),
+                    review_file=handoff.reviewer_handoff_name(1, config.reviewer),
+                )
+                review_resume = False
+            else:
+                review_prompt = _render(
+                    handoff.load_prompt("reviewer_rereview.md"),
+                    reviewer=config.reviewer,
+                    round_no=str(round_no),
+                    acceptance_criteria=config.effective_acceptance_criteria,
+                    base_sha=base[:12],
+                    coder_handoff_file=handoff.coder_handoff_name(round_no),
+                    review_file=handoff.reviewer_handoff_name(
+                        round_no, config.reviewer
+                    ),
+                )
+                review_resume = True
+
+            review = _review_turn(
+                config,
+                container=reviewer_name,
+                session_id=reviewer_session,
+                round_no=round_no,
+                resume=review_resume,
+                prompt=review_prompt,
+                timeout=reviewer_timeout,
+            )
+            review_cost += review.cost_usd
+            final_review = review
+
+            if review.status == "invalid":
+                failure_reason = f"round {round_no}: reviewer handoff invalid"
+                status = "failed"
+                break
+            if review.passed:
+                status = "approved"
+                break
+            # otherwise: loop to the next round (if any remain)
+        else:
+            # loop exhausted without an approval / failure break
+            status = "max_rounds"
+    finally:
+        containers.stop_container(coder_name)
+        containers.stop_container(reviewer_name)
+
+    commits = git.commits_since(wt, base)
+    handoff_present = (config.handoff_dir / handoff.coder_handoff_name(1)).is_file()
+
+    log_path = config.run_dir / "conversation.md"
+    log_path.write_text(
+        handoff.conversation_log(config.handoff_dir, rounds_completed, config.reviewer),
+        encoding="utf-8",
+    )
+
+    total = coder_cost + review_cost
+    if status == "approved":
+        assert final_review is not None
+        sev = f" (max {final_review.max_severity})" if final_review.max_severity else ""
+        message = (
+            f"approved by [{final_review.reviewer}] in {rounds_completed} "
+            f"round(s){sev}; {len(commits)} commit(s) on {branch}; cost ${total:.4f}"
+        )
+    elif status == "max_rounds":
+        assert final_review is not None
+        sev = f" (max {final_review.max_severity})" if final_review.max_severity else ""
+        message = (
+            f"NOT approved after {rounds_completed} round(s) (max_rounds); "
+            f"last review[{final_review.reviewer}]={final_review.status}{sev}; "
+            f"{len(commits)} commit(s) on {branch}; cost ${total:.4f}"
+        )
+    else:  # failed
+        message = f"{failure_reason}; {len(commits)} commit(s) on {branch}"
 
     return DevelopResult(
-        status="succeeded" if coder_ok else "failed",
+        status=status,
         run_id=config.run_id,
         worktree=wt,
         branch=branch,
         base_sha=base,
         commits=commits,
+        rounds=rounds_completed,
         handoff_present=handoff_present,
-        coder_cost_usd=turn.cost_usd if turn else 0.0,
+        coder_cost_usd=coder_cost,
+        review_cost_usd=review_cost,
         message=message,
-        review=review,
+        review=final_review,
+        conversation_log=log_path,
     )
