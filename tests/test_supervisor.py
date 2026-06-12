@@ -55,6 +55,53 @@ def _echo_category(
     )
 
 
+# ── Readiness helpers ─────────────────────────────────────────────────
+#
+# The echo child prints "ready\n" to stderr once its signal handlers are
+# installed.  Tests that need to send SIGTERM to the child must wait for
+# this marker instead of using a fixed ``asyncio.sleep`` — otherwise the
+# SIGTERM may arrive before the handler is installed (kernel-default kill
+# ⇒ ``rc == -15``), which is exactly the CI flake this eliminates.
+
+
+def _patch_subprocess_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force child subprocesses to pipe stderr for readiness detection."""
+    real_create = asyncio.create_subprocess_exec
+
+    async def _patched(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        kwargs.setdefault("stderr", asyncio.subprocess.PIPE)
+        return await real_create(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _patched)
+
+
+async def _wait_children_ready(sup: Supervisor, *, count: int = 1) -> None:
+    """Block until *count* echo-children have printed ``ready`` on stderr."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while len(sup.children) < count:
+        if loop.time() > deadline:
+            raise TimeoutError(
+                f"expected {count} children, only {len(sup.children)} spawned"
+            )
+        await asyncio.sleep(0.01)
+    for child in sup.children[:count]:
+        assert child.proc.stderr is not None
+        while True:
+            line = await asyncio.wait_for(child.proc.stderr.readline(), timeout=5.0)
+            if line == b"ready\n":
+                break
+            if not line:
+                # EOF: the child exited before becoming ready. Without
+                # this check readline() returns b"" instantly forever and
+                # the loop never times out — a startup failure would hang
+                # the test instead of failing it.
+                raise AssertionError(
+                    "echo child exited before printing the readiness "
+                    f"marker (returncode={child.proc.returncode})"
+                )
+
+
 # ── Tests ──────────────────────────────────────────────────────────────
 
 
@@ -79,16 +126,17 @@ async def test_supervisor_returns_zero_when_all_categories_disabled(
 
 async def test_supervisor_spawns_enabled_children_then_shuts_down_cleanly(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Children are spawned, are alive after spawn, and exit cleanly on shutdown()."""
+    _patch_subprocess_stderr(monkeypatch)
     sup = Supervisor(
         _minimal_cfg(tmp_path),
         categories=[_echo_category()],
     )
 
     run_task = asyncio.create_task(sup.run())
-    # Give the supervisor a moment to spawn the child.
-    await asyncio.sleep(0.2)
+    await _wait_children_ready(sup, count=1)
 
     assert len(sup.children) == 1
     child = sup.children[0]
@@ -101,8 +149,12 @@ async def test_supervisor_spawns_enabled_children_then_shuts_down_cleanly(
     assert exit_code == 0
 
 
-async def test_supervisor_filters_by_enabled_predicate(tmp_path: Path) -> None:
+async def test_supervisor_filters_by_enabled_predicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only the enabled category spawns; the disabled one is skipped silently."""
+    _patch_subprocess_stderr(monkeypatch)
     sup = Supervisor(
         _minimal_cfg(tmp_path),
         categories=[
@@ -112,7 +164,7 @@ async def test_supervisor_filters_by_enabled_predicate(tmp_path: Path) -> None:
     )
 
     run_task = asyncio.create_task(sup.run())
-    await asyncio.sleep(0.2)
+    await _wait_children_ready(sup, count=1)
 
     assert [c.spec.name for c in sup.children] == ["on"]
 
@@ -122,8 +174,10 @@ async def test_supervisor_filters_by_enabled_predicate(tmp_path: Path) -> None:
 
 async def test_supervisor_waits_for_child_that_briefly_ignores_sigterm(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Patient shutdown: child handles SIGTERM late, supervisor still cleans up."""
+    _patch_subprocess_stderr(monkeypatch)
     sup = Supervisor(
         _minimal_cfg(tmp_path),
         categories=[_echo_category(extra_args=("--ignore-sigterm-for", "0.5"))],
@@ -131,7 +185,7 @@ async def test_supervisor_waits_for_child_that_briefly_ignores_sigterm(
     )
 
     run_task = asyncio.create_task(sup.run())
-    await asyncio.sleep(0.2)
+    await _wait_children_ready(sup, count=1)
     await sup.shutdown()
 
     exit_code = await asyncio.wait_for(run_task, timeout=5.0)
@@ -142,8 +196,10 @@ async def test_supervisor_waits_for_child_that_briefly_ignores_sigterm(
 
 async def test_supervisor_force_kills_child_that_exceeds_grace_period(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If a child won't exit within shutdown_grace_seconds, supervisor SIGKILLs it."""
+    _patch_subprocess_stderr(monkeypatch)
     sup = Supervisor(
         _minimal_cfg(tmp_path),
         categories=[_echo_category(extra_args=("--ignore-sigterm-for", "10"))],
@@ -151,7 +207,7 @@ async def test_supervisor_force_kills_child_that_exceeds_grace_period(
     )
 
     run_task = asyncio.create_task(sup.run())
-    await asyncio.sleep(0.2)
+    await _wait_children_ready(sup, count=1)
     await sup.shutdown()
 
     exit_code = await asyncio.wait_for(run_task, timeout=5.0)
@@ -243,14 +299,18 @@ async def test_supervisor_does_not_restart_crashed_child(tmp_path: Path) -> None
     assert sup.crashes == ("echo",)
 
 
-async def test_supervisor_spawns_child_with_config_path_argv(tmp_path: Path) -> None:
+async def test_supervisor_spawns_child_with_config_path_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The child is invoked with --config <source_path> so it can load the same TOML."""
+    _patch_subprocess_stderr(monkeypatch)
     cfg_path = tmp_path / "alt.toml"
     cfg = replace(_minimal_cfg(tmp_path), source_path=cfg_path)
     sup = Supervisor(cfg, categories=[_echo_category(extra_args=("--echo-argv",))])
 
     run_task = asyncio.create_task(sup.run())
-    await asyncio.sleep(0.3)
+    await _wait_children_ready(sup, count=1)
     assert len(sup.children) == 1
     await sup.shutdown()
     await asyncio.wait_for(run_task, timeout=5.0)
@@ -332,9 +392,13 @@ async def test_echo_child_responds_to_sigterm() -> None:
         "-m",
         "lithos_loom.children._echo",
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    await asyncio.sleep(0.1)
+    # Wait for the child to signal that its signal handlers are installed,
+    # instead of guessing with a fixed sleep (the old 100ms race window).
+    assert proc.stderr is not None
+    line = await asyncio.wait_for(proc.stderr.readline(), timeout=5.0)
+    assert line == b"ready\n"
     proc.terminate()
     rc = await asyncio.wait_for(proc.wait(), timeout=5.0)
     assert rc == 0
