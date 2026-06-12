@@ -90,6 +90,15 @@ async def _wait_children_ready(sup: Supervisor, *, count: int = 1) -> None:
             line = await asyncio.wait_for(child.proc.stderr.readline(), timeout=5.0)
             if line == b"ready\n":
                 break
+            if not line:
+                # EOF: the child exited before becoming ready. Without
+                # this check readline() returns b"" instantly forever and
+                # the loop never times out — a startup failure would hang
+                # the test instead of failing it.
+                raise AssertionError(
+                    "echo child exited before printing the readiness "
+                    f"marker (returncode={child.proc.returncode})"
+                )
 
 
 # ── Tests ──────────────────────────────────────────────────────────────
