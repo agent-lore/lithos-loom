@@ -22,10 +22,17 @@ changed — and any points it disputes.
    finding rather than restating it.
 3. Write your updated verdict to `/workspace/.handoff/{review_file}` using the
    format in `/workspace/.handoff/FORMAT.md`:
-   - **Satisfied** → `## Status: LGTM` with a one-paragraph `## Summary`.
+   - **No remaining issues** → `## Status: LGTM` with a one-paragraph `## Summary`.
    - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a
      `## Findings` block listing only the issues that remain open (plus any
      genuinely new ones), each with `severity:` (critical | major | minor),
      `status: open`, `files:`, and `rationale:`.
+
+Record **every** remaining or new issue as a structured finding with an honest
+severity — do not pre-judge what should block. The orchestrator applies the
+project's severity threshold to decide which findings block; sub-threshold
+findings are recorded without blocking. Never fold an issue into the summary
+prose instead of a finding — an issue that is not a finding is invisible to
+the rest of the pipeline.
 
 Do not modify any files. Do not commit. Be specific and actionable.
