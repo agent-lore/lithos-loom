@@ -391,7 +391,15 @@ class RouteRunner:
             name=f"resume-{task_id}",
         )
         self._resume_tasks[task_id] = sleeper
-        sleeper.add_done_callback(lambda _t: self._resume_tasks.pop(task_id, None))
+
+        def _cleanup(done: asyncio.Task[None]) -> None:
+            # Only remove the entry this task still owns: a cancelled old
+            # sleeper's callback can fire AFTER a replacement was stored,
+            # and must not evict the replacement.
+            if self._resume_tasks.get(task_id) is done:
+                del self._resume_tasks[task_id]
+
+        sleeper.add_done_callback(_cleanup)
 
     async def _resume_dispatch(
         self, task_id: str, payload: Mapping[str, Any], delay: float

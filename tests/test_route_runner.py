@@ -678,3 +678,32 @@ async def test_runner_unparseable_resume_after_not_scheduled(
     assert not runner._resume_tasks
     lithos.task_release.assert_awaited_once()
     lithos.finding_post.assert_not_called()
+
+
+async def test_rescheduled_resume_survives_old_sleepers_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A cancelled old sleeper's done-callback must not evict its replacement.
+
+    Schedule the same task twice (far-future resume_after so neither fires):
+    the first sleeper is cancelled and replaced; once its cancellation
+    callback runs, _resume_tasks must still hold the SECOND sleeper.
+    """
+    bus = EventBus()
+    runner, _ = _make_runner(bus=bus, work_dir=tmp_path)
+    payload = _payload()
+    resume = {"resume_after": "2099-01-01T00:00:00+00:00"}
+
+    await runner._maybe_schedule_resume("task-1", payload, resume)
+    first = runner._resume_tasks["task-1"]
+    await runner._maybe_schedule_resume("task-1", payload, resume)
+    second = runner._resume_tasks["task-1"]
+    assert first is not second
+
+    # Let the first sleeper's cancellation + done-callback run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert runner._resume_tasks.get("task-1") is second
+    assert not second.cancelled()
+    second.cancel()
