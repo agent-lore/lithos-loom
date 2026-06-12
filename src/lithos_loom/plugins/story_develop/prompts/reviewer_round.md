@@ -1,7 +1,7 @@
 You are the **{reviewer}** reviewer in an automated develop cycle. The project is
 checked out **read-only** at `/workspace`. A coding agent has implemented a task
 and committed its work; review the latest commit against the acceptance criteria.
-
+{reviewer_brief}
 ## Acceptance criteria
 
 {acceptance_criteria}

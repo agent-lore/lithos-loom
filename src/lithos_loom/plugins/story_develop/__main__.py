@@ -31,7 +31,9 @@ from .config import (
     DEFAULT_REVIEWER_NAME,
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
+    ReviewerSpec,
     is_valid_reviewer_name,
+    load_develop_config,
 )
 from .develop import develop
 
@@ -52,14 +54,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--reviewer",
-        default=DEFAULT_REVIEWER_NAME,
-        help="Reviewer name (its persona/focus); single reviewer until T6",
+        action="append",
+        default=None,
+        help="Reviewer name (repeatable; each gets its own RO container). "
+        f"Default: one '{DEFAULT_REVIEWER_NAME}' reviewer",
+    )
+    p.add_argument(
+        "--develop-config",
+        type=Path,
+        default=None,
+        help="TOML file of full reviewer specs ([[reviewers]] tables with "
+        "name/tool/block_threshold/system_prompt/fallback_chain); "
+        "mutually exclusive with --reviewer",
     )
     p.add_argument(
         "--block-threshold",
         default=DEFAULT_BLOCK_THRESHOLD,
         choices=["critical", "major", "minor"],
-        help="Findings below this severity do not block",
+        help="Findings below this severity do not block (applies to all "
+        "--reviewer names; per-reviewer thresholds need --develop-config)",
     )
     p.add_argument(
         "--max-rounds",
@@ -138,13 +151,40 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --description must not be empty", file=sys.stderr)
         return 2
 
-    if not is_valid_reviewer_name(args.reviewer):
+    # --- resolve the reviewer panel (T6) ---------------------------------
+    if args.develop_config is not None and args.reviewer:
         print(
-            f"error: invalid --reviewer {args.reviewer!r}: use lowercase "
-            "alphanumerics + hyphens (e.g. 'code-quality')",
+            "error: --develop-config and --reviewer are mutually exclusive",
             file=sys.stderr,
         )
         return 2
+    if args.develop_config is not None:
+        try:
+            specs = load_develop_config(args.develop_config.expanduser())
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    else:
+        names = args.reviewer or [DEFAULT_REVIEWER_NAME]
+        if len(set(names)) != len(names):
+            print(f"error: duplicate --reviewer names: {names}", file=sys.stderr)
+            return 2
+        for name in names:
+            if not is_valid_reviewer_name(name):
+                print(
+                    f"error: invalid --reviewer {name!r}: use lowercase "
+                    "alphanumerics + hyphens (e.g. 'code-quality')",
+                    file=sys.stderr,
+                )
+                return 2
+        specs = tuple(
+            ReviewerSpec(
+                name=name,
+                block_threshold=args.block_threshold,
+                fallback_chain=tuple(args.reviewer_fallback or ()),
+            )
+            for name in names
+        )
 
     if args.max_rounds < 1:
         print("error: --max-rounds must be >= 1", file=sys.stderr)
@@ -174,8 +214,7 @@ def main(argv: list[str] | None = None) -> int:
         description=args.description,
         work_dir=work_dir,
         coder=args.coder,
-        reviewer=args.reviewer,
-        block_threshold=args.block_threshold,
+        reviewers=specs,
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,
         test_command=args.test_command,
@@ -200,12 +239,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  worktree: {result.worktree}")
     print(f"  rounds:   {result.rounds}")
     print(f"  commits:  {len(result.commits)}")
-    if result.review is not None:
-        r = result.review
+    for r in result.reviews:
         sev = f" (max severity: {r.max_severity})" if r.max_severity else ""
         gate = "passes threshold" if r.passed else "BLOCKS"
-        print(f"  review:   [{r.reviewer}] {r.status} — {gate}{sev}")
-        print(f"            {r.findings_count} finding(s)")
+        print(
+            f"  review:   [{r.reviewer}] {r.status} — {gate}{sev}; "
+            f"{r.findings_count} finding(s)"
+        )
     if result.test_gate is not None:
         g = result.test_gate
         blocking = " — BLOCKS approval" if (not g.passed and args.block_on_red) else ""
