@@ -17,6 +17,7 @@ Docker) + thin side-effecting wrappers (monkeypatched in orchestration tests).
 
 from __future__ import annotations
 
+import contextlib
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -160,15 +161,23 @@ def select_command(candidates: list[str], available_tools: list[str]) -> str | N
 
 
 def probe_tools(image: str, tools: list[str]) -> list[str]:
-    """Return the subset of *tools* that exist in *image* (one probe container)."""
+    """Return the subset of *tools* that exist in *image* (one probe container).
+
+    Degrades to "no tools found" on any infra failure (docker missing, probe
+    timeout) — the caller then skips the gate with a warning rather than the
+    probe crashing the run.
+    """
     if not tools:
         return []
-    proc = subprocess.run(
-        build_probe_command(image=image, tools=tools),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            build_probe_command(image=image, tools=tools),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
     if proc.returncode != 0:
         return []
     found = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
@@ -188,8 +197,10 @@ def run_gate_container(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        # the --rm container keeps running after the host-side timeout; kill it.
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        # The --rm container keeps running after the host-side timeout; kill it.
+        # Best-effort: a cleanup failure must not turn the TIMEOUT into a crash.
+        with contextlib.suppress(OSError):
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
         return GateResult(
             command=command,
             exit_code=_TIMEOUT_EXIT,

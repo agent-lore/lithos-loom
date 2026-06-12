@@ -7,11 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from lithos_loom.plugins.story_develop import test_gate as test_gate_mod
 from lithos_loom.plugins.story_develop.test_gate import (
     GateResult,
     build_gate_command,
     build_probe_command,
     export_tree,
+    probe_tools,
+    run_gate_container,
     select_command,
 )
 
@@ -81,6 +84,58 @@ def test_gate_result_verdicts() -> None:
     assert green.verdict == "GREEN"
     assert red.verdict == "RED" and not red.timed_out
     assert timeout.verdict == "TIMEOUT" and timeout.timed_out
+
+
+# --- infra-failure degradation ------------------------------------------------
+
+
+def test_probe_tools_degrades_when_docker_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("docker not on PATH")
+
+    monkeypatch.setattr(test_gate_mod.subprocess, "run", boom)
+    assert probe_tools("img:latest", ["make", "uv"]) == []
+
+
+def test_probe_tools_degrades_on_probe_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=120)
+
+    monkeypatch.setattr(test_gate_mod.subprocess, "run", boom)
+    assert probe_tools("img:latest", ["make"]) == []
+
+
+def test_probe_tools_empty_tools_no_docker_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args, **kwargs):  # would fail the test if reached
+        raise AssertionError("docker should not be invoked for an empty tool list")
+
+    monkeypatch.setattr(test_gate_mod.subprocess, "run", boom)
+    assert probe_tools("img:latest", []) == []
+
+
+def test_timeout_cleanup_is_best_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    # First call (the gate run) times out; the docker rm -f cleanup then fails
+    # too — callers must still get a TIMEOUT GateResult, not an exception.
+    calls: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[0] if isinstance(cmd, list) else str(cmd))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(cmd="docker", timeout=5)
+        raise FileNotFoundError("docker vanished")
+
+    monkeypatch.setattr(test_gate_mod.subprocess, "run", fake_run)
+    result = run_gate_container(
+        ["docker", "run", "..."], name="gate-x", command="pytest", timeout=5
+    )
+    assert result.timed_out and result.verdict == "TIMEOUT"
+    assert len(calls) == 2  # gate run + attempted cleanup
 
 
 # --- export_tree (real git) --------------------------------------------------
