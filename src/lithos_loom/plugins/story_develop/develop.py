@@ -19,8 +19,14 @@ of the conversational model over Ralph++'s fire-and-forget loop.
 
 The side-effecting bits (container start/exec/stop) live in :mod:`containers` /
 :mod:`turns` so this orchestration is unit-testable by monkeypatching them.
-Stall / dispute / cost guards are deliberately *not* here — they arrive with T7;
-T3's only loop bound is ``max_rounds``.
+
+Unattended runs are bounded (T7): ``max_rounds``, a ``max_cost_usd`` ceiling,
+a stall guard keyed off finding identity (empty round commit or an unchanged
+blocking set, two rounds running), and a dispute escalation — a coder-disputed
+finding the reviewer keeps blocking for 2 rounds stops the run with a
+``[ReviewDispute]`` breadcrumb instead of grinding to ``max_rounds``. Finding
+identity itself is plugin-enforced via each reviewer's
+:class:`~.findings.FindingLedger`.
 """
 
 from __future__ import annotations
@@ -30,7 +36,8 @@ import logging
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ...runner import detection, git, worktree
@@ -41,6 +48,7 @@ from .config import (
     DevelopConfig,
     is_valid_reviewer_name,
 )
+from .findings import FindingLedger
 from .handoff import Finding, HandoffError, ReviewHandoff
 from .test_gate import GateResult
 from .turns import TurnResult, run_turn
@@ -68,7 +76,9 @@ class ReviewOutcome:
 class DevelopResult:
     """Outcome of a ``develop()`` run."""
 
-    status: str  # "approved" | "max_rounds" | "failed" | "interrupted"
+    # "approved" | "max_rounds" | "failed" | "interrupted"
+    # | "stalled" | "disputed" | "cost_exceeded"  (T7 guards)
+    status: str
     run_id: str
     worktree: Path
     branch: str
@@ -436,13 +446,16 @@ def _review_turn(
     prompt: str,
     timeout: int,
     tool: str = "claude",
+    validate: Callable[[ReviewHandoff], str | None] | None = None,
 ) -> tuple[ReviewOutcome, TurnResult | None]:
     """Run one reviewer turn against an already-running reviewer container.
 
-    Re-prompts the *same* session once if the handoff is malformed. The handoff
-    is only authoritative if the turn that produced it SUCCEEDED (clean exit +
-    structured result) — a failed turn that happens to leave a parseable file is
-    rejected, preserving the exit-code contract (ADR 0002).
+    Re-prompts the *same* session once if the handoff is malformed — or, T7,
+    if it fails the *validate* callback (the finding-lifecycle check: unknown
+    or dropped ids). The handoff is only authoritative if the turn that
+    produced it SUCCEEDED (clean exit + structured result) — a failed turn
+    that happens to leave a parseable file is rejected, preserving the
+    exit-code contract (ADR 0002).
 
     Returns ``(outcome, failed_turn)``: *failed_turn* is the TurnResult of a
     turn-level failure (for usage-limit classification by the caller), or
@@ -450,6 +463,15 @@ def _review_turn(
     """
     review_file = handoff.reviewer_handoff_name(round_no, reviewer)
     review_path = config.handoff_dir / review_file
+
+    def _read_checked() -> tuple[ReviewHandoff | None, str | None]:
+        parsed, err = _read_review(review_path)
+        if parsed is not None and validate is not None:
+            verr = validate(parsed)
+            if verr is not None:
+                return None, verr
+        return parsed, err
+
     cost = 0.0
     parsed: ReviewHandoff | None = None
     err: str | None = "reviewer did not run"
@@ -474,7 +496,7 @@ def _review_turn(
             turn=turn,
         )
     else:
-        parsed, err = _read_review(review_path)
+        parsed, err = _read_checked()
         if parsed is None:
             correction = (
                 f"Your review at .handoff/{review_file} was not valid: {err}. "
@@ -490,7 +512,7 @@ def _review_turn(
             )
             cost += retry.cost_usd
             if retry.succeeded:
-                parsed, err = _read_review(review_path)
+                parsed, err = _read_checked()
             else:
                 err = f"reviewer retry turn failed (exit {retry.exit_code})"
                 failed_turn = retry
@@ -532,7 +554,7 @@ def _review_turn(
 
 
 class _ReviewerState:
-    """Mutable per-reviewer run state (container, session, current tool)."""
+    """Mutable per-reviewer run state (container, session, tool, ledger)."""
 
     def __init__(self, spec, container: str, run_cmd: list[str]) -> None:
         self.spec = spec
@@ -541,6 +563,7 @@ class _ReviewerState:
         self.session = str(uuid.uuid4())
         self.tool_now: str = spec.tool
         self.outcome: ReviewOutcome | None = None  # latest completed round
+        self.ledger = FindingLedger(spec.name)  # T7: plugin-owned finding ids
         # order-preserving dedupe (see T5 review): never self-switch
         self.chain: tuple[str, ...] = tuple(
             dict.fromkeys((spec.tool, *spec.fallback_chain))
@@ -576,6 +599,7 @@ def _run_reviewer_with_reaction(
         prompt=prompt,
         timeout=timeout,
         tool=rstate.tool_now,
+        validate=rstate.ledger.check,
     )
     cost = review.cost_usd
 
@@ -631,6 +655,7 @@ def _run_reviewer_with_reaction(
                 prompt=reseed_prompt,
                 timeout=timeout,
                 tool=rstate.tool_now,
+                validate=rstate.ledger.check,
             )
             cost += review.cost_usd
             continue
@@ -668,10 +693,50 @@ def _run_reviewer_with_reaction(
             prompt=retry_prompt,
             timeout=timeout,
             tool=rstate.tool_now,
+            validate=rstate.ledger.check,
         )
         cost += review.cost_usd
 
     return review, cost, False
+
+
+def _record_coder_disputes(
+    config: DevelopConfig, reviewers: list[_ReviewerState], round_no: int
+) -> None:
+    """Parse the coder's round handoff and record dispute marks (T7).
+
+    The coder may qualify ids as ``<reviewer>/<id>`` (the panel rendering) or
+    leave them bare (routed to the sole reviewer; ambiguous in a panel and
+    ignored there). Tolerant by design — a malformed coder handoff records
+    nothing rather than failing the round.
+    """
+    path = config.handoff_dir / handoff.coder_handoff_name(round_no)
+    try:
+        parsed = handoff.parse_review_handoff(path.read_text(encoding="utf-8"))
+    except (HandoffError, OSError):
+        return
+    if not parsed.findings:
+        return
+    by_name = {r.spec.name: r for r in reviewers}
+    for f in parsed.findings:
+        fid = f.finding_id
+        if "/" in fid:
+            prefix, _, bare = fid.partition("/")
+            target = by_name.get(prefix)
+            if target is not None:
+                target.ledger.record_coder_updates(
+                    [replace(f, finding_id=bare)], round_no
+                )
+            continue
+        if len(reviewers) == 1:
+            reviewers[0].ledger.record_coder_updates([f], round_no)
+        else:
+            logger.debug(
+                "story-develop %s: unqualified coder finding id %r in a panel "
+                "run; ignored",
+                config.run_id,
+                fid,
+            )
 
 
 # --- orchestration ----------------------------------------------------------
@@ -718,6 +783,8 @@ def develop(
         raise ValueError(
             f"max_pause_minutes must be >= 0 (got {config.max_pause_minutes})"
         )
+    if config.max_cost_usd is not None and config.max_cost_usd <= 0:
+        raise ValueError(f"max_cost_usd must be > 0 (got {config.max_cost_usd})")
 
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     for spec in specs:
@@ -763,6 +830,8 @@ def develop(
     coder_cost = 0.0
     review_cost = 0.0
     budget = _PauseBudget(config.max_pause_minutes * 60)
+    stall_strikes = 0  # T7: consecutive no-progress rounds
+    prev_signature: frozenset | None = None
 
     try:
         containers.start_container(coder_cmd)
@@ -834,6 +903,12 @@ def develop(
                 status = "failed"
                 break
 
+            # T7: record the coder's dispute marks (its handoff may carry a
+            # Findings block updating ids with status: disputed). Tolerant —
+            # an unparseable coder handoff just records nothing.
+            if round_no >= 2:
+                _record_coder_disputes(config, reviewers, round_no)
+
             new_commit = git.commit_all(
                 wt,
                 f"story-develop r{round_no}: {config.description}",
@@ -842,6 +917,18 @@ def develop(
             if round_no == 1 and new_commit is None:
                 failure_reason = "round 1: coder produced no commit"
                 status = "failed"
+                break
+
+            # T7: cost ceiling — check before spending more on reviews.
+            if (
+                config.max_cost_usd is not None
+                and coder_cost + review_cost >= config.max_cost_usd
+            ):
+                failure_reason = (
+                    f"round {round_no}: cost ceiling reached "
+                    f"(${coder_cost + review_cost:.2f} >= ${config.max_cost_usd:.2f})"
+                )
+                status = "cost_exceeded"
                 break
 
             # --- test gate (only when there is a new commit to gate) --------
@@ -878,6 +965,7 @@ def develop(
                         acceptance_criteria=config.effective_acceptance_criteria,
                         base_sha=base[:12],
                         coder_handoff_file=handoff.coder_handoff_name(round_no),
+                        open_findings=rstate.ledger.render_open(),
                         review_file=handoff.reviewer_handoff_name(round_no, name),
                     )
                     review_resume = True
@@ -893,6 +981,18 @@ def develop(
                     base=base,
                 )
                 review_cost += cost
+                if review.status != "invalid":
+                    # T7: commit the (already check()-validated) review into
+                    # the ledger; downstream sees ledger-canonical ids.
+                    applied = rstate.ledger.apply_review(
+                        ReviewHandoff(
+                            status=review.status,
+                            summary="",
+                            findings=review.findings,
+                        ),
+                        round_no,
+                    )
+                    review = replace(review, findings=applied)
                 round_reviews.append(review)
                 rstate.outcome = review
                 if interrupted:
@@ -930,6 +1030,61 @@ def develop(
                 else:
                     status = "approved"
                     break
+
+            # --- T7 termination guards (not approved this round) ------------
+            # Dispute escalation: a coder-disputed finding the reviewer kept
+            # blocking for 2 consecutive rounds -> stop with a human
+            # breadcrumb rather than grinding to max_rounds.
+            deadlocked = [
+                f"{r.spec.name}/{fid}"
+                for r in reviewers
+                for fid in r.ledger.disputed_deadlocks(r.spec.block_threshold)
+            ]
+            if deadlocked:
+                logger.warning(
+                    "[ReviewDispute] story-develop %s: round %d dispute deadlock "
+                    "on %s — stopping for human review",
+                    config.run_id,
+                    round_no,
+                    ", ".join(deadlocked),
+                )
+                failure_reason = (
+                    f"round {round_no}: dispute deadlock on "
+                    f"{', '.join(deadlocked)} (coder disputes, reviewer keeps "
+                    "blocking)"
+                )
+                status = "disputed"
+                break
+            # Stall guard, keyed off finding IDENTITY: an empty round commit
+            # or an unchanged blocking set, two rounds running -> stop.
+            signature = frozenset(
+                (r.spec.name, fid, fstatus)
+                for r in reviewers
+                for fid, fstatus in r.ledger.blocking_signature(r.spec.block_threshold)
+            )
+            if round_no >= 2 and (new_commit is None or signature == prev_signature):
+                stall_strikes += 1
+            else:
+                stall_strikes = 0
+            prev_signature = signature
+            if stall_strikes >= 2:
+                failure_reason = f"round {round_no}: stalled — " + (
+                    "no new commit and/or blocking findings unchanged "
+                    "across 2 consecutive rounds"
+                )
+                status = "stalled"
+                break
+            # Cost ceiling after the round's reviews.
+            if (
+                config.max_cost_usd is not None
+                and coder_cost + review_cost >= config.max_cost_usd
+            ):
+                failure_reason = (
+                    f"round {round_no}: cost ceiling reached "
+                    f"(${coder_cost + review_cost:.2f} >= ${config.max_cost_usd:.2f})"
+                )
+                status = "cost_exceeded"
+                break
             # otherwise: loop to the next round (if any remain)
         else:
             # loop exhausted without an approval / failure break
@@ -976,6 +1131,12 @@ def develop(
             f"INTERRUPTED: {failure_reason}; {len(commits)} commit(s) on {branch}; "
             f"sessions + handoffs preserved in {config.run_dir} (re-run to retry); "
             f"cost ${total:.4f}"
+        )
+    elif status in ("stalled", "disputed", "cost_exceeded"):
+        message = (
+            f"STOPPED ({status}): {failure_reason}; "
+            f"last reviews: {_reviews_part(final_reviews)}{gate_part}; "
+            f"{len(commits)} commit(s) on {branch}; cost ${total:.4f}"
         )
     else:  # failed
         message = f"{failure_reason}{gate_part}; {len(commits)} commit(s) on {branch}"

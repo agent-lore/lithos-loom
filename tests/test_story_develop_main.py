@@ -117,6 +117,14 @@ def test_main_rejects_zero_pause_poll(tmp_git_repo: Path, capsys) -> None:
     assert "--pause-poll-minutes must be >= 1" in capsys.readouterr().err
 
 
+def test_main_rejects_bad_max_cost(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--max-cost-usd", "0"]
+    )
+    assert rc == 2
+    assert "--max-cost-usd must be > 0" in capsys.readouterr().err
+
+
 def test_main_rejects_negative_max_pause(tmp_git_repo: Path, capsys) -> None:
     rc = main(
         [

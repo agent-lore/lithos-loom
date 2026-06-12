@@ -22,11 +22,19 @@ One short paragraph. The coder also reports test results here.
   coder_response: <what changed, or why disputed>
 ```
 
-**Reviewers:** `LGTM` means *no issues at all*. Record every issue as a
-structured finding with an honest severity — the orchestrator applies the
-project's severity threshold to decide which findings block, and sub-threshold
-findings are recorded without blocking. An issue mentioned only in the summary
-prose is invisible to the rest of the pipeline.
+**Reviewers:** `LGTM` means *no issues at all* (it closes every finding you
+previously raised). Record every issue as a structured finding with an honest
+severity — the orchestrator applies the project's severity threshold to decide
+which findings block, and sub-threshold findings are recorded without
+blocking. An issue mentioned only in the summary prose is invisible to the
+rest of the pipeline.
+
+**Finding identity:** ids are orchestrator-assigned. Leave `finding_id:` blank
+for a NEW finding; on re-review, account for EVERY id you were given (update
+its status — never drop, renumber, or invent ids).
+
+**Coders:** to dispute a finding, include a `## Findings` block with that id,
+`status: disputed`, and your reasoning in `coder_response:`.
 
 For the coder's first turn there are no findings — just write
 `## Status: LGTM` plus a `## Summary` of what you implemented and the result of

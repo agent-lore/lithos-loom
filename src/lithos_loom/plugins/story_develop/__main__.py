@@ -102,6 +102,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Max seconds for one test-gate run",
     )
     p.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help="Stop the run when total agent spend reaches this (default: none)",
+    )
+    p.add_argument(
         "--max-pause-minutes",
         type=int,
         default=DEFAULT_MAX_PAUSE_MINUTES,
@@ -198,6 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --max-pause-minutes must be >= 0", file=sys.stderr)
         return 2
 
+    if args.max_cost_usd is not None and args.max_cost_usd <= 0:
+        print("error: --max-cost-usd must be > 0", file=sys.stderr)
+        return 2
+
     repo = args.repo.expanduser().resolve()
     if not (repo / ".git").exists():
         print(f"error: {repo} is not a git repository", file=sys.stderr)
@@ -223,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
         reviewer_fallback_chain=tuple(args.reviewer_fallback or ()),
+        max_cost_usd=args.max_cost_usd,
         image=args.image,
         base_branch=args.branch,
     )
@@ -260,6 +271,20 @@ def main(argv: list[str] | None = None) -> int:
             "log above;\n  re-run with a higher --max-rounds, or attach to the "
             "worktree to intervene."
         )
+    elif result.status == "disputed":
+        print(
+            "\n  Dispute deadlock: the coder formally disputes finding(s) the "
+            "reviewer keeps blocking.\n  Read the conversation log and decide — "
+            "this needs a human."
+        )
+    elif result.status == "stalled":
+        print(
+            "\n  Stalled: no progress across consecutive rounds (no new commit "
+            "and/or unchanged\n  blocking findings). Inspect the conversation log "
+            "before re-running."
+        )
+    elif result.status == "cost_exceeded":
+        print("\n  Stopped at the --max-cost-usd ceiling.")
     return 0 if result.succeeded else 1
 
 

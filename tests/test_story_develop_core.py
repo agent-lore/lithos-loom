@@ -24,12 +24,19 @@ from lithos_loom.plugins.story_develop.test_gate import GateResult
 from lithos_loom.plugins.story_develop.turns import TurnResult
 
 _LGTM = "## Status: LGTM\n## Summary\nLooks correct and complete.\n"
+# NEW findings carry a BLANK id — the orchestrator's ledger assigns f-001 etc.
 _FINDINGS_MAJOR = (
     "## Status: FINDINGS\n## Summary\nOne issue.\n## Findings\n"
-    "- finding_id: f-001\n  severity: major\n  status: open\n"
+    "- finding_id:\n  severity: major\n  status: open\n"
     '  files: ["greeting.txt:1"]\n  rationale: needs work\n  coder_response:\n'
 )
 _FINDINGS_MINOR = _FINDINGS_MAJOR.replace("severity: major", "severity: minor")
+# A re-review that keeps the (ledger-assigned) first finding open by id.
+_FINDINGS_KEEP_F001 = (
+    "## Status: FINDINGS\n## Summary\nStill not addressed.\n## Findings\n"
+    "- finding_id: f-001\n  severity: major\n  status: open\n"
+    '  files: ["greeting.txt:1"]\n  rationale: still needs work\n'
+)
 _GARBAGE = "this is not a valid handoff at all\n"
 
 
@@ -62,6 +69,7 @@ def _install_fakes(
     gates: list[bool | str] | None = None,
     coder_results: list[str] | None = None,
     coder_transcript_on_limit: bool = False,
+    coder_handoffs: dict[int, str] | None = None,
 ) -> dict:
     """Install fake container + turn + gate machinery.
 
@@ -143,9 +151,9 @@ def _install_fakes(
             if write_source and (source_rounds is None or rnd in source_rounds):
                 (wt / "greeting.txt").write_text(f"hello round {rnd}\n")
             if write_coder_handoff:
-                (config.handoff_dir / handoff.coder_handoff_name(rnd)).write_text(
-                    f"## Status: LGTM\n## Summary\nRound {rnd}: did the work.\n"
-                )
+                default = f"## Status: LGTM\n## Summary\nRound {rnd}: did the work.\n"
+                text = (coder_handoffs or {}).get(rnd, default)
+                (config.handoff_dir / handoff.coder_handoff_name(rnd)).write_text(text)
             return TurnResult(
                 exit_code=0 if coder_ok else 1,
                 succeeded=coder_ok,
@@ -308,7 +316,11 @@ def test_max_rounds_stops_unapproved(
         claude_config_dir=config.claude_config_dir,
         max_rounds=2,
     )
-    _install_fakes(monkeypatch, cfg, reviews=[{"text": _FINDINGS_MAJOR}])
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+    )
     result = develop_mod.develop(cfg)
 
     assert result.status == "max_rounds"
@@ -540,6 +552,179 @@ def test_gate_disabled_by_config(
     result = develop_mod.develop(cfg)
     assert result.test_gate is None
     assert state["gate_calls"] == []
+
+
+# --- termination guards (T7) ---------------------------------------------------
+
+_CODER_DISPUTE = (
+    "## Status: LGTM\n## Summary\nI disagree with f-001; see dispute.\n"
+    "## Findings\n- finding_id: f-001\n  severity: major\n  status: disputed\n"
+    "  coder_response: the current behaviour is intentional and documented\n"
+)
+_UNKNOWN_ID_FINDINGS = (
+    "## Status: FINDINGS\n## Summary\nIssue.\n## Findings\n"
+    "- finding_id: f-999\n  severity: major\n  status: open\n  rationale: x\n"
+)
+
+
+def test_stall_guard_stops_on_unchanged_blocking_findings(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # Coder commits every round, but the reviewer keeps the SAME finding open
+    # by id: rounds 2 and 3 have identical blocking signatures -> stalled.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "stalled"
+    assert result.rounds == 3  # strikes at r2 and r3
+    assert "stalled" in result.message
+    assert result.succeeded is False
+
+
+def test_stall_guard_stops_on_empty_round_commits(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # The coder stops changing code after round 1 while findings stay open:
+    # two commit-less rounds -> stalled, even though statuses keep moving.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+        source_rounds={1},
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "stalled"
+    assert result.rounds == 3
+
+
+def test_stall_guard_resets_on_progress(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # r2: same signature (strike); r3: reviewer accepts f-001 but raises a NEW
+    # finding (signature changes -> strike resets); r4: LGTM -> approved.
+    fix_then_new = (
+        "## Status: FINDINGS\n## Summary\nOld fixed; new issue.\n## Findings\n"
+        "- finding_id: f-001\n  severity: major\n  status: fixed\n"
+        "- finding_id:\n  severity: major\n  status: open\n  rationale: new\n"
+    )
+    keep_new_open = (
+        "## Status: FINDINGS\n## Summary\nStill open.\n## Findings\n"
+        "- finding_id: f-002\n  severity: major\n  status: open\n"
+    )
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[
+            {"text": _FINDINGS_MAJOR},
+            {"text": _FINDINGS_KEEP_F001},
+            {"text": fix_then_new},
+            {"text": _LGTM},
+        ],
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert result.rounds == 4
+    assert keep_new_open  # silence unused warning if scenario changes
+
+
+def test_dispute_deadlock_stops_with_breadcrumb(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # r1: finding raised. r2: coder formally disputes; reviewer keeps blocking
+    # (disputed-block #1). r3: reviewer blocks again (#2) -> dispute deadlock.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+        coder_handoffs={2: _CODER_DISPUTE, 3: _CODER_DISPUTE},
+    )
+    with caplog.at_level("WARNING"):
+        result = develop_mod.develop(config)
+    assert result.status == "disputed"
+    assert result.rounds == 3
+    assert "dispute deadlock" in result.message and "f-001" in result.message
+    assert any("[ReviewDispute]" in r.message for r in caplog.records)
+
+
+def test_cost_ceiling_stops_run(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    # fake costs: coder 0.01/turn, reviewer 0.02/turn -> r1 total 0.03
+    cfg = replace(config, max_cost_usd=0.025)
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _FINDINGS_MAJOR}])
+    result = develop_mod.develop(cfg)
+    assert result.status == "cost_exceeded"
+    assert result.rounds == 1
+    assert "cost ceiling" in result.message
+
+
+def test_lifecycle_unknown_id_is_reprompted_and_recovers(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # The reviewer invents an id -> lifecycle validation rejects -> the same
+    # session is re-prompted with the correction and writes a valid review.
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _UNKNOWN_ID_FINDINGS, "retry_text": _LGTM}],
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    corrections = [c for (_, _, c) in state["review_calls"] if c]
+    assert len(corrections) == 1  # exactly one correction re-prompt
+
+
+def test_lifecycle_dropped_id_never_fixed_fails(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # r2 review drops the open f-001 (new blank-id finding instead) and the
+    # correction retry repeats the mistake -> invalid -> failed.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[
+            {"text": _FINDINGS_MAJOR},
+            {"text": _FINDINGS_MAJOR, "retry_text": _FINDINGS_MAJOR},
+        ],
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "failed"
+    assert "invalid" in result.message
+
+
+def test_rereview_prompt_carries_open_findings_ledger(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}],
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    r2_prompt = state["review_prompts"][1]
+    assert "Your open findings" in r2_prompt
+    assert "finding_id: f-001" in r2_prompt  # the ledger-assigned id
+
+
+def test_develop_rejects_bad_max_cost(tmp_git_repo: Path, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    base = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        claude_config_dir=tmp_path / "fake-claude",
+    )
+    with pytest.raises(ValueError, match="max_cost_usd"):
+        develop_mod.develop(replace(base, max_cost_usd=0))
 
 
 # --- multi-reviewer panel (T6) ------------------------------------------------
