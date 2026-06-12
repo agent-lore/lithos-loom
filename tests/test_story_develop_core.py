@@ -59,6 +59,8 @@ def _install_fakes(
     write_source: bool = True,
     review_first: str | None = _LGTM,
     review_retry: str | None = None,
+    reviewer_ok: bool = True,
+    retry_ok: bool = True,
 ) -> dict:
     state: dict = {"stopped": []}
 
@@ -90,13 +92,14 @@ def _install_fakes(
         text = review_retry if resume else review_first
         if text is not None:
             review_path.write_text(text)
+        ok = retry_ok if resume else reviewer_ok
         return TurnResult(
-            exit_code=0,
-            succeeded=True,
+            exit_code=0 if ok else 1,
+            succeeded=ok,
             session_id=session_id,
             result_text="",
             cost_usd=0.02,
-            raw={"is_error": False},
+            raw={"is_error": not ok},
             stderr="",
         )
 
@@ -186,6 +189,49 @@ def test_review_invalid_when_never_well_formed(
     assert result.review is not None
     assert result.review.status == "invalid"
     assert result.review.passed is False
+
+
+def test_review_invalid_when_turn_fails_even_with_parseable_file(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # A failed reviewer turn that left a *valid* handoff must NOT be accepted
+    # (exit-code contract). review_first is well-formed LGTM, but reviewer_ok=False.
+    _install_fakes(monkeypatch, config, review_first=_LGTM, reviewer_ok=False)
+    result = develop_mod.develop(config)
+    assert result.review is not None
+    assert result.review.status == "invalid"
+    assert result.review.passed is False
+
+
+def test_review_invalid_when_retry_turn_fails(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # First turn succeeds but malformed -> re-prompt; the retry turn fails even
+    # though a valid file now exists -> still invalid.
+    _install_fakes(
+        monkeypatch,
+        config,
+        review_first=_GARBAGE,
+        review_retry=_LGTM,
+        retry_ok=False,
+    )
+    result = develop_mod.develop(config)
+    assert result.review is not None
+    assert result.review.status == "invalid"
+
+
+def test_develop_rejects_invalid_reviewer_name(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    cfg = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        reviewer="code quality",  # space -> invalid container/path/filename
+        claude_config_dir=tmp_path / "fake-claude",
+    )
+    with pytest.raises(ValueError, match="invalid reviewer name"):
+        develop_mod.develop(cfg)
 
 
 def test_no_review_when_coder_fails(

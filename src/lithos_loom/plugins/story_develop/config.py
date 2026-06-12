@@ -7,9 +7,22 @@ etc. — see ``docs/prd/story-develop.md``.
 
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# A reviewer name becomes a Docker container name, a host dir, and a handoff
+# filename, so it must be a safe slug (lowercase alphanumerics + hyphens,
+# starting alphanumeric). This rejects spaces ("code quality") and path
+# separators ("security/appsec") before they create invalid names / nested dirs.
+_REVIEWER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def is_valid_reviewer_name(name: str) -> bool:
+    """True if *name* is a safe slug for container / path / filename use."""
+    return bool(_REVIEWER_NAME_RE.fullmatch(name))
+
 
 # Image + container constants (ralph-sandbox; see ADR 0002 / feasibility gate).
 DEFAULT_CODER_TOOL = "claude"

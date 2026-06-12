@@ -17,7 +17,12 @@ from pathlib import Path
 
 from ...runner import git, worktree
 from . import containers, handoff
-from .config import CLAUDE_AUTH_FILES, HANDOFF_DIRNAME, DevelopConfig
+from .config import (
+    CLAUDE_AUTH_FILES,
+    HANDOFF_DIRNAME,
+    DevelopConfig,
+    is_valid_reviewer_name,
+)
 from .handoff import Finding, HandoffError, ReviewHandoff
 from .turns import TurnResult, run_turn
 
@@ -144,22 +149,31 @@ def _run_review(config: DevelopConfig, wt: Path, *, timeout: int) -> ReviewOutco
             container=name, prompt=prompt, session_id=session_id, timeout=timeout
         )
         cost += turn.cost_usd
-        parsed, err = _read_review(review_path)
-        if parsed is None and turn.succeeded:
-            # Malformed handoff: re-prompt the same reviewer (resume its session).
-            correction = (
-                f"Your review at .handoff/{review_file} was not valid: {err}. "
-                f"Please rewrite only that file per /workspace/.handoff/FORMAT.md."
-            )
-            retry = run_turn(
-                container=name,
-                prompt=correction,
-                session_id=session_id,
-                resume=True,
-                timeout=timeout,
-            )
-            cost += retry.cost_usd
+        # A handoff is only authoritative if the turn that produced it SUCCEEDED
+        # (clean exit + structured result). A failed turn that happens to leave a
+        # parseable file must not be accepted — it defeats the exit-code contract.
+        if not turn.succeeded:
+            err = f"reviewer turn failed (exit {turn.exit_code})"
+        else:
             parsed, err = _read_review(review_path)
+            if parsed is None:
+                # Malformed handoff: re-prompt the same reviewer (resume session).
+                correction = (
+                    f"Your review at .handoff/{review_file} was not valid: {err}. "
+                    f"Please rewrite only that file per /workspace/.handoff/FORMAT.md."
+                )
+                retry = run_turn(
+                    container=name,
+                    prompt=correction,
+                    session_id=session_id,
+                    resume=True,
+                    timeout=timeout,
+                )
+                cost += retry.cost_usd
+                if retry.succeeded:
+                    parsed, err = _read_review(review_path)
+                else:
+                    err = f"reviewer retry turn failed (exit {retry.exit_code})"
     finally:
         containers.stop_container(name)
 
@@ -195,6 +209,11 @@ def develop(
     if config.coder != "claude" or config.reviewer_tool != "claude":
         raise ValueError(
             "unsupported tool for T2: only 'claude' (codex arrives with T5/T6)"
+        )
+    if not is_valid_reviewer_name(config.reviewer):
+        raise ValueError(
+            f"invalid reviewer name {config.reviewer!r}: must be lowercase "
+            "alphanumerics + hyphens (e.g. 'code-quality')"
         )
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)

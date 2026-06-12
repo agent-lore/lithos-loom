@@ -25,6 +25,7 @@ from .config import (
     DEFAULT_IMAGE,
     DEFAULT_REVIEWER_NAME,
     DevelopConfig,
+    is_valid_reviewer_name,
 )
 from .develop import develop
 
@@ -81,6 +82,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.description.strip():
         print("error: --description must not be empty", file=sys.stderr)
+        return 2
+
+    if not is_valid_reviewer_name(args.reviewer):
+        print(
+            f"error: invalid --reviewer {args.reviewer!r}: use lowercase "
+            "alphanumerics + hyphens (e.g. 'code-quality')",
+            file=sys.stderr,
+        )
         return 2
 
     repo = args.repo.expanduser().resolve()
