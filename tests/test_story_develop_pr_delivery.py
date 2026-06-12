@@ -200,10 +200,14 @@ def _install(
     )
     monkeypatch.setattr(pr_delivery, "request_copilot", lambda *a: request_ok)
     monkeypatch.setattr(
-        pr_delivery, "wait_for_copilot", lambda *a, **kw: copilot_arrives
+        pr_delivery,
+        "wait_for_copilot",
+        lambda *a, **kw: len(comments or []) if copilot_arrives else None,
     )
     monkeypatch.setattr(
-        pr_delivery, "fetch_copilot_comments", lambda *a: list(comments or [])
+        pr_delivery,
+        "fetch_copilot_comments_settled",
+        lambda *a, **kw: list(comments or []),
     )
     monkeypatch.setattr(
         pr_delivery,
@@ -417,3 +421,71 @@ def test_deliver_coder_failure_comments_and_degrades(
     assert out.fix_committed is False and out.replies_posted == 0
     assert any("coder turn failed" in c for c in state["pr_comments"])
     assert any("respond manually" in n for n in out.notes)
+
+
+# --- comment-lag settling (the first-dogfood race) ------------------------------
+
+
+def test_settled_fetch_waits_for_lagging_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # First poll returns [], the comments materialise on the third — the
+    # settle loop must keep going until the EXPECTED count is visible.
+    calls = {"n": 0}
+    arrived = [CopilotComment(comment_id=1, path="a.py", line=1, body="x")]
+
+    def fake_fetch(wt, repo, pr):
+        calls["n"] += 1
+        return arrived if calls["n"] >= 3 else []
+
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
+    monkeypatch.setattr(pr_delivery.time, "sleep", lambda s: None)
+    out = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=1, grace_seconds=60
+    )
+    assert out == arrived and calls["n"] == 3
+
+
+def test_settled_fetch_zero_expected_returns_immediately(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = {"n": 0}
+
+    def fake_fetch(wt, repo, pr):
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
+    out = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=0, grace_seconds=60
+    )
+    assert out == [] and calls["n"] == 1  # no pointless polling
+
+
+def test_settled_fetch_grace_bounds_the_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", lambda *a: [])
+    clock = {"t": 0.0}
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
+    out = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=2, grace_seconds=30
+    )
+    assert out == []  # gave up after the grace window
+
+
+def test_generated_count_parsing() -> None:
+    def token(text: str) -> str:
+        m = pr_delivery._GENERATED_RE.search(text)
+        assert m is not None
+        return m.group(1)
+
+    assert token("generated 3 comments") == "3"
+    assert token("generated 1 comment") == "1"
+    assert token("generated no comments") == "no"
+    assert pr_delivery._GENERATED_RE.search("reviewed all files") is None

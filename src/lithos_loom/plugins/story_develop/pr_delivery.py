@@ -283,15 +283,32 @@ def request_copilot(wt: Path, repo: str, pr_number: int) -> bool:
     return True
 
 
-def _copilot_review_exists(wt: Path, repo: str, pr_number: int) -> bool:
+_GENERATED_RE = re.compile(r"generated (\d+|no) comments?", re.IGNORECASE)
+
+
+def copilot_expected_comments(wt: Path, repo: str, pr_number: int) -> int | None:
+    """The comment count Copilot's review summary claims, or status markers.
+
+    Returns ``None`` while no Copilot review exists yet; ``-1`` when a review
+    exists but its body doesn't state a count (treat as "unknown, expect
+    some"); otherwise the stated count (``"no comments"`` -> 0).
+    """
     proc = _run(["gh", "api", f"repos/{repo}/pulls/{pr_number}/reviews"], cwd=wt)
     if proc.returncode != 0:
-        return False
+        return None
     try:
         reviews: list[dict[str, Any]] = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return False
-    return any((r.get("user") or {}).get("login") == COPILOT_LOGIN for r in reviews)
+        return None
+    for r in reviews:
+        if (r.get("user") or {}).get("login") != COPILOT_LOGIN:
+            continue
+        m = _GENERATED_RE.search(str(r.get("body") or ""))
+        if m is None:
+            return -1
+        token = m.group(1)
+        return 0 if token == "no" else int(token)
+    return None
 
 
 def fetch_copilot_comments(wt: Path, repo: str, pr_number: int) -> list[CopilotComment]:
@@ -327,14 +344,48 @@ def wait_for_copilot(
     *,
     timeout: int,
     poll_seconds: int = COPILOT_POLL_SECONDS,
-) -> bool:
-    """Poll until Copilot's review lands; False on timeout."""
+) -> int | None:
+    """Poll until Copilot's review lands; its expected comment count, or
+    ``None`` on timeout (see :func:`copilot_expected_comments`)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _copilot_review_exists(wt, repo, pr_number):
-            return True
+        expected = copilot_expected_comments(wt, repo, pr_number)
+        if expected is not None:
+            return expected
         time.sleep(min(poll_seconds, max(1, deadline - time.monotonic())))
-    return False
+    return None
+
+
+def fetch_copilot_comments_settled(
+    wt: Path,
+    repo: str,
+    pr_number: int,
+    *,
+    expected: int,
+    grace_seconds: int = 90,
+    poll_seconds: int = 5,
+) -> list[CopilotComment]:
+    """Fetch Copilot's inline comments, waiting for them to MATERIALISE.
+
+    Copilot's inline comments lag its review summary by a few seconds (a
+    first-poll empty list is the norm, not the signal — this raced in the
+    first T9 dogfood run). *expected* comes from the review body: 0 returns
+    immediately; a positive count waits until that many are visible; -1
+    (unknown) waits for any to appear. The grace window bounds the wait.
+    """
+    if expected == 0:
+        return fetch_copilot_comments(wt, repo, pr_number)
+    deadline = time.monotonic() + grace_seconds
+    comments: list[CopilotComment] = []
+    while True:
+        comments = fetch_copilot_comments(wt, repo, pr_number)
+        if expected > 0 and len(comments) >= expected:
+            return comments
+        if expected < 0 and comments:
+            return comments
+        if time.monotonic() >= deadline:
+            return comments
+        time.sleep(min(poll_seconds, max(1, deadline - time.monotonic())))
 
 
 def post_thread_reply(
@@ -429,7 +480,8 @@ def deliver(
     if not requested:
         notes.append("Copilot review request failed; respond manually")
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
-    if not wait_for_copilot(wt, repo, pr_number, timeout=copilot_timeout):
+    expected = wait_for_copilot(wt, repo, pr_number, timeout=copilot_timeout)
+    if expected is None:
         notes.append(
             f"Copilot review not received within {copilot_timeout}s; "
             "respond manually when it lands"
@@ -441,7 +493,12 @@ def deliver(
             notes=tuple(notes),
         )
 
-    comments = fetch_copilot_comments(wt, repo, pr_number)
+    comments = fetch_copilot_comments_settled(wt, repo, pr_number, expected=expected)
+    if expected > 0 and len(comments) < expected:
+        notes.append(
+            f"Copilot's summary claims {expected} comment(s) but only "
+            f"{len(comments)} became visible; check the PR"
+        )
     if not comments:
         return DeliveryOutcome(
             pr_url=pr_url,
