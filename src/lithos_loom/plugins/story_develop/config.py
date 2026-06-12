@@ -70,6 +70,56 @@ class ReviewerSpec:
 
 _VALID_THRESHOLDS = ("critical", "major", "minor")
 
+_REVIEWER_ENTRY_KEYS = {
+    "name",
+    "tool",
+    "block_threshold",
+    "system_prompt",
+    "fallback_chain",
+}
+
+
+def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
+    """Validate one reviewer mapping into a :class:`ReviewerSpec`.
+
+    Shared by the ``--develop-config`` TOML loader and the daemon-mode
+    project-context metadata loader (T10) so both surfaces enforce the
+    identical schema. *where* labels the entry in error messages
+    (e.g. ``"config.toml: reviewers[2]"``). Raises :class:`ValueError`.
+    """
+    if not isinstance(entry, dict):
+        raise ValueError(f"{where} is not a table/object")
+    unknown = set(entry) - _REVIEWER_ENTRY_KEYS
+    if unknown:
+        raise ValueError(f"{where} has unknown keys {sorted(unknown)}")
+    name = entry.get("name", "")
+    if not isinstance(name, str) or not is_valid_reviewer_name(name):
+        raise ValueError(
+            f"{where}: name {name!r} must be a lowercase alphanumeric-and-hyphens slug"
+        )
+    threshold = entry.get("block_threshold", DEFAULT_BLOCK_THRESHOLD)
+    if threshold not in _VALID_THRESHOLDS:
+        raise ValueError(
+            f"{where}: block_threshold must be one of "
+            f"{_VALID_THRESHOLDS} (got {threshold!r})"
+        )
+    chain = entry.get("fallback_chain", [])
+    if not isinstance(chain, list) or not all(isinstance(t, str) for t in chain):
+        raise ValueError(f"{where}: fallback_chain must be a list of strings")
+    system_prompt = entry.get("system_prompt")
+    if system_prompt is not None and not isinstance(system_prompt, str):
+        raise ValueError(f"{where}: system_prompt must be a string")
+    tool = entry.get("tool", DEFAULT_REVIEWER_TOOL)
+    if not isinstance(tool, str):
+        raise ValueError(f"{where}: tool must be a string")
+    return ReviewerSpec(
+        name=name,
+        tool=tool,
+        block_threshold=threshold,
+        system_prompt=system_prompt,
+        fallback_chain=tuple(chain),
+    )
+
 
 def load_develop_config(path: Path) -> tuple[ReviewerSpec, ...]:
     """Parse a ``--develop-config`` TOML file into reviewer specs.
@@ -99,54 +149,11 @@ def load_develop_config(path: Path) -> tuple[ReviewerSpec, ...]:
     specs: list[ReviewerSpec] = []
     seen: set[str] = set()
     for i, entry in enumerate(raw, start=1):
-        if not isinstance(entry, dict):
-            raise ValueError(f"{path}: reviewers[{i}] is not a table")
-        unknown = set(entry) - {
-            "name",
-            "tool",
-            "block_threshold",
-            "system_prompt",
-            "fallback_chain",
-        }
-        if unknown:
-            raise ValueError(
-                f"{path}: reviewers[{i}] has unknown keys {sorted(unknown)}"
-            )
-        name = entry.get("name", "")
-        if not isinstance(name, str) or not is_valid_reviewer_name(name):
-            raise ValueError(
-                f"{path}: reviewers[{i}].name {name!r} must be a lowercase "
-                "alphanumeric-and-hyphens slug"
-            )
-        if name in seen:
-            raise ValueError(f"{path}: duplicate reviewer name {name!r}")
-        seen.add(name)
-        threshold = entry.get("block_threshold", DEFAULT_BLOCK_THRESHOLD)
-        if threshold not in _VALID_THRESHOLDS:
-            raise ValueError(
-                f"{path}: reviewers[{i}].block_threshold must be one of "
-                f"{_VALID_THRESHOLDS} (got {threshold!r})"
-            )
-        chain = entry.get("fallback_chain", [])
-        if not isinstance(chain, list) or not all(isinstance(t, str) for t in chain):
-            raise ValueError(
-                f"{path}: reviewers[{i}].fallback_chain must be a list of strings"
-            )
-        system_prompt = entry.get("system_prompt")
-        if system_prompt is not None and not isinstance(system_prompt, str):
-            raise ValueError(f"{path}: reviewers[{i}].system_prompt must be a string")
-        tool = entry.get("tool", DEFAULT_REVIEWER_TOOL)
-        if not isinstance(tool, str):
-            raise ValueError(f"{path}: reviewers[{i}].tool must be a string")
-        specs.append(
-            ReviewerSpec(
-                name=name,
-                tool=tool,
-                block_threshold=threshold,
-                system_prompt=system_prompt,
-                fallback_chain=tuple(chain),
-            )
-        )
+        spec = parse_reviewer_entry(entry, where=f"{path}: reviewers[{i}]")
+        if spec.name in seen:
+            raise ValueError(f"{path}: duplicate reviewer name {spec.name!r}")
+        seen.add(spec.name)
+        specs.append(spec)
     return tuple(specs)
 
 

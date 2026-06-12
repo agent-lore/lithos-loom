@@ -548,3 +548,133 @@ async def test_runner_subscribes_only_to_created_and_released(
         await bus.publish(_evt(type_=type_))
     await _run_for(runner)
     lithos.task_claim.assert_not_called()
+
+
+# ── Usage-limit re-dispatch (T10) ──────────────────────────────────────
+
+
+def _interrupted_with_resume(
+    resume_after: str = "2026-01-01T00:00:00+00:00",
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "task_id": "task-1",
+        "status": "interrupted",
+        "exit_code": 30,
+        "error": {
+            "category": "usage_limited",
+            "message": "coder usage-limited",
+            "retriable": True,
+        },
+        "resume": {"resume_after": resume_after, "run_id": "r1"},
+    }
+
+
+async def test_runner_interrupted_with_resume_redispatches(tmp_path: Path) -> None:
+    """A resume block on an interrupted result schedules a re-claim + re-run.
+
+    resume_after in the past → the sleeper fires immediately; the runner
+    re-checks the task is open, drops the dedup entry, re-claims, and the
+    plugin's second run succeeds → task_complete.
+    """
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(),
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "exit_code": 0,
+            },
+        ]
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="open",
+        tags=("trigger:story-implement",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 2
+    assert lithos.task_claim.await_count == 2
+    lithos.task_release.assert_awaited_once()
+    lithos.task_complete.assert_awaited_once()
+
+
+async def test_runner_resume_dropped_when_task_no_longer_open(
+    tmp_path: Path,
+) -> None:
+    """At resume time a terminal task is dropped — no re-claim, no re-run."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="completed",
+        tags=("trigger:story-implement",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1
+    assert lithos.task_claim.await_count == 1
+
+
+async def test_runner_resume_budget_exhausted_posts_friction(
+    tmp_path: Path,
+) -> None:
+    """Beyond MAX_RESUMES_PER_TASK the task stays open with a [Friction] note."""
+    from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
+
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    runner._resume_counts["task-1"] = MAX_RESUMES_PER_TASK
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1
+    assert not runner._resume_tasks
+    lithos.finding_post.assert_awaited_once()
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[Friction]")
+    assert "resume budget exhausted" in summary
+
+
+async def test_runner_unparseable_resume_after_not_scheduled(
+    tmp_path: Path,
+) -> None:
+    """Garbage resume_after → release only; no crash, no re-dispatch."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        side_effect=[_interrupted_with_resume(resume_after="not-a-timestamp")]
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1
+    assert not runner._resume_tasks
+    lithos.task_release.assert_awaited_once()
+    lithos.finding_post.assert_not_called()

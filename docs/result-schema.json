@@ -66,10 +66,35 @@
           "properties": {
             "category": {
               "type": "string",
-              "enum": ["config", "environment", "input", "agent", "git", "github", "lithos", "internal"]
+              "enum": ["config", "environment", "input", "agent", "git", "github", "lithos", "usage_limited", "internal"]
             },
             "message": {"type": "string"},
             "retriable": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "resume": {
+      "description": "Present only on status=interrupted runs that are worth re-dispatching (e.g. a provider usage limit). The runner schedules a re-claim + re-run at resume_after; session ids let the plugin resume its on-disk transcripts from the retained work dir.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["resume_after"],
+          "additionalProperties": false,
+          "properties": {
+            "resume_after": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Earliest instant a re-dispatch is expected to succeed (provider reset time, or a fallback delay when unknown)."
+            },
+            "run_id": {"type": "string"},
+            "coder_session": {"type": "string"},
+            "reviewer_sessions": {
+              "type": "object",
+              "description": "Map of reviewer name to its session id.",
+              "additionalProperties": {"type": "string"}
+            }
           }
         }
       ]

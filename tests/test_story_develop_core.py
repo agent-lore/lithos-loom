@@ -1104,3 +1104,73 @@ def test_develop_rejects_bad_max_rounds(tmp_git_repo: Path, tmp_path: Path) -> N
     )
     with pytest.raises(ValueError, match="max_rounds"):
         develop_mod.develop(cfg)
+
+
+# --- resume_after surface (T10) ----------------------------------------------
+
+
+def test_interrupted_coder_run_carries_resume_after(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """An interrupted run exposes WHEN to retry — on the result AND in
+    state.json (the daemon re-dispatch surface). The fake's epoch hint is in
+    the past (= noise), so the fixed fallback delay applies."""
+    from dataclasses import replace
+    from datetime import UTC, datetime, timedelta
+
+    cfg = replace(config, max_pause_minutes=0)
+    _install_fakes(monkeypatch, cfg, coder_results=["limit"])
+    before = datetime.now(UTC)
+    result = develop_mod.develop(cfg)
+    assert result.status == "interrupted"
+    assert result.resume_after is not None
+    delta = result.resume_after - before
+    assert timedelta(minutes=55) < delta < timedelta(minutes=65)
+    state_file = json.loads((cfg.run_dir / "state.json").read_text())
+    assert state_file["resume_after"] == result.resume_after.isoformat(
+        timespec="seconds"
+    )
+
+
+def test_interrupted_reviewer_run_carries_resume_after(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, max_pause_minutes=0)
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 99}])
+    result = develop_mod.develop(cfg)
+    assert result.status == "interrupted"
+    assert result.resume_after is not None
+
+
+def test_non_interrupted_run_has_no_resume_after(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    _install_fakes(monkeypatch, config)
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert result.resume_after is None
+    state_file = json.loads((config.run_dir / "state.json").read_text())
+    assert state_file["resume_after"] is None
+
+
+def test_resume_after_uses_provider_reset_hint_when_future() -> None:
+    """A parseable FUTURE epoch sentinel becomes the resume time verbatim."""
+    from datetime import UTC, datetime
+
+    from lithos_loom.plugins.story_develop.develop import _resume_after_from
+    from lithos_loom.plugins.story_develop.turns import TurnResult
+
+    future_epoch = int(datetime.now(UTC).timestamp()) + 7200  # +2h
+    turn = TurnResult(
+        exit_code=1,
+        succeeded=False,
+        session_id="",
+        result_text=f"Claude AI usage limit reached|{future_epoch}",
+        cost_usd=0.0,
+        raw={"is_error": True},
+        stderr="",
+    )
+    resumed = _resume_after_from(turn)
+    assert int(resumed.timestamp()) == future_epoch

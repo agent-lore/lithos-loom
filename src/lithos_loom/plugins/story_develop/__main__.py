@@ -15,9 +15,21 @@ reviewer approves (LGTM or below the block threshold) or ``--max-rounds`` is
 hit. Leaves a branch with per-round commits and a conversation log. With
 ``--task-id`` the task (title, body, acceptance criteria) is fetched from
 Lithos up front and the outcome (verdicts, open findings, branch, cost) is
-posted back when the run ends. Daemon mode
-(``--task-json/--work-dir/--result-file``) arrives with T10. The shared core is
-:func:`lithos_loom.plugins.story_develop.develop.develop`.
+posted back when the run ends.
+
+Daemon mode (T10)::
+
+    python -m lithos_loom.plugins.story_develop \\
+        --repo ~/projects/foo \\
+        --task-json <p> --work-dir <p> --result-file <p>
+
+The route-runner contract: the task arrives as ``task.json`` (no Lithos
+fetch needed — the runner claimed it), reviewer config is resolved from the
+project-context doc's ``develop_*`` metadata, and the outcome is written
+atomically to ``--result-file`` per ``docs/result-schema.json`` (plus the
+same Lithos findings post as ``--task-id`` mode). ``--repo`` still comes
+from the route's command template — the daemon knows tasks, not checkouts.
+The shared core is :func:`lithos_loom.plugins.story_develop.develop.develop`.
 """
 
 from __future__ import annotations
@@ -26,8 +38,10 @@ import argparse
 import logging
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
+from ...plugin_runner import write_result_atomically
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     DEFAULT_CODER_TOOL,
@@ -41,6 +55,13 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
     load_develop_config,
+)
+from .daemon_io import (
+    EXIT_BAD_INPUT,
+    build_result_payload,
+    post_frictions,
+    read_task_payload,
+    resolve_project_settings,
 )
 from .develop import develop
 from .lithos_io import (
@@ -60,6 +81,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "iterate to approval or --max-rounds).",
     )
     p.add_argument("--repo", required=True, type=Path, help="Path to the project repo")
+    p.add_argument(
+        "--task-json",
+        type=Path,
+        default=None,
+        help="DAEMON MODE: path to the runner's task.json; requires "
+        "--work-dir and --result-file, and replaces --description/--task-id "
+        "(reviewer config comes from project-context metadata)",
+    )
+    p.add_argument(
+        "--result-file",
+        type=Path,
+        default=None,
+        help="DAEMON MODE: where to write the atomic result.json",
+    )
     p.add_argument(
         "--description",
         default=None,
@@ -217,11 +252,157 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _daemon_main(args: argparse.Namespace) -> int:
+    """Daemon-mode entry (T10): task.json in, atomic result.json out.
+
+    Validation failures before the task id is known exit ``EXIT_BAD_INPUT``
+    with no result file — the runner surfaces that as a contract violation,
+    which is correct (there is nothing to report against). Once the task id
+    is known, every outcome — including a config rejection or an unexpected
+    crash — is reported through result.json so the runner applies the right
+    release/complete/re-dispatch behaviour.
+    """
+    flags = [
+        ("--description", args.description is not None),
+        ("--task-id", args.task_id is not None),
+        ("--no-lithos", args.no_lithos),
+        ("--complete-on-approval", args.complete_on_approval),
+        ("--reviewer", bool(args.reviewer)),
+        ("--develop-config", args.develop_config is not None),
+    ]
+    bad = [flag for flag, present in flags if present]
+    if bad:
+        print(
+            f"error: {', '.join(bad)} incompatible with --task-json (daemon "
+            "mode resolves the task from task.json and reviewer config from "
+            "project-context metadata)",
+            file=sys.stderr,
+        )
+        return EXIT_BAD_INPUT
+    if args.result_file is None or args.work_dir is None:
+        print(
+            "error: daemon mode requires --result-file and --work-dir",
+            file=sys.stderr,
+        )
+        return EXIT_BAD_INPUT
+    repo = args.repo.expanduser().resolve()
+    if not (repo / ".git").exists():
+        print(f"error: {repo} is not a git repository", file=sys.stderr)
+        return EXIT_BAD_INPUT
+    try:
+        ctx = read_task_payload(args.task_json.expanduser().resolve())
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_BAD_INPUT
+
+    result_file = args.result_file.expanduser().resolve()
+    started_at = datetime.now(UTC)
+    settings = resolve_project_settings(args.lithos_url, ctx.metadata)
+    for friction in settings.frictions:
+        print(f"[Friction] {friction}", file=sys.stderr)
+    post_frictions(args.lithos_url, ctx.task_id, settings.frictions)
+    print(f"developing Lithos task {ctx.task_id}: {ctx.title} (daemon mode)")
+
+    config = DevelopConfig(
+        repo=repo,
+        description=ctx.task_text,
+        work_dir=args.work_dir.expanduser().resolve(),
+        acceptance_criteria=ctx.acceptance_criteria,
+        coder=settings.coder,
+        reviewers=settings.reviewers,
+        max_rounds=settings.max_rounds or args.max_rounds,
+        test_gate=not args.no_test_gate,
+        test_command=args.test_command,
+        block_on_red=args.block_on_red,
+        test_timeout=args.test_timeout,
+        max_pause_minutes=args.max_pause_minutes,
+        pause_poll_minutes=args.pause_poll_minutes,
+        reviewer_fallback_chain=(
+            settings.fallback_chain or tuple(args.reviewer_fallback or ())
+        ),
+        max_cost_usd=(
+            settings.max_cost_usd
+            if settings.max_cost_usd is not None
+            else args.max_cost_usd
+        ),
+        image=args.image,
+        base_branch=args.branch,
+    )
+
+    def _fail_payload(category: str, message: str, exit_code: int) -> int:
+        write_result_atomically(
+            result_file,
+            {
+                "schema_version": 1,
+                "task_id": ctx.task_id,
+                "status": "failed",
+                "exit_code": exit_code,
+                "started_at": started_at.isoformat(timespec="seconds"),
+                "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "error": {"category": category, "message": message},
+            },
+        )
+        print(f"error: {message}", file=sys.stderr)
+        return exit_code
+
+    try:
+        result = develop(
+            config,
+            coder_timeout=args.coder_timeout,
+            reviewer_timeout=args.reviewer_timeout,
+        )
+    except ValueError as exc:
+        # The core rejected the resolved config (e.g. project metadata named
+        # an unsupported tool): a do-not-retry config failure.
+        return _fail_payload("config", str(exc), EXIT_BAD_INPUT)
+    except Exception as exc:  # crash: still honour the result.json contract
+        logging.getLogger(__name__).exception("story-develop daemon run crashed")
+        return _fail_payload("internal", f"unexpected error: {exc}", 1)
+
+    delivery = None
+    if args.open_pr and result.approved:
+        raw_issue = ctx.metadata.get("github_issue_url")
+        try:
+            delivery = deliver(
+                config,
+                result,
+                no_copilot=args.no_copilot,
+                copilot_timeout=args.copilot_timeout,
+                coder_timeout=args.coder_timeout,
+                github_issue_url=raw_issue if isinstance(raw_issue, str) else None,
+                task_id=ctx.task_id,
+            )
+        except Exception as exc:  # delivery failure must not sink the run
+            print(f"pr delivery failed: {exc}", file=sys.stderr)
+
+    post_results(args.lithos_url, ctx.task_id, result, delivery=delivery)
+    payload, exit_code = build_result_payload(
+        result,
+        task_id=ctx.task_id,
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        run_dir=config.run_dir,
+    )
+    write_result_atomically(result_file, payload)
+    print(
+        f"story-develop daemon run {result.run_id}: {result.status.upper()} — "
+        f"{result.message}"
+    )
+    return exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+
+    # --- daemon mode (T10): dispatch before any standalone validation -----
+    if args.task_json is not None:
+        return _daemon_main(args)
+    if args.result_file is not None:
+        print("error: --result-file requires --task-json", file=sys.stderr)
+        return 2
 
     # --- resolve the task source (T8) -------------------------------------
     if args.task_id is not None and args.no_lithos:

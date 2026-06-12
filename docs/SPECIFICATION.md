@@ -111,7 +111,7 @@ Each child runs its own EventBus instance. There is no inter-child IPC; all thre
 
 - `succeeded` → `lithos_task_complete`.
 - `failed` → `lithos_task_release` + `[BlockerFailed]` finding (the error message is pulled from `error.message` if present).
-- `interrupted` → `lithos_task_release`, no finding.
+- `interrupted` → `lithos_task_release`, no finding. When the result also carries a `resume` block (`resume_after` timestamp — e.g. a story-develop run that checkpointed on a provider usage limit), the runner additionally schedules an in-process re-dispatch: at `resume_after` it re-checks the task is still open, then re-claims and re-runs the plugin. Bounded at `MAX_RESUMES_PER_TASK` (3) re-dispatches per task per daemon process; on exhaustion the task stays open with a `[Friction]` finding. The schedule is in-memory only — a daemon restart loses it, but the event-stream bootstrap re-surfaces open tasks on startup anyway.
 - Unknown / missing status → `lithos_task_release` + `[BlockerFailed]`.
 
 Other `result.json` fields (`metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable`) are schema-validated but currently ignored. On plugin timeout, the runner sends SIGTERM with a grace period before SIGKILL.
@@ -234,6 +234,17 @@ human_blocking = false  # if true, surfaced in Obsidian projection once claimed
 
 [routes.match]
 tags = ["trigger:story-implement"]  # task must carry ALL listed tags
+
+# story-develop binds a trigger tag to one host repo path (--repo lives in
+# the command; one route per project). Reviewer config comes from the
+# project-context doc's develop_* metadata (§5.5).
+[[routes]]
+name = "story-develop"
+command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo /home/you/projects/example"
+max_runtime_seconds = 28800
+
+[routes.match]
+tags = ["trigger:story-develop"]
 
 # ── Subscriptions (fire-and-forget side effects) ──────────────────────
 #
@@ -529,7 +540,22 @@ The full schema is at `docs/result-schema.json` (JSON Schema Draft 2020-12). Req
 }
 ```
 
-For a failed run, replace `status` with `"failed"` (or `"interrupted"`) and set `error` to an object with the required keys `category` (one of `config`, `environment`, `input`, `agent`, `git`, `github`, `lithos`, `internal`) and `message`, plus the optional boolean `retriable`. No other `error` keys are accepted.
+For a failed run, replace `status` with `"failed"` (or `"interrupted"`) and set `error` to an object with the required keys `category` (one of `config`, `environment`, `input`, `agent`, `git`, `github`, `lithos`, `usage_limited`, `internal`) and `message`, plus the optional boolean `retriable`. No other `error` keys are accepted.
+
+An `interrupted` result may additionally carry a `resume` object marking the interruption as retryable:
+
+```json
+{
+  "resume": {
+    "resume_after": "2026-06-12T15:00:00+00:00",
+    "run_id": "abc12345",
+    "coder_session": "uuid",
+    "reviewer_sessions": { "code-quality": "uuid" }
+  }
+}
+```
+
+`resume_after` (required within the block) is the earliest instant a re-run is expected to succeed — the provider's parsed reset time, or a fixed fallback delay when no hint was parseable. The session ids let a future run resume its on-disk transcripts from the retained work dir.
 
 **What the runner does with each field today:**
 
@@ -537,7 +563,8 @@ For a failed run, replace `status` with `"failed"` (or `"interrupted"`) and set 
 |---|---|
 | `schema_version`, `task_id`, `status` | Required by schema; `status` drives the runner's branch (see §2.2). |
 | `error.message` | Used as the `[BlockerFailed]` finding text when `status == "failed"`. |
-| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error.category`, `error.retriable` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
+| `resume.resume_after` | Schedules the in-process re-dispatch on `status == "interrupted"` (see §2.2). |
+| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error.category`, `error.retriable`, `resume.run_id`, `resume.coder_session`, `resume.reviewer_sessions` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
 
 ### 5.3 Runner Lifecycle
 
@@ -548,6 +575,24 @@ The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, 
 ### 5.4 Bundled Plugins (scaffolded)
 
 `prd-decompose`, `story-implement`, `story-review-human` are present under `src/lithos_loom/plugins/` as Python modules with prompt files. Their bodies are stubs; they do not yet produce real `result.json` output. The route-runner code path is the load-bearing piece exercised by tests.
+
+### 5.5 story-develop (shipped)
+
+`story-develop` runs the full implement → review → fix → approve loop with containerised agents (one persistent coder session + an N-reviewer panel; per-round commits, objective test gate, usage-limit reactions, optional PR delivery with an autonomous Copilot review round). The full design is `docs/prd/story-develop.md`; the standalone CLI surface is `python -m lithos_loom.plugins.story_develop --help`.
+
+**Daemon mode.** Passing `--task-json` (with `--work-dir` and `--result-file`) switches the plugin to the route-runner contract:
+
+```
+uv run python -m lithos_loom.plugins.story_develop \
+    --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} \
+    --repo /abs/path/to/checkout
+```
+
+- `--repo` stays in the route's `command` — the daemon dispatches tasks, not checkouts, so a route binds a trigger tag to one host repo path (one route per project).
+- The task (title, body, `metadata.acceptance_criteria`) comes from `task.json`; `--description` / `--task-id` / `--no-lithos` / `--complete-on-approval` / `--reviewer` / `--develop-config` are rejected in daemon mode.
+- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`. Per-task override: `task.metadata.reviewers` (names from the pool). Every miss — no slug, no doc, no keys, unknown name — degrades to the built-in single `code-quality` reviewer with a `[Friction]` finding; a populated pool without a default selection still runs only the built-in reviewer (pool membership does not auto-run).
+- **Status mapping.** `approved` → `succeeded` (the runner completes the task); `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.
+- The plugin still owns its Lithos round-trip directly (the `[DevelopResult]` finding + `develop_*` metadata, same as `--task-id` mode); `result.json` carries `status` for the runner, so there is no double-application.
 
 ---
 
