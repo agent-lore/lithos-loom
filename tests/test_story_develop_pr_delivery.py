@@ -324,6 +324,8 @@ def test_deliver_full_copilot_round(
 
     assert out.comments_count == 1
     assert out.fix_committed and out.fix_pushed
+    assert out.fix_sha is not None
+    assert out.extra_cost_usd == pytest.approx(0.1)  # the fix turn's spend
     assert state["pushes"] == 2  # initial + fix
     # the coder round resumed the ORIGINAL session
     assert state["resume"] is True and state["session"] == "sess-1"
@@ -332,6 +334,11 @@ def test_deliver_full_copilot_round(
     assert "pull/82" in state["turn_prompts"][0]
     # synthetic copilot review handoff persisted (round = rounds+1)
     assert (config.handoff_dir / "round_03_review_copilot.md").is_file()
+    # audit parity: the conversation log now includes the Copilot exchange
+    log = (config.run_dir / "conversation.md").read_text()
+    assert "## Copilot round" in log
+    assert "tighten this" in log  # copilot's comment
+    assert "tightened the annotation" in log  # the coder's response
     # one reply, on the right thread, with the coder's public one-liner
     ((cid, body),) = state["replies"]
     assert cid == 11

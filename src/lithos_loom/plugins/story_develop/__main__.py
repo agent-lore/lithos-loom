@@ -415,7 +415,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(
                     f"  copilot:  {delivery.comments_count} comment(s); {fix}; "
-                    f"{delivery.replies_posted} repl(ies) posted"
+                    f"{delivery.replies_posted} repl(ies) posted; "
+                    f"+${delivery.extra_cost_usd:.4f}"
                 )
             for note in delivery.notes:
                 print(f"  note:     {note}")
@@ -427,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
             args.lithos_url,
             args.task_id,
             result,
-            pr_url=delivery.pr_url if delivery else None,
+            delivery=delivery,
         )
         print(
             f"  lithos:   {'results posted to' if posted else 'POSTING FAILED for'} "

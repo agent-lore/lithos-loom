@@ -66,6 +66,8 @@ class DeliveryOutcome:
     fix_pushed: bool = False
     fix_gate_verdict: str | None = None  # GREEN | RED | TIMEOUT | None (no gate)
     replies_posted: int = 0
+    fix_sha: str | None = None  # the (pushed) fix commit
+    extra_cost_usd: float = 0.0  # the Copilot fix turn's spend
     notes: tuple[str, ...] = field(default=())
 
 
@@ -489,6 +491,7 @@ def deliver(
     finally:
         containers.stop_container(name)
 
+    extra_cost = turn.cost_usd
     if not turn.succeeded:
         notes.append(
             f"Copilot fix turn failed (exit {turn.exit_code}); comments left "
@@ -506,6 +509,7 @@ def deliver(
             copilot_requested=True,
             copilot_reviewed=True,
             comments_count=len(comments),
+            extra_cost_usd=extra_cost,
             notes=tuple(notes),
         )
 
@@ -573,6 +577,11 @@ def deliver(
         if post_thread_reply(wt, repo, pr_number, comment.comment_id, body_text):
             replies += 1
 
+    # Audit parity: the conversation log must include the Copilot exchange.
+    _append_copilot_round_to_log(
+        config, fix_round=fix_round, pr_url=pr_url, coder_handoff=coder_handoff
+    )
+
     return DeliveryOutcome(
         pr_url=pr_url,
         pr_number=pr_number,
@@ -583,5 +592,36 @@ def deliver(
         fix_pushed=fix_pushed,
         fix_gate_verdict=gate_verdict,
         replies_posted=replies,
+        fix_sha=new_sha if fix_pushed else None,
+        extra_cost_usd=extra_cost,
         notes=tuple(notes),
     )
+
+
+def _append_copilot_round_to_log(
+    config, *, fix_round: int, pr_url: str, coder_handoff: str
+) -> None:
+    """Append the Copilot review + the coder's response to conversation.md.
+
+    ``develop()`` wrote the log before delivery started; without this append
+    the shipped log would omit the whole Copilot exchange.
+    """
+    from .handoff import _blockquote, _read_or_missing, reviewer_handoff_name
+
+    log_path = config.run_dir / "conversation.md"
+    review_name = reviewer_handoff_name(fix_round, "copilot")
+    parts = [
+        "",
+        f"## Copilot round ({pr_url})",
+        "",
+        f"### Reviewer [copilot] — `{review_name}`",
+        "",
+        _blockquote(_read_or_missing(config.handoff_dir / review_name)),
+        "",
+        f"### Coder — `{coder_handoff}`",
+        "",
+        _blockquote(_read_or_missing(config.handoff_dir / coder_handoff)),
+        "",
+    ]
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(parts))
