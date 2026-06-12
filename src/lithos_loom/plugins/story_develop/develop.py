@@ -396,6 +396,7 @@ def _review_turn(
     resume: bool,
     prompt: str,
     timeout: int,
+    tool: str = "claude",
 ) -> tuple[ReviewOutcome, TurnResult | None]:
     """Run one reviewer turn against an already-running reviewer container.
 
@@ -422,6 +423,7 @@ def _review_turn(
         session_id=session_id,
         resume=resume,
         timeout=timeout,
+        tool=tool,
     )
     cost += turn.cost_usd
     if not turn.succeeded:
@@ -446,6 +448,7 @@ def _review_turn(
                 session_id=session_id,
                 resume=True,
                 timeout=timeout,
+                tool=tool,
             )
             cost += retry.cost_usd
             if retry.succeeded:
@@ -678,6 +681,7 @@ def develop(
                 resume=review_resume,
                 prompt=review_prompt,
                 timeout=reviewer_timeout,
+                tool=reviewer_tool_now,
             )
             review_cost += review.cost_usd
 
@@ -733,6 +737,7 @@ def develop(
                         resume=False,
                         prompt=reseed_prompt,
                         timeout=reviewer_timeout,
+                        tool=reviewer_tool_now,
                     )
                     review_cost += review.cost_usd
                     continue
@@ -769,6 +774,7 @@ def develop(
                     resume=retry_resume,
                     prompt=retry_prompt,
                     timeout=reviewer_timeout,
+                    tool=reviewer_tool_now,
                 )
                 review_cost += review.cost_usd
 

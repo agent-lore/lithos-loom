@@ -197,3 +197,24 @@ def test_record_failure_fixture_round_trips(tmp_path: Path) -> None:
     assert data["result_text"] == "usage limit reached|1750000000"
     assert data["stderr"] == "boom"
     assert data["exit_code"] == 1
+
+
+def test_record_failure_fixture_never_overwrites(tmp_path: Path) -> None:
+    # Repeated failures in the same round/agent each keep their wording.
+    d = tmp_path / "failures"
+    p1 = record_failure_fixture(
+        d, agent="coder", round_no=1, turn=_failed(result_text="usage limit reached")
+    )
+    p2 = record_failure_fixture(
+        d, agent="coder", round_no=1, turn=_failed(result_text="quota exceeded")
+    )
+    p3 = record_failure_fixture(
+        d, agent="coder", round_no=1, turn=_failed(result_text="boom")
+    )
+    assert [p.name for p in (p1, p2, p3)] == [
+        "round_01_coder.json",
+        "round_01_coder_02.json",
+        "round_01_coder_03.json",
+    ]
+    assert "usage limit reached" in p1.read_text()
+    assert "quota exceeded" in p2.read_text()

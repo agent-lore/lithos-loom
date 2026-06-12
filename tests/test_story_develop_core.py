@@ -92,6 +92,7 @@ def _install_fakes(
         "review_attempts": {},
         "gate_calls": [],
         "sleeps": [],
+        "tools": [],
     }
 
     def fake_start(run_cmd) -> str:
@@ -113,8 +114,11 @@ def _install_fakes(
     def _entry(rnd: int) -> dict:
         return reviews[min(rnd - 1, len(reviews) - 1)]
 
-    def fake_run_turn(*, container, prompt, session_id, resume=False, timeout):
+    def fake_run_turn(
+        *, container, prompt, session_id, resume=False, timeout, tool="claude"
+    ):
         wt = state["worktree"]
+        state["tools"].append(tool)
         if "-coder" in container:
             # a continuation retry has no round marker; reuse the last round
             if "coder_done" in prompt:
@@ -620,6 +624,9 @@ def test_reviewer_limit_switches_to_fallback_tool(
     reseed = state["review_prompts"][1]
     assert "taking over" in reseed
     assert "acceptance criteria" in reseed.lower()
+    # the switched tool is actually threaded through to the exec layer (it
+    # would raise there until T6 — never silently run claude as "codex")
+    assert state["tools"][-1] == "codex"
     state_file = json.loads((cfg.run_dir / "state.json").read_text())
     assert state_file["reviewer_tool"] == "codex"
 

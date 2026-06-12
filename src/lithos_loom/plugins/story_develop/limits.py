@@ -153,10 +153,17 @@ def record_failure_fixture(
 
     These files are the capture harness: real limit events land here with
     their exact wording, ready to be promoted into ``_USAGE_LIMIT_PATTERNS``
-    and the test corpus.
+    and the test corpus. Repeated failures in the same round/agent (limit
+    retries, malformed-handoff retries) get a numeric suffix rather than
+    overwriting — each attempt's wording is preserved.
     """
     failures_dir.mkdir(parents=True, exist_ok=True)
-    path = failures_dir / f"round_{round_no:02d}_{agent}.json"
+    base = f"round_{round_no:02d}_{agent}"
+    path = failures_dir / f"{base}.json"
+    attempt = 2
+    while path.exists():
+        path = failures_dir / f"{base}_{attempt:02d}.json"
+        attempt += 1
     path.write_text(
         json.dumps(
             {
