@@ -660,6 +660,36 @@ def test_cost_ceiling_stops_run(
     assert "cost ceiling" in result.message
 
 
+def test_approval_beats_cost_ceiling_in_the_same_round(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    # The round's reviews push spend past the ceiling AND all pass: approval
+    # wins. The ceiling stops FURTHER spend on unfinished work; the spend has
+    # already happened, and discarding a finished approved branch protects
+    # nothing. (Deliberate precedence — see the develop() comment.)
+    cfg = replace(config, max_cost_usd=0.025)  # coder 0.01 + review 0.02 = 0.03
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
+    result = develop_mod.develop(cfg)
+    assert result.status == "approved"
+    assert result.total_cost_usd >= 0.025
+
+
+def test_cost_ceiling_stops_before_reviews_when_coder_exceeds(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    # The coder phase alone crosses the ceiling -> stop BEFORE spending on
+    # reviews (no reviewer calls at all).
+    cfg = replace(config, max_cost_usd=0.01)
+    state = _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
+    result = develop_mod.develop(cfg)
+    assert result.status == "cost_exceeded"
+    assert state["review_calls"] == []
+
+
 def test_lifecycle_unknown_id_is_reprompted_and_recovers(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

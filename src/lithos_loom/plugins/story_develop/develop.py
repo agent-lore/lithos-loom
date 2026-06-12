@@ -1018,7 +1018,12 @@ def develop(
                 break
 
             # Approval requires ALL reviewers to pass their OWN threshold in
-            # the SAME round (PRD decision #7).
+            # the SAME round (PRD decision #7). Approval deliberately takes
+            # precedence over the cost ceiling when both land in the same
+            # round: the ceiling exists to stop FURTHER spend on unfinished
+            # work, and the spend has already happened — relabelling a
+            # finished, approved run as cost_exceeded would discard a good
+            # branch for no protective benefit.
             if all(r.passed for r in round_reviews):
                 if gate is not None and not gate.passed and config.block_on_red:
                     logger.info(
