@@ -138,3 +138,102 @@ def test_main_rejects_negative_max_pause(tmp_git_repo: Path, capsys) -> None:
     )
     assert rc == 2
     assert "--max-pause-minutes must be >= 0" in capsys.readouterr().err
+
+
+def test_main_rejects_task_id_with_no_lithos(tmp_git_repo: Path, capsys) -> None:
+    rc = main(["--repo", str(tmp_git_repo), "--task-id", "t-1", "--no-lithos"])
+    assert rc == 2
+    assert "incompatible" in capsys.readouterr().err
+
+
+def test_main_requires_description_or_task_id(tmp_git_repo: Path, capsys) -> None:
+    rc = main(["--repo", str(tmp_git_repo)])
+    assert rc == 2
+    assert "one of --description or --task-id" in capsys.readouterr().err
+
+
+def test_main_rejects_missing_ac_file(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--acceptance-criteria",
+            "@/nonexistent/ac.md",
+        ]
+    )
+    assert rc == 2
+    assert "cannot read --acceptance-criteria" in capsys.readouterr().err
+
+
+def test_main_rejects_blank_ac(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--acceptance-criteria",
+            "  ",
+        ]
+    )
+    assert rc == 2
+    assert "--acceptance-criteria must not be empty" in capsys.readouterr().err
+
+
+def test_main_task_id_resolves_description_and_posts(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """--task-id alone: task text becomes the description, metadata AC flows
+    into the config, and results are posted back after the run."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    captured: dict = {}
+
+    def fake_fetch(url, task_id):
+        captured["fetched"] = (url, task_id)
+        return TaskContext(
+            task_id=task_id,
+            title="Add a flag",
+            description="Body.",
+            acceptance_criteria="must have tests",
+            metadata={},
+        )
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.1,
+            review_cost_usd=0.1,
+            message="ok",
+        )
+
+    def fake_post(url, task_id, result):
+        captured["posted"] = (url, task_id, result.status)
+        return True
+
+    monkeypatch.setattr(main_mod, "fetch_task_context", fake_fetch)
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(main_mod, "post_results", fake_post)
+
+    rc = main_mod.main(["--repo", str(tmp_git_repo), "--task-id", "t-9"])
+    assert rc == 0
+    assert captured["fetched"][1] == "t-9"
+    cfg = captured["config"]
+    assert cfg.description == "Add a flag\n\nBody."
+    assert cfg.acceptance_criteria == "must have tests"
+    assert captured["posted"] == ("http://localhost:8765", "t-9", "approved")
+    out = capsys.readouterr().out
+    assert "developing Lithos task t-9" in out
+    assert "results posted to task t-9" in out

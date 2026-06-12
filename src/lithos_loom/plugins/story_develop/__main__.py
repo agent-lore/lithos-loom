@@ -1,14 +1,21 @@
-"""story-develop entry point (T3 — standalone only).
+"""story-develop entry point (standalone).
 
 Standalone mode::
 
     python -m lithos_loom.plugins.story_develop \\
         --repo ~/projects/foo --description "Add a CLI flag"
 
+    # or develop a Lithos task directly (full round-trip, T8):
+    python -m lithos_loom.plugins.story_develop \\
+        --repo ~/projects/foo --task-id <uuid>
+
 Runs the implement → review → fix loop: a coder implements the task, a reviewer
 reviews it, and the coder fixes and the reviewer re-reviews each round until the
 reviewer approves (LGTM or below the block threshold) or ``--max-rounds`` is
-hit. Leaves a branch with per-round commits and a conversation log. Daemon mode
+hit. Leaves a branch with per-round commits and a conversation log. With
+``--task-id`` the task (title, body, acceptance criteria) is fetched from
+Lithos up front and the outcome (verdicts, open findings, branch, cost) is
+posted back when the run ends. Daemon mode
 (``--task-json/--work-dir/--result-file``) arrives with T10. The shared core is
 :func:`lithos_loom.plugins.story_develop.develop.develop`.
 """
@@ -36,6 +43,12 @@ from .config import (
     load_develop_config,
 )
 from .develop import develop
+from .lithos_io import (
+    DEFAULT_LITHOS_URL,
+    LithosIOError,
+    fetch_task_context,
+    post_results,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -45,7 +58,36 @@ def _build_parser() -> argparse.ArgumentParser:
         "iterate to approval or --max-rounds).",
     )
     p.add_argument("--repo", required=True, type=Path, help="Path to the project repo")
-    p.add_argument("--description", required=True, help="Free-text task description")
+    p.add_argument(
+        "--description",
+        default=None,
+        help="Free-text task description (optional with --task-id: the task's "
+        "title + body are used)",
+    )
+    p.add_argument(
+        "--task-id",
+        default=None,
+        help="Lithos task to develop: fetches title/body/acceptance criteria "
+        "up front and posts the outcome back when the run ends",
+    )
+    p.add_argument(
+        "--lithos-url",
+        default=DEFAULT_LITHOS_URL,
+        help="Lithos MCP base URL (used with --task-id)",
+    )
+    p.add_argument(
+        "--no-lithos",
+        action="store_true",
+        help="Pure-offline run: never touch Lithos (incompatible with --task-id)",
+    )
+    p.add_argument(
+        "--acceptance-criteria",
+        default=None,
+        metavar="TEXT|@FILE",
+        help="Definition of done shown to the coder AND every reviewer; "
+        "@path reads a file. Default: task metadata (with --task-id), "
+        "else the description",
+    )
     p.add_argument(
         "--coder",
         default=DEFAULT_CODER_TOOL,
@@ -153,9 +195,44 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
 
-    if not args.description.strip():
+    # --- resolve the task source (T8) -------------------------------------
+    if args.task_id is not None and args.no_lithos:
+        print("error: --task-id and --no-lithos are incompatible", file=sys.stderr)
+        return 2
+    if args.task_id is None and args.description is None:
+        print("error: one of --description or --task-id is required", file=sys.stderr)
+        return 2
+    if args.description is not None and not args.description.strip():
         print("error: --description must not be empty", file=sys.stderr)
         return 2
+
+    acceptance_criteria = args.acceptance_criteria
+    if acceptance_criteria is not None and acceptance_criteria.startswith("@"):
+        ac_path = Path(acceptance_criteria[1:]).expanduser()
+        try:
+            acceptance_criteria = ac_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"error: cannot read --acceptance-criteria file: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+    if acceptance_criteria is not None and not acceptance_criteria.strip():
+        print("error: --acceptance-criteria must not be empty", file=sys.stderr)
+        return 2
+
+    description = args.description
+    if args.task_id is not None:
+        try:
+            ctx = fetch_task_context(args.lithos_url, args.task_id)
+        except LithosIOError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        description = description or ctx.task_text
+        # explicit flag > task metadata > (effective fallback to description)
+        acceptance_criteria = acceptance_criteria or ctx.acceptance_criteria
+        print(f"developing Lithos task {ctx.task_id}: {ctx.title}")
+    assert description is not None  # guaranteed by the validation above
 
     # --- resolve the reviewer panel (T6) ---------------------------------
     if args.develop_config is not None and args.reviewer:
@@ -221,8 +298,9 @@ def main(argv: list[str] | None = None) -> int:
 
     config = DevelopConfig(
         repo=repo,
-        description=args.description,
+        description=description,
         work_dir=work_dir,
+        acceptance_criteria=acceptance_criteria,
         coder=args.coder,
         reviewers=specs,
         max_rounds=args.max_rounds,
@@ -264,6 +342,12 @@ def main(argv: list[str] | None = None) -> int:
     if result.conversation_log is not None:
         print(f"  log:      {result.conversation_log}")
     print(f"  cost:     ${result.total_cost_usd:.4f}")
+    if args.task_id is not None:
+        posted = post_results(args.lithos_url, args.task_id, result)
+        print(
+            f"  lithos:   {'results posted to' if posted else 'POSTING FAILED for'} "
+            f"task {args.task_id}"
+        )
     print(f"  {result.message}")
     if result.status == "max_rounds":
         print(
