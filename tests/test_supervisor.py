@@ -69,7 +69,7 @@ def _patch_subprocess_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
     real_create = asyncio.create_subprocess_exec
 
     async def _patched(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
-        kwargs["stderr"] = asyncio.subprocess.PIPE
+        kwargs.setdefault("stderr", asyncio.subprocess.PIPE)
         return await real_create(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _patched)
@@ -77,14 +77,15 @@ def _patch_subprocess_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _wait_children_ready(sup: Supervisor, *, count: int = 1) -> None:
     """Block until *count* echo-children have printed ``ready`` on stderr."""
-    deadline = asyncio.get_event_loop().time() + 5.0
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
     while len(sup.children) < count:
-        if asyncio.get_event_loop().time() > deadline:
+        if loop.time() > deadline:
             raise TimeoutError(
                 f"expected {count} children, only {len(sup.children)} spawned"
             )
         await asyncio.sleep(0.01)
-    for child in sup.children:
+    for child in sup.children[:count]:
         assert child.proc.stderr is not None
         while True:
             line = await asyncio.wait_for(child.proc.stderr.readline(), timeout=5.0)
