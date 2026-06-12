@@ -174,3 +174,26 @@ def test_blank_finding_id_stays_blank() -> None:
     )
     findings = parse_review_handoff(text).findings
     assert [f.finding_id for f in findings] == ["", ""]
+
+
+def test_folded_scalar_keeps_embedded_bullet_lists() -> None:
+    # Bullet lists are common inside YAML text blocks; a more-indented "- "
+    # line is fold CONTENT, not a new finding item (Copilot review on PR #80).
+    text = (
+        "## Status: FINDINGS\n## Summary\nOne.\n## Findings\n"
+        "- finding_id:\n"
+        "  severity: major\n"
+        "  status: open\n"
+        "  rationale: >\n"
+        "    Two problems:\n"
+        "    - the lock is taken twice\n"
+        "    - the error path leaks the fd\n"
+        "- finding_id:\n"
+        "  severity: minor\n"
+        "  status: open\n"
+        "  rationale: separate item\n"
+    )
+    first, second = parse_review_handoff(text).findings
+    assert "- the lock is taken twice" in first.rationale
+    assert "- the error path leaks the fd" in first.rationale
+    assert second.severity == "minor" and second.rationale == "separate item"

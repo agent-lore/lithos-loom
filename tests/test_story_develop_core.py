@@ -610,10 +610,6 @@ def test_stall_guard_resets_on_progress(
         "- finding_id: f-001\n  severity: major\n  status: fixed\n"
         "- finding_id:\n  severity: major\n  status: open\n  rationale: new\n"
     )
-    keep_new_open = (
-        "## Status: FINDINGS\n## Summary\nStill open.\n## Findings\n"
-        "- finding_id: f-002\n  severity: major\n  status: open\n"
-    )
     _install_fakes(
         monkeypatch,
         config,
@@ -627,7 +623,6 @@ def test_stall_guard_resets_on_progress(
     result = develop_mod.develop(config)
     assert result.status == "approved"
     assert result.rounds == 4
-    assert keep_new_open  # silence unused warning if scenario changes
 
 
 def test_dispute_deadlock_stops_with_breadcrumb(

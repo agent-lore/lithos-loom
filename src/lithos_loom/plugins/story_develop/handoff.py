@@ -263,9 +263,11 @@ def _parse_findings(block: str) -> list[Finding]:
     for line in block.splitlines():
         indent = len(line) - len(line.lstrip(" "))
         if fold_key is not None:
-            # inside a folded scalar: more-indented lines are content,
-            # anything at or left of the key's indent ends it.
-            if line.strip() and indent > fold_indent and not _ITEM_RE.match(line):
+            # Inside a folded scalar, indentation alone decides: any
+            # MORE-indented line is content — including bullet lists, which
+            # are common in YAML text blocks. A new finding item ("- ...")
+            # sits at or left of the key's indent and ends the fold below.
+            if line.strip() and indent > fold_indent:
                 fold_lines.append(line.strip())
                 continue
             if not line.strip():
