@@ -78,11 +78,17 @@ def run_turn(
     session_id: str,
     resume: bool = False,
     timeout: int = 3600,
+    tool: str = "claude",
 ) -> TurnResult:
-    """Execute one agent turn in *container* and return its parsed result."""
+    """Execute one agent turn in *container* and return its parsed result.
+
+    *tool* is threaded through to the exec builder, which raises for tools it
+    cannot run — so an orchestration-level tool switch that the exec layer
+    doesn't support yet fails loudly instead of silently running claude.
+    """
     exec_cmd = containers.build_exec_command(
         name=container,
-        tool="claude",
+        tool=tool,
         prompt=prompt,
         session_id=session_id,
         resume=resume,

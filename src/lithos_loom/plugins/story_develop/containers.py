@@ -107,8 +107,8 @@ def build_exec_command(
     it on later turns (T3). Output is ``--output-format json`` so completion /
     cost / errors come from structured output, not pane scraping.
     """
-    if tool != "claude":  # codex support arrives with T5/T6
-        raise ValueError(f"unsupported coder tool for T1: {tool!r}")
+    if tool != "claude":  # codex support arrives with T6
+        raise ValueError(f"unsupported tool: {tool!r} (only 'claude' until T6)")
 
     session_flag = ["--resume", session_id] if resume else ["--session-id", session_id]
     return [

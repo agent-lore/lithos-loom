@@ -42,3 +42,34 @@ def test_main_rejects_bad_max_rounds(tmp_git_repo: Path, capsys) -> None:
     rc = main(["--repo", str(tmp_git_repo), "--description", "x", "--max-rounds", "0"])
     assert rc == 2
     assert "--max-rounds must be >= 1" in capsys.readouterr().err
+
+
+def test_main_rejects_zero_pause_poll(tmp_git_repo: Path, capsys) -> None:
+    # 0 would spin forever on zero-second pauses; negative would crash sleep()
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--pause-poll-minutes",
+            "0",
+        ]
+    )
+    assert rc == 2
+    assert "--pause-poll-minutes must be >= 1" in capsys.readouterr().err
+
+
+def test_main_rejects_negative_max_pause(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--max-pause-minutes",
+            "-1",
+        ]
+    )
+    assert rc == 2
+    assert "--max-pause-minutes must be >= 0" in capsys.readouterr().err

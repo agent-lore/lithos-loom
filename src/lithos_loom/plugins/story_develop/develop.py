@@ -25,14 +25,16 @@ T3's only loop bound is ``max_rounds``.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...runner import detection, git, worktree
-from . import containers, handoff, test_gate
+from . import containers, handoff, limits, test_gate
 from .config import (
     CLAUDE_AUTH_FILES,
     HANDOFF_DIRNAME,
@@ -41,7 +43,7 @@ from .config import (
 )
 from .handoff import Finding, HandoffError, ReviewHandoff
 from .test_gate import GateResult
-from .turns import run_turn
+from .turns import TurnResult, run_turn
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +68,7 @@ class ReviewOutcome:
 class DevelopResult:
     """Outcome of a ``develop()`` run."""
 
-    status: str  # "approved" | "max_rounds" | "failed"
+    status: str  # "approved" | "max_rounds" | "failed" | "interrupted"
     run_id: str
     worktree: Path
     branch: str
@@ -158,6 +160,18 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
         ).summary or ("(the coder wrote no summary)")
     except (HandoffError, OSError):
         return "(coder summary unavailable)"
+
+
+def _prior_review_text(config: DevelopConfig, round_no: int) -> str:
+    """The outgoing reviewer's most recent handoff text (reseed payload)."""
+    for r in range(round_no - 1, 0, -1):
+        path = config.handoff_dir / handoff.reviewer_handoff_name(r, config.reviewer)
+        if path.is_file():
+            try:
+                return path.read_text(encoding="utf-8").strip()
+            except OSError:
+                break
+    return "(no prior review — the limit hit on the first review attempt)"
 
 
 # --- test gate (T4) ---------------------------------------------------------
@@ -258,6 +272,118 @@ def _gate_note(gate: GateResult | None) -> str:
     )
 
 
+# --- usage-limit reaction (T5) ----------------------------------------------
+
+_CONTINUATION_PROMPT = (
+    "You were interrupted by a provider usage limit, which has now lifted. "
+    "Continue the task from where you left off. If you had already finished, "
+    "just write the handoff file as previously instructed."
+)
+
+
+class _PauseBudget:
+    """The run's shared usage-limit pause budget, in seconds."""
+
+    def __init__(self, seconds: float) -> None:
+        self.remaining = seconds
+
+
+def _sleep(seconds: float) -> None:
+    """Monkeypatch seam — tests must never actually sleep."""
+    time.sleep(seconds)
+
+
+def _tool_supported(tool: str) -> bool:
+    """Whether the container/exec layer can run *tool* (codex arrives with T6)."""
+    return tool == "claude"
+
+
+def _session_transcript_exists(config_dir: Path, session_id: str) -> bool:
+    """True when the agent's on-disk transcript for *session_id* exists.
+
+    Decides whether a limit-interrupted turn is retried as a ``--resume``
+    continuation (partial progress is in the transcript) or re-issued fresh
+    (the process died before the session was created).
+    """
+    projects = config_dir / "projects"
+    if not projects.is_dir():
+        return False
+    return any(projects.glob(f"*/{session_id}.jsonl"))
+
+
+def _turn_with_limit_pauses(
+    config: DevelopConfig,
+    budget: _PauseBudget,
+    *,
+    agent: str,
+    container: str,
+    config_dir: Path,
+    prompt: str,
+    session_id: str,
+    resume: bool,
+    round_no: int,
+    timeout: int,
+) -> tuple[TurnResult, bool, float]:
+    """Run a turn, pausing-and-retrying through provider usage limits.
+
+    Returns ``(turn, interrupted, total_cost)``: *interrupted* is True when
+    the turn was usage-limited and the pause budget ran out — the caller
+    checkpoints rather than treating it as an agent failure. Non-limit
+    failures return immediately (the existing failure paths own those).
+    *total_cost* sums every attempt, not just the last. Every failed turn is
+    recorded as a classification fixture (G4 capture harness).
+    """
+    attempt_prompt, attempt_resume = prompt, resume
+    total_cost = 0.0
+    while True:
+        turn = run_turn(
+            container=container,
+            prompt=attempt_prompt,
+            session_id=session_id,
+            resume=attempt_resume,
+            timeout=timeout,
+        )
+        total_cost += turn.cost_usd
+        if turn.succeeded:
+            return turn, False, total_cost
+        limits.record_failure_fixture(
+            config.failures_dir, agent=agent, round_no=round_no, turn=turn
+        )
+        if limits.classify_failure(turn) != limits.USAGE_LIMITED:
+            return turn, False, total_cost
+        plan = limits.pause_plan(
+            turn,
+            poll_seconds=config.pause_poll_minutes * 60,
+            remaining_seconds=budget.remaining,
+        )
+        if plan is None:
+            logger.warning(
+                "story-develop %s: %s usage-limited and the pause budget is "
+                "exhausted — checkpointing",
+                config.run_id,
+                agent,
+            )
+            return turn, True, total_cost
+        logger.info(
+            "story-develop %s: %s usage-limited; pausing %.0fs (%s; %.0f min "
+            "of pause budget left)",
+            config.run_id,
+            agent,
+            plan.wait_seconds,
+            plan.reason,
+            budget.remaining / 60,
+        )
+        _sleep(plan.wait_seconds)
+        budget.remaining -= plan.wait_seconds
+        # Resume the SAME session when its transcript survived the interruption
+        # (the in-session context is the thing we are protecting); otherwise
+        # re-issue the original prompt fresh.
+        if _session_transcript_exists(config_dir, session_id):
+            attempt_prompt, attempt_resume = _CONTINUATION_PROMPT, True
+        else:
+            attempt_prompt, attempt_resume = prompt, resume
+
+
 # --- per-turn drivers -------------------------------------------------------
 
 
@@ -270,13 +396,18 @@ def _review_turn(
     resume: bool,
     prompt: str,
     timeout: int,
-) -> ReviewOutcome:
+    tool: str = "claude",
+) -> tuple[ReviewOutcome, TurnResult | None]:
     """Run one reviewer turn against an already-running reviewer container.
 
     Re-prompts the *same* session once if the handoff is malformed. The handoff
     is only authoritative if the turn that produced it SUCCEEDED (clean exit +
     structured result) — a failed turn that happens to leave a parseable file is
     rejected, preserving the exit-code contract (ADR 0002).
+
+    Returns ``(outcome, failed_turn)``: *failed_turn* is the TurnResult of a
+    turn-level failure (for usage-limit classification by the caller), or
+    ``None`` when the turns ran cleanly (even if the handoff stayed invalid).
     """
     reviewer = config.reviewer
     review_file = handoff.reviewer_handoff_name(round_no, reviewer)
@@ -284,6 +415,7 @@ def _review_turn(
     cost = 0.0
     parsed: ReviewHandoff | None = None
     err: str | None = "reviewer did not run"
+    failed_turn: TurnResult | None = None
 
     turn = run_turn(
         container=container,
@@ -291,10 +423,18 @@ def _review_turn(
         session_id=session_id,
         resume=resume,
         timeout=timeout,
+        tool=tool,
     )
     cost += turn.cost_usd
     if not turn.succeeded:
         err = f"reviewer turn failed (exit {turn.exit_code})"
+        failed_turn = turn
+        limits.record_failure_fixture(
+            config.failures_dir,
+            agent=f"review-{reviewer}",
+            round_no=round_no,
+            turn=turn,
+        )
     else:
         parsed, err = _read_review(review_path)
         if parsed is None:
@@ -308,12 +448,20 @@ def _review_turn(
                 session_id=session_id,
                 resume=True,
                 timeout=timeout,
+                tool=tool,
             )
             cost += retry.cost_usd
             if retry.succeeded:
                 parsed, err = _read_review(review_path)
             else:
                 err = f"reviewer retry turn failed (exit {retry.exit_code})"
+                failed_turn = retry
+                limits.record_failure_fixture(
+                    config.failures_dir,
+                    agent=f"review-{reviewer}",
+                    round_no=round_no,
+                    turn=retry,
+                )
 
     if parsed is None:
         logger.warning(
@@ -322,20 +470,26 @@ def _review_turn(
             round_no,
             err,
         )
-        return ReviewOutcome(
-            reviewer=reviewer,
-            status="invalid",
-            passed=False,
-            max_severity=None,
-            cost_usd=cost,
+        return (
+            ReviewOutcome(
+                reviewer=reviewer,
+                status="invalid",
+                passed=False,
+                max_severity=None,
+                cost_usd=cost,
+            ),
+            failed_turn,
         )
-    return ReviewOutcome(
-        reviewer=reviewer,
-        status=parsed.status,
-        passed=parsed.passes(config.block_threshold),
-        max_severity=parsed.max_open_severity,
-        findings=parsed.findings,
-        cost_usd=cost,
+    return (
+        ReviewOutcome(
+            reviewer=reviewer,
+            status=parsed.status,
+            passed=parsed.passes(config.block_threshold),
+            max_severity=parsed.max_open_severity,
+            findings=parsed.findings,
+            cost_usd=cost,
+        ),
+        None,
     )
 
 
@@ -355,9 +509,7 @@ def develop(
     torn down.
     """
     if config.coder != "claude" or config.reviewer_tool != "claude":
-        raise ValueError(
-            "unsupported tool for T3: only 'claude' (codex arrives with T5/T6)"
-        )
+        raise ValueError("unsupported tool: only 'claude' (codex arrives with T6)")
     if not is_valid_reviewer_name(config.reviewer):
         raise ValueError(
             f"invalid reviewer name {config.reviewer!r}: must be lowercase "
@@ -365,6 +517,16 @@ def develop(
         )
     if config.max_rounds < 1:
         raise ValueError(f"max_rounds must be >= 1 (got {config.max_rounds})")
+    if config.pause_poll_minutes < 1:
+        # 0 would spin forever on zero-second "pauses"; negative would crash
+        # time.sleep(). The budget (max_pause_minutes) MAY be 0 ("never wait").
+        raise ValueError(
+            f"pause_poll_minutes must be >= 1 (got {config.pause_poll_minutes})"
+        )
+    if config.max_pause_minutes < 0:
+        raise ValueError(
+            f"max_pause_minutes must be >= 0 (got {config.max_pause_minutes})"
+        )
 
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     config.reviewer_config_dir(config.reviewer).mkdir(parents=True, exist_ok=True)
@@ -406,6 +568,15 @@ def develop(
     rounds_completed = 0
     coder_cost = 0.0
     review_cost = 0.0
+    budget = _PauseBudget(config.max_pause_minutes * 60)
+    # Order-preserving dedupe: a fallback chain that repeats the primary tool
+    # (e.g. --reviewer-fallback claude --reviewer-fallback codex) must not
+    # trap the reviewer in a claude->claude self-switch loop that never
+    # reaches the later entries or the pause path.
+    reviewer_chain = tuple(
+        dict.fromkeys((config.reviewer_tool, *config.reviewer_fallback_chain))
+    )
+    reviewer_tool_now = config.reviewer_tool
 
     try:
         containers.start_container(coder_cmd)
@@ -443,14 +614,25 @@ def develop(
                 )
                 coder_resume = True
 
-            coder_turn = run_turn(
+            coder_turn, coder_interrupted, attempt_cost = _turn_with_limit_pauses(
+                config,
+                budget,
+                agent="coder",
                 container=coder_name,
+                config_dir=config.coder_config_dir,
                 prompt=coder_prompt,
                 session_id=coder_session,
                 resume=coder_resume,
+                round_no=round_no,
                 timeout=coder_timeout,
             )
-            coder_cost += coder_turn.cost_usd
+            coder_cost += attempt_cost
+            if coder_interrupted:
+                failure_reason = (
+                    f"round {round_no}: coder usage-limited; pause budget exhausted"
+                )
+                status = "interrupted"
+                break
             done_present = (
                 config.handoff_dir / handoff.coder_handoff_name(round_no)
             ).is_file()
@@ -507,7 +689,7 @@ def develop(
                 )
                 review_resume = True
 
-            review = _review_turn(
+            review, rev_failed = _review_turn(
                 config,
                 container=reviewer_name,
                 session_id=reviewer_session,
@@ -515,8 +697,110 @@ def develop(
                 resume=review_resume,
                 prompt=review_prompt,
                 timeout=reviewer_timeout,
+                tool=reviewer_tool_now,
             )
             review_cost += review.cost_usd
+
+            # --- reviewer usage-limit reaction: switch first, pause last ----
+            reviewer_interrupted = False
+            while (
+                rev_failed is not None
+                and limits.classify_failure(rev_failed) == limits.USAGE_LIMITED
+            ):
+                nxt = limits.next_fallback_tool(reviewer_chain, reviewer_tool_now)
+                while nxt is not None and not _tool_supported(nxt):
+                    logger.warning(
+                        "story-develop %s: fallback tool %r not supported yet; "
+                        "skipping",
+                        config.run_id,
+                        nxt,
+                    )
+                    nxt = limits.next_fallback_tool(reviewer_chain, nxt)
+                if nxt is not None:
+                    # Replace ONLY the reviewer container; reseed a fresh
+                    # session from the handoff history (PRD decision #4).
+                    logger.info(
+                        "story-develop %s: reviewer usage-limited; switching "
+                        "tool %s -> %s",
+                        config.run_id,
+                        reviewer_tool_now,
+                        nxt,
+                    )
+                    containers.stop_container(reviewer_name)
+                    reviewer_tool_now = nxt
+                    reviewer_session = str(uuid.uuid4())
+                    containers.start_container(reviewer_cmd)
+                    reseed_prompt = _render(
+                        handoff.load_prompt("reviewer_reseed.md"),
+                        reviewer=config.reviewer,
+                        round_no=str(round_no),
+                        acceptance_criteria=config.effective_acceptance_criteria,
+                        base_sha=base[:12],
+                        coder_handoff_file=handoff.coder_handoff_name(round_no),
+                        prior_findings=_render_findings(
+                            final_review.findings if final_review else []
+                        ),
+                        prior_review=_prior_review_text(config, round_no),
+                        review_file=handoff.reviewer_handoff_name(
+                            round_no, config.reviewer
+                        ),
+                    )
+                    review, rev_failed = _review_turn(
+                        config,
+                        container=reviewer_name,
+                        session_id=reviewer_session,
+                        round_no=round_no,
+                        resume=False,
+                        prompt=reseed_prompt,
+                        timeout=reviewer_timeout,
+                        tool=reviewer_tool_now,
+                    )
+                    review_cost += review.cost_usd
+                    continue
+                # No alternate tool: pause-and-retry within the shared budget.
+                plan = limits.pause_plan(
+                    rev_failed,
+                    poll_seconds=config.pause_poll_minutes * 60,
+                    remaining_seconds=budget.remaining,
+                )
+                if plan is None:
+                    reviewer_interrupted = True
+                    break
+                logger.info(
+                    "story-develop %s: reviewer usage-limited; pausing %.0fs "
+                    "(%s; %.0f min of pause budget left)",
+                    config.run_id,
+                    plan.wait_seconds,
+                    plan.reason,
+                    budget.remaining / 60,
+                )
+                _sleep(plan.wait_seconds)
+                budget.remaining -= plan.wait_seconds
+                if _session_transcript_exists(
+                    config.reviewer_config_dir(config.reviewer), reviewer_session
+                ):
+                    retry_prompt, retry_resume = _CONTINUATION_PROMPT, True
+                else:
+                    retry_prompt, retry_resume = review_prompt, review_resume
+                review, rev_failed = _review_turn(
+                    config,
+                    container=reviewer_name,
+                    session_id=reviewer_session,
+                    round_no=round_no,
+                    resume=retry_resume,
+                    prompt=retry_prompt,
+                    timeout=reviewer_timeout,
+                    tool=reviewer_tool_now,
+                )
+                review_cost += review.cost_usd
+
+            if reviewer_interrupted:
+                failure_reason = (
+                    f"round {round_no}: reviewer usage-limited; pause budget exhausted"
+                )
+                status = "interrupted"
+                final_review = review
+                break
             final_review = review
 
             if review.status == "invalid":
@@ -569,8 +853,37 @@ def develop(
             f"last review[{final_review.reviewer}]={final_review.status}{sev}"
             f"{gate_part}; {len(commits)} commit(s) on {branch}; cost ${total:.4f}"
         )
+    elif status == "interrupted":
+        message = (
+            f"INTERRUPTED: {failure_reason}; {len(commits)} commit(s) on {branch}; "
+            f"sessions + handoffs preserved in {config.run_dir} (re-run to retry); "
+            f"cost ${total:.4f}"
+        )
     else:  # failed
         message = f"{failure_reason}{gate_part}; {len(commits)} commit(s) on {branch}"
+
+    # Durable run state (PRD decision #5: resume state is ~free — session ids
+    # + handoffs are on disk). Written on every exit, primarily for
+    # `interrupted` runs and the future daemon re-dispatch (T10).
+    (config.run_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "status": status,
+                "run_id": config.run_id,
+                "branch": branch,
+                "worktree": str(wt),
+                "base_sha": base,
+                "rounds": rounds_completed,
+                "coder_session": coder_session,
+                "reviewer_session": reviewer_session,
+                "reviewer_tool": reviewer_tool_now,
+                "pause_budget_remaining_s": round(budget.remaining, 1),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     return DevelopResult(
         status=status,
