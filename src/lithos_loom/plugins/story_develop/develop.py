@@ -79,8 +79,8 @@ class DevelopResult:
     coder_cost_usd: float
     review_cost_usd: float
     message: str
-    # the final round's outcomes, in panel order
-    reviews: list[ReviewOutcome] = field(default_factory=list)
+    # the final round's outcomes, in panel order (immutable — frozen dataclass)
+    reviews: tuple[ReviewOutcome, ...] = ()
     test_gate: GateResult | None = None  # the latest round's gate (T4)
     conversation_log: Path | None = None
 
@@ -948,7 +948,7 @@ def develop(
         encoding="utf-8",
     )
 
-    def _reviews_part(outcomes: list[ReviewOutcome]) -> str:
+    def _reviews_part(outcomes: list[ReviewOutcome] | tuple) -> str:
         bits = []
         for r in outcomes:
             sev = f" max {r.max_severity}" if r.max_severity else ""
@@ -1017,7 +1017,7 @@ def develop(
         coder_cost_usd=coder_cost,
         review_cost_usd=review_cost,
         message=message,
-        reviews=final_reviews,
+        reviews=tuple(final_reviews),
         test_gate=gate,
         conversation_log=log_path,
     )
