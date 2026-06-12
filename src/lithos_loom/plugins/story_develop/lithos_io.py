@@ -130,7 +130,9 @@ def _result_summary(result: DevelopResult) -> str:
     return "\n".join(lines)
 
 
-def post_results(url: str, task_id: str, result: DevelopResult) -> bool:
+def post_results(
+    url: str, task_id: str, result: DevelopResult, *, pr_url: str | None = None
+) -> bool:
     """Post the run outcome back to the task. Returns True when fully posted.
 
     A post failure must NOT fail the run — the work exists on the branch
@@ -140,7 +142,10 @@ def post_results(url: str, task_id: str, result: DevelopResult) -> bool:
 
     async def _post() -> None:
         async with LithosClient(url, agent_id=AGENT_ID) as client:
-            await client.finding_post(task_id=task_id, summary=_result_summary(result))
+            summary = _result_summary(result)
+            if pr_url:
+                summary += f"\n\npull request: {pr_url}"
+            await client.finding_post(task_id=task_id, summary=summary)
             if result.status == "disputed":
                 await client.finding_post(
                     task_id=task_id,
@@ -151,16 +156,16 @@ def post_results(url: str, task_id: str, result: DevelopResult) -> bool:
                         f"at {result.conversation_log})."
                     ),
                 )
-            await client.task_update(
-                task_id=task_id,
-                metadata={
-                    "develop_status": result.status,
-                    "develop_branch": result.branch,
-                    "develop_run_id": result.run_id,
-                    "develop_rounds": result.rounds,
-                    "develop_cost_usd": round(result.total_cost_usd, 4),
-                },
-            )
+            metadata: dict[str, Any] = {
+                "develop_status": result.status,
+                "develop_branch": result.branch,
+                "develop_run_id": result.run_id,
+                "develop_rounds": result.rounds,
+                "develop_cost_usd": round(result.total_cost_usd, 4),
+            }
+            if pr_url:
+                metadata["develop_pr_url"] = pr_url
+            await client.task_update(task_id=task_id, metadata=metadata)
 
     try:
         asyncio.run(_post())

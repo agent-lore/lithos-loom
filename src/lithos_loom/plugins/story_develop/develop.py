@@ -91,6 +91,8 @@ class DevelopResult:
     message: str
     # the final round's outcomes, in panel order (immutable — frozen dataclass)
     reviews: tuple[ReviewOutcome, ...] = ()
+    # the coder's session id — the PR-delivery Copilot round resumes it (T9)
+    coder_session: str = ""
     test_gate: GateResult | None = None  # the latest round's gate (T4)
     conversation_log: Path | None = None
 
@@ -1193,6 +1195,7 @@ def develop(
         review_cost_usd=review_cost,
         message=message,
         reviews=tuple(final_reviews),
+        coder_session=coder_session,
         test_gate=gate,
         conversation_log=log_path,
     )

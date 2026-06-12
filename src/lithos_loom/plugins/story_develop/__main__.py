@@ -50,6 +50,7 @@ from .lithos_io import (
     fetch_task_context,
     post_results,
 )
+from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -89,6 +90,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-lithos",
         action="store_true",
         help="Pure-offline run: never touch Lithos (incompatible with --task-id)",
+    )
+    p.add_argument(
+        "--open-pr",
+        action="store_true",
+        help="On approval: push the branch and open a PR host-side (gh), then "
+        "request a Copilot review and respond to its comments in one round",
+    )
+    p.add_argument(
+        "--no-copilot",
+        action="store_true",
+        help="With --open-pr: skip the Copilot review request + response round",
+    )
+    p.add_argument(
+        "--copilot-timeout",
+        type=int,
+        default=DEFAULT_COPILOT_TIMEOUT,
+        help="Max seconds to wait for the Copilot review before proceeding",
     )
     p.add_argument(
         "--acceptance-criteria",
@@ -247,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     description = args.description
+    github_issue_url: str | None = None
     if args.task_id is not None:
         try:
             ctx = fetch_task_context(args.lithos_url, args.task_id)
@@ -256,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         description = ctx.task_text
         # explicit flag > task metadata > (effective fallback to description)
         acceptance_criteria = acceptance_criteria or ctx.acceptance_criteria
+        raw_issue = ctx.metadata.get("github_issue_url")
+        github_issue_url = raw_issue if isinstance(raw_issue, str) else None
         print(f"developing Lithos task {ctx.task_id}: {ctx.title}")
     assert description is not None  # guaranteed by the validation above
 
@@ -367,8 +388,47 @@ def main(argv: list[str] | None = None) -> int:
     if result.conversation_log is not None:
         print(f"  log:      {result.conversation_log}")
     print(f"  cost:     ${result.total_cost_usd:.4f}")
+
+    delivery = None
+    if args.open_pr and result.approved:
+        try:
+            delivery = deliver(
+                config,
+                result,
+                no_copilot=args.no_copilot,
+                copilot_timeout=args.copilot_timeout,
+                coder_timeout=args.coder_timeout,
+                github_issue_url=github_issue_url,
+                task_id=args.task_id,
+            )
+        except Exception as exc:  # delivery failure must not sink the run
+            print(f"  pr:       DELIVERY FAILED — {exc}", file=sys.stderr)
+        else:
+            print(f"  pr:       {delivery.pr_url}")
+            if delivery.copilot_reviewed:
+                fix = (
+                    f"fix pushed ({delivery.fix_gate_verdict or 'no gate'})"
+                    if delivery.fix_pushed
+                    else (
+                        "fix held back" if delivery.fix_committed else "no fix needed"
+                    )
+                )
+                print(
+                    f"  copilot:  {delivery.comments_count} comment(s); {fix}; "
+                    f"{delivery.replies_posted} repl(ies) posted"
+                )
+            for note in delivery.notes:
+                print(f"  note:     {note}")
+    elif args.open_pr:
+        print("  pr:       skipped (run not approved)")
+
     if args.task_id is not None:
-        posted = post_results(args.lithos_url, args.task_id, result)
+        posted = post_results(
+            args.lithos_url,
+            args.task_id,
+            result,
+            pr_url=delivery.pr_url if delivery else None,
+        )
         print(
             f"  lithos:   {'results posted to' if posted else 'POSTING FAILED for'} "
             f"task {args.task_id}"

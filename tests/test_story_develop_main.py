@@ -219,7 +219,7 @@ def test_main_task_id_resolves_description_and_posts(
             message="ok",
         )
 
-    def fake_post(url, task_id, result):
+    def fake_post(url, task_id, result, **kw):
         captured["posted"] = (url, task_id, result.status)
         return True
 
@@ -306,7 +306,7 @@ def test_main_complete_on_approval_completes_task(
         )
 
     monkeypatch.setattr(main_mod, "fetch_task_context", fake_fetch)
-    monkeypatch.setattr(main_mod, "post_results", lambda *a: True)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
     monkeypatch.setattr(
         main_mod, "complete_task", lambda *a: captured.setdefault("completed", True)
     )
@@ -332,3 +332,65 @@ def test_main_complete_on_approval_completes_task(
     monkeypatch.setattr(main_mod, "develop", lambda c, **kw: _fake_result("approved"))
     rc = main_mod.main(["--repo", str(tmp_git_repo), "--task-id", "t-1"])
     assert rc == 0 and "completed" not in captured
+
+
+def test_main_open_pr_passes_issue_link_to_delivery(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """--task-id + --open-pr: the task's github_issue_url reaches deliver()
+    (for the PR's Closes line) and the PR URL flows into the Lithos post."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
+
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        main_mod,
+        "fetch_task_context",
+        lambda url, tid: TaskContext(
+            task_id=tid,
+            title="T",
+            description="",
+            acceptance_criteria=None,
+            metadata={"github_issue_url": "https://github.com/o/r/issues/9"},
+        ),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "develop",
+        lambda c, **kw: DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.1,
+            review_cost_usd=0.1,
+            message="m",
+        ),
+    )
+
+    def fake_deliver(config, result, **kw):
+        captured["deliver_kwargs"] = kw
+        return DeliveryOutcome(pr_url="https://github.com/o/r/pull/12", pr_number=12)
+
+    def fake_post(url, task_id, result, *, pr_url=None):
+        captured["posted_pr_url"] = pr_url
+        return True
+
+    monkeypatch.setattr(main_mod, "deliver", fake_deliver)
+    monkeypatch.setattr(main_mod, "post_results", fake_post)
+
+    rc = main_mod.main(["--repo", str(tmp_git_repo), "--task-id", "t-1", "--open-pr"])
+    assert rc == 0
+    assert (
+        captured["deliver_kwargs"]["github_issue_url"]
+        == "https://github.com/o/r/issues/9"
+    )
+    assert captured["posted_pr_url"] == "https://github.com/o/r/pull/12"
+    assert "pull/12" in capsys.readouterr().out
