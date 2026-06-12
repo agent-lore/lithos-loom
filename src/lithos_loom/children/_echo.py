@@ -55,6 +55,10 @@ async def _amain(args: argparse.Namespace) -> int:
 
     loop.add_signal_handler(signal.SIGINT, stop_event.set)
 
+    # Signal that signal handlers are installed and the child is ready.
+    # Tests read this line to avoid a race between SIGTERM and handler setup.
+    print("ready", file=sys.stderr, flush=True)
+
     if args.crash_after is not None:
 
         async def _crash() -> None:
