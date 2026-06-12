@@ -31,6 +31,8 @@ DEFAULT_REVIEWER_NAME = "code-quality"
 DEFAULT_BLOCK_THRESHOLD = "major"  # findings below this don't block (see handoff.py)
 DEFAULT_MAX_ROUNDS = 5  # T3 loop bound; stall/dispute/cost guards arrive with T7
 DEFAULT_TEST_TIMEOUT = 900  # seconds for one test-gate container run (T4)
+DEFAULT_MAX_PAUSE_MINUTES = 120  # T5: total usage-limit pause budget per run
+DEFAULT_PAUSE_POLL_MINUTES = 5  # T5: retry cadence when the reset time is unknown
 DEFAULT_IMAGE = "ralph-sandbox:latest"
 WORKSPACE_MOUNT = "/workspace"
 CLAUDE_CONFIG_MOUNT = "/claude_config"
@@ -73,6 +75,12 @@ class DevelopConfig:
     test_command: str | None = None  # explicit override beats detection
     block_on_red: bool = False  # red gate prevents approval + feeds the coder
     test_timeout: int = DEFAULT_TEST_TIMEOUT
+    # T5: usage-limit reaction. The pause budget is shared across the run;
+    # the fallback chain lists ALTERNATE reviewer tools tried in order when
+    # the current one is usage-limited (empty = no alternate -> pause).
+    max_pause_minutes: int = DEFAULT_MAX_PAUSE_MINUTES
+    pause_poll_minutes: int = DEFAULT_PAUSE_POLL_MINUTES
+    reviewer_fallback_chain: tuple[str, ...] = ()
     acceptance_criteria: str | None = None
     run_id: str = field(default_factory=_short_run_id)
     # Host path to the operator's claude config dir (source of the auth file).
@@ -119,6 +127,11 @@ class DevelopConfig:
     def gate_dir(self) -> Path:
         """Per-run root for test-gate state (exported trees, output, cache)."""
         return self.run_dir / "test_gate"
+
+    @property
+    def failures_dir(self) -> Path:
+        """Per-run dir of failed-turn fixtures (the G4 capture harness)."""
+        return self.run_dir / "failures"
 
     @property
     def operator_skills_dir(self) -> Path | None:

@@ -25,7 +25,9 @@ from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     DEFAULT_CODER_TOOL,
     DEFAULT_IMAGE,
+    DEFAULT_MAX_PAUSE_MINUTES,
     DEFAULT_MAX_ROUNDS,
+    DEFAULT_PAUSE_POLL_MINUTES,
     DEFAULT_REVIEWER_NAME,
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
@@ -85,6 +87,26 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_TEST_TIMEOUT,
         help="Max seconds for one test-gate run",
+    )
+    p.add_argument(
+        "--max-pause-minutes",
+        type=int,
+        default=DEFAULT_MAX_PAUSE_MINUTES,
+        help="Total usage-limit pause budget for the run (then: interrupted)",
+    )
+    p.add_argument(
+        "--pause-poll-minutes",
+        type=int,
+        default=DEFAULT_PAUSE_POLL_MINUTES,
+        help="Retry cadence while usage-limited with no known reset time",
+    )
+    p.add_argument(
+        "--reviewer-fallback",
+        action="append",
+        default=None,
+        metavar="TOOL",
+        help="Alternate reviewer tool tried when the current one is "
+        "usage-limited (repeatable; tried in order)",
     )
     p.add_argument("--image", default=DEFAULT_IMAGE, help="Agent container image")
     p.add_argument("--branch", default="main", help="Base branch for the worktree")
@@ -151,6 +173,9 @@ def main(argv: list[str] | None = None) -> int:
         test_command=args.test_command,
         block_on_red=args.block_on_red,
         test_timeout=args.test_timeout,
+        max_pause_minutes=args.max_pause_minutes,
+        pause_poll_minutes=args.pause_poll_minutes,
+        reviewer_fallback_chain=tuple(args.reviewer_fallback or ()),
         image=args.image,
         base_branch=args.branch,
     )

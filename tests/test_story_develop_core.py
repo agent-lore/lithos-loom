@@ -9,6 +9,7 @@ round is scripted via the ``reviews`` list.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -59,6 +60,8 @@ def _install_fakes(
     reviews: list[dict] | None = None,
     source_rounds: set[int] | None = None,
     gates: list[bool | str] | None = None,
+    coder_results: list[str] | None = None,
+    coder_transcript_on_limit: bool = False,
 ) -> dict:
     """Install fake container + turn + gate machinery.
 
@@ -70,19 +73,42 @@ def _install_fakes(
     every round). ``gates`` scripts the gate result per gate run (last repeats;
     ``True``/``False`` = green/red, ``"error"`` = simulated infra failure); the
     gate only actually runs when the config carries a ``test_command``.
+
+    T5 limit scripting: ``coder_results`` is consumed per coder call (last
+    repeats; ``"ok"`` or ``"limit"``); a review entry's ``limit_first: N``
+    makes that round's first N reviewer calls fail usage-limited.
+    ``coder_transcript_on_limit`` simulates the partial session transcript
+    surviving the interruption (drives the resume-vs-fresh retry choice).
+    ``_sleep`` is captured into ``state["sleeps"]`` — tests never sleep.
     """
     reviews = reviews if reviews is not None else [{"text": _LGTM}]
     state: dict = {
         "stopped": [],
+        "starts": 0,
         "coder_calls": [],
         "coder_prompts": [],
         "review_calls": [],
+        "review_prompts": [],
+        "review_attempts": {},
         "gate_calls": [],
+        "sleeps": [],
     }
 
     def fake_start(run_cmd) -> str:
         state["worktree"] = _worktree_from_run_cmd(run_cmd)
+        state["starts"] += 1
         return "cid"
+
+    def _limit_turn(session_id: str) -> TurnResult:
+        return TurnResult(
+            exit_code=1,
+            succeeded=False,
+            session_id="",
+            result_text="Claude AI usage limit reached|1750000000",
+            cost_usd=0.001,
+            raw={"is_error": True},
+            stderr="",
+        )
 
     def _entry(rnd: int) -> dict:
         return reviews[min(rnd - 1, len(reviews) - 1)]
@@ -90,9 +116,23 @@ def _install_fakes(
     def fake_run_turn(*, container, prompt, session_id, resume=False, timeout):
         wt = state["worktree"]
         if "-coder" in container:
-            rnd = _round_from(prompt, "coder_done")
+            # a continuation retry has no round marker; reuse the last round
+            if "coder_done" in prompt:
+                rnd = _round_from(prompt, "coder_done")
+                state["last_coder_round"] = rnd
+            else:
+                rnd = state.get("last_coder_round", 1)
             state["coder_calls"].append((rnd, resume))
             state["coder_prompts"].append(prompt)
+            if coder_results is not None:
+                idx = len(state["coder_calls"]) - 1
+                action = coder_results[min(idx, len(coder_results) - 1)]
+                if action == "limit":
+                    if coder_transcript_on_limit:
+                        pdir = config.coder_config_dir / "projects" / "-workspace"
+                        pdir.mkdir(parents=True, exist_ok=True)
+                        (pdir / f"{session_id}.jsonl").write_text("{}\n")
+                    return _limit_turn(session_id)
             if write_source and (source_rounds is None or rnd in source_rounds):
                 (wt / "greeting.txt").write_text(f"hello round {rnd}\n")
             if write_coder_handoff:
@@ -109,10 +149,19 @@ def _install_fakes(
                 stderr="",
             )
         # reviewer turn
-        rnd = _round_from(prompt, "review")
+        if "review" in prompt and re.search(r"round_\d+_review", prompt):
+            rnd = _round_from(prompt, "review")
+            state["last_review_round"] = rnd
+        else:  # continuation retry carries no filename marker
+            rnd = state.get("last_review_round", 1)
         is_correction = "was not valid" in prompt
         state["review_calls"].append((rnd, resume, is_correction))
+        state["review_prompts"].append(prompt)
         entry = _entry(rnd)
+        attempts = state["review_attempts"].get(rnd, 0)
+        state["review_attempts"][rnd] = attempts + 1
+        if attempts < entry.get("limit_first", 0):
+            return _limit_turn(session_id)
         review_path = config.handoff_dir / handoff.reviewer_handoff_name(
             rnd, config.reviewer
         )
@@ -152,6 +201,7 @@ def _install_fakes(
     )
     monkeypatch.setattr(develop_mod, "run_turn", fake_run_turn)
     monkeypatch.setattr(test_gate_mod, "run_gate_container", fake_gate_container)
+    monkeypatch.setattr(develop_mod, "_sleep", lambda s: state["sleeps"].append(s))
     return state
 
 
@@ -484,6 +534,134 @@ def test_gate_disabled_by_config(
     result = develop_mod.develop(cfg)
     assert result.test_gate is None
     assert state["gate_calls"] == []
+
+
+# --- usage limits (T5) -------------------------------------------------------
+
+
+def test_coder_limit_pauses_and_retries_fresh(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # No transcript survived -> the retry re-issues the ORIGINAL prompt fresh.
+    state = _install_fakes(monkeypatch, config, coder_results=["limit", "ok"])
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert state["sleeps"] == [300]  # one poll-interval pause (5 min default)
+    assert [r for r, _ in state["coder_calls"]] == [1, 1]  # same round, twice
+    assert state["coder_calls"][1][1] is False  # fresh, not resumed
+    assert "coder_done" in state["coder_prompts"][1]  # original prompt re-sent
+    # the failed turn was captured as a G4 fixture
+    fixture = config.failures_dir / "round_01_coder.json"
+    assert "usage limit" in fixture.read_text()
+
+
+def test_coder_limit_resumes_when_transcript_survived(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        coder_results=["limit", "ok"],
+        coder_transcript_on_limit=True,
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert state["coder_calls"][1][1] is True  # resumed the SAME session
+    assert "interrupted by a provider usage limit" in state["coder_prompts"][1]
+
+
+def test_coder_limit_budget_exhausted_interrupts(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, max_pause_minutes=0)
+    state = _install_fakes(monkeypatch, cfg, coder_results=["limit"])
+    result = develop_mod.develop(cfg)
+    assert result.status == "interrupted"
+    assert result.succeeded is False
+    assert "INTERRUPTED" in result.message and "usage-limited" in result.message
+    assert state["sleeps"] == []  # zero budget -> no pointless wait
+    state_file = json.loads((cfg.run_dir / "state.json").read_text())
+    assert state_file["status"] == "interrupted"
+    assert state_file["coder_session"]  # resume handle preserved
+
+
+def test_reviewer_limit_pauses_when_no_fallback(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    state = _install_fakes(
+        monkeypatch, config, reviews=[{"text": _LGTM, "limit_first": 1}]
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert state["sleeps"] == [300]
+    assert len(state["review_calls"]) == 2  # limited attempt + retry
+    assert state["starts"] == 2  # no container replacement happened
+
+
+def test_reviewer_limit_switches_to_fallback_tool(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, reviewer_fallback_chain=("codex",))
+    monkeypatch.setattr(develop_mod, "_tool_supported", lambda t: True)
+    state = _install_fakes(
+        monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 1}]
+    )
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved"
+    assert state["sleeps"] == []  # switch, not pause
+    assert state["starts"] == 3  # coder + reviewer + replacement reviewer
+    # the replacement was reseeded: fresh session, takeover prompt with the
+    # handoff-history payload
+    reseed = state["review_prompts"][1]
+    assert "taking over" in reseed
+    assert "acceptance criteria" in reseed.lower()
+    state_file = json.loads((cfg.run_dir / "state.json").read_text())
+    assert state_file["reviewer_tool"] == "codex"
+
+
+def test_reviewer_limit_skips_unsupported_fallback_and_pauses(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    # codex is in the chain but the exec layer can't run it yet (T6) ->
+    # fall through to the pause path rather than a broken switch.
+    cfg = replace(config, reviewer_fallback_chain=("codex",))
+    state = _install_fakes(
+        monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 1}]
+    )
+    result = develop_mod.develop(cfg)
+    assert result.status == "approved"
+    assert state["sleeps"] == [300]
+    assert state["starts"] == 2  # no replacement container
+
+
+def test_reviewer_limit_budget_exhausted_interrupts(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, max_pause_minutes=0)
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 99}])
+    result = develop_mod.develop(cfg)
+    assert result.status == "interrupted"
+    assert "reviewer usage-limited" in result.message
+
+
+def test_state_json_written_on_success(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    _install_fakes(monkeypatch, config)
+    result = develop_mod.develop(config)
+    data = json.loads((config.run_dir / "state.json").read_text())
+    assert data["status"] == "approved"
+    assert data["branch"] == result.branch
+    assert data["rounds"] == result.rounds
 
 
 # --- validation -------------------------------------------------------------
