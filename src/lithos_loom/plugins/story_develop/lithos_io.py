@@ -5,10 +5,17 @@ directly: it fetches the task up front (title, description, acceptance
 criteria, metadata) and posts the outcome back when the run ends — a
 ``[DevelopResult]`` finding carrying the verdicts + open findings, a
 ``[ReviewDispute]`` finding when a dispute deadlock stopped the run, and a
-metadata update with the branch / status / cost. Standalone therefore gets a
-full Lithos round-trip today; the daemon (T10) reuses the identical path, and
-``result.json`` still carries only ``status`` for the runner — no
-double-application.
+metadata update with the branch / status / cost. The daemon (T10) reuses the
+identical path, and ``result.json`` still carries only ``status`` for the
+runner — no double-application.
+
+Task STATE deliberately does not transition by default: agent approval means
+a reviewed-but-unmerged branch exists, not that the work is done — the
+operator merges (and typically soaks) first, then completes the task.
+``complete_task`` exists for operators who do want route-runner parity
+(``--complete-on-approval``). There is nothing to release on failure: the
+standalone plugin never claims the task (claiming is the daemon's collision
+contract, T10).
 
 The sync wrappers run one short-lived :class:`~lithos_loom.lithos_client.
 LithosClient` connection per operation (one fetch at start, one post at end)
@@ -162,6 +169,32 @@ def post_results(url: str, task_id: str, result: DevelopResult) -> bool:
         logger.warning(
             "[Friction] story-develop %s: posting results to Lithos task %s "
             "failed (%s); the branch is intact — post manually if needed",
+            result.run_id,
+            task_id,
+            exc,
+        )
+        return False
+
+
+def complete_task(url: str, task_id: str, result: DevelopResult) -> bool:
+    """Mark the task completed (``--complete-on-approval`` opt-in only).
+
+    Only meaningful for APPROVED runs; the caller gates on that. Returns
+    True on success; failure logs friction and returns False (same
+    never-fail-a-finished-run policy as :func:`post_results`).
+    """
+
+    async def _complete() -> None:
+        async with LithosClient(url, agent_id=AGENT_ID) as client:
+            await client.task_complete(task_id=task_id)
+
+    try:
+        asyncio.run(_complete())
+        return True
+    except Exception as exc:
+        logger.warning(
+            "[Friction] story-develop %s: completing Lithos task %s failed "
+            "(%s); complete it manually",
             result.run_id,
             task_id,
             exc,

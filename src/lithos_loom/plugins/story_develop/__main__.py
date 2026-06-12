@@ -46,6 +46,7 @@ from .develop import develop
 from .lithos_io import (
     DEFAULT_LITHOS_URL,
     LithosIOError,
+    complete_task,
     fetch_task_context,
     post_results,
 )
@@ -68,7 +69,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--task-id",
         default=None,
         help="Lithos task to develop: fetches title/body/acceptance criteria "
-        "up front and posts the outcome back when the run ends",
+        "up front and posts the outcome back when the run ends. The task IS "
+        "the description (incompatible with --description — the audit trail "
+        "must not lie about what was developed)",
+    )
+    p.add_argument(
+        "--complete-on-approval",
+        action="store_true",
+        help="With --task-id: mark the Lithos task completed when the run is "
+        "approved. Default OFF — agent approval means a reviewed branch "
+        "exists, not that the work is merged",
     )
     p.add_argument(
         "--lithos-url",
@@ -199,6 +209,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.task_id is not None and args.no_lithos:
         print("error: --task-id and --no-lithos are incompatible", file=sys.stderr)
         return 2
+    if args.task_id is not None and args.description is not None:
+        # The task IS the description: a run that reports "developing task X"
+        # while prompting the coder with unrelated operator text would be a
+        # lying audit trail. Refine the definition of done via
+        # --acceptance-criteria, or fix the task body itself.
+        print(
+            "error: --task-id and --description are incompatible (the task's "
+            "title + body are the description; use --acceptance-criteria to "
+            "refine the definition of done)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.complete_on_approval and args.task_id is None:
+        print("error: --complete-on-approval requires --task-id", file=sys.stderr)
+        return 2
     if args.task_id is None and args.description is None:
         print("error: one of --description or --task-id is required", file=sys.stderr)
         return 2
@@ -228,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         except LithosIOError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        description = description or ctx.task_text
+        description = ctx.task_text
         # explicit flag > task metadata > (effective fallback to description)
         acceptance_criteria = acceptance_criteria or ctx.acceptance_criteria
         print(f"developing Lithos task {ctx.task_id}: {ctx.title}")
@@ -348,6 +373,12 @@ def main(argv: list[str] | None = None) -> int:
             f"  lithos:   {'results posted to' if posted else 'POSTING FAILED for'} "
             f"task {args.task_id}"
         )
+        if args.complete_on_approval and result.approved:
+            done = complete_task(args.lithos_url, args.task_id, result)
+            print(
+                f"  lithos:   task {args.task_id} "
+                f"{'marked completed' if done else 'COMPLETION FAILED'}"
+            )
     print(f"  {result.message}")
     if result.status == "max_rounds":
         print(

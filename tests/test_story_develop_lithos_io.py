@@ -178,3 +178,22 @@ def test_post_results_disputed_adds_breadcrumb(fake_client) -> None:
 def test_post_failure_returns_false_not_raise(fake_client) -> None:
     fake_client.raise_on_post = True
     assert lithos_io.post_results("http://x", "task-1", _result()) is False
+
+
+def test_complete_task_calls_client(fake_client, monkeypatch) -> None:
+    completed: list[str] = []
+
+    async def fake_complete(self, *, task_id):
+        completed.append(task_id)
+
+    monkeypatch.setattr(_FakeClient, "task_complete", fake_complete, raising=False)
+    assert lithos_io.complete_task("http://x", "task-1", _result()) is True
+    assert completed == ["task-1"]
+
+
+def test_complete_task_failure_returns_false(fake_client, monkeypatch) -> None:
+    async def boom(self, *, task_id):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(_FakeClient, "task_complete", boom, raising=False)
+    assert lithos_io.complete_task("http://x", "task-1", _result()) is False

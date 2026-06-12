@@ -237,3 +237,98 @@ def test_main_task_id_resolves_description_and_posts(
     out = capsys.readouterr().out
     assert "developing Lithos task t-9" in out
     assert "results posted to task t-9" in out
+
+
+def test_main_rejects_task_id_with_description(tmp_git_repo: Path, capsys) -> None:
+    # The task IS the description — a mixed source would let the audit trail
+    # claim task X while developing unrelated text.
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--task-id",
+            "t-1",
+            "--description",
+            "something else entirely",
+        ]
+    )
+    assert rc == 2
+    assert "--task-id and --description are incompatible" in capsys.readouterr().err
+
+
+def test_main_rejects_complete_on_approval_without_task_id(
+    tmp_git_repo: Path, capsys
+) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--complete-on-approval",
+        ]
+    )
+    assert rc == 2
+    assert "--complete-on-approval requires --task-id" in capsys.readouterr().err
+
+
+def test_main_complete_on_approval_completes_task(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    captured: dict = {}
+
+    def fake_fetch(url, task_id):
+        return TaskContext(
+            task_id=task_id,
+            title="T",
+            description="",
+            acceptance_criteria=None,
+            metadata={},
+        )
+
+    def _fake_result(status: str) -> DevelopResult:
+        return DevelopResult(
+            status=status,
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.1,
+            review_cost_usd=0.1,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "fetch_task_context", fake_fetch)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a: True)
+    monkeypatch.setattr(
+        main_mod, "complete_task", lambda *a: captured.setdefault("completed", True)
+    )
+
+    # approved + flag -> completes
+    monkeypatch.setattr(main_mod, "develop", lambda c, **kw: _fake_result("approved"))
+    rc = main_mod.main(
+        ["--repo", str(tmp_git_repo), "--task-id", "t-1", "--complete-on-approval"]
+    )
+    assert rc == 0 and captured.get("completed") is True
+    assert "marked completed" in capsys.readouterr().out
+
+    # NOT approved + flag -> no completion
+    captured.clear()
+    monkeypatch.setattr(main_mod, "develop", lambda c, **kw: _fake_result("stalled"))
+    rc = main_mod.main(
+        ["--repo", str(tmp_git_repo), "--task-id", "t-1", "--complete-on-approval"]
+    )
+    assert rc == 1 and "completed" not in captured
+
+    # approved WITHOUT the flag -> no completion (default behaviour)
+    captured.clear()
+    monkeypatch.setattr(main_mod, "develop", lambda c, **kw: _fake_result("approved"))
+    rc = main_mod.main(["--repo", str(tmp_git_repo), "--task-id", "t-1"])
+    assert rc == 0 and "completed" not in captured
