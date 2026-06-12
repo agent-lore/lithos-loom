@@ -124,3 +124,76 @@ def test_headers_with_trailing_colon_are_tolerated() -> None:
     assert h.status == "FINDINGS"
     assert h.summary == "Needs a guard."
     assert len(h.findings) == 1 and h.findings[0].severity == "major"
+
+
+def test_folded_scalar_rationale_is_captured() -> None:
+    # Reviewers write YAML folded scalars in practice (seen in run c7fa1c8d);
+    # the text must be captured, not silently dropped (T7 ledger feeds on it).
+    text = (
+        "## Status: FINDINGS\n## Summary\nOne issue.\n## Findings\n"
+        "- finding_id:\n"
+        "  severity: minor\n"
+        "  status: open\n"
+        "  rationale: >\n"
+        "    The alias on line 30 is a redundant duplicate of line 29.\n"
+        "    Removing it and using the plain name is cleaner.\n"
+        "  coder_response:\n"
+    )
+    (f,) = parse_review_handoff(text).findings
+    assert "redundant duplicate" in f.rationale
+    assert "is cleaner" in f.rationale
+    assert f.coder_response == ""  # the key AFTER the fold still parses
+
+
+def test_literal_scalar_and_fold_ends_at_next_item() -> None:
+    text = (
+        "## Status: FINDINGS\n## Summary\nTwo.\n## Findings\n"
+        "- finding_id:\n"
+        "  severity: major\n"
+        "  status: open\n"
+        "  rationale: |\n"
+        "    line one\n"
+        "    line two\n"
+        "- finding_id:\n"
+        "  severity: minor\n"
+        "  status: open\n"
+        "  rationale: plain\n"
+    )
+    first, second = parse_review_handoff(text).findings
+    assert first.rationale == "line one\nline two"
+    assert second.rationale == "plain"
+
+
+def test_blank_finding_id_stays_blank() -> None:
+    # Canonical ids are LEDGER-assigned; the parser must not invent fallbacks
+    # (a per-file fallback would collide across rounds).
+    text = (
+        "## Status: FINDINGS\n## Summary\nx.\n## Findings\n"
+        "- finding_id:\n  severity: minor\n  status: open\n"
+        "- severity: major\n  status: open\n"
+    )
+    findings = parse_review_handoff(text).findings
+    assert [f.finding_id for f in findings] == ["", ""]
+
+
+def test_folded_scalar_keeps_embedded_bullet_lists() -> None:
+    # Bullet lists are common inside YAML text blocks; a more-indented "- "
+    # line is fold CONTENT, not a new finding item (Copilot review on PR #80).
+    text = (
+        "## Status: FINDINGS\n## Summary\nOne.\n## Findings\n"
+        "- finding_id:\n"
+        "  severity: major\n"
+        "  status: open\n"
+        "  rationale: >\n"
+        "    Two problems:\n"
+        "    - the lock is taken twice\n"
+        "    - the error path leaks the fd\n"
+        "- finding_id:\n"
+        "  severity: minor\n"
+        "  status: open\n"
+        "  rationale: separate item\n"
+    )
+    first, second = parse_review_handoff(text).findings
+    assert "- the lock is taken twice" in first.rationale
+    assert "- the error path leaks the fd" in first.rationale
+    assert second.severity == "minor" and second.rationale == "separate item"

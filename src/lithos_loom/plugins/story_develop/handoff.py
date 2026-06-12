@@ -226,11 +226,54 @@ def _split_files(value: str) -> list[str]:
     return [p for p in parts if p]
 
 
+_FOLD_MARKERS = (">", "|", ">-", "|-", ">+", "|+")
+
+
 def _parse_findings(block: str) -> list[Finding]:
-    """Parse the ``## Findings`` body into a list of :class:`Finding`."""
+    """Parse the ``## Findings`` body into a list of :class:`Finding`.
+
+    Supports YAML-style folded/literal scalars (``rationale: >`` / ``|`` with
+    indented continuation lines) — reviewers write them in practice, and
+    dropping the text silently would starve the lifecycle ledger (T7) and the
+    coder prompts of the rationale.
+
+    A finding with no id is left with ``finding_id=""`` — canonical ids are
+    assigned by the orchestrator's ledger, never invented here (a per-file
+    fallback would collide across rounds).
+    """
     items: list[dict[str, str]] = []
     current: dict[str, str] | None = None
+    fold_key: str | None = None  # key currently accumulating folded lines
+    fold_indent = 0
+    fold_lines: list[str] = []
+
+    def _flush_fold() -> None:
+        nonlocal fold_key, fold_lines
+        if current is not None and fold_key is not None:
+            current[fold_key] = "\n".join(fold_lines).strip()
+        fold_key, fold_lines = None, []
+
+    def _start_kv(target: dict[str, str], key: str, value: str, indent: int) -> None:
+        nonlocal fold_key, fold_indent, fold_lines
+        if value in _FOLD_MARKERS:
+            fold_key, fold_indent, fold_lines = key, indent, []
+        else:
+            target[key] = value
+
     for line in block.splitlines():
+        indent = len(line) - len(line.lstrip(" "))
+        if fold_key is not None:
+            # Inside a folded scalar, indentation alone decides: any
+            # MORE-indented line is content — including bullet lists, which
+            # are common in YAML text blocks. A new finding item ("- ...")
+            # sits at or left of the key's indent and ends the fold below.
+            if line.strip() and indent > fold_indent:
+                fold_lines.append(line.strip())
+                continue
+            if not line.strip():
+                fold_lines.append("")
+                continue
+            _flush_fold()
         item = _ITEM_RE.match(line)
         if item:  # new list entry: "- finding_id: ..."
             current = {}
@@ -238,13 +281,14 @@ def _parse_findings(block: str) -> list[Finding]:
             rest = item.group(1)
             kv = _KV_RE.match(rest)
             if kv:
-                current[kv.group(1).lower()] = kv.group(2).strip()
+                _start_kv(current, kv.group(1).lower(), kv.group(2).strip(), indent)
             continue
         if current is None:
             continue
         kv = _KV_RE.match(line)
         if kv:
-            current[kv.group(1).lower()] = kv.group(2).strip()
+            _start_kv(current, kv.group(1).lower(), kv.group(2).strip(), indent)
+    _flush_fold()
 
     findings: list[Finding] = []
     for idx, raw in enumerate(items, start=1):
@@ -262,7 +306,7 @@ def _parse_findings(block: str) -> list[Finding]:
             )
         findings.append(
             Finding(
-                finding_id=raw.get("finding_id") or raw.get("id") or f"f-{idx:03d}",
+                finding_id=(raw.get("finding_id") or raw.get("id") or "").strip(),
                 severity=severity,
                 status=status,
                 files=_split_files(raw.get("files", "")),

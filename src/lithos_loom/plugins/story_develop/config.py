@@ -184,6 +184,8 @@ class DevelopConfig:
     max_pause_minutes: int = DEFAULT_MAX_PAUSE_MINUTES
     pause_poll_minutes: int = DEFAULT_PAUSE_POLL_MINUTES
     reviewer_fallback_chain: tuple[str, ...] = ()
+    # T7: total agent-spend ceiling for the run (None = unlimited).
+    max_cost_usd: float | None = None
     acceptance_criteria: str | None = None
     run_id: str = field(default_factory=_short_run_id)
     # Host path to the operator's claude config dir (source of the auth file).
