@@ -58,7 +58,7 @@ def _install_fakes(
     write_coder_handoff: bool = True,
     reviews: list[dict] | None = None,
     source_rounds: set[int] | None = None,
-    gates: list[bool] | None = None,
+    gates: list[bool | str] | None = None,
 ) -> dict:
     """Install fake container + turn + gate machinery.
 
@@ -67,8 +67,9 @@ def _install_fakes(
     ``text`` is what the first review turn writes (None = write nothing);
     ``retry_text`` is what the malformed-handoff re-prompt writes.
     ``source_rounds`` limits which rounds the coder writes source in (None =
-    every round). ``gates`` scripts the gate result per gate run (last repeats);
-    the gate only actually runs when the config carries a ``test_command``.
+    every round). ``gates`` scripts the gate result per gate run (last repeats;
+    ``True``/``False`` = green/red, ``"error"`` = simulated infra failure); the
+    gate only actually runs when the config carries a ``test_command``.
     """
     reviews = reviews if reviews is not None else [{"text": _LGTM}]
     state: dict = {
@@ -133,8 +134,11 @@ def _install_fakes(
 
     def fake_gate_container(gate_cmd, *, name, command, timeout):
         seq = gates if gates is not None else [True]
-        ok = seq[min(len(state["gate_calls"]), len(seq) - 1)]
+        val = seq[min(len(state["gate_calls"]), len(seq) - 1)]
         state["gate_calls"].append(name)
+        if isinstance(val, str):  # "error" -> simulated infra failure
+            raise RuntimeError("simulated gate infra failure")
+        ok = val
         return GateResult(
             command=command,
             exit_code=0 if ok else 1,
@@ -450,6 +454,24 @@ def test_gate_not_rerun_without_new_commit(
     assert result.status == "approved"
     assert result.rounds == 2
     assert len(state["gate_calls"]) == 1  # only the round-1 commit was gated
+
+
+def test_gate_infra_error_clears_stale_red_under_block_on_red(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # Round 1: gate RED + block_on_red -> blocked despite LGTM review.
+    # Round 2: NEW commit but the gate errors (infra) -> the stale round-1 RED
+    # must NOT stand in for this commit; with no gate result the review's pass
+    # approves the run (the gate is an independent check, not a dependency).
+    cfg = _gated_config(config, block_on_red=True)
+    state = _install_fakes(monkeypatch, cfg, gates=[False, "error"])
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved"
+    assert result.rounds == 2
+    assert len(state["gate_calls"]) == 2  # round 2 did attempt its own gate
+    assert result.test_gate is None  # no result for the approved commit
+    assert "test gate" not in result.message  # no stale verdict reported
 
 
 def test_gate_disabled_by_config(

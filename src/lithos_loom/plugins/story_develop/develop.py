@@ -476,9 +476,12 @@ def develop(
 
             # --- test gate (only when there is a new commit to gate) --------
             if gate_command is not None and new_commit is not None:
-                gate_result = _run_gate(config, wt, new_commit, round_no, gate_command)
-                if gate_result is not None:
-                    gate = gate_result
+                # Overwrite unconditionally: on a gate infra error this clears
+                # to None rather than letting a PRIOR commit's result (e.g. a
+                # stale RED under block_on_red) stand in for this commit. A
+                # round with no new commit keeps the prior result — the tree is
+                # unchanged, so it still describes HEAD.
+                gate = _run_gate(config, wt, new_commit, round_no, gate_command)
 
             # --- reviewer turn --------------------------------------------
             if round_no == 1:
