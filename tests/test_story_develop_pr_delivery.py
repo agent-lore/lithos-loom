@@ -112,6 +112,11 @@ def test_reply_body_variants() -> None:
     assert disputed.startswith("Not changed — intentional")
     nodetail = reply_body(fixed=True, sha=None, coder_response="")
     assert "Addressed — (no further detail given)" in nodetail
+    held = reply_body(
+        fixed=False, sha=None, coder_response="adds a guard", held_back_verdict="RED"
+    )
+    assert "NOT pushed" in held and "RED" in held and "adds a guard" in held
+    assert AUTOMATED_MARKER in held
 
 
 def test_pr_number_from_url() -> None:
@@ -385,9 +390,13 @@ def test_deliver_red_gate_holds_fix_back(
     assert out.fix_gate_verdict == "RED"
     assert state["pushes"] == 1  # only the initial push
     assert any("NOT pushed" in c for c in state["pr_comments"])
-    # replies reflect the un-pushed state (no "Fixed in <sha>")
+    # replies say what actually happened: a fix exists but was held back —
+    # neither "Fixed in <sha>" (not on the PR) nor "Not changed" (it WAS)
     ((_, body),) = state["replies"]
     assert not body.startswith("Fixed in ")
+    assert not body.startswith("Not changed")
+    assert "NOT pushed" in body and "RED" in body
+    assert "tightened the annotation" in body  # intended change still shown
 
 
 def test_deliver_coder_failure_comments_and_degrades(

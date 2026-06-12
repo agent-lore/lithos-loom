@@ -164,10 +164,27 @@ def comments_to_handoff_text(comments: list[CopilotComment]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def reply_body(*, fixed: bool, sha: str | None, coder_response: str) -> str:
-    """The per-thread reply: fix reference or reasoned pushback, marked."""
+def reply_body(
+    *,
+    fixed: bool,
+    sha: str | None,
+    coder_response: str,
+    held_back_verdict: str | None = None,
+) -> str:
+    """The per-thread reply: fix reference, held-back notice, or pushback.
+
+    *held_back_verdict* covers the committed-but-not-pushed case (RED
+    regression gate): the code DID change, so "Not changed" would be
+    misleading — say what happened instead.
+    """
     response = coder_response.strip() or "(no further detail given)"
-    if fixed and sha:
+    if held_back_verdict is not None:
+        head = (
+            f"A fix was prepared but NOT pushed — the regression test gate "
+            f"came back {held_back_verdict} on the fix commit (see the PR "
+            f"comment). Intended change: {response}"
+        )
+    elif fixed and sha:
         head = f"Fixed in {sha[:10]} — {response}"
     elif fixed:
         head = f"Addressed — {response}"
@@ -542,10 +559,16 @@ def deliver(
         f = responses.get(fid)
         disputed = f is not None and f.status == "disputed"
         coder_response = f.coder_response if f is not None else ""
+        held_back = (
+            gate_verdict
+            if (not disputed and fix_committed and not fix_pushed)
+            else None
+        )
         body_text = reply_body(
             fixed=not disputed and fix_pushed,
             sha=new_sha if fix_pushed else None,
             coder_response=coder_response,
+            held_back_verdict=held_back,
         )
         if post_thread_reply(wt, repo, pr_number, comment.comment_id, body_text):
             replies += 1
