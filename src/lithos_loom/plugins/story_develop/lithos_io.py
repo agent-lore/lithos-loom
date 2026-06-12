@@ -130,17 +130,57 @@ def _result_summary(result: DevelopResult) -> str:
     return "\n".join(lines)
 
 
-def post_results(url: str, task_id: str, result: DevelopResult) -> bool:
+def _delivery_section(delivery: Any) -> str:
+    """The Copilot-round block of the ``[DevelopResult]`` finding."""
+    lines = [f"pull request: {delivery.pr_url}"]
+    if delivery.copilot_reviewed:
+        if delivery.fix_pushed:
+            fix = f"fix pushed ({delivery.fix_sha})"
+        elif delivery.fix_committed:
+            fix = f"fix prepared but HELD BACK (gate {delivery.fix_gate_verdict})"
+        else:
+            fix = "no code change"
+        lines.append(
+            f"copilot round: {delivery.comments_count} comment(s); {fix}; "
+            f"{delivery.replies_posted} repl(ies) posted"
+        )
+    for note in delivery.notes:
+        lines.append(f"note: {note}")
+    return "\n".join(lines)
+
+
+def post_results(
+    url: str,
+    task_id: str,
+    result: DevelopResult,
+    *,
+    pr_url: str | None = None,
+    delivery: Any = None,
+) -> bool:
     """Post the run outcome back to the task. Returns True when fully posted.
+
+    *delivery* (a ``DeliveryOutcome``) supersedes *pr_url* and corrects the
+    reported spend: the Copilot fix round happens AFTER ``develop()`` returns,
+    so the result object alone would understate cost and omit the round.
 
     A post failure must NOT fail the run — the work exists on the branch
     regardless — so errors are logged as friction and ``False`` is returned
     for the caller to surface.
     """
+    total_cost = result.total_cost_usd + (
+        delivery.extra_cost_usd if delivery is not None else 0.0
+    )
 
     async def _post() -> None:
         async with LithosClient(url, agent_id=AGENT_ID) as client:
-            await client.finding_post(task_id=task_id, summary=_result_summary(result))
+            summary = _result_summary(result)
+            if delivery is not None:
+                summary += "\n\n" + _delivery_section(delivery)
+                if delivery.extra_cost_usd:
+                    summary += f"\ntotal cost incl. copilot round: ${total_cost:.4f}"
+            elif pr_url:
+                summary += f"\n\npull request: {pr_url}"
+            await client.finding_post(task_id=task_id, summary=summary)
             if result.status == "disputed":
                 await client.finding_post(
                     task_id=task_id,
@@ -151,16 +191,17 @@ def post_results(url: str, task_id: str, result: DevelopResult) -> bool:
                         f"at {result.conversation_log})."
                     ),
                 )
-            await client.task_update(
-                task_id=task_id,
-                metadata={
-                    "develop_status": result.status,
-                    "develop_branch": result.branch,
-                    "develop_run_id": result.run_id,
-                    "develop_rounds": result.rounds,
-                    "develop_cost_usd": round(result.total_cost_usd, 4),
-                },
-            )
+            metadata: dict[str, Any] = {
+                "develop_status": result.status,
+                "develop_branch": result.branch,
+                "develop_run_id": result.run_id,
+                "develop_rounds": result.rounds,
+                "develop_cost_usd": round(total_cost, 4),
+            }
+            effective_pr_url = delivery.pr_url if delivery is not None else pr_url
+            if effective_pr_url:
+                metadata["develop_pr_url"] = effective_pr_url
+            await client.task_update(task_id=task_id, metadata=metadata)
 
     try:
         asyncio.run(_post())

@@ -168,6 +168,54 @@ def test_post_results_finding_and_metadata(fake_client) -> None:
     assert meta["develop_cost_usd"] == 0.75
 
 
+def test_post_results_with_delivery_corrects_cost_and_reports_round(
+    fake_client,
+) -> None:
+    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
+
+    delivery = DeliveryOutcome(
+        pr_url="https://github.com/o/r/pull/12",
+        pr_number=12,
+        copilot_requested=True,
+        copilot_reviewed=True,
+        comments_count=2,
+        fix_committed=True,
+        fix_pushed=True,
+        fix_sha="abc123",
+        replies_posted=2,
+        extra_cost_usd=0.5,
+    )
+    ok = lithos_io.post_results("http://x", "task-1", _result(), delivery=delivery)
+    assert ok is True
+    body = fake_client.findings[0]
+    assert "pull request: https://github.com/o/r/pull/12" in body
+    assert "copilot round: 2 comment(s); fix pushed (abc123); 2 repl(ies)" in body
+    assert "total cost incl. copilot round: $1.2500" in body  # 0.75 + 0.5
+    (meta,) = fake_client.metadata_updates
+    assert meta["develop_cost_usd"] == 1.25  # NOT the stale 0.75
+    assert meta["develop_pr_url"] == "https://github.com/o/r/pull/12"
+
+
+def test_post_results_with_held_back_delivery(fake_client) -> None:
+    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
+
+    delivery = DeliveryOutcome(
+        pr_url="https://github.com/o/r/pull/12",
+        pr_number=12,
+        copilot_requested=True,
+        copilot_reviewed=True,
+        comments_count=1,
+        fix_committed=True,
+        fix_pushed=False,
+        fix_gate_verdict="RED",
+        replies_posted=1,
+        extra_cost_usd=0.2,
+    )
+    lithos_io.post_results("http://x", "task-1", _result(), delivery=delivery)
+    body = fake_client.findings[0]
+    assert "HELD BACK (gate RED)" in body
+
+
 def test_post_results_disputed_adds_breadcrumb(fake_client) -> None:
     lithos_io.post_results("http://x", "task-1", _result(status="disputed"))
     assert len(fake_client.findings) == 2
