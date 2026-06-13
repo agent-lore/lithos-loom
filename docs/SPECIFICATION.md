@@ -193,7 +193,7 @@ Loom reads one TOML file per process. Discovery order:
 agent_id      = "lithos-orchestrator-<host>"  # claim attribution; must be unique per host
 lithos_url    = "http://localhost:8765"        # Lithos MCP-over-SSE endpoint
 work_dir      = "/tmp/lithos-loom"             # per-task staging tree
-max_concurrency        = 4                     # global concurrent plugin runs
+max_concurrency        = 4                     # parsed but NOT YET enforced (#85); no runtime cap today — a single route runs serially, multiple routes do not contend
 log_level              = "info"                # debug | info | warning | error
 retain_failed_workdirs = true                  # keep failed work-dirs for triage
 
@@ -892,6 +892,7 @@ The following are absent from the current surface. Some are explicit non-goals; 
 
 - **Plugin bodies for `prd-decompose`, `story-implement`, `story-review-human`.** Scaffolding under `src/lithos_loom/plugins/`; no real logic.
 - **Application of `result.json` fields beyond `status`.** `metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable` are schema-validated but not used by the runner today (§5.2).
+- **`orchestrator.max_concurrency` enforcement.** Parsed and stored but never read at runtime — there is no global cap on concurrent plugin runs. A single route runs its tasks serially; multiple routes run concurrently without contending. Tracked in [#85](https://github.com/agent-lore/lithos-loom/issues/85).
 - **Resolved project entry in `task.json`.** Plugins receive `{"task": <payload>}` only.
 - **Startup reclaim of stale claims.** Claims age out via Lithos's own TTL; the route-runner does not actively release them on startup.
 - **Hot-reload of TOML config.** Operator restarts the daemon.
