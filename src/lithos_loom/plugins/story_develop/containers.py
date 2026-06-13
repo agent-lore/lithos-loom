@@ -110,11 +110,11 @@ def build_exec_command(
     cost / errors come from structured output, not pane scraping.
 
     *model* / *effort*, when set, add ``--model <model>`` / ``--effort <level>``
-    (#93) — passed on every turn, including resumes. *effort* is a reasoning
-    level (``low``/``medium``/``high``/``xhigh``), not a token budget; ``None``
-    leaves the agent default. Codex's equivalent (``-c model_reasoning_effort=``)
-    lands with codex support (#94); this builder is the per-tool translation
-    point for both knobs.
+    (#93) — passed on every turn, including resumes. *effort* is a Claude
+    reasoning level (``low``…``max``), not a token budget; ``None`` leaves the
+    agent default. Other tools have no shared effort knob (Codex picks depth via
+    the model; OpenCode uses ``--variant``) — when they land (#94) this builder
+    is the per-tool translation point for both ``model`` and ``effort``.
     """
     if tool != "claude":  # codex support arrives with T6
         raise ValueError(f"unsupported tool: {tool!r} (only 'claude' until T6)")

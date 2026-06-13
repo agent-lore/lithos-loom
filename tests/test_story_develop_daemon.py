@@ -433,7 +433,7 @@ def test_apply_cli_fallbacks_bad_values_friction_and_dropped() -> None:
             coder_model="  ",
             coder_effort="ultra",
             reviewer_model="",
-            reviewer_effort="max",
+            reviewer_effort="minimal",  # OpenCode level, not Claude's canonical set
         ),
     )
     assert out.coder_model is None and out.coder_effort is None

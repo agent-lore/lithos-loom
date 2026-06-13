@@ -41,12 +41,14 @@ def test_main_rejects_invalid_reviewer_name(tmp_git_repo: Path, capsys) -> None:
 
 
 def test_main_rejects_invalid_coder_effort(tmp_git_repo: Path, capsys) -> None:
-    # argparse `choices` rejects an off-list effort level (exits 2).
-    argv = ["--repo", str(tmp_git_repo), "--description", "x", "--coder-effort", "max"]
+    # argparse `choices` rejects an off-list effort level (exits 2). `minimal`
+    # is an OpenCode/Codex level, not a Claude one — not in Loom's canonical set.
+    argv = ["--repo", str(tmp_git_repo), "--description", "x"]
+    argv += ["--coder-effort", "minimal"]
     with pytest.raises(SystemExit) as exc:
         main(argv)
     assert exc.value.code == 2
-    assert "invalid choice: 'max'" in capsys.readouterr().err
+    assert "invalid choice: 'minimal'" in capsys.readouterr().err
 
 
 def test_main_rejects_invalid_reviewer_effort(tmp_git_repo: Path, capsys) -> None:

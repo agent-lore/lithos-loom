@@ -125,7 +125,7 @@ def test_parse_model_rejects_bad(bad: object) -> None:
         parse_model(bad, where="x")
 
 
-@pytest.mark.parametrize("good", ["low", "medium", "high", "xhigh"])
+@pytest.mark.parametrize("good", ["low", "medium", "high", "xhigh", "max"])
 def test_parse_effort_accepts_levels(good: str) -> None:
     assert parse_effort(good, where="x") == good
 
@@ -138,9 +138,10 @@ def test_parse_effort_none_passes_through() -> None:
     assert parse_effort(None, where="x") is None
 
 
-@pytest.mark.parametrize("bad", ["max", "minimal", "ultra", 3, ""])
+@pytest.mark.parametrize("bad", ["minimal", "ultra", "none", 3, ""])
 def test_parse_effort_rejects_bad(bad: object) -> None:
-    # `max` (Claude-only) and `minimal` (Codex-only) are deliberately omitted.
+    # Loom's canonical vocabulary is Claude's; `minimal` (OpenCode/Codex) is
+    # not a Claude effort level and is rejected at this layer.
     with pytest.raises(ValueError, match="effort must be one of"):
         parse_effort(bad, where="x")
 

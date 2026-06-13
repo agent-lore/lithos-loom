@@ -105,13 +105,14 @@ def parse_model(value: object, *, where: str) -> str | None:
     return value.strip()
 
 
-# The portable reasoning-effort levels — valid on BOTH agent tools: Claude's
-# `--effort` (low/medium/high/xhigh/max) and Codex's `model_reasoning_effort`
-# (minimal/low/medium/high/xhigh). We expose only the shared four so a level
-# means the same thing whatever tool runs the agent; each tool also coerces an
-# unsupported level to its nearest, so this degrades safely per model. (`max`
-# is Claude-only, `minimal` Codex-only — deliberately omitted to stay portable.)
-VALID_EFFORTS = ("low", "medium", "high", "xhigh")
+# Reasoning-effort levels. There is no universal cross-tool effort vocabulary:
+# Claude's `--effort` is low/medium/high/xhigh/max; Codex has NO effort flag
+# (depth is implicit in model choice — o3 vs gpt-4o); OpenCode's `--variant` is
+# high/max/minimal. So Loom adopts CLAUDE'S levels as canonical (Claude is the
+# only wired agent today). When other tools land (#94), each tool's
+# `build_exec_command` maps this canonical level onto that tool's mechanism
+# (Codex: pick the model; OpenCode: map to a `--variant`), coercing as needed.
+VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def parse_effort(value: object, *, where: str) -> str | None:
