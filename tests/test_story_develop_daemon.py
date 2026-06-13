@@ -425,6 +425,21 @@ def test_apply_cli_fallbacks_reviewer_flag_fills_only_unset() -> None:
     assert cq.model == "sonnet" and cq.effort == "high"
 
 
+def test_apply_cli_fallbacks_skips_unused_reviewer_fallback_validation() -> None:
+    """A bad reviewer fallback is NOT frictioned when every reviewer already
+    has that field — it would never be applied, so it must stay silent."""
+    settings = ProjectDevelopSettings(
+        reviewers=(ReviewerSpec(name="sec", model="opus", effort="xhigh"),),
+    )
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(reviewer_model="", reviewer_effort="bogus"),  # both invalid
+    )
+    (sec,) = out.reviewers
+    assert sec.model == "opus" and sec.effort == "xhigh"  # untouched
+    assert out.frictions == ()  # unused bad fallbacks raise no noise
+
+
 def test_apply_cli_fallbacks_bad_values_friction_and_dropped() -> None:
     settings = ProjectDevelopSettings(reviewers=(ReviewerSpec(name="cq"),))
     out = apply_cli_fallbacks(
@@ -707,11 +722,12 @@ def test_daemon_mode_cli_model_effort_fallback_used(
 def test_daemon_mode_bad_cli_fallback_degrades_with_friction(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """A bad route fallback (whitespace model) frictions, not crashes.
+    """A bad route fallback (whitespace model, off-canonical effort) frictions
+    and continues — it must NOT crash at parse time before result.json.
 
-    (Effort can't be bad here — argparse `choices` rejects an off-list level
-    before _daemon_main runs — so the fallback-validation guard is exercised
-    via the model, plus the apply_cli_fallbacks unit tests.)
+    Regression guard: the effort flags are validated by parse_effort (not
+    argparse `choices`), so a bad route-level ``--coder-effort`` degrades like
+    a bad model instead of SystemExit-ing before _daemon_main runs.
     """
     from lithos_loom.plugins.story_develop import __main__ as main_mod
     from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
@@ -734,11 +750,14 @@ def test_daemon_mode_bad_cli_fallback_degrades_with_friction(
         return _result("approved", tmp_path)
 
     monkeypatch.setattr(main_mod, "develop", fake_develop)
-    argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--coder-model", "   ")
+    argv, _ = _daemon_args(
+        tmp_git_repo, tmp_path, "--coder-model", "   ", "--coder-effort", "lo"
+    )
     assert main_mod.main(argv) == EXIT_SUCCEEDED  # never fails the run
     assert captured["config"].coder_model is None  # bad fallback dropped
+    assert captured["config"].coder_effort is None  # bad effort dropped, not crashed
     joined = "\n".join(captured["frictions"])
-    assert "--coder-model" in joined
+    assert "--coder-model" in joined and "--coder-effort" in joined
 
 
 def test_daemon_mode_config_rejection_writes_failed_result(

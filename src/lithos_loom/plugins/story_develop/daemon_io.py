@@ -357,8 +357,20 @@ def apply_cli_fallbacks(
     if coder_e is None:
         coder_e = _validate(coder_effort, parse_effort, "--coder-effort")
 
-    rev_m = _validate(reviewer_model, parse_model, "--reviewer-model")
-    rev_e = _validate(reviewer_effort, parse_effort, "--reviewer-effort")
+    # Only validate (and thus possibly friction) a reviewer fallback when at
+    # least one reviewer is actually missing that field — otherwise an unused
+    # bad fallback would emit noise it never gets to apply (mirrors the coder
+    # path, which only validates when its field is unset).
+    rev_m = (
+        _validate(reviewer_model, parse_model, "--reviewer-model")
+        if any(s.model is None for s in settings.reviewers)
+        else None
+    )
+    rev_e = (
+        _validate(reviewer_effort, parse_effort, "--reviewer-effort")
+        if any(s.effort is None for s in settings.reviewers)
+        else None
+    )
     reviewers = settings.reviewers
     if rev_m is not None or rev_e is not None:
         reviewers = tuple(

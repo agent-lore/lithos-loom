@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from lithos_loom.plugins.story_develop.__main__ import main
 
 
@@ -41,23 +39,23 @@ def test_main_rejects_invalid_reviewer_name(tmp_git_repo: Path, capsys) -> None:
 
 
 def test_main_rejects_invalid_coder_effort(tmp_git_repo: Path, capsys) -> None:
-    # argparse `choices` rejects an off-list effort level (exits 2). `minimal`
-    # is an OpenCode/Codex level, not a Claude one — not in Loom's canonical set.
+    # Standalone errors (rc 2) on an off-canonical level. Validated by
+    # parse_effort, NOT argparse choices — so the same flag can friction-degrade
+    # in daemon mode (see test_story_develop_daemon). `minimal` is an
+    # OpenCode/Codex level, not in Loom's canonical (Claude) set.
     argv = ["--repo", str(tmp_git_repo), "--description", "x"]
     argv += ["--coder-effort", "minimal"]
-    with pytest.raises(SystemExit) as exc:
-        main(argv)
-    assert exc.value.code == 2
-    assert "invalid choice: 'minimal'" in capsys.readouterr().err
+    rc = main(argv)
+    assert rc == 2
+    assert "effort must be one of" in capsys.readouterr().err
 
 
 def test_main_rejects_invalid_reviewer_effort(tmp_git_repo: Path, capsys) -> None:
     argv = ["--repo", str(tmp_git_repo), "--description", "x"]
     argv += ["--reviewer-effort", "lo"]
-    with pytest.raises(SystemExit) as exc:
-        main(argv)
-    assert exc.value.code == 2
-    assert "invalid choice: 'lo'" in capsys.readouterr().err
+    rc = main(argv)
+    assert rc == 2
+    assert "effort must be one of" in capsys.readouterr().err
 
 
 def test_main_rejects_whitespace_coder_model(tmp_git_repo: Path, capsys) -> None:

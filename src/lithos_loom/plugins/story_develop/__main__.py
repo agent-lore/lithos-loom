@@ -56,6 +56,7 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
     load_develop_config,
+    parse_effort,
     parse_model,
 )
 from .daemon_io import (
@@ -170,7 +171,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--coder-effort",
         default=None,
-        choices=VALID_EFFORTS,
+        metavar="LEVEL",
+        # NOT argparse `choices`: this flag doubles as a daemon-mode route-level
+        # fallback that must degrade-with-friction (not SystemExit at parse time)
+        # on a bad value — so it's validated by parse_effort, like --coder-model.
         help="Reasoning-effort level for the coder "
         f"({'/'.join(VALID_EFFORTS)}). Default: the agent's default",
     )
@@ -206,9 +210,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--reviewer-effort",
         default=None,
-        choices=VALID_EFFORTS,
-        help="Reasoning-effort level for every --reviewer (per-reviewer "
-        "levels need --develop-config). Default: the agent's default",
+        metavar="LEVEL",
+        # See --coder-effort: validated by parse_effort, not argparse choices,
+        # to preserve the daemon-mode friction-degradation contract.
+        help="Reasoning-effort level for every --reviewer "
+        f"({'/'.join(VALID_EFFORTS)}; per-reviewer levels need "
+        "--develop-config). Default: the agent's default",
     )
     p.add_argument(
         "--max-rounds",
@@ -523,12 +530,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    # Validate + normalise the model flags (strips surrounding whitespace) so a
-    # bad value is a clear CLI error, not an invalid model id at the agent.
-    # (Effort is validated by argparse `choices`.)
+    # Validate + normalise the model/effort flags so a bad value is a clear
+    # standalone CLI error (not an invalid argument at the agent). Effort is
+    # NOT argparse `choices` — that would also reject a bad daemon-mode route
+    # fallback at parse time, breaking the friction-degradation contract; the
+    # daemon path validates the same flags via apply_cli_fallbacks instead.
     try:
         coder_model = parse_model(args.coder_model, where="--coder-model")
         reviewer_model = parse_model(args.reviewer_model, where="--reviewer-model")
+        coder_effort = parse_effort(args.coder_effort, where="--coder-effort")
+        reviewer_effort = parse_effort(args.reviewer_effort, where="--reviewer-effort")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -557,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
                 block_threshold=args.block_threshold,
                 fallback_chain=tuple(args.reviewer_fallback or ()),
                 model=reviewer_model,
-                effort=args.reviewer_effort,
+                effort=reviewer_effort,
             )
             for name in names
         )
@@ -596,7 +607,7 @@ def main(argv: list[str] | None = None) -> int:
         acceptance_criteria=acceptance_criteria,
         coder=args.coder,
         coder_model=coder_model,
-        coder_effort=args.coder_effort,
+        coder_effort=coder_effort,
         reviewers=specs,
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,
