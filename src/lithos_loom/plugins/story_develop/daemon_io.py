@@ -266,7 +266,10 @@ def resolve_project_settings(
         except ValueError as exc:
             frictions.append(f"{exc}; ignoring")
     elif raw_coder is not None:
-        frictions.append("develop_coder must be an object with a 'tool'; ignoring")
+        frictions.append(
+            "develop_coder must be an object with optional tool/model/thinking; "
+            "ignoring"
+        )
 
     # Per-task override (#93): a task flags "this one is cheap / needs deep
     # reasoning" by pinning the CODER's model/thinking. Reviewer models stay

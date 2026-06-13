@@ -569,6 +569,70 @@ def test_daemon_mode_happy_path_writes_result(
     _validate_result_schema(payload)
 
 
+def test_daemon_mode_cli_model_thinking_fallback_used(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Route --coder-model/--coder-thinking is the fallback when metadata is silent."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(),  # no model/thinking set
+    )
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(
+        tmp_git_repo, tmp_path, "--coder-model", "opus", "--coder-thinking", "9000"
+    )
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].coder_model == "opus"
+    assert captured["config"].coder_thinking == 9000
+
+
+def test_daemon_mode_bad_cli_fallback_degrades_with_friction(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A bad route fallback (whitespace model, <=0 thinking) frictions, not crashes."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "post_frictions",
+        lambda url, task_id, frictions: captured.setdefault("frictions", frictions),
+    )
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(
+        tmp_git_repo, tmp_path, "--coder-model", "   ", "--coder-thinking", "0"
+    )
+    assert main_mod.main(argv) == EXIT_SUCCEEDED  # never fails the run
+    assert captured["config"].coder_model is None  # bad fallback dropped
+    assert captured["config"].coder_thinking is None
+    joined = "\n".join(captured["frictions"])
+    assert "--coder-model" in joined and "--coder-thinking" in joined
+
+
 def test_daemon_mode_config_rejection_writes_failed_result(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

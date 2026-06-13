@@ -55,6 +55,8 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
     load_develop_config,
+    parse_model,
+    parse_thinking,
 )
 from .daemon_io import (
     EXIT_BAD_INPUT,
@@ -328,9 +330,28 @@ def _daemon_main(args: argparse.Namespace) -> int:
     result_file = args.result_file.expanduser().resolve()
     started_at = datetime.now(UTC)
     settings = resolve_project_settings(args.lithos_url, ctx.metadata)
-    for friction in settings.frictions:
+    frictions = list(settings.frictions)
+    # Project metadata (incl. per-task override) wins; the CLI flag is a
+    # route-level fallback (mirrors max_rounds). A bad fallback flag degrades
+    # with friction rather than erroring — daemon mode never fails the run on
+    # config; it must not flow an empty/<=0 value through to the agent either.
+    coder_model = settings.coder_model
+    if coder_model is None and args.coder_model is not None:
+        try:
+            coder_model = parse_model(args.coder_model, where="--coder-model")
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring the route fallback")
+    coder_thinking = settings.coder_thinking
+    if coder_thinking is None and args.coder_thinking is not None:
+        try:
+            coder_thinking = parse_thinking(
+                args.coder_thinking, where="--coder-thinking"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring the route fallback")
+    for friction in frictions:
         print(f"[Friction] {friction}", file=sys.stderr)
-    post_frictions(args.lithos_url, ctx.task_id, settings.frictions)
+    post_frictions(args.lithos_url, ctx.task_id, tuple(frictions))
     print(f"developing Lithos task {ctx.task_id}: {ctx.title} (daemon mode)")
 
     config = DevelopConfig(
@@ -339,15 +360,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
         work_dir=args.work_dir.expanduser().resolve(),
         acceptance_criteria=ctx.acceptance_criteria,
         coder=settings.coder,
-        # Project metadata (incl. per-task override) wins; the CLI flag is a
-        # route-level fallback (mirrors max_rounds). Reviewer model/thinking
-        # ride along inside settings.reviewers (per-reviewer specs).
-        coder_model=settings.coder_model or args.coder_model,
-        coder_thinking=(
-            settings.coder_thinking
-            if settings.coder_thinking is not None
-            else args.coder_thinking
-        ),
+        # Reviewer model/thinking ride along inside settings.reviewers.
+        coder_model=coder_model,
+        coder_thinking=coder_thinking,
         reviewers=settings.reviewers,
         max_rounds=settings.max_rounds or args.max_rounds,
         test_gate=not args.no_test_gate,
@@ -514,6 +529,14 @@ def main(argv: list[str] | None = None) -> int:
         if value is not None and value < 1:
             print(f"error: {flag} must be >= 1", file=sys.stderr)
             return 2
+    # Validate + normalise the model flags (strips surrounding whitespace) so a
+    # bad value is a clear CLI error, not an invalid model id at the agent.
+    try:
+        coder_model = parse_model(args.coder_model, where="--coder-model")
+        reviewer_model = parse_model(args.reviewer_model, where="--reviewer-model")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.develop_config is not None:
         try:
             specs = load_develop_config(args.develop_config.expanduser())
@@ -538,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
                 name=name,
                 block_threshold=args.block_threshold,
                 fallback_chain=tuple(args.reviewer_fallback or ()),
-                model=args.reviewer_model,
+                model=reviewer_model,
                 thinking=args.reviewer_thinking,
             )
             for name in names
@@ -577,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
         work_dir=work_dir,
         acceptance_criteria=acceptance_criteria,
         coder=args.coder,
-        coder_model=args.coder_model,
+        coder_model=coder_model,
         coder_thinking=args.coder_thinking,
         reviewers=specs,
         max_rounds=args.max_rounds,

@@ -89,17 +89,20 @@ _REVIEWER_ENTRY_KEYS = {
 
 
 def parse_model(value: object, *, where: str) -> str | None:
-    """Validate a ``model`` value: a non-empty string, or ``None``.
+    """Validate + normalise a ``model`` value: a non-empty string, or ``None``.
 
-    Shared by the reviewer-entry parser and the daemon-mode coder lookup so
-    both surfaces reject the same garbage (empty / non-string) identically.
-    Raises :class:`ValueError`.
+    Shared by the reviewer-entry parser, the standalone CLI, and the
+    daemon-mode coder lookup so every surface rejects the same garbage
+    (empty / non-string) identically. The returned string is **stripped** —
+    validating on ``.strip()`` but returning the raw value would let
+    ``" opus "`` pass and then reach the CLI as an invalid model id. Raises
+    :class:`ValueError`.
     """
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{where}: model must be a non-empty string (got {value!r})")
-    return value
+    return value.strip()
 
 
 def parse_thinking(value: object, *, where: str) -> int | None:

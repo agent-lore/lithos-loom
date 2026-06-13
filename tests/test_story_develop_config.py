@@ -114,6 +114,11 @@ def test_parse_model_none_passes_through() -> None:
     assert parse_model(None, where="x") is None
 
 
+def test_parse_model_strips_surrounding_whitespace() -> None:
+    # validate-on-strip but return-raw would let " opus " reach the CLI verbatim
+    assert parse_model("  opus  ", where="x") == "opus"
+
+
 @pytest.mark.parametrize("bad", ["", "   ", 7, []])
 def test_parse_model_rejects_bad(bad: object) -> None:
     with pytest.raises(ValueError, match="model must be a non-empty string"):

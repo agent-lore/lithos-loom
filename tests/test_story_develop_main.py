@@ -54,6 +54,22 @@ def test_main_rejects_zero_reviewer_thinking(tmp_git_repo: Path, capsys) -> None
     assert "--reviewer-thinking must be >= 1" in capsys.readouterr().err
 
 
+def test_main_rejects_whitespace_coder_model(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--coder-model", "   "]
+    )
+    assert rc == 2
+    assert "model must be a non-empty string" in capsys.readouterr().err
+
+
+def test_main_rejects_whitespace_reviewer_model(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--reviewer-model", "  "]
+    )
+    assert rc == 2
+    assert "model must be a non-empty string" in capsys.readouterr().err
+
+
 def test_main_threads_model_and_thinking_into_config(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
@@ -87,7 +103,7 @@ def test_main_threads_model_and_thinking_into_config(
             "--description",
             "do a thing",
             "--coder-model",
-            "opus",
+            "  opus  ",  # normalised (stripped) into the config
             "--coder-thinking",
             "20000",
             "--reviewer",
