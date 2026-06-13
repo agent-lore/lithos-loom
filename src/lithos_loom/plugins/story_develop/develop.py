@@ -38,6 +38,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ...runner import detection, git, worktree
@@ -95,6 +96,10 @@ class DevelopResult:
     coder_session: str = ""
     test_gate: GateResult | None = None  # the latest round's gate (T4)
     conversation_log: Path | None = None
+    # when an INTERRUPTED run is worth retrying: the provider's parsed reset
+    # time, or now + a fixed delay when no hint was parseable (T10 — the
+    # daemon schedules a re-dispatch at this instant)
+    resume_after: datetime | None = None
 
     @property
     def review(self) -> ReviewOutcome | None:
@@ -360,6 +365,24 @@ def _session_transcript_exists(config_dir: Path, session_id: str) -> bool:
     return any(projects.glob(f"*/{session_id}.jsonl"))
 
 
+# When a usage-limited run checkpoints WITHOUT a parseable reset hint, suggest
+# retrying after this long. Provider windows are typically 1-5h; an hourly
+# re-dispatch is bounded and cheap, where re-trying at the pause-poll cadence
+# (minutes) would burn a full container spin-up per attempt.
+_RESUME_FALLBACK_MINUTES = 60
+
+
+def _resume_after_from(turn: TurnResult | None) -> datetime:
+    """When an interrupted run should be retried (PRD decision #5, T10).
+
+    The provider's parsed reset time when available, else now + a fixed
+    fallback delay. Always returns a value — an ``interrupted`` status is by
+    definition retryable, so the daemon contract gets a concrete timestamp.
+    """
+    hint = limits.reset_hint(turn) if turn is not None else None
+    return hint or (datetime.now(UTC) + timedelta(minutes=_RESUME_FALLBACK_MINUTES))
+
+
 def _turn_with_limit_pauses(
     config: DevelopConfig,
     budget: _PauseBudget,
@@ -582,12 +605,13 @@ def _run_reviewer_with_reaction(
     prompt: str,
     timeout: int,
     base: str,
-) -> tuple[ReviewOutcome, float, bool]:
+) -> tuple[ReviewOutcome, float, bool, datetime | None]:
     """One reviewer's round, with the T5 usage-limit reaction wrapped around it.
 
     Switch first (replace ONLY this reviewer's container, reseed a fresh
     session from the handoff history), pause last (shared budget). Returns
-    ``(outcome, cost, interrupted)``.
+    ``(outcome, cost, interrupted, resume_after)`` — *resume_after* is set
+    only when *interrupted* is True (T10 daemon re-dispatch surface).
     """
     name = rstate.spec.name
     review, rev_failed = _review_turn(
@@ -668,7 +692,7 @@ def _run_reviewer_with_reaction(
             remaining_seconds=budget.remaining,
         )
         if plan is None:
-            return review, cost, True
+            return review, cost, True, _resume_after_from(rev_failed)
         logger.info(
             "story-develop %s: reviewer [%s] usage-limited; pausing %.0fs "
             "(%s; %.0f min of pause budget left)",
@@ -699,7 +723,7 @@ def _run_reviewer_with_reaction(
         )
         cost += review.cost_usd
 
-    return review, cost, False
+    return review, cost, False, None
 
 
 def _record_coder_disputes(
@@ -834,6 +858,7 @@ def develop(
     budget = _PauseBudget(config.max_pause_minutes * 60)
     stall_strikes = 0  # T7: consecutive no-progress rounds
     prev_signature: frozenset | None = None
+    resume_after: datetime | None = None  # set only on interrupted (T10)
 
     try:
         containers.start_container(coder_cmd)
@@ -900,6 +925,7 @@ def develop(
                     f"round {round_no}: coder usage-limited; pause budget exhausted"
                 )
                 status = "interrupted"
+                resume_after = _resume_after_from(coder_turn)
                 break
             done_present = (
                 config.handoff_dir / handoff.coder_handoff_name(round_no)
@@ -981,15 +1007,17 @@ def develop(
                     )
                     review_resume = True
 
-                review, cost, interrupted = _run_reviewer_with_reaction(
-                    config,
-                    budget,
-                    rstate,
-                    round_no=round_no,
-                    resume=review_resume,
-                    prompt=review_prompt,
-                    timeout=reviewer_timeout,
-                    base=base,
+                review, cost, interrupted, rev_resume_after = (
+                    _run_reviewer_with_reaction(
+                        config,
+                        budget,
+                        rstate,
+                        round_no=round_no,
+                        resume=review_resume,
+                        prompt=review_prompt,
+                        timeout=reviewer_timeout,
+                        base=base,
+                    )
                 )
                 review_cost += cost
                 if review.status != "invalid":
@@ -1008,6 +1036,7 @@ def develop(
                 rstate.outcome = review
                 if interrupted:
                     reviewer_interrupted = True
+                    resume_after = rev_resume_after
                     break
                 if review.status == "invalid":
                     invalid_reviewer = name
@@ -1175,6 +1204,11 @@ def develop(
                     for r in reviewers
                 },
                 "pause_budget_remaining_s": round(budget.remaining, 1),
+                "resume_after": (
+                    resume_after.isoformat(timespec="seconds")
+                    if resume_after is not None
+                    else None
+                ),
             },
             indent=2,
         )
@@ -1198,4 +1232,5 @@ def develop(
         coder_session=coder_session,
         test_gate=gate,
         conversation_log=log_path,
+        resume_after=resume_after,
     )

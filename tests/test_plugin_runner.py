@@ -242,3 +242,52 @@ async def test_run_plugin_returns_failed_result_on_nonzero_exit_with_result(
     )
     assert result["status"] == "failed"
     assert result["exit_code"] == 1
+
+
+async def test_run_plugin_accepts_interrupted_result_with_resume_block(
+    tmp_path: Path,
+) -> None:
+    """The T10 contract extension: status=interrupted may carry an
+    error.category=usage_limited and a resume block (resume_after + session
+    ids) — the runner validates and returns it for re-dispatch scheduling."""
+    plugin = _write_fake_plugin(
+        tmp_path / "plugin.py",
+        body=dedent(
+            """\
+            payload = {
+                "schema_version": 1,
+                "task_id": "t1",
+                "status": "interrupted",
+                "exit_code": 30,
+                "error": {
+                    "category": "usage_limited",
+                    "message": "coder usage-limited",
+                    "retriable": True,
+                },
+                "resume": {
+                    "resume_after": "2026-06-12T15:00:00+00:00",
+                    "run_id": "r1",
+                    "coder_session": "sess-c",
+                    "reviewer_sessions": {"code-quality": "sess-r"},
+                },
+            }
+            with open(args.result_file, "w") as fh:
+                json.dump(payload, fh)
+            sys.exit(30)
+            """
+        ),
+    )
+    work_dir = tmp_path / "wd"
+    work_dir.mkdir()
+    result = await run_plugin(
+        command=(
+            f"{sys.executable} {plugin} "
+            "--task-json {{task_json}} --work-dir {{work_dir}} "
+            "--result-file {{result_file}}"
+        ),
+        task_json_path=work_dir / "task.json",
+        work_dir=work_dir,
+        result_file=work_dir / "result.json",
+    )
+    assert result["status"] == "interrupted"
+    assert result["resume"]["resume_after"] == "2026-06-12T15:00:00+00:00"

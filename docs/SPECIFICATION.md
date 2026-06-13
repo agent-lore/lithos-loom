@@ -111,7 +111,7 @@ Each child runs its own EventBus instance. There is no inter-child IPC; all thre
 
 - `succeeded` → `lithos_task_complete`.
 - `failed` → `lithos_task_release` + `[BlockerFailed]` finding (the error message is pulled from `error.message` if present).
-- `interrupted` → `lithos_task_release`, no finding.
+- `interrupted` → `lithos_task_release`, no finding. When the result also carries a `resume` block (`resume_after` timestamp — e.g. a story-develop run that checkpointed on a provider usage limit), the runner additionally schedules an in-process re-dispatch: at `resume_after` it re-checks the task is still open, then re-claims and re-runs the plugin. Bounded at `MAX_RESUMES_PER_TASK` (3) re-dispatches per task per daemon process; on exhaustion the task stays open with a `[Friction]` finding. The schedule is in-memory only — a daemon restart loses it, but the event-stream bootstrap re-surfaces open tasks on startup anyway.
 - Unknown / missing status → `lithos_task_release` + `[BlockerFailed]`.
 
 Other `result.json` fields (`metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable`) are schema-validated but currently ignored. On plugin timeout, the runner sends SIGTERM with a grace period before SIGKILL.
@@ -193,7 +193,7 @@ Loom reads one TOML file per process. Discovery order:
 agent_id      = "lithos-orchestrator-<host>"  # claim attribution; must be unique per host
 lithos_url    = "http://localhost:8765"        # Lithos MCP-over-SSE endpoint
 work_dir      = "/tmp/lithos-loom"             # per-task staging tree
-max_concurrency        = 4                     # global concurrent plugin runs
+max_concurrency        = 4                     # parsed but NOT YET enforced (#85); no runtime cap today — a single route runs serially, multiple routes do not contend
 log_level              = "info"                # debug | info | warning | error
 retain_failed_workdirs = true                  # keep failed work-dirs for triage
 
@@ -225,6 +225,8 @@ codex_config  = "/home/you/.codex-lithos"      # optional, parsed but unused tod
 #   {{task_json}}    — path to the task envelope JSON (read-only)
 #   {{work_dir}}     — per-task staging dir under orchestrator.work_dir
 #   {{result_file}}  — path the plugin must atomically write
+#   {{repo}}         — [projects.<slug>].repo for the task's metadata.project
+#                      (one route serves all projects; unresolvable → finding)
 
 [[routes]]
 name = "story-implement"
@@ -234,6 +236,17 @@ human_blocking = false  # if true, surfaced in Obsidian projection once claimed
 
 [routes.match]
 tags = ["trigger:story-implement"]  # task must carry ALL listed tags
+
+# story-develop: {{repo}} resolves per task from [projects.<slug>].repo, so
+# one route serves every project. Reviewer config comes from the
+# project-context doc's develop_* metadata (§5.5).
+[[routes]]
+name = "story-develop"
+command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo {{repo}}"
+max_runtime_seconds = 28800
+
+[routes.match]
+tags = ["trigger:story-develop"]
 
 # ── Subscriptions (fire-and-forget side effects) ──────────────────────
 #
@@ -502,7 +515,9 @@ Plugins are subprocesses invoked by a route-runner. They receive a small CLI sur
 <command> --task-json <path> --work-dir <path> --result-file <path>
 ```
 
-- `--task-json`: read-only JSON file. Today its contents are `{"task": <event-payload>}` — the bus event's payload (a Lithos task envelope) wrapped under a single `task` key. The resolved project entry from the local TOML is **not** included today; if a plugin needs it, the plugin must load the TOML itself or have it baked into the route's `command`.
+- `--task-json`: read-only JSON file. Today its contents are `{"task": <event-payload>}` — the bus event's payload (a Lithos task envelope) wrapped under a single `task` key. The resolved project entry from the local TOML is **not** included in the file; a plugin that needs the project's on-disk repo path uses the `{{repo}}` command token (below) or loads the TOML itself.
+
+  **`{{repo}}` substitution.** Beyond the three path tokens, a route `command` may carry a `{{repo}}` token. The runner resolves it from `[projects.<slug>].repo` keyed by the claimed task's `metadata.project`, before the plugin forks — so one route serves every registered project, and the repo a plugin acts on is derived from the task's own project rather than hard-coded per route. A `{{repo}}` route whose task has no `metadata.project`, or whose slug isn't in `[projects.*]` on this host, is released with a `[BlockerFailed]` finding (`route misconfigured: …`) and never run. Routes without the token don't require a project.
 - `--work-dir`: per-task staging directory at `<orchestrator.work_dir>/<task_id>/`. The plugin owns the tree; the runner reads only the result file.
 - `--result-file`: path the plugin must write atomically (temp file + fsync + rename). Partial files must never be observable.
 
@@ -529,7 +544,22 @@ The full schema is at `docs/result-schema.json` (JSON Schema Draft 2020-12). Req
 }
 ```
 
-For a failed run, replace `status` with `"failed"` (or `"interrupted"`) and set `error` to an object with the required keys `category` (one of `config`, `environment`, `input`, `agent`, `git`, `github`, `lithos`, `internal`) and `message`, plus the optional boolean `retriable`. No other `error` keys are accepted.
+For a failed run, replace `status` with `"failed"` (or `"interrupted"`) and set `error` to an object with the required keys `category` (one of `config`, `environment`, `input`, `agent`, `git`, `github`, `lithos`, `usage_limited`, `internal`) and `message`, plus the optional boolean `retriable`. No other `error` keys are accepted.
+
+An `interrupted` result may additionally carry a `resume` object marking the interruption as retryable:
+
+```json
+{
+  "resume": {
+    "resume_after": "2026-06-12T15:00:00+00:00",
+    "run_id": "abc12345",
+    "coder_session": "uuid",
+    "reviewer_sessions": { "code-quality": "uuid" }
+  }
+}
+```
+
+`resume_after` (required within the block) is the earliest instant a re-run is expected to succeed — the provider's parsed reset time, or a fixed fallback delay when no hint was parseable. The session ids let a future run resume its on-disk transcripts from the retained work dir.
 
 **What the runner does with each field today:**
 
@@ -537,7 +567,8 @@ For a failed run, replace `status` with `"failed"` (or `"interrupted"`) and set 
 |---|---|
 | `schema_version`, `task_id`, `status` | Required by schema; `status` drives the runner's branch (see §2.2). |
 | `error.message` | Used as the `[BlockerFailed]` finding text when `status == "failed"`. |
-| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error.category`, `error.retriable` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
+| `resume.resume_after` | Schedules the in-process re-dispatch on `status == "interrupted"` (see §2.2). |
+| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `spawned_tasks`, `metadata_updates`, `error.category`, `error.retriable`, `resume.run_id`, `resume.coder_session`, `resume.reviewer_sessions` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
 
 ### 5.3 Runner Lifecycle
 
@@ -548,6 +579,24 @@ The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, 
 ### 5.4 Bundled Plugins (scaffolded)
 
 `prd-decompose`, `story-implement`, `story-review-human` are present under `src/lithos_loom/plugins/` as Python modules with prompt files. Their bodies are stubs; they do not yet produce real `result.json` output. The route-runner code path is the load-bearing piece exercised by tests.
+
+### 5.5 story-develop (shipped)
+
+`story-develop` runs the full implement → review → fix → approve loop with containerised agents (one persistent coder session + an N-reviewer panel; per-round commits, objective test gate, usage-limit reactions, optional PR delivery with an autonomous Copilot review round). The full design is `docs/prd/story-develop.md`; the standalone CLI surface is `python -m lithos_loom.plugins.story_develop --help`.
+
+**Daemon mode.** Passing `--task-json` (with `--work-dir` and `--result-file`) switches the plugin to the route-runner contract:
+
+```
+uv run python -m lithos_loom.plugins.story_develop \
+    --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} \
+    --repo {{repo}}
+```
+
+- `--repo` takes the runner's `{{repo}}` token (§5.1), resolved per task from `[projects.<slug>].repo` keyed by `metadata.project` — so one route serves every registered project. (An absolute path also works if you want a route pinned to one checkout.)
+- The task (title, body, `metadata.acceptance_criteria`) comes from `task.json`; `--description` / `--task-id` / `--no-lithos` / `--complete-on-approval` / `--reviewer` / `--develop-config` are rejected in daemon mode.
+- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`. Per-task override: `task.metadata.reviewers` (names from the pool). Every miss — no slug, no doc, no keys, unknown name — degrades to the built-in single `code-quality` reviewer with a `[Friction]` finding; a populated pool without a default selection still runs only the built-in reviewer (pool membership does not auto-run).
+- **Status mapping.** `approved` → `succeeded` (the runner completes the task); `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.
+- The plugin still owns its Lithos round-trip directly (the `[DevelopResult]` finding + `develop_*` metadata, same as `--task-id` mode); `result.json` carries `status` for the runner, so there is no double-application.
 
 ---
 
@@ -843,6 +892,7 @@ The following are absent from the current surface. Some are explicit non-goals; 
 
 - **Plugin bodies for `prd-decompose`, `story-implement`, `story-review-human`.** Scaffolding under `src/lithos_loom/plugins/`; no real logic.
 - **Application of `result.json` fields beyond `status`.** `metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable` are schema-validated but not used by the runner today (§5.2).
+- **`orchestrator.max_concurrency` enforcement.** Parsed and stored but never read at runtime — there is no global cap on concurrent plugin runs. A single route runs its tasks serially; multiple routes run concurrently without contending. Tracked in [#85](https://github.com/agent-lore/lithos-loom/issues/85).
 - **Resolved project entry in `task.json`.** Plugins receive `{"task": <payload>}` only.
 - **Startup reclaim of stale claims.** Claims age out via Lithos's own TTL; the route-runner does not actively release them on startup.
 - **Hot-reload of TOML config.** Operator restarts the daemon.

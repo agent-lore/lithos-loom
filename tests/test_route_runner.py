@@ -548,3 +548,405 @@ async def test_runner_subscribes_only_to_created_and_released(
         await bus.publish(_evt(type_=type_))
     await _run_for(runner)
     lithos.task_claim.assert_not_called()
+
+
+# ── Usage-limit re-dispatch (T10) ──────────────────────────────────────
+
+
+def _interrupted_with_resume(
+    resume_after: str = "2026-01-01T00:00:00+00:00",
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "task_id": "task-1",
+        "status": "interrupted",
+        "exit_code": 30,
+        "error": {
+            "category": "usage_limited",
+            "message": "coder usage-limited",
+            "retriable": True,
+        },
+        "resume": {"resume_after": resume_after, "run_id": "r1"},
+    }
+
+
+async def test_runner_interrupted_with_resume_redispatches(tmp_path: Path) -> None:
+    """A resume block on an interrupted result schedules a re-claim + re-run.
+
+    resume_after in the past → the sleeper fires immediately; the runner
+    re-checks the task is open, drops the dedup entry, re-claims, and the
+    plugin's second run succeeds → task_complete.
+    """
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(),
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "exit_code": 0,
+            },
+        ]
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="open",
+        tags=("trigger:story-implement",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 2
+    assert lithos.task_claim.await_count == 2
+    lithos.task_release.assert_awaited_once()
+    lithos.task_complete.assert_awaited_once()
+
+
+async def test_runner_resume_dropped_when_task_no_longer_open(
+    tmp_path: Path,
+) -> None:
+    """At resume time a terminal task is dropped — no re-claim, no re-run."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="completed",
+        tags=("trigger:story-implement",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1
+    assert lithos.task_claim.await_count == 1
+
+
+async def test_runner_resume_budget_exhausted_posts_friction(
+    tmp_path: Path,
+) -> None:
+    """Beyond MAX_RESUMES_PER_TASK the task stays open with a [Friction] note."""
+    from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
+
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    runner._resume_counts["task-1"] = MAX_RESUMES_PER_TASK
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1
+    assert not runner._resume_tasks
+    lithos.finding_post.assert_awaited_once()
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[Friction]")
+    assert "resume budget exhausted" in summary
+
+
+async def test_runner_unparseable_resume_after_not_scheduled(
+    tmp_path: Path,
+) -> None:
+    """Garbage resume_after → release only; no crash, no re-dispatch."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        side_effect=[_interrupted_with_resume(resume_after="not-a-timestamp")]
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1
+    assert not runner._resume_tasks
+    lithos.task_release.assert_awaited_once()
+    lithos.finding_post.assert_not_called()
+
+
+async def test_rescheduled_resume_survives_old_sleepers_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A cancelled old sleeper's done-callback must not evict its replacement.
+
+    Schedule the same task twice (far-future resume_after so neither fires):
+    the first sleeper is cancelled and replaced; once its cancellation
+    callback runs, _resume_tasks must still hold the SECOND sleeper.
+    """
+    bus = EventBus()
+    runner, _ = _make_runner(bus=bus, work_dir=tmp_path)
+    resume = {"resume_after": "2099-01-01T00:00:00+00:00"}
+
+    await runner._maybe_schedule_resume("task-1", resume)
+    first = runner._resume_tasks["task-1"]
+    await runner._maybe_schedule_resume("task-1", resume)
+    second = runner._resume_tasks["task-1"]
+    assert first is not second
+
+    # Let the first sleeper's cancellation + done-callback run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert runner._resume_tasks.get("task-1") is second
+    assert not second.cancelled()
+    second.cancel()
+
+
+async def test_resume_redispatch_uses_fresh_task_content(tmp_path: Path) -> None:
+    """The resumed run must develop against the task's CURRENT content.
+
+    The operator edits the task body / metadata during the pause window;
+    task_get returns the edited task; the second plugin run's task.json must
+    carry the fresh title + body + metadata, not the interrupted snapshot.
+    """
+    import json as _json
+
+    bus = EventBus()
+    seen: list[dict[str, Any]] = []
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        body = _json.loads(kwargs["task_json_path"].read_text())
+        seen.append(body["task"])
+        if len(seen) == 1:
+            return _interrupted_with_resume()
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+    )
+    # The fresh snapshot the operator's edits produced.
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="EDITED title",
+        status="open",
+        tags=("trigger:story-implement",),
+        metadata={"project": "loom", "acceptance_criteria": "NEW criteria"},
+        claims=(),
+        description="EDITED body",
+    )
+
+    # The interrupting event carried the STALE content.
+    stale = _payload(task_id="task-1", metadata={"project": "loom"})
+    await bus.publish(_evt(payload=stale))
+    await _run_for(runner, seconds=0.3)
+
+    assert len(seen) == 2
+    second = seen[1]
+    assert second["title"] == "EDITED title"
+    assert second["description"] == "EDITED body"
+    assert second["metadata"]["acceptance_criteria"] == "NEW criteria"
+
+
+# ── {{repo}} token resolution (T10) ────────────────────────────────────
+
+
+def _repo_route() -> RouteConfig:
+    return _route(
+        name="story-develop",
+        tags=("trigger:story-develop",),
+        command="run --repo {{repo}} --result-file {{result_file}}",
+    )
+
+
+async def test_repo_token_resolved_from_projects_map(tmp_path: Path) -> None:
+    """{{repo}} expands to the task's project repo before the plugin runs."""
+    bus = EventBus()
+    captured: dict[str, Any] = {}
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        captured["command"] = kwargs["command"]
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=capturing_plugin,
+        project_repos={"loom": Path("/home/x/loom")},
+    )
+    payload = _payload(
+        task_id="task-1",
+        tags=("trigger:story-develop",),
+        metadata={"project": "loom"},
+    )
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    assert "--repo /home/x/loom" in captured["command"]
+    assert "{{repo}}" not in captured["command"]
+
+
+async def test_repo_token_with_spaces_is_shell_quoted(tmp_path: Path) -> None:
+    """A repo path with spaces survives shlex.split as ONE argv element.
+
+    The resolved command is tokenised with shlex.split in plugin_runner, so
+    an unquoted spaced path would split and truncate --repo. Assert the
+    round-trip: shlex.split of the resolved command yields the full path.
+    """
+    import shlex
+
+    bus = EventBus()
+    captured: dict[str, Any] = {}
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        captured["command"] = kwargs["command"]
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    spaced = "/home/x/my projects/loom repo"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=capturing_plugin,
+        project_repos={"loom": Path(spaced)},
+    )
+    payload = _payload(
+        task_id="task-1",
+        tags=("trigger:story-develop",),
+        metadata={"project": "loom"},
+    )
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    argv = shlex.split(captured["command"])
+    assert spaced in argv  # one element, not split on the spaces
+    assert argv[argv.index("--repo") + 1] == spaced
+
+
+async def test_repo_token_without_project_releases_with_finding(
+    tmp_path: Path,
+) -> None:
+    """A {{repo}} route + a task with no metadata.project is a config error:
+    release with a finding, never run the plugin."""
+    bus = EventBus()
+    plugin = AsyncMock()
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=plugin,
+        project_repos={"loom": Path("/home/x/loom")},
+    )
+    payload = _payload(task_id="task-1", tags=("trigger:story-develop",), metadata={})
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    plugin.assert_not_called()
+    lithos.task_release.assert_awaited_once()
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert "metadata.project" in summary
+
+
+async def test_repo_token_unregistered_project_releases_with_finding(
+    tmp_path: Path,
+) -> None:
+    """A {{repo}} route + a task whose project isn't in [projects.*]: same."""
+    bus = EventBus()
+    plugin = AsyncMock()
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=plugin,
+        project_repos={"loom": Path("/home/x/loom")},
+    )
+    payload = _payload(
+        task_id="task-1",
+        tags=("trigger:story-develop",),
+        metadata={"project": "unregistered"},
+    )
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    plugin.assert_not_called()
+    lithos.task_release.assert_awaited_once()
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert "unregistered" in summary
+
+
+async def test_no_repo_token_does_not_require_project(tmp_path: Path) -> None:
+    """A route WITHOUT {{repo}} runs regardless of metadata.project."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)  # default echo route
+    await bus.publish(_evt(payload=_payload(metadata={})))
+    await _run_for(runner)
+    lithos.task_complete.assert_awaited_once()
+
+
+async def test_resume_dropped_when_task_retagged_out_of_route(
+    tmp_path: Path,
+) -> None:
+    """If the task no longer carries the route's trigger tags at resume time
+    (operator pulled the tag during the pause), the resumed run is dropped —
+    the direct _handle call must not bypass the route's tag filter."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    # Fresh snapshot: still open, but the trigger tag is gone.
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="open",
+        tags=("some-other-tag",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1  # only the first run; no re-dispatch
+    assert lithos.task_claim.await_count == 1

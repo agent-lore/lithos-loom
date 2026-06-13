@@ -9,7 +9,13 @@ status:
 * ``status="succeeded"`` → ``task_complete`` (releases all claims)
 * ``status="failed"`` → ``task_release`` + ``[BlockerFailed]`` finding
 * ``status="interrupted"`` → ``task_release`` (no finding — operator
-  signal, not an error)
+  signal, not an error). When the result also carries a ``resume`` block
+  (``resume_after`` timestamp — e.g. a story-develop run checkpointed on a
+  provider usage limit), the runner schedules an in-process re-dispatch:
+  at ``resume_after`` it re-checks the task is still open, drops it from
+  the dedup set, and re-claims + re-runs. Bounded by
+  ``MAX_RESUMES_PER_TASK``; the schedule is in-memory only (a daemon
+  restart re-bootstraps open tasks anyway).
 
 The runner is instantiated directly by the route-runner child entry
 point (one runner per route) — it does **not** go through the
@@ -25,9 +31,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import shlex
 import shutil
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +57,32 @@ _HANDLED_EVENT_TYPES = (
     "lithos.task.created",
     "lithos.task.released",
 )
+
+# Re-dispatch budget for `interrupted` results carrying a `resume` block.
+# Each resume re-runs the full plugin (container spin-up + agent spend), so
+# a run that keeps hitting its provider limit must not retry unbounded —
+# after this many resumes the task is left open with a [Friction] finding
+# for the operator. Distinct from the failure retry budget (issue #11):
+# resume is "try again after the limit lifts", not "retry a failure".
+MAX_RESUMES_PER_TASK = 3
+
+
+def _task_to_payload(task: Any) -> dict[str, Any]:
+    """Build an event-shaped payload from a fresh :class:`Task` snapshot.
+
+    Mirrors the fields ``_handle`` reads and the runner writes into
+    ``task.json`` (id / status / title / description / tags / metadata), so a
+    resumed run develops against the task's CURRENT content, not the snapshot
+    captured when it was interrupted.
+    """
+    return {
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "description": task.description or "",
+        "tags": list(task.tags),
+        "metadata": dict(task.metadata),
+    }
 
 
 @dataclass
@@ -82,6 +116,14 @@ class RouteRunner:
         Injectable subprocess-runner. Defaults to the real
         :func:`lithos_loom.plugin_runner.run_plugin`. Tests inject an
         ``AsyncMock`` to bypass real subprocess work.
+    project_repos:
+        Map of project slug → on-disk repo path, from the host's
+        ``[projects.*]`` TOML. A route command may carry a ``{{repo}}``
+        token; the runner resolves it per task from this map keyed by
+        ``task.metadata.project``, so one generic route can serve every
+        registered project instead of baking an absolute path into the
+        command. Empty by default — routes that don't use ``{{repo}}``
+        don't need it.
     """
 
     route: RouteConfig
@@ -92,6 +134,7 @@ class RouteRunner:
     renew_interval_seconds: float = 60.0
     retain_failed_workdirs: bool = True
     plugin_runner: PluginRunFn = field(default=run_plugin)
+    project_repos: Mapping[str, Path] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._subscription: Subscription = self.bus.subscribe(
@@ -116,6 +159,12 @@ class RouteRunner:
         # (claim_failed) deliberately does NOT add to this set, so a
         # subsequent released event there does re-attempt the claim.
         self._processed_tasks: set[str] = set()
+        # T10: pending usage-limit re-dispatches (task id → sleeper task)
+        # and how many resumes each task has consumed. In-memory only:
+        # a daemon restart loses the schedule, but the event-stream
+        # bootstrap re-surfaces open tasks on startup anyway.
+        self._resume_tasks: dict[str, asyncio.Task[None]] = {}
+        self._resume_counts: dict[str, int] = {}
 
     @property
     def subscription(self) -> Subscription:
@@ -201,7 +250,48 @@ class RouteRunner:
 
     # ── claimed-task lifecycle ────────────────────────────────────────
 
+    def _resolve_command(self, payload: Mapping[str, Any]) -> str:
+        """Substitute the optional ``{{repo}}`` token from the projects map.
+
+        Resolution is keyed off ``task.metadata.project`` against the host's
+        ``[projects.*]`` table, so the repo a plugin acts on is derived from
+        the task's own project rather than hard-coded per route. Raises
+        :class:`PluginContractError` when the token is present but
+        unresolvable — the caller releases the claim with a finding (a
+        misconfigured route + unroutable task is a config error, not a plugin
+        failure). Routes without the token are returned unchanged.
+        """
+        command = self.route.command
+        if "{{repo}}" not in command:
+            return command
+        metadata = payload.get("metadata") or {}
+        slug = metadata.get("project") if isinstance(metadata, Mapping) else None
+        if not isinstance(slug, str) or not slug:
+            raise PluginContractError(
+                "route command uses the {{repo}} token but the task has no "
+                "metadata.project to resolve it against"
+            )
+        repo = self.project_repos.get(slug)
+        if repo is None:
+            raise PluginContractError(
+                f"route command uses the {{repo}} token but project {slug!r} "
+                "is not registered in [projects.*] on this host"
+            )
+        # shlex.quote: the resolved command is tokenised with shlex.split in
+        # plugin_runner._build_argv, so a repo path containing spaces (or
+        # shell metacharacters) must be quoted or it would split into several
+        # argv elements and truncate --repo.
+        return command.replace("{{repo}}", shlex.quote(str(repo)))
+
     async def _run_claimed_task(self, task_id: str, payload: Mapping[str, Any]) -> None:
+        try:
+            command = self._resolve_command(payload)
+        except PluginContractError as exc:
+            # Token present but unresolvable: release with a finding before
+            # any work-dir / plugin spend, same as a contract violation.
+            await self._release_with_finding(task_id, f"route misconfigured: {exc}")
+            return
+
         work_dir = self.work_dir_base / task_id
         work_dir.mkdir(parents=True, exist_ok=True)
         task_json_path = work_dir / "task.json"
@@ -215,7 +305,7 @@ class RouteRunner:
         try:
             try:
                 result = await self.plugin_runner(
-                    command=self.route.command,
+                    command=command,
                     task_json_path=task_json_path,
                     work_dir=work_dir,
                     result_file=result_file,
@@ -281,9 +371,10 @@ class RouteRunner:
             )
             return False
         if status == "interrupted":
-            # Shutdown signal — release the claim so a future run picks it
-            # up. No [BlockerFailed] finding (operator-initiated, not an
-            # error).
+            # Release the claim either way: a shutdown signal frees the task
+            # for a future run; a usage-limit checkpoint must not hold the
+            # claim across the (potentially hours-long) wait. No
+            # [BlockerFailed] finding — neither case is an error.
             with contextlib.suppress(Exception):
                 await self.lithos.task_release(
                     task_id=task_id,
@@ -295,12 +386,138 @@ class RouteRunner:
                 self.route.name,
                 task_id,
             )
+            # T10: a `resume` block makes the interruption retryable — the
+            # plugin says WHEN a re-run is expected to succeed.
+            resume = result.get("resume")
+            if isinstance(resume, Mapping):
+                await self._maybe_schedule_resume(task_id, resume)
             return False
         await self._release_with_finding(
             task_id,
             f"plugin returned unknown status {status!r}",
         )
         return False
+
+    # ── usage-limit re-dispatch (T10) ─────────────────────────────────
+
+    async def _maybe_schedule_resume(
+        self,
+        task_id: str,
+        resume: Mapping[str, Any],
+    ) -> None:
+        raw = resume.get("resume_after")
+        try:
+            resume_after = datetime.fromisoformat(str(raw))
+        except ValueError:
+            logger.warning(
+                "RouteRunner %s: %s has unparseable resume_after %r; not "
+                "re-dispatching",
+                self.route.name,
+                task_id,
+                raw,
+            )
+            return
+        if resume_after.tzinfo is None:
+            resume_after = resume_after.replace(tzinfo=UTC)
+        used = self._resume_counts.get(task_id, 0)
+        if used >= MAX_RESUMES_PER_TASK:
+            logger.warning(
+                "RouteRunner %s: %s exhausted its resume budget (%d); leaving open",
+                self.route.name,
+                task_id,
+                MAX_RESUMES_PER_TASK,
+            )
+            with contextlib.suppress(Exception):
+                await self.lithos.finding_post(
+                    task_id=task_id,
+                    summary=(
+                        f"[Friction] route {self.route.name}: usage-limited run "
+                        f"resume budget exhausted ({MAX_RESUMES_PER_TASK} "
+                        "re-dispatches); the task stays open for the operator"
+                    ),
+                    agent=self.agent_id,
+                )
+            return
+        self._resume_counts[task_id] = used + 1
+        existing = self._resume_tasks.get(task_id)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        delay = max(0.0, (resume_after - datetime.now(UTC)).total_seconds())
+        logger.info(
+            "RouteRunner %s: scheduling re-dispatch of %s in %.0fs "
+            "(resume %d/%d, at %s)",
+            self.route.name,
+            task_id,
+            delay,
+            used + 1,
+            MAX_RESUMES_PER_TASK,
+            resume_after.isoformat(timespec="seconds"),
+        )
+        sleeper = asyncio.create_task(
+            self._resume_dispatch(task_id, delay),
+            name=f"resume-{task_id}",
+        )
+        self._resume_tasks[task_id] = sleeper
+
+        def _cleanup(done: asyncio.Task[None]) -> None:
+            # Only remove the entry this task still owns: a cancelled old
+            # sleeper's callback can fire AFTER a replacement was stored,
+            # and must not evict the replacement.
+            if self._resume_tasks.get(task_id) is done:
+                del self._resume_tasks[task_id]
+
+        sleeper.add_done_callback(_cleanup)
+
+    async def _resume_dispatch(self, task_id: str, delay: float) -> None:
+        """Sleep until ``resume_after``, then re-claim + re-run the task.
+
+        The synthetic event is built from a FRESH ``task_get`` snapshot, not
+        the payload captured when the run was interrupted: an operator may
+        edit the task (body, acceptance criteria, reviewer override, deps)
+        during the pause window, and the plugin re-reads all of that from the
+        task.json the runner writes from this payload. Re-using the stale
+        payload would silently develop against the old instructions.
+        """
+        try:
+            await asyncio.sleep(delay)
+            task = await self.lithos.task_get(task_id=task_id)
+            if task is None or task.status != "open":
+                logger.info(
+                    "RouteRunner %s: %s no longer open at resume time; dropping",
+                    self.route.name,
+                    task_id,
+                )
+                return
+            # Re-check the route's tag filter. The re-dispatch calls _handle
+            # directly, bypassing the bus matcher that gates normal events, so
+            # an operator who retagged the task during the pause window (e.g.
+            # pulled the trigger tag to cancel it) would otherwise still get a
+            # resumed run against a task that no longer matches this route.
+            if not set(self.route.match.tags).issubset(set(task.tags)):
+                logger.info(
+                    "RouteRunner %s: %s no longer carries the route's trigger "
+                    "tags at resume time; dropping",
+                    self.route.name,
+                    task_id,
+                )
+                return
+            # Drop the dedup entry so _handle's claim path re-runs.
+            self._processed_tasks.discard(task_id)
+            await self._handle(
+                Event(
+                    type="loom.route.resume",
+                    timestamp=datetime.now(UTC),
+                    payload=_task_to_payload(task),
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "RouteRunner %s: re-dispatch of %s failed",
+                self.route.name,
+                task_id,
+            )
 
     async def _release_with_finding(self, task_id: str, detail: str) -> None:
         summary = f"[BlockerFailed] route {self.route.name}: {detail}"
