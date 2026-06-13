@@ -1015,3 +1015,23 @@ async def test_completes_task_true_still_completes(tmp_path: Path) -> None:
 
     lithos.task_complete.assert_awaited_once()
     lithos.task_update.assert_not_called()
+
+
+async def test_delivered_marker_failure_posts_friction(tmp_path: Path) -> None:
+    """If marking loom_delivered fails, the restart-re-develop risk is made
+    visible as a [Friction] finding, not just logged (Copilot #95)."""
+    bus = EventBus()
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos.task_update.side_effect = RuntimeError("lithos unavailable")
+    runner, _ = _make_runner(
+        bus=bus, route=_develop_route(), lithos=lithos, work_dir=tmp_path
+    )
+
+    await bus.publish(_evt(payload=_payload(tags=("trigger:story-develop",))))
+    await _run_for(runner)
+
+    lithos.task_release.assert_awaited_once()  # release still attempted
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[Friction]")
+    assert "loom_delivered" in summary

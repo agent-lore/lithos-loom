@@ -574,10 +574,14 @@ class RouteRunner:
 
         Marks ``metadata.loom_delivered`` so a restart's bootstrap won't
         re-develop it, then releases the claim (don't hold it across a
-        potentially long wait for a human merge). Both steps are best-effort:
-        the work exists on the branch + PR regardless, so a marker/release
-        failure is logged, not fatal.
+        potentially long wait for a human merge). The work exists on the
+        branch + PR regardless, so neither step is fatal — but a failure of
+        either has an operational consequence (a missing marker re-opens the
+        duplicate-PR-on-restart hazard; a stuck claim can block other
+        runners), so on failure we post a ``[Friction]`` finding rather than
+        only logging, making the degraded state visible in Lithos.
         """
+        marked = True
         try:
             await self.lithos.task_update(
                 task_id=task_id,
@@ -585,22 +589,47 @@ class RouteRunner:
                 metadata={"loom_delivered": True},
             )
         except Exception:
+            marked = False
             logger.exception(
                 "RouteRunner %s: marking %s delivered failed", self.route.name, task_id
             )
+        released = True
         try:
             await self.lithos.task_release(
                 task_id=task_id, aspect=self.route.name, agent=self.agent_id
             )
         except Exception:
+            released = False
             logger.exception(
                 "RouteRunner %s: task_release failed for %s", self.route.name, task_id
             )
-        logger.info(
-            "RouteRunner %s: delivered %s — left open for human merge",
-            self.route.name,
-            task_id,
+        if marked and released:
+            logger.info(
+                "RouteRunner %s: delivered %s — left open for human merge",
+                self.route.name,
+                task_id,
+            )
+            return
+        problems: list[str] = []
+        if not marked:
+            problems.append(
+                "could not set metadata.loom_delivered — a daemon restart may "
+                "re-develop this task into a duplicate PR; merge the PR or set "
+                "the marker manually"
+            )
+        if not released:
+            problems.append(
+                "could not release the claim — it will linger until its TTL "
+                "expires, briefly blocking other runners"
+            )
+        summary = (
+            f"[Friction] route {self.route.name}: delivered task (PR raised) but "
+            + "; ".join(problems)
         )
+        with contextlib.suppress(Exception):
+            await self.lithos.finding_post(
+                task_id=task_id, summary=summary, agent=self.agent_id
+            )
 
     def _cleanup_work_dir(self, work_dir: Path, *, success: bool) -> None:
         if success or not self.retain_failed_workdirs:
