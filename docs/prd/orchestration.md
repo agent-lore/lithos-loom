@@ -8,7 +8,7 @@ supersedes:
   - docs/prd/full.md (A1–A10 roadmap — folded in and reshaped below)
 references:
   - docs/SPECIFICATION.md (implemented surface — architecture, plugin contract, event bus)
-  - docs/prd/story-develop.md (the canonical implement→review→PR plugin — shipped)
+  - docs/prd/archive/story-develop.md (the canonical implement→review→PR plugin — shipped + archived)
   - docs/prd/archive/integration.md (Obsidian bridge PRD — shipped)
   - /home/dns/projects/lithos/code/lithos/docs/plans/task-graph-coordination-extension.md (the Lithos extension this plan assumes)
   - /home/dns/projects/lithos/code/lithos/docs/SPECIFICATION.md (Lithos task + knowledge surface)
@@ -62,10 +62,11 @@ plan:
   per-round commits, objective test gate in a throwaway container, usage-limit
   role-aware degradation, optional PR delivery with an autonomous Copilot review
   round, and full daemon-mode integration. Shipped (T1–T10), specced in
-  [docs/prd/story-develop.md](story-develop.md).
+  [docs/prd/archive/story-develop.md](archive/story-develop.md).
 - **Stubs:** `prd-decompose` (the surviving front-end — to be built here),
   `story-implement` + `story-review-human` (**to be retired** — `story-develop`
-  supersedes them; see US-2 and the open question resolved in story-develop.md).
+  supersedes them; see US-2 — this resolves the "supersede vs coexist" open
+  question the story-develop PRD left deferred).
 
 So the remaining work is: a decompose front-end, adopting the extension's graph
 primitives in place of the hand-rolled `metadata.depends_on` machinery, turning
@@ -582,7 +583,8 @@ Unchanged from the old full PRD, plus extension-specific exclusions:
   Phase 4; Loom keeps `metadata.priority` advisory until then.
 - **The docker sandbox as a separate A10 deliverable** — `story-develop` already
   runs agents in hardened per-agent containers; the remaining hardening (egress
-  allowlist) is tracked in story-develop.md Phase 2, not re-litigated here.
+  allowlist, codex tool support, configurable agent model) is tracked as issues
+  (#92, #94, #93), not re-litigated here.
 
 ## Further Notes
 

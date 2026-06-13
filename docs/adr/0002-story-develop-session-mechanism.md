@@ -7,7 +7,7 @@
 ## Context
 
 `story-develop` runs a multi-round conversation between a persistent **coder** agent and one
-or more **reviewer** agents (see [PRD](../prd/story-develop.md)). Its whole advantage over
+or more **reviewer** agents (see [PRD](../prd/archive/story-develop.md)). Its whole advantage over
 Ralph++'s fire-and-forget loop is **session persistence**: each agent keeps its context
 across rounds, so the coder remembers what it tried and the reviewer remembers what it
 objected to.

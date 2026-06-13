@@ -2,7 +2,7 @@
 
 T1 carries only what the walking skeleton needs (one coder, no reviewers). Later
 slices extend :class:`DevelopConfig` with reviewers, thresholds, fallback chains,
-etc. — see ``docs/prd/story-develop.md``.
+etc. — see ``docs/prd/archive/story-develop.md``.
 """
 
 from __future__ import annotations
