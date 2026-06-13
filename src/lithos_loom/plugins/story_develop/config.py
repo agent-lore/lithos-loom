@@ -164,8 +164,10 @@ def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
     tool = entry.get("tool", DEFAULT_REVIEWER_TOOL)
     if not isinstance(tool, str):
         raise ValueError(f"{where}: tool must be a string")
-    model = parse_model(entry.get("model"), where=where)
-    effort = parse_effort(entry.get("effort"), where=where)
+    # Field-qualify the location so a bad value points at the exact key
+    # (e.g. ``develop_reviewers[1].model``), matching the coder-path breadcrumbs.
+    model = parse_model(entry.get("model"), where=f"{where}.model")
+    effort = parse_effort(entry.get("effort"), where=f"{where}.effort")
     return ReviewerSpec(
         name=name,
         tool=tool,

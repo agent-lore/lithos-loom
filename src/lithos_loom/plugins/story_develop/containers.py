@@ -103,7 +103,7 @@ def build_exec_command(
     model: str | None = None,
     effort: str | None = None,
 ) -> list[str]:
-    """Build the ``docker exec`` argv for one coder turn.
+    """Build the ``docker exec`` argv for one agent turn (coder or reviewer).
 
     ``--session-id`` controls the session on the first turn; ``--resume`` reloads
     it on later turns (T3). Output is ``--output-format json`` so completion /

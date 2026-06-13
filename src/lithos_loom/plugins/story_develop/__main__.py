@@ -207,8 +207,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reviewer-effort",
         default=None,
         choices=VALID_EFFORTS,
-        help="Reasoning-effort level for every --reviewer "
-        "(per-reviewer levels need --develop-config). Default: the agent's",
+        help="Reasoning-effort level for every --reviewer (per-reviewer "
+        "levels need --develop-config). Default: the agent's default",
     )
     p.add_argument(
         "--max-rounds",
