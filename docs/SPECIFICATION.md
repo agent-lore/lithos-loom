@@ -584,7 +584,7 @@ The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, 
 
 ### 5.5 story-develop (shipped)
 
-`story-develop` runs the full implement → review → fix → approve loop with containerised agents (one persistent coder session + an N-reviewer panel; per-round commits, objective test gate, usage-limit reactions, optional PR delivery with an autonomous Copilot review round). The full design is `docs/prd/story-develop.md`; the standalone CLI surface is `python -m lithos_loom.plugins.story_develop --help`.
+`story-develop` runs the full implement → review → fix → approve loop with containerised agents (one persistent coder session + an N-reviewer panel; per-round commits, objective test gate, usage-limit reactions, optional PR delivery with an autonomous Copilot review round). The full design is `docs/prd/archive/story-develop.md` (shipped + archived); the standalone CLI surface is `python -m lithos_loom.plugins.story_develop --help`.
 
 **Daemon mode.** Passing `--task-json` (with `--work-dir` and `--result-file`) switches the plugin to the route-runner contract:
 

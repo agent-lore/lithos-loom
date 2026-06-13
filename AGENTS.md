@@ -33,8 +33,8 @@ Loom replaces [Ralph++](https://github.com/snarktank/ralph) as the user's coding
 | [`docs/cli/project-regenerate-done.md`](docs/cli/project-regenerate-done.md) | Full reference for `lithos-loom project regenerate-done`. |
 | [`docs/cli/project-github-repos.md`](docs/cli/project-github-repos.md) | Full reference for `lithos-loom project add-github-repo` / `remove-github-repo` / `enable-github` / `disable-github` / `migrate-github-tags`. |
 | [`docs/macros/README.md`](docs/macros/README.md) | Templater macro install + behaviour notes. |
-| [`docs/prd/mvp.md`](docs/prd/mvp.md) | Plugin-body contract for `prd-decompose` / `story-implement` / `story-review-human` (orchestration shipped, bodies queued). |
-| [`docs/prd/full.md`](docs/prd/full.md) | Roadmap for the larger automated workflow system. |
+| [`docs/prd/orchestration.md`](docs/prd/orchestration.md) | Active orchestration plan: assumes the Lithos task-graph extension, reframes the remaining work (decompose front-end, ready-queue adoption, PR gate) + the A-layer roadmap. Supersedes the former `mvp.md` + `full.md`. |
+| [`docs/prd/archive/story-develop.md`](docs/prd/archive/story-develop.md) | Design history for the canonical implement→review→PR plugin (shipped T1–T10; live surface in SPECIFICATION.md §5.5; residual follow-ups tracked as issues). |
 | [`docs/prd/archive/`](docs/prd/archive/) | Shipped PRDs preserved as historical context. |
 
 ## Pre-merge checks (mandatory)

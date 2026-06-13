@@ -1,8 +1,8 @@
 """Resolved configuration + paths for a single ``story-develop`` run.
 
-T1 carries only what the walking skeleton needs (one coder, no reviewers). Later
-slices extend :class:`DevelopConfig` with reviewers, thresholds, fallback chains,
-etc. — see ``docs/prd/story-develop.md``.
+:class:`DevelopConfig` carries the coder, the reviewer panel, per-reviewer
+severity thresholds, and usage-limit fallback chains — see
+``docs/prd/archive/story-develop.md`` and SPECIFICATION.md §5.5.
 """
 
 from __future__ import annotations

@@ -1,6 +1,7 @@
 """``story-develop`` plugin — automated conversational code review.
 
-See ``docs/prd/story-develop.md``. T1 (this slice) is the walking skeleton:
-worktree -> one long-lived coder container -> one coder turn -> committed branch.
-No reviewer loop yet (T2/T3).
+A persistent coder session implements and fixes; an N-reviewer panel reviews each
+round to approval (per-round commits, objective test gate, usage-limit handling,
+optional PR delivery). See ``docs/prd/archive/story-develop.md`` and
+SPECIFICATION.md §5.5.
 """

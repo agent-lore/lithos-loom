@@ -5,7 +5,8 @@ Invoked by the daemon as::
     python -m lithos_loom.plugins.story_implement \\
         --task-json <path> --work-dir <path> --result-file <path>
 
-Stub — see docs/prd/mvp.md US-10, US-14-17.
+Stub — superseded by ``story-develop`` and slated for removal; see US-2 in
+docs/prd/orchestration.md.
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Stub — implement per docs/prd/mvp.md US-10, US-14-17."""
-    raise NotImplementedError("story-implement plugin — implement per US-10, US-14-17")
+    """Stub — superseded by story-develop; see US-2 in docs/prd/orchestration.md."""
+    raise NotImplementedError(
+        "story-implement is superseded by story-develop and slated for removal (US-2)"
+    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,21 @@
 # PRD: `story-develop` plugin — automated conversational code review
 
-> **Status:** Approved design, not yet implemented. Revised 2026-06-11 after review.
+> **Status: SHIPPED + ARCHIVED (2026-06-13).** Implemented across T1–T10 (walking
+> skeleton → daemon integration); see SPECIFICATION.md §5.5 for the live operator
+> surface. Archived here as design history. Residual follow-ups did **not** ship
+> with v1 and are tracked as issues, not as open PRD scope:
+> [#94](https://github.com/agent-lore/lithos-loom/issues/94) codex tool support
+> (coder + reviewers; schema-ready, runtime-unbuilt — only `claude` turns are wired
+> today, so the `fallback_chain` cannot switch to codex),
+> [#93](https://github.com/agent-lore/lithos-loom/issues/93) configurable agent
+> model / thinking-level, [#92](https://github.com/agent-lore/lithos-loom/issues/92)
+> project-declared sandbox agent config + the egress-allowlist hardening this PRD's
+> security section deferred, [#91](https://github.com/agent-lore/lithos-loom/issues/91)
+> Copilot review comment-lag race, and
+> [#88](https://github.com/agent-lore/lithos-loom/issues/88) an operator
+> observe/attach CLI (the "attach escape hatch" is a printed hint today, not a real
+> affordance). The post-extension reframing of the surrounding pipeline lives in
+> [docs/prd/orchestration.md](../orchestration.md).
 > **Date:** 2026-06-11
 > **Deciders:** Dave Snowdon
 >
@@ -96,7 +111,7 @@ security) only for stories that warrant them — most don't.
    on-disk session transcript. NOT a live tmux REPL driven by `send-keys`. This keeps the
    container warm (per #2) **and** gives **clean per-turn detection** of completion /
    usage-limit / malformed-handoff from **process exit code + stderr** — no ANSI scraping.
-   Rationale and trade-offs: [ADR 0002](../adr/0002-story-develop-session-mechanism.md).
+   Rationale and trade-offs: [ADR 0002](../../adr/0002-story-develop-session-mechanism.md).
    Where the transcript physically lives, how it is namespaced per run, and how it survives
    teardown: see [Run-state & session durability](#run-state--session-durability) — this is
    the project's biggest technical risk and a feasibility-gate item.
@@ -127,7 +142,7 @@ security) only for stories that warrant them — most don't.
      (repeatable) for quick one-offs. v1 is *low*-config, not *zero*-config.
    - **Daemon:** the project's **available reviewer pool (`develop_reviewers`) and its default
      subset (`develop_default_reviewers`) live in project-context doc metadata** (consistent
-     with [ADR 0001](../adr/0001-github-watch-config-storage.md)). A **per-task override**
+     with [ADR 0001](../../adr/0001-github-watch-config-storage.md)). A **per-task override**
      (`metadata.reviewers` / tags) selects which run for that task; absent → the project
      default subset; absent *that* → the single built-in `code-quality` reviewer (never the
      whole pool). Because `--task-json` does not carry the resolved project config today, the

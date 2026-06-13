@@ -6,5 +6,5 @@ contract::
     python -m lithos_loom.plugins.<name> \\
         --task-json <path> --work-dir <path> --result-file <path>
 
-See ``docs/prd/mvp.md`` for plugin-specific behaviour.
+See ``docs/prd/orchestration.md`` for plugin-specific behaviour.
 """
