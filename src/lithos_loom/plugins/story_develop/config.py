@@ -119,8 +119,9 @@ def parse_effort(value: object, *, where: str) -> str | None:
     """Validate + normalise a reasoning-effort level, or ``None``.
 
     Accepts one of :data:`VALID_EFFORTS` (case-insensitive, whitespace
-    stripped); ``None`` means "inherit the agent's default effort" (`high`
-    on current Claude models). Raises :class:`ValueError`.
+    stripped); ``None`` means "inherit the agent/tool's own default effort"
+    (which is model-dependent and may drift — we don't pin it). Raises
+    :class:`ValueError`.
     """
     if value is None:
         return None
