@@ -177,6 +177,64 @@ def test_route_human_blocking_must_be_bool(
         load_config()
 
 
+# ── RouteConfig.completes_task (#90) ───────────────────────────────────
+
+
+def _route_toml_completes(value: str | None = None) -> str:
+    """Minimal config with one route; optional completes_task line."""
+    extra = f"        completes_task = {value}\n" if value is not None else ""
+    return (
+        dedent(
+            """
+        [orchestrator]
+        agent_id = "lithos-orchestrator-test"
+        lithos_url = "http://localhost:8765"
+
+        [[routes]]
+        name = "r1"
+        command = "echo hi"
+        """
+        )
+        + extra
+        + dedent(
+            """
+            [routes.match]
+            tags = ["trigger:r1"]
+        """
+        )
+    )
+
+
+def test_route_completes_task_defaults_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent completes_task defaults to True — existing routes still complete
+    their tasks on success (backwards compatible)."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_route_toml_completes())
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    assert load_config().routes[0].completes_task is True
+
+
+def test_route_completes_task_false_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_route_toml_completes("false"))
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    assert load_config().routes[0].completes_task is False
+
+
+def test_route_completes_task_must_be_bool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_route_toml_completes('"no"'))
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="completes_task must be a boolean"):
+        load_config()
+
+
 # ── [obsidian_sync] section (Slice 1 US7) ──────────────────────────────
 
 

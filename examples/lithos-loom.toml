@@ -63,6 +63,11 @@ command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task
 # A multi-round develop loop with containerised agents is slow, and
 # usage-limit pauses count against the wall clock too; budget a working day.
 max_runtime_seconds = 28800
+# completes_task = false: an APPROVED run means a reviewed branch + PR exist,
+# awaiting human merge — NOT that the task is done. The runner leaves the task
+# open (marks metadata.loom_delivered so a restart won't re-develop it);
+# completion happens on PR merge (github-linked tasks close via the watcher).
+completes_task = false
 
 [routes.match]
 tags = ["trigger:story-develop"]

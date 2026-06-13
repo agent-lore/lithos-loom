@@ -202,7 +202,24 @@ class RouteRunner:
             )
             return
 
-        depends_on = payload.get("metadata", {}).get("depends_on") or []
+        metadata = payload.get("metadata") or {}
+        if not self.route.completes_task and metadata.get("loom_delivered"):
+            # `loom_delivered` is restart-safety for THIS kind of route: a
+            # completes_task=false route already delivered this task (PR raised,
+            # awaiting merge) and left it open, so don't re-develop it — most
+            # importantly on a daemon restart, where the bootstrap re-emits every
+            # open task as `created`. The guard is gated on `not completes_task`
+            # so the marker stays route-specific: a normal (completes_task=true)
+            # route re-tagged onto the still-open task is NOT suppressed by it.
+            # Completion (and the marker becoming moot) happens when the PR merges.
+            logger.debug(
+                "RouteRunner %s: skipping %s — already delivered (awaiting merge)",
+                self.route.name,
+                task_id,
+            )
+            return
+
+        depends_on = metadata.get("depends_on") or []
         if depends_on and not await self._deps_satisfied(depends_on):
             logger.info(
                 "RouteRunner %s: deferring %s — dependencies not complete",
@@ -359,8 +376,15 @@ class RouteRunner:
         """Apply the plugin's result. Returns ``True`` iff the task succeeded."""
         status = result.get("status")
         if status == "succeeded":
-            await self.lithos.task_complete(task_id=task_id, agent=self.agent_id)
-            logger.info("RouteRunner %s: completed %s", self.route.name, task_id)
+            if self.route.completes_task:
+                await self.lithos.task_complete(task_id=task_id, agent=self.agent_id)
+                logger.info("RouteRunner %s: completed %s", self.route.name, task_id)
+            else:
+                # PR-producing route: success means a reviewed branch + PR
+                # exist, awaiting human merge — NOT that the task is done.
+                # Leave it open (release the claim) and mark it delivered so a
+                # restart doesn't re-develop it. Completion happens on merge.
+                await self._mark_delivered_and_release(task_id)
             return True
         if status == "failed":
             err = result.get("error") or {}
@@ -546,6 +570,68 @@ class RouteRunner:
                 "RouteRunner %s: task_release failed for %s",
                 self.route.name,
                 task_id,
+            )
+
+    async def _mark_delivered_and_release(self, task_id: str) -> None:
+        """Leave a delivered task open for merge (``completes_task=false``).
+
+        Marks ``metadata.loom_delivered`` so a restart's bootstrap won't
+        re-develop it, then releases the claim (don't hold it across a
+        potentially long wait for a human merge). The work exists on the
+        branch + PR regardless, so neither step is fatal — but a failure of
+        either has an operational consequence (a missing marker re-opens the
+        duplicate-PR-on-restart hazard; a stuck claim can block other
+        runners), so on failure we post a ``[Friction]`` finding rather than
+        only logging, making the degraded state visible in Lithos.
+        """
+        marked = True
+        try:
+            await self.lithos.task_update(
+                task_id=task_id,
+                agent=self.agent_id,
+                metadata={"loom_delivered": True},
+            )
+        except Exception:
+            marked = False
+            logger.exception(
+                "RouteRunner %s: marking %s delivered failed", self.route.name, task_id
+            )
+        released = True
+        try:
+            await self.lithos.task_release(
+                task_id=task_id, aspect=self.route.name, agent=self.agent_id
+            )
+        except Exception:
+            released = False
+            logger.exception(
+                "RouteRunner %s: task_release failed for %s", self.route.name, task_id
+            )
+        if marked and released:
+            logger.info(
+                "RouteRunner %s: delivered %s — left open for human merge",
+                self.route.name,
+                task_id,
+            )
+            return
+        problems: list[str] = []
+        if not marked:
+            problems.append(
+                "could not set metadata.loom_delivered — a daemon restart may "
+                "re-develop this task into a duplicate PR; merge the PR or set "
+                "the marker manually"
+            )
+        if not released:
+            problems.append(
+                "could not release the claim — it will linger until its TTL "
+                "expires, briefly blocking other runners"
+            )
+        summary = (
+            f"[Friction] route {self.route.name}: delivered task (PR raised) but "
+            + "; ".join(problems)
+        )
+        with contextlib.suppress(Exception):
+            await self.lithos.finding_post(
+                task_id=task_id, summary=summary, agent=self.agent_id
             )
 
     def _cleanup_work_dir(self, work_dir: Path, *, success: bool) -> None:

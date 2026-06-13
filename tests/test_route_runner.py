@@ -37,12 +37,14 @@ def _route(
     tags: tuple[str, ...] = ("trigger:story-implement",),
     command: str = "echo {{task_json}} {{work_dir}} {{result_file}}",
     max_runtime_seconds: int | None = None,
+    completes_task: bool = True,
 ) -> RouteConfig:
     return RouteConfig(
         name=name,
         command=command,
         match=RouteMatch(tags=tags),
         max_runtime_seconds=max_runtime_seconds,
+        completes_task=completes_task,
     )
 
 
@@ -950,3 +952,104 @@ async def test_resume_dropped_when_task_retagged_out_of_route(
 
     assert plugin_runner.await_count == 1  # only the first run; no re-dispatch
     assert lithos.task_claim.await_count == 1
+
+
+# ── completes_task=false (PR-producing routes, #90) ────────────────────
+
+
+def _develop_route(completes_task: bool = False) -> RouteConfig:
+    return _route(
+        name="story-develop",
+        tags=("trigger:story-develop",),
+        completes_task=completes_task,
+    )
+
+
+async def test_completes_task_false_leaves_open_and_marks_delivered(
+    tmp_path: Path,
+) -> None:
+    """A completes_task=false route must NOT complete the task on success — it
+    releases (leaves it open for human merge) and marks loom_delivered so a
+    restart won't re-develop it. This is the #90 fix: an approved PR-producing
+    run can no longer close an issue for unmerged work."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, route=_develop_route(), work_dir=tmp_path)
+
+    await bus.publish(_evt(payload=_payload(tags=("trigger:story-develop",))))
+    await _run_for(runner)
+
+    lithos.task_complete.assert_not_called()
+    lithos.task_release.assert_awaited_once()
+    upd = lithos.task_update.await_args
+    assert upd.kwargs["metadata"] == {"loom_delivered": True}
+
+
+async def test_delivered_task_is_skipped_not_re_developed(tmp_path: Path) -> None:
+    """A task already marked loom_delivered is skipped — the restart-safety
+    guard: bootstrap re-emits open tasks as `created`, and a delivered task
+    must not be re-claimed while its PR awaits merge."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, route=_develop_route(), work_dir=tmp_path)
+
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                tags=("trigger:story-develop",),
+                metadata={"loom_delivered": True},
+            )
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()
+
+
+async def test_completes_task_true_still_completes(tmp_path: Path) -> None:
+    """Default routes (completes_task=True) are unchanged: success completes the
+    task and writes no delivered marker."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)  # default completes
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    lithos.task_complete.assert_awaited_once()
+    lithos.task_update.assert_not_called()
+
+
+async def test_delivered_marker_failure_posts_friction(tmp_path: Path) -> None:
+    """If marking loom_delivered fails, the restart-re-develop risk is made
+    visible as a [Friction] finding, not just logged (Copilot #95)."""
+    bus = EventBus()
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos.task_update.side_effect = RuntimeError("lithos unavailable")
+    runner, _ = _make_runner(
+        bus=bus, route=_develop_route(), lithos=lithos, work_dir=tmp_path
+    )
+
+    await bus.publish(_evt(payload=_payload(tags=("trigger:story-develop",))))
+    await _run_for(runner)
+
+    lithos.task_release.assert_awaited_once()  # release still attempted
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[Friction]")
+    assert "loom_delivered" in summary
+
+
+async def test_completes_task_true_route_ignores_delivered_marker(
+    tmp_path: Path,
+) -> None:
+    """loom_delivered is route-specific protection for completes_task=false
+    routes. A completes_task=true route must still run an open task carrying the
+    marker — e.g. a follow-on route re-tagged onto the still-open task (#95
+    review). The guard is gated on `not completes_task`."""
+    bus = EventBus()
+    # default _make_runner route is completes_task=True
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    await bus.publish(_evt(payload=_payload(metadata={"loom_delivered": True})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    lithos.task_complete.assert_awaited_once()

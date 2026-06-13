@@ -109,7 +109,7 @@ Each child runs its own EventBus instance. There is no inter-child IPC; all thre
 **Task lifecycle (route-runner).**
 `LithosEventStream` (running in the route-runner child) emits `lithos.task.*` events. Each `[[routes]]` stanza registers a claim-bound subscriber against `lithos.task.created` and `lithos.task.released` (only) that requires every tag in `match.tags` to be present on the task (same semantic as the bus matcher and `is_human_actionable`). `lithos.task.updated` is **not** subscribed to today — editing a task's tags after creation does not re-trigger route pickup. On match, the runner claims via `lithos_task_claim`, spawns the plugin subprocess, periodically renews the claim, and waits for `result.json`. It then reads only the `status` field:
 
-- `succeeded` → `lithos_task_complete`.
+- `succeeded` → `lithos_task_complete` — **unless** the route sets `completes_task = false` (§3.1), in which case the runner instead marks `metadata.loom_delivered = true` and `lithos_task_release`s, leaving the task **open**. This is for PR-producing routes (e.g. `story-develop`) where success = "a reviewed branch + PR exist, awaiting human merge", not "done": completing on approval would close a github-linked issue for un-merged work. Completion then happens on PR merge (github-linked tasks via the watcher close-mirror; otherwise the operator, or #87). The `loom_delivered` marker makes a delivered task a no-op for **`completes_task = false` routes only** (the guard is gated on `not completes_task`), so a daemon restart's bootstrap (which re-emits every open task as `created`) does not re-develop it — while a normal `completes_task = true` route re-tagged onto the still-open task is *not* suppressed by the marker and runs as usual.
 - `failed` → `lithos_task_release` + `[BlockerFailed]` finding (the error message is pulled from `error.message` if present).
 - `interrupted` → `lithos_task_release`, no finding. When the result also carries a `resume` block (`resume_after` timestamp — e.g. a story-develop run that checkpointed on a provider usage limit), the runner additionally schedules an in-process re-dispatch: at `resume_after` it re-checks the task is still open, then re-claims and re-runs the plugin. Bounded at `MAX_RESUMES_PER_TASK` (3) re-dispatches per task per daemon process; on exhaustion the task stays open with a `[Friction]` finding. The schedule is in-memory only — a daemon restart loses it, but the event-stream bootstrap re-surfaces open tasks on startup anyway.
 - Unknown / missing status → `lithos_task_release` + `[BlockerFailed]`.
@@ -239,11 +239,13 @@ tags = ["trigger:story-implement"]  # task must carry ALL listed tags
 
 # story-develop: {{repo}} resolves per task from [projects.<slug>].repo, so
 # one route serves every project. Reviewer config comes from the
-# project-context doc's develop_* metadata (§5.5).
+# project-context doc's develop_* metadata (§5.5). completes_task = false
+# leaves an approved task OPEN for human merge (see §2.2).
 [[routes]]
 name = "story-develop"
 command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo {{repo}}"
 max_runtime_seconds = 28800
+completes_task = false
 
 [routes.match]
 tags = ["trigger:story-develop"]
@@ -595,7 +597,7 @@ uv run python -m lithos_loom.plugins.story_develop \
 - `--repo` takes the runner's `{{repo}}` token (§5.1), resolved per task from `[projects.<slug>].repo` keyed by `metadata.project` — so one route serves every registered project. (An absolute path also works if you want a route pinned to one checkout.)
 - The task (title, body, `metadata.acceptance_criteria`) comes from `task.json`; `--description` / `--task-id` / `--no-lithos` / `--complete-on-approval` / `--reviewer` / `--develop-config` are rejected in daemon mode.
 - **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`. Per-task override: `task.metadata.reviewers` (names from the pool). Every miss — no slug, no doc, no keys, unknown name — degrades to the built-in single `code-quality` reviewer with a `[Friction]` finding; a populated pool without a default selection still runs only the built-in reviewer (pool membership does not auto-run).
-- **Status mapping.** `approved` → `succeeded` (the runner completes the task); `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.
+- **Status mapping.** `approved` → `succeeded`; with the route's `completes_task = false` (§2.2) the runner then leaves the task **open** for human merge (marks `loom_delivered`, releases) rather than completing it — so an approved run never closes a github-linked issue for un-merged work. `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.
 - The plugin still owns its Lithos round-trip directly (the `[DevelopResult]` finding + `develop_*` metadata, same as `--task-id` mode); `result.json` carries `status` for the runner, so there is no double-application.
 
 ---

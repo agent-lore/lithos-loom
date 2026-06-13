@@ -149,6 +149,19 @@ class RouteConfig:
     autonomous (the daemon will handle them; hide from operator).
     """
     max_runtime_seconds: int | None = None
+    completes_task: bool = True
+    """Whether a successful plugin run completes the task.
+
+    Default ``True``: a ``status:"succeeded"`` result completes the task
+    (and, for github-linked tasks, closes the issue via the watcher).
+
+    Set ``False`` for PR-producing routes (e.g. ``story-develop``) where
+    success means "a reviewed branch + PR exist, awaiting human merge", not
+    "done". The runner then *releases* the claim and leaves the task open,
+    marking it ``metadata.loom_delivered`` so a later daemon restart does not
+    re-develop it. Completion happens on PR merge — for github-linked tasks via
+    the watcher close-mirror; otherwise the operator completes it (see #87).
+    """
 
 
 @dataclass(frozen=True)
@@ -457,6 +470,9 @@ def _parse_routes(data: Any, config_path: Path) -> tuple[RouteConfig, ...]:
         human_blocking = _optional_bool(
             entry, "human_blocking", False, config_path, scope
         )
+        completes_task = _optional_bool(
+            entry, "completes_task", True, config_path, scope
+        )
         routes.append(
             RouteConfig(
                 name=name,
@@ -464,6 +480,7 @@ def _parse_routes(data: Any, config_path: Path) -> tuple[RouteConfig, ...]:
                 match=RouteMatch(tags=tuple(tags_raw)),
                 human_blocking=human_blocking,
                 max_runtime_seconds=max_runtime,
+                completes_task=completes_task,
             )
         )
     return tuple(routes)
