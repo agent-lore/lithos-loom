@@ -362,30 +362,47 @@ def fetch_copilot_comments_settled(
     pr_number: int,
     *,
     expected: int,
-    grace_seconds: int = 90,
+    grace_seconds: int = 180,
     poll_seconds: int = 5,
+    settle_seconds: int = 15,
 ) -> list[CopilotComment]:
     """Fetch Copilot's inline comments, waiting for them to MATERIALISE.
 
-    Copilot's inline comments lag its review summary by a few seconds (a
-    first-poll empty list is the norm, not the signal — this raced in the
-    first T9 dogfood run). *expected* comes from the review body: 0 returns
-    immediately; a positive count waits until that many are visible; -1
-    (unknown) waits for any to appear. The grace window bounds the wait.
+    Copilot's inline comments lag its review summary by a variable amount
+    (a first-poll empty list is the norm, not the signal — this raced in the
+    first T9 dogfood run and again at 90 s grace).  *expected* comes from the
+    review body: 0 returns immediately; a positive count waits until that many
+    are visible AND the count stabilises; -1 (unknown) waits for the count to
+    stabilise after any appear.  The grace window bounds the overall wait.
+
+    "Stabilised" means the count has not increased for *settle_seconds*.
+    This prevents returning before late-arriving comments materialise —
+    the original 90 s window with an immediate return on threshold hit
+    was the root cause of the recurrence.
     """
     if expected == 0:
         return fetch_copilot_comments(wt, repo, pr_number)
     deadline = time.monotonic() + grace_seconds
     comments: list[CopilotComment] = []
+    prev_count = 0
+    settled_at: float | None = None  # monotonic time the count last changed
     while True:
         comments = fetch_copilot_comments(wt, repo, pr_number)
-        if expected > 0 and len(comments) >= expected:
+        now = time.monotonic()
+        if len(comments) != prev_count:
+            prev_count = len(comments)
+            settled_at = now  # (re)start the settle clock
+
+        threshold_hit = (expected > 0 and len(comments) >= expected) or (
+            expected < 0 and len(comments) > 0
+        )
+        settled = settled_at is not None and now - settled_at >= settle_seconds
+        if threshold_hit and settled:
             return comments
-        if expected < 0 and comments:
+
+        if now >= deadline:
             return comments
-        if time.monotonic() >= deadline:
-            return comments
-        time.sleep(min(poll_seconds, max(1, deadline - time.monotonic())))
+        time.sleep(min(poll_seconds, max(1, deadline - now)))
 
 
 def post_thread_reply(

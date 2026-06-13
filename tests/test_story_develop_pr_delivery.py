@@ -423,27 +423,37 @@ def test_deliver_coder_failure_comments_and_degrades(
     assert any("respond manually" in n for n in out.notes)
 
 
-# --- comment-lag settling (the first-dogfood race) ------------------------------
+# --- comment-lag settling (the first-dogfood race + recurrence) -----------------
 
 
 def test_settled_fetch_waits_for_lagging_comments(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # First poll returns [], the comments materialise on the third — the
-    # settle loop must keep going until the EXPECTED count is visible.
+    # settle loop must keep going until the EXPECTED count is visible AND
+    # the count has been stable for settle_seconds.
     calls = {"n": 0}
     arrived = [CopilotComment(comment_id=1, path="a.py", line=1, body="x")]
+    clock = {"t": 0.0}
 
     def fake_fetch(wt, repo, pr):
         calls["n"] += 1
         return arrived if calls["n"] >= 3 else []
 
     monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
-    monkeypatch.setattr(pr_delivery.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
     out = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=1, grace_seconds=60
+        tmp_path, "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
     )
-    assert out == arrived and calls["n"] == 3
+    assert out == arrived
+    # call 1-2: empty; call 3: arrives (settle clock starts); then more
+    # polls until settle_seconds elapses without a count change
+    assert calls["n"] >= 3
 
 
 def test_settled_fetch_zero_expected_returns_immediately(
@@ -457,7 +467,7 @@ def test_settled_fetch_zero_expected_returns_immediately(
 
     monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
     out = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=0, grace_seconds=60
+        tmp_path, "o/r", 1, expected=0, grace_seconds=120
     )
     assert out == [] and calls["n"] == 1  # no pointless polling
 
@@ -477,6 +487,70 @@ def test_settled_fetch_grace_bounds_the_wait(
         tmp_path, "o/r", 1, expected=2, grace_seconds=30
     )
     assert out == []  # gave up after the grace window
+
+
+def test_settled_fetch_catches_late_arriving_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The settle window re-polls after the threshold is met, catching
+    comments that trickle in after the expected count is reached — the
+    exact race that the 90 s grace missed."""
+    c1 = CopilotComment(comment_id=1, path="a.py", line=1, body="x")
+    c2 = CopilotComment(comment_id=2, path="b.py", line=2, body="y")
+    clock = {"t": 0.0}
+
+    # c1 arrives at t=5 (poll 2), c2 arrives at t=15 (poll 4)
+    def fake_fetch(wt, repo, pr):
+        if clock["t"] < 5:
+            return []
+        if clock["t"] < 15:
+            return [c1]
+        return [c1, c2]
+
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
+
+    # expected=1 — old code would have returned [c1] immediately at t=5
+    out = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
+    )
+    assert len(out) == 2  # settle window caught c2
+
+
+def test_settled_fetch_unknown_expected_waits_for_stability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When expected=-1 (unknown count), the old code returned on the first
+    comment; the settle window now waits for the count to stop changing."""
+    c1 = CopilotComment(comment_id=1, path="a.py", line=1, body="x")
+    c2 = CopilotComment(comment_id=2, path="b.py", line=2, body="y")
+    clock = {"t": 0.0}
+
+    def fake_fetch(wt, repo, pr):
+        if clock["t"] < 5:
+            return []
+        if clock["t"] < 10:
+            return [c1]
+        return [c1, c2]
+
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
+
+    out = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=-1, grace_seconds=120, settle_seconds=15
+    )
+    # c2 arrived at t=10, settle window of 15 s starts THEN, so returns at ~t=25
+    assert len(out) == 2
 
 
 def test_generated_count_parsing() -> None:
