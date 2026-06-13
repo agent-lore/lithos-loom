@@ -172,6 +172,7 @@ def _install(
     *,
     comments: list[CopilotComment] | None = None,
     expected: int | None = None,
+    settled: bool | None = None,
     copilot_arrives: bool = True,
     request_ok: bool = True,
     coder_ok: bool = True,
@@ -206,7 +207,11 @@ def _install(
         "wait_for_copilot",
         lambda *a, **kw: expected_count if copilot_arrives else None,
     )
-    settled_flag = expected_count <= 0 or len(comments or []) >= expected_count
+    settled_flag = (
+        settled
+        if settled is not None
+        else (expected_count <= 0 or len(comments or []) >= expected_count)
+    )
     monkeypatch.setattr(
         pr_delivery,
         "fetch_copilot_comments_settled",
@@ -332,6 +337,23 @@ def test_deliver_copilot_nonsettle_zero_defers(
     assert out.copilot_reviewed is True
     assert out.copilot_settled is False
     assert any("did not settle" in n for n in out.notes)
+    assert state["turn_prompts"] == []  # nothing materialised → no fix round
+
+
+def test_deliver_copilot_unknown_count_unsettled_flags_incomplete(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """A Copilot review whose body states no count (expected=-1) and whose
+    stream never stabilises must be flagged INCOMPLETE at the deliver() level,
+    not reported as a clean/settled review (#96 review finding 2). This is the
+    case most prone to silently reintroducing the missed-comments failure."""
+    state = _install(monkeypatch, config, comments=[], expected=-1, settled=False)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+    assert out.copilot_reviewed is True
+    assert out.copilot_settled is False
+    assert any("did not stabilise" in n for n in out.notes)
     assert state["turn_prompts"] == []  # nothing materialised → no fix round
 
 
