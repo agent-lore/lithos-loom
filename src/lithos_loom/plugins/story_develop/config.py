@@ -60,10 +60,10 @@ class ReviewerSpec:
     prompts. ``fallback_chain`` lists alternate tools tried when this
     reviewer's tool is usage-limited (T5).
 
-    ``model`` / ``thinking`` are per-reviewer (#93): a strong reviewer can run
-    a more capable model + bigger thinking budget than a lenient one. ``None``
-    means "inherit the agent CLI's default" — see :class:`DevelopConfig` for
-    why we do not hard-pin a model string.
+    ``model`` / ``effort`` are per-reviewer (#93): a strong reviewer can run a
+    more capable model + higher reasoning effort than a lenient one. ``None``
+    means "inherit the agent's default" — see :class:`DevelopConfig` for why we
+    do not hard-pin a model string. ``effort`` is one of :data:`VALID_EFFORTS`.
     """
 
     name: str
@@ -72,7 +72,7 @@ class ReviewerSpec:
     system_prompt: str | None = None
     fallback_chain: tuple[str, ...] = ()
     model: str | None = None
-    thinking: int | None = None
+    effort: str | None = None
 
 
 _VALID_THRESHOLDS = ("critical", "major", "minor")
@@ -84,7 +84,7 @@ _REVIEWER_ENTRY_KEYS = {
     "system_prompt",
     "fallback_chain",
     "model",
-    "thinking",
+    "effort",
 }
 
 
@@ -105,19 +105,30 @@ def parse_model(value: object, *, where: str) -> str | None:
     return value.strip()
 
 
-def parse_thinking(value: object, *, where: str) -> int | None:
-    """Validate a ``thinking`` token budget: a positive int, or ``None``.
+# The portable reasoning-effort levels — valid on BOTH agent tools: Claude's
+# `--effort` (low/medium/high/xhigh/max) and Codex's `model_reasoning_effort`
+# (minimal/low/medium/high/xhigh). We expose only the shared four so a level
+# means the same thing whatever tool runs the agent; each tool also coerces an
+# unsupported level to its nearest, so this degrades safely per model. (`max`
+# is Claude-only, `minimal` Codex-only — deliberately omitted to stay portable.)
+VALID_EFFORTS = ("low", "medium", "high", "xhigh")
 
-    ``bool`` is rejected explicitly (it is an ``int`` subclass, so ``True``
-    would otherwise sneak through as ``1``). Raises :class:`ValueError`.
+
+def parse_effort(value: object, *, where: str) -> str | None:
+    """Validate + normalise a reasoning-effort level, or ``None``.
+
+    Accepts one of :data:`VALID_EFFORTS` (case-insensitive, whitespace
+    stripped); ``None`` means "inherit the agent's default effort" (`high`
+    on current Claude models). Raises :class:`ValueError`.
     """
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    norm = value.strip().lower() if isinstance(value, str) else value
+    if norm not in VALID_EFFORTS:
         raise ValueError(
-            f"{where}: thinking must be a positive integer (got {value!r})"
+            f"{where}: effort must be one of {VALID_EFFORTS} (got {value!r})"
         )
-    return value
+    return norm  # type: ignore[return-value]  # membership check proves it's str
 
 
 def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
@@ -154,7 +165,7 @@ def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
     if not isinstance(tool, str):
         raise ValueError(f"{where}: tool must be a string")
     model = parse_model(entry.get("model"), where=where)
-    thinking = parse_thinking(entry.get("thinking"), where=where)
+    effort = parse_effort(entry.get("effort"), where=where)
     return ReviewerSpec(
         name=name,
         tool=tool,
@@ -162,7 +173,7 @@ def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
         system_prompt=system_prompt,
         fallback_chain=tuple(chain),
         model=model,
-        thinking=thinking,
+        effort=effort,
     )
 
 
@@ -214,15 +225,17 @@ class DevelopConfig:
     description: str
     work_dir: Path
     coder: str = DEFAULT_CODER_TOOL
-    # Coder model + thinking budget (#93). ``None`` = inherit the agent CLI's
+    # Coder model + reasoning effort (#93). ``None`` = inherit the agent's
     # default. We deliberately do NOT hard-pin a model string here: a pin
     # chosen today goes stale and couples the plugin to a model's lifecycle
     # (an upgrade would need a code release). Reproducibility is instead served
     # by letting the operator pin via project metadata / CLI and by recording
-    # the resolved choice with the run. Per-reviewer model/thinking live on
-    # ``ReviewerSpec``; this pair is the coder's.
+    # the resolved choice with the run. Per-reviewer model/effort live on
+    # ``ReviewerSpec``; this pair is the coder's. ``effort`` is a level string
+    # (:data:`VALID_EFFORTS`), not a token budget — the portable knob across
+    # Claude (`--effort`) and Codex (`model_reasoning_effort`).
     coder_model: str | None = None
-    coder_thinking: int | None = None
+    coder_effort: str | None = None
     image: str = DEFAULT_IMAGE
     base_branch: str = "main"
     # Single-reviewer convenience fields (the T2-era surface; still the

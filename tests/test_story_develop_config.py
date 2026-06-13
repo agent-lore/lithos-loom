@@ -14,8 +14,8 @@ from lithos_loom.plugins.story_develop.config import (
     DevelopConfig,
     ReviewerSpec,
     load_develop_config,
+    parse_effort,
     parse_model,
-    parse_thinking,
 )
 
 
@@ -73,12 +73,12 @@ tool = "claude"
         ("[[reviewers]]\nname = 'a'\nmodel = ''\n", "model must be a non-empty string"),
         ("[[reviewers]]\nname = 'a'\nmodel = 3\n", "model must be a non-empty string"),
         (
-            "[[reviewers]]\nname = 'a'\nthinking = 0\n",
-            "thinking must be a positive integer",
+            "[[reviewers]]\nname = 'a'\neffort = 'ultra'\n",
+            "effort must be one of",
         ),
         (
-            "[[reviewers]]\nname = 'a'\nthinking = 'lots'\n",
-            "thinking must be a positive integer",
+            "[[reviewers]]\nname = 'a'\neffort = 3\n",
+            "effort must be one of",
         ),
     ],
 )
@@ -87,22 +87,22 @@ def test_loader_rejects_bad_schema(tmp_path: Path, body: str, match: str) -> Non
         load_develop_config(_write(tmp_path, body))
 
 
-def test_loads_per_reviewer_model_and_thinking(tmp_path: Path) -> None:
+def test_loads_per_reviewer_model_and_effort(tmp_path: Path) -> None:
     p = _write(
         tmp_path,
         """
 [[reviewers]]
 name = "code-quality"
 model = "sonnet"
-thinking = 8000
+effort = "high"
 
 [[reviewers]]
 name = "security"
 """,
     )
     cq, sec = load_develop_config(p)
-    assert cq.model == "sonnet" and cq.thinking == 8000
-    assert sec.model is None and sec.thinking is None  # default = CLI default
+    assert cq.model == "sonnet" and cq.effort == "high"
+    assert sec.model is None and sec.effort is None  # default = agent default
 
 
 @pytest.mark.parametrize("good", ["opus", "claude-opus-4-8", "sonnet"])
@@ -125,16 +125,24 @@ def test_parse_model_rejects_bad(bad: object) -> None:
         parse_model(bad, where="x")
 
 
-def test_parse_thinking_accepts_positive_int() -> None:
-    assert parse_thinking(10000, where="x") == 10000
-    assert parse_thinking(None, where="x") is None
+@pytest.mark.parametrize("good", ["low", "medium", "high", "xhigh"])
+def test_parse_effort_accepts_levels(good: str) -> None:
+    assert parse_effort(good, where="x") == good
 
 
-@pytest.mark.parametrize("bad", [0, -1, True, 1.5, "lots"])
-def test_parse_thinking_rejects_bad(bad: object) -> None:
-    # bool is an int subclass — True must NOT slip through as 1.
-    with pytest.raises(ValueError, match="thinking must be a positive integer"):
-        parse_thinking(bad, where="x")
+def test_parse_effort_normalises_case_and_whitespace() -> None:
+    assert parse_effort("  HIGH ", where="x") == "high"
+
+
+def test_parse_effort_none_passes_through() -> None:
+    assert parse_effort(None, where="x") is None
+
+
+@pytest.mark.parametrize("bad", ["max", "minimal", "ultra", 3, ""])
+def test_parse_effort_rejects_bad(bad: object) -> None:
+    # `max` (Claude-only) and `minimal` (Codex-only) are deliberately omitted.
+    with pytest.raises(ValueError, match="effort must be one of"):
+        parse_effort(bad, where="x")
 
 
 def test_loader_rejects_invalid_toml(tmp_path: Path) -> None:

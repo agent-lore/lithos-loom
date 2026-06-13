@@ -102,6 +102,7 @@ def _install_fakes(
         "sleeps": [],
         "tools": [],
         "models": [],
+        "efforts": [],
         "start_cmds": [],
     }
 
@@ -137,10 +138,12 @@ def _install_fakes(
         timeout,
         tool="claude",
         model=None,
+        effort=None,
     ):
         wt = state["worktree"]
         state["tools"].append(tool)
         state["models"].append((container, model))
+        state["efforts"].append((container, effort))
         if "-coder" in container:
             # a continuation retry has no round marker; reuse the last round
             if "coder_done" in prompt:
@@ -284,10 +287,10 @@ def test_approved_in_round_one_on_lgtm(
     )
 
 
-def test_model_and_thinking_threaded_to_agents(
+def test_model_and_effort_threaded_to_agents(
     monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
 ) -> None:
-    """#93: coder/reviewer model reaches run_turn; thinking reaches the container."""
+    """#93: each agent's model + reasoning effort reach its run_turn calls."""
     cfg_dir = tmp_path / "fake-claude"
     cfg_dir.mkdir()
     cfg = DevelopConfig(
@@ -296,26 +299,18 @@ def test_model_and_thinking_threaded_to_agents(
         work_dir=tmp_path / "work",
         claude_config_dir=cfg_dir,
         coder_model="opus",
-        coder_thinking=20000,
-        reviewers=(ReviewerSpec(name="code-quality", model="sonnet", thinking=8000),),
+        coder_effort="xhigh",
+        reviewers=(ReviewerSpec(name="code-quality", model="sonnet", effort="high"),),
     )
     state = _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
     result = develop_mod.develop(cfg)
     assert result.status == "approved"
 
-    # --model threaded per agent through run_turn
+    # model + effort threaded per agent through run_turn (per-turn exec flags)
     assert {m for c, m in state["models"] if "-coder" in c} == {"opus"}
+    assert {e for c, e in state["efforts"] if "-coder" in c} == {"xhigh"}
     assert {m for c, m in state["models"] if "-review-" in c} == {"sonnet"}
-
-    # MAX_THINKING_TOKENS env set per agent's container
-    def _cmd_for(substr: str) -> list[str]:
-        for cmd in state["start_cmds"]:
-            if substr in cmd[cmd.index("--name") + 1]:
-                return cmd
-        raise AssertionError(f"no start cmd for {substr}")
-
-    assert "MAX_THINKING_TOKENS=20000" in _cmd_for("-coder")
-    assert "MAX_THINKING_TOKENS=8000" in _cmd_for("-review-code-quality")
+    assert {e for c, e in state["efforts"] if "-review-" in c} == {"high"}
 
 
 def test_below_threshold_findings_pass_immediately(

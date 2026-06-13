@@ -51,6 +51,7 @@ from .config import (
     DEFAULT_PAUSE_POLL_MINUTES,
     DEFAULT_REVIEWER_NAME,
     DEFAULT_TEST_TIMEOUT,
+    VALID_EFFORTS,
     DevelopConfig,
     ReviewerSpec,
     is_valid_reviewer_name,
@@ -167,12 +168,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "Default: the agent CLI's default model",
     )
     p.add_argument(
-        "--coder-thinking",
-        type=int,
+        "--coder-effort",
         default=None,
-        metavar="TOKENS",
-        help="Extended-thinking token budget for the coder "
-        "(MAX_THINKING_TOKENS). Default: the CLI's default",
+        choices=VALID_EFFORTS,
+        help="Reasoning-effort level for the coder "
+        f"({'/'.join(VALID_EFFORTS)}). Default: the agent's default",
     )
     p.add_argument(
         "--reviewer",
@@ -204,12 +204,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--develop-config). Default: the agent CLI's default model",
     )
     p.add_argument(
-        "--reviewer-thinking",
-        type=int,
+        "--reviewer-effort",
         default=None,
-        metavar="TOKENS",
-        help="Extended-thinking token budget for every --reviewer "
-        "(per-reviewer budgets need --develop-config). Default: the CLI's",
+        choices=VALID_EFFORTS,
+        help="Reasoning-effort level for every --reviewer "
+        "(per-reviewer levels need --develop-config). Default: the agent's",
     )
     p.add_argument(
         "--max-rounds",
@@ -335,9 +334,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
     settings = apply_cli_fallbacks(
         settings,
         coder_model=args.coder_model,
-        coder_thinking=args.coder_thinking,
+        coder_effort=args.coder_effort,
         reviewer_model=args.reviewer_model,
-        reviewer_thinking=args.reviewer_thinking,
+        reviewer_effort=args.reviewer_effort,
     )
     for friction in settings.frictions:
         print(f"[Friction] {friction}", file=sys.stderr)
@@ -351,7 +350,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         acceptance_criteria=ctx.acceptance_criteria,
         coder=settings.coder,
         coder_model=settings.coder_model,
-        coder_thinking=settings.coder_thinking,
+        coder_effort=settings.coder_effort,
         reviewers=settings.reviewers,
         max_rounds=settings.max_rounds or args.max_rounds,
         test_gate=not args.no_test_gate,
@@ -512,27 +511,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     if args.develop_config is not None and (
-        args.reviewer_model is not None or args.reviewer_thinking is not None
+        args.reviewer_model is not None or args.reviewer_effort is not None
     ):
-        # --develop-config supplies per-reviewer model/thinking in the TOML;
-        # a blanket --reviewer-model/--reviewer-thinking would ambiguously
+        # --develop-config supplies per-reviewer model/effort in the TOML;
+        # a blanket --reviewer-model/--reviewer-effort would ambiguously
         # fight those. Reject rather than silently ignore.
         print(
-            "error: --reviewer-model / --reviewer-thinking cannot be combined "
-            "with --develop-config (set model/thinking per [[reviewers]] table "
+            "error: --reviewer-model / --reviewer-effort cannot be combined "
+            "with --develop-config (set model/effort per [[reviewers]] table "
             "in the config file instead)",
             file=sys.stderr,
         )
         return 2
-    for flag, value in (
-        ("--coder-thinking", args.coder_thinking),
-        ("--reviewer-thinking", args.reviewer_thinking),
-    ):
-        if value is not None and value < 1:
-            print(f"error: {flag} must be >= 1", file=sys.stderr)
-            return 2
     # Validate + normalise the model flags (strips surrounding whitespace) so a
     # bad value is a clear CLI error, not an invalid model id at the agent.
+    # (Effort is validated by argparse `choices`.)
     try:
         coder_model = parse_model(args.coder_model, where="--coder-model")
         reviewer_model = parse_model(args.reviewer_model, where="--reviewer-model")
@@ -564,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
                 block_threshold=args.block_threshold,
                 fallback_chain=tuple(args.reviewer_fallback or ()),
                 model=reviewer_model,
-                thinking=args.reviewer_thinking,
+                effort=args.reviewer_effort,
             )
             for name in names
         )
@@ -603,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         acceptance_criteria=acceptance_criteria,
         coder=args.coder,
         coder_model=coder_model,
-        coder_thinking=args.coder_thinking,
+        coder_effort=args.coder_effort,
         reviewers=specs,
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,

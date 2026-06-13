@@ -43,7 +43,6 @@ def build_run_command(
     auth_files: Sequence[str],
     skills_dir: Path | None = None,
     read_only_worktree: bool = False,
-    thinking_tokens: int | None = None,
 ) -> list[str]:
     """Build the ``docker run`` argv for a long-lived idle agent container.
 
@@ -60,12 +59,6 @@ def build_run_command(
       refresh) — never the whole config dir;
     * *skills_dir* at ``/claude_config/skills`` (RO) when provided, so
       operator-installed skills are available (feasibility gate G2).
-
-    *thinking_tokens*, when set, becomes a ``MAX_THINKING_TOKENS`` env var on
-    the container (#93) — the agent's extended-thinking budget. It is set on
-    the container (not per ``exec``) so every turn inherits it. This is the
-    Claude CLI's knob; codex thinking is a separate axis handled when codex
-    support lands (#94).
     """
     workspace_mount = f"{worktree}:{WORKSPACE_MOUNT}"
     if read_only_worktree:
@@ -95,8 +88,6 @@ def build_run_command(
     if skills_dir is not None:
         cmd += ["-v", f"{skills_dir}:{CLAUDE_CONFIG_MOUNT}/skills:ro"]
     cmd += ["-e", f"CLAUDE_CONFIG_DIR={CLAUDE_CONFIG_MOUNT}"]
-    if thinking_tokens is not None:
-        cmd += ["-e", f"MAX_THINKING_TOKENS={thinking_tokens}"]
     cmd += ["--entrypoint", "sleep", image, "infinity"]
     return cmd
 
@@ -110,6 +101,7 @@ def build_exec_command(
     resume: bool = False,
     workdir: str = WORKSPACE_MOUNT,
     model: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     """Build the ``docker exec`` argv for one coder turn.
 
@@ -117,15 +109,19 @@ def build_exec_command(
     it on later turns (T3). Output is ``--output-format json`` so completion /
     cost / errors come from structured output, not pane scraping.
 
-    *model*, when set, adds ``--model <model>`` (#93) — passed on every turn,
-    including resumes (the Claude CLI accepts a model on ``--resume``). ``None``
-    leaves the CLI default.
+    *model* / *effort*, when set, add ``--model <model>`` / ``--effort <level>``
+    (#93) — passed on every turn, including resumes. *effort* is a reasoning
+    level (``low``/``medium``/``high``/``xhigh``), not a token budget; ``None``
+    leaves the agent default. Codex's equivalent (``-c model_reasoning_effort=``)
+    lands with codex support (#94); this builder is the per-tool translation
+    point for both knobs.
     """
     if tool != "claude":  # codex support arrives with T6
         raise ValueError(f"unsupported tool: {tool!r} (only 'claude' until T6)")
 
     session_flag = ["--resume", session_id] if resume else ["--session-id", session_id]
     model_flag = ["--model", model] if model else []
+    effort_flag = ["--effort", effort] if effort else []
     return [
         "docker",
         "exec",
@@ -135,6 +131,7 @@ def build_exec_command(
         "claude",
         *session_flag,
         *model_flag,
+        *effort_flag,
         "-p",
         "--dangerously-skip-permissions",
         "--output-format",

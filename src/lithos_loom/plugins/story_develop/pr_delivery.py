@@ -590,13 +590,12 @@ def deliver(
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,
-        thinking=config.coder_thinking,
     )
     try:
         containers.start_container(run_cmd)
         # Same coder, same session resumed — it must run on the SAME model +
-        # thinking the develop loop used (#93), not silently revert to the CLI
-        # default while finalizing the branch.
+        # reasoning effort the develop loop used (#93), not silently revert to
+        # the agent default while finalizing the branch.
         turn = run_turn(
             container=name,
             prompt=prompt,
@@ -604,6 +603,7 @@ def deliver(
             resume=True,
             timeout=coder_timeout,
             model=config.coder_model,
+            effort=config.coder_effort,
         )
     finally:
         containers.stop_container(name)

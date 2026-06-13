@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from lithos_loom.plugins.story_develop.__main__ import main
 
 
@@ -38,20 +40,22 @@ def test_main_rejects_invalid_reviewer_name(tmp_git_repo: Path, capsys) -> None:
     assert "invalid --reviewer" in capsys.readouterr().err
 
 
-def test_main_rejects_zero_coder_thinking(tmp_git_repo: Path, capsys) -> None:
-    rc = main(
-        ["--repo", str(tmp_git_repo), "--description", "x", "--coder-thinking", "0"]
-    )
-    assert rc == 2
-    assert "--coder-thinking must be >= 1" in capsys.readouterr().err
+def test_main_rejects_invalid_coder_effort(tmp_git_repo: Path, capsys) -> None:
+    # argparse `choices` rejects an off-list effort level (exits 2).
+    argv = ["--repo", str(tmp_git_repo), "--description", "x", "--coder-effort", "max"]
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert "invalid choice: 'max'" in capsys.readouterr().err
 
 
-def test_main_rejects_zero_reviewer_thinking(tmp_git_repo: Path, capsys) -> None:
-    rc = main(
-        ["--repo", str(tmp_git_repo), "--description", "x", "--reviewer-thinking", "0"]
-    )
-    assert rc == 2
-    assert "--reviewer-thinking must be >= 1" in capsys.readouterr().err
+def test_main_rejects_invalid_reviewer_effort(tmp_git_repo: Path, capsys) -> None:
+    argv = ["--repo", str(tmp_git_repo), "--description", "x"]
+    argv += ["--reviewer-effort", "lo"]
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert "invalid choice: 'lo'" in capsys.readouterr().err
 
 
 def test_main_rejects_whitespace_coder_model(tmp_git_repo: Path, capsys) -> None:
@@ -91,10 +95,10 @@ def test_main_rejects_reviewer_model_with_develop_config(
     assert "cannot be combined with --develop-config" in capsys.readouterr().err
 
 
-def test_main_threads_model_and_thinking_into_config(
+def test_main_threads_model_and_effort_into_config(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """--coder/--reviewer model+thinking flags land on the resolved config."""
+    """--coder/--reviewer model+effort flags land on the resolved config."""
     from lithos_loom.plugins.story_develop import __main__ as main_mod
     from lithos_loom.plugins.story_develop.develop import DevelopResult
 
@@ -125,24 +129,24 @@ def test_main_threads_model_and_thinking_into_config(
             "do a thing",
             "--coder-model",
             "  opus  ",  # normalised (stripped) into the config
-            "--coder-thinking",
-            "20000",
+            "--coder-effort",
+            "xhigh",
             "--reviewer",
             "code-quality",
             "--reviewer",
             "security",
             "--reviewer-model",
             "sonnet",
-            "--reviewer-thinking",
-            "8000",
+            "--reviewer-effort",
+            "high",
         ]
     )
     assert rc == 0
     cfg = captured["config"]
-    assert cfg.coder_model == "opus" and cfg.coder_thinking == 20000
+    assert cfg.coder_model == "opus" and cfg.coder_effort == "xhigh"
     assert {s.name for s in cfg.reviewers} == {"code-quality", "security"}
     for spec in cfg.reviewers:
-        assert spec.model == "sonnet" and spec.thinking == 8000
+        assert spec.model == "sonnet" and spec.effort == "high"
 
 
 def test_main_rejects_bad_max_rounds(tmp_git_repo: Path, capsys) -> None:

@@ -243,11 +243,13 @@ def _install(
         timeout,
         tool="claude",
         model=None,
+        effort=None,
     ):
         state["turn_prompts"].append(prompt)
         state["resume"] = resume
         state["session"] = session_id
         state["model"] = model
+        state["effort"] = effort
         wt = state["wt"]
         if coder_writes_source:
             (wt / "copilot_fix.txt").write_text("fixed\n")
@@ -420,10 +422,10 @@ def test_deliver_full_copilot_round(
     assert AUTOMATED_MARKER in body
 
 
-def test_deliver_copilot_round_uses_configured_model_and_thinking(
+def test_deliver_copilot_round_uses_configured_model_and_effort(
     monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
 ) -> None:
-    """#93: the Copilot fix round inherits the run's coder model + thinking."""
+    """#93: the Copilot fix round inherits the run's coder model + effort."""
     cfg_dir = tmp_path / "fake-claude"
     cfg_dir.mkdir()
     config = DevelopConfig(
@@ -433,7 +435,7 @@ def test_deliver_copilot_round_uses_configured_model_and_thinking(
         claude_config_dir=cfg_dir,
         test_gate=False,
         coder_model="opus",
-        coder_thinking=20000,
+        coder_effort="xhigh",
     )
     comments = [CopilotComment(comment_id=11, path="a.py", line=5, body="tighten this")]
     state = _install(monkeypatch, config, comments=comments)
@@ -443,10 +445,7 @@ def test_deliver_copilot_round_uses_configured_model_and_thinking(
 
     assert out.fix_pushed  # a coder fix round actually ran
     assert state["model"] == "opus"  # --model threaded to the fix turn
-    coder_cmd = next(
-        c for c in state["start_cmds"] if "-coder" in c[c.index("--name") + 1]
-    )
-    assert "MAX_THINKING_TOKENS=20000" in coder_cmd  # thinking on the container
+    assert state["effort"] == "xhigh"  # --effort threaded to the fix turn
 
 
 def test_deliver_dispute_reply(

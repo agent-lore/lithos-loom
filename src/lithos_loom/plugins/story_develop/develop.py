@@ -177,18 +177,13 @@ def _reviewer_brief(spec) -> str:
 
 
 def _build_run_cmd(
-    config: DevelopConfig,
-    *,
-    agent: str,
-    config_dir: Path,
-    wt: Path,
-    read_only: bool,
-    thinking: int | None = None,
+    config: DevelopConfig, *, agent: str, config_dir: Path, wt: Path, read_only: bool
 ) -> tuple[str, list[str]]:
     """Build (container_name, docker-run-argv) for an agent container.
 
-    *thinking* (#93) becomes the container's ``MAX_THINKING_TOKENS`` budget —
-    per-agent (the coder's and each reviewer's may differ).
+    Model + reasoning effort (#93) are per-TURN flags applied in
+    :func:`run_turn` (the per-tool exec builder), not container env, so the
+    idle container itself carries no agent tuning.
     """
     name = containers.container_name(config.run_id, agent)
     cmd = containers.build_run_command(
@@ -201,7 +196,6 @@ def _build_run_cmd(
         auth_files=containers.resolve_auth_files(config, CLAUDE_AUTH_FILES),
         skills_dir=config.operator_skills_dir,
         read_only_worktree=read_only,
-        thinking_tokens=thinking,
     )
     return name, cmd
 
@@ -426,6 +420,7 @@ def _turn_with_limit_pauses(
             resume=attempt_resume,
             timeout=timeout,
             model=config.coder_model,
+            effort=config.coder_effort,
         )
         total_cost += turn.cost_usd
         if turn.succeeded:
@@ -484,6 +479,7 @@ def _review_turn(
     timeout: int,
     tool: str = "claude",
     model: str | None = None,
+    effort: str | None = None,
     validate: Callable[[ReviewHandoff], str | None] | None = None,
 ) -> tuple[ReviewOutcome, TurnResult | None]:
     """Run one reviewer turn against an already-running reviewer container.
@@ -523,6 +519,7 @@ def _review_turn(
         timeout=timeout,
         tool=tool,
         model=model,
+        effort=effort,
     )
     cost += turn.cost_usd
     if not turn.succeeded:
@@ -549,6 +546,7 @@ def _review_turn(
                 timeout=timeout,
                 tool=tool,
                 model=model,
+                effort=effort,
             )
             cost += retry.cost_usd
             if retry.succeeded:
@@ -641,6 +639,7 @@ def _run_reviewer_with_reaction(
         timeout=timeout,
         tool=rstate.tool_now,
         model=rstate.spec.model,
+        effort=rstate.spec.effort,
         validate=rstate.ledger.check,
     )
     cost = review.cost_usd
@@ -698,6 +697,7 @@ def _run_reviewer_with_reaction(
                 timeout=timeout,
                 tool=rstate.tool_now,
                 model=rstate.spec.model,
+                effort=rstate.spec.effort,
                 validate=rstate.ledger.check,
             )
             cost += review.cost_usd
@@ -737,6 +737,7 @@ def _run_reviewer_with_reaction(
             timeout=timeout,
             tool=rstate.tool_now,
             model=rstate.spec.model,
+            effort=rstate.spec.effort,
             validate=rstate.ledger.check,
         )
         cost += review.cost_usd
@@ -852,7 +853,6 @@ def develop(
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,
-        thinking=config.coder_thinking,
     )
     reviewers: list[_ReviewerState] = []
     for spec in specs:
@@ -862,7 +862,6 @@ def develop(
             config_dir=config.reviewer_config_dir(spec.name),
             wt=wt,
             read_only=True,
-            thinking=spec.thinking,
         )
         reviewers.append(_ReviewerState(spec, rname, rcmd))
     coder_session = str(uuid.uuid4())
