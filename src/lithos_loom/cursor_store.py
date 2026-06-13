@@ -50,11 +50,19 @@ class CursorStore:
         return self._cache.get(name)
 
     def save(self, name: str, cursor: str) -> None:
-        """Persist *cursor* under *name*. Atomic write."""
+        """Persist *cursor* under *name* (atomic write).
+
+        ``_cache`` is the source of truth for "what is durably on disk", so it
+        is updated ONLY after a successful write. If the write fails, the cache
+        is left unchanged — the failed cursor is not recorded as persisted, so
+        the next ``save`` of the same value retries the disk sync instead of
+        short-circuiting as a no-op against an un-persisted cursor.
+        """
         if self._cache.get(name) == cursor:
-            return  # no-op
-        self._cache[name] = cursor
-        self._write()
+            return  # already durable (cache mirrors disk) — nothing to do
+        candidate = {**self._cache, name: cursor}
+        if self._write(candidate):
+            self._cache = candidate
 
     # ── internals ───────────────────────────────────────────────────
 
@@ -93,18 +101,24 @@ class CursorStore:
             k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)
         }
 
-    def _write(self) -> None:
-        """Atomic write: temp → fsync → rename."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def _write(self, data: dict[str, str]) -> bool:
+        """Atomically write *data* (temp → fsync → rename).
+
+        Returns ``True`` on a durable write, ``False`` if it failed. Every
+        failure mode — unwritable parent dir, short write, fsync/rename error —
+        is logged and reported as ``False`` (never raised) so the caller keeps
+        the old cache and the stream degrades gracefully rather than crashing.
+        """
         fd = -1
         tmp_path: str | None = None
         try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp_path = tempfile.mkstemp(
                 dir=str(self._path.parent),
                 prefix=".sse_cursors.",
                 suffix=".tmp",
             )
-            payload = json.dumps(self._cache, indent=2, sort_keys=True).encode("utf-8")
+            payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
             # os.write may write fewer bytes than requested; loop until the
             # whole payload is out, or a short write would truncate the file.
             view = memoryview(payload)
@@ -116,8 +130,10 @@ class CursorStore:
             fd = -1
             os.replace(tmp_path, str(self._path))
             tmp_path = None
+            return True
         except OSError as exc:
             logger.warning("CursorStore: failed to write %s: %s", self._path, exc)
+            return False
         finally:
             if fd >= 0:
                 os.close(fd)

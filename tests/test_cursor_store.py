@@ -118,6 +118,36 @@ def test_file_contains_valid_json(tmp_path: Path) -> None:
     assert data == {"a": "1", "b": "2"}
 
 
+def test_failed_write_does_not_poison_cache_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient write failure must not record the cursor as persisted.
+
+    The cache is the source of truth for "what is on disk", so after a failed
+    write it must stay unchanged — otherwise a later ``save`` of the same value
+    would no-op against an un-persisted cursor and the daemon would replay from
+    an older cursor on restart (duplicate work).
+    """
+    import os
+
+    path = tmp_path / "cursors.json"
+    store = CursorStore(path)
+
+    def boom(fd: int, data: object) -> int:
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(os, "write", boom)
+    store.save("task-events", "evt-1")
+    assert not path.exists()  # the write failed
+    assert store.get("task-events") is None  # cache NOT poisoned
+
+    # Disk recovers; saving the SAME value must retry (not short-circuit).
+    monkeypatch.undo()
+    store.save("task-events", "evt-1")
+    assert json.loads(path.read_text()) == {"task-events": "evt-1"}
+    assert store.get("task-events") == "evt-1"
+
+
 def test_partial_os_write_writes_full_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
