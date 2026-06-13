@@ -203,12 +203,15 @@ class RouteRunner:
             return
 
         metadata = payload.get("metadata") or {}
-        if metadata.get("loom_delivered"):
-            # A completes_task=false route already delivered this task (PR
-            # raised, awaiting human merge) and left it open. Don't re-develop
-            # it — most importantly on a daemon restart, where the bootstrap
-            # re-emits every open task as `created`. Completion (and the marker
-            # becoming moot) happens when the PR merges.
+        if not self.route.completes_task and metadata.get("loom_delivered"):
+            # `loom_delivered` is restart-safety for THIS kind of route: a
+            # completes_task=false route already delivered this task (PR raised,
+            # awaiting merge) and left it open, so don't re-develop it — most
+            # importantly on a daemon restart, where the bootstrap re-emits every
+            # open task as `created`. The guard is gated on `not completes_task`
+            # so the marker stays route-specific: a normal (completes_task=true)
+            # route re-tagged onto the still-open task is NOT suppressed by it.
+            # Completion (and the marker becoming moot) happens when the PR merges.
             logger.debug(
                 "RouteRunner %s: skipping %s — already delivered (awaiting merge)",
                 self.route.name,

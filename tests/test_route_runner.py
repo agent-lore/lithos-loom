@@ -1035,3 +1035,21 @@ async def test_delivered_marker_failure_posts_friction(tmp_path: Path) -> None:
     summary = lithos.finding_post.await_args.kwargs["summary"]
     assert summary.startswith("[Friction]")
     assert "loom_delivered" in summary
+
+
+async def test_completes_task_true_route_ignores_delivered_marker(
+    tmp_path: Path,
+) -> None:
+    """loom_delivered is route-specific protection for completes_task=false
+    routes. A completes_task=true route must still run an open task carrying the
+    marker — e.g. a follow-on route re-tagged onto the still-open task (#95
+    review). The guard is gated on `not completes_task`."""
+    bus = EventBus()
+    # default _make_runner route is completes_task=True
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    await bus.publish(_evt(payload=_payload(metadata={"loom_delivered": True})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    lithos.task_complete.assert_awaited_once()
