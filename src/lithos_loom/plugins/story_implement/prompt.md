@@ -12,6 +12,5 @@ inside a per-task worktree.
 
 ## Prompt body
 
-(TODO: write the full implementation prompt here. See US-10, US-14 in
-`docs/prd/mvp.md` for the framing — single-shot delegated mode, commit
-when done, exit cleanly.)
+(Superseded by `story-develop`; this stub is slated for removal — see US-2 in
+`docs/prd/orchestration.md`.)

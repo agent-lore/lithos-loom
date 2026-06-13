@@ -10,8 +10,8 @@ references:
   - docs/SPECIFICATION.md (implemented surface — architecture, plugin contract, event bus)
   - docs/prd/archive/story-develop.md (the canonical implement→review→PR plugin — shipped + archived)
   - docs/prd/archive/integration.md (Obsidian bridge PRD — shipped)
-  - /home/dns/projects/lithos/code/lithos/docs/plans/task-graph-coordination-extension.md (the Lithos extension this plan assumes)
-  - /home/dns/projects/lithos/code/lithos/docs/SPECIFICATION.md (Lithos task + knowledge surface)
+  - https://github.com/agent-lore/lithos/blob/main/docs/plans/task-graph-coordination-extension.md (the Lithos extension this plan assumes)
+  - https://github.com/agent-lore/lithos/blob/main/docs/SPECIFICATION.md (Lithos task + knowledge surface)
 labels: [needs-triage, lithos-loom, orchestrator, task-graph]
 ---
 
@@ -20,7 +20,7 @@ labels: [needs-triage, lithos-loom, orchestrator, task-graph]
 > **Status (2026-06-13).** This plan replaces both `docs/prd/mvp.md` (the
 > proof-of-concept) and `docs/prd/full.md` (the A1–A10 roadmap). It is written
 > against a Lithos server that has the
-> [task-graph coordination extension](/home/dns/projects/lithos/code/lithos/docs/plans/task-graph-coordination-extension.md)
+> [task-graph coordination extension](https://github.com/agent-lore/lithos/blob/main/docs/plans/task-graph-coordination-extension.md)
 > **fully in place** — `task_type`, `task_edges`, gates, and the
 > `lithos_task_ready` / `lithos_task_blocked` / `lithos_task_spawn` /
 > `lithos_task_children` / `lithos_task_edge_*` tool surface. The extension is a
@@ -198,7 +198,7 @@ anyway) and instead builds a real graph:
 > blocker would make its dependents `ready`, which is wrong for a strict-
 > sequential PRD. Loom's current `_deps_satisfied` requires the blocker be
 > `completed`. This plan depends on the companion Lithos edit
-> ([task-graph extension, cancelled-blocker semantic](/home/dns/projects/lithos/code/lithos/docs/plans/task-graph-coordination-extension.md))
+> ([task-graph extension, cancelled-blocker semantic](https://github.com/agent-lore/lithos/blob/main/docs/plans/task-graph-coordination-extension.md))
 > that makes a non-`completed` terminal blocker keep dependents blocked,
 > surfaced via `lithos_task_blocked` with a `blocker_unsatisfiable` reason. With
 > that in place, the MVP's `[BlockerFailed]` propagation (old US-10) becomes a
