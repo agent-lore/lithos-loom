@@ -2,9 +2,10 @@
 
 The reconcile polls a delivered PR's merge state and acts on the open Lithos
 task: merged → complete; closed-unmerged / deleted → one-shot
-``[DeliveredPRClosed]`` finding + leave open; still-open → no-op. A single
-``develop_pr_merge_state`` marker de-dups across sweeps. GitHub + Lithos are
-stubbed (no network); the ``task`` is a minimal object with ``id`` + ``metadata``.
+``[DeliveredPRClosed]`` finding + leave open; still-open → no-op. A
+``develop_pr_merge_state`` + ``develop_pr_merge_url`` marker scoped to the
+resolved PR de-dups across sweeps while letting a replacement PR recover.
+GitHub + Lithos are stubbed; the ``task`` is a minimal id + metadata object.
 """
 
 from __future__ import annotations
@@ -23,11 +24,13 @@ from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._develop_pr_merge import (
     DELIVERED_PR_CLOSED,
     MERGE_STATE_KEY,
+    MERGE_STATE_URL_KEY,
     _parse_pr_url,
     reconcile_develop_pr,
 )
 
 _PR_URL = "https://github.com/agent-lore/lithos-loom/pull/7"
+_PR_URL_2 = "https://github.com/agent-lore/lithos-loom/pull/8"  # a replacement PR
 
 
 def _ctx(lithos: Any) -> SubscriptionContext:
@@ -87,7 +90,8 @@ async def test_merged_pr_completes_task_and_marks() -> None:
     assert outcome == "merged"
     lithos.task_complete.assert_awaited_once_with(task_id="t-1")
     lithos.task_update.assert_awaited_once_with(
-        task_id="t-1", metadata={MERGE_STATE_KEY: "merged"}
+        task_id="t-1",
+        metadata={MERGE_STATE_KEY: "merged", MERGE_STATE_URL_KEY: _PR_URL},
     )
     lithos.finding_post.assert_not_awaited()
 
@@ -106,7 +110,8 @@ async def test_closed_unmerged_leaves_open_with_finding() -> None:
     summary = lithos.finding_post.await_args.kwargs["summary"]
     assert summary.startswith(DELIVERED_PR_CLOSED)
     lithos.task_update.assert_awaited_once_with(
-        task_id="t-1", metadata={MERGE_STATE_KEY: "closed_unmerged"}
+        task_id="t-1",
+        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
     )
 
 
@@ -140,21 +145,81 @@ async def test_deleted_pr_marks_gone_with_finding() -> None:
     lithos.task_complete.assert_not_awaited()
     assert DELIVERED_PR_CLOSED in lithos.finding_post.await_args.kwargs["summary"]
     lithos.task_update.assert_awaited_once_with(
-        task_id="t-1", metadata={MERGE_STATE_KEY: "gone"}
+        task_id="t-1", metadata={MERGE_STATE_KEY: "gone", MERGE_STATE_URL_KEY: _PR_URL}
     )
 
 
 @pytest.mark.asyncio
-async def test_terminal_marker_skips_without_github_call() -> None:
+async def test_terminal_marker_for_same_url_skips_without_github_call() -> None:
+    """De-dup: a marker terminal for the CURRENT develop_pr_url is a skip."""
     github = AsyncMock()
     lithos = AsyncMock()
-    task = _task({"develop_pr_url": _PR_URL, MERGE_STATE_KEY: "merged"})
+    task = _task(
+        {
+            "develop_pr_url": _PR_URL,
+            MERGE_STATE_KEY: "merged",
+            MERGE_STATE_URL_KEY: _PR_URL,  # same url it resolved
+        }
+    )
 
     outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
 
     assert outcome is None
     github.get_pull_request.assert_not_awaited()  # de-dup: no re-poll
     lithos.task_complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replacement_pr_recovers_after_abandoned_one() -> None:
+    """The natural recovery path: an old PR was abandoned (marker
+    closed_unmerged for the OLD url), the task was re-developed into a NEW PR
+    (develop_pr_url changed). The stale marker must NOT suppress the new PR —
+    it's re-evaluated and, on merge, completes."""
+    github = AsyncMock()
+    github.get_pull_request.return_value = _pr(state="closed", merged=True)
+    lithos = AsyncMock()
+    task = _task(
+        {
+            "develop_pr_url": _PR_URL_2,  # the replacement PR
+            MERGE_STATE_KEY: "closed_unmerged",
+            MERGE_STATE_URL_KEY: _PR_URL,  # stale: points at the abandoned PR
+        }
+    )
+
+    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
+
+    assert outcome == "merged"
+    github.get_pull_request.assert_awaited_once_with("agent-lore/lithos-loom", 8)
+    lithos.task_complete.assert_awaited_once_with(task_id="t-1")
+    lithos.task_update.assert_awaited_once_with(
+        task_id="t-1",
+        metadata={MERGE_STATE_KEY: "merged", MERGE_STATE_URL_KEY: _PR_URL_2},
+    )
+
+
+@pytest.mark.asyncio
+async def test_replacement_pr_also_closed_reposts_for_new_url() -> None:
+    """A replacement PR that's also closed-unmerged re-posts the finding (it's a
+    different url than the recorded marker) and re-marks for the new url."""
+    github = AsyncMock()
+    github.get_pull_request.return_value = _pr(state="closed", merged=False)
+    lithos = AsyncMock()
+    task = _task(
+        {
+            "develop_pr_url": _PR_URL_2,
+            MERGE_STATE_KEY: "closed_unmerged",
+            MERGE_STATE_URL_KEY: _PR_URL,
+        }
+    )
+
+    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
+
+    assert outcome == "closed_unmerged"
+    assert DELIVERED_PR_CLOSED in lithos.finding_post.await_args.kwargs["summary"]
+    lithos.task_update.assert_awaited_once_with(
+        task_id="t-1",
+        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL_2},
+    )
 
 
 @pytest.mark.asyncio
@@ -193,7 +258,8 @@ async def test_complete_swallows_task_not_found_and_still_marks() -> None:
 
     assert outcome == "merged"  # no exception escaped
     lithos.task_update.assert_awaited_once_with(
-        task_id="t-1", metadata={MERGE_STATE_KEY: "merged"}
+        task_id="t-1",
+        metadata={MERGE_STATE_KEY: "merged", MERGE_STATE_URL_KEY: _PR_URL},
     )
 
 
@@ -209,7 +275,11 @@ async def test_malformed_url_frictions_and_marks_unparseable() -> None:
     github.get_pull_request.assert_not_awaited()
     assert "[Friction]" in lithos.finding_post.await_args.kwargs["summary"]
     lithos.task_update.assert_awaited_once_with(
-        task_id="t-1", metadata={MERGE_STATE_KEY: "unparseable"}
+        task_id="t-1",
+        metadata={
+            MERGE_STATE_KEY: "unparseable",
+            MERGE_STATE_URL_KEY: "https://github.com/o/r/pull/notanum",
+        },
     )
 
 

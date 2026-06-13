@@ -25,18 +25,30 @@ from lithos_loom.errors import LithosClientError
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.subscriptions import SubscriptionContext
 
-__all__ = ["MERGE_STATE_KEY", "MERGE_STATE_TERMINAL", "reconcile_develop_pr"]
+__all__ = [
+    "MERGE_STATE_KEY",
+    "MERGE_STATE_TERMINAL",
+    "MERGE_STATE_URL_KEY",
+    "reconcile_develop_pr",
+]
 
 # Stable, machine-parseable finding prefix (see AGENTS.md): a delivered PR
 # reached a closed-without-merge end state (closed unmerged, or deleted), so the
 # task is left open for a human rather than completed.
 DELIVERED_PR_CLOSED = "[DeliveredPRClosed]"
 
-# Task-metadata key carrying the de-dup marker.
+# Task-metadata keys carrying the de-dup marker. The marker is SCOPED to the
+# develop_pr_url it resolved (MERGE_STATE_URL_KEY): the sweep skips a task only
+# when its resolved state is terminal AND the recorded url still matches the
+# task's current develop_pr_url. So when a rejected PR is abandoned and the task
+# is re-developed into a REPLACEMENT PR, develop_pr_url changes, the recorded
+# url no longer matches, and the sweep re-evaluates the new PR — without that
+# scoping a stale marker would suppress the new PR forever.
 MERGE_STATE_KEY = "develop_pr_merge_state"
+MERGE_STATE_URL_KEY = "develop_pr_merge_url"
 
-# Marker values that mean "already resolved — the sweep skips this task". A
-# still-open PR leaves the marker UNSET so the sweep re-polls next cycle.
+# Marker values that mean "this develop_pr_url is resolved". A still-open PR
+# leaves the marker UNSET so the sweep re-polls next cycle.
 MERGE_STATE_TERMINAL: frozenset[str] = frozenset(
     {"merged", "closed_unmerged", "gone", "unparseable"}
 )
@@ -70,10 +82,10 @@ async def reconcile_develop_pr(
     Returns a short outcome label for the sweep's counters
     (``merged`` / ``closed_unmerged`` / ``still_open`` / ``gone`` /
     ``unparseable`` / ``error``), or ``None`` when the task is not a
-    develop-PR task (no ``develop_pr_url``, issue-linked, or already at a
-    terminal marker). Never raises — GitHub and Lithos failures are caught,
-    logged as ``[Friction]``, and (for transient ones) retried next sweep by
-    leaving the marker unset.
+    develop-PR task (no ``develop_pr_url``, issue-linked, or already resolved
+    for *this same* ``develop_pr_url``). Never raises — GitHub and Lithos
+    failures are caught, logged as ``[Friction]``, and (for transient ones)
+    retried next sweep by leaving the marker unset.
     """
     metadata = task.metadata
     pr_url = metadata.get("develop_pr_url")
@@ -82,7 +94,12 @@ async def reconcile_develop_pr(
     if metadata.get("github_issue_url"):
         # Issue-linked: the issue close-mirror already handles merge→complete.
         return None
-    if metadata.get(MERGE_STATE_KEY) in MERGE_STATE_TERMINAL:
+    if (
+        metadata.get(MERGE_STATE_KEY) in MERGE_STATE_TERMINAL
+        and metadata.get(MERGE_STATE_URL_KEY) == pr_url
+    ):
+        # Already resolved THIS pr_url. A replacement PR (changed develop_pr_url)
+        # has a stale recorded url, so it falls through and gets re-evaluated.
         return None
 
     repo, number = _parse_pr_url(pr_url)
@@ -91,6 +108,7 @@ async def reconcile_develop_pr(
             task,
             ctx,
             "unparseable",
+            pr_url,
             f"[Friction] develop-pr-merge: task {task.id} has an unparseable "
             f"develop_pr_url ({pr_url!r}); cannot watch it for merge",
         )
@@ -118,6 +136,7 @@ async def reconcile_develop_pr(
             task,
             ctx,
             "gone",
+            pr_url,
             f"{DELIVERED_PR_CLOSED} develop-pr-merge: delivered PR {pr_url} no "
             f"longer exists (404) for task {task.id}; left open for a human",
         )
@@ -132,6 +151,7 @@ async def reconcile_develop_pr(
             task,
             ctx,
             "closed_unmerged",
+            pr_url,
             f"{DELIVERED_PR_CLOSED} develop-pr-merge: delivered PR {pr_url} was "
             f"closed without merging; task {task.id} left open for a human",
         )
@@ -177,18 +197,18 @@ async def _complete_merged(
         pr_url,
         pr.merge_commit_sha or "no sha",
     )
-    await _mark(task, ctx, "merged")
+    await _mark(task, ctx, "merged", pr_url)
 
 
 async def _friction_and_mark(
-    task: Any, ctx: SubscriptionContext, marker: str, summary: str
+    task: Any, ctx: SubscriptionContext, marker: str, pr_url: str, summary: str
 ) -> None:
-    """Post a one-shot finding, then write the terminal marker.
+    """Post a one-shot finding, then write the (state, url) marker.
 
     Post-then-mark ordering: a crash between the two costs at most one
     duplicate finding on the next sweep — the accepted tradeoff (cf.
     ``_github_issue_sync`` snapshot writes). The marker is what makes the
-    finding one-shot.
+    finding one-shot for this ``pr_url``.
     """
     try:
         await ctx.lithos.finding_post(task_id=task.id, summary=summary)
@@ -201,13 +221,17 @@ async def _friction_and_mark(
                 exc,
             )
             return  # leave the marker unset → retry next sweep
-    await _mark(task, ctx, marker)
+    await _mark(task, ctx, marker, pr_url)
 
 
-async def _mark(task: Any, ctx: SubscriptionContext, state: str) -> None:
-    """Write ``metadata.develop_pr_merge_state``. Swallows ``task_not_found``."""
+async def _mark(task: Any, ctx: SubscriptionContext, state: str, pr_url: str) -> None:
+    """Write the de-dup marker (state + the url it resolved). Swallows
+    ``task_not_found`` (the task may already be terminal)."""
     try:
-        await ctx.lithos.task_update(task_id=task.id, metadata={MERGE_STATE_KEY: state})
+        await ctx.lithos.task_update(
+            task_id=task.id,
+            metadata={MERGE_STATE_KEY: state, MERGE_STATE_URL_KEY: pr_url},
+        )
     except LithosClientError as exc:
         if exc.code != "task_not_found":
             ctx.logger.warning(
