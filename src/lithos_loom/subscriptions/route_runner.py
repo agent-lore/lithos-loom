@@ -66,6 +66,24 @@ _HANDLED_EVENT_TYPES = (
 MAX_RESUMES_PER_TASK = 3
 
 
+def _task_to_payload(task: Any) -> dict[str, Any]:
+    """Build an event-shaped payload from a fresh :class:`Task` snapshot.
+
+    Mirrors the fields ``_handle`` reads and the runner writes into
+    ``task.json`` (id / status / title / description / tags / metadata), so a
+    resumed run develops against the task's CURRENT content, not the snapshot
+    captured when it was interrupted.
+    """
+    return {
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "description": task.description or "",
+        "tags": list(task.tags),
+        "metadata": dict(task.metadata),
+    }
+
+
 @dataclass
 class RouteRunner:
     """One claim-bound subscriber per route.
@@ -97,6 +115,14 @@ class RouteRunner:
         Injectable subprocess-runner. Defaults to the real
         :func:`lithos_loom.plugin_runner.run_plugin`. Tests inject an
         ``AsyncMock`` to bypass real subprocess work.
+    project_repos:
+        Map of project slug → on-disk repo path, from the host's
+        ``[projects.*]`` TOML. A route command may carry a ``{{repo}}``
+        token; the runner resolves it per task from this map keyed by
+        ``task.metadata.project``, so one generic route can serve every
+        registered project instead of baking an absolute path into the
+        command. Empty by default — routes that don't use ``{{repo}}``
+        don't need it.
     """
 
     route: RouteConfig
@@ -107,6 +133,7 @@ class RouteRunner:
     renew_interval_seconds: float = 60.0
     retain_failed_workdirs: bool = True
     plugin_runner: PluginRunFn = field(default=run_plugin)
+    project_repos: Mapping[str, Path] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._subscription: Subscription = self.bus.subscribe(
@@ -222,7 +249,44 @@ class RouteRunner:
 
     # ── claimed-task lifecycle ────────────────────────────────────────
 
+    def _resolve_command(self, payload: Mapping[str, Any]) -> str:
+        """Substitute the optional ``{{repo}}`` token from the projects map.
+
+        Resolution is keyed off ``task.metadata.project`` against the host's
+        ``[projects.*]`` table, so the repo a plugin acts on is derived from
+        the task's own project rather than hard-coded per route. Raises
+        :class:`PluginContractError` when the token is present but
+        unresolvable — the caller releases the claim with a finding (a
+        misconfigured route + unroutable task is a config error, not a plugin
+        failure). Routes without the token are returned unchanged.
+        """
+        command = self.route.command
+        if "{{repo}}" not in command:
+            return command
+        metadata = payload.get("metadata") or {}
+        slug = metadata.get("project") if isinstance(metadata, Mapping) else None
+        if not isinstance(slug, str) or not slug:
+            raise PluginContractError(
+                "route command uses the {{repo}} token but the task has no "
+                "metadata.project to resolve it against"
+            )
+        repo = self.project_repos.get(slug)
+        if repo is None:
+            raise PluginContractError(
+                f"route command uses the {{repo}} token but project {slug!r} "
+                "is not registered in [projects.*] on this host"
+            )
+        return command.replace("{{repo}}", str(repo))
+
     async def _run_claimed_task(self, task_id: str, payload: Mapping[str, Any]) -> None:
+        try:
+            command = self._resolve_command(payload)
+        except PluginContractError as exc:
+            # Token present but unresolvable: release with a finding before
+            # any work-dir / plugin spend, same as a contract violation.
+            await self._release_with_finding(task_id, f"route misconfigured: {exc}")
+            return
+
         work_dir = self.work_dir_base / task_id
         work_dir.mkdir(parents=True, exist_ok=True)
         task_json_path = work_dir / "task.json"
@@ -236,7 +300,7 @@ class RouteRunner:
         try:
             try:
                 result = await self.plugin_runner(
-                    command=self.route.command,
+                    command=command,
                     task_json_path=task_json_path,
                     work_dir=work_dir,
                     result_file=result_file,
@@ -253,7 +317,7 @@ class RouteRunner:
                     f"plugin exceeded max runtime: {exc}",
                 )
             else:
-                succeeded = await self._apply_result(task_id, result, payload)
+                succeeded = await self._apply_result(task_id, result)
         finally:
             renew_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -286,7 +350,6 @@ class RouteRunner:
         self,
         task_id: str,
         result: Mapping[str, Any],
-        payload: Mapping[str, Any],
     ) -> bool:
         """Apply the plugin's result. Returns ``True`` iff the task succeeded."""
         status = result.get("status")
@@ -322,7 +385,7 @@ class RouteRunner:
             # plugin says WHEN a re-run is expected to succeed.
             resume = result.get("resume")
             if isinstance(resume, Mapping):
-                await self._maybe_schedule_resume(task_id, payload, resume)
+                await self._maybe_schedule_resume(task_id, resume)
             return False
         await self._release_with_finding(
             task_id,
@@ -335,7 +398,6 @@ class RouteRunner:
     async def _maybe_schedule_resume(
         self,
         task_id: str,
-        payload: Mapping[str, Any],
         resume: Mapping[str, Any],
     ) -> None:
         raw = resume.get("resume_after")
@@ -387,7 +449,7 @@ class RouteRunner:
             resume_after.isoformat(timespec="seconds"),
         )
         sleeper = asyncio.create_task(
-            self._resume_dispatch(task_id, payload, delay),
+            self._resume_dispatch(task_id, delay),
             name=f"resume-{task_id}",
         )
         self._resume_tasks[task_id] = sleeper
@@ -401,10 +463,16 @@ class RouteRunner:
 
         sleeper.add_done_callback(_cleanup)
 
-    async def _resume_dispatch(
-        self, task_id: str, payload: Mapping[str, Any], delay: float
-    ) -> None:
-        """Sleep until ``resume_after``, then re-claim + re-run the task."""
+    async def _resume_dispatch(self, task_id: str, delay: float) -> None:
+        """Sleep until ``resume_after``, then re-claim + re-run the task.
+
+        The synthetic event is built from a FRESH ``task_get`` snapshot, not
+        the payload captured when the run was interrupted: an operator may
+        edit the task (body, acceptance criteria, reviewer override, deps)
+        during the pause window, and the plugin re-reads all of that from the
+        task.json the runner writes from this payload. Re-using the stale
+        payload would silently develop against the old instructions.
+        """
         try:
             await asyncio.sleep(delay)
             task = await self.lithos.task_get(task_id=task_id)
@@ -415,15 +483,13 @@ class RouteRunner:
                     task_id,
                 )
                 return
-            # Drop the dedup entry so _handle's claim path re-runs; the
-            # synthetic event reuses the original payload (the task body is
-            # re-read by the plugin from task.json either way).
+            # Drop the dedup entry so _handle's claim path re-runs.
             self._processed_tasks.discard(task_id)
             await self._handle(
                 Event(
                     type="loom.route.resume",
                     timestamp=datetime.now(UTC),
-                    payload=payload,
+                    payload=_task_to_payload(task),
                 )
             )
         except asyncio.CancelledError:

@@ -691,12 +691,11 @@ async def test_rescheduled_resume_survives_old_sleepers_cleanup(
     """
     bus = EventBus()
     runner, _ = _make_runner(bus=bus, work_dir=tmp_path)
-    payload = _payload()
     resume = {"resume_after": "2099-01-01T00:00:00+00:00"}
 
-    await runner._maybe_schedule_resume("task-1", payload, resume)
+    await runner._maybe_schedule_resume("task-1", resume)
     first = runner._resume_tasks["task-1"]
-    await runner._maybe_schedule_resume("task-1", payload, resume)
+    await runner._maybe_schedule_resume("task-1", resume)
     second = runner._resume_tasks["task-1"]
     assert first is not second
 
@@ -707,3 +706,172 @@ async def test_rescheduled_resume_survives_old_sleepers_cleanup(
     assert runner._resume_tasks.get("task-1") is second
     assert not second.cancelled()
     second.cancel()
+
+
+async def test_resume_redispatch_uses_fresh_task_content(tmp_path: Path) -> None:
+    """The resumed run must develop against the task's CURRENT content.
+
+    The operator edits the task body / metadata during the pause window;
+    task_get returns the edited task; the second plugin run's task.json must
+    carry the fresh title + body + metadata, not the interrupted snapshot.
+    """
+    import json as _json
+
+    bus = EventBus()
+    seen: list[dict[str, Any]] = []
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        body = _json.loads(kwargs["task_json_path"].read_text())
+        seen.append(body["task"])
+        if len(seen) == 1:
+            return _interrupted_with_resume()
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+    )
+    # The fresh snapshot the operator's edits produced.
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="EDITED title",
+        status="open",
+        tags=("trigger:story-implement",),
+        metadata={"project": "loom", "acceptance_criteria": "NEW criteria"},
+        claims=(),
+        description="EDITED body",
+    )
+
+    # The interrupting event carried the STALE content.
+    stale = _payload(task_id="task-1", metadata={"project": "loom"})
+    await bus.publish(_evt(payload=stale))
+    await _run_for(runner, seconds=0.3)
+
+    assert len(seen) == 2
+    second = seen[1]
+    assert second["title"] == "EDITED title"
+    assert second["description"] == "EDITED body"
+    assert second["metadata"]["acceptance_criteria"] == "NEW criteria"
+
+
+# ── {{repo}} token resolution (T10) ────────────────────────────────────
+
+
+def _repo_route() -> RouteConfig:
+    return _route(
+        name="story-develop",
+        tags=("trigger:story-develop",),
+        command="run --repo {{repo}} --result-file {{result_file}}",
+    )
+
+
+async def test_repo_token_resolved_from_projects_map(tmp_path: Path) -> None:
+    """{{repo}} expands to the task's project repo before the plugin runs."""
+    bus = EventBus()
+    captured: dict[str, Any] = {}
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        captured["command"] = kwargs["command"]
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=capturing_plugin,
+        project_repos={"loom": Path("/home/x/loom")},
+    )
+    payload = _payload(
+        task_id="task-1",
+        tags=("trigger:story-develop",),
+        metadata={"project": "loom"},
+    )
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    assert "--repo /home/x/loom" in captured["command"]
+    assert "{{repo}}" not in captured["command"]
+
+
+async def test_repo_token_without_project_releases_with_finding(
+    tmp_path: Path,
+) -> None:
+    """A {{repo}} route + a task with no metadata.project is a config error:
+    release with a finding, never run the plugin."""
+    bus = EventBus()
+    plugin = AsyncMock()
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=plugin,
+        project_repos={"loom": Path("/home/x/loom")},
+    )
+    payload = _payload(task_id="task-1", tags=("trigger:story-develop",), metadata={})
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    plugin.assert_not_called()
+    lithos.task_release.assert_awaited_once()
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert "metadata.project" in summary
+
+
+async def test_repo_token_unregistered_project_releases_with_finding(
+    tmp_path: Path,
+) -> None:
+    """A {{repo}} route + a task whose project isn't in [projects.*]: same."""
+    bus = EventBus()
+    plugin = AsyncMock()
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=plugin,
+        project_repos={"loom": Path("/home/x/loom")},
+    )
+    payload = _payload(
+        task_id="task-1",
+        tags=("trigger:story-develop",),
+        metadata={"project": "unregistered"},
+    )
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    plugin.assert_not_called()
+    lithos.task_release.assert_awaited_once()
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert "unregistered" in summary
+
+
+async def test_no_repo_token_does_not_require_project(tmp_path: Path) -> None:
+    """A route WITHOUT {{repo}} runs regardless of metadata.project."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)  # default echo route
+    await bus.publish(_evt(payload=_payload(metadata={})))
+    await _run_for(runner)
+    lithos.task_complete.assert_awaited_once()

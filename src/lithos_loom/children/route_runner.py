@@ -103,6 +103,7 @@ async def _amain(cfg: LoomConfig) -> int:
             bus=bus,
             events_url=events_url,
         )
+        project_repos = {slug: pc.repo for slug, pc in cfg.projects.items()}
         runners = [
             RouteRunner(
                 route=route,
@@ -111,6 +112,7 @@ async def _amain(cfg: LoomConfig) -> int:
                 agent_id=cfg.orchestrator.agent_id,
                 work_dir_base=cfg.orchestrator.work_dir,
                 retain_failed_workdirs=cfg.orchestrator.retain_failed_workdirs,
+                project_repos=project_repos,
             )
             for route in cfg.routes
         ]

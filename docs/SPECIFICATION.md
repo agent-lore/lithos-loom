@@ -225,6 +225,8 @@ codex_config  = "/home/you/.codex-lithos"      # optional, parsed but unused tod
 #   {{task_json}}    — path to the task envelope JSON (read-only)
 #   {{work_dir}}     — per-task staging dir under orchestrator.work_dir
 #   {{result_file}}  — path the plugin must atomically write
+#   {{repo}}         — [projects.<slug>].repo for the task's metadata.project
+#                      (one route serves all projects; unresolvable → finding)
 
 [[routes]]
 name = "story-implement"
@@ -235,12 +237,12 @@ human_blocking = false  # if true, surfaced in Obsidian projection once claimed
 [routes.match]
 tags = ["trigger:story-implement"]  # task must carry ALL listed tags
 
-# story-develop binds a trigger tag to one host repo path (--repo lives in
-# the command; one route per project). Reviewer config comes from the
+# story-develop: {{repo}} resolves per task from [projects.<slug>].repo, so
+# one route serves every project. Reviewer config comes from the
 # project-context doc's develop_* metadata (§5.5).
 [[routes]]
 name = "story-develop"
-command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo /home/you/projects/example"
+command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo {{repo}}"
 max_runtime_seconds = 28800
 
 [routes.match]
@@ -513,7 +515,9 @@ Plugins are subprocesses invoked by a route-runner. They receive a small CLI sur
 <command> --task-json <path> --work-dir <path> --result-file <path>
 ```
 
-- `--task-json`: read-only JSON file. Today its contents are `{"task": <event-payload>}` — the bus event's payload (a Lithos task envelope) wrapped under a single `task` key. The resolved project entry from the local TOML is **not** included today; if a plugin needs it, the plugin must load the TOML itself or have it baked into the route's `command`.
+- `--task-json`: read-only JSON file. Today its contents are `{"task": <event-payload>}` — the bus event's payload (a Lithos task envelope) wrapped under a single `task` key. The resolved project entry from the local TOML is **not** included in the file; a plugin that needs the project's on-disk repo path uses the `{{repo}}` command token (below) or loads the TOML itself.
+
+  **`{{repo}}` substitution.** Beyond the three path tokens, a route `command` may carry a `{{repo}}` token. The runner resolves it from `[projects.<slug>].repo` keyed by the claimed task's `metadata.project`, before the plugin forks — so one route serves every registered project, and the repo a plugin acts on is derived from the task's own project rather than hard-coded per route. A `{{repo}}` route whose task has no `metadata.project`, or whose slug isn't in `[projects.*]` on this host, is released with a `[BlockerFailed]` finding (`route misconfigured: …`) and never run. Routes without the token don't require a project.
 - `--work-dir`: per-task staging directory at `<orchestrator.work_dir>/<task_id>/`. The plugin owns the tree; the runner reads only the result file.
 - `--result-file`: path the plugin must write atomically (temp file + fsync + rename). Partial files must never be observable.
 
@@ -585,10 +589,10 @@ The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, 
 ```
 uv run python -m lithos_loom.plugins.story_develop \
     --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} \
-    --repo /abs/path/to/checkout
+    --repo {{repo}}
 ```
 
-- `--repo` stays in the route's `command` — the daemon dispatches tasks, not checkouts, so a route binds a trigger tag to one host repo path (one route per project).
+- `--repo` takes the runner's `{{repo}}` token (§5.1), resolved per task from `[projects.<slug>].repo` keyed by `metadata.project` — so one route serves every registered project. (An absolute path also works if you want a route pinned to one checkout.)
 - The task (title, body, `metadata.acceptance_criteria`) comes from `task.json`; `--description` / `--task-id` / `--no-lithos` / `--complete-on-approval` / `--reviewer` / `--develop-config` are rejected in daemon mode.
 - **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`. Per-task override: `task.metadata.reviewers` (names from the pool). Every miss — no slug, no doc, no keys, unknown name — degrades to the built-in single `code-quality` reviewer with a `[Friction]` finding; a populated pool without a default selection still runs only the built-in reviewer (pool membership does not auto-run).
 - **Status mapping.** `approved` → `succeeded` (the runner completes the task); `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.

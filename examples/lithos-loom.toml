@@ -52,12 +52,14 @@ tags = ["trigger:story-implement"]
 
 [[routes]]
 name = "story-develop"
-# --repo is part of the route command — the daemon dispatches tasks, not
-# checkouts, so a route binds a trigger tag to a host repo path (one route
-# per project). Reviewer config comes from the project-context doc's
-# develop_* metadata (see docs/SPECIFICATION.md). Add --open-pr to push +
-# open a PR (and run the Copilot review round) on approval.
-command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo /home/you/projects/lithos/code/lithos-loom"
+# {{repo}} resolves per task from [projects.<slug>].repo, keyed by the
+# task's metadata.project — so ONE route serves every registered project.
+# (A task with no metadata.project, or an unregistered slug, is released
+# with a finding rather than run against the wrong checkout.) Reviewer
+# config comes from the project-context doc's develop_* metadata (see
+# docs/SPECIFICATION.md). Add --open-pr to push + open a PR (and run the
+# Copilot review round) on approval.
+command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo {{repo}}"
 # A multi-round develop loop with containerised agents is slow, and
 # usage-limit pauses count against the wall clock too; budget a working day.
 max_runtime_seconds = 28800
