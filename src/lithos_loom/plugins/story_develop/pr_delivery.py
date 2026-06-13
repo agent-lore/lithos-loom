@@ -40,10 +40,6 @@ COPILOT_REVIEWER = "copilot-pull-request-reviewer[bot]"
 AUTOMATED_MARKER = "_(automated reply by story-develop)_"
 DEFAULT_COPILOT_TIMEOUT = 600  # seconds; observed turnaround is ~2-4 min
 COPILOT_POLL_SECONDS = 15
-# Floor for the comment-settle window when the review summary itself lands late
-# in the copilot budget. Comment materialisation lags the summary (the #91
-# race), so even a near-exhausted budget keeps a minimum window to catch them.
-_MIN_SETTLE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -374,15 +370,20 @@ def fetch_copilot_comments_settled(
     grace_seconds: int = 180,
     poll_seconds: int = 5,
     settle_seconds: int = 15,
-) -> list[CopilotComment]:
+) -> tuple[list[CopilotComment], bool]:
     """Fetch Copilot's inline comments, waiting for them to MATERIALISE.
+
+    Returns ``(comments, settled)``. *settled* is ``True`` only when the wait
+    ended because the comments actually arrived and the count stabilised —
+    ``False`` when it ended at the deadline (so the caller can flag the round
+    incomplete rather than silently treat a partial/empty result as complete).
 
     Copilot's inline comments lag its review summary by a variable amount
     (a first-poll empty list is the norm, not the signal — this raced in the
     first T9 dogfood run and again at 90 s grace).  *expected* comes from the
-    review body: 0 returns immediately; a positive count waits until that many
-    are visible AND the count stabilises; -1 (unknown) waits for the count to
-    stabilise after any appear.  The grace window bounds the overall wait.
+    review body: 0 returns immediately (settled); a positive count waits until
+    that many are visible AND the count stabilises; -1 (unknown) waits for the
+    count to stabilise after any appear.  The grace window bounds the wait.
 
     "Stabilised" means the count has not changed for *settle_seconds*.
     This prevents returning before late-arriving comments materialise —
@@ -390,7 +391,7 @@ def fetch_copilot_comments_settled(
     was the root cause of the recurrence.
     """
     if expected == 0:
-        return fetch_copilot_comments(wt, repo, pr_number)
+        return fetch_copilot_comments(wt, repo, pr_number), True
     deadline = time.monotonic() + grace_seconds
     comments: list[CopilotComment] = []
     prev_count = 0
@@ -405,12 +406,12 @@ def fetch_copilot_comments_settled(
         threshold_hit = (expected > 0 and len(comments) >= expected) or (
             expected < 0 and len(comments) > 0
         )
-        settled = settled_at is not None and now - settled_at >= settle_seconds
-        if threshold_hit and settled:
-            return comments
+        stable = settled_at is not None and now - settled_at >= settle_seconds
+        if threshold_hit and stable:
+            return comments, True
 
         if now >= deadline:
-            return comments
+            return comments, False
         time.sleep(min(poll_seconds, max(1, deadline - now)))
 
 
@@ -522,25 +523,33 @@ def deliver(
             notes=tuple(notes),
         )
 
-    # Bound the comment-settle by the REMAINING copilot budget, not a fixed
-    # window — the #91 fix. Comments lag the summary by a variable amount; a
-    # flat 90/180s window silently missed late arrivals. Use whatever budget
-    # wait_for_copilot left (with a floor, since the lag is the risk).
-    settle_budget = max(int(copilot_deadline - time.monotonic()), _MIN_SETTLE_SECONDS)
-    comments = fetch_copilot_comments_settled(
+    # Bound the comment-settle by the REMAINING copilot budget — the #91 fix.
+    # Comments lag the summary by a variable amount; a flat 90/180s window
+    # silently missed late arrivals. Give materialisation whatever of
+    # copilot_timeout wait_for_copilot left, and NOTHING more — copilot_timeout
+    # is a hard cap on the whole round. A near-exhausted budget just means the
+    # round is flagged incomplete (below), which is honest.
+    settle_budget = max(0, int(copilot_deadline - time.monotonic()))
+    comments, settled = fetch_copilot_comments_settled(
         wt, repo, pr_number, expected=expected, grace_seconds=settle_budget
     )
-    # Settled = every comment Copilot claimed actually showed up. expected<=0
-    # is "Copilot stated no count / no comments" → genuinely nothing to wait
-    # for. A shortfall means the round is INCOMPLETE, not all-clear (#91): the
-    # operator must be told, not left thinking Copilot was happy.
-    settled = expected <= 0 or len(comments) >= expected
+    # `settled` is authoritative (the fetch reports whether the comments
+    # actually arrived + stabilised, vs hit the deadline). A non-settle means
+    # the round is INCOMPLETE, not all-clear (#91): the operator must be told,
+    # not left thinking Copilot was happy.
     if not settled:
-        notes.append(
-            f"Copilot review did not settle: expected {expected} comment(s), "
-            f"{len(comments)} arrived within {settle_budget}s — the rest may be "
-            "unaddressed; review the PR or re-trigger Copilot"
-        )
+        if expected > 0:
+            notes.append(
+                f"Copilot review did not settle: expected {expected} comment(s), "
+                f"{len(comments)} arrived within {settle_budget}s — the rest may "
+                "be unaddressed; review the PR or re-trigger Copilot"
+            )
+        else:
+            notes.append(
+                "Copilot review's comment stream did not stabilise within "
+                f"{settle_budget}s ({len(comments)} seen) — there may be more; "
+                "review the PR or re-trigger Copilot"
+            )
     if not comments:
         # Nothing to fix this round. With expected>0 and none materialised this
         # is a deferral (flagged above + copilot_settled=False), not an
