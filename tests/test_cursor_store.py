@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lithos_loom.cursor_store import CursorStore
 
 # ── basic round-trip ────────────────────────────────────────────────────
@@ -114,3 +116,26 @@ def test_file_contains_valid_json(tmp_path: Path) -> None:
     store.save("b", "2")
     data = json.loads(path.read_text())
     assert data == {"a": "1", "b": "2"}
+
+
+def test_partial_os_write_writes_full_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.write`` may return a short count; the store must loop until the
+    whole payload is on disk rather than truncating the file."""
+    import os
+
+    real_write = os.write
+
+    def short_write(fd: int, data: object) -> int:
+        # Force a one-byte-at-a-time write to exercise the loop.
+        view = memoryview(bytes(data))  # type: ignore[arg-type]
+        return real_write(fd, view[:1])
+
+    path = tmp_path / "cursors.json"
+    store = CursorStore(path)
+    monkeypatch.setattr(os, "write", short_write)
+    store.save("task-events", "evt-1234567890")
+
+    # The file must be complete and parseable despite the short writes.
+    assert json.loads(path.read_text()) == {"task-events": "evt-1234567890"}

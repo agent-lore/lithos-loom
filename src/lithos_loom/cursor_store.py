@@ -8,11 +8,11 @@ caller-chosen stream name (e.g. ``"task-events"``, ``"note-events"``).
 Atomic write uses temp + fsync + rename (same pattern the projection layer
 uses for vault files) so a crash mid-write never leaves a half-written file.
 
-The file is a flat ``{"<name>": "<last-event-id>", …}`` JSON object. Multiple
-children may maintain separate cursor files when they run in separate
-processes; each child passes its own ``work_dir / "<child>" / sse_cursors.json``
-or the children can share a single file since JSON keys don't collide
-(``"route-runner/task-events"`` vs ``"obsidian-sync/task-events"``).
+The file is a flat ``{"<name>": "<last-event-id>", …}`` JSON object. Each child
+process keeps its own cursor file (``<work_dir>/<child>/sse_cursors.json``) and
+addresses its streams by plain name (e.g. ``"task-events"``, ``"note-events"``);
+the per-stream keying means a single file could hold several streams' cursors,
+but the children do not share one in practice.
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ class CursorStore:
     Parameters
     ----------
     path:
-        Filesystem path to the JSON cursor file. Created on first write
-        (parent directory must exist).
+        Filesystem path to the JSON cursor file. The file and any missing
+        parent directories are created on first write.
     """
 
     def __init__(self, path: Path) -> None:
@@ -105,7 +105,12 @@ class CursorStore:
                 suffix=".tmp",
             )
             payload = json.dumps(self._cache, indent=2, sort_keys=True).encode("utf-8")
-            os.write(fd, payload)
+            # os.write may write fewer bytes than requested; loop until the
+            # whole payload is out, or a short write would truncate the file.
+            view = memoryview(payload)
+            written = 0
+            while written < len(payload):
+                written += os.write(fd, view[written:])
             os.fsync(fd)
             os.close(fd)
             fd = -1

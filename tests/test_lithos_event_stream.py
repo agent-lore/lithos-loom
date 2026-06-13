@@ -1575,8 +1575,9 @@ async def test_cursor_store_persists_last_event_id(tmp_path: Any) -> None:
 
 
 async def test_cursor_store_loaded_at_construction(tmp_path: Any) -> None:
-    """A stream constructed with a pre-populated CursorStore sends
-    Last-Event-ID on its first connect and skips bootstrap."""
+    """A stream constructed with a pre-populated CursorStore sends the
+    persisted Last-Event-ID on its first connect (bootstrap still runs —
+    see the note below)."""
     from lithos_loom.cursor_store import CursorStore
 
     store_path = tmp_path / "sse_cursors.json"
@@ -1609,21 +1610,12 @@ async def test_cursor_store_loaded_at_construction(tmp_path: Any) -> None:
     # First connect should carry the persisted Last-Event-ID.
     assert aconnect.calls[0]["headers"].get("Last-Event-ID") == "evt-99"
 
-    # Bootstrap should have been skipped (cursor present → bootstrapped
-    # flag is False, but _last_event_id is set → skip-bootstrap gate).
-    # The only task_list call should NOT be bootstrap (open), since
-    # bootstrap was skipped. Actually, the stream has _bootstrapped=False
-    # at start but _last_event_id is set. The gate is:
-    # bootstrap_this_attempt = not self._bootstrapped or self._last_event_id is None
-    # With _bootstrapped=False and _last_event_id="evt-99":
-    #   not False or "evt-99" is None → True or False → True
-    # So bootstrap WILL run on the first connect even with a persisted
-    # cursor. This is the correct behaviour: the cursor resumes the SSE
-    # stream mid-ring-buffer, but bootstrap ensures we don't miss any
-    # tasks that were created while we were down (the bootstrap + SSE
-    # overlap is deduped by RouteRunner._processed_tasks).
-    # Verify the cursor was sent.
-    assert aconnect.calls[0]["headers"]["Last-Event-ID"] == "evt-99"
+    # A persisted cursor does NOT skip bootstrap. The gate is
+    # `not self._bootstrapped or self._last_event_id is None`, and
+    # `_bootstrapped` starts False, so the first connect still bootstraps.
+    # That is deliberate: the cursor resumes the SSE stream mid-ring-buffer,
+    # while bootstrap covers any open tasks created while we were down — the
+    # overlap is deduped downstream (RouteRunner._processed_tasks).
 
 
 async def test_stream_without_cursor_store_still_works(tmp_path: Any) -> None:
