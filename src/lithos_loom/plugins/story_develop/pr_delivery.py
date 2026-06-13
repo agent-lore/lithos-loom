@@ -40,6 +40,10 @@ COPILOT_REVIEWER = "copilot-pull-request-reviewer[bot]"
 AUTOMATED_MARKER = "_(automated reply by story-develop)_"
 DEFAULT_COPILOT_TIMEOUT = 600  # seconds; observed turnaround is ~2-4 min
 COPILOT_POLL_SECONDS = 15
+# Floor for the comment-settle window when the review summary itself lands late
+# in the copilot budget. Comment materialisation lags the summary (the #91
+# race), so even a near-exhausted budget keeps a minimum window to catch them.
+_MIN_SETTLE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,11 @@ class DeliveryOutcome:
     pushed: bool = True
     copilot_requested: bool = False
     copilot_reviewed: bool = False
+    copilot_settled: bool = True
+    """Whether all the comments Copilot's summary claimed actually materialised
+    within the wait budget. ``False`` means the round was INCOMPLETE — some
+    comments hadn't appeared in time and may be unaddressed (the #91
+    comment-lag race); the operator should review the PR or re-trigger."""
     comments_count: int = 0
     fix_committed: bool = False
     fix_pushed: bool = False
@@ -375,7 +384,7 @@ def fetch_copilot_comments_settled(
     are visible AND the count stabilises; -1 (unknown) waits for the count to
     stabilise after any appear.  The grace window bounds the overall wait.
 
-    "Stabilised" means the count has not increased for *settle_seconds*.
+    "Stabilised" means the count has not changed for *settle_seconds*.
     This prevents returning before late-arriving comments materialise —
     the original 90 s window with an immediate return on threshold hit
     was the root cause of the recurrence.
@@ -497,6 +506,9 @@ def deliver(
     if not requested:
         notes.append("Copilot review request failed; respond manually")
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
+    # copilot_timeout is the whole-round budget: the review summary wait AND
+    # the comment-materialisation wait share it.
+    copilot_deadline = time.monotonic() + copilot_timeout
     expected = wait_for_copilot(wt, repo, pr_number, timeout=copilot_timeout)
     if expected is None:
         notes.append(
@@ -510,18 +522,35 @@ def deliver(
             notes=tuple(notes),
         )
 
-    comments = fetch_copilot_comments_settled(wt, repo, pr_number, expected=expected)
-    if expected > 0 and len(comments) < expected:
+    # Bound the comment-settle by the REMAINING copilot budget, not a fixed
+    # window — the #91 fix. Comments lag the summary by a variable amount; a
+    # flat 90/180s window silently missed late arrivals. Use whatever budget
+    # wait_for_copilot left (with a floor, since the lag is the risk).
+    settle_budget = max(int(copilot_deadline - time.monotonic()), _MIN_SETTLE_SECONDS)
+    comments = fetch_copilot_comments_settled(
+        wt, repo, pr_number, expected=expected, grace_seconds=settle_budget
+    )
+    # Settled = every comment Copilot claimed actually showed up. expected<=0
+    # is "Copilot stated no count / no comments" → genuinely nothing to wait
+    # for. A shortfall means the round is INCOMPLETE, not all-clear (#91): the
+    # operator must be told, not left thinking Copilot was happy.
+    settled = expected <= 0 or len(comments) >= expected
+    if not settled:
         notes.append(
-            f"Copilot's summary claims {expected} comment(s) but only "
-            f"{len(comments)} became visible; check the PR"
+            f"Copilot review did not settle: expected {expected} comment(s), "
+            f"{len(comments)} arrived within {settle_budget}s — the rest may be "
+            "unaddressed; review the PR or re-trigger Copilot"
         )
     if not comments:
+        # Nothing to fix this round. With expected>0 and none materialised this
+        # is a deferral (flagged above + copilot_settled=False), not an
+        # all-clear; with expected==0 it is a genuine clean review.
         return DeliveryOutcome(
             pr_url=pr_url,
             pr_number=pr_number,
             copilot_requested=True,
             copilot_reviewed=True,
+            copilot_settled=settled,
             notes=tuple(notes),
         )
 
@@ -582,6 +611,7 @@ def deliver(
             pr_number=pr_number,
             copilot_requested=True,
             copilot_reviewed=True,
+            copilot_settled=settled,
             comments_count=len(comments),
             extra_cost_usd=extra_cost,
             notes=tuple(notes),
@@ -661,6 +691,7 @@ def deliver(
         pr_number=pr_number,
         copilot_requested=True,
         copilot_reviewed=True,
+        copilot_settled=settled,
         comments_count=len(comments),
         fix_committed=fix_committed,
         fix_pushed=fix_pushed,

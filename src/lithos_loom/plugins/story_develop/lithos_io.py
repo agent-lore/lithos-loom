@@ -140,9 +140,10 @@ def _delivery_section(delivery: Any) -> str:
             fix = f"fix prepared but HELD BACK (gate {delivery.fix_gate_verdict})"
         else:
             fix = "no code change"
+        incomplete = "" if delivery.copilot_settled else " — INCOMPLETE (see note)"
         lines.append(
             f"copilot round: {delivery.comments_count} comment(s); {fix}; "
-            f"{delivery.replies_posted} repl(ies) posted"
+            f"{delivery.replies_posted} repl(ies) posted{incomplete}"
         )
     for note in delivery.notes:
         lines.append(f"note: {note}")

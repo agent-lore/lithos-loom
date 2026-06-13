@@ -171,6 +171,7 @@ def _install(
     config: DevelopConfig,
     *,
     comments: list[CopilotComment] | None = None,
+    expected: int | None = None,
     copilot_arrives: bool = True,
     request_ok: bool = True,
     coder_ok: bool = True,
@@ -199,10 +200,11 @@ def _install(
         lambda wt, **kw: state.update(pr_kwargs=kw) or "https://github.com/o/r/pull/82",
     )
     monkeypatch.setattr(pr_delivery, "request_copilot", lambda *a: request_ok)
+    expected_count = expected if expected is not None else len(comments or [])
     monkeypatch.setattr(
         pr_delivery,
         "wait_for_copilot",
-        lambda *a, **kw: len(comments or []) if copilot_arrives else None,
+        lambda *a, **kw: expected_count if copilot_arrives else None,
     )
     monkeypatch.setattr(
         pr_delivery,
@@ -311,7 +313,40 @@ def test_deliver_copilot_clean_review_no_fix_round(
     state["wt"] = wt
     out = deliver(config, _result(config, wt))
     assert out.copilot_reviewed is True and out.comments_count == 0
+    assert out.copilot_settled is True  # expected 0 → genuinely clean, settled
     assert state["turn_prompts"] == []  # no coder round for a clean review
+
+
+def test_deliver_copilot_nonsettle_zero_defers(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """Copilot's summary claimed comments but none materialised in the window
+    (#91). The round must be flagged INCOMPLETE — copilot_settled=False + a
+    'did not settle' note — NOT silently treated as a clean review, and no fix
+    round runs against zero comments."""
+    state = _install(monkeypatch, config, comments=[], expected=2)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+    assert out.copilot_reviewed is True
+    assert out.copilot_settled is False
+    assert any("did not settle" in n for n in out.notes)
+    assert state["turn_prompts"] == []  # nothing materialised → no fix round
+
+
+def test_deliver_copilot_nonsettle_partial_fixes_and_flags(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """Some-but-not-all comments materialised: address the ones we have, but
+    still flag the round INCOMPLETE so the missing comments aren't lost."""
+    comments = [CopilotComment(comment_id=11, path="a.py", line=5, body="fix this")]
+    state = _install(monkeypatch, config, comments=comments, expected=3)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+    assert out.copilot_settled is False
+    assert any("did not settle" in n for n in out.notes)
+    assert state["turn_prompts"]  # fix round still runs on the comment we have
 
 
 def test_deliver_full_copilot_round(
@@ -327,6 +362,7 @@ def test_deliver_full_copilot_round(
     out = deliver(config, result)
 
     assert out.comments_count == 1
+    assert out.copilot_settled is True  # all expected comments materialised
     assert out.fix_committed and out.fix_pushed
     assert out.fix_sha is not None
     assert out.extra_cost_usd == pytest.approx(0.1)  # the fix turn's spend
