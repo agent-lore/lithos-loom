@@ -153,7 +153,17 @@ async def _run_reconcile_pass(
             )
 
     counts = {"open": 0, "completed": 0, "cancelled": 0}
-    pr_counts = {"merged": 0, "closed_unmerged": 0, "still_open": 0}
+    # Every outcome reconcile_develop_pr can return (except None = skipped) so
+    # the sweep log surfaces deleted / unparseable / errored PRs too, not just
+    # the happy cases — visibility into why a delivered task didn't auto-close.
+    pr_counts = {
+        "merged": 0,
+        "closed_unmerged": 0,
+        "still_open": 0,
+        "gone": 0,
+        "unparseable": 0,
+        "error": 0,
+    }
 
     async def _pr_merge_one(task: Any) -> None:
         """PR-merge close for a non-issue delivered-PR task (#87).
@@ -182,15 +192,20 @@ async def _run_reconcile_pass(
         elif pr_merge_enabled and task.metadata.get("develop_pr_url"):
             await _pr_merge_one(task)
 
+    pr_summary = (
+        f"{pr_counts['merged']} merged / {pr_counts['closed_unmerged']} "
+        f"closed-unmerged / {pr_counts['still_open']} still-open / "
+        f"{pr_counts['gone']} deleted / {pr_counts['unparseable']} unparseable / "
+        f"{pr_counts['error']} error"
+    )
+
     if resolved_window is None:
         logger.info(
             "github-watcher: reconcile sweep replayed %d open GH-linked "
-            "task(s); PR-merge: %d merged / %d closed-unmerged / %d still-open; "
-            "resolved-task sweep disabled (resolved_replay_days=0)",
+            "task(s); PR-merge: %s; resolved-task sweep disabled "
+            "(resolved_replay_days=0)",
             counts["open"],
-            pr_counts["merged"],
-            pr_counts["closed_unmerged"],
-            pr_counts["still_open"],
+            pr_summary,
         )
         return
 
@@ -215,14 +230,11 @@ async def _run_reconcile_pass(
 
     logger.info(
         "github-watcher: reconcile sweep replayed %d open / %d completed / "
-        "%d cancelled GH-linked task(s); PR-merge: %d merged / %d "
-        "closed-unmerged / %d still-open",
+        "%d cancelled GH-linked task(s); PR-merge: %s",
         counts["open"],
         counts["completed"],
         counts["cancelled"],
-        pr_counts["merged"],
-        pr_counts["closed_unmerged"],
-        pr_counts["still_open"],
+        pr_summary,
     )
 
 
