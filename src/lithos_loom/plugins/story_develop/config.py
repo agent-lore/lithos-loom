@@ -235,8 +235,9 @@ class DevelopConfig:
     # by letting the operator pin via project metadata / CLI and by recording
     # the resolved choice with the run. Per-reviewer model/effort live on
     # ``ReviewerSpec``; this pair is the coder's. ``effort`` is a level string
-    # (:data:`VALID_EFFORTS`), not a token budget — the portable knob across
-    # Claude (`--effort`) and Codex (`model_reasoning_effort`).
+    # (:data:`VALID_EFFORTS`, Claude's canonical levels), not a token budget;
+    # each tool's ``build_exec_command`` translates it to that tool's mechanism
+    # when other tools land (#94) — see VALID_EFFORTS for why it's not universal.
     coder_model: str | None = None
     coder_effort: str | None = None
     image: str = DEFAULT_IMAGE

@@ -425,19 +425,39 @@ def test_apply_cli_fallbacks_reviewer_flag_fills_only_unset() -> None:
     assert cq.model == "sonnet" and cq.effort == "high"
 
 
-def test_apply_cli_fallbacks_skips_unused_reviewer_fallback_validation() -> None:
-    """A bad reviewer fallback is NOT frictioned when every reviewer already
-    has that field — it would never be applied, so it must stay silent."""
+def test_apply_cli_fallbacks_surfaces_unused_invalid_fallback() -> None:
+    """A malformed route fallback is frictioned even when metadata already sets
+    the field — a route-config typo must not be silently masked (it would only
+    bite later when metadata changes). The bad values are still NOT applied."""
     settings = ProjectDevelopSettings(
         reviewers=(ReviewerSpec(name="sec", model="opus", effort="xhigh"),),
+        coder_model="sonnet",
+        coder_effort="high",
     )
+    # NB: model *names* aren't validated against a list (they drift) — only an
+    # empty/whitespace model is catchable; off-canonical effort is catchable.
     out = apply_cli_fallbacks(
         settings,
-        **_fb(reviewer_model="", reviewer_effort="bogus"),  # both invalid
+        **_fb(
+            coder_model="   ",  # empty -> validatable-invalid
+            coder_effort="hgh",  # off-canonical level
+            reviewer_model="",  # empty
+            reviewer_effort="bogus",  # off-canonical level
+        ),
     )
+    # metadata values untouched (no valid fallback to apply)
+    assert out.coder_model == "sonnet" and out.coder_effort == "high"
     (sec,) = out.reviewers
-    assert sec.model == "opus" and sec.effort == "xhigh"  # untouched
-    assert out.frictions == ()  # unused bad fallbacks raise no noise
+    assert sec.model == "opus" and sec.effort == "xhigh"
+    # ...but every malformed flag is surfaced as friction, not silently dropped
+    joined = "\n".join(out.frictions)
+    for flag in (
+        "--coder-model",
+        "--coder-effort",
+        "--reviewer-model",
+        "--reviewer-effort",
+    ):
+        assert flag in joined
 
 
 def test_apply_cli_fallbacks_bad_values_friction_and_dropped() -> None:

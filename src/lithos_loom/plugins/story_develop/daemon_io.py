@@ -350,34 +350,26 @@ def apply_cli_fallbacks(
             frictions.append(f"{exc}; ignoring the route fallback")
             return None
 
-    coder_m = settings.coder_model
-    if coder_m is None:
-        coder_m = _validate(coder_model, parse_model, "--coder-model")
-    coder_e = settings.coder_effort
-    if coder_e is None:
-        coder_e = _validate(coder_effort, parse_effort, "--coder-effort")
+    # Validate EVERY provided fallback flag up front so a malformed route value
+    # is surfaced with a [Friction] even when metadata already supplies that
+    # field — a route-config typo (`--coder-model opuss`, `--reviewer-effort
+    # hgh`) must not stay silently masked until metadata changes later. A valid
+    # fallback is then APPLIED only where metadata left the field unset.
+    v_coder_m = _validate(coder_model, parse_model, "--coder-model")
+    v_coder_e = _validate(coder_effort, parse_effort, "--coder-effort")
+    v_rev_m = _validate(reviewer_model, parse_model, "--reviewer-model")
+    v_rev_e = _validate(reviewer_effort, parse_effort, "--reviewer-effort")
 
-    # Only validate (and thus possibly friction) a reviewer fallback when at
-    # least one reviewer is actually missing that field — otherwise an unused
-    # bad fallback would emit noise it never gets to apply (mirrors the coder
-    # path, which only validates when its field is unset).
-    rev_m = (
-        _validate(reviewer_model, parse_model, "--reviewer-model")
-        if any(s.model is None for s in settings.reviewers)
-        else None
-    )
-    rev_e = (
-        _validate(reviewer_effort, parse_effort, "--reviewer-effort")
-        if any(s.effort is None for s in settings.reviewers)
-        else None
-    )
+    coder_m = settings.coder_model if settings.coder_model is not None else v_coder_m
+    coder_e = settings.coder_effort if settings.coder_effort is not None else v_coder_e
+
     reviewers = settings.reviewers
-    if rev_m is not None or rev_e is not None:
+    if v_rev_m is not None or v_rev_e is not None:
         reviewers = tuple(
             replace(
                 spec,
-                model=spec.model if spec.model is not None else rev_m,
-                effort=spec.effort if spec.effort is not None else rev_e,
+                model=spec.model if spec.model is not None else v_rev_m,
+                effort=spec.effort if spec.effort is not None else v_rev_e,
             )
             for spec in reviewers
         )
