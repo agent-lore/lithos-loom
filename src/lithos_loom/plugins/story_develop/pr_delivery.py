@@ -61,6 +61,11 @@ class DeliveryOutcome:
     pushed: bool = True
     copilot_requested: bool = False
     copilot_reviewed: bool = False
+    copilot_settled: bool = True
+    """Whether all the comments Copilot's summary claimed actually materialised
+    within the wait budget. ``False`` means the round was INCOMPLETE — some
+    comments hadn't appeared in time and may be unaddressed (the #91
+    comment-lag race); the operator should review the PR or re-trigger."""
     comments_count: int = 0
     fix_committed: bool = False
     fix_pushed: bool = False
@@ -362,30 +367,52 @@ def fetch_copilot_comments_settled(
     pr_number: int,
     *,
     expected: int,
-    grace_seconds: int = 90,
+    grace_seconds: int = 180,
     poll_seconds: int = 5,
-) -> list[CopilotComment]:
+    settle_seconds: int = 15,
+) -> tuple[list[CopilotComment], bool]:
     """Fetch Copilot's inline comments, waiting for them to MATERIALISE.
 
-    Copilot's inline comments lag its review summary by a few seconds (a
-    first-poll empty list is the norm, not the signal — this raced in the
-    first T9 dogfood run). *expected* comes from the review body: 0 returns
-    immediately; a positive count waits until that many are visible; -1
-    (unknown) waits for any to appear. The grace window bounds the wait.
+    Returns ``(comments, settled)``. *settled* is ``True`` only when the wait
+    ended because the comments actually arrived and the count stabilised —
+    ``False`` when it ended at the deadline (so the caller can flag the round
+    incomplete rather than silently treat a partial/empty result as complete).
+
+    Copilot's inline comments lag its review summary by a variable amount
+    (a first-poll empty list is the norm, not the signal — this raced in the
+    first T9 dogfood run and again at 90 s grace).  *expected* comes from the
+    review body: 0 returns immediately (settled); a positive count waits until
+    that many are visible AND the count stabilises; -1 (unknown) waits for the
+    count to stabilise after any appear.  The grace window bounds the wait.
+
+    "Stabilised" means the count has not changed for *settle_seconds*.
+    This prevents returning before late-arriving comments materialise —
+    the original 90 s window with an immediate return on threshold hit
+    was the root cause of the recurrence.
     """
     if expected == 0:
-        return fetch_copilot_comments(wt, repo, pr_number)
+        return fetch_copilot_comments(wt, repo, pr_number), True
     deadline = time.monotonic() + grace_seconds
     comments: list[CopilotComment] = []
+    prev_count = 0
+    settled_at: float | None = None  # monotonic time the count last changed
     while True:
         comments = fetch_copilot_comments(wt, repo, pr_number)
-        if expected > 0 and len(comments) >= expected:
-            return comments
-        if expected < 0 and comments:
-            return comments
-        if time.monotonic() >= deadline:
-            return comments
-        time.sleep(min(poll_seconds, max(1, deadline - time.monotonic())))
+        now = time.monotonic()
+        if len(comments) != prev_count:
+            prev_count = len(comments)
+            settled_at = now  # (re)start the settle clock
+
+        threshold_hit = (expected > 0 and len(comments) >= expected) or (
+            expected < 0 and len(comments) > 0
+        )
+        stable = settled_at is not None and now - settled_at >= settle_seconds
+        if threshold_hit and stable:
+            return comments, True
+
+        if now >= deadline:
+            return comments, False
+        time.sleep(min(poll_seconds, max(1, deadline - now)))
 
 
 def post_thread_reply(
@@ -480,6 +507,9 @@ def deliver(
     if not requested:
         notes.append("Copilot review request failed; respond manually")
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
+    # copilot_timeout is the whole-round budget: the review summary wait AND
+    # the comment-materialisation wait share it.
+    copilot_deadline = time.monotonic() + copilot_timeout
     expected = wait_for_copilot(wt, repo, pr_number, timeout=copilot_timeout)
     if expected is None:
         notes.append(
@@ -493,18 +523,43 @@ def deliver(
             notes=tuple(notes),
         )
 
-    comments = fetch_copilot_comments_settled(wt, repo, pr_number, expected=expected)
-    if expected > 0 and len(comments) < expected:
-        notes.append(
-            f"Copilot's summary claims {expected} comment(s) but only "
-            f"{len(comments)} became visible; check the PR"
-        )
+    # Bound the comment-settle by the REMAINING copilot budget — the #91 fix.
+    # Comments lag the summary by a variable amount; a flat 90/180s window
+    # silently missed late arrivals. Give materialisation whatever of
+    # copilot_timeout wait_for_copilot left, and NOTHING more — copilot_timeout
+    # is a hard cap on the whole round. A near-exhausted budget just means the
+    # round is flagged incomplete (below), which is honest.
+    settle_budget = max(0, int(copilot_deadline - time.monotonic()))
+    comments, settled = fetch_copilot_comments_settled(
+        wt, repo, pr_number, expected=expected, grace_seconds=settle_budget
+    )
+    # `settled` is authoritative (the fetch reports whether the comments
+    # actually arrived + stabilised, vs hit the deadline). A non-settle means
+    # the round is INCOMPLETE, not all-clear (#91): the operator must be told,
+    # not left thinking Copilot was happy.
+    if not settled:
+        if expected > 0:
+            notes.append(
+                f"Copilot review did not settle: expected {expected} comment(s), "
+                f"{len(comments)} arrived within {settle_budget}s — the rest may "
+                "be unaddressed; review the PR or re-trigger Copilot"
+            )
+        else:
+            notes.append(
+                "Copilot review's comment stream did not stabilise within "
+                f"{settle_budget}s ({len(comments)} seen) — there may be more; "
+                "review the PR or re-trigger Copilot"
+            )
     if not comments:
+        # Nothing to fix this round. With expected>0 and none materialised this
+        # is a deferral (flagged above + copilot_settled=False), not an
+        # all-clear; with expected==0 it is a genuine clean review.
         return DeliveryOutcome(
             pr_url=pr_url,
             pr_number=pr_number,
             copilot_requested=True,
             copilot_reviewed=True,
+            copilot_settled=settled,
             notes=tuple(notes),
         )
 
@@ -565,6 +620,7 @@ def deliver(
             pr_number=pr_number,
             copilot_requested=True,
             copilot_reviewed=True,
+            copilot_settled=settled,
             comments_count=len(comments),
             extra_cost_usd=extra_cost,
             notes=tuple(notes),
@@ -644,6 +700,7 @@ def deliver(
         pr_number=pr_number,
         copilot_requested=True,
         copilot_reviewed=True,
+        copilot_settled=settled,
         comments_count=len(comments),
         fix_committed=fix_committed,
         fix_pushed=fix_pushed,

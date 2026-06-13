@@ -171,6 +171,8 @@ def _install(
     config: DevelopConfig,
     *,
     comments: list[CopilotComment] | None = None,
+    expected: int | None = None,
+    settled: bool | None = None,
     copilot_arrives: bool = True,
     request_ok: bool = True,
     coder_ok: bool = True,
@@ -199,15 +201,21 @@ def _install(
         lambda wt, **kw: state.update(pr_kwargs=kw) or "https://github.com/o/r/pull/82",
     )
     monkeypatch.setattr(pr_delivery, "request_copilot", lambda *a: request_ok)
+    expected_count = expected if expected is not None else len(comments or [])
     monkeypatch.setattr(
         pr_delivery,
         "wait_for_copilot",
-        lambda *a, **kw: len(comments or []) if copilot_arrives else None,
+        lambda *a, **kw: expected_count if copilot_arrives else None,
+    )
+    settled_flag = (
+        settled
+        if settled is not None
+        else (expected_count <= 0 or len(comments or []) >= expected_count)
     )
     monkeypatch.setattr(
         pr_delivery,
         "fetch_copilot_comments_settled",
-        lambda *a, **kw: list(comments or []),
+        lambda *a, **kw: (list(comments or []), settled_flag),
     )
     monkeypatch.setattr(
         pr_delivery,
@@ -311,7 +319,57 @@ def test_deliver_copilot_clean_review_no_fix_round(
     state["wt"] = wt
     out = deliver(config, _result(config, wt))
     assert out.copilot_reviewed is True and out.comments_count == 0
+    assert out.copilot_settled is True  # expected 0 → genuinely clean, settled
     assert state["turn_prompts"] == []  # no coder round for a clean review
+
+
+def test_deliver_copilot_nonsettle_zero_defers(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """Copilot's summary claimed comments but none materialised in the window
+    (#91). The round must be flagged INCOMPLETE — copilot_settled=False + a
+    'did not settle' note — NOT silently treated as a clean review, and no fix
+    round runs against zero comments."""
+    state = _install(monkeypatch, config, comments=[], expected=2)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+    assert out.copilot_reviewed is True
+    assert out.copilot_settled is False
+    assert any("did not settle" in n for n in out.notes)
+    assert state["turn_prompts"] == []  # nothing materialised → no fix round
+
+
+def test_deliver_copilot_unknown_count_unsettled_flags_incomplete(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """A Copilot review whose body states no count (expected=-1) and whose
+    stream never stabilises must be flagged INCOMPLETE at the deliver() level,
+    not reported as a clean/settled review (#96 review finding 2). This is the
+    case most prone to silently reintroducing the missed-comments failure."""
+    state = _install(monkeypatch, config, comments=[], expected=-1, settled=False)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+    assert out.copilot_reviewed is True
+    assert out.copilot_settled is False
+    assert any("did not stabilise" in n for n in out.notes)
+    assert state["turn_prompts"] == []  # nothing materialised → no fix round
+
+
+def test_deliver_copilot_nonsettle_partial_fixes_and_flags(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """Some-but-not-all comments materialised: address the ones we have, but
+    still flag the round INCOMPLETE so the missing comments aren't lost."""
+    comments = [CopilotComment(comment_id=11, path="a.py", line=5, body="fix this")]
+    state = _install(monkeypatch, config, comments=comments, expected=3)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+    assert out.copilot_settled is False
+    assert any("did not settle" in n for n in out.notes)
+    assert state["turn_prompts"]  # fix round still runs on the comment we have
 
 
 def test_deliver_full_copilot_round(
@@ -327,6 +385,7 @@ def test_deliver_full_copilot_round(
     out = deliver(config, result)
 
     assert out.comments_count == 1
+    assert out.copilot_settled is True  # all expected comments materialised
     assert out.fix_committed and out.fix_pushed
     assert out.fix_sha is not None
     assert out.extra_cost_usd == pytest.approx(0.1)  # the fix turn's spend
@@ -423,27 +482,38 @@ def test_deliver_coder_failure_comments_and_degrades(
     assert any("respond manually" in n for n in out.notes)
 
 
-# --- comment-lag settling (the first-dogfood race) ------------------------------
+# --- comment-lag settling (the first-dogfood race + recurrence) -----------------
 
 
 def test_settled_fetch_waits_for_lagging_comments(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # First poll returns [], the comments materialise on the third — the
-    # settle loop must keep going until the EXPECTED count is visible.
+    # settle loop must keep going until the EXPECTED count is visible AND
+    # the count has been stable for settle_seconds.
     calls = {"n": 0}
     arrived = [CopilotComment(comment_id=1, path="a.py", line=1, body="x")]
+    clock = {"t": 0.0}
 
     def fake_fetch(wt, repo, pr):
         calls["n"] += 1
         return arrived if calls["n"] >= 3 else []
 
     monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
-    monkeypatch.setattr(pr_delivery.time, "sleep", lambda s: None)
-    out = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=1, grace_seconds=60
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
+    out, settled = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
     )
-    assert out == arrived and calls["n"] == 3
+    assert out == arrived
+    assert settled is True  # comments arrived + stabilised before the deadline
+    # call 1-2: empty; call 3: arrives (settle clock starts); then more
+    # polls until settle_seconds elapses without a count change
+    assert calls["n"] >= 3
 
 
 def test_settled_fetch_zero_expected_returns_immediately(
@@ -456,10 +526,11 @@ def test_settled_fetch_zero_expected_returns_immediately(
         return []
 
     monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
-    out = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=0, grace_seconds=60
+    out, settled = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=0, grace_seconds=120
     )
     assert out == [] and calls["n"] == 1  # no pointless polling
+    assert settled is True  # expected 0 → genuinely nothing to wait for
 
 
 def test_settled_fetch_grace_bounds_the_wait(
@@ -473,10 +544,103 @@ def test_settled_fetch_grace_bounds_the_wait(
         clock["t"] += s
 
     monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
-    out = pr_delivery.fetch_copilot_comments_settled(
+    out, settled = pr_delivery.fetch_copilot_comments_settled(
         tmp_path, "o/r", 1, expected=2, grace_seconds=30
     )
     assert out == []  # gave up after the grace window
+    assert settled is False  # deadline hit before the comments arrived
+
+
+def test_settled_fetch_catches_late_arriving_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The settle window re-polls after the threshold is met, catching
+    comments that trickle in after the expected count is reached — the
+    exact race that the 90 s grace missed."""
+    c1 = CopilotComment(comment_id=1, path="a.py", line=1, body="x")
+    c2 = CopilotComment(comment_id=2, path="b.py", line=2, body="y")
+    clock = {"t": 0.0}
+
+    # c1 arrives at t=5 (poll 2), c2 arrives at t=15 (poll 4)
+    def fake_fetch(wt, repo, pr):
+        if clock["t"] < 5:
+            return []
+        if clock["t"] < 15:
+            return [c1]
+        return [c1, c2]
+
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
+
+    # expected=1 — old code would have returned [c1] immediately at t=5
+    out, settled = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
+    )
+    assert len(out) == 2  # settle window caught c2
+    assert settled is True
+
+
+def test_settled_fetch_unknown_expected_waits_for_stability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When expected=-1 (unknown count), the old code returned on the first
+    comment; the settle window now waits for the count to stop changing."""
+    c1 = CopilotComment(comment_id=1, path="a.py", line=1, body="x")
+    c2 = CopilotComment(comment_id=2, path="b.py", line=2, body="y")
+    clock = {"t": 0.0}
+
+    def fake_fetch(wt, repo, pr):
+        if clock["t"] < 5:
+            return []
+        if clock["t"] < 10:
+            return [c1]
+        return [c1, c2]
+
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
+
+    out, settled = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=-1, grace_seconds=120, settle_seconds=15
+    )
+    # c2 arrived at t=10, settle window of 15 s starts THEN, so returns at ~t=25
+    assert len(out) == 2
+    assert settled is True  # unknown count stabilised before the deadline
+
+
+def test_settled_fetch_unknown_expected_unstable_at_deadline_not_settled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """expected=-1 but the stream is still changing at the deadline → the fetch
+    must report settled=False, so deliver() flags the round incomplete rather
+    than reporting an unknown-count review as settled (#96 review finding 2)."""
+    c1 = CopilotComment(comment_id=1, path="a.py", line=1, body="x")
+    c2 = CopilotComment(comment_id=2, path="b.py", line=2, body="y")
+    clock = {"t": 0.0}
+
+    def fake_fetch(wt, repo, pr):
+        return [c1] if clock["t"] < 10 else [c1, c2]  # changes at t=10
+
+    monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
+    monkeypatch.setattr(pr_delivery.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        pr_delivery.time, "sleep", lambda s: clock.update(t=clock["t"] + s)
+    )
+    # deadline t=20; count last changed at t=10, so only 10 s stable (< 15)
+    out, settled = pr_delivery.fetch_copilot_comments_settled(
+        tmp_path, "o/r", 1, expected=-1, grace_seconds=20, settle_seconds=15
+    )
+    assert len(out) == 2
+    assert settled is False  # never stabilised within the window
 
 
 def test_generated_count_parsing() -> None:
