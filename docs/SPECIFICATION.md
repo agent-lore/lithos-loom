@@ -601,6 +601,52 @@ uv run python -m lithos_loom.plugins.story_develop \
 - **Status mapping.** `approved` → `succeeded`; with the route's `completes_task = false` (§2.2) the runner then leaves the task **open** for human merge (marks `loom_delivered`, releases) rather than completing it — so an approved run never closes a github-linked issue for un-merged work. `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.
 - The plugin still owns its Lithos round-trip directly (the `[DevelopResult]` finding + `develop_*` metadata, same as `--task-id` mode); `result.json` carries `status` for the runner, so there is no double-application.
 
+**Worked example — model + effort.** Project default in the project-context doc's frontmatter (a reviewer that out-models the coder, plus a strict security pass):
+
+```yaml
+develop_coder:
+  model: sonnet
+  effort: medium
+develop_reviewers:
+  - name: code-quality
+    model: opus
+    effort: high
+  - name: security
+    model: claude-opus-4-8        # full id — pinned for reproducibility
+    effort: xhigh
+    block_threshold: minor        # blocks on minor+ (code-quality stays major+)
+    system_prompt: "Focus on authz, injection, secrets, SSRF."
+develop_default_reviewers: [code-quality, security]
+```
+
+Per-task override on a Lithos task's `metadata` (coder-only; reviewers stay project policy):
+
+```jsonc
+{ "develop_model": "haiku", "develop_effort": "low" }   // a trivial task — go cheap
+{ "develop_model": "opus", "develop_effort": "max" }    // a gnarly task — go deep
+{ "reviewers": ["security"] }                            // run only this reviewer from the pool
+```
+
+Standalone CLI (per-reviewer model/effort require `--develop-config`; the blanket `--reviewer-*` flags apply to every `--reviewer` and **error** if combined with `--develop-config`):
+
+```bash
+# blanket: cheap coder, rigorous single reviewer
+python -m lithos_loom.plugins.story_develop --repo ~/proj --task-id <uuid> \
+    --coder-model haiku --coder-effort low --reviewer-model opus --reviewer-effort xhigh
+
+# per-reviewer: a [[reviewers]] table per reviewer in the config file
+python -m lithos_loom.plugins.story_develop --repo ~/proj --task-id <uuid> \
+    --develop-config panel.toml
+```
+
+Resolution precedence (first match wins; "agent default" = no flag passed, so the tool's own default applies):
+
+| Knob | Order |
+|------|-------|
+| coder model | `task.develop_model` → `develop_coder.model` → `--coder-model` (route fallback) → agent default |
+| coder effort | `task.develop_effort` → `develop_coder.effort` → `--coder-effort` (route fallback) → agent default |
+| reviewer model / effort | `develop_reviewers[].{model,effort}` → `--reviewer-*` (fills only what's unset) → agent default |
+
 ---
 
 ## 6. Event Bus Contract

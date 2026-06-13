@@ -1,20 +1,35 @@
 # Example reviewer panel for `story-develop --develop-config <this file>`.
 #
-# Each [[reviewers]] table defines one reviewer: its persona (name +
-# system_prompt), its strictness (block_threshold — findings AT or ABOVE this
-# severity block approval; below it they are recorded but non-blocking), and
-# its tooling (tool + fallback_chain for usage-limit switching).
+# Each [[reviewers]] table defines one reviewer:
+#   name           persona / handoff id (lowercase slug)
+#   block_threshold strictness — findings AT or ABOVE this severity block
+#                   approval; below it they are recorded but non-blocking
+#   system_prompt   the reviewer's focus brief
+#   tool            agent tool (only "claude" is wired today; codex is #94)
+#   fallback_chain  alternate tools tried when this one is usage-limited
+#   model           model alias (opus/sonnet/haiku/fable) or a full id; omit
+#                   to inherit the agent default
+#   effort          reasoning level: low | medium | high | xhigh | max; omit
+#                   to inherit the agent default. NOT a token budget — these
+#                   are Claude's --effort levels (the canonical set; other
+#                   tools map onto them when they land, #94)
 #
 # The run is approved only when ALL reviewers pass their OWN threshold in the
-# same round.
+# same round. (With --reviewer instead of --develop-config, the blanket
+# --reviewer-model / --reviewer-effort flags set these for every reviewer;
+# per-reviewer values require this file.)
 
 [[reviewers]]
 name = "code-quality"
 block_threshold = "major"
+model = "opus"     # out-model the coder so the default reviewer isn't the weak link
+effort = "high"
 
 [[reviewers]]
 name = "security"
-block_threshold = "minor"  # security is strict: any minor finding blocks
+block_threshold = "minor"          # security is strict: any minor finding blocks
+model = "claude-opus-4-8"          # pinned full id — reproducible, won't drift
+effort = "xhigh"                   # deepest practical reasoning for the strict gate
 system_prompt = """
 Review as a security specialist: injection, authn/authz, secret handling,
 unsafe deserialization, path traversal, SSRF, and dependency risks. Judge the
