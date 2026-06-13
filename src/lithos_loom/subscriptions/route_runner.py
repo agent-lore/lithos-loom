@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import shlex
 import shutil
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -276,7 +277,11 @@ class RouteRunner:
                 f"route command uses the {{repo}} token but project {slug!r} "
                 "is not registered in [projects.*] on this host"
             )
-        return command.replace("{{repo}}", str(repo))
+        # shlex.quote: the resolved command is tokenised with shlex.split in
+        # plugin_runner._build_argv, so a repo path containing spaces (or
+        # shell metacharacters) must be quoted or it would split into several
+        # argv elements and truncate --repo.
+        return command.replace("{{repo}}", shlex.quote(str(repo)))
 
     async def _run_claimed_task(self, task_id: str, payload: Mapping[str, Any]) -> None:
         try:
@@ -479,6 +484,19 @@ class RouteRunner:
             if task is None or task.status != "open":
                 logger.info(
                     "RouteRunner %s: %s no longer open at resume time; dropping",
+                    self.route.name,
+                    task_id,
+                )
+                return
+            # Re-check the route's tag filter. The re-dispatch calls _handle
+            # directly, bypassing the bus matcher that gates normal events, so
+            # an operator who retagged the task during the pause window (e.g.
+            # pulled the trigger tag to cancel it) would otherwise still get a
+            # resumed run against a task that no longer matches this route.
+            if not set(self.route.match.tags).issubset(set(task.tags)):
+                logger.info(
+                    "RouteRunner %s: %s no longer carries the route's trigger "
+                    "tags at resume time; dropping",
                     self.route.name,
                     task_id,
                 )

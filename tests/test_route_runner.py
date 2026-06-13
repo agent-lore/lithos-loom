@@ -807,6 +807,53 @@ async def test_repo_token_resolved_from_projects_map(tmp_path: Path) -> None:
     assert "{{repo}}" not in captured["command"]
 
 
+async def test_repo_token_with_spaces_is_shell_quoted(tmp_path: Path) -> None:
+    """A repo path with spaces survives shlex.split as ONE argv element.
+
+    The resolved command is tokenised with shlex.split in plugin_runner, so
+    an unquoted spaced path would split and truncate --repo. Assert the
+    round-trip: shlex.split of the resolved command yields the full path.
+    """
+    import shlex
+
+    bus = EventBus()
+    captured: dict[str, Any] = {}
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        captured["command"] = kwargs["command"]
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    spaced = "/home/x/my projects/loom repo"
+    runner = RouteRunner(
+        route=_repo_route(),
+        bus=bus,
+        lithos=lithos,
+        agent_id="a",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=capturing_plugin,
+        project_repos={"loom": Path(spaced)},
+    )
+    payload = _payload(
+        task_id="task-1",
+        tags=("trigger:story-develop",),
+        metadata={"project": "loom"},
+    )
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    argv = shlex.split(captured["command"])
+    assert spaced in argv  # one element, not split on the spaces
+    assert argv[argv.index("--repo") + 1] == spaced
+
+
 async def test_repo_token_without_project_releases_with_finding(
     tmp_path: Path,
 ) -> None:
@@ -875,3 +922,31 @@ async def test_no_repo_token_does_not_require_project(tmp_path: Path) -> None:
     await bus.publish(_evt(payload=_payload(metadata={})))
     await _run_for(runner)
     lithos.task_complete.assert_awaited_once()
+
+
+async def test_resume_dropped_when_task_retagged_out_of_route(
+    tmp_path: Path,
+) -> None:
+    """If the task no longer carries the route's trigger tags at resume time
+    (operator pulled the tag during the pause), the resumed run is dropped —
+    the direct _handle call must not bypass the route's tag filter."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    # Fresh snapshot: still open, but the trigger tag is gone.
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="open",
+        tags=("some-other-tag",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1  # only the first run; no re-dispatch
+    assert lithos.task_claim.await_count == 1
