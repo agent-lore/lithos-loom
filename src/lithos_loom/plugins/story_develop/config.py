@@ -59,6 +59,11 @@ class ReviewerSpec:
     ``system_prompt`` is an optional focus brief injected into the reviewer's
     prompts. ``fallback_chain`` lists alternate tools tried when this
     reviewer's tool is usage-limited (T5).
+
+    ``model`` / ``thinking`` are per-reviewer (#93): a strong reviewer can run
+    a more capable model + bigger thinking budget than a lenient one. ``None``
+    means "inherit the agent CLI's default" — see :class:`DevelopConfig` for
+    why we do not hard-pin a model string.
     """
 
     name: str
@@ -66,6 +71,8 @@ class ReviewerSpec:
     block_threshold: str = DEFAULT_BLOCK_THRESHOLD
     system_prompt: str | None = None
     fallback_chain: tuple[str, ...] = ()
+    model: str | None = None
+    thinking: int | None = None
 
 
 _VALID_THRESHOLDS = ("critical", "major", "minor")
@@ -76,7 +83,38 @@ _REVIEWER_ENTRY_KEYS = {
     "block_threshold",
     "system_prompt",
     "fallback_chain",
+    "model",
+    "thinking",
 }
+
+
+def parse_model(value: object, *, where: str) -> str | None:
+    """Validate a ``model`` value: a non-empty string, or ``None``.
+
+    Shared by the reviewer-entry parser and the daemon-mode coder lookup so
+    both surfaces reject the same garbage (empty / non-string) identically.
+    Raises :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where}: model must be a non-empty string (got {value!r})")
+    return value
+
+
+def parse_thinking(value: object, *, where: str) -> int | None:
+    """Validate a ``thinking`` token budget: a positive int, or ``None``.
+
+    ``bool`` is rejected explicitly (it is an ``int`` subclass, so ``True``
+    would otherwise sneak through as ``1``). Raises :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"{where}: thinking must be a positive integer (got {value!r})"
+        )
+    return value
 
 
 def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
@@ -112,12 +150,16 @@ def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
     tool = entry.get("tool", DEFAULT_REVIEWER_TOOL)
     if not isinstance(tool, str):
         raise ValueError(f"{where}: tool must be a string")
+    model = parse_model(entry.get("model"), where=where)
+    thinking = parse_thinking(entry.get("thinking"), where=where)
     return ReviewerSpec(
         name=name,
         tool=tool,
         block_threshold=threshold,
         system_prompt=system_prompt,
         fallback_chain=tuple(chain),
+        model=model,
+        thinking=thinking,
     )
 
 
@@ -169,6 +211,15 @@ class DevelopConfig:
     description: str
     work_dir: Path
     coder: str = DEFAULT_CODER_TOOL
+    # Coder model + thinking budget (#93). ``None`` = inherit the agent CLI's
+    # default. We deliberately do NOT hard-pin a model string here: a pin
+    # chosen today goes stale and couples the plugin to a model's lifecycle
+    # (an upgrade would need a code release). Reproducibility is instead served
+    # by letting the operator pin via project metadata / CLI and by recording
+    # the resolved choice with the run. Per-reviewer model/thinking live on
+    # ``ReviewerSpec``; this pair is the coder's.
+    coder_model: str | None = None
+    coder_thinking: int | None = None
     image: str = DEFAULT_IMAGE
     base_branch: str = "main"
     # Single-reviewer convenience fields (the T2-era surface; still the

@@ -37,7 +37,9 @@ from .config import (
     DEFAULT_CODER_TOOL,
     DEFAULT_REVIEWER_NAME,
     ReviewerSpec,
+    parse_model,
     parse_reviewer_entry,
+    parse_thinking,
 )
 from .lithos_io import AGENT_ID, TaskContext
 
@@ -110,6 +112,8 @@ class ProjectDevelopSettings:
 
     reviewers: tuple[ReviewerSpec, ...] = BUILTIN_REVIEWERS
     coder: str = DEFAULT_CODER_TOOL
+    coder_model: str | None = None
+    coder_thinking: int | None = None
     fallback_chain: tuple[str, ...] = ()
     max_rounds: int | None = None
     max_cost_usd: float | None = None
@@ -238,11 +242,51 @@ def resolve_project_settings(
     reviewers = _select_reviewers(pool, meta, task_metadata, frictions)
 
     coder = DEFAULT_CODER_TOOL
+    coder_model: str | None = None
+    coder_thinking: int | None = None
     raw_coder = meta.get("develop_coder")
-    if isinstance(raw_coder, dict) and isinstance(raw_coder.get("tool"), str):
-        coder = raw_coder["tool"]
+    if isinstance(raw_coder, dict):
+        raw_tool = raw_coder.get("tool")
+        if isinstance(raw_tool, str):
+            coder = raw_tool
+        elif raw_tool is not None:
+            frictions.append("develop_coder.tool must be a string; using default")
+        # model/thinking are optional within develop_coder (#93); each is
+        # validated independently so one bad value doesn't drop the other.
+        try:
+            coder_model = parse_model(
+                raw_coder.get("model"), where="develop_coder.model"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring")
+        try:
+            coder_thinking = parse_thinking(
+                raw_coder.get("thinking"), where="develop_coder.thinking"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring")
     elif raw_coder is not None:
         frictions.append("develop_coder must be an object with a 'tool'; ignoring")
+
+    # Per-task override (#93): a task flags "this one is cheap / needs deep
+    # reasoning" by pinning the CODER's model/thinking. Reviewer models stay
+    # project policy (per-reviewer in develop_reviewers) — a blanket per-task
+    # downgrade must never silently weaken a strict security reviewer.
+    if task_metadata.get("develop_model") is not None:
+        try:
+            coder_model = parse_model(
+                task_metadata["develop_model"], where="task metadata.develop_model"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
+    if task_metadata.get("develop_thinking") is not None:
+        try:
+            coder_thinking = parse_thinking(
+                task_metadata["develop_thinking"],
+                where="task metadata.develop_thinking",
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
 
     raw_chain = meta.get("develop_fallback_chain")
     chain: tuple[str, ...] = ()
@@ -266,6 +310,8 @@ def resolve_project_settings(
     return ProjectDevelopSettings(
         reviewers=reviewers,
         coder=coder,
+        coder_model=coder_model,
+        coder_thinking=coder_thinking,
         fallback_chain=chain,
         max_rounds=max_rounds,
         max_cost_usd=float(max_cost) if max_cost is not None else None,

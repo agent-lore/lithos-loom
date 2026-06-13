@@ -38,6 +38,76 @@ def test_main_rejects_invalid_reviewer_name(tmp_git_repo: Path, capsys) -> None:
     assert "invalid --reviewer" in capsys.readouterr().err
 
 
+def test_main_rejects_zero_coder_thinking(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--coder-thinking", "0"]
+    )
+    assert rc == 2
+    assert "--coder-thinking must be >= 1" in capsys.readouterr().err
+
+
+def test_main_rejects_zero_reviewer_thinking(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--reviewer-thinking", "0"]
+    )
+    assert rc == 2
+    assert "--reviewer-thinking must be >= 1" in capsys.readouterr().err
+
+
+def test_main_threads_model_and_thinking_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """--coder/--reviewer model+thinking flags land on the resolved config."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "do a thing",
+            "--coder-model",
+            "opus",
+            "--coder-thinking",
+            "20000",
+            "--reviewer",
+            "code-quality",
+            "--reviewer",
+            "security",
+            "--reviewer-model",
+            "sonnet",
+            "--reviewer-thinking",
+            "8000",
+        ]
+    )
+    assert rc == 0
+    cfg = captured["config"]
+    assert cfg.coder_model == "opus" and cfg.coder_thinking == 20000
+    assert {s.name for s in cfg.reviewers} == {"code-quality", "security"}
+    for spec in cfg.reviewers:
+        assert spec.model == "sonnet" and spec.thinking == 8000
+
+
 def test_main_rejects_bad_max_rounds(tmp_git_repo: Path, capsys) -> None:
     rc = main(["--repo", str(tmp_git_repo), "--description", "x", "--max-rounds", "0"])
     assert rc == 2

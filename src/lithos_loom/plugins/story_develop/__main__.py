@@ -158,6 +158,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Coding agent tool",
     )
     p.add_argument(
+        "--coder-model",
+        default=None,
+        metavar="MODEL",
+        help="Model for the coder (e.g. 'opus', 'sonnet', or a full id). "
+        "Default: the agent CLI's default model",
+    )
+    p.add_argument(
+        "--coder-thinking",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="Extended-thinking token budget for the coder "
+        "(MAX_THINKING_TOKENS). Default: the CLI's default",
+    )
+    p.add_argument(
         "--reviewer",
         action="append",
         default=None,
@@ -178,6 +193,21 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["critical", "major", "minor"],
         help="Findings below this severity do not block (applies to all "
         "--reviewer names; per-reviewer thresholds need --develop-config)",
+    )
+    p.add_argument(
+        "--reviewer-model",
+        default=None,
+        metavar="MODEL",
+        help="Model for every --reviewer (per-reviewer models need "
+        "--develop-config). Default: the agent CLI's default model",
+    )
+    p.add_argument(
+        "--reviewer-thinking",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="Extended-thinking token budget for every --reviewer "
+        "(per-reviewer budgets need --develop-config). Default: the CLI's",
     )
     p.add_argument(
         "--max-rounds",
@@ -309,6 +339,15 @@ def _daemon_main(args: argparse.Namespace) -> int:
         work_dir=args.work_dir.expanduser().resolve(),
         acceptance_criteria=ctx.acceptance_criteria,
         coder=settings.coder,
+        # Project metadata (incl. per-task override) wins; the CLI flag is a
+        # route-level fallback (mirrors max_rounds). Reviewer model/thinking
+        # ride along inside settings.reviewers (per-reviewer specs).
+        coder_model=settings.coder_model or args.coder_model,
+        coder_thinking=(
+            settings.coder_thinking
+            if settings.coder_thinking is not None
+            else args.coder_thinking
+        ),
         reviewers=settings.reviewers,
         max_rounds=settings.max_rounds or args.max_rounds,
         test_gate=not args.no_test_gate,
@@ -468,6 +507,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    for flag, value in (
+        ("--coder-thinking", args.coder_thinking),
+        ("--reviewer-thinking", args.reviewer_thinking),
+    ):
+        if value is not None and value < 1:
+            print(f"error: {flag} must be >= 1", file=sys.stderr)
+            return 2
     if args.develop_config is not None:
         try:
             specs = load_develop_config(args.develop_config.expanduser())
@@ -492,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
                 name=name,
                 block_threshold=args.block_threshold,
                 fallback_chain=tuple(args.reviewer_fallback or ()),
+                model=args.reviewer_model,
+                thinking=args.reviewer_thinking,
             )
             for name in names
         )
@@ -529,6 +577,8 @@ def main(argv: list[str] | None = None) -> int:
         work_dir=work_dir,
         acceptance_criteria=acceptance_criteria,
         coder=args.coder,
+        coder_model=args.coder_model,
+        coder_thinking=args.coder_thinking,
         reviewers=specs,
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,

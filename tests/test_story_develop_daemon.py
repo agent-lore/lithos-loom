@@ -224,6 +224,83 @@ def test_resolve_full_config_with_task_override(fake_client) -> None:
     assert settings.frictions == ()
 
 
+def test_resolve_coder_model_and_thinking_from_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"tool": "claude", "model": "opus", "thinking": 12000}},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.coder_model == "opus"
+    assert settings.coder_thinking == 12000
+    assert settings.frictions == ()
+
+
+def test_resolve_coder_model_without_tool_keeps_default_tool(fake_client) -> None:
+    """develop_coder = {model = ...} is valid — tool stays the default, no friction."""
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "sonnet"}},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.coder == "claude"  # default
+    assert settings.coder_model == "sonnet"
+    assert settings.frictions == ()
+
+
+def test_resolve_task_override_beats_project_coder_model(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "opus", "thinking": 12000}},
+    )
+    settings = resolve_project_settings(
+        "http://x",
+        {"project": "loom", "develop_model": "haiku", "develop_thinking": 2000},
+    )
+    assert settings.coder_model == "haiku"  # per-task wins
+    assert settings.coder_thinking == 2000
+    assert settings.frictions == ()
+
+
+def test_resolve_reviewer_model_and_thinking_flow_through_pool(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {
+            "develop_reviewers": [
+                {"name": "security", "model": "opus", "thinking": 16000}
+            ],
+            "develop_default_reviewers": ["security"],
+        },
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    (sec,) = settings.reviewers
+    assert sec.model == "opus" and sec.thinking == 16000
+
+
+def test_resolve_invalid_coder_model_thinking_frictioned(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "", "thinking": 0}},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.coder_model is None
+    assert settings.coder_thinking is None
+    joined = "\n".join(settings.frictions)
+    assert "develop_coder.model" in joined
+    assert "develop_coder.thinking" in joined
+
+
+def test_resolve_invalid_task_override_keeps_project_default(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "opus"}},
+    )
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_model": ""}
+    )
+    assert settings.coder_model == "opus"  # bad override ignored, default kept
+    assert any("develop_model" in f for f in settings.frictions)
+
+
 def test_resolve_unknown_override_name_skipped_with_friction(fake_client) -> None:
     fake_client.note = _FakeNote(
         "projects/loom/loom-project-context.md",
