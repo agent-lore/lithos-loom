@@ -30,8 +30,8 @@ def run_claude(
     output_format: str = "stream-json",
     timeout: int = 3600,
 ) -> AgentResult:
-    """Stub — implement per docs/prd/mvp.md US-12."""
-    raise NotImplementedError("runner.agents.run_claude — implement per US-12")
+    """Stub — implement per docs/prd/orchestration.md."""
+    raise NotImplementedError("runner.agents.run_claude — not yet implemented")
 
 
 def run_codex(
@@ -41,4 +41,4 @@ def run_codex(
     timeout: int = 3600,
 ) -> AgentResult:
     """Stub — Codex mirror of :func:`run_claude`."""
-    raise NotImplementedError("runner.agents.run_codex — implement per US-12")
+    raise NotImplementedError("runner.agents.run_codex — not yet implemented")

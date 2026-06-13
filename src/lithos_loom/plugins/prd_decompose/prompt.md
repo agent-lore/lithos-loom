@@ -26,5 +26,5 @@ and asks Claude for structured JSON output matching the schema below.
 ## Prompt body
 
 (TODO: write the full Pocock-shaped decomposition prompt here, referencing
-the PRD body as `<<PRD_BODY>>` substitution token. See US-12 in
-`docs/prd/mvp.md`.)
+the PRD body as `<<PRD_BODY>>` substitution token. See the `prd-decompose`
+story (US-22) in `docs/prd/orchestration.md`.)
