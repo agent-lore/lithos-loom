@@ -51,13 +51,17 @@ from .config import (
     DEFAULT_PAUSE_POLL_MINUTES,
     DEFAULT_REVIEWER_NAME,
     DEFAULT_TEST_TIMEOUT,
+    VALID_EFFORTS,
     DevelopConfig,
     ReviewerSpec,
     is_valid_reviewer_name,
     load_develop_config,
+    parse_effort,
+    parse_model,
 )
 from .daemon_io import (
     EXIT_BAD_INPUT,
+    apply_cli_fallbacks,
     build_result_payload,
     post_frictions,
     read_task_payload,
@@ -158,6 +162,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Coding agent tool",
     )
     p.add_argument(
+        "--coder-model",
+        default=None,
+        metavar="MODEL",
+        help="Model for the coder (e.g. 'opus', 'sonnet', or a full id). "
+        "Default: the agent CLI's default model",
+    )
+    p.add_argument(
+        "--coder-effort",
+        default=None,
+        metavar="LEVEL",
+        # NOT argparse `choices`: this flag doubles as a daemon-mode route-level
+        # fallback that must degrade-with-friction (not SystemExit at parse time)
+        # on a bad value — so it's validated by parse_effort, like --coder-model.
+        help="Reasoning-effort level for the coder "
+        f"({'/'.join(VALID_EFFORTS)}). Default: the agent's default",
+    )
+    p.add_argument(
         "--reviewer",
         action="append",
         default=None,
@@ -178,6 +199,23 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["critical", "major", "minor"],
         help="Findings below this severity do not block (applies to all "
         "--reviewer names; per-reviewer thresholds need --develop-config)",
+    )
+    p.add_argument(
+        "--reviewer-model",
+        default=None,
+        metavar="MODEL",
+        help="Model for every --reviewer (per-reviewer models need "
+        "--develop-config). Default: the agent CLI's default model",
+    )
+    p.add_argument(
+        "--reviewer-effort",
+        default=None,
+        metavar="LEVEL",
+        # See --coder-effort: validated by parse_effort, not argparse choices,
+        # to preserve the daemon-mode friction-degradation contract.
+        help="Reasoning-effort level for every --reviewer "
+        f"({'/'.join(VALID_EFFORTS)}; per-reviewer levels need "
+        "--develop-config). Default: the agent's default",
     )
     p.add_argument(
         "--max-rounds",
@@ -298,6 +336,15 @@ def _daemon_main(args: argparse.Namespace) -> int:
     result_file = args.result_file.expanduser().resolve()
     started_at = datetime.now(UTC)
     settings = resolve_project_settings(args.lithos_url, ctx.metadata)
+    # Route-level --coder-*/--reviewer-* flags are blanket fallbacks under the
+    # resolved metadata (#93); bad values drop with friction, never error.
+    settings = apply_cli_fallbacks(
+        settings,
+        coder_model=args.coder_model,
+        coder_effort=args.coder_effort,
+        reviewer_model=args.reviewer_model,
+        reviewer_effort=args.reviewer_effort,
+    )
     for friction in settings.frictions:
         print(f"[Friction] {friction}", file=sys.stderr)
     post_frictions(args.lithos_url, ctx.task_id, settings.frictions)
@@ -309,6 +356,8 @@ def _daemon_main(args: argparse.Namespace) -> int:
         work_dir=args.work_dir.expanduser().resolve(),
         acceptance_criteria=ctx.acceptance_criteria,
         coder=settings.coder,
+        coder_model=settings.coder_model,
+        coder_effort=settings.coder_effort,
         reviewers=settings.reviewers,
         max_rounds=settings.max_rounds or args.max_rounds,
         test_gate=not args.no_test_gate,
@@ -468,6 +517,32 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.develop_config is not None and (
+        args.reviewer_model is not None or args.reviewer_effort is not None
+    ):
+        # --develop-config supplies per-reviewer model/effort in the TOML;
+        # a blanket --reviewer-model/--reviewer-effort would ambiguously
+        # fight those. Reject rather than silently ignore.
+        print(
+            "error: --reviewer-model / --reviewer-effort cannot be combined "
+            "with --develop-config (set model/effort per [[reviewers]] table "
+            "in the config file instead)",
+            file=sys.stderr,
+        )
+        return 2
+    # Validate + normalise the model/effort flags so a bad value is a clear
+    # standalone CLI error (not an invalid argument at the agent). Effort is
+    # NOT argparse `choices` — that would also reject a bad daemon-mode route
+    # fallback at parse time, breaking the friction-degradation contract; the
+    # daemon path validates the same flags via apply_cli_fallbacks instead.
+    try:
+        coder_model = parse_model(args.coder_model, where="--coder-model")
+        reviewer_model = parse_model(args.reviewer_model, where="--reviewer-model")
+        coder_effort = parse_effort(args.coder_effort, where="--coder-effort")
+        reviewer_effort = parse_effort(args.reviewer_effort, where="--reviewer-effort")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.develop_config is not None:
         try:
             specs = load_develop_config(args.develop_config.expanduser())
@@ -492,6 +567,8 @@ def main(argv: list[str] | None = None) -> int:
                 name=name,
                 block_threshold=args.block_threshold,
                 fallback_chain=tuple(args.reviewer_fallback or ()),
+                model=reviewer_model,
+                effort=reviewer_effort,
             )
             for name in names
         )
@@ -529,6 +606,8 @@ def main(argv: list[str] | None = None) -> int:
         work_dir=work_dir,
         acceptance_criteria=acceptance_criteria,
         coder=args.coder,
+        coder_model=coder_model,
+        coder_effort=coder_effort,
         reviewers=specs,
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,

@@ -100,17 +100,28 @@ def build_exec_command(
     session_id: str,
     resume: bool = False,
     workdir: str = WORKSPACE_MOUNT,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
-    """Build the ``docker exec`` argv for one coder turn.
+    """Build the ``docker exec`` argv for one agent turn (coder or reviewer).
 
     ``--session-id`` controls the session on the first turn; ``--resume`` reloads
     it on later turns (T3). Output is ``--output-format json`` so completion /
     cost / errors come from structured output, not pane scraping.
+
+    *model* / *effort*, when set, add ``--model <model>`` / ``--effort <level>``
+    (#93) — passed on every turn, including resumes. *effort* is a Claude
+    reasoning level (``low``…``max``), not a token budget; ``None`` leaves the
+    agent default. Other tools have no shared effort knob (Codex picks depth via
+    the model; OpenCode uses ``--variant``) — when they land (#94) this builder
+    is the per-tool translation point for both ``model`` and ``effort``.
     """
     if tool != "claude":  # codex support arrives with T6
         raise ValueError(f"unsupported tool: {tool!r} (only 'claude' until T6)")
 
     session_flag = ["--resume", session_id] if resume else ["--session-id", session_id]
+    model_flag = ["--model", model] if model else []
+    effort_flag = ["--effort", effort] if effort else []
     return [
         "docker",
         "exec",
@@ -119,6 +130,8 @@ def build_exec_command(
         name,
         "claude",
         *session_flag,
+        *model_flag,
+        *effort_flag,
         "-p",
         "--dangerously-skip-permissions",
         "--output-format",

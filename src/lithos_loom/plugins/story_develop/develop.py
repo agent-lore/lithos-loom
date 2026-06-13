@@ -179,7 +179,12 @@ def _reviewer_brief(spec) -> str:
 def _build_run_cmd(
     config: DevelopConfig, *, agent: str, config_dir: Path, wt: Path, read_only: bool
 ) -> tuple[str, list[str]]:
-    """Build (container_name, docker-run-argv) for an agent container."""
+    """Build (container_name, docker-run-argv) for an agent container.
+
+    Model + reasoning effort (#93) are per-TURN flags applied in
+    :func:`run_turn` (the per-tool exec builder), not container env, so the
+    idle container itself carries no agent tuning.
+    """
     name = containers.container_name(config.run_id, agent)
     cmd = containers.build_run_command(
         name=name,
@@ -414,6 +419,8 @@ def _turn_with_limit_pauses(
             session_id=session_id,
             resume=attempt_resume,
             timeout=timeout,
+            model=config.coder_model,
+            effort=config.coder_effort,
         )
         total_cost += turn.cost_usd
         if turn.succeeded:
@@ -471,6 +478,8 @@ def _review_turn(
     prompt: str,
     timeout: int,
     tool: str = "claude",
+    model: str | None = None,
+    effort: str | None = None,
     validate: Callable[[ReviewHandoff], str | None] | None = None,
 ) -> tuple[ReviewOutcome, TurnResult | None]:
     """Run one reviewer turn against an already-running reviewer container.
@@ -509,6 +518,8 @@ def _review_turn(
         resume=resume,
         timeout=timeout,
         tool=tool,
+        model=model,
+        effort=effort,
     )
     cost += turn.cost_usd
     if not turn.succeeded:
@@ -534,6 +545,8 @@ def _review_turn(
                 resume=True,
                 timeout=timeout,
                 tool=tool,
+                model=model,
+                effort=effort,
             )
             cost += retry.cost_usd
             if retry.succeeded:
@@ -625,6 +638,8 @@ def _run_reviewer_with_reaction(
         prompt=prompt,
         timeout=timeout,
         tool=rstate.tool_now,
+        model=rstate.spec.model,
+        effort=rstate.spec.effort,
         validate=rstate.ledger.check,
     )
     cost = review.cost_usd
@@ -681,6 +696,8 @@ def _run_reviewer_with_reaction(
                 prompt=reseed_prompt,
                 timeout=timeout,
                 tool=rstate.tool_now,
+                model=rstate.spec.model,
+                effort=rstate.spec.effort,
                 validate=rstate.ledger.check,
             )
             cost += review.cost_usd
@@ -719,6 +736,8 @@ def _run_reviewer_with_reaction(
             prompt=retry_prompt,
             timeout=timeout,
             tool=rstate.tool_now,
+            model=rstate.spec.model,
+            effort=rstate.spec.effort,
             validate=rstate.ledger.check,
         )
         cost += review.cost_usd

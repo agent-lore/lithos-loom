@@ -596,9 +596,56 @@ uv run python -m lithos_loom.plugins.story_develop \
 
 - `--repo` takes the runner's `{{repo}}` token (§5.1), resolved per task from `[projects.<slug>].repo` keyed by `metadata.project` — so one route serves every registered project. (An absolute path also works if you want a route pinned to one checkout.)
 - The task (title, body, `metadata.acceptance_criteria`) comes from `task.json`; `--description` / `--task-id` / `--no-lithos` / `--complete-on-approval` / `--reviewer` / `--develop-config` are rejected in daemon mode.
-- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`. Per-task override: `task.metadata.reviewers` (names from the pool). Every miss — no slug, no doc, no keys, unknown name — degrades to the built-in single `code-quality` reviewer with a `[Friction]` finding; a populated pool without a default selection still runs only the built-in reviewer (pool membership does not auto-run).
+- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?, model?, effort?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool?, model?, effort?}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`. Per-task override: `task.metadata.reviewers` (names from the pool); `task.metadata.develop_model` / `task.metadata.develop_effort` (override the **coder's** model / reasoning effort for that one task — reviewer models stay project policy). Every miss — no slug, no doc, no keys, unknown name — degrades to the built-in single `code-quality` reviewer with a `[Friction]` finding; a populated pool without a default selection still runs only the built-in reviewer (pool membership does not auto-run).
+- **Model + reasoning effort (#93).** `model` (e.g. `"opus"`, `"sonnet"`, or a full id) and `effort` (a reasoning-effort **level**: `low` / `medium` / `high` / `xhigh` / `max`) are configurable per agent: project-wide on `develop_coder` and per-reviewer in the `develop_reviewers` pool; per-task on the coder via `task.metadata.develop_model` / `develop_effort`. `effort` is **not** a token budget (`MAX_THINKING_TOKENS` is legacy and ignored by current adaptive-reasoning models) and there is **no universal cross-tool effort vocabulary** — Loom adopts **Claude's `--effort` levels as canonical** (Claude is the only wired agent today); when other tools land (#94) each maps the canonical level onto its own mechanism (Codex has no effort flag — depth follows the model choice; OpenCode uses `--variant high/max/minimal`). Both default to **the agent's default** (no `--model`, no `--effort`) — the plugin deliberately does not hard-pin a model string, so an agent upgrade is picked up without a code release. Standalone flags: `--coder-model` / `--coder-effort` and `--reviewer-model` / `--reviewer-effort` (the latter apply to every `--reviewer`; per-reviewer values need `--develop-config`). In daemon mode the standalone `--coder-model` / `--coder-effort` flags act as a route-level fallback that project/task metadata overrides. Invalid-value handling differs by surface: **standalone CLI** flags **error** (non-zero exit) on bad input (empty/whitespace model, or an off-canonical effort level); **project/task metadata and the daemon-mode CLI fallback** drop an invalid value with a `[Friction]` finding and continue — daemon-mode config resolution never fails the run (so the effort flags are validated by `parse_effort`, not argparse `choices`, which would otherwise reject a bad route fallback at parse time). A malformed route fallback is surfaced with friction **even when metadata already supplies that field** (so a route-config typo isn't silently masked); the valid fallback value is *applied* only where metadata left the field unset.
 - **Status mapping.** `approved` → `succeeded`; with the route's `completes_task = false` (§2.2) the runner then leaves the task **open** for human merge (marks `loom_delivered`, releases) rather than completing it — so an approved run never closes a github-linked issue for un-merged work. `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.
 - The plugin still owns its Lithos round-trip directly (the `[DevelopResult]` finding + `develop_*` metadata, same as `--task-id` mode); `result.json` carries `status` for the runner, so there is no double-application.
+
+**Worked example — model + effort.** Project default in the project-context doc's frontmatter (a reviewer that out-models the coder, plus a strict security pass):
+
+```yaml
+develop_coder:
+  model: sonnet
+  effort: medium
+develop_reviewers:
+  - name: code-quality
+    model: opus
+    effort: high
+  - name: security
+    model: claude-opus-4-8        # full id — pinned for reproducibility
+    effort: xhigh
+    block_threshold: minor        # blocks on minor+ (code-quality stays major+)
+    system_prompt: "Focus on authz, injection, secrets, SSRF."
+develop_default_reviewers: [code-quality, security]
+```
+
+Per-task override on a Lithos task's `metadata` (coder-only; reviewers stay project policy):
+
+```jsonc
+{ "develop_model": "haiku", "develop_effort": "low" }   // a trivial task — go cheap
+{ "develop_model": "opus", "develop_effort": "max" }    // a gnarly task — go deep
+{ "reviewers": ["security"] }                            // run only this reviewer from the pool
+```
+
+Standalone CLI (per-reviewer model/effort require `--develop-config`; the blanket `--reviewer-*` flags apply to every `--reviewer` and **error** if combined with `--develop-config`):
+
+```bash
+# blanket: cheap coder, rigorous single reviewer
+python -m lithos_loom.plugins.story_develop --repo ~/proj --task-id <uuid> \
+    --coder-model haiku --coder-effort low --reviewer-model opus --reviewer-effort xhigh
+
+# per-reviewer: a [[reviewers]] table per reviewer in the config file
+python -m lithos_loom.plugins.story_develop --repo ~/proj --task-id <uuid> \
+    --develop-config panel.toml
+```
+
+Resolution precedence (first match wins; "agent default" = no flag passed, so the tool's own default applies):
+
+| Knob | Order |
+|------|-------|
+| coder model | `task.develop_model` → `develop_coder.model` → `--coder-model` (route fallback) → agent default |
+| coder effort | `task.develop_effort` → `develop_coder.effort` → `--coder-effort` (route fallback) → agent default |
+| reviewer model / effort | `develop_reviewers[].{model,effort}` → `--reviewer-*` (fills only what's unset) → agent default |
 
 ---
 

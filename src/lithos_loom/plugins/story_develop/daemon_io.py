@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +37,8 @@ from .config import (
     DEFAULT_CODER_TOOL,
     DEFAULT_REVIEWER_NAME,
     ReviewerSpec,
+    parse_effort,
+    parse_model,
     parse_reviewer_entry,
 )
 from .lithos_io import AGENT_ID, TaskContext
@@ -110,6 +112,8 @@ class ProjectDevelopSettings:
 
     reviewers: tuple[ReviewerSpec, ...] = BUILTIN_REVIEWERS
     coder: str = DEFAULT_CODER_TOOL
+    coder_model: str | None = None
+    coder_effort: str | None = None
     fallback_chain: tuple[str, ...] = ()
     max_rounds: int | None = None
     max_cost_usd: float | None = None
@@ -238,11 +242,53 @@ def resolve_project_settings(
     reviewers = _select_reviewers(pool, meta, task_metadata, frictions)
 
     coder = DEFAULT_CODER_TOOL
+    coder_model: str | None = None
+    coder_effort: str | None = None
     raw_coder = meta.get("develop_coder")
-    if isinstance(raw_coder, dict) and isinstance(raw_coder.get("tool"), str):
-        coder = raw_coder["tool"]
+    if isinstance(raw_coder, dict):
+        raw_tool = raw_coder.get("tool")
+        if isinstance(raw_tool, str):
+            coder = raw_tool
+        elif raw_tool is not None:
+            frictions.append("develop_coder.tool must be a string; using default")
+        # model/effort are optional within develop_coder (#93); each is
+        # validated independently so one bad value doesn't drop the other.
+        try:
+            coder_model = parse_model(
+                raw_coder.get("model"), where="develop_coder.model"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring")
+        try:
+            coder_effort = parse_effort(
+                raw_coder.get("effort"), where="develop_coder.effort"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring")
     elif raw_coder is not None:
-        frictions.append("develop_coder must be an object with a 'tool'; ignoring")
+        frictions.append(
+            "develop_coder must be an object with optional tool/model/effort; ignoring"
+        )
+
+    # Per-task override (#93): a task flags "this one is cheap / needs deep
+    # reasoning" by pinning the CODER's model/effort. Reviewer models stay
+    # project policy (per-reviewer in develop_reviewers) — a blanket per-task
+    # downgrade must never silently weaken a strict security reviewer.
+    if task_metadata.get("develop_model") is not None:
+        try:
+            coder_model = parse_model(
+                task_metadata["develop_model"], where="task metadata.develop_model"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
+    if task_metadata.get("develop_effort") is not None:
+        try:
+            coder_effort = parse_effort(
+                task_metadata["develop_effort"],
+                where="task metadata.develop_effort",
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
 
     raw_chain = meta.get("develop_fallback_chain")
     chain: tuple[str, ...] = ()
@@ -266,9 +312,73 @@ def resolve_project_settings(
     return ProjectDevelopSettings(
         reviewers=reviewers,
         coder=coder,
+        coder_model=coder_model,
+        coder_effort=coder_effort,
         fallback_chain=chain,
         max_rounds=max_rounds,
         max_cost_usd=float(max_cost) if max_cost is not None else None,
+        frictions=tuple(frictions),
+    )
+
+
+def apply_cli_fallbacks(
+    settings: ProjectDevelopSettings,
+    *,
+    coder_model: str | None,
+    coder_effort: str | None,
+    reviewer_model: str | None,
+    reviewer_effort: str | None,
+) -> ProjectDevelopSettings:
+    """Layer route-level CLI model/effort flags UNDER the resolved settings.
+
+    Daemon mode has no per-agent CLI surface (``--reviewer`` / ``--develop-config``
+    are rejected), so these flags are blanket route-level fallbacks (#93): project
+    metadata always wins, and a flag fills only what metadata left unset — the
+    coder's model/effort, and each reviewer's. A bad flag value drops with a
+    ``[Friction]`` breadcrumb (never errors — daemon config resolution must not
+    fail the run, nor flow an invalid value through to the agent). Returns a new
+    settings object with the merged frictions.
+    """
+    frictions = list(settings.frictions)
+
+    def _validate(raw: object, parser, where: str):  # type: ignore[no-untyped-def]
+        if raw is None:
+            return None
+        try:
+            return parser(raw, where=where)
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring the route fallback")
+            return None
+
+    # Validate EVERY provided fallback flag up front so a malformed route value
+    # is surfaced with a [Friction] even when metadata already supplies that
+    # field — a route-config typo (`--coder-model opuss`, `--reviewer-effort
+    # hgh`) must not stay silently masked until metadata changes later. A valid
+    # fallback is then APPLIED only where metadata left the field unset.
+    v_coder_m = _validate(coder_model, parse_model, "--coder-model")
+    v_coder_e = _validate(coder_effort, parse_effort, "--coder-effort")
+    v_rev_m = _validate(reviewer_model, parse_model, "--reviewer-model")
+    v_rev_e = _validate(reviewer_effort, parse_effort, "--reviewer-effort")
+
+    coder_m = settings.coder_model if settings.coder_model is not None else v_coder_m
+    coder_e = settings.coder_effort if settings.coder_effort is not None else v_coder_e
+
+    reviewers = settings.reviewers
+    if v_rev_m is not None or v_rev_e is not None:
+        reviewers = tuple(
+            replace(
+                spec,
+                model=spec.model if spec.model is not None else v_rev_m,
+                effort=spec.effort if spec.effort is not None else v_rev_e,
+            )
+            for spec in reviewers
+        )
+
+    return replace(
+        settings,
+        coder_model=coder_m,
+        coder_effort=coder_e,
+        reviewers=reviewers,
         frictions=tuple(frictions),
     )
 

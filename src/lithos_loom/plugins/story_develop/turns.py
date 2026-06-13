@@ -79,12 +79,16 @@ def run_turn(
     resume: bool = False,
     timeout: int = 3600,
     tool: str = "claude",
+    model: str | None = None,
+    effort: str | None = None,
 ) -> TurnResult:
     """Execute one agent turn in *container* and return its parsed result.
 
     *tool* is threaded through to the exec builder, which raises for tools it
     cannot run — so an orchestration-level tool switch that the exec layer
     doesn't support yet fails loudly instead of silently running claude.
+    *model* / *effort* (#93), when set, pin the agent model + reasoning effort
+    for the turn; ``None`` leaves the agent default.
     """
     exec_cmd = containers.build_exec_command(
         name=container,
@@ -92,6 +96,8 @@ def run_turn(
         prompt=prompt,
         session_id=session_id,
         resume=resume,
+        model=model,
+        effort=effort,
     )
     try:
         proc = containers.exec_turn(exec_cmd, timeout=timeout)

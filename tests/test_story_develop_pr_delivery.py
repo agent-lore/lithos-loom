@@ -186,6 +186,7 @@ def _install(
         "pr_comments": [],
         "turn_prompts": [],
         "containers": [],
+        "start_cmds": [],
     }
     config.handoff_dir.mkdir(parents=True, exist_ok=True)
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
@@ -230,14 +231,25 @@ def _install(
 
     def fake_start(run_cmd):
         state["containers"].append("start")
+        state["start_cmds"].append(list(run_cmd))
         return "cid"
 
     def fake_run_turn(
-        *, container, prompt, session_id, resume=False, timeout, tool="claude"
+        *,
+        container,
+        prompt,
+        session_id,
+        resume=False,
+        timeout,
+        tool="claude",
+        model=None,
+        effort=None,
     ):
         state["turn_prompts"].append(prompt)
         state["resume"] = resume
         state["session"] = session_id
+        state["model"] = model
+        state["effort"] = effort
         wt = state["wt"]
         if coder_writes_source:
             (wt / "copilot_fix.txt").write_text("fixed\n")
@@ -408,6 +420,32 @@ def test_deliver_full_copilot_round(
     assert body.startswith("Fixed in ")
     assert "tightened the annotation" in body
     assert AUTOMATED_MARKER in body
+
+
+def test_deliver_copilot_round_uses_configured_model_and_effort(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """#93: the Copilot fix round inherits the run's coder model + effort."""
+    cfg_dir = tmp_path / "fake-claude"
+    cfg_dir.mkdir()
+    config = DevelopConfig(
+        repo=tmp_git_repo,
+        description="Add a flag",
+        work_dir=tmp_path / "work",
+        claude_config_dir=cfg_dir,
+        test_gate=False,
+        coder_model="opus",
+        coder_effort="xhigh",
+    )
+    comments = [CopilotComment(comment_id=11, path="a.py", line=5, body="tighten this")]
+    state = _install(monkeypatch, config, comments=comments)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+
+    assert out.fix_pushed  # a coder fix round actually ran
+    assert state["model"] == "opus"  # --model threaded to the fix turn
+    assert state["effort"] == "xhigh"  # --effort threaded to the fix turn
 
 
 def test_deliver_dispute_reply(

@@ -85,6 +85,42 @@ def test_exec_command_resume_uses_resume_flag() -> None:
     assert cmd[cmd.index("--resume") + 1] == "sid-1"
 
 
+def test_exec_command_adds_model_flag_when_given() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="claude", prompt="p", session_id="s", model="opus"
+    )
+    assert cmd[cmd.index("--model") + 1] == "opus"
+
+
+def test_exec_command_passes_model_on_resume_too() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="claude", prompt="p", session_id="s", resume=True, model="opus"
+    )
+    assert "--resume" in cmd
+    assert cmd[cmd.index("--model") + 1] == "opus"
+
+
+def test_exec_command_omits_model_flag_when_none() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="claude", prompt="p", session_id="s"
+    )
+    assert "--model" not in cmd
+
+
+def test_exec_command_adds_effort_flag_when_given() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="claude", prompt="p", session_id="s", effort="xhigh"
+    )
+    assert cmd[cmd.index("--effort") + 1] == "xhigh"
+
+
+def test_exec_command_omits_effort_flag_when_none() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="claude", prompt="p", session_id="s"
+    )
+    assert "--effort" not in cmd
+
+
 def test_exec_command_rejects_non_claude_tool() -> None:
     with pytest.raises(ValueError):
         containers.build_exec_command(

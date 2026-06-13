@@ -59,6 +59,11 @@ class ReviewerSpec:
     ``system_prompt`` is an optional focus brief injected into the reviewer's
     prompts. ``fallback_chain`` lists alternate tools tried when this
     reviewer's tool is usage-limited (T5).
+
+    ``model`` / ``effort`` are per-reviewer (#93): a strong reviewer can run a
+    more capable model + higher reasoning effort than a lenient one. ``None``
+    means "inherit the agent's default" — see :class:`DevelopConfig` for why we
+    do not hard-pin a model string. ``effort`` is one of :data:`VALID_EFFORTS`.
     """
 
     name: str
@@ -66,6 +71,8 @@ class ReviewerSpec:
     block_threshold: str = DEFAULT_BLOCK_THRESHOLD
     system_prompt: str | None = None
     fallback_chain: tuple[str, ...] = ()
+    model: str | None = None
+    effort: str | None = None
 
 
 _VALID_THRESHOLDS = ("critical", "major", "minor")
@@ -76,7 +83,54 @@ _REVIEWER_ENTRY_KEYS = {
     "block_threshold",
     "system_prompt",
     "fallback_chain",
+    "model",
+    "effort",
 }
+
+
+def parse_model(value: object, *, where: str) -> str | None:
+    """Validate + normalise a ``model`` value: a non-empty string, or ``None``.
+
+    Shared by the reviewer-entry parser, the standalone CLI, and the
+    daemon-mode coder lookup so every surface rejects the same garbage
+    (empty / non-string) identically. The returned string is **stripped** —
+    validating on ``.strip()`` but returning the raw value would let
+    ``" opus "`` pass and then reach the CLI as an invalid model id. Raises
+    :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where}: model must be a non-empty string (got {value!r})")
+    return value.strip()
+
+
+# Reasoning-effort levels. There is no universal cross-tool effort vocabulary:
+# Claude's `--effort` is low/medium/high/xhigh/max; Codex has NO effort flag
+# (depth is implicit in model choice — o3 vs gpt-4o); OpenCode's `--variant` is
+# high/max/minimal. So Loom adopts CLAUDE'S levels as canonical (Claude is the
+# only wired agent today). When other tools land (#94), each tool's
+# `build_exec_command` maps this canonical level onto that tool's mechanism
+# (Codex: pick the model; OpenCode: map to a `--variant`), coercing as needed.
+VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def parse_effort(value: object, *, where: str) -> str | None:
+    """Validate + normalise a reasoning-effort level, or ``None``.
+
+    Accepts one of :data:`VALID_EFFORTS` (case-insensitive, whitespace
+    stripped); ``None`` means "inherit the agent/tool's own default effort"
+    (which is model-dependent and may drift — we don't pin it). Raises
+    :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    norm = value.strip().lower() if isinstance(value, str) else value
+    if norm not in VALID_EFFORTS:
+        raise ValueError(
+            f"{where}: effort must be one of {VALID_EFFORTS} (got {value!r})"
+        )
+    return norm  # type: ignore[return-value]  # membership check proves it's str
 
 
 def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
@@ -112,12 +166,18 @@ def parse_reviewer_entry(entry: object, *, where: str) -> ReviewerSpec:
     tool = entry.get("tool", DEFAULT_REVIEWER_TOOL)
     if not isinstance(tool, str):
         raise ValueError(f"{where}: tool must be a string")
+    # Field-qualify the location so a bad value points at the exact key
+    # (e.g. ``develop_reviewers[1].model``), matching the coder-path breadcrumbs.
+    model = parse_model(entry.get("model"), where=f"{where}.model")
+    effort = parse_effort(entry.get("effort"), where=f"{where}.effort")
     return ReviewerSpec(
         name=name,
         tool=tool,
         block_threshold=threshold,
         system_prompt=system_prompt,
         fallback_chain=tuple(chain),
+        model=model,
+        effort=effort,
     )
 
 
@@ -169,6 +229,18 @@ class DevelopConfig:
     description: str
     work_dir: Path
     coder: str = DEFAULT_CODER_TOOL
+    # Coder model + reasoning effort (#93). ``None`` = inherit the agent's
+    # default. We deliberately do NOT hard-pin a model string here: a pin
+    # chosen today goes stale and couples the plugin to a model's lifecycle
+    # (an upgrade would need a code release). Reproducibility is instead served
+    # by letting the operator pin via project metadata / CLI and by recording
+    # the resolved choice with the run. Per-reviewer model/effort live on
+    # ``ReviewerSpec``; this pair is the coder's. ``effort`` is a level string
+    # (:data:`VALID_EFFORTS`, Claude's canonical levels), not a token budget;
+    # each tool's ``build_exec_command`` translates it to that tool's mechanism
+    # when other tools land (#94) — see VALID_EFFORTS for why it's not universal.
+    coder_model: str | None = None
+    coder_effort: str | None = None
     image: str = DEFAULT_IMAGE
     base_branch: str = "main"
     # Single-reviewer convenience fields (the T2-era surface; still the

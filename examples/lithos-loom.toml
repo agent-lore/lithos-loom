@@ -55,10 +55,17 @@ name = "story-develop"
 # {{repo}} resolves per task from [projects.<slug>].repo, keyed by the
 # task's metadata.project — so ONE route serves every registered project.
 # (A task with no metadata.project, or an unregistered slug, is released
-# with a finding rather than run against the wrong checkout.) Reviewer
-# config comes from the project-context doc's develop_* metadata (see
-# docs/SPECIFICATION.md). Add --open-pr to push + open a PR (and run the
-# Copilot review round) on approval.
+# with a finding rather than run against the wrong checkout.) Reviewer panel
+# AND per-agent model/effort come from the project-context doc's develop_*
+# metadata: develop_coder.{model,effort}, develop_reviewers[].{model,effort},
+# and per-task task.metadata.develop_model / develop_effort (coder-only).
+# `effort` is a level — low|medium|high|xhigh|max — not a token budget.
+# See docs/SPECIFICATION.md §5.5 for the keys + resolution precedence.
+# Add --open-pr to push + open a PR (and run the Copilot review round) on
+# approval. The --coder-model/--coder-effort/--reviewer-model/--reviewer-effort
+# flags may be appended here as a ROUTE-LEVEL DEFAULT that project/task
+# metadata overrides (they fill only what metadata leaves unset), e.g.:
+#   ... --repo {{repo}} --coder-effort high --reviewer-effort high
 command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}} --repo {{repo}}"
 # A multi-round develop loop with containerised agents is slow, and
 # usage-limit pauses count against the wall clock too; budget a working day.

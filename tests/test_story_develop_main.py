@@ -38,6 +38,117 @@ def test_main_rejects_invalid_reviewer_name(tmp_git_repo: Path, capsys) -> None:
     assert "invalid --reviewer" in capsys.readouterr().err
 
 
+def test_main_rejects_invalid_coder_effort(tmp_git_repo: Path, capsys) -> None:
+    # Standalone errors (rc 2) on an off-canonical level. Validated by
+    # parse_effort, NOT argparse choices — so the same flag can friction-degrade
+    # in daemon mode (see test_story_develop_daemon). `minimal` is an
+    # OpenCode/Codex level, not in Loom's canonical (Claude) set.
+    argv = ["--repo", str(tmp_git_repo), "--description", "x"]
+    argv += ["--coder-effort", "minimal"]
+    rc = main(argv)
+    assert rc == 2
+    assert "effort must be one of" in capsys.readouterr().err
+
+
+def test_main_rejects_invalid_reviewer_effort(tmp_git_repo: Path, capsys) -> None:
+    argv = ["--repo", str(tmp_git_repo), "--description", "x"]
+    argv += ["--reviewer-effort", "lo"]
+    rc = main(argv)
+    assert rc == 2
+    assert "effort must be one of" in capsys.readouterr().err
+
+
+def test_main_rejects_whitespace_coder_model(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--coder-model", "   "]
+    )
+    assert rc == 2
+    assert "model must be a non-empty string" in capsys.readouterr().err
+
+
+def test_main_rejects_whitespace_reviewer_model(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--reviewer-model", "  "]
+    )
+    assert rc == 2
+    assert "model must be a non-empty string" in capsys.readouterr().err
+
+
+def test_main_rejects_reviewer_model_with_develop_config(
+    tmp_git_repo: Path, tmp_path: Path, capsys
+) -> None:
+    cfg = tmp_path / "develop.toml"
+    cfg.write_text("[[reviewers]]\nname = 'cq'\n")
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--reviewer-model",
+            "opus",
+            "--develop-config",
+            str(cfg),
+        ]
+    )
+    assert rc == 2
+    assert "cannot be combined with --develop-config" in capsys.readouterr().err
+
+
+def test_main_threads_model_and_effort_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """--coder/--reviewer model+effort flags land on the resolved config."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "do a thing",
+            "--coder-model",
+            "  opus  ",  # normalised (stripped) into the config
+            "--coder-effort",
+            "xhigh",
+            "--reviewer",
+            "code-quality",
+            "--reviewer",
+            "security",
+            "--reviewer-model",
+            "sonnet",
+            "--reviewer-effort",
+            "high",
+        ]
+    )
+    assert rc == 0
+    cfg = captured["config"]
+    assert cfg.coder_model == "opus" and cfg.coder_effort == "xhigh"
+    assert {s.name for s in cfg.reviewers} == {"code-quality", "security"}
+    for spec in cfg.reviewers:
+        assert spec.model == "sonnet" and spec.effort == "high"
+
+
 def test_main_rejects_bad_max_rounds(tmp_git_repo: Path, capsys) -> None:
     rc = main(["--repo", str(tmp_git_repo), "--description", "x", "--max-rounds", "0"])
     assert rc == 2

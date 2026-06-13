@@ -24,6 +24,8 @@ from lithos_loom.plugins.story_develop.daemon_io import (
     EXIT_FAILED,
     EXIT_INTERRUPTED,
     EXIT_SUCCEEDED,
+    ProjectDevelopSettings,
+    apply_cli_fallbacks,
     build_result_payload,
     read_task_payload,
     resolve_project_settings,
@@ -224,6 +226,83 @@ def test_resolve_full_config_with_task_override(fake_client) -> None:
     assert settings.frictions == ()
 
 
+def test_resolve_coder_model_and_effort_from_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"tool": "claude", "model": "opus", "effort": "high"}},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.coder_model == "opus"
+    assert settings.coder_effort == "high"
+    assert settings.frictions == ()
+
+
+def test_resolve_coder_model_without_tool_keeps_default_tool(fake_client) -> None:
+    """develop_coder = {model = ...} is valid — tool stays the default, no friction."""
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "sonnet"}},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.coder == "claude"  # default
+    assert settings.coder_model == "sonnet"
+    assert settings.frictions == ()
+
+
+def test_resolve_task_override_beats_project_coder_model(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "opus", "effort": "high"}},
+    )
+    settings = resolve_project_settings(
+        "http://x",
+        {"project": "loom", "develop_model": "haiku", "develop_effort": "low"},
+    )
+    assert settings.coder_model == "haiku"  # per-task wins
+    assert settings.coder_effort == "low"
+    assert settings.frictions == ()
+
+
+def test_resolve_reviewer_model_and_effort_flow_through_pool(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {
+            "develop_reviewers": [
+                {"name": "security", "model": "opus", "effort": "xhigh"}
+            ],
+            "develop_default_reviewers": ["security"],
+        },
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    (sec,) = settings.reviewers
+    assert sec.model == "opus" and sec.effort == "xhigh"
+
+
+def test_resolve_invalid_coder_model_effort_frictioned(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "", "effort": "ultra"}},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.coder_model is None
+    assert settings.coder_effort is None
+    joined = "\n".join(settings.frictions)
+    assert "develop_coder.model" in joined
+    assert "develop_coder.effort" in joined
+
+
+def test_resolve_invalid_task_override_keeps_project_default(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"model": "opus"}},
+    )
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_model": ""}
+    )
+    assert settings.coder_model == "opus"  # bad override ignored, default kept
+    assert any("develop_model" in f for f in settings.frictions)
+
+
 def test_resolve_unknown_override_name_skipped_with_friction(fake_client) -> None:
     fake_client.note = _FakeNote(
         "projects/loom/loom-project-context.md",
@@ -275,6 +354,134 @@ def test_resolve_invalid_pool_entry_and_ceilings_frictioned(fake_client) -> None
     assert "develop_coder" in joined
     assert "develop_max_rounds" in joined
     assert "develop_max_cost_usd" in joined
+
+
+# ── apply_cli_fallbacks ────────────────────────────────────────────────
+
+
+def _fb(**kw: Any) -> dict[str, Any]:
+    base: dict[str, Any] = dict(
+        coder_model=None,
+        coder_effort=None,
+        reviewer_model=None,
+        reviewer_effort=None,
+    )
+    base.update(kw)
+    return base
+
+
+def test_apply_cli_fallbacks_fills_unset_coder_and_reviewers() -> None:
+    settings = ProjectDevelopSettings(
+        reviewers=(ReviewerSpec(name="cq"),)  # no model/effort
+    )
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(
+            coder_model="opus",
+            coder_effort="xhigh",
+            reviewer_model="sonnet",
+            reviewer_effort="high",
+        ),
+    )
+    assert out.coder_model == "opus" and out.coder_effort == "xhigh"
+    (cq,) = out.reviewers
+    assert cq.model == "sonnet" and cq.effort == "high"
+    assert out.frictions == ()
+
+
+def test_apply_cli_fallbacks_metadata_wins() -> None:
+    settings = ProjectDevelopSettings(
+        reviewers=(ReviewerSpec(name="sec", model="opus", effort="xhigh"),),
+        coder_model="haiku",
+        coder_effort="low",
+    )
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(
+            coder_model="sonnet",
+            coder_effort="medium",
+            reviewer_model="sonnet",
+            reviewer_effort="medium",
+        ),
+    )
+    # metadata values are preserved; the CLI flags fill nothing
+    assert out.coder_model == "haiku" and out.coder_effort == "low"
+    (sec,) = out.reviewers
+    assert sec.model == "opus" and sec.effort == "xhigh"
+
+
+def test_apply_cli_fallbacks_reviewer_flag_fills_only_unset() -> None:
+    settings = ProjectDevelopSettings(
+        reviewers=(
+            ReviewerSpec(name="sec", model="opus"),  # model set, effort unset
+            ReviewerSpec(name="cq"),  # both unset
+        )
+    )
+    out = apply_cli_fallbacks(
+        settings, **_fb(reviewer_model="sonnet", reviewer_effort="high")
+    )
+    sec, cq = out.reviewers
+    assert sec.model == "opus" and sec.effort == "high"  # model kept, effort filled
+    assert cq.model == "sonnet" and cq.effort == "high"
+
+
+def test_apply_cli_fallbacks_surfaces_unused_invalid_fallback() -> None:
+    """A malformed route fallback is frictioned even when metadata already sets
+    the field — a route-config typo must not be silently masked (it would only
+    bite later when metadata changes). The bad values are still NOT applied."""
+    settings = ProjectDevelopSettings(
+        reviewers=(ReviewerSpec(name="sec", model="opus", effort="xhigh"),),
+        coder_model="sonnet",
+        coder_effort="high",
+    )
+    # NB: model *names* aren't validated against a list (they drift) — only an
+    # empty/whitespace model is catchable; off-canonical effort is catchable.
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(
+            coder_model="   ",  # empty -> validatable-invalid
+            coder_effort="hgh",  # off-canonical level
+            reviewer_model="",  # empty
+            reviewer_effort="bogus",  # off-canonical level
+        ),
+    )
+    # metadata values untouched (no valid fallback to apply)
+    assert out.coder_model == "sonnet" and out.coder_effort == "high"
+    (sec,) = out.reviewers
+    assert sec.model == "opus" and sec.effort == "xhigh"
+    # ...but every malformed flag is surfaced as friction, not silently dropped
+    joined = "\n".join(out.frictions)
+    for flag in (
+        "--coder-model",
+        "--coder-effort",
+        "--reviewer-model",
+        "--reviewer-effort",
+    ):
+        assert flag in joined
+
+
+def test_apply_cli_fallbacks_bad_values_friction_and_dropped() -> None:
+    settings = ProjectDevelopSettings(reviewers=(ReviewerSpec(name="cq"),))
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(
+            coder_model="  ",
+            coder_effort="ultra",
+            reviewer_model="",
+            reviewer_effort="minimal",  # OpenCode level, not Claude's canonical set
+        ),
+    )
+    assert out.coder_model is None and out.coder_effort is None
+    (cq,) = out.reviewers
+    assert cq.model is None and cq.effort is None
+    joined = "\n".join(out.frictions)
+    for flag in (
+        "--coder-model",
+        "--coder-effort",
+        "--reviewer-model",
+        "--reviewer-effort",
+    ):
+        assert flag in joined
 
 
 # ── build_result_payload ───────────────────────────────────────────────
@@ -490,6 +697,87 @@ def test_daemon_mode_happy_path_writes_result(
     assert payload["task_id"] == "t-1"
     assert payload["status"] == "succeeded"
     _validate_result_schema(payload)
+
+
+def test_daemon_mode_cli_model_effort_fallback_used(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Route --coder-model/--coder-effort is the fallback when metadata is silent."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(),  # no model/effort set
+    )
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(
+        tmp_git_repo,
+        tmp_path,
+        "--coder-model",
+        "opus",
+        "--coder-effort",
+        "xhigh",
+        "--reviewer-model",
+        "sonnet",
+        "--reviewer-effort",
+        "medium",
+    )
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    cfg = captured["config"]
+    assert cfg.coder_model == "opus" and cfg.coder_effort == "xhigh"
+    # reviewer flags fill the built-in reviewer too (finding 2: not ignored)
+    assert all(s.model == "sonnet" and s.effort == "medium" for s in cfg.reviewers)
+
+
+def test_daemon_mode_bad_cli_fallback_degrades_with_friction(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A bad route fallback (whitespace model, off-canonical effort) frictions
+    and continues — it must NOT crash at parse time before result.json.
+
+    Regression guard: the effort flags are validated by parse_effort (not
+    argparse `choices`), so a bad route-level ``--coder-effort`` degrades like
+    a bad model instead of SystemExit-ing before _daemon_main runs.
+    """
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "post_frictions",
+        lambda url, task_id, frictions: captured.setdefault("frictions", frictions),
+    )
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(
+        tmp_git_repo, tmp_path, "--coder-model", "   ", "--coder-effort", "lo"
+    )
+    assert main_mod.main(argv) == EXIT_SUCCEEDED  # never fails the run
+    assert captured["config"].coder_model is None  # bad fallback dropped
+    assert captured["config"].coder_effort is None  # bad effort dropped, not crashed
+    joined = "\n".join(captured["frictions"])
+    assert "--coder-model" in joined and "--coder-effort" in joined
 
 
 def test_daemon_mode_config_rejection_writes_failed_result(
