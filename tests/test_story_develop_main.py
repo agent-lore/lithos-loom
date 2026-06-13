@@ -70,6 +70,27 @@ def test_main_rejects_whitespace_reviewer_model(tmp_git_repo: Path, capsys) -> N
     assert "model must be a non-empty string" in capsys.readouterr().err
 
 
+def test_main_rejects_reviewer_model_with_develop_config(
+    tmp_git_repo: Path, tmp_path: Path, capsys
+) -> None:
+    cfg = tmp_path / "develop.toml"
+    cfg.write_text("[[reviewers]]\nname = 'cq'\n")
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--reviewer-model",
+            "opus",
+            "--develop-config",
+            str(cfg),
+        ]
+    )
+    assert rc == 2
+    assert "cannot be combined with --develop-config" in capsys.readouterr().err
+
+
 def test_main_threads_model_and_thinking_into_config(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

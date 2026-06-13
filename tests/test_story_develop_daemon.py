@@ -24,6 +24,8 @@ from lithos_loom.plugins.story_develop.daemon_io import (
     EXIT_FAILED,
     EXIT_INTERRUPTED,
     EXIT_SUCCEEDED,
+    ProjectDevelopSettings,
+    apply_cli_fallbacks,
     build_result_payload,
     read_task_payload,
     resolve_project_settings,
@@ -354,6 +356,99 @@ def test_resolve_invalid_pool_entry_and_ceilings_frictioned(fake_client) -> None
     assert "develop_max_cost_usd" in joined
 
 
+# ── apply_cli_fallbacks ────────────────────────────────────────────────
+
+
+def _fb(**kw: Any) -> dict[str, Any]:
+    base: dict[str, Any] = dict(
+        coder_model=None,
+        coder_thinking=None,
+        reviewer_model=None,
+        reviewer_thinking=None,
+    )
+    base.update(kw)
+    return base
+
+
+def test_apply_cli_fallbacks_fills_unset_coder_and_reviewers() -> None:
+    settings = ProjectDevelopSettings(
+        reviewers=(ReviewerSpec(name="cq"),)  # no model/thinking
+    )
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(
+            coder_model="opus",
+            coder_thinking=20000,
+            reviewer_model="sonnet",
+            reviewer_thinking=8000,
+        ),
+    )
+    assert out.coder_model == "opus" and out.coder_thinking == 20000
+    (cq,) = out.reviewers
+    assert cq.model == "sonnet" and cq.thinking == 8000
+    assert out.frictions == ()
+
+
+def test_apply_cli_fallbacks_metadata_wins() -> None:
+    settings = ProjectDevelopSettings(
+        reviewers=(ReviewerSpec(name="sec", model="opus", thinking=16000),),
+        coder_model="haiku",
+        coder_thinking=2000,
+    )
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(
+            coder_model="sonnet",
+            coder_thinking=5000,
+            reviewer_model="sonnet",
+            reviewer_thinking=5000,
+        ),
+    )
+    # metadata values are preserved; the CLI flags fill nothing
+    assert out.coder_model == "haiku" and out.coder_thinking == 2000
+    (sec,) = out.reviewers
+    assert sec.model == "opus" and sec.thinking == 16000
+
+
+def test_apply_cli_fallbacks_reviewer_flag_fills_only_unset() -> None:
+    settings = ProjectDevelopSettings(
+        reviewers=(
+            ReviewerSpec(name="sec", model="opus"),  # model set, thinking unset
+            ReviewerSpec(name="cq"),  # both unset
+        )
+    )
+    out = apply_cli_fallbacks(
+        settings, **_fb(reviewer_model="sonnet", reviewer_thinking=8000)
+    )
+    sec, cq = out.reviewers
+    assert sec.model == "opus" and sec.thinking == 8000  # model kept, thinking filled
+    assert cq.model == "sonnet" and cq.thinking == 8000
+
+
+def test_apply_cli_fallbacks_bad_values_friction_and_dropped() -> None:
+    settings = ProjectDevelopSettings(reviewers=(ReviewerSpec(name="cq"),))
+    out = apply_cli_fallbacks(
+        settings,
+        **_fb(
+            coder_model="  ",
+            coder_thinking=0,
+            reviewer_model="",
+            reviewer_thinking=-1,
+        ),
+    )
+    assert out.coder_model is None and out.coder_thinking is None
+    (cq,) = out.reviewers
+    assert cq.model is None and cq.thinking is None
+    joined = "\n".join(out.frictions)
+    for flag in (
+        "--coder-model",
+        "--coder-thinking",
+        "--reviewer-model",
+        "--reviewer-thinking",
+    ):
+        assert flag in joined
+
+
 # ── build_result_payload ───────────────────────────────────────────────
 
 
@@ -591,11 +686,22 @@ def test_daemon_mode_cli_model_thinking_fallback_used(
 
     monkeypatch.setattr(main_mod, "develop", fake_develop)
     argv, _ = _daemon_args(
-        tmp_git_repo, tmp_path, "--coder-model", "opus", "--coder-thinking", "9000"
+        tmp_git_repo,
+        tmp_path,
+        "--coder-model",
+        "opus",
+        "--coder-thinking",
+        "9000",
+        "--reviewer-model",
+        "sonnet",
+        "--reviewer-thinking",
+        "4000",
     )
     assert main_mod.main(argv) == EXIT_SUCCEEDED
-    assert captured["config"].coder_model == "opus"
-    assert captured["config"].coder_thinking == 9000
+    cfg = captured["config"]
+    assert cfg.coder_model == "opus" and cfg.coder_thinking == 9000
+    # reviewer flags fill the built-in reviewer too (finding 2: not ignored)
+    assert all(s.model == "sonnet" and s.thinking == 4000 for s in cfg.reviewers)
 
 
 def test_daemon_mode_bad_cli_fallback_degrades_with_friction(

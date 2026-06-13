@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -318,6 +318,64 @@ def resolve_project_settings(
         fallback_chain=chain,
         max_rounds=max_rounds,
         max_cost_usd=float(max_cost) if max_cost is not None else None,
+        frictions=tuple(frictions),
+    )
+
+
+def apply_cli_fallbacks(
+    settings: ProjectDevelopSettings,
+    *,
+    coder_model: str | None,
+    coder_thinking: int | None,
+    reviewer_model: str | None,
+    reviewer_thinking: int | None,
+) -> ProjectDevelopSettings:
+    """Layer route-level CLI model/thinking flags UNDER the resolved settings.
+
+    Daemon mode has no per-agent CLI surface (``--reviewer`` / ``--develop-config``
+    are rejected), so these flags are blanket route-level fallbacks (#93): project
+    metadata always wins, and a flag fills only what metadata left unset — the
+    coder's model/thinking, and each reviewer's. A bad flag value drops with a
+    ``[Friction]`` breadcrumb (never errors — daemon config resolution must not
+    fail the run, nor flow an empty/<=0 value through to the agent). Returns a new
+    settings object with the merged frictions.
+    """
+    frictions = list(settings.frictions)
+
+    def _validate(raw: object, parser, where: str):  # type: ignore[no-untyped-def]
+        if raw is None:
+            return None
+        try:
+            return parser(raw, where=where)
+        except ValueError as exc:
+            frictions.append(f"{exc}; ignoring the route fallback")
+            return None
+
+    coder_m = settings.coder_model
+    if coder_m is None:
+        coder_m = _validate(coder_model, parse_model, "--coder-model")
+    coder_t = settings.coder_thinking
+    if coder_t is None:
+        coder_t = _validate(coder_thinking, parse_thinking, "--coder-thinking")
+
+    rev_m = _validate(reviewer_model, parse_model, "--reviewer-model")
+    rev_t = _validate(reviewer_thinking, parse_thinking, "--reviewer-thinking")
+    reviewers = settings.reviewers
+    if rev_m is not None or rev_t is not None:
+        reviewers = tuple(
+            replace(
+                spec,
+                model=spec.model if spec.model is not None else rev_m,
+                thinking=spec.thinking if spec.thinking is not None else rev_t,
+            )
+            for spec in reviewers
+        )
+
+    return replace(
+        settings,
+        coder_model=coder_m,
+        coder_thinking=coder_t,
+        reviewers=reviewers,
         frictions=tuple(frictions),
     )
 

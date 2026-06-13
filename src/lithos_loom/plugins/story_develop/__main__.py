@@ -56,10 +56,10 @@ from .config import (
     is_valid_reviewer_name,
     load_develop_config,
     parse_model,
-    parse_thinking,
 )
 from .daemon_io import (
     EXIT_BAD_INPUT,
+    apply_cli_fallbacks,
     build_result_payload,
     post_frictions,
     read_task_payload,
@@ -330,28 +330,18 @@ def _daemon_main(args: argparse.Namespace) -> int:
     result_file = args.result_file.expanduser().resolve()
     started_at = datetime.now(UTC)
     settings = resolve_project_settings(args.lithos_url, ctx.metadata)
-    frictions = list(settings.frictions)
-    # Project metadata (incl. per-task override) wins; the CLI flag is a
-    # route-level fallback (mirrors max_rounds). A bad fallback flag degrades
-    # with friction rather than erroring — daemon mode never fails the run on
-    # config; it must not flow an empty/<=0 value through to the agent either.
-    coder_model = settings.coder_model
-    if coder_model is None and args.coder_model is not None:
-        try:
-            coder_model = parse_model(args.coder_model, where="--coder-model")
-        except ValueError as exc:
-            frictions.append(f"{exc}; ignoring the route fallback")
-    coder_thinking = settings.coder_thinking
-    if coder_thinking is None and args.coder_thinking is not None:
-        try:
-            coder_thinking = parse_thinking(
-                args.coder_thinking, where="--coder-thinking"
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; ignoring the route fallback")
-    for friction in frictions:
+    # Route-level --coder-*/--reviewer-* flags are blanket fallbacks under the
+    # resolved metadata (#93); bad values drop with friction, never error.
+    settings = apply_cli_fallbacks(
+        settings,
+        coder_model=args.coder_model,
+        coder_thinking=args.coder_thinking,
+        reviewer_model=args.reviewer_model,
+        reviewer_thinking=args.reviewer_thinking,
+    )
+    for friction in settings.frictions:
         print(f"[Friction] {friction}", file=sys.stderr)
-    post_frictions(args.lithos_url, ctx.task_id, tuple(frictions))
+    post_frictions(args.lithos_url, ctx.task_id, settings.frictions)
     print(f"developing Lithos task {ctx.task_id}: {ctx.title} (daemon mode)")
 
     config = DevelopConfig(
@@ -360,9 +350,8 @@ def _daemon_main(args: argparse.Namespace) -> int:
         work_dir=args.work_dir.expanduser().resolve(),
         acceptance_criteria=ctx.acceptance_criteria,
         coder=settings.coder,
-        # Reviewer model/thinking ride along inside settings.reviewers.
-        coder_model=coder_model,
-        coder_thinking=coder_thinking,
+        coder_model=settings.coder_model,
+        coder_thinking=settings.coder_thinking,
         reviewers=settings.reviewers,
         max_rounds=settings.max_rounds or args.max_rounds,
         test_gate=not args.no_test_gate,
@@ -519,6 +508,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.develop_config is not None and args.reviewer:
         print(
             "error: --develop-config and --reviewer are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+    if args.develop_config is not None and (
+        args.reviewer_model is not None or args.reviewer_thinking is not None
+    ):
+        # --develop-config supplies per-reviewer model/thinking in the TOML;
+        # a blanket --reviewer-model/--reviewer-thinking would ambiguously
+        # fight those. Reject rather than silently ignore.
+        print(
+            "error: --reviewer-model / --reviewer-thinking cannot be combined "
+            "with --develop-config (set model/thinking per [[reviewers]] table "
+            "in the config file instead)",
             file=sys.stderr,
         )
         return 2
