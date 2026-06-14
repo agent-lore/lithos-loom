@@ -92,7 +92,13 @@ def parse_codex_result(
       "text": ...}}`` → the final message text;
     * ``{"type": "turn.completed", "usage": {...}}`` → success signal + token
       usage (stashed in ``raw``);
-    * ``{"type": "turn.failed" | "error", ...}`` → failure.
+    * ``{"type": "turn.failed" | "error", ...}`` → failure; the event is
+      retained **verbatim** in ``raw["failure_events"]`` (issue #103 Part A).
+      The exact codex limit signal is not yet known, so we capture the events
+      without interpreting them — ``record_failure_fixture`` serialises
+      ``raw``, so a real usage-limit then lands in the failures dir with its
+      precise wording, ready to classify (Part B). Interpreting the shape here
+      would be guessing the very fields the capture is meant to discover.
 
     The returned ``session_id`` is the captured ``thread_id``, or — on a
     **resume** turn where the stream may not re-announce ``thread.started`` —
@@ -100,15 +106,15 @@ def parse_codex_result(
     zero exit, a ``turn.completed``, no failure event, AND a usable handle (so
     later resume turns always have something to resume — mirrors the claude
     contract). ``cost_usd`` is ``0.0``: codex reports tokens, not USD; the
-    ``max_cost_usd`` ceiling is claude-only until a pricing map lands (#94
-    follow-up). Token usage is preserved in ``raw`` for the run summary.
-    Unparseable lines are skipped defensively.
+    ``max_cost_usd`` ceiling is claude-only (the cost-measure design is #102).
+    Token usage is preserved in ``raw`` for the run summary. Unparseable lines
+    are skipped defensively.
     """
     thread_id = ""
     result_text = ""
     usage: dict | None = None
     saw_completed = False
-    saw_failure = False
+    failure_events: list[dict] = []
 
     for line in stdout.splitlines():
         line = line.strip()
@@ -133,14 +139,20 @@ def parse_codex_result(
             if isinstance(u, dict):
                 usage = u
         elif etype in ("turn.failed", "error"):
-            saw_failure = True
+            failure_events.append(event)
 
     # On resume, keep the handle we resumed even if the stream didn't re-emit
     # thread.started; on the first turn the handle MUST be captured fresh.
     handle = thread_id or (session_id if resume else "")
-    succeeded = exit_code == 0 and saw_completed and not saw_failure and bool(handle)
-    # ``raw`` carries the token usage (no USD) for the run summary / findings.
-    raw = {"usage": usage} if usage is not None else None
+    succeeded = exit_code == 0 and saw_completed and not failure_events and bool(handle)
+    # ``raw`` carries the token usage (no USD) for the run summary / findings,
+    # and any failure event(s) verbatim for the G4 capture harness (#103).
+    raw_parts: dict = {}
+    if usage is not None:
+        raw_parts["usage"] = usage
+    if failure_events:
+        raw_parts["failure_events"] = failure_events
+    raw = raw_parts or None
 
     return TurnResult(
         exit_code=exit_code,
