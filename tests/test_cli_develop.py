@@ -121,6 +121,7 @@ def test_run_containers_filters_by_run_prefix(
     )
     monkeypatch.setattr(develop, "_docker", lambda args: ps)
     cs = develop._run_containers("abc")
+    assert cs is not None
     assert {c.agent for c in cs} == {"coder", "review-security"}
     assert {c.agent: c.running for c in cs} == {"coder": True, "review-security": False}
 
@@ -154,10 +155,37 @@ def test_active_agent_none_when_no_busy_process(
     assert develop._active_agent(containers) is None
 
 
-def test_docker_absent_degrades(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_containers_none_when_docker_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # None (docker unavailable) is DISTINCT from [] (docker works, no
+    # containers) — callers must not conflate "can't tell" with "done".
     monkeypatch.setattr(develop, "_docker", lambda args: None)
-    assert develop._run_containers("abc") == []
+    assert develop._run_containers("abc") is None
     assert develop._active_agent([]) is None
+
+
+def test_agent_state_distinguishes_no_docker_from_done(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    info = develop.RunInfo("r", "t", "", 1, (), str(tmp_path))
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: None)
+    assert develop._agent_state(info) == "—"  # docker absent → can't tell
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    assert develop._agent_state(info) == "done"  # docker present, no containers
+
+
+def test_still_running_predicate(tmp_path: Path) -> None:
+    rd = tmp_path / "run"
+    rd.mkdir()
+    running = [develop.ContainerStatus("n", "coder", "Up", True)]
+    exited = [develop.ContainerStatus("n", "coder", "Exited", False)]
+    assert develop._still_running(rd, running) is True
+    assert develop._still_running(rd, exited) is False
+    # docker absent (None): live until conversation.md appears (or dir reaped)
+    assert develop._still_running(rd, None) is True
+    (rd / "conversation.md").write_text("done")
+    assert develop._still_running(rd, None) is False
 
 
 # ── commands ───────────────────────────────────────────────────────────
@@ -196,7 +224,7 @@ def test_list_json_shape(patched: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert rows[0]["run_id"] == "rr"
     assert rows[0]["task_id"] == "t-7"
     assert rows[0]["round"] == 1
-    assert rows[0]["active"] == "done"  # docker absent → no containers
+    assert rows[0]["active"] == "—"  # docker absent → can't tell (not "done")
 
 
 def test_list_text_table_and_empty(
@@ -218,3 +246,47 @@ def test_attach_once_snapshot(
     out = capsys.readouterr().out
     assert "attached to run r1" in out
     assert "round_01_coder_done.md" in out  # handoff printed in the snapshot
+
+
+def test_attach_follows_handoffs_when_docker_absent(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression: docker absent must NOT make attach exit instantly as "done".
+    # A finished run (conversation.md present) still prints its handoffs and
+    # terminates via the file-based end signal.
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["code-quality"]},
+        conversation="done",
+    )
+    develop.develop_attach(key="r1", config=None, once=False)
+    out = capsys.readouterr().out
+    assert "round_01_coder_done.md" in out  # handoffs followed despite no docker
+    assert "not running" in out
+
+
+def test_attach_follows_until_containers_stop(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)  # no real wait
+    _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["code-quality"]})
+    polls = {"n": 0}
+
+    def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
+        polls["n"] += 1
+        running = polls["n"] == 1  # live on poll 1, stopped on poll 2
+        return [
+            develop.ContainerStatus(
+                "loom-develop-r1-coder", "coder", "Up" if running else "Exited", running
+            )
+        ]
+
+    monkeypatch.setattr(develop, "_run_containers", fake_containers)
+    monkeypatch.setattr(develop, "_active_agent", lambda cs: "coder")
+    develop.develop_attach(key="r1", config=None, once=False)
+    out = capsys.readouterr().out
+    assert "coder working" in out
+    assert "round_01_coder_done.md" in out
+    assert "not running" in out

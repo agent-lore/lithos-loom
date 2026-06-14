@@ -48,6 +48,9 @@ develop_app = typer.Typer(
 
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
+# Active-agent label when docker is unavailable: we can't tell which (if any)
+# agent is executing, but the file-based views still work.
+_UNKNOWN = "—"
 
 # Container naming owned by story_develop.containers.container_name:
 # loom-develop-<run_id>-<agent>  (agent = "coder" | "review-<name>").
@@ -187,11 +190,17 @@ def _docker(args: list[str]) -> str | None:
     return proc.stdout
 
 
-def _run_containers(run_id: str) -> list[ContainerStatus]:
-    """All agent containers for *run_id* (running + exited), or [] if no docker."""
+def _run_containers(run_id: str) -> list[ContainerStatus] | None:
+    """Agent containers for *run_id* (running + exited).
+
+    Returns ``None`` when **docker is unavailable** — distinct from an empty
+    list (docker works, but the run has no containers: finished / reaped /
+    not-yet-started). Callers must keep the two apart: ``None`` means "can't
+    tell" (active agent → ``—``, file views still work), ``[]`` means "done".
+    """
     out = _docker(["ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
     if out is None:
-        return []
+        return None
     prefix = f"{_CONTAINER_PREFIX}{run_id}-"
     result: list[ContainerStatus] = []
     for line in out.splitlines():
@@ -226,12 +235,27 @@ def _active_agent(containers: list[ContainerStatus]) -> str | None:
 def _agent_state(info: RunInfo) -> str:
     """Human label for what the run is doing now."""
     containers = _run_containers(info.run_id)
+    if containers is None:
+        return _UNKNOWN  # docker unavailable — can't tell (file views still work)
     if not containers:
-        return "done"  # no containers: finished/reaped or never started
+        return "done"  # docker works, no containers: finished/reaped
     active = _active_agent(containers)
     if active:
         return active
     return "idle" if any(c.running for c in containers) else "done"
+
+
+def _still_running(run_dir: Path, containers: list[ContainerStatus] | None) -> bool:
+    """Whether ``attach`` should keep following.
+
+    With docker, the run is live while any agent container runs. Without docker
+    (``containers is None``), fall back to a file-based end signal so the
+    handoff view still follows: the run dir is reaped on success, and
+    ``conversation.md`` is written on a non-success end — either means done.
+    """
+    if containers is None:
+        return run_dir.is_dir() and not (run_dir / "conversation.md").is_file()
+    return any(c.running for c in containers)
 
 
 def _fail(msg: str, code: int = 1) -> NoReturn:
@@ -339,7 +363,8 @@ def develop_attach(
     ),
 ) -> None:
     """Follow a live run: current round + active agent, printing handoffs as
-    they land, until the run's containers stop. Read-only."""
+    they land, until the run ends. Read-only. When docker is unavailable it
+    still follows the handoff files (active agent shows as ``—``)."""
     try:
         cfg = load_config(config)
     except LithosLoomError as exc:
@@ -358,24 +383,28 @@ def develop_attach(
         return
 
     seen: set[str] = set()
-    waiting = False
+    last_line: str | None = None
     while True:
         containers = _run_containers(info.run_id)
-        if not containers or not any(c.running for c in containers):
-            break
-        active = _active_agent(containers)
-        if active is None:
-            if not waiting:
-                typer.echo("── (between turns: commit / test gate / next prompt…)")
-            waiting = True
-        else:
-            waiting = False
-            round_no = _round_and_reviewers(run_dir / "handoff")[0]
-            typer.echo(f"── round {round_no}: {active} working…")
+        running = _still_running(run_dir, containers)
+        if running:
+            if containers is None:
+                line = "── (docker unavailable — following handoffs only)"
+            elif (active := _active_agent(containers)) is not None:
+                round_no = _round_and_reviewers(run_dir / "handoff")[0]
+                line = f"── round {round_no}: {active} working…"
+            else:
+                line = "── (between turns: commit / test gate / next prompt…)"
+            if line != last_line:  # re-announce only on a state change
+                typer.echo(line)
+                last_line = line
+        # Print new handoffs every poll — including the final one before we
+        # stop — so a docker-absent follow still surfaces them as they land.
         seen = _print_new_handoffs(run_dir / "handoff", seen)
+        if not running:
+            break
         time.sleep(_ATTACH_POLL_SECONDS)
 
-    _print_new_handoffs(run_dir / "handoff", seen)
     typer.echo(
         f"── run {info.run_id} not running — "
         f"`lithos-loom develop dump {key}` for the full log"
