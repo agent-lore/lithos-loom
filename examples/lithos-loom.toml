@@ -93,6 +93,20 @@ human_blocking = true
 [routes.match]
 tags = ["trigger:story-review-human"]
 
+# echo — a zero-cost smoke-test route. The plugin does no work: it writes a
+# status="succeeded" result.json and exits, so the task completes immediately.
+# Use it to validate the dispatch/claim/complete lifecycle without a
+# containerised agent — e.g. to dogfood #86 (add `trigger:echo` to an
+# already-open task and watch it dispatch with NO daemon restart). Uncomment
+# to enable.
+# [[routes]]
+# name = "echo"
+# command = "uv run python -m lithos_loom.plugins.echo --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
+# max_runtime_seconds = 60
+#
+# [routes.match]
+# tags = ["trigger:echo"]
+
 # ── Subscriptions ─────────────────────────────────────────────────────
 #
 # Fire-and-forget side effects on bus events. Each [[subscriptions]]
