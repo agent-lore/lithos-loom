@@ -176,3 +176,35 @@ def test_parse_codex_empty_output_fails_safely() -> None:
     assert r.succeeded is False
     assert r.raw is None
     assert r.cost_usd == 0.0
+
+
+# ── #103 Part A: failure events retained verbatim for the G4 capture harness ──
+
+
+def test_parse_codex_turn_failed_event_retained_in_raw() -> None:
+    failure = {
+        "type": "turn.failed",
+        "error": {"message": "you have hit your usage limit", "type": "rate_limit"},
+    }
+    stream = _codex_jsonl({"type": "thread.started", "thread_id": "t1"}, failure)
+    r = parse_codex_result(stream, exit_code=1, stderr="")
+    assert r.succeeded is False
+    # verbatim — no interpretation; record_failure_fixture serialises raw, so the
+    # real limit wording lands in the failures dir (Part B then classifies it).
+    assert r.raw == {"failure_events": [failure]}
+
+
+def test_parse_codex_error_event_retained_in_raw() -> None:
+    failure = {"type": "error", "message": "quota exceeded"}
+    stream = _codex_jsonl({"type": "thread.started", "thread_id": "t1"}, failure)
+    r = parse_codex_result(stream, exit_code=1, stderr="")
+    assert r.raw is not None
+    assert r.raw["failure_events"] == [failure]
+
+
+def test_parse_codex_success_raw_has_no_failure_events() -> None:
+    # backward-compat: a clean success still carries only usage in raw.
+    r = parse_codex_result(_CODEX_SUCCESS, exit_code=0, stderr="")
+    assert r.succeeded is True
+    assert r.raw is not None
+    assert "failure_events" not in r.raw
