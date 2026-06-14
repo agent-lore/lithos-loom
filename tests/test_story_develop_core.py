@@ -837,6 +837,39 @@ def test_panel_both_lgtm_approved_round_one(
     assert result.conversation_log is not None
     log = result.conversation_log.read_text()
     assert "Reviewer [code-quality]" in log and "Reviewer [security]" in log
+
+
+def test_panel_mixed_claude_and_codex_reviewers(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#94: a heterogeneous panel (codex + claude reviewers) — each reviewer's
+    container is built for its own tool, and the tool is threaded to each turn.
+    """
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    cfg = _panel_config(
+        config,
+        ReviewerSpec(name="code-quality", tool="codex"),
+        ReviewerSpec(name="security", tool="claude"),
+    )
+    state = _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews={"code-quality": [{"text": _LGTM}], "security": [{"text": _LGTM}]},
+    )
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved"
+    assert state["starts"] == 3  # coder + 2 reviewers
+    # both tools reached the exec layer (coder=claude + the two reviewers)
+    assert "codex" in state["tools"] and "claude" in state["tools"]
+    # each reviewer container was built for its own tool
+    cq_cmd = next(
+        c for c in state["start_cmds"] if "review-code-quality" in " ".join(c)
+    )
+    sec_cmd = next(c for c in state["start_cmds"] if "review-security" in " ".join(c))
+    assert "CODEX_HOME=/codex_home" in cq_cmd
+    assert "CLAUDE_CONFIG_DIR=/claude_config" in sec_cmd
     # state.json records both reviewers
     data = json.loads((cfg.run_dir / "state.json").read_text())
     assert set(data["reviewers"]) == {"code-quality", "security"}
@@ -1006,8 +1039,8 @@ def test_reviewer_limit_switches_to_fallback_tool(
 ) -> None:
     from dataclasses import replace
 
+    # codex is natively supported (#94) — no _tool_supported monkeypatch needed.
     cfg = replace(config, reviewer_fallback_chain=("codex",))
-    monkeypatch.setattr(develop_mod, "_tool_supported", lambda t: True)
     state = _install_fakes(
         monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 1}]
     )
@@ -1021,9 +1054,12 @@ def test_reviewer_limit_switches_to_fallback_tool(
     reseed = state["review_prompts"][1]
     assert "taking over" in reseed
     assert "acceptance criteria" in reseed.lower()
-    # the switched tool is actually threaded through to the exec layer (it
-    # would raise there until T6 — never silently run claude as "codex")
+    # the switched tool is actually threaded through to the exec layer
     assert state["tools"][-1] == "codex"
+    # the replacement container was REBUILT for codex (CODEX_HOME, not the
+    # original claude env) — #94
+    assert "CODEX_HOME=/codex_home" in state["start_cmds"][-1]
+    assert "CLAUDE_CONFIG_DIR=/claude_config" not in state["start_cmds"][-1]
     state_file = json.loads((cfg.run_dir / "state.json").read_text())
     assert state_file["reviewers"][cfg.reviewer]["tool"] == "codex"
 
@@ -1033,9 +1069,9 @@ def test_reviewer_limit_skips_unsupported_fallback_and_pauses(
 ) -> None:
     from dataclasses import replace
 
-    # codex is in the chain but the exec layer can't run it yet (T6) ->
-    # fall through to the pause path rather than a broken switch.
-    cfg = replace(config, reviewer_fallback_chain=("codex",))
+    # An unsupported tool is in the chain (claude + codex run; opencode does
+    # not, #94) -> fall through to the pause path rather than a broken switch.
+    cfg = replace(config, reviewer_fallback_chain=("opencode",))
     state = _install_fakes(
         monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 1}]
     )
@@ -1123,11 +1159,12 @@ def test_develop_rejects_invalid_reviewer_name(
 
 
 def test_develop_rejects_unsupported_coder(tmp_git_repo: Path, tmp_path: Path) -> None:
+    # claude + codex are supported (#94); anything else is rejected up front.
     cfg = DevelopConfig(
         repo=tmp_git_repo,
         description="x",
         work_dir=tmp_path / "work",
-        coder="codex",
+        coder="opencode",
         claude_config_dir=tmp_path / "fake-claude",
     )
     with pytest.raises(ValueError, match="unsupported coder tool"):

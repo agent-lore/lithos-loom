@@ -45,6 +45,7 @@ from ...runner import detection, git, worktree
 from . import containers, handoff, limits, test_gate
 from .config import (
     CLAUDE_AUTH_FILES,
+    CODEX_AUTH_FILES,
     HANDOFF_DIRNAME,
     DevelopConfig,
     is_valid_reviewer_name,
@@ -177,25 +178,37 @@ def _reviewer_brief(spec) -> str:
 
 
 def _build_run_cmd(
-    config: DevelopConfig, *, agent: str, config_dir: Path, wt: Path, read_only: bool
+    config: DevelopConfig,
+    *,
+    agent: str,
+    tool: str,
+    config_dir: Path,
+    wt: Path,
+    read_only: bool,
 ) -> tuple[str, list[str]]:
     """Build (container_name, docker-run-argv) for an agent container.
 
     Model + reasoning effort (#93) are per-TURN flags applied in
     :func:`run_turn` (the per-tool exec builder), not container env, so the
-    idle container itself carries no agent tuning.
+    idle container itself carries no agent tuning. *tool* (#94) selects the
+    config env var + mount + auth file: claude (``CLAUDE_CONFIG_DIR`` +
+    ``.credentials.json`` + operator skills) vs codex (``CODEX_HOME`` +
+    ``auth.json``, no skills — codex honours the worktree ``AGENTS.md``).
     """
     name = containers.container_name(config.run_id, agent)
+    is_codex = tool == "codex"
+    auth_candidates = CODEX_AUTH_FILES if is_codex else CLAUDE_AUTH_FILES
     cmd = containers.build_run_command(
         name=name,
         image=config.image,
         worktree=wt,
         config_dir=config_dir,
         handoff_dir=config.handoff_dir,
-        auth_source_dir=config.claude_config_dir,
-        auth_files=containers.resolve_auth_files(config, CLAUDE_AUTH_FILES),
-        skills_dir=config.operator_skills_dir,
+        auth_source_dir=config.auth_source_dir(tool),
+        auth_files=containers.resolve_auth_files(config, auth_candidates, tool=tool),
+        skills_dir=None if is_codex else config.operator_skills_dir,
         read_only_worktree=read_only,
+        tool=tool,
     )
     return name, cmd
 
@@ -353,17 +366,29 @@ def _sleep(seconds: float) -> None:
 
 
 def _tool_supported(tool: str) -> bool:
-    """Whether the container/exec layer can run *tool* (codex arrives with T6)."""
-    return tool == "claude"
+    """Whether the container/exec layer can run *tool* (claude + codex, #94)."""
+    return tool in ("claude", "codex")
 
 
-def _session_transcript_exists(config_dir: Path, session_id: str) -> bool:
+def _session_transcript_exists(
+    config_dir: Path, session_id: str, *, tool: str = "claude"
+) -> bool:
     """True when the agent's on-disk transcript for *session_id* exists.
 
-    Decides whether a limit-interrupted turn is retried as a ``--resume``
+    Decides whether a limit-interrupted turn is retried as a resume
     continuation (partial progress is in the transcript) or re-issued fresh
-    (the process died before the session was created).
+    (the process died before the session was created). The layout is
+    tool-specific: claude writes ``projects/<cwd-hash>/<uuid>.jsonl`` under
+    ``CLAUDE_CONFIG_DIR``; codex writes
+    ``sessions/YYYY/MM/DD/rollout-…-<thread_id>.jsonl`` under ``CODEX_HOME``
+    (#94). Dormant for codex until codex usage-limits are classified (G4), but
+    kept correct.
     """
+    if tool == "codex":
+        sessions = config_dir / "sessions"
+        if not sessions.is_dir():
+            return False
+        return any(sessions.glob(f"**/*{session_id}*.jsonl"))
     projects = config_dir / "projects"
     if not projects.is_dir():
         return False
@@ -400,6 +425,7 @@ def _turn_with_limit_pauses(
     resume: bool,
     round_no: int,
     timeout: int,
+    tool: str = "claude",
 ) -> tuple[TurnResult, bool, float]:
     """Run a turn, pausing-and-retrying through provider usage limits.
 
@@ -419,10 +445,19 @@ def _turn_with_limit_pauses(
             session_id=session_id,
             resume=attempt_resume,
             timeout=timeout,
+            tool=tool,
             model=config.coder_model,
             effort=config.coder_effort,
         )
         total_cost += turn.cost_usd
+        # Codex mints its handle (thread_id) on turn 1; rebind so a retry after
+        # a usage-limit pause resumes the SAME session (and the transcript
+        # check below globs the right id) rather than the stale pre-mint uuid.
+        # No-op for claude (echoes the supplied uuid); dormant for codex until
+        # codex usage-limits are classified (G4), but kept correct — mirrors
+        # the reviewer path's `cur_session` rebind in `_review_turn`.
+        if turn.session_id:
+            session_id = turn.session_id
         if turn.succeeded:
             return turn, False, total_cost
         limits.record_failure_fixture(
@@ -457,7 +492,7 @@ def _turn_with_limit_pauses(
         # Resume the SAME session when its transcript survived the interruption
         # (the in-session context is the thing we are protecting); otherwise
         # re-issue the original prompt fresh.
-        if _session_transcript_exists(config_dir, session_id):
+        if _session_transcript_exists(config_dir, session_id, tool=tool):
             attempt_prompt, attempt_resume = _CONTINUATION_PROMPT, True
         else:
             attempt_prompt, attempt_resume = prompt, resume
@@ -481,7 +516,7 @@ def _review_turn(
     model: str | None = None,
     effort: str | None = None,
     validate: Callable[[ReviewHandoff], str | None] | None = None,
-) -> tuple[ReviewOutcome, TurnResult | None]:
+) -> tuple[ReviewOutcome, TurnResult | None, str]:
     """Run one reviewer turn against an already-running reviewer container.
 
     Re-prompts the *same* session once if the handoff is malformed — or, T7,
@@ -491,9 +526,11 @@ def _review_turn(
     that happens to leave a parseable file is rejected, preserving the
     exit-code contract (ADR 0002).
 
-    Returns ``(outcome, failed_turn)``: *failed_turn* is the TurnResult of a
-    turn-level failure (for usage-limit classification by the caller), or
-    ``None`` when the turns ran cleanly (even if the handoff stayed invalid).
+    Returns ``(outcome, failed_turn, session_handle)``: *failed_turn* is the
+    TurnResult of a turn-level failure (for usage-limit classification by the
+    caller), or ``None`` when the turns ran cleanly (even if the handoff stayed
+    invalid). *session_handle* is the handle to resume next round — the inbound
+    one for claude, the tool-minted ``thread_id`` for codex (#94).
     """
     review_file = handoff.reviewer_handoff_name(round_no, reviewer)
     review_path = config.handoff_dir / review_file
@@ -522,6 +559,10 @@ def _review_turn(
         effort=effort,
     )
     cost += turn.cost_usd
+    # Codex mints its handle (thread_id) on turn 1; carry the returned handle
+    # forward to the in-function retry and back to the caller (no-op for claude,
+    # which echoes the supplied uuid).
+    cur_session = turn.session_id or session_id
     if not turn.succeeded:
         err = f"reviewer turn failed (exit {turn.exit_code})"
         failed_turn = turn
@@ -541,13 +582,14 @@ def _review_turn(
             retry = run_turn(
                 container=container,
                 prompt=correction,
-                session_id=session_id,
+                session_id=cur_session,
                 resume=True,
                 timeout=timeout,
                 tool=tool,
                 model=model,
                 effort=effort,
             )
+            cur_session = retry.session_id or cur_session
             cost += retry.cost_usd
             if retry.succeeded:
                 parsed, err = _read_checked()
@@ -577,6 +619,7 @@ def _review_turn(
                 cost_usd=cost,
             ),
             failed_turn,
+            cur_session,
         )
     return (
         ReviewOutcome(
@@ -588,16 +631,20 @@ def _review_turn(
             cost_usd=cost,
         ),
         None,
+        cur_session,
     )
 
 
 class _ReviewerState:
     """Mutable per-reviewer run state (container, session, tool, ledger)."""
 
-    def __init__(self, spec, container: str, run_cmd: list[str]) -> None:
+    def __init__(self, spec, container: str, run_cmd: list[str], wt: Path) -> None:
         self.spec = spec
         self.container = container
         self.run_cmd = run_cmd
+        # The worktree path, kept so a usage-limit tool switch can rebuild the
+        # run command for the NEW tool's env/auth/mount (#94).
+        self.wt = wt
         self.session = str(uuid.uuid4())
         self.tool_now: str = spec.tool
         self.outcome: ReviewOutcome | None = None  # latest completed round
@@ -627,7 +674,7 @@ def _run_reviewer_with_reaction(
     only when *interrupted* is True (T10 daemon re-dispatch surface).
     """
     name = rstate.spec.name
-    review, rev_failed = _review_turn(
+    review, rev_failed, rstate.session = _review_turn(
         config,
         reviewer=name,
         block_threshold=rstate.spec.block_threshold,
@@ -670,6 +717,18 @@ def _run_reviewer_with_reaction(
             containers.stop_container(rstate.container)
             rstate.tool_now = nxt
             rstate.session = str(uuid.uuid4())
+            # Rebuild the run command for the NEW tool — its env var
+            # (CODEX_HOME vs CLAUDE_CONFIG_DIR), auth file, and mount differ, so
+            # the original (claude) run_cmd would mis-configure a codex
+            # container (#94).
+            rstate.container, rstate.run_cmd = _build_run_cmd(
+                config,
+                agent=f"review-{name}",
+                tool=nxt,
+                config_dir=config.reviewer_config_dir(name),
+                wt=rstate.wt,
+                read_only=True,
+            )
             containers.start_container(rstate.run_cmd)
             reseed_prompt = _render(
                 handoff.load_prompt("reviewer_reseed.md"),
@@ -685,7 +744,7 @@ def _run_reviewer_with_reaction(
                 prior_review=_prior_review_text(config, round_no, name),
                 review_file=handoff.reviewer_handoff_name(round_no, name),
             )
-            review, rev_failed = _review_turn(
+            review, rev_failed, rstate.session = _review_turn(
                 config,
                 reviewer=name,
                 block_threshold=rstate.spec.block_threshold,
@@ -721,11 +780,13 @@ def _run_reviewer_with_reaction(
         )
         _sleep(plan.wait_seconds)
         budget.remaining -= plan.wait_seconds
-        if _session_transcript_exists(config.reviewer_config_dir(name), rstate.session):
+        if _session_transcript_exists(
+            config.reviewer_config_dir(name), rstate.session, tool=rstate.tool_now
+        ):
             retry_prompt, retry_resume = _CONTINUATION_PROMPT, True
         else:
             retry_prompt, retry_resume = prompt, resume
-        review, rev_failed = _review_turn(
+        review, rev_failed, rstate.session = _review_turn(
             config,
             reviewer=name,
             block_threshold=rstate.spec.block_threshold,
@@ -800,13 +861,15 @@ def develop(
     containers are torn down.
     """
     specs = config.effective_reviewers
-    if config.coder != "claude":
-        raise ValueError("unsupported coder tool: only 'claude' until codex lands")
+    if not _tool_supported(config.coder):
+        raise ValueError(
+            f"unsupported coder tool {config.coder!r}: expected 'claude' or 'codex'"
+        )
     for spec in specs:
-        if spec.tool != "claude":
+        if not _tool_supported(spec.tool):
             raise ValueError(
                 f"unsupported tool {spec.tool!r} for reviewer {spec.name!r}: "
-                "only 'claude' until codex lands"
+                "expected 'claude' or 'codex'"
             )
         if not is_valid_reviewer_name(spec.name):
             raise ValueError(
@@ -850,6 +913,7 @@ def develop(
     coder_name, coder_cmd = _build_run_cmd(
         config,
         agent="coder",
+        tool=config.coder,
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,
@@ -859,11 +923,12 @@ def develop(
         rname, rcmd = _build_run_cmd(
             config,
             agent=f"review-{spec.name}",
+            tool=spec.tool,
             config_dir=config.reviewer_config_dir(spec.name),
             wt=wt,
             read_only=True,
         )
-        reviewers.append(_ReviewerState(spec, rname, rcmd))
+        reviewers.append(_ReviewerState(spec, rname, rcmd, wt))
     coder_session = str(uuid.uuid4())
 
     status = "failed"
@@ -937,8 +1002,14 @@ def develop(
                 resume=coder_resume,
                 round_no=round_no,
                 timeout=coder_timeout,
+                tool=config.coder,
             )
             coder_cost += attempt_cost
+            # Codex mints its session handle (thread_id) on turn 1; reuse the
+            # returned handle for resumes + persist it (no-op for claude, which
+            # echoes the supplied uuid). Drives daemon-resume + PR delivery.
+            if coder_turn.session_id:
+                coder_session = coder_turn.session_id
             if coder_interrupted:
                 failure_reason = (
                     f"round {round_no}: coder usage-limited; pause budget exhausted"

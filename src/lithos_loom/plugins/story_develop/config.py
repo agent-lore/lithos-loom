@@ -36,12 +36,18 @@ DEFAULT_PAUSE_POLL_MINUTES = 5  # T5: retry cadence when the reset time is unkno
 DEFAULT_IMAGE = "ralph-sandbox:latest"
 WORKSPACE_MOUNT = "/workspace"
 CLAUDE_CONFIG_MOUNT = "/claude_config"
+# Codex (#94): the per-run config/transcript dir is `CODEX_HOME` (NOT
+# `CODEX_CONFIG_DIR`, which codex ignores — feasibility gate). Mounted under the
+# work-dir, never `/tmp`. Auth is a single `auth.json` (the codex analogue of
+# claude's `.credentials.json`), bind-mounted RW for token refresh.
+CODEX_CONFIG_MOUNT = "/codex_home"
 # The single auth file bind-mounted from the operator's real config (RW, so the
 # OAuth token refresh propagates) — never the whole ~/.claude, and NOT
 # ``.claude.json`` (that is mutable user state, not auth; mounting the real one
 # RW would let the container pollute the operator's live config). See the PRD
 # "Run-state & session durability" section.
 CLAUDE_AUTH_FILES = (".credentials.json",)
+CODEX_AUTH_FILES = ("auth.json",)
 HANDOFF_DIRNAME = ".handoff"
 
 
@@ -269,6 +275,8 @@ class DevelopConfig:
     run_id: str = field(default_factory=_short_run_id)
     # Host path to the operator's claude config dir (source of the auth file).
     claude_config_dir: Path = field(default_factory=lambda: Path.home() / ".claude")
+    # Host path to the operator's codex config dir (source of `auth.json`, #94).
+    codex_config_dir: Path = field(default_factory=lambda: Path.home() / ".codex")
 
     @property
     def effective_reviewers(self) -> tuple[ReviewerSpec, ...]:
@@ -341,6 +349,16 @@ class DevelopConfig:
 
         Restores the feasibility-gate G2 behaviour: operator-installed skills
         are available to the agent inside the per-run ``CLAUDE_CONFIG_DIR``.
+        Claude-only — codex has no skill concept (it honours the worktree
+        ``AGENTS.md`` instead), so codex agents pass ``skills_dir=None``.
         """
         skills = self.claude_config_dir / "skills"
         return skills if skills.is_dir() else None
+
+    def auth_source_dir(self, tool: str) -> Path:
+        """Operator config dir that holds *tool*'s auth file (#94).
+
+        ``codex`` reads ``auth.json`` from :attr:`codex_config_dir`; every other
+        tool (claude) reads from :attr:`claude_config_dir`.
+        """
+        return self.codex_config_dir if tool == "codex" else self.claude_config_dir

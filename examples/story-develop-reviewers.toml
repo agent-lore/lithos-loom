@@ -5,14 +5,17 @@
 #   block_threshold strictness — findings AT or ABOVE this severity block
 #                   approval; below it they are recorded but non-blocking
 #   system_prompt   the reviewer's focus brief
-#   tool            agent tool (only "claude" is wired today; codex is #94)
-#   fallback_chain  alternate tools tried when this one is usage-limited
+#   tool            agent tool: "claude" or "codex" (#94). A mixed panel is a
+#                   quality multiplier — different engines catch different things
+#   fallback_chain  alternate tools tried when this one is usage-limited (e.g.
+#                   ["codex"] to switch engines when claude is rate-limited)
 #   model           model alias (opus/sonnet/haiku/fable) or a full id; omit
-#                   to inherit the agent default
+#                   to inherit the agent default. For codex this is the `-m`
+#                   model (codex depth is model-driven)
 #   effort          reasoning level: low | medium | high | xhigh | max; omit
 #                   to inherit the agent default. NOT a token budget — these
-#                   are Claude's --effort levels (the canonical set; other
-#                   tools map onto them when they land, #94)
+#                   are Claude's --effort levels (the canonical set). Ignored
+#                   for codex agents (#94), whose depth follows the model
 #
 # The run is approved only when ALL reviewers pass their OWN threshold in the
 # same round. (With --reviewer instead of --develop-config, the blanket
@@ -30,8 +33,22 @@ name = "security"
 block_threshold = "minor"          # security is strict: any minor finding blocks
 model = "claude-opus-4-8"          # pinned full id — reproducible, won't drift
 effort = "xhigh"                   # deepest practical reasoning for the strict gate
+fallback_chain = ["codex"]         # if claude is rate-limited, switch engines
 system_prompt = """
 Review as a security specialist: injection, authn/authz, secret handling,
 unsafe deserialization, path traversal, SSRF, and dependency risks. Judge the
 change's blast radius, not just its diff.
+"""
+
+# A codex reviewer alongside the claude ones — heterogeneous panels catch more
+# because different engines have different blind spots (#94). `effort` is
+# omitted: codex depth is model-driven, so set `model` instead if you want to
+# pin the engine's reasoning level.
+[[reviewers]]
+name = "code-review"
+tool = "codex"
+block_threshold = "major"
+system_prompt = """
+Review for correctness, edge cases, and API misuse — a second engine's read on
+the same diff.
 """

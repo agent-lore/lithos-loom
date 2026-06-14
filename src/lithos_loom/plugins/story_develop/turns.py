@@ -1,10 +1,13 @@
 """Run a single agent turn (coder or reviewer) and parse its structured result.
 
-A turn is ``docker exec ... claude --session-id <id> -p --output-format json``.
-Completion, error, and cost all come from the parsed JSON + the process exit
-code — no terminal scraping (ADR 0002). The machinery is identical for the coder
-and the reviewer; only the prompt + container differ. Usage-limit *classification*
-lands in T5.
+A turn is ``docker exec ...`` into a warm container: claude as
+``claude --session-id <id> -p --output-format json``, or codex (#94) as
+``codex exec [resume <thread_id>] --json``. Completion, error, and cost all come
+from the parsed structured output + the process exit code — no terminal scraping
+(ADR 0002). The machinery is identical for the coder and the reviewer; only the
+prompt + container differ. The two tools parse differently (claude emits a
+single JSON result object; codex emits a JSONL event stream), so :func:`run_turn`
+dispatches to the matching parser on *tool*.
 """
 
 from __future__ import annotations
@@ -71,6 +74,85 @@ def parse_claude_result(stdout: str, *, exit_code: int, stderr: str) -> TurnResu
     )
 
 
+def parse_codex_result(
+    stdout: str,
+    *,
+    exit_code: int,
+    stderr: str,
+    session_id: str = "",
+    resume: bool = False,
+) -> TurnResult:
+    """Parse ``codex exec --json`` JSONL stdout into a TurnResult (#94).
+
+    The stream is one JSON object per line. We read:
+
+    * ``{"type": "thread.started", "thread_id": ...}`` → the session handle
+      (codex *mints* it on turn 1; we capture it for ``codex exec resume``);
+    * the last ``{"type": "item.completed", "item": {"type": "agent_message",
+      "text": ...}}`` → the final message text;
+    * ``{"type": "turn.completed", "usage": {...}}`` → success signal + token
+      usage (stashed in ``raw``);
+    * ``{"type": "turn.failed" | "error", ...}`` → failure.
+
+    The returned ``session_id`` is the captured ``thread_id``, or — on a
+    **resume** turn where the stream may not re-announce ``thread.started`` —
+    the inbound *session_id* (the handle we resumed). Success requires a
+    zero exit, a ``turn.completed``, no failure event, AND a usable handle (so
+    later resume turns always have something to resume — mirrors the claude
+    contract). ``cost_usd`` is ``0.0``: codex reports tokens, not USD; the
+    ``max_cost_usd`` ceiling is claude-only until a pricing map lands (#94
+    follow-up). Token usage is preserved in ``raw`` for the run summary.
+    Unparseable lines are skipped defensively.
+    """
+    thread_id = ""
+    result_text = ""
+    usage: dict | None = None
+    saw_completed = False
+    saw_failure = False
+
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        if etype == "thread.started":
+            thread_id = str(event.get("thread_id") or "")
+        elif etype == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                result_text = str(item.get("text") or "")
+        elif etype == "turn.completed":
+            saw_completed = True
+            u = event.get("usage")
+            if isinstance(u, dict):
+                usage = u
+        elif etype in ("turn.failed", "error"):
+            saw_failure = True
+
+    # On resume, keep the handle we resumed even if the stream didn't re-emit
+    # thread.started; on the first turn the handle MUST be captured fresh.
+    handle = thread_id or (session_id if resume else "")
+    succeeded = exit_code == 0 and saw_completed and not saw_failure and bool(handle)
+    # ``raw`` carries the token usage (no USD) for the run summary / findings.
+    raw = {"usage": usage} if usage is not None else None
+
+    return TurnResult(
+        exit_code=exit_code,
+        succeeded=succeeded,
+        session_id=handle,
+        result_text=result_text,
+        cost_usd=0.0,
+        raw=raw,
+        stderr=stderr,
+    )
+
+
 def run_turn(
     *,
     container: str,
@@ -110,6 +192,14 @@ def run_turn(
             cost_usd=0.0,
             raw=None,
             stderr=f"agent turn timed out after {timeout}s",
+        )
+    if tool == "codex":
+        return parse_codex_result(
+            proc.stdout,
+            exit_code=proc.returncode,
+            stderr=proc.stderr,
+            session_id=session_id,
+            resume=resume,
         )
     return parse_claude_result(
         proc.stdout, exit_code=proc.returncode, stderr=proc.stderr

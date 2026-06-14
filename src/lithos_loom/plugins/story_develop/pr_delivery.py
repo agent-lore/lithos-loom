@@ -587,21 +587,25 @@ def deliver(
     name, run_cmd = _build_run_cmd(
         config,
         agent="coder",
+        tool=config.coder,
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,
     )
     try:
         containers.start_container(run_cmd)
-        # Same coder, same session resumed — it must run on the SAME model +
-        # reasoning effort the develop loop used (#93), not silently revert to
-        # the agent default while finalizing the branch.
+        # Same coder, same session resumed — it must run on the SAME tool (#94)
+        # + model + reasoning effort the develop loop used (#93), not silently
+        # revert to the agent default while finalizing the branch.
+        # ``result.coder_session`` is the live handle (the codex thread_id, or
+        # the claude uuid).
         turn = run_turn(
             container=name,
             prompt=prompt,
             session_id=result.coder_session,
             resume=True,
             timeout=coder_timeout,
+            tool=config.coder,
             model=config.coder_model,
             effort=config.coder_effort,
         )

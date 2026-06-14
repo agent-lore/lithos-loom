@@ -146,6 +146,32 @@ def test_parse_effort_rejects_bad(bad: object) -> None:
         parse_effort(bad, where="x")
 
 
+# --- codex agent config (#94) -----------------------------------------------
+
+
+def test_codex_config_dir_defaults_to_home_dotcodex(tmp_path: Path) -> None:
+    cfg = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
+    assert cfg.codex_config_dir == Path.home() / ".codex"
+
+
+def test_auth_source_dir_selects_by_tool(tmp_path: Path) -> None:
+    cfg = DevelopConfig(
+        repo=tmp_path,
+        description="x",
+        work_dir=tmp_path / "w",
+        claude_config_dir=tmp_path / "c",
+        codex_config_dir=tmp_path / "x",
+    )
+    assert cfg.auth_source_dir("codex") == tmp_path / "x"
+    assert cfg.auth_source_dir("claude") == tmp_path / "c"
+
+
+def test_codex_auth_files_constant() -> None:
+    from lithos_loom.plugins.story_develop.config import CODEX_AUTH_FILES
+
+    assert CODEX_AUTH_FILES == ("auth.json",)
+
+
 def test_loader_rejects_invalid_toml(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="cannot read develop config"):
         load_develop_config(_write(tmp_path, "this is [not toml"))

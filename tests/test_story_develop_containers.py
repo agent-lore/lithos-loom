@@ -121,11 +121,66 @@ def test_exec_command_omits_effort_flag_when_none() -> None:
     assert "--effort" not in cmd
 
 
-def test_exec_command_rejects_non_claude_tool() -> None:
+def test_exec_command_rejects_unknown_tool() -> None:
     with pytest.raises(ValueError):
         containers.build_exec_command(
-            name="c", tool="codex", prompt="p", session_id="s"
+            name="c", tool="opencode", prompt="p", session_id="s"
         )
+
+
+# ── codex (#94) ────────────────────────────────────────────────────────
+
+
+def test_exec_command_codex_first_turn() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="codex", prompt="do it", session_id="unused-uuid"
+    )
+    assert cmd[:5] == ["docker", "exec", "-w", "/workspace", "c"]
+    # `codex exec` (no `resume`); the supplied session_id is NOT in the argv —
+    # codex mints the thread_id itself on turn 1.
+    assert cmd[cmd.index("codex") + 1] == "exec"
+    assert "resume" not in cmd
+    assert "unused-uuid" not in cmd
+    assert "--json" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert cmd[-1] == "do it"
+
+
+def test_exec_command_codex_resume_passes_thread_id() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="codex", prompt="p", session_id="thread-7", resume=True
+    )
+    # `codex exec resume <thread_id>` — handle is positional, right after resume.
+    idx = cmd.index("resume")
+    assert cmd[idx - 1] == "exec"
+    assert cmd[idx + 1] == "thread-7"
+    assert "--json" in cmd
+    assert cmd[-1] == "p"
+
+
+def test_exec_command_codex_model_flag_and_effort_ignored() -> None:
+    cmd = containers.build_exec_command(
+        name="c", tool="codex", prompt="p", session_id="s", model="o3", effort="high"
+    )
+    assert cmd[cmd.index("-m") + 1] == "o3"
+    # codex depth is model-driven; the claude `--effort` knob is not emitted.
+    assert "--effort" not in cmd
+
+
+def test_run_command_codex_env_mount_and_auth() -> None:
+    cmd = _run_cmd(
+        config_dir=Path("/work/run/agents/coder/claude_config"),
+        auth_source_dir=Path("/home/u/.codex"),
+        auth_files=["auth.json"],
+        skills_dir=None,
+        tool="codex",
+    )
+    assert "/work/run/agents/coder/claude_config:/codex_home" in cmd
+    assert "/home/u/.codex/auth.json:/codex_home/auth.json" in cmd
+    assert "CODEX_HOME=/codex_home" in cmd
+    assert "CLAUDE_CONFIG_DIR=/claude_config" not in cmd
+    # codex has no skill concept even if a dir were passed
+    assert not any(a.endswith("/skills:ro") for a in cmd)
 
 
 def test_container_name() -> None:
