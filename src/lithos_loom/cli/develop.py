@@ -103,13 +103,22 @@ def _iter_run_dirs(work_dir: Path) -> list[Path]:
 
 
 def _task_title(run_dir: Path) -> str:
-    """Task title from the runner-written sibling ``task.json`` (best-effort)."""
-    try:
-        data = json.loads((run_dir.parent / "task.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    task = data.get("task", data) if isinstance(data, dict) else {}
-    return str(task.get("title") or "") if isinstance(task, dict) else ""
+    """Title for *this* run (best-effort).
+
+    Prefers the **per-run** ``task.json`` the plugin snapshots into the run dir
+    at run start — immune to a later re-dispatch overwriting the shared
+    per-task ``task.json`` (#88). Falls back to the per-task sibling for runs
+    that predate the snapshot.
+    """
+    for candidate in (run_dir / "task.json", run_dir.parent / "task.json"):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        task = data.get("task", data) if isinstance(data, dict) else {}
+        if isinstance(task, dict) and task.get("title"):
+            return str(task["title"])
+    return ""
 
 
 def _round_and_reviewers(handoff_dir: Path) -> tuple[int, tuple[str, ...]]:

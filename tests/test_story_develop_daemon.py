@@ -698,6 +698,13 @@ def test_daemon_mode_happy_path_writes_result(
     assert payload["status"] == "succeeded"
     _validate_result_schema(payload)
 
+    # #88: the run's task envelope is snapshotted into the run dir at start, so
+    # `lithos-loom develop` reports THIS run's title even after a later
+    # re-dispatch overwrites the shared per-task task.json.
+    snapshot = json.loads((cfg.run_dir / "task.json").read_text(encoding="utf-8"))
+    assert snapshot["task"]["id"] == "t-1"
+    assert snapshot["task"]["title"] == "Add a flag"
+
 
 def test_daemon_mode_cli_model_effort_fallback_used(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch

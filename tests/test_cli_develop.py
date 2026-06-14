@@ -23,14 +23,21 @@ def _make_run(
     task_id: str = "t-1",
     run_id: str = "abc123",
     title: str = "Do the thing",
+    run_title: str | None = None,
     rounds: dict[int, list[str]] | None = None,
     conversation: str | None = None,
 ) -> Path:
     run_dir = work_dir / task_id / run_id
     (run_dir / "handoff").mkdir(parents=True)
+    # the shared per-task task.json (runner-written; overwritten each dispatch)
     (work_dir / task_id / "task.json").write_text(
         json.dumps({"task": {"id": task_id, "title": title}})
     )
+    # the per-run snapshot the plugin writes at run start (#88)
+    if run_title is not None:
+        (run_dir / "task.json").write_text(
+            json.dumps({"task": {"id": task_id, "title": run_title}})
+        )
     for rnd, reviewers in (rounds or {}).items():
         hd = run_dir / "handoff"
         (hd / f"round_{rnd:02d}_coder_done.md").write_text(
@@ -105,6 +112,36 @@ def test_task_title_missing_json_is_blank(tmp_path: Path) -> None:
     run_dir = tmp_path / "t-x" / "r"
     (run_dir / "handoff").mkdir(parents=True)  # no task.json sibling
     assert develop._task_title(run_dir) == ""
+
+
+def test_title_is_per_run_not_per_task(tmp_path: Path) -> None:
+    # A task re-dispatched after its title changed: run-1 was started as "Old
+    # title", run-2 as "New title". The shared per-task task.json now holds the
+    # NEWEST title; each run's own snapshot must win so the historical run isn't
+    # mislabelled (#88 review).
+    run1 = _make_run(
+        tmp_path,
+        task_id="t-1",
+        run_id="run-1",
+        title="New title",
+        run_title="Old title",
+    )
+    run2 = _make_run(
+        tmp_path,
+        task_id="t-1",
+        run_id="run-2",
+        title="New title",
+        run_title="New title",
+    )
+    assert develop._run_info(run1).title == "Old title"  # not the shared newest
+    assert develop._run_info(run2).title == "New title"
+
+
+def test_title_falls_back_to_per_task_when_no_snapshot(tmp_path: Path) -> None:
+    # An in-flight run (or one predating the snapshot) has no per-run task.json;
+    # the per-task file is then its own current title.
+    run_dir = _make_run(tmp_path, task_id="t-2", run_id="r", title="Current")
+    assert develop._task_title(run_dir) == "Current"
 
 
 # ── docker seam ────────────────────────────────────────────────────────
