@@ -35,7 +35,9 @@ The shared core is :func:`lithos_loom.plugins.story_develop.develop.develop`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
+import shutil
 import sys
 import tempfile
 from datetime import UTC, datetime
@@ -393,6 +395,18 @@ def _daemon_main(args: argparse.Namespace) -> int:
         )
         print(f"error: {message}", file=sys.stderr)
         return exit_code
+
+    # Snapshot the task envelope into the run dir so `lithos-loom develop`
+    # reports THIS run's title (and body/tags) even after the task is
+    # re-dispatched — the shared per-task work_dir/task.json is overwritten on
+    # each dispatch, so an older retained run would otherwise show the newest
+    # title (#88). Written at run start so an in-flight run has it too; copy is
+    # best-effort (a missing snapshot just falls back to the per-task file).
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        shutil.copy2(
+            args.task_json.expanduser().resolve(), config.run_dir / "task.json"
+        )
 
     try:
         result = develop(
