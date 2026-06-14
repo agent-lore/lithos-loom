@@ -1,8 +1,16 @@
 # ADR 0002 — `story-develop` session mechanism: live container + resumable exec, not a live REPL
 
-- **Status:** Accepted
+- **Status:** Accepted (claude shipped T1–T10; codex adapter implemented #94)
 - **Date:** 2026-06-11
 - **Deciders:** Dave Snowdon
+
+> **#94 update.** The codex adapter is built on this mechanism. The one
+> tool-specific wrinkle the design anticipated is confirmed: codex **mints** its
+> session handle (the `thread_id` from the first turn's `thread.started`
+> `--json` event) rather than taking a caller-supplied uuid like claude — so the
+> runner captures the returned handle and reuses it for `codex exec resume
+> <thread_id>`. Transcript redirect uses `CODEX_HOME` (under the work-dir) per
+> the gate; no change to the live-container + resumable-exec decision itself.
 
 ## Context
 

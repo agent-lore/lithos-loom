@@ -149,6 +149,39 @@ def test_main_threads_model_and_effort_into_config(
         assert spec.model == "sonnet" and spec.effort == "high"
 
 
+def test_main_accepts_codex_coder(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#94: ``--coder codex`` is a valid choice and lands on the config."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main_mod.main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--coder", "codex"]
+    )
+    assert rc == 0
+    assert captured["config"].coder == "codex"
+
+
 def test_main_rejects_bad_max_rounds(tmp_git_repo: Path, capsys) -> None:
     rc = main(["--repo", str(tmp_git_repo), "--description", "x", "--max-rounds", "0"])
     assert rc == 2

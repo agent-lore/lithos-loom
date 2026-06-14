@@ -158,7 +158,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--coder",
         default=DEFAULT_CODER_TOOL,
-        choices=["claude"],  # only claude until T5/T6
+        choices=["claude", "codex"],  # #94: codex adapter parallel to claude
         help="Coding agent tool",
     )
     p.add_argument(
