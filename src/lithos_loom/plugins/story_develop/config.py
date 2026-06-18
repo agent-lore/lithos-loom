@@ -111,6 +111,25 @@ def parse_model(value: object, *, where: str) -> str | None:
     return value.strip()
 
 
+def parse_image(value: object, *, where: str) -> str | None:
+    """Validate + normalise a sandbox container ``image`` value, or ``None``.
+
+    Mirrors :func:`parse_model`: a non-empty string (stripped) or ``None``
+    (meaning "inherit the route-level ``--image`` / built-in default"). Like a
+    model id, an image reference (e.g. ``ralph-sandbox:latest``,
+    ``ghcr.io/acme/dev@sha256:…``) is not validated against a catalogue — it
+    just has to be a non-empty string; a bad ref surfaces when ``docker run``
+    fails. Shared by the project-context metadata loader and the per-task
+    override so both surfaces reject the same garbage identically. Raises
+    :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where}: image must be a non-empty string (got {value!r})")
+    return value.strip()
+
+
 # Reasoning-effort levels. There is no universal cross-tool effort vocabulary:
 # Claude's `--effort` is low/medium/high/xhigh/max; Codex has NO effort flag
 # (depth is implicit in model choice — o3 vs gpt-4o); OpenCode's `--variant` is

@@ -386,7 +386,10 @@ def _daemon_main(args: argparse.Namespace) -> int:
             if settings.max_cost_usd is not None
             else args.max_cost_usd
         ),
-        image=args.image,
+        # Per-project / per-task sandbox image from project-context metadata
+        # wins; the route-level --image flag (default DEFAULT_IMAGE) is the
+        # fallback when metadata pins nothing.
+        image=settings.image or args.image,
         base_branch=args.branch,
     )
 
