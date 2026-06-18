@@ -342,4 +342,4 @@ tags = ["trigger:story-review-human"]
 # Uncomment to set host-wide defaults.
 # [story_develop.default_models]
 # claude = "opus"
-# codex  = "gpt-5-codex"
+# codex  = "gpt-5.4"
