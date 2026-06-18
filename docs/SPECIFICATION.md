@@ -339,7 +339,7 @@ reconcile_interval_minutes = 60
 
 [story_develop.default_models]
 claude = "opus"
-codex  = "gpt-5-codex"
+codex  = "gpt-5.4"
 ```
 
 ### 3.2 Validation
