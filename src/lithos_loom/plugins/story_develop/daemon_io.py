@@ -10,7 +10,8 @@ Three concerns, all pure-ish and unit-testable:
   contract": a daemon-mode run loads its reviewer config ITSELF from the
   project-context doc's metadata (``develop_reviewers`` /
   ``develop_default_reviewers`` / ``develop_coder`` /
-  ``develop_fallback_chain`` / ceilings), because ``--task-json`` carries
+  ``develop_fallback_chain`` / ``develop_image`` / ceilings), because
+  ``--task-json`` carries
   the task, not resolved project config. Every miss degrades to the
   built-in default (a single ``code-quality`` reviewer) plus a
   ``[Friction]`` breadcrumb — a missing or stale link must never block
@@ -38,6 +39,7 @@ from .config import (
     DEFAULT_REVIEWER_NAME,
     ReviewerSpec,
     parse_effort,
+    parse_image,
     parse_model,
     parse_reviewer_entry,
 )
@@ -117,6 +119,10 @@ class ProjectDevelopSettings:
     fallback_chain: tuple[str, ...] = ()
     max_rounds: int | None = None
     max_cost_usd: float | None = None
+    # Per-project (``develop_image``) sandbox container image, with an optional
+    # per-task override (``task.metadata.develop_image``). ``None`` = "inherit
+    # the route-level ``--image`` flag / the built-in default".
+    image: str | None = None
     frictions: tuple[str, ...] = ()
 
 
@@ -290,6 +296,24 @@ def resolve_project_settings(
         except ValueError as exc:
             frictions.append(f"{exc}; keeping project default")
 
+    # Per-project sandbox image (``develop_image``), with an optional per-task
+    # override — a single task can opt into a heavier / specialised image
+    # (e.g. one carrying a GPU toolchain) without changing project policy.
+    # Per-task wins; both degrade to friction on a bad value so resolution
+    # never fails the run.
+    image: str | None = None
+    try:
+        image = parse_image(meta.get("develop_image"), where="develop_image")
+    except ValueError as exc:
+        frictions.append(f"{exc}; ignoring")
+    if task_metadata.get("develop_image") is not None:
+        try:
+            image = parse_image(
+                task_metadata["develop_image"], where="task metadata.develop_image"
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
+
     raw_chain = meta.get("develop_fallback_chain")
     chain: tuple[str, ...] = ()
     if isinstance(raw_chain, list) and all(isinstance(t, str) for t in raw_chain):
@@ -317,6 +341,7 @@ def resolve_project_settings(
         fallback_chain=chain,
         max_rounds=max_rounds,
         max_cost_usd=float(max_cost) if max_cost is not None else None,
+        image=image,
         frictions=tuple(frictions),
     )
 
