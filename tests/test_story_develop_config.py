@@ -15,6 +15,7 @@ from lithos_loom.plugins.story_develop.config import (
     ReviewerSpec,
     load_develop_config,
     parse_effort,
+    parse_image,
     parse_model,
 )
 
@@ -144,6 +145,28 @@ def test_parse_effort_rejects_bad(bad: object) -> None:
     # not a Claude effort level and is rejected at this layer.
     with pytest.raises(ValueError, match="effort must be one of"):
         parse_effort(bad, where="x")
+
+
+@pytest.mark.parametrize(
+    "good",
+    ["ralph-sandbox:latest", "ghcr.io/acme/dev:2026-06", "img@sha256:abc"],
+)
+def test_parse_image_accepts_non_empty_strings(good: str) -> None:
+    assert parse_image(good, where="x") == good
+
+
+def test_parse_image_none_passes_through() -> None:
+    assert parse_image(None, where="x") is None
+
+
+def test_parse_image_strips_surrounding_whitespace() -> None:
+    assert parse_image("  ralph-sandbox:latest  ", where="x") == "ralph-sandbox:latest"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, []])
+def test_parse_image_rejects_bad(bad: object) -> None:
+    with pytest.raises(ValueError, match="image must be a non-empty string"):
+        parse_image(bad, where="x")
 
 
 # --- codex agent config (#94) -----------------------------------------------

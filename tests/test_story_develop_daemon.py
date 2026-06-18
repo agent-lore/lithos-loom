@@ -305,6 +305,57 @@ def test_resolve_invalid_task_override_keeps_project_default(fake_client) -> Non
     assert any("develop_model" in f for f in settings.frictions)
 
 
+def test_resolve_image_from_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_image": "ghcr.io/acme/dev:2026-06"},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.image == "ghcr.io/acme/dev:2026-06"
+    assert settings.frictions == ()
+
+
+def test_resolve_image_defaults_none_without_key(fake_client) -> None:
+    fake_client.note = _FakeNote("projects/loom/loom-project-context.md", {})
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.image is None
+
+
+def test_resolve_task_image_override_beats_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_image": "ghcr.io/acme/dev:2026-06"},
+    )
+    settings = resolve_project_settings(
+        "http://x",
+        {"project": "loom", "develop_image": "ghcr.io/acme/dev-cuda:2026-06"},
+    )
+    assert settings.image == "ghcr.io/acme/dev-cuda:2026-06"  # per-task wins
+    assert settings.frictions == ()
+
+
+def test_resolve_invalid_project_image_frictioned(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_image": ""},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.image is None
+    assert any("develop_image" in f for f in settings.frictions)
+
+
+def test_resolve_invalid_task_image_keeps_project_default(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_image": "ghcr.io/acme/dev:2026-06"},
+    )
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_image": 7}
+    )
+    assert settings.image == "ghcr.io/acme/dev:2026-06"  # bad override ignored
+    assert any("task metadata.develop_image" in f for f in settings.frictions)
+
+
 def test_resolve_unknown_override_name_skipped_with_friction(fake_client) -> None:
     fake_client.note = _FakeNote(
         "projects/loom/loom-project-context.md",
@@ -862,6 +913,61 @@ def test_daemon_mode_cli_model_effort_fallback_used(
     assert cfg.coder_model == "opus" and cfg.coder_effort == "xhigh"
     # reviewer flags fill the built-in reviewer too (finding 2: not ignored)
     assert all(s.model == "sonnet" and s.effort == "medium" for s in cfg.reviewers)
+
+
+def test_daemon_mode_metadata_image_flows_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A resolved per-project/per-task image wins over the route --image flag."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(image="ghcr.io/acme/dev:2026-06"),
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    # Pass a route --image too: metadata must still win.
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--image", "route-image:latest")
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].image == "ghcr.io/acme/dev:2026-06"
+
+
+def test_daemon_mode_image_falls_back_to_route_flag(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """With no metadata image, the route --image flag is the fallback."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(),  # image=None
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--image", "route-image:latest")
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].image == "route-image:latest"
 
 
 def test_daemon_mode_bad_cli_fallback_degrades_with_friction(
