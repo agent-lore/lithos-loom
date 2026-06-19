@@ -34,6 +34,13 @@ DEFAULT_TEST_TIMEOUT = 900  # seconds for one test-gate container run (T4)
 DEFAULT_MAX_PAUSE_MINUTES = 120  # T5: total usage-limit pause budget per run
 DEFAULT_PAUSE_POLL_MINUTES = 5  # T5: retry cadence when the reset time is unknown
 DEFAULT_IMAGE = "ralph-sandbox:latest"
+# Open-file-descriptor limit for every story-develop container. runc's default
+# soft RLIMIT_NOFILE is 1024; an FD-heavy test suite (e.g. one that loads an ML
+# model per fixture) crosses that mid-run and every later fixture errors with
+# EMFILE — a false RED unrelated to the code under test (#117). 65536 is ~50x the
+# observed need (failure begins right at 1024) and stays under typical
+# docker-daemon hard caps for portability. Passed as ``--ulimit nofile=soft:hard``.
+CONTAINER_NOFILE_ULIMIT = "65536:65536"
 WORKSPACE_MOUNT = "/workspace"
 CLAUDE_CONFIG_MOUNT = "/claude_config"
 # Codex (#94): the per-run config/transcript dir is `CODEX_HOME` (NOT

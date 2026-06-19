@@ -23,6 +23,7 @@ from pathlib import Path
 from .config import (
     CLAUDE_CONFIG_MOUNT,
     CODEX_CONFIG_MOUNT,
+    CONTAINER_NOFILE_ULIMIT,
     WORKSPACE_MOUNT,
     DevelopConfig,
 )
@@ -87,6 +88,8 @@ def build_run_command(
         "ALL",
         "--security-opt",
         "no-new-privileges:true",
+        "--ulimit",
+        f"nofile={CONTAINER_NOFILE_ULIMIT}",
         "-v",
         workspace_mount,
         "-v",
