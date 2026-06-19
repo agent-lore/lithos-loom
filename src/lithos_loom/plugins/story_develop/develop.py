@@ -356,6 +356,24 @@ _CONTINUATION_PROMPT = (
 )
 
 
+def _coder_handoff_nudge(round_no: int) -> str:
+    """One-shot re-prompt when the coder ended its turn with work but no handoff.
+
+    The implementation is already in the worktree; only the required handoff
+    breadcrumb is missing (lithos-loom#114 — typically the coder backgrounded a
+    slow suite and stopped before the handoff step). Ask only for the handoff,
+    synchronously, with no further commands.
+    """
+    return (
+        "You changed files under /workspace but never wrote your handoff file, "
+        "so the run cannot proceed. Do not run, background, or wait on any "
+        "further commands. Right now, synchronously, write your summary to "
+        f"/workspace/.handoff/{handoff.coder_handoff_name(round_no)} per "
+        "/workspace/.handoff/FORMAT.md (`## Status: LGTM` then `## Summary`). "
+        "That is the only remaining step."
+    )
+
+
 class _PauseBudget:
     """The run's shared usage-limit pause budget, in seconds."""
 
@@ -1023,6 +1041,44 @@ def develop(
             done_present = (
                 config.handoff_dir / handoff.coder_handoff_name(round_no)
             ).is_file()
+            # Salvage (lithos-loom#114): the coder ended its turn cleanly and
+            # left work in the worktree but never wrote its handoff (classic
+            # case: it backgrounded a slow suite and stopped before the handoff
+            # step). The implementation is done; only the required breadcrumb is
+            # missing. Re-prompt once to write it before failing — the prompt
+            # already forbids this (#115); this recovers the slips-through. Only
+            # for a clean turn (a crashed/errored turn can't be resumed) and
+            # only when there is uncommitted work to save (else a nudge is
+            # wasted); between rounds the worktree is clean, so the flag
+            # reflects this round's coder work.
+            if (
+                coder_turn.succeeded
+                and not done_present
+                and git.has_uncommitted_changes(wt)
+            ):
+                logger.warning(
+                    "story-develop %s: round %d coder ended its turn with "
+                    "uncommitted changes but no handoff — re-prompting once to "
+                    "write it",
+                    config.run_id,
+                    round_no,
+                )
+                nudge_turn = run_turn(
+                    container=coder_name,
+                    prompt=_coder_handoff_nudge(round_no),
+                    session_id=coder_session,
+                    resume=True,
+                    timeout=coder_timeout,
+                    tool=config.coder,
+                    model=config.coder_model,
+                    effort=config.coder_effort,
+                )
+                coder_cost += nudge_turn.cost_usd
+                if nudge_turn.session_id:
+                    coder_session = nudge_turn.session_id
+                done_present = (
+                    config.handoff_dir / handoff.coder_handoff_name(round_no)
+                ).is_file()
             if not (coder_turn.succeeded and done_present):
                 reasons = []
                 if not coder_turn.succeeded:

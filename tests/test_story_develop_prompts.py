@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from lithos_loom.plugins.story_develop.develop import _coder_handoff_nudge
 from lithos_loom.plugins.story_develop.handoff import load_prompt
 
 
@@ -29,3 +30,15 @@ def test_coder_init_drops_run_the_suite_instruction() -> None:
     # The old instruction ("run it and note the result") is what pushed the
     # agent to background a slow suite; it must not return.
     assert "run it and note the result" not in load_prompt("coder_init.md")
+
+
+def test_coder_handoff_nudge_asks_only_for_the_handoff() -> None:
+    # The #114 salvage re-prompt: when the coder left work but no handoff, the
+    # one-shot nudge names that round's handoff file and forbids any further
+    # backgrounded/awaited work — the implementation is already done.
+    nudge = _coder_handoff_nudge(1)
+    assert "round_01_coder_done.md" in nudge
+    assert "synchronously" in nudge
+    assert "background" in nudge
+    # the stable marker the orchestrator's salvage path is recognised by
+    assert "never wrote your handoff" in nudge
