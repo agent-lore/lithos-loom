@@ -11,6 +11,7 @@ from lithos_loom.config import (
     DEFAULT_GITHUB_WATCHER_COORD_DOC,
     DEFAULT_GITHUB_WATCHER_POLL_INTERVAL,
     DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE,
     DEFAULT_OBSIDIAN_PROJECTS_DIR,
     DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS,
     DEFAULT_OBSIDIAN_TASKS_FILE,
@@ -291,6 +292,9 @@ def test_obsidian_sync_minimal_parses(
     assert cfg.obsidian_sync.include_blocked is True
     assert cfg.obsidian_sync.exclude_tags == ()
     assert cfg.obsidian_sync.projects_dir == DEFAULT_OBSIDIAN_PROJECTS_DIR
+    assert (
+        cfg.obsidian_sync.awaiting_review_file == DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE
+    )
 
 
 def test_obsidian_sync_full_parses(
@@ -310,6 +314,7 @@ def test_obsidian_sync_full_parses(
             include_blocked = false
             exclude_tags = ["debug:trace", "internal"]
             projects_dir = "loom/projects"
+            awaiting_review_file = "loom/review.md"
             """
         ),
     )
@@ -321,6 +326,26 @@ def test_obsidian_sync_full_parses(
     assert cfg.obsidian_sync.include_blocked is False
     assert cfg.obsidian_sync.exclude_tags == ("debug:trace", "internal")
     assert cfg.obsidian_sync.projects_dir == Path("loom/projects")
+    assert cfg.obsidian_sync.awaiting_review_file == Path("loom/review.md")
+
+
+def test_obsidian_sync_rejects_absolute_awaiting_review_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            f"""
+            [obsidian_sync]
+            vault_path = "{vault}"
+            awaiting_review_file = "/etc/passwd"
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="awaiting_review_file"):
+        load_config()
 
 
 def test_obsidian_sync_vault_path_required(

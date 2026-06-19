@@ -56,6 +56,9 @@ from lithos_loom.subscriptions import (
     SubscriptionContext,
     build_runners,
 )
+from lithos_loom.subscriptions._awaiting_review import (
+    make_handler as make_awaiting_review_handler,
+)
 from lithos_loom.subscriptions._note_push import (
     make_handler as make_note_push_handler,
 )
@@ -86,6 +89,7 @@ from lithos_loom.sync_state import ProjectionSyncState
 _CHILD_ACTIONS: frozenset[str] = frozenset(
     {
         "obsidian-projection",
+        "obsidian-awaiting-review",
         "obsidian-status-transition",
         "obsidian-priority-changed",
         "obsidian-due-date-changed",
@@ -213,6 +217,7 @@ async def _amain(cfg: LoomConfig) -> int:
     project_context_projection_specs = by_action.get("project-context-projection", [])
     note_push_specs = by_action.get("note-push", [])
     task_archive_specs = by_action.get("task-archive", [])
+    awaiting_review_specs = by_action.get("obsidian-awaiting-review", [])
     projection_spec = projection_specs[0] if projection_specs else None
     status_transition_spec = (
         status_transition_specs[0] if status_transition_specs else None
@@ -230,6 +235,7 @@ async def _amain(cfg: LoomConfig) -> int:
     )
     note_push_spec = note_push_specs[0] if note_push_specs else None
     task_archive_spec = task_archive_specs[0] if task_archive_specs else None
+    awaiting_review_spec = awaiting_review_specs[0] if awaiting_review_specs else None
 
     # status-transition / priority-changed / due-date-changed all need
     # the projection's ``sync_state`` populated for the fs watcher to
@@ -417,6 +423,14 @@ async def _amain(cfg: LoomConfig) -> int:
             my_handlers["task-archive"] = make_task_archive_handler(
                 cfg, sync_state=sync_state
             )
+        if awaiting_review_spec is not None:
+            logger.info(
+                "obsidian-sync: wiring subscription %r", awaiting_review_spec.name
+            )
+            # #113: read-only projection — no sync_state (never round-tripped
+            # by the fs watcher) and no LithosEventStream of its own (it rides
+            # the same upstream events the projection's stream publishes).
+            my_handlers["obsidian-awaiting-review"] = make_awaiting_review_handler(cfg)
 
         # LithosClient is needed for both: the projection wires through
         # to LithosEventStream for upstream events; the status-transition
@@ -426,7 +440,11 @@ async def _amain(cfg: LoomConfig) -> int:
         # LithosNoteStream only spawns when the project-context-projection
         # subscription is configured — otherwise nothing would consume
         # its events.
-        need_event_stream = projection_spec is not None
+        # The awaiting-review handler (#113) consumes the same upstream
+        # lithos.task.* events the projection does, so it needs the stream too.
+        need_event_stream = (
+            projection_spec is not None or awaiting_review_spec is not None
+        )
         need_note_stream = project_context_projection_spec is not None
         async with LithosClient(
             cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id

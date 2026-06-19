@@ -169,6 +169,29 @@ tags = ["trigger:story-review-human"]
 # initial_delay_seconds = 0.5
 # max_delay_seconds = 30.0
 
+# Awaiting-review note (#113) — a dedicated _lithos/awaiting-review.md
+# listing open tasks whose story-develop PR is awaiting your review
+# (metadata.loom_delivered + develop_pr_url). Same upstream events as the
+# projection; needs the obsidian-sync child (below). Pairs with the
+# operator-as-reviewer GitHub notification ([story_develop].operator_github_login).
+# [[subscriptions]]
+# name = "obsidian-awaiting-review"
+# on = [
+#   "lithos.task.created",
+#   "lithos.task.updated",
+#   "lithos.task.claimed",
+#   "lithos.task.released",
+#   "lithos.task.completed",
+#   "lithos.task.cancelled",
+# ]
+# action = "obsidian-awaiting-review"
+# on_persistent_failure = "friction"
+# [subscriptions.retry]
+# attempts = 5
+# backoff = "exponential"
+# initial_delay_seconds = 0.5
+# max_delay_seconds = 30.0
+
 # ── Obsidian sync (vault host only) ───────────────────────────────────
 #
 # Presence of this section is the supervisor's spawn gate for the
@@ -205,6 +228,9 @@ tags = ["trigger:story-review-human"]
 # # files. Without project-context-projection wired (below), this is
 # # unused.
 # projects_dir = "_lithos/projects"
+# # #113: the dedicated "PRs awaiting review" note (relative to vault_path),
+# # written by the obsidian-awaiting-review subscription above. Default below.
+# awaiting_review_file = "_lithos/awaiting-review.md"
 
 # ── Slice 4: project-context one-way pull (Lithos → vault) ─────────────
 #

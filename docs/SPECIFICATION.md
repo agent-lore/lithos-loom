@@ -31,7 +31,7 @@ Status: Aligned with Implementation
 1. **TOML schema evolves.** Field renames or removals require a documented migration step but are otherwise free.
 2. **Event names are stable.** Subscribers depend on dotted event names (`lithos.task.created`, `obsidian.note.modified`); changing them is a breaking change.
 3. **`result.json` schema is versioned.** Plugins ship a `schema_version` integer; incompatible changes bump it.
-4. **Vault-projected file layout is stable.** `_lithos/tasks.md`, `_lithos/projects/<slug>/<file>.md`, `_lithos/conflicts/<slug>.<file>.<ts>.md` are documented locations operators query and grep against.
+4. **Vault-projected file layout is stable.** `_lithos/tasks.md`, `_lithos/awaiting-review.md`, `_lithos/projects/<slug>/<file>.md`, `_lithos/conflicts/<slug>.<file>.<ts>.md` are documented locations operators query and grep against.
 
 ---
 
@@ -290,6 +290,7 @@ max_delay_seconds     = 30.0
 vault_path        = "/home/you/Obsidian/Vault"   # absolute
 tasks_file        = "_lithos/tasks.md"           # relative to vault_path
 projects_dir      = "_lithos/projects"           # relative to vault_path
+awaiting_review_file = "_lithos/awaiting-review.md"  # #113 PRs-awaiting-review note (relative)
 resolved_ttl_days = 7                            # see §6.3 task-archive interaction
 include_blocked   = true                         # project tasks with metadata.depends_on
 exclude_tags      = ["debug:trace"]              # suppress projection for these tags
@@ -760,6 +761,7 @@ Subscriptions resolve their `action` field against the `lithos_loom.subscription
 |---|---|---|---|
 | `noop` | `_noop` | any | Logs at DEBUG. Useful for tracing. |
 | `obsidian-projection` | `_obsidian_projection` | `lithos.task.*` | Rewrites `<vault>/<tasks_file>`. |
+| `obsidian-awaiting-review` | `_awaiting_review` | `lithos.task.*` | Rewrites `<vault>/<awaiting_review_file>` (#113): open tasks carrying `loom_delivered` + `develop_pr_url`, as a clickable PR-link reference list (empty → a "none" placeholder). Read-only — no `sync_state`. |
 | `obsidian-status-transition` | `_obsidian_status_transition` | `obsidian.task.status_changed` | `[ ]→[x]` calls `lithos_task_complete`; `[ ]→[-]` calls `lithos_task_cancel`; `[x]→[ ]` posts `[ReopenRequested]` finding; `[/]` / `[>]` are no-op (logged). |
 | `obsidian-priority-changed` | `_obsidian_priority_changed` | `obsidian.task.priority_changed` | `lithos_task_update(metadata={priority: ...})`. |
 | `obsidian-due-date-changed` | `_obsidian_due_date_changed` | `obsidian.task.due_date_changed` | `lithos_task_update(metadata={scheduled_for: ...})`. |
