@@ -51,6 +51,7 @@ __all__ = [
     "DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS",
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_MAX_CONCURRENCY",
+    "DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE",
     "DEFAULT_OBSIDIAN_PROJECTS_DIR",
     "DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS",
     "DEFAULT_OBSIDIAN_TASKS_FILE",
@@ -93,6 +94,7 @@ DEFAULT_LOG_LEVEL: LogLevel = "info"
 DEFAULT_OBSIDIAN_TASKS_FILE = Path("_lithos/tasks.md")
 DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS = 7
 DEFAULT_OBSIDIAN_PROJECTS_DIR = Path("_lithos/projects")
+DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE = Path("_lithos/awaiting-review.md")
 DEFAULT_GITHUB_WATCHER_POLL_INTERVAL = 60
 DEFAULT_GITHUB_WATCHER_COORD_DOC = (
     "projects/_lithos-loom-internal/github-watcher-state.md"
@@ -225,6 +227,10 @@ class ObsidianSyncConfig:
     the slug + filename map straight across. Stored as a relative path;
     joined with ``vault_path`` only at use time (same shape as
     ``tasks_file``)."""
+    awaiting_review_file: Path = field(default=DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE)
+    """#113: the dedicated 'PRs awaiting review' note — open tasks carrying
+    ``metadata.loom_delivered`` + ``metadata.develop_pr_url``. Relative to
+    ``vault_path`` (same shape as ``tasks_file``)."""
 
 
 @dataclass(frozen=True)
@@ -592,6 +598,7 @@ _OBSIDIAN_SYNC_KEYS: frozenset[str] = frozenset(
         "include_blocked",
         "exclude_tags",
         "projects_dir",
+        "awaiting_review_file",
     }
 )
 
@@ -679,6 +686,25 @@ def _parse_obsidian_sync(data: Any, config_path: Path) -> ObsidianSyncConfig | N
                 f"vault_path and may not contain '..' (got {projects_dir_raw!r})"
             )
 
+    awaiting_review_raw = data.get("awaiting_review_file")
+    if awaiting_review_raw is None:
+        awaiting_review_file = DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE
+    else:
+        if not isinstance(awaiting_review_raw, str) or not awaiting_review_raw:
+            raise ConfigError(
+                f"{config_path}: obsidian_sync.awaiting_review_file must be a "
+                f"non-empty path string"
+            )
+        awaiting_review_file = Path(awaiting_review_raw)
+        if awaiting_review_file.is_absolute() or any(
+            part == ".." for part in awaiting_review_file.parts
+        ):
+            raise ConfigError(
+                f"{config_path}: obsidian_sync.awaiting_review_file must be "
+                f"relative to vault_path and may not contain '..' "
+                f"(got {awaiting_review_raw!r})"
+            )
+
     return ObsidianSyncConfig(
         vault_path=vault_path,
         tasks_file=tasks_file,
@@ -686,6 +712,7 @@ def _parse_obsidian_sync(data: Any, config_path: Path) -> ObsidianSyncConfig | N
         include_blocked=include_blocked,
         exclude_tags=tuple(exclude_tags_raw),
         projects_dir=projects_dir,
+        awaiting_review_file=awaiting_review_file,
     )
 
 
