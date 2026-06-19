@@ -860,6 +860,41 @@ def test_story_develop_rejects_unknown_keys(
         load_config()
 
 
+def test_story_develop_operator_github_login_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [story_develop]
+            operator_github_login = "  davesnowdon  "
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.story_develop is not None
+    assert cfg.story_develop.operator_github_login == "davesnowdon"
+
+
+def test_story_develop_rejects_blank_operator_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [story_develop]
+            operator_github_login = ""
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match=r"operator_github_login"):
+        load_config()
+
+
 def test_story_develop_default_models_must_be_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

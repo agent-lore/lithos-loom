@@ -67,6 +67,7 @@ from .daemon_io import (
     apply_cli_fallbacks,
     apply_tool_default_models,
     build_result_payload,
+    load_operator_github_login,
     load_tool_default_models,
     post_frictions,
     read_task_payload,
@@ -278,6 +279,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--image", default=DEFAULT_IMAGE, help="Agent container image")
     p.add_argument("--branch", default="main", help="Base branch for the worktree")
     p.add_argument(
+        "--notify-github-login",
+        default=None,
+        help="GitHub login to request as a reviewer (or assign, if they "
+        "authored the PR) when a PR is delivered, so native notifications "
+        "fire (#113). Daemon mode reads [story_develop].operator_github_login.",
+    )
+    p.add_argument(
         "--work-dir",
         type=Path,
         default=None,
@@ -391,6 +399,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         # fallback when metadata pins nothing.
         image=settings.image or args.image,
         base_branch=args.branch,
+        notify_github_login=load_operator_github_login(),
     )
 
     def _fail_payload(category: str, message: str, exit_code: int) -> int:
@@ -570,6 +579,15 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    # Match the TOML surface (config.py strips + rejects blank/whitespace): ""
+    # would silently disable notifications, "   " would reach `gh api` as a
+    # bogus login. Strip and reject empty so the contract is identical.
+    notify_github_login = args.notify_github_login
+    if notify_github_login is not None:
+        notify_github_login = notify_github_login.strip()
+        if not notify_github_login:
+            print("error: --notify-github-login must not be empty", file=sys.stderr)
+            return 2
     if args.develop_config is not None:
         try:
             specs = load_develop_config(args.develop_config.expanduser())
@@ -647,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
         max_cost_usd=args.max_cost_usd,
         image=args.image,
         base_branch=args.branch,
+        notify_github_login=notify_github_login,
     )
 
     result = develop(

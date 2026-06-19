@@ -432,6 +432,25 @@ def load_tool_default_models() -> tuple[dict[str, str], tuple[str, ...]]:
     return dict(cfg.story_develop.default_models), ()
 
 
+def load_operator_github_login() -> str | None:
+    """The host loom config's ``[story_develop].operator_github_login`` (#113).
+
+    Best-effort, mirroring :func:`load_tool_default_models`: an unreadable /
+    missing config, or no ``[story_develop]`` section / unset key, yields
+    ``None`` so delivery requests no human reviewer (Copilot-only, today's
+    behaviour). Never raises.
+    """
+    from ...config import load_config
+
+    try:
+        cfg = load_config()
+    except Exception:
+        return None
+    if cfg.story_develop is None:
+        return None
+    return cfg.story_develop.operator_github_login
+
+
 def apply_tool_default_models(
     settings: ProjectDevelopSettings, default_models: Mapping[str, str]
 ) -> ProjectDevelopSettings:

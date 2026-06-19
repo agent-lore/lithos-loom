@@ -383,6 +383,16 @@ tags = ["trigger:story-review-human"]
 # are NOT validated against a catalogue (they drift), so a typo silently
 # falls through to the agent default — set this once and verify a run.
 # Uncomment to set host-wide defaults.
+#
+# operator_github_login (#113): GitHub user to notify when a story-develop PR
+# is delivered — requested as a reviewer, or *assigned* to the PR when they
+# authored it (loom usually runs under their own gh auth, and GitHub forbids
+# self review-requests). Either way GitHub fires a native notification. Unset →
+# Copilot review only, no human notification. Lives under [story_develop], so
+# it must precede the [story_develop.default_models] subtable.
+# [story_develop]
+# operator_github_login = "your-github-login"
+#
 # [story_develop.default_models]
 # claude = "opus"
 # codex  = "gpt-5.4"

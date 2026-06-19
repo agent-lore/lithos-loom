@@ -7,6 +7,7 @@ no Docker.
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,97 @@ def test_pr_number_from_url() -> None:
     assert pr_number_from_url("https://github.com/o/r/pull/82") == 82
     with pytest.raises(RuntimeError):
         pr_number_from_url("https://github.com/o/r")
+
+
+# --- request_operator_review (#113) --------------------------------------------
+
+
+def _completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout="", stderr=stderr
+    )
+
+
+def test_request_operator_review_requests_reviewer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def fake_run(args, *, cwd, timeout=120):
+        calls.append(" ".join(args))
+        return _completed(0)
+
+    monkeypatch.setattr(pr_delivery, "_run", fake_run)
+    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave")
+    assert out == "review_requested"
+    assert any("requested_reviewers" in c and "dave" in c for c in calls)
+    assert not any("assignees" in c for c in calls)
+
+
+def test_request_operator_review_assigns_when_author_422(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def fake_run(args, *, cwd, timeout=120):
+        joined = " ".join(args)
+        calls.append(joined)
+        if "requested_reviewers" in joined:
+            return _completed(
+                1, "HTTP 422: Review cannot be requested from pull request author."
+            )
+        return _completed(0)  # assignees
+
+    monkeypatch.setattr(pr_delivery, "_run", fake_run)
+    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave")
+    assert out == "assigned"
+    assert any("issues/7/assignees" in c and "dave" in c for c in calls)
+
+
+def test_request_operator_review_non_author_failure_does_not_assign(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def fake_run(args, *, cwd, timeout=120):
+        calls.append(" ".join(args))
+        return _completed(1, "HTTP 404: Not Found")
+
+    monkeypatch.setattr(pr_delivery, "_run", fake_run)
+    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave")
+    assert out == "failed"
+    assert not any("assignees" in c for c in calls)
+
+
+def test_request_operator_review_non_author_422_does_not_assign(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A 422 that is NOT the self-author case (e.g. a non-collaborator / bad
+    # login) must surface as a real failure, not a silent assignee downgrade.
+    calls: list[str] = []
+
+    def fake_run(args, *, cwd, timeout=120):
+        calls.append(" ".join(args))
+        return _completed(
+            1, "HTTP 422: Reviews may only be requested from collaborators."
+        )
+
+    monkeypatch.setattr(pr_delivery, "_run", fake_run)
+    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "ghost")
+    assert out == "failed"
+    assert not any("assignees" in c for c in calls)
+
+
+def test_request_operator_review_failed_assign_returns_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_run(args, *, cwd, timeout=120):
+        if "requested_reviewers" in " ".join(args):
+            return _completed(1, "422 pull request author")
+        return _completed(1, "assign exploded")
+
+    monkeypatch.setattr(pr_delivery, "_run", fake_run)
+    assert pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave") == "failed"
 
 
 # --- deliver() orchestration ------------------------------------------------------
@@ -309,6 +401,42 @@ def test_deliver_no_copilot(
     assert state["pushes"] == 1
     assert out.copilot_requested is False
     assert state["pr_kwargs"]["base"] == "main"
+
+
+def test_deliver_notifies_operator_when_configured(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    cfg = replace(config, notify_github_login="dave")
+    _install(monkeypatch, cfg)
+    calls: list[tuple[str, int, str]] = []
+    monkeypatch.setattr(
+        pr_delivery,
+        "request_operator_review",
+        lambda wt, repo, pr_number, login: (
+            calls.append((repo, pr_number, login)) or "review_requested"
+        ),
+    )
+    wt = _make_wt(cfg)
+    out = deliver(cfg, _result(cfg, wt), no_copilot=True)
+    assert calls == [("o/r", 82, "dave")]
+    assert any("requested review from @dave" in n for n in out.notes)
+
+
+def test_deliver_skips_operator_notify_when_unset(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    _install(monkeypatch, config)  # config.notify_github_login is None
+    called = False
+
+    def boom(*a, **k):
+        nonlocal called
+        called = True
+        return "review_requested"
+
+    monkeypatch.setattr(pr_delivery, "request_operator_review", boom)
+    wt = _make_wt(config)
+    deliver(config, _result(config, wt), no_copilot=True)
+    assert called is False
 
 
 def test_deliver_copilot_timeout_degrades(

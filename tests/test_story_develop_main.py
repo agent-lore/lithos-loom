@@ -74,6 +74,32 @@ def test_main_rejects_whitespace_reviewer_model(tmp_git_repo: Path, capsys) -> N
     assert "model must be a non-empty string" in capsys.readouterr().err
 
 
+def test_main_rejects_blank_notify_login(tmp_git_repo: Path, capsys) -> None:
+    # #113: the CLI must reject a blank --notify-github-login (matching the TOML
+    # surface), not silently disable notifications.
+    rc = main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--notify-github-login", ""]
+    )
+    assert rc == 2
+    assert "--notify-github-login must not be empty" in capsys.readouterr().err
+
+
+def test_main_rejects_whitespace_notify_login(tmp_git_repo: Path, capsys) -> None:
+    # "   " is truthy, so without normalization it would reach gh as a bogus login.
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--notify-github-login",
+            "   ",
+        ]
+    )
+    assert rc == 2
+    assert "--notify-github-login must not be empty" in capsys.readouterr().err
+
+
 def test_main_rejects_reviewer_model_with_develop_config(
     tmp_git_repo: Path, tmp_path: Path, capsys
 ) -> None:
