@@ -169,11 +169,16 @@ async def _complete_merged(
 ) -> None:
     """Complete the task on PR merge, then write the ``merged`` marker.
 
-    ``task_complete`` is independently idempotent (Lithos returns
-    ``task_not_found`` for an already-terminal task — lithos#303 — which we
-    swallow), so a crash between the complete and the marker write just
-    re-completes (a no-op) and re-marks next sweep. Order: complete first; only
-    mark once the close has been accepted (or the task was already terminal).
+    Order is complete-first: a completion failure leaves the marker unset so the
+    next sweep retries the whole reconcile, rather than a marked-but-uncompleted
+    task being skipped forever. The marker write then lands on the now-terminal
+    task — Lithos accepts ``task_update`` on a terminal task (lithos#303, fixed
+    2026-06-19); ``task_complete`` itself stays idempotent (``task_not_found``
+    for an already-terminal task is swallowed). The one residual gap — a crash
+    *strictly between* the complete and the mark — loses the marker permanently
+    (the completed task leaves the open set, so it is never re-swept), but that
+    is benign: the merged marker is observability-only, since merged-path de-dup
+    is the open-set exclusion, not the marker.
     """
     try:
         await ctx.lithos.task_complete(task_id=task.id)
@@ -225,8 +230,12 @@ async def _friction_and_mark(
 
 
 async def _mark(task: Any, ctx: SubscriptionContext, state: str, pr_url: str) -> None:
-    """Write the de-dup marker (state + the url it resolved). Swallows
-    ``task_not_found`` (the task may already be terminal)."""
+    """Write the de-dup marker (state + the url it resolved).
+
+    Swallows ``task_not_found`` defensively: post-lithos#303 a terminal task
+    accepts the update, so this now only fires for a genuinely deleted task
+    (nothing left to mark). Any other error warns and leaves the marker unset.
+    """
     try:
         await ctx.lithos.task_update(
             task_id=task.id,
