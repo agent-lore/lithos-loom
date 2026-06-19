@@ -71,6 +71,7 @@ def _install_fakes(
     coder_transcript_on_limit: bool = False,
     coder_handoffs: dict[int, str] | None = None,
     skip_coder_handoff_until_nudge: bool = False,
+    nudge_fails: bool = False,
 ) -> dict:
     """Install fake container + turn + gate machinery.
 
@@ -176,13 +177,16 @@ def _install_fakes(
                 default = f"## Status: LGTM\n## Summary\nRound {rnd}: did the work.\n"
                 text = (coder_handoffs or {}).get(rnd, default)
                 (config.handoff_dir / handoff.coder_handoff_name(rnd)).write_text(text)
+            # #114: a nudge can write the handoff yet still exit failed — that is
+            # NOT a clean recovery, so the round must still fail.
+            turn_ok = coder_ok and not (is_nudge and nudge_fails)
             return TurnResult(
-                exit_code=0 if coder_ok else 1,
-                succeeded=coder_ok,
+                exit_code=0 if turn_ok else 1,
+                succeeded=turn_ok,
                 session_id=session_id,
                 result_text="",
                 cost_usd=0.01,
-                raw={"is_error": not coder_ok},
+                raw={"is_error": not turn_ok},
                 stderr="",
             )
         # reviewer turn — derive WHICH reviewer from the container name
@@ -543,6 +547,28 @@ def test_coder_reprompt_still_no_handoff_fails(
     assert "no coder handoff file" in result.message
     assert state["coder_calls"] == [(1, False), (1, True)]  # nudged exactly once
     assert state["review_calls"] == []
+
+
+def test_coder_nudge_writes_handoff_but_fails_does_not_recover(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#114: recovery is judged on the NUDGE's own outcome. A nudge that writes
+    the handoff but then exits failed is not a clean recovery — the round fails
+    (it does not proceed to commit/gate/review on a failed turn)."""
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        write_source=True,
+        skip_coder_handoff_until_nudge=True,  # the nudge writes the handoff...
+        nudge_fails=True,  # ...but the nudge turn exits failed
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "failed"
+    assert "coder turn failed" in result.message
+    assert state["coder_calls"] == [(1, False), (1, True)]
+    assert state["review_calls"] == []
+    assert _commit_count_since_base(result) == 0
 
 
 # --- artifacts --------------------------------------------------------------

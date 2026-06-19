@@ -1041,6 +1041,11 @@ def develop(
             done_present = (
                 config.handoff_dir / handoff.coder_handoff_name(round_no)
             ).is_file()
+            # The turn whose success gates the handoff for this round. The
+            # salvage nudge (below) replaces it, so a re-prompt is judged on the
+            # NUDGE's own outcome — a nudge that writes the file but then exits
+            # failed/non-zero is not a clean recovery.
+            handoff_turn = coder_turn
             # Salvage (lithos-loom#114): the coder ended its turn cleanly and
             # left work in the worktree but never wrote its handoff (classic
             # case: it backgrounded a slow suite and stopped before the handoff
@@ -1063,7 +1068,7 @@ def develop(
                     config.run_id,
                     round_no,
                 )
-                nudge_turn = run_turn(
+                handoff_turn = run_turn(
                     container=coder_name,
                     prompt=_coder_handoff_nudge(round_no),
                     session_id=coder_session,
@@ -1073,16 +1078,16 @@ def develop(
                     model=config.coder_model,
                     effort=config.coder_effort,
                 )
-                coder_cost += nudge_turn.cost_usd
-                if nudge_turn.session_id:
-                    coder_session = nudge_turn.session_id
+                coder_cost += handoff_turn.cost_usd
+                if handoff_turn.session_id:
+                    coder_session = handoff_turn.session_id
                 done_present = (
                     config.handoff_dir / handoff.coder_handoff_name(round_no)
                 ).is_file()
-            if not (coder_turn.succeeded and done_present):
+            if not (handoff_turn.succeeded and done_present):
                 reasons = []
-                if not coder_turn.succeeded:
-                    reasons.append(f"coder turn failed (exit {coder_turn.exit_code})")
+                if not handoff_turn.succeeded:
+                    reasons.append(f"coder turn failed (exit {handoff_turn.exit_code})")
                 if not done_present:
                     reasons.append("no coder handoff file")
                 failure_reason = f"round {round_no}: " + "; ".join(reasons)
