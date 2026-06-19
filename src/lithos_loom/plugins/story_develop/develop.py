@@ -209,6 +209,9 @@ def _build_run_cmd(
         skills_dir=None if is_codex else config.operator_skills_dir,
         read_only_worktree=read_only,
         tool=tool,
+        # #109: mount the linked worktree's shared .git (RO) so in-container
+        # `git diff`/`log`/`show` resolve — reviewers inspect the actual change.
+        git_common_dir=worktree.git_common_dir(wt),
     )
     return name, cmd
 

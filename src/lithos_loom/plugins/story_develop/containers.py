@@ -46,6 +46,7 @@ def build_run_command(
     skills_dir: Path | None = None,
     read_only_worktree: bool = False,
     tool: str = "claude",
+    git_common_dir: Path | None = None,
 ) -> list[str]:
     """Build the ``docker run`` argv for a long-lived idle agent container.
 
@@ -65,6 +66,9 @@ def build_run_command(
     * *skills_dir* at ``<config-mount>/skills`` (RO) when provided, so
       operator-installed skills are available (feasibility gate G2). Codex has
       no skill concept, so codex agents pass ``skills_dir=None``.
+    * *git_common_dir* at its identical host path (RO) when provided (#109), so
+      a linked worktree's ``gitdir:`` backlink resolves in-container and
+      reviewers can ``git diff``/``log``/``show`` the change.
     """
     config_mount, config_env = (
         (CODEX_CONFIG_MOUNT, "CODEX_HOME")
@@ -101,6 +105,14 @@ def build_run_command(
         cmd += ["-v", f"{auth_source_dir / fname}:{config_mount}/{fname}"]
     if skills_dir is not None:
         cmd += ["-v", f"{skills_dir}:{config_mount}/skills:ro"]
+    if git_common_dir is not None:
+        # Linked-worktree git access (#109): the worktree's `.git` is a file
+        # whose `gitdir:` backlink points at <repo>/.git/worktrees/<branch> by
+        # absolute host path. Mount the common dir at that SAME path (identity
+        # mount) so the backlink resolves and reviewers can `git diff`/`log`/
+        # `show`. RO: loom commits host-side, so no agent needs write access to
+        # the real repo's object store (and a --cap-drop ALL agent shouldn't).
+        cmd += ["-v", f"{git_common_dir}:{git_common_dir}:ro"]
     cmd += ["-e", f"{config_env}={config_mount}"]
     cmd += ["--entrypoint", "sleep", image, "infinity"]
     return cmd

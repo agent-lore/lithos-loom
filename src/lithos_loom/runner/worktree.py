@@ -63,11 +63,12 @@ def create(
     return path
 
 
-def remove(path: Path, *, force: bool = False) -> None:
-    """Remove a worktree. Refuses a dirty tree unless *force* is True.
+def git_common_dir(path: Path) -> Path:
+    """Absolute path to the shared git dir for the worktree at *path*.
 
-    Runs from the main repository (derived from the worktree's common git dir)
-    so git does not refuse to remove "the current working tree".
+    For a linked worktree this is the main repo's ``.git``; the per-worktree
+    gitdir (``<repo>/.git/worktrees/<branch>``), HEAD, index, objects and refs
+    all live under it. Raises if *path* is not inside a git worktree.
     """
     common = subprocess.run(
         ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
@@ -76,11 +77,20 @@ def remove(path: Path, *, force: bool = False) -> None:
     )
     if common.returncode != 0:
         raise RuntimeError(f"not a git worktree: {path} ({common.stderr.strip()})")
-    # git-common-dir is "<repo>/.git"; its parent is the main working tree.
     common_dir = Path(common.stdout.strip())
     if not common_dir.is_absolute():
         common_dir = (path / common_dir).resolve()
-    main_repo = common_dir.parent
+    return common_dir
+
+
+def remove(path: Path, *, force: bool = False) -> None:
+    """Remove a worktree. Refuses a dirty tree unless *force* is True.
+
+    Runs from the main repository (derived from the worktree's common git dir)
+    so git does not refuse to remove "the current working tree".
+    """
+    # git-common-dir is "<repo>/.git"; its parent is the main working tree.
+    main_repo = git_common_dir(path).parent
 
     args = ["git", "worktree", "remove"]
     if force:
