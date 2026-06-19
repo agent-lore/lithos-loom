@@ -70,6 +70,8 @@ def _install_fakes(
     coder_results: list[str] | None = None,
     coder_transcript_on_limit: bool = False,
     coder_handoffs: dict[int, str] | None = None,
+    skip_coder_handoff_until_nudge: bool = False,
+    nudge_fails: bool = False,
 ) -> dict:
     """Install fake container + turn + gate machinery.
 
@@ -164,17 +166,27 @@ def _install_fakes(
                     return _limit_turn(session_id)
             if write_source and (source_rounds is None or rnd in source_rounds):
                 (wt / "greeting.txt").write_text(f"hello round {rnd}\n")
-            if write_coder_handoff:
+            # #114 salvage: when scripted, the initial coder turn leaves work but
+            # no handoff; only the orchestrator's nudge turn writes it.
+            is_nudge = "never wrote your handoff" in prompt
+            if skip_coder_handoff_until_nudge:
+                write_handoff_now = is_nudge
+            else:
+                write_handoff_now = write_coder_handoff
+            if write_handoff_now:
                 default = f"## Status: LGTM\n## Summary\nRound {rnd}: did the work.\n"
                 text = (coder_handoffs or {}).get(rnd, default)
                 (config.handoff_dir / handoff.coder_handoff_name(rnd)).write_text(text)
+            # #114: a nudge can write the handoff yet still exit failed — that is
+            # NOT a clean recovery, so the round must still fail.
+            turn_ok = coder_ok and not (is_nudge and nudge_fails)
             return TurnResult(
-                exit_code=0 if coder_ok else 1,
-                succeeded=coder_ok,
+                exit_code=0 if turn_ok else 1,
+                succeeded=turn_ok,
                 session_id=session_id,
                 result_text="",
                 cost_usd=0.01,
-                raw={"is_error": not coder_ok},
+                raw={"is_error": not turn_ok},
                 stderr="",
             )
         # reviewer turn — derive WHICH reviewer from the container name
@@ -468,6 +480,94 @@ def test_failed_when_coder_makes_no_commit(
     result = develop_mod.develop(config)
     assert result.status == "failed"
     assert result.review is None
+    assert _commit_count_since_base(result) == 0
+
+
+# --- coder handoff salvage (#114) -------------------------------------------
+
+
+def test_coder_reprompted_to_write_handoff_recovers(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#114: a clean coder turn that left work but no handoff is nudged once;
+    the nudge writes the handoff and the round proceeds to review + approval."""
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        write_source=True,
+        skip_coder_handoff_until_nudge=True,
+        reviews=[{"text": _LGTM}],
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    assert result.rounds == 1
+    # initial coder turn + the resume nudge, both for round 1
+    assert state["coder_calls"] == [(1, False), (1, True)]
+    assert "never wrote your handoff" in state["coder_prompts"][1]
+    # the salvaged work was committed and the reviewer ran
+    assert _commit_count_since_base(result) == 1
+    assert state["review_calls"]
+
+
+def test_coder_no_handoff_and_no_changes_fails_without_reprompt(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#114: with no uncommitted work there is nothing to salvage, so the coder
+    is NOT re-prompted — the round fails on the first (only) turn."""
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        write_source=False,
+        write_coder_handoff=False,
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "failed"
+    assert "no coder handoff file" in result.message
+    assert state["coder_calls"] == [(1, False)]  # no wasted nudge turn
+    assert state["review_calls"] == []
+
+
+def test_coder_reprompt_still_no_handoff_fails(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#114: the salvage nudge is one-shot — if the coder still writes no
+    handoff after the nudge, the round fails as before (after exactly one
+    re-prompt)."""
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        write_source=True,
+        write_coder_handoff=False,  # never writes, even on the nudge
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "failed"
+    assert "no coder handoff file" in result.message
+    assert state["coder_calls"] == [(1, False), (1, True)]  # nudged exactly once
+    assert state["review_calls"] == []
+
+
+def test_coder_nudge_writes_handoff_but_fails_does_not_recover(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#114: recovery is judged on the NUDGE's own outcome. A nudge that writes
+    the handoff but then exits failed is not a clean recovery — the round fails
+    (it does not proceed to commit/gate/review on a failed turn)."""
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        write_source=True,
+        skip_coder_handoff_until_nudge=True,  # the nudge writes the handoff...
+        nudge_fails=True,  # ...but the nudge turn exits failed
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "failed"
+    assert "coder turn failed" in result.message
+    assert state["coder_calls"] == [(1, False), (1, True)]
+    assert state["review_calls"] == []
     assert _commit_count_since_base(result) == 0
 
 
