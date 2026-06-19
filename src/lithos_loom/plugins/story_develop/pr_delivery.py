@@ -315,8 +315,11 @@ def request_operator_review(wt: Path, repo: str, pr_number: int, login: str) -> 
         return "review_requested"
 
     stderr = proc.stderr.strip()
-    # 422 "Review cannot be requested from pull request author" → assign instead.
-    if "pull request author" not in stderr and "422" not in stderr:
+    # Only the specific self-author 422 ("Review cannot be requested from pull
+    # request author") falls back to assigning. Every other failure — a bad
+    # login, a non-collaborator, repo policy, or any other 422 — is a real
+    # failure the operator should see, NOT silently downgraded to an assignee.
+    if "pull request author" not in stderr:
         logger.warning(
             "story-develop: requesting review from %s on %s#%d failed: %s",
             login,

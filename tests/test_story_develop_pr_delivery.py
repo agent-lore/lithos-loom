@@ -186,6 +186,25 @@ def test_request_operator_review_non_author_failure_does_not_assign(
     assert not any("assignees" in c for c in calls)
 
 
+def test_request_operator_review_non_author_422_does_not_assign(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A 422 that is NOT the self-author case (e.g. a non-collaborator / bad
+    # login) must surface as a real failure, not a silent assignee downgrade.
+    calls: list[str] = []
+
+    def fake_run(args, *, cwd, timeout=120):
+        calls.append(" ".join(args))
+        return _completed(
+            1, "HTTP 422: Reviews may only be requested from collaborators."
+        )
+
+    monkeypatch.setattr(pr_delivery, "_run", fake_run)
+    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "ghost")
+    assert out == "failed"
+    assert not any("assignees" in c for c in calls)
+
+
 def test_request_operator_review_failed_assign_returns_failed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
