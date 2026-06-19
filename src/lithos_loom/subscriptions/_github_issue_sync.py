@@ -380,24 +380,17 @@ async def _sync_drift(
     polls cheap. The state-snapshot field rides on the same write so the
     reopen-finding de-dupe stays consistent without an extra round-trip.
 
-    Skipped entirely for terminal tasks (status ``completed`` /
-    ``cancelled``). Pinned via soak 2026-05-30: Lithos ``task_update``
-    returns ``task_not_found`` for terminal tasks (upstream
-    `agent-lore/lithos#303`), so the per-poll boundary replay of a
-    just-closed issue would otherwise re-attempt and re-log
-    ``[Friction]`` every cycle. Until #303 lands, the metadata
-    snapshot (and thus reopen-finding dedup on terminal tasks) is
-    frozen at the value it had when the task went terminal — a known
-    limit documented in the lithos-schema-status memory note.
+    Runs for **every** matched task, terminal or open. (It used to skip
+    terminal tasks: lithos#303 once made ``task_update`` reject them, so a
+    per-poll replay re-attempted and re-logged ``[Friction]`` every cycle, and
+    the snapshot — hence reopen-finding dedup — was frozen on terminal tasks.
+    #303 is fixed: terminal tasks accept ``task_update``, so drift mirrors onto
+    them and the snapshot rolls forward, which is exactly what makes the
+    reopen-finding one-shot on a reopened terminal task — #124.) No loop: a
+    drift ``task_update`` fires ``task.updated``, but drift just set the Lithos
+    title equal to the GH title, so the push handler's title mirror finds no
+    diff; ``task_update`` never reopens a terminal task.
     """
-    if task.status != "open":
-        ctx.logger.debug(
-            "github-issue-sync: drift sync skipped for terminal task %s "
-            "(Lithos #303: task_update rejects terminal tasks)",
-            task.id,
-        )
-        return
-
     updates: dict[str, Any] = {}
     metadata_updates: dict[str, Any] = {}
 
@@ -653,18 +646,14 @@ async def _safe_call(ctx: SubscriptionContext, coro: Any, *, describe: str) -> N
     freezes and the next poll retries. The [Friction] log line stays
     for the operator-grep convention.
 
-    Soak observation (2026-05-30): Lithos's ``task_update`` returns
-    ``task_not_found`` for tasks whose status is terminal
-    (``completed`` / ``cancelled``) — even though ``task_get`` happily
-    returns them. A poll that fetches a closed GH issue paired with a
-    just-completed Lithos task (the operator ticked it in Obsidian,
-    which closed both sides) then loops forever: drift-sync raises,
-    cursor freezes, stuck retry re-hits the same wall. Treat
-    ``task_not_found`` as **non-fatal**: log [Friction] but don't
-    raise, so the dispatcher advances the cursor and the stuck entry
-    drains. The spec's "drift sync always runs" contract holds at the
-    handler-call level; whether Lithos accepts the write is a server
-    concern we surface but don't loop on.
+    ``task_not_found`` is treated as **non-fatal**: log [Friction] but
+    don't raise, so the dispatcher advances the cursor and the stuck
+    entry drains instead of looping forever (a raise would freeze the
+    cursor and the next poll would re-hit the same wall). Historically
+    (soak 2026-05-30) this also fired for *terminal* tasks because
+    lithos#303 made ``task_update`` reject them; #303 is fixed (#124), so
+    ``task_not_found`` on a write now means a **genuinely-deleted** task —
+    still the right thing to drain rather than loop on.
     """
     try:
         await coro

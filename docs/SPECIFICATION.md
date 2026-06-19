@@ -148,7 +148,7 @@ Filters apply only on the create branch (no marker + no matching URL + GH open).
 - **Label diff** — read `metadata.github_labels` snapshot; compute `removed = old − new` and `added = new − old`; new tag set is `(task.tags − removed) | added`. Operator-added Lithos tags never in any GH snapshot survive untouched. The snapshot in metadata rolls forward to `issue.labels`.
 - **State snapshot** — `metadata.github_state_snapshot` rolls forward to `issue.state` on every poll. Reopen detection compares the *prior* value before drift sync overwrites it.
 
-All four drifts in one poll batch into a single `task_update` call. Steady-state polls (nothing changed) cost zero round-trips.
+All four drifts in one poll batch into a single `task_update` call. Steady-state polls (nothing changed) cost zero round-trips. Drift runs on **every** matched task, terminal or open — lithos#303 once forced a terminal-task skip, now lifted (#124), so a reopened terminal task's `github_state_snapshot` rolls forward in the same poll and the `[ReopenRequested]` finding stays one-shot.
 
 **GitHub issue mirror (Lithos → GitHub, Slice 7.2).**
 The `github-issue-push` subscription (auto-wired in the github-watcher child) consumes `lithos.task.{created,completed,cancelled,updated}` events from `LithosEventStream` on the in-process bus. The `task.created` event is the open-task snapshot replay surface at daemon startup — a Lithos rename that happened while the watcher was down only re-fires as `task.created` on restart, so the title branch consumes it identically to `task.updated`. The handler branches as follows:

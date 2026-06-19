@@ -807,17 +807,16 @@ async def test_open_to_closed_writes_snapshot_and_mirrors_close() -> None:
 
 @pytest.mark.asyncio
 async def test_reopen_after_close_posts_finding_once() -> None:
-    """closed→open on a completed task posts the finding via finding_post.
+    """closed→open on a completed task posts the finding once, then advances the
+    snapshot so the *next* poll de-dups (#124).
 
-    PRD #75: signal the operator a closed-then-reopened condition.
-    Note (soak 2026-05-30): snapshot dedup via metadata.github_state_snapshot
-    no longer works on terminal tasks because Lithos #303 makes task_update
-    reject them. Drift sync is now skipped for terminal tasks entirely,
-    so the snapshot stays at its prior value. Result: the reopen finding
-    can re-fire on every subsequent poll while the GH issue stays open;
-    the test ``test_reopen_with_snapshot_already_open_does_not_repost``
-    still covers the open-task case via the snapshot path. Re-enable
-    snapshot-on-terminal once #303 lands.
+    PRD #75: signal the operator a closed-then-reopened condition. With
+    lithos#303 fixed, drift runs on the terminal task and rolls
+    ``github_state_snapshot`` forward to ``open`` in the same poll — so the
+    follow-up poll (covered by
+    ``test_reopen_with_snapshot_already_open_does_not_repost``) sees
+    ``prior_snapshot == "open"`` and fires no duplicate finding. Together the
+    two are the two-poll dedup.
     """
     lithos = _stub_lithos()
     existing = _task(
@@ -841,9 +840,12 @@ async def test_reopen_after_close_posts_finding_once() -> None:
     finding_kwargs = lithos.finding_post.await_args.kwargs
     assert finding_kwargs["task_id"] == "task-123"
     assert "[ReopenRequested]" in finding_kwargs["summary"]
-    # Drift sync (and therefore the snapshot bump) is skipped on terminal
-    # tasks; this is the Lithos #303 trade-off.
-    lithos.task_update.assert_not_awaited()
+    # Drift now runs on the terminal task and advances the snapshot → poll 2 dedups.
+    lithos.task_update.assert_awaited_once()
+    assert (
+        lithos.task_update.await_args.kwargs["metadata"]["github_state_snapshot"]
+        == "open"
+    )
 
 
 @pytest.mark.asyncio
@@ -957,15 +959,11 @@ async def test_safe_call_swallows_task_not_found_without_freezing_cursor() -> No
 
 
 @pytest.mark.asyncio
-async def test_drift_on_terminal_task_is_skipped() -> None:
-    """Soak 2026-05-30: Lithos #303 (task_update rejects terminal tasks).
-    A poll that fetches a closed GH issue paired with a terminal Lithos
-    task used to attempt drift sync every cycle and log [Friction] for
-    the rejection. Now skipped entirely on terminal tasks. Reopen
-    finding still fires (uses finding_post, not task_update) so the
-    operator still gets the signal even while task_update is locked
-    out upstream.
-    """
+async def test_drift_on_terminal_task_now_syncs() -> None:
+    """#124: drift now mirrors onto terminal tasks too (lithos#303 is fixed, so
+    task_update is accepted). A renamed / re-bodied / re-labelled / reopened GH
+    issue on a completed task → one task_update carrying every drifted field,
+    and the reopen finding still fires."""
     lithos = _stub_lithos()
     existing = _task(
         status="completed",
@@ -989,10 +987,17 @@ async def test_drift_on_terminal_task_is_skipped() -> None:
         ),
         _ctx(lithos),
     )
-    # Reopen finding still fires (separate MCP endpoint, accepts terminal tasks).
-    lithos.finding_post.assert_awaited_once()
-    # Drift sync skipped entirely — no task_update attempt at all.
-    lithos.task_update.assert_not_awaited()
+    lithos.finding_post.assert_awaited_once()  # reopen finding still fires
+    # Drift now runs on the terminal task: one merged task_update with the
+    # title / body / labels / state-snapshot all mirrored.
+    lithos.task_update.assert_awaited_once()
+    kwargs = lithos.task_update.await_args.kwargs
+    assert kwargs["task_id"] == "task-123"
+    assert kwargs["title"] == "renamed"
+    assert kwargs["description"] == "new body"
+    assert "needs-info" in kwargs["tags"]
+    assert kwargs["metadata"]["github_state_snapshot"] == "open"
+    assert kwargs["metadata"]["github_labels"] == ["bug", "needs-info"]
 
 
 @pytest.mark.asyncio
