@@ -74,7 +74,7 @@ def _note(tmp_path: Path) -> str:
 
 
 async def test_delivered_task_is_listed(tmp_path: Path) -> None:
-    handler = make_handler(_cfg(tmp_path))
+    handler, _ = make_handler(_cfg(tmp_path))
     await handler(
         _event(
             "lithos.task.created",
@@ -92,7 +92,7 @@ async def test_delivered_task_is_listed(tmp_path: Path) -> None:
 
 
 async def test_completed_task_is_removed(tmp_path: Path) -> None:
-    handler = make_handler(_cfg(tmp_path))
+    handler, _ = make_handler(_cfg(tmp_path))
     await handler(
         _event("lithos.task.created", task_id="t1", metadata=_DELIVERED), _ctx()
     )
@@ -106,7 +106,7 @@ async def test_completed_task_is_removed(tmp_path: Path) -> None:
 
 
 async def test_non_delivered_task_absent(tmp_path: Path) -> None:
-    handler = make_handler(_cfg(tmp_path))
+    handler, _ = make_handler(_cfg(tmp_path))
     await handler(
         _event("lithos.task.created", task_id="t1", title="plain task"), _ctx()
     )
@@ -115,7 +115,7 @@ async def test_non_delivered_task_absent(tmp_path: Path) -> None:
 
 
 async def test_delivered_without_pr_url_absent(tmp_path: Path) -> None:
-    handler = make_handler(_cfg(tmp_path))
+    handler, _ = make_handler(_cfg(tmp_path))
     await handler(
         _event(
             "lithos.task.created",
@@ -138,7 +138,7 @@ async def test_unchanged_set_does_not_rewrite(
         await real(path, content)
 
     monkeypatch.setattr(_awaiting_review, "write_file_atomic", counting)
-    handler = make_handler(_cfg(tmp_path))
+    handler, _ = make_handler(_cfg(tmp_path))
     await handler(
         _event("lithos.task.created", task_id="t1", metadata=_DELIVERED), _ctx()
     )
@@ -149,8 +149,56 @@ async def test_unchanged_set_does_not_rewrite(
 
 
 async def test_atomic_write_leaves_no_temp(tmp_path: Path) -> None:
-    handler = make_handler(_cfg(tmp_path))
+    handler, _ = make_handler(_cfg(tmp_path))
     await handler(
         _event("lithos.task.created", task_id="t1", metadata=_DELIVERED), _ctx()
     )
     assert list((tmp_path / "_lithos").glob(".*.tmp*")) == []
+
+
+# --- cold-start reconcile (#113 review) ----------------------------------------
+
+
+class _StubTask:
+    def __init__(self, id: str, title: str, status: str, metadata: dict) -> None:
+        self.id = id
+        self.title = title
+        self.status = status
+        self.metadata = metadata
+
+
+class _StubLithos:
+    def __init__(self, tasks: list[_StubTask]) -> None:
+        self._tasks = tasks
+
+    async def task_list(self, status: str) -> list[_StubTask]:
+        assert status == "open"
+        return self._tasks
+
+
+async def test_reconcile_cold_start_collapses_stale_note(tmp_path: Path) -> None:
+    # A note written by a previous run; on restart there are zero open tasks and
+    # the delivered task resolved outside the replay window → no events fire.
+    note = tmp_path / _NOTE
+    note.parent.mkdir(parents=True)
+    note.write_text("# PRs awaiting review\n\n- **Old** — [PR #1](https://x/pull/1)\n")
+    _, reconcile = make_handler(_cfg(tmp_path))
+    await reconcile(_StubLithos([]))  # zero open tasks
+    content = note.read_text()
+    assert "Old" not in content
+    assert "_No PRs awaiting review._" in content
+
+
+async def test_reconcile_lists_open_delivered(tmp_path: Path) -> None:
+    _, reconcile = make_handler(_cfg(tmp_path))
+    await reconcile(
+        _StubLithos(
+            [
+                _StubTask("t1", "Add note_update", "open", dict(_DELIVERED)),
+                _StubTask("t2", "plain", "open", {}),
+            ]
+        )
+    )
+    content = _note(tmp_path)
+    assert "**Add note_update**" in content
+    assert "plain" not in content

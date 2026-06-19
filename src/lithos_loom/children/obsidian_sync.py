@@ -42,6 +42,7 @@ import sys
 from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from lithos_loom.bus import EventBus
 from lithos_loom.config import LogLevel, LoomConfig, SubscriptionConfig, load_config
@@ -368,6 +369,9 @@ async def _amain(cfg: LoomConfig) -> int:
             return 0
 
         my_handlers: dict[str, Handler] = {}
+        # #113: the awaiting-review handler exposes a cold-start reconcile we
+        # invoke once after wiring (None when the subscription isn't enabled).
+        awaiting_review_reconcile: Any = None
         if projection_spec is not None:
             logger.info("obsidian-sync: wiring subscription %r", projection_spec.name)
             # 50ms debounce coalesces bursts of bus events (especially
@@ -430,7 +434,8 @@ async def _amain(cfg: LoomConfig) -> int:
             # #113: read-only projection — no sync_state (never round-tripped
             # by the fs watcher) and no LithosEventStream of its own (it rides
             # the same upstream events the projection's stream publishes).
-            my_handlers["obsidian-awaiting-review"] = make_awaiting_review_handler(cfg)
+            aw_handle, awaiting_review_reconcile = make_awaiting_review_handler(cfg)
+            my_handlers["obsidian-awaiting-review"] = aw_handle
 
         # LithosClient is needed for both: the projection wires through
         # to LithosEventStream for upstream events; the status-transition
@@ -460,6 +465,19 @@ async def _amain(cfg: LoomConfig) -> int:
                 handlers=my_handlers,
                 ctx=ctx,
             )
+
+            # #113: authoritative cold-start reconcile of the awaiting-review
+            # note BEFORE the event stream starts, so a restart with no open
+            # tasks (or none still delivered) collapses a stale note even when
+            # the bootstrap replays zero events. Best-effort — a failure must
+            # not abort the child; the note reconciles on the next task event.
+            if awaiting_review_reconcile is not None:
+                try:
+                    await awaiting_review_reconcile(lithos)
+                except Exception:
+                    logger.exception(
+                        "obsidian-awaiting-review: cold-start reconcile failed"
+                    )
 
             if need_event_stream:
                 events_url = cfg.orchestrator.lithos_url.rstrip("/") + "/events"

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -84,12 +85,21 @@ def _hash_existing(path: Path) -> bytes | None:
         return None
 
 
-def make_handler(cfg: LoomConfig) -> Any:
-    """Build a stateful awaiting-review handler bound to *cfg*.
+def make_handler(cfg: LoomConfig) -> tuple[Any, Any]:
+    """Build the awaiting-review handler + its cold-start reconcile, bound to *cfg*.
+
+    Returns ``(handle, reconcile)``:
+
+    * ``handle(event, ctx)`` — the bus subscription handler (live updates).
+    * ``reconcile(lithos)`` — an authoritative startup pass: rebuilds the set
+      from a direct ``task_list(status="open")`` and writes the note once. The
+      event stream only replays open tasks (+ terminal tasks within the resolved
+      window), so a restart with zero open tasks and no recent terminal events
+      yields no handler calls — without this, a note written by a previous run
+      would persist stale instead of collapsing to the placeholder.
 
     ``cfg.obsidian_sync`` must be set (the obsidian-sync child's spawn gate
-    guarantees this); the note is written to
-    ``vault_path / awaiting_review_file``.
+    guarantees this); the note is written to ``vault_path / awaiting_review_file``.
     """
     obs = cfg.obsidian_sync
     if obs is None:
@@ -101,8 +111,38 @@ def make_handler(cfg: LoomConfig) -> Any:
     delivered: dict[str, _Entry] = {}
     last_hash: bytes | None = _hash_existing(note_path)
 
-    async def handle(event: Event, ctx: Any) -> None:
+    def _record(
+        task_id: str, title: str, status: str, metadata: Mapping[str, Any]
+    ) -> None:
+        """Add an open delivered task to the set, or drop it. A terminal task
+        (status != "open") or one missing the delivery markers is removed."""
+        pr_url = metadata.get("develop_pr_url")
+        # isinstance check lives in the `if` so pyright narrows pr_url to str.
+        if (
+            status == "open"
+            and bool(metadata.get("loom_delivered"))
+            and isinstance(pr_url, str)
+            and pr_url
+        ):
+            project = metadata.get("project")
+            delivered[task_id] = _Entry(
+                title=title or task_id,
+                pr_url=pr_url,
+                project=str(project) if project else None,
+            )
+        else:
+            delivered.pop(task_id, None)
+
+    async def _flush() -> None:
         nonlocal last_hash
+        content = _render(delivered)
+        content_hash = hashlib.sha256(content.encode("utf-8")).digest()
+        if content_hash == last_hash:
+            return
+        await write_file_atomic(note_path, content)
+        last_hash = content_hash
+
+    async def handle(event: Event, ctx: Any) -> None:
         if event.type not in _REEVALUATE_EVENTS and event.type not in _REMOVAL_EVENTS:
             ctx.logger.debug(
                 "obsidian-awaiting-review: ignoring event type %s", event.type
@@ -118,30 +158,30 @@ def make_handler(cfg: LoomConfig) -> Any:
                 exc,
             )
             return
-
-        metadata = payload.get("metadata") or {}
-        pr_url = metadata.get("develop_pr_url")
-        open_delivered = (
-            event.type in _REEVALUATE_EVENTS
-            and str(payload.get("status", "")) == "open"
-            and bool(metadata.get("loom_delivered"))
-        )
-        # isinstance check lives in the `if` so pyright narrows pr_url to str.
-        if open_delivered and isinstance(pr_url, str) and pr_url:
-            project = metadata.get("project")
-            delivered[task_id] = _Entry(
-                title=str(payload.get("title") or task_id),
-                pr_url=pr_url,
-                project=str(project) if project else None,
-            )
-        else:
+        if event.type in _REMOVAL_EVENTS:
+            # A terminal event always drops the entry, regardless of the
+            # status carried in the payload.
             delivered.pop(task_id, None)
+        else:
+            _record(
+                task_id,
+                str(payload.get("title") or task_id),
+                str(payload.get("status", "")),
+                payload.get("metadata") or {},
+            )
+        await _flush()
 
-        content = _render(delivered)
-        content_hash = hashlib.sha256(content.encode("utf-8")).digest()
-        if content_hash == last_hash:
-            return
-        await write_file_atomic(note_path, content)
-        last_hash = content_hash
+    async def reconcile(lithos: Any) -> None:
+        """Authoritative cold-start reconcile from the current open tasks.
 
-    return handle
+        Rebuilds the set from ``task_list(status="open")`` and flushes once, so a
+        restart that replays no events still collapses a stale note. Live events
+        keep it current afterward. Run before the event stream starts so it never
+        races the bootstrap replay on the shared state.
+        """
+        delivered.clear()
+        for task in await lithos.task_list(status="open"):
+            _record(task.id, task.title, task.status, dict(task.metadata or {}))
+        await _flush()
+
+    return handle, reconcile
