@@ -56,6 +56,36 @@ def _pr(*, state: str, merged: bool, sha: str | None = "abc123") -> PullRequest:
     )
 
 
+class _StatefulLithos:
+    """A fake Lithos that models post-lithos#303 semantics: ``task_update``
+    applies its additive metadata merge **even on a terminal task**. Tracks
+    ``status`` + the merged ``metadata`` so a test can assert the marker
+    actually persists end-to-end — the ``AsyncMock`` fake never modelled #303,
+    so it green-lit the merged marker even while the real write was rejected."""
+
+    def __init__(self, metadata: dict[str, Any] | None = None) -> None:
+        self.status = "open"
+        self.metadata: dict[str, Any] = dict(metadata or {})
+        self.findings: list[str] = []
+
+    async def task_complete(self, *, task_id: str) -> None:
+        if self.status != "open":
+            raise LithosClientError("task_not_found", "already terminal")
+        self.status = "completed"
+
+    async def task_update(
+        self, *, task_id: str, metadata: dict[str, Any] | None = None
+    ) -> None:
+        for key, value in (metadata or {}).items():
+            if value is None:
+                self.metadata.pop(key, None)
+            else:
+                self.metadata[key] = value
+
+    async def finding_post(self, *, task_id: str, summary: str) -> None:
+        self.findings.append(summary)
+
+
 # ── _parse_pr_url ──────────────────────────────────────────────────────
 
 
@@ -94,6 +124,29 @@ async def test_merged_pr_completes_task_and_marks() -> None:
         metadata={MERGE_STATE_KEY: "merged", MERGE_STATE_URL_KEY: _PR_URL},
     )
     lithos.finding_post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_merged_pr_persists_marker_on_completed_task() -> None:
+    """#111: the ``merged`` marker must survive on the now-terminal task. Drives
+    a stateful fake (post-lithos#303: ``task_update`` applies to a terminal
+    task) end-to-end — the regression guard the lenient ``AsyncMock`` couldn't
+    be: complete-then-mark with the mark landing on a completed task."""
+    github = AsyncMock()
+    github.get_pull_request.return_value = _pr(state="closed", merged=True)
+    lithos = _StatefulLithos({"develop_pr_url": _PR_URL, "loom_delivered": True})
+    task = _task({"develop_pr_url": _PR_URL})
+
+    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
+
+    assert outcome == "merged"
+    assert lithos.status == "completed"
+    assert lithos.metadata[MERGE_STATE_KEY] == "merged"
+    assert lithos.metadata[MERGE_STATE_URL_KEY] == _PR_URL
+    # the additive merge preserves pre-existing metadata
+    assert lithos.metadata["develop_pr_url"] == _PR_URL
+    assert lithos.metadata["loom_delivered"] is True
+    assert lithos.findings == []
 
 
 @pytest.mark.asyncio
