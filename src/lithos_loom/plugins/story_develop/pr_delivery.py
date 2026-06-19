@@ -288,6 +288,68 @@ def request_copilot(wt: Path, repo: str, pr_number: int) -> bool:
     return True
 
 
+def request_operator_review(wt: Path, repo: str, pr_number: int, login: str) -> str:
+    """Request *login* as a reviewer on the PR; assign them if they authored it.
+
+    Best-effort and non-fatal (mirrors :func:`request_copilot`): never raises,
+    logs on failure. GitHub forbids requesting review from the PR *author* (HTTP
+    422) — the common case when loom runs under the operator's own ``gh`` auth —
+    so on that error we fall back to *assigning* the PR to them, which is allowed
+    for self and still fires a native GitHub notification.
+
+    Returns ``"review_requested"``, ``"assigned"``, or ``"failed"``.
+    """
+    proc = _run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            f"repos/{repo}/pulls/{pr_number}/requested_reviewers",
+            "-f",
+            f"reviewers[]={login}",
+        ],
+        cwd=wt,
+    )
+    if proc.returncode == 0:
+        return "review_requested"
+
+    stderr = proc.stderr.strip()
+    # 422 "Review cannot be requested from pull request author" → assign instead.
+    if "pull request author" not in stderr and "422" not in stderr:
+        logger.warning(
+            "story-develop: requesting review from %s on %s#%d failed: %s",
+            login,
+            repo,
+            pr_number,
+            stderr,
+        )
+        return "failed"
+
+    assigned = _run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            f"repos/{repo}/issues/{pr_number}/assignees",
+            "-f",
+            f"assignees[]={login}",
+        ],
+        cwd=wt,
+    )
+    if assigned.returncode == 0:
+        return "assigned"
+    logger.warning(
+        "story-develop: assigning %s to %s#%d failed: %s",
+        login,
+        repo,
+        pr_number,
+        assigned.stderr.strip(),
+    )
+    return "failed"
+
+
 _GENERATED_RE = re.compile(r"generated (\d+|no) comments?", re.IGNORECASE)
 
 
@@ -499,6 +561,22 @@ def deliver(
     )
     pr_number = pr_number_from_url(pr_url)
     logger.info("story-develop %s: opened PR %s", config.run_id, pr_url)
+
+    # #113: notify the operator their PR awaits review (native GitHub
+    # notification). Best-effort; the note threads into every return below.
+    if config.notify_github_login:
+        notified = request_operator_review(
+            wt, repo, pr_number, config.notify_github_login
+        )
+        if notified == "review_requested":
+            notes.append(f"requested review from @{config.notify_github_login}")
+        elif notified == "assigned":
+            notes.append(
+                f"assigned PR to @{config.notify_github_login} "
+                "(review can't be self-requested on your own PR)"
+            )
+        else:
+            notes.append(f"could not notify @{config.notify_github_login} of the PR")
 
     if no_copilot:
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))

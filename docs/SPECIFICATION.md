@@ -337,6 +337,11 @@ reconcile_interval_minutes = 60
 # runs pin models with their own flags. Model names are not validated
 # (they drift) — a typo falls through to the agent's CLI default.
 
+[story_develop]
+# operator_github_login (#113): GitHub user to notify on PR delivery —
+# requested as a reviewer, or assigned to the PR when they authored it.
+operator_github_login = "your-github-login"
+
 [story_develop.default_models]
 claude = "opus"
 codex  = "gpt-5.4"
@@ -635,6 +640,7 @@ uv run python -m lithos_loom.plugins.story_develop \
 - **Agent tools (#94).** Each agent's `tool` is `claude` or `codex`, declarable independently per coder (`develop_coder.tool` / `--coder`) and per reviewer (`develop_reviewers[].tool`), so a heterogeneous panel (e.g. `code-quality = codex`, `security = claude`) and an engine-switching `fallback_chain` both work. Codex runs as `codex exec --json --dangerously-bypass-approvals-and-sandbox` (first turn) / `codex exec resume <thread_id> …` (later turns) inside the same hardened per-turn container model (ADR 0002). Two codex specifics: (1) the session handle is **minted by the tool** — the `thread_id` from the first turn's `thread.started` `--json` event is captured and reused for resumes (claude's is a caller-supplied uuid); (2) the per-run config/transcript dir is `CODEX_HOME` (under the work-dir, never `/tmp`) with a single `auth.json` bind-mounted from `~/.codex`, and codex has no skills concept (it honours the worktree `AGENTS.md`). **Cost gap:** codex reports token usage, not USD, so codex turns contribute `0.0` to the `max_cost_usd` ceiling — for codex agents the ceiling is unenforced (a run stays bounded by `max_rounds` + per-turn timeout); a token→USD pricing map is a follow-up. Codex usage-limit *strings* are not yet captured (feasibility-gate G4), so a codex limit currently classifies as a generic `agent_error` rather than `usage_limited` — an engine `fallback_chain` still switches *to* codex on a claude limit, but switching *off* codex on a codex limit awaits the captured strings.
 - **Status mapping.** `approved` → `succeeded`; with the route's `completes_task = false` (§2.2) the runner then leaves the task **open** for human merge (marks `loom_delivered`, releases) rather than completing it — so an approved run never closes a github-linked issue for un-merged work. `interrupted` (usage-limit pause budget exhausted) → `interrupted` with `error.category="usage_limited"` and a `resume` block (the runner schedules a re-dispatch, §2.2); every other stop (`max_rounds`, `stalled`, `disputed`, `cost_exceeded`, `failed`) → `failed`.
 - The plugin still owns its Lithos round-trip directly (the `[DevelopResult]` finding + `develop_*` metadata, same as `--task-id` mode); `result.json` carries `status` for the runner, so there is no double-application.
+- **Operator notification on delivery (#113).** When `[story_develop].operator_github_login` (§3.1) is set in daemon mode (or `--notify-github-login` is passed standalone), a delivered PR requests that user as a GitHub reviewer so native email/web/mobile notifications fire. If they **authored** the PR — the usual case, since loom runs under the operator's own `gh` auth and GitHub rejects a self review-request with HTTP 422 — it falls back to **assigning** the PR to them (allowed for self, still notifies). The run summary records "requested review from / assigned to `<login>`". Best-effort: a failure is noted, never fatal. Unset → Copilot review only (the prior behaviour).
 
 **Worked example — model + effort.** Project default in the project-context doc's frontmatter (a reviewer that out-models the coder, plus a strict security pass):
 

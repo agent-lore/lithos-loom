@@ -298,9 +298,14 @@ class StoryDevelopConfig:
     their own tool. Only consulted by daemon-mode runs (the route-runner path
     this config file drives); standalone CLI runs pin models with their own
     flags.
+
+    ``operator_github_login`` (#113): when set, a delivered PR requests this
+    GitHub user as a reviewer so native notifications fire. ``None`` → no human
+    reviewer is requested (today's behaviour; Copilot only).
     """
 
     default_models: Mapping[str, str] = field(default_factory=dict)
+    operator_github_login: str | None = None
 
 
 @dataclass(frozen=True)
@@ -791,7 +796,9 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
     )
 
 
-_STORY_DEVELOP_KEYS: frozenset[str] = frozenset({"default_models"})
+_STORY_DEVELOP_KEYS: frozenset[str] = frozenset(
+    {"default_models", "operator_github_login"}
+)
 
 
 def _parse_story_develop(data: Any, config_path: Path) -> StoryDevelopConfig | None:
@@ -831,7 +838,17 @@ def _parse_story_develop(data: Any, config_path: Path) -> StoryDevelopConfig | N
             )
         default_models[tool] = model.strip()
 
-    return StoryDevelopConfig(default_models=default_models)
+    login = data.get("operator_github_login")
+    if login is not None and (not isinstance(login, str) or not login.strip()):
+        raise ConfigError(
+            f"{config_path}: story_develop.operator_github_login must be a "
+            f"non-empty string (got {login!r})"
+        )
+
+    return StoryDevelopConfig(
+        default_models=default_models,
+        operator_github_login=login.strip() if isinstance(login, str) else None,
+    )
 
 
 def _parse_retry_policy(data: Any, config_path: Path, scope: str) -> RetryPolicy:
