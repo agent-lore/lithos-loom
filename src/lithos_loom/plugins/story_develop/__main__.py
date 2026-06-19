@@ -579,6 +579,15 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    # Match the TOML surface (config.py strips + rejects blank/whitespace): ""
+    # would silently disable notifications, "   " would reach `gh api` as a
+    # bogus login. Strip and reject empty so the contract is identical.
+    notify_github_login = args.notify_github_login
+    if notify_github_login is not None:
+        notify_github_login = notify_github_login.strip()
+        if not notify_github_login:
+            print("error: --notify-github-login must not be empty", file=sys.stderr)
+            return 2
     if args.develop_config is not None:
         try:
             specs = load_develop_config(args.develop_config.expanduser())
@@ -656,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
         max_cost_usd=args.max_cost_usd,
         image=args.image,
         base_branch=args.branch,
-        notify_github_login=args.notify_github_login,
+        notify_github_login=notify_github_login,
     )
 
     result = develop(
