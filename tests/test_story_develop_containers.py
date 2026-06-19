@@ -57,6 +57,18 @@ def test_run_command_readonly_worktree() -> None:
     assert "/work/run/worktree/branch:/workspace:ro" in cmd
 
 
+def test_run_command_mounts_git_common_dir() -> None:
+    cmd = _run_cmd(git_common_dir=Path("/home/project/.git"))
+    # identity mount (#109): host path == container path, read-only, so the
+    # worktree's absolute `gitdir:` backlink resolves in-container.
+    assert "/home/project/.git:/home/project/.git:ro" in cmd
+
+
+def test_run_command_omits_git_common_dir_when_absent() -> None:
+    cmd = _run_cmd()  # git_common_dir defaults to None
+    assert not any(a.endswith("/.git:ro") for a in cmd)
+
+
 def test_run_command_multiple_auth_files() -> None:
     cmd = _run_cmd(auth_files=[".credentials.json", ".claude.json"])
     assert "/home/u/.claude/.claude.json:/claude_config/.claude.json" in cmd

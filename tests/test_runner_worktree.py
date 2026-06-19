@@ -63,3 +63,16 @@ def test_remove_refuses_dirty_without_force(tmp_git_repo: Path, tmp_path: Path) 
 def test_remove_rejects_non_worktree(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         worktree.remove(tmp_path / "nope")
+
+
+def test_git_common_dir_is_main_repo_git(tmp_git_repo: Path, tmp_path: Path) -> None:
+    # A linked worktree's common dir is the main repo's `.git` (#109).
+    wt = worktree.create(tmp_git_repo, "main", "task", parent=tmp_path / "w")
+    common = worktree.git_common_dir(wt)
+    assert common.is_absolute()
+    assert common.resolve() == (tmp_git_repo / ".git").resolve()
+
+
+def test_git_common_dir_rejects_non_worktree(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError):
+        worktree.git_common_dir(tmp_path / "nope")
