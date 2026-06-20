@@ -380,9 +380,25 @@ def _daemon_main(args: argparse.Namespace) -> int:
         coder_effort=settings.coder_effort,
         reviewers=settings.reviewers,
         max_rounds=settings.max_rounds or args.max_rounds,
-        test_gate=not args.no_test_gate,
-        test_command=args.test_command,
-        block_on_red=args.block_on_red,
+        # Per-project / per-task test-gate config from project-context metadata
+        # (#127) wins; the route-level flags (--no-test-gate / --test-command /
+        # --block-on-red) are the fallback when metadata pins nothing. ``None``
+        # from the resolver means "inherit the flag".
+        test_gate=(
+            settings.test_gate
+            if settings.test_gate is not None
+            else not args.no_test_gate
+        ),
+        test_command=(
+            settings.test_command
+            if settings.test_command is not None
+            else args.test_command
+        ),
+        block_on_red=(
+            settings.block_on_red
+            if settings.block_on_red is not None
+            else args.block_on_red
+        ),
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,

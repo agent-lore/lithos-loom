@@ -38,10 +38,12 @@ from .config import (
     DEFAULT_CODER_TOOL,
     DEFAULT_REVIEWER_NAME,
     ReviewerSpec,
+    parse_bool_setting,
     parse_effort,
     parse_image,
     parse_model,
     parse_reviewer_entry,
+    parse_test_command,
 )
 from .lithos_io import AGENT_ID, TaskContext
 
@@ -123,6 +125,12 @@ class ProjectDevelopSettings:
     # per-task override (``task.metadata.develop_image``). ``None`` = "inherit
     # the route-level ``--image`` flag / the built-in default".
     image: str | None = None
+    # Per-project test-gate overrides (#127), each ``None`` = "inherit the
+    # route-level flag" (``--test-command`` / ``--no-test-gate`` /
+    # ``--block-on-red``). ``test_command`` is trusted as-is by the gate.
+    test_command: str | None = None
+    test_gate: bool | None = None
+    block_on_red: bool | None = None
     frictions: tuple[str, ...] = ()
 
 
@@ -314,6 +322,59 @@ def resolve_project_settings(
         except ValueError as exc:
             frictions.append(f"{exc}; keeping project default")
 
+    # Per-project test-gate overrides (#127), each with an optional per-task
+    # override and a friction (never a failure) on a bad value — mirroring
+    # ``develop_image``. ``develop_test_command`` is trusted as-is by the gate
+    # (no auto-detection); ``develop_test_gate`` / ``develop_block_on_red`` are
+    # booleans. ``None`` at every layer means "inherit the route-level flag".
+    test_command: str | None = None
+    try:
+        test_command = parse_test_command(
+            meta.get("develop_test_command"), where="develop_test_command"
+        )
+    except ValueError as exc:
+        frictions.append(f"{exc}; ignoring")
+    if task_metadata.get("develop_test_command") is not None:
+        try:
+            test_command = parse_test_command(
+                task_metadata["develop_test_command"],
+                where="task metadata.develop_test_command",
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
+
+    test_gate: bool | None = None
+    try:
+        test_gate = parse_bool_setting(
+            meta.get("develop_test_gate"), where="develop_test_gate"
+        )
+    except ValueError as exc:
+        frictions.append(f"{exc}; ignoring")
+    if task_metadata.get("develop_test_gate") is not None:
+        try:
+            test_gate = parse_bool_setting(
+                task_metadata["develop_test_gate"],
+                where="task metadata.develop_test_gate",
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
+
+    block_on_red: bool | None = None
+    try:
+        block_on_red = parse_bool_setting(
+            meta.get("develop_block_on_red"), where="develop_block_on_red"
+        )
+    except ValueError as exc:
+        frictions.append(f"{exc}; ignoring")
+    if task_metadata.get("develop_block_on_red") is not None:
+        try:
+            block_on_red = parse_bool_setting(
+                task_metadata["develop_block_on_red"],
+                where="task metadata.develop_block_on_red",
+            )
+        except ValueError as exc:
+            frictions.append(f"{exc}; keeping project default")
+
     raw_chain = meta.get("develop_fallback_chain")
     chain: tuple[str, ...] = ()
     if isinstance(raw_chain, list) and all(isinstance(t, str) for t in raw_chain):
@@ -342,6 +403,9 @@ def resolve_project_settings(
         max_rounds=max_rounds,
         max_cost_usd=float(max_cost) if max_cost is not None else None,
         image=image,
+        test_command=test_command,
+        test_gate=test_gate,
+        block_on_red=block_on_red,
         frictions=tuple(frictions),
     )
 

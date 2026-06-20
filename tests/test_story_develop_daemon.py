@@ -356,6 +356,94 @@ def test_resolve_invalid_task_image_keeps_project_default(fake_client) -> None:
     assert any("task metadata.develop_image" in f for f in settings.frictions)
 
 
+# --- develop_test_command / develop_test_gate / develop_block_on_red (#127) ---
+
+
+def test_resolve_test_gate_keys_default_none(fake_client) -> None:
+    fake_client.note = _FakeNote("projects/loom/loom-project-context.md", {})
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.test_command is None
+    assert settings.test_gate is None
+    assert settings.block_on_red is None
+
+
+def test_resolve_test_command_from_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_test_command": "make check"},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.test_command == "make check"
+    assert settings.frictions == ()
+
+
+def test_resolve_task_test_command_override_beats_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_test_command": "make check"},
+    )
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_test_command": "pytest -q"}
+    )
+    assert settings.test_command == "pytest -q"  # per-task wins
+    assert settings.frictions == ()
+
+
+def test_resolve_invalid_test_command_frictioned(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_test_command": ""},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.test_command is None
+    assert any("develop_test_command" in f for f in settings.frictions)
+
+
+def test_resolve_test_gate_and_block_on_red_from_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_test_gate": False, "develop_block_on_red": True},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.test_gate is False
+    assert settings.block_on_red is True
+    assert settings.frictions == ()
+
+
+def test_resolve_task_test_gate_override_beats_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_test_gate": True},
+    )
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_test_gate": False}
+    )
+    assert settings.test_gate is False  # per-task wins
+    assert settings.frictions == ()
+
+
+def test_resolve_invalid_test_gate_frictioned(fake_client) -> None:
+    # TOML ``1`` / ``"yes"`` are not booleans — a mistyped flag frictions
+    # rather than silently coercing.
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_test_gate": "yes"},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.test_gate is None
+    assert any("develop_test_gate" in f for f in settings.frictions)
+
+
+def test_resolve_invalid_block_on_red_frictioned(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_block_on_red": 1},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.block_on_red is None
+    assert any("develop_block_on_red" in f for f in settings.frictions)
+
+
 def test_resolve_unknown_override_name_skipped_with_friction(fake_client) -> None:
     fake_client.note = _FakeNote(
         "projects/loom/loom-project-context.md",

@@ -63,6 +63,11 @@ name = "story-develop"
 # The sandbox container image is develop_image (per-project), overridable
 # per task via task.metadata.develop_image; the --image flag below is the
 # route-level fallback when metadata pins neither.
+# The per-round test gate is develop_test_command (trusted as-is, no auto-
+# detection) / develop_test_gate / develop_block_on_red (per-project, with the
+# same task.metadata.* per-task override) (#127); the --test-command /
+# --no-test-gate / --block-on-red flags are the route-level fallback. So a
+# project standardised on `make check` sets develop_test_command = "make check".
 # See docs/SPECIFICATION.md §5.5 for the keys + resolution precedence.
 # Add --open-pr to push + open a PR (and run the Copilot review round) on
 # approval. The --coder-model/--coder-effort/--reviewer-model/--reviewer-effort
