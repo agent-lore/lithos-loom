@@ -21,6 +21,14 @@
 > semantics (§9); pinned the **auto-format commit/review sequence** (§4); added a
 > per-profile **`strength_rank`** total order (§2); made **critical-signal
 > escalation non-suppressible** (§7); clarified **required-where-applicable** (§4).
+>
+> **Revised again after review round 3 (implementation-contract hardening):**
+> `strength_rank` now carries a validated **monotonicity invariant** (§2); CI
+> re-opens draw down a **cumulative per-PR budget** with human escalation on
+> exhaustion (§9); the **same-PR-branch rerun mechanics** are an explicit slice;
+> **N/A applicability is declared, not inferred from absence** (§4); CI required
+> set is **declared-contexts-then-N/A**, not "any failed suite" (§9);
+> `allow_weaken_floor` is **bounded** (cannot bypass CI or critical escalation, §10).
 
 ## Context
 
@@ -99,13 +107,21 @@ dial's purpose. For hosts that must never block, a config switch
 (`unknown_profile = "strongest"`) falls back to the **strongest configured**
 profile + friction — **never a weaker one**.
 
-**`strength_rank` makes "strongest" unambiguous.** Each profile declares an
-integer `strength_rank` (built-ins: `minimal` 10, `standard` 20, `thorough` 30;
-operators slot custom profiles like `security` or `fast-ci` in between). It is
-the total order used by `unknown_profile = "strongest"`, by escalation (§7, "a
-higher profile" = higher rank), and by the floor/override rules (an additive
-override may not drop below the selected rank's required set). Without it,
-"strongest configured" is undefined once operators add profiles.
+**`strength_rank` makes "strongest" unambiguous — but only if rank tracks
+strictness.** Each profile declares an integer `strength_rank` (built-ins:
+`minimal` 10, `standard` 20, `thorough` 30; operators slot custom profiles
+between). It orders `unknown_profile = "strongest"`, escalation (§7, "a higher
+profile" = higher rank), and the floor/override rules. **Rank is meaningless
+unless it tracks strictness, so the config loader enforces a monotonicity
+invariant: a higher-ranked profile's required check-set *and* required personas
+must be a superset of every lower-ranked profile's.** A `fast-ci` at rank 40 that
+drops `sast`/`dep-audit` is a **load-time error**, not a silently-"strongest"
+profile. Escalation and "strongest" therefore operate only over a **validated
+monotonic chain**. Strength is sometimes genuinely *partial* (a `security`
+profile may be stricter on a different axis than `thorough`, hence incomparable);
+such profiles must either be made supersets to join the chain, or they are not
+rank-comparable — in which case the safe fallback is an explicitly
+operator-declared `fallback_profile`, or halt (the §2 default).
 
 ### 3. Three canonical profiles ship, each stating a **quality floor**
 
@@ -146,10 +162,13 @@ real rather than aspirational:
   **A required check whose tool is absent — or that errors/times out — fails at
   preflight and blocks the run** (it does NOT silently downgrade to
   informational). "Required" governs *execution*, not findings (see below). A
-  required check is required **where applicable**: one that resolves to
-  `not_applicable` for the repo's ecosystem (e.g. `test` in a docs-only repo with
-  no test ecosystem) is satisfied and recorded N/A — it does **not** violate the
-  floor. (Operators may also ship a `docs` profile.)
+  required check is required **where applicable**, and **applicability is
+  *declared*, not inferred from absence**: N/A is a property of the repo's
+  declared ecosystem/policy (a docs-only repo *declares* `test` N/A), **not** "the
+  detector found no tests." "Expected-but-absent" — no tests in a *code* repo, or
+  tests deleted by the change — is a **blocking finding** (and a risk-escalation
+  signal, §7), never an automatic N/A, so N/A can't become a delete-the-tests
+  escape hatch. (Operators may ship a `docs` profile for genuinely test-free repos.)
 - **optional** — runs if its tool is present; absence is fine.
 - **informational** — runs if present; its findings never block; surfaced to
   coder + reviewers.
@@ -275,12 +294,15 @@ CI's services/secrets/matrix, so local-green can still be CI-red. After PR open,
 loom **consumes the PR's CI check-runs** as a deterministic gate. Local checks
 catch most issues cheaply and early; CI is the final word.
 
-**Check-run semantics (so "CI RED" is implemented consistently).** loom treats as
-RED a failure of the repo's **branch-protection required checks** when configured,
-else any failed check suite on the head SHA. `pending` is awaited up to a
-timeout, then surfaced (never merged); `cancelled` / `skipped` / `neutral` are
-**non-blocking**; a repo with **no CI** makes the local gate final (the CI gate is
-`not_applicable`, not a block).
+**Check-run semantics (so "CI RED" is implemented consistently).** The CI
+*required set* is, in order: the repo's **branch-protection required checks** if
+configured; else **profile/project-declared required CI contexts**; else —
+nothing declared and no branch protection — CI is **`not_applicable` + a
+friction**, **not** "block on every check suite" (which would let optional / flaky
+/ experimental checks drive automated churn). Within the required set, loom treats
+a failure as RED; `pending` is awaited up to a timeout, then surfaced (never
+merged); `cancelled` / `skipped` / `neutral` are **non-blocking**; a repo with no
+CI at all makes the local gate final.
 
 **Lifecycle contract (reconciled with delivery).** Today, on approval loom marks
 `loom_delivered`, releases the claim, and opens the PR; the watcher owns
@@ -297,7 +319,15 @@ sweep**, following loom's existing marker pattern (cf. `develop_pr_merge_state`,
   re-triggers once, and a new push re-evaluates.
 
 This keeps exactly one owner of the task at a time and prevents duplicate / raced
-runs. The CI re-open consumes rounds against the same `max_rounds` / cost ceilings.
+runs.
+
+**Budget is cumulative across re-dispatches.** Clearing `loom_delivered` triggers
+a *fresh* route dispatch (new process, new `max_rounds` / cost), so per-run
+ceilings alone would let a CI-red loop reset its budget every re-open. A
+**cumulative per-PR budget** — total rounds, total cost, and a re-open count — is
+persisted in task metadata **keyed by the PR URL / head history** and drawn down
+across dispatches. When it is exhausted, loom **stops re-developing and escalates
+to the human** (a `[Friction]` / story-review-human handoff) rather than looping.
 
 ### 10. Composition with [#92] and [#127] — no double-building
 
@@ -316,6 +346,11 @@ runs. The CI re-open consumes rounds against the same `max_rounds` / cost ceilin
   ships before the profile model, where `develop_test_gate` toggles the only gate
   — the §4 slice re-scopes it to the `test` check when profiles land.) One
   gate-config truth, with the flat keys as a thin convenience layer.
+  **`allow_weaken_floor` is itself bounded:** it can drop *local deterministic
+  checks* only — it can **not** disable the CI final gate (§9), the
+  non-suppressible critical-signal escalation (§7), or the required panel. The
+  strongest thing an operator can switch off is local static tooling; CI and
+  critical-risk review remain.
 
 ### 11. Calibration: outcomes, not just "merged"
 
@@ -402,6 +437,14 @@ requests — not a dependency of this design.
   backward-compat, but a backdoor around the required-check floor. Rejected — it
   scopes to the `test` check; whole-gate-off requires an explicit, audited
   floor-weaken.
+- **`strength_rank` as a bare ordering label.** Rejected — rank that doesn't track
+  strictness lets a high-ranked profile that drops SAST be picked as "strongest."
+  Replaced with a load-time **monotonicity invariant** (higher rank ⊇ lower
+  required sets), plus a declared `fallback_profile` / halt for genuinely
+  incomparable profiles.
+- **"Block on any failed CI check suite" when no branch protection.** Rejected —
+  catches optional / flaky / experimental checks and drives automated churn.
+  Replaced with declared-required-contexts, else CI = N/A + friction.
 - **External bots (Greptile/CodeRabbit) as core.** Rejected — out-of-sandbox,
   SaaS-coupled; the gap is closable in-system via [#92].
 
@@ -421,8 +464,10 @@ requests — not a dependency of this design.
 | 4 — the dial | review-profile resolution (precedence + fail-closed); ship the 3 profiles with quality floors | |
 | | additive per-task overrides; `allow_escalation` opt-out | |
 | | wire profile → panel + check-set in `DevelopConfig` | |
+| | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
 | 5 — CI + calibration | consume PR CI check-runs (branch-protection-aware) as a `gate/ci-*` gate; lifecycle contract: re-open delivered-but-red on the same PR with merge-race + SHA-marker dedup | [#87] |
+| | same-PR rerun mechanics: `develop_pr_url`/branch discovery, branch checkout, idempotent push, same-PR update; cumulative per-PR budget (rounds/cost/reopens) keyed by PR URL, exhaustion → human escalation | [#87] |
 | | record review metadata; build the outcome-signal basket + success metrics | [#87] |
 
 Each slice is an independently grabbable tracer-bullet issue, linked back to #128.
