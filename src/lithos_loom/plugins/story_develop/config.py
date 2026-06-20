@@ -137,6 +137,41 @@ def parse_image(value: object, *, where: str) -> str | None:
     return value.strip()
 
 
+def parse_test_command(value: object, *, where: str) -> str | None:
+    """Validate + normalise a gate ``test_command`` override, or ``None``.
+
+    Mirrors :func:`parse_image`: a non-empty string (stripped), or ``None``
+    (meaning "inherit the route-level ``--test-command`` / auto-detection").
+    The command is **trusted as-is** by the gate (no parsing, no tool-probe —
+    see ``_resolve_gate_command``), so the only validation is non-empty-string;
+    a bad command surfaces when the gate container runs it. Shared by the
+    project-metadata loader and the per-task override so both reject the same
+    garbage identically. Raises :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{where}: test_command must be a non-empty string (got {value!r})"
+        )
+    return value.strip()
+
+
+def parse_bool_setting(value: object, *, where: str) -> bool | None:
+    """Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
+
+    Accepts a real ``bool`` or ``None``; **rejects ints and strings** so a
+    mistyped flag (TOML ``1`` / ``"true"`` are NOT booleans) frictions rather
+    than silently coercing — ``isinstance(1, bool)`` is ``False``, so only
+    literal ``true`` / ``false`` pass. Raises :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{where}: must be a boolean true/false (got {value!r})")
+    return value
+
+
 # Reasoning-effort levels. There is no universal cross-tool effort vocabulary:
 # Claude's `--effort` is low/medium/high/xhigh/max; Codex has NO effort flag
 # (depth is implicit in model choice — o3 vs gpt-4o); OpenCode's `--variant` is
