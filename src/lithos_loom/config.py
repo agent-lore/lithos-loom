@@ -88,7 +88,7 @@ _VALID_ON_PERSISTENT_FAILURE: set[str] = {"friction", "ignore"}
 # ── Defaults ───────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG_FILENAME = "config.toml"
-DEFAULT_WORK_DIR = Path("/tmp/lithos-loom")
+DEFAULT_WORK_DIR = Path("/tmp/lithos-loom")  # noqa: S108 — operator-overridable default work dir on a single-operator host, not a secret-bearing temp file
 DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_LOG_LEVEL: LogLevel = "info"
 DEFAULT_OBSIDIAN_TASKS_FILE = Path("_lithos/tasks.md")
