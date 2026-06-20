@@ -69,3 +69,12 @@ def commit_all(
         return None
     _git(worktree, "commit", "-m", message)
     return base_sha(worktree)
+
+
+def diff_stat(worktree: Path, base_sha: str) -> str:
+    """Return ``git diff --stat base_sha..HEAD`` — the cumulative change so far.
+
+    Pre-injected into the reviewer prompt for orientation (#136). Empty string
+    when *base_sha* is already HEAD (no commits yet this run).
+    """
+    return _git(worktree, "diff", "--stat", f"{base_sha}..HEAD")

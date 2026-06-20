@@ -43,7 +43,13 @@ from pathlib import Path
 
 from ...runner import detection, git, worktree
 from . import containers, handoff, limits, test_gate
-from .check_set import Check, CheckResult, CheckSetResult, classify_execution
+from .check_set import (
+    Check,
+    CheckResult,
+    CheckSetResult,
+    classify_execution,
+    render_check_summary,
+)
 from .config import (
     CLAUDE_AUTH_FILES,
     CODEX_AUTH_FILES,
@@ -394,21 +400,6 @@ def _run_check_set(
             )
         )
     return CheckSetResult(results=tuple(results))
-
-
-def _gate_note(gate: GateResult | None) -> str:
-    """A prompt section describing a red gate (empty when green/absent)."""
-    if gate is None or gate.passed:
-        return ""
-    how = "timed out" if gate.timed_out else f"exit {gate.exit_code}"
-    return (
-        "\n## Independent test gate (FAILED)\n\n"
-        f"The orchestrator independently ran `{gate.command}` against your last "
-        f"commit in a clean container and it failed ({how}). This result is "
-        "authoritative — fix the failures regardless of how the tests behaved "
-        "in your own environment. Output tail:\n\n"
-        "```\n" + gate.output_tail + "\n```\n"
-    )
 
 
 # --- usage-limit reaction (T5) ----------------------------------------------
@@ -1074,7 +1065,7 @@ def develop(
                     round_no=str(round_no),
                     acceptance_criteria=config.effective_acceptance_criteria,
                     findings=_render_panel_findings(final_reviews),
-                    test_gate_note=_gate_note(gate),
+                    gate_summary=render_check_summary(check_set, for_coder=True),
                     review_files=review_files,
                     handoff_file=handoff.coder_handoff_name(round_no),
                 )
@@ -1213,6 +1204,8 @@ def develop(
                         reviewer_brief=_reviewer_brief(rstate.spec),
                         acceptance_criteria=config.effective_acceptance_criteria,
                         coder_summary=_coder_summary(config, 1),
+                        diff_stat=git.diff_stat(wt, base),
+                        gate_summary=render_check_summary(check_set, for_coder=False),
                         review_file=handoff.reviewer_handoff_name(1, name),
                     )
                     review_resume = False
@@ -1226,6 +1219,8 @@ def develop(
                         base_sha=base[:12],
                         coder_handoff_file=handoff.coder_handoff_name(round_no),
                         open_findings=rstate.ledger.render_open(),
+                        diff_stat=git.diff_stat(wt, base),
+                        gate_summary=render_check_summary(check_set, for_coder=False),
                         review_file=handoff.reviewer_handoff_name(round_no, name),
                     )
                     review_resume = True

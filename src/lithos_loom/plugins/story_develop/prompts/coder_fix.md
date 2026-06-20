@@ -11,7 +11,7 @@ findings were raised. This is round {round_no}.
 {findings}
 
 The full write-ups are in `/workspace/.handoff/` ({review_files}).
-{test_gate_note}
+{gate_summary}
 ## Your job
 
 You have a **single, non-interactive turn** — run every command synchronously

@@ -81,6 +81,20 @@ def test_commit_all_returns_none_when_only_excluded_changes(tmp_git_repo: Path) 
     assert git.commit_all(tmp_git_repo, "feat", exclude=[".handoff"]) is None
 
 
+def test_diff_stat_lists_changed_files(tmp_git_repo: Path) -> None:
+    base = git.base_sha(tmp_git_repo)
+    _commit(tmp_git_repo, "a.txt", "a\n")
+    _commit(tmp_git_repo, "b.txt", "b\n")
+    out = git.diff_stat(tmp_git_repo, base)  # base..HEAD
+    assert "a.txt" in out and "b.txt" in out
+    assert "2 files changed" in out
+
+
+def test_diff_stat_empty_without_changes(tmp_git_repo: Path) -> None:
+    base = git.base_sha(tmp_git_repo)
+    assert git.diff_stat(tmp_git_repo, base) == ""  # base == HEAD
+
+
 def test_raises_on_bad_repo(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         git.base_sha(tmp_path)  # not a git repo
