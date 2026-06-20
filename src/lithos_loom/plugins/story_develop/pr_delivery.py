@@ -377,7 +377,7 @@ def copilot_expected_comments(wt: Path, repo: str, pr_number: int) -> int | None
         if m is None:
             return -1
         token = m.group(1)
-        return 0 if token == "no" else int(token)
+        return 0 if token == "no" else int(token)  # noqa: S105 — "token" is a parsed Copilot-marker value (a count or "no"), not a credential
     return None
 
 

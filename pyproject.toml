@@ -51,7 +51,16 @@ target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+# Project-wide flake8-bandit (``S``) exemptions, each a deliberate pattern in loom:
+#   S101  ``assert`` is used only for internal invariants / type-narrowing (e.g.
+#         ``assert x is not None`` guaranteed by prior code), never for input
+#         validation — which uses explicit raises. Idiomatic in typed Python.
+#   S603  loom's subprocess calls are list-form, never ``shell=True`` (S603 flags
+#         the *safe* pattern).
+#   S607  loom invokes docker/git/gh by name on the operator's PATH by design —
+#         absolute paths are non-portable (the host must have them; see AGENTS.md).
+ignore = ["S101", "S603", "S607"]
 
 [tool.ruff.lint.per-file-ignores]
 # Typer's idiomatic style uses ``typer.Option(...)`` / ``typer.Argument(...)`` in
@@ -60,6 +69,14 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 "src/lithos_loom/main.py" = ["B008"]
 "src/lithos_loom/cli/**.py" = ["B008"]
 "src/lithos_loom/plugins/**/__main__.py" = ["B008"]
+# Tests legitimately use fixture credentials (S105/S106) and temp paths (S108);
+# (S101 ``assert`` is exempt project-wide above — and is the test idiom anyway).
+"tests/**" = ["S105", "S106", "S108"]
+# Deliberate best-effort teardown of already-dead MCP/SSE contexts via
+# ``except* Exception: pass`` (exception groups, so ``contextlib.suppress`` can't
+# express it); the swallow is documented at each site (``_teardown_quietly`` /
+# ``_cleanup_partial_connect``).
+"src/lithos_loom/lithos_client.py" = ["S110"]
 
 [tool.pyright]
 pythonVersion = "3.12"
