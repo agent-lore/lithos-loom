@@ -9,11 +9,18 @@
 > generalises). An advisory "state of the art in automated code review" report
 > informed this design but was treated as advisory only.
 >
-> **Revised 2026-06-20 after review (PR #130):** added fail-closed profile
+> **Revised 2026-06-20 after review round 1 (PR #130):** added fail-closed profile
 > resolution, required/optional/informational/not-applicable check states, a
 > first-class deterministic-finding ledger, risk-based escalation (profiles are a
 > *floor*, not a fixed level), auto-format-before-review, CI-as-authoritative-final-gate,
 > explicit ecosystem applicability, and a broadened calibration metric set.
+>
+> **Revised again after review round 2:** separated **check execution-success
+> from finding-severity blocking** (§4/§5); closed the `develop_test_gate`
+> floor backdoor (§10); specified the **CI lifecycle contract** + check-run
+> semantics (§9); pinned the **auto-format commit/review sequence** (§4); added a
+> per-profile **`strength_rank`** total order (§2); made **critical-signal
+> escalation non-suppressible** (§7); clarified **required-where-applicable** (§4).
 
 ## Context
 
@@ -92,6 +99,14 @@ dial's purpose. For hosts that must never block, a config switch
 (`unknown_profile = "strongest"`) falls back to the **strongest configured**
 profile + friction — **never a weaker one**.
 
+**`strength_rank` makes "strongest" unambiguous.** Each profile declares an
+integer `strength_rank` (built-ins: `minimal` 10, `standard` 20, `thorough` 30;
+operators slot custom profiles like `security` or `fast-ci` in between). It is
+the total order used by `unknown_profile = "strongest"`, by escalation (§7, "a
+higher profile" = higher rank), and by the floor/override rules (an additive
+override may not drop below the selected rank's required set). Without it,
+"strongest configured" is undefined once operators add profiles.
+
 ### 3. Three canonical profiles ship, each stating a **quality floor**
 
 Each profile declares not just *which tools it tries to run* but a **quality-floor
@@ -127,20 +142,41 @@ format → lint → typecheck → sast → dep-audit → test → coverage → s
 Each check carries a **state**, which is what makes a profile's quality floor
 real rather than aspirational:
 
-- **required** — must be present *and* pass. **A required check whose tool is
-  absent fails at preflight and blocks the run** (it does NOT silently downgrade
-  to informational). This is the fix for "thorough approves without the SAST that
-  justifies it."
-- **optional** — runs if its tool is present; absence is fine; a failure blocks.
-- **informational** — runs if present; never blocks; surfaced to coder + reviewers.
-- **not_applicable** — declared inapplicable for this repo's ecosystem; skipped,
-  recorded as N/A (not a silent pass).
+- **required** — must **execute successfully** (run to completion, tool present).
+  **A required check whose tool is absent — or that errors/times out — fails at
+  preflight and blocks the run** (it does NOT silently downgrade to
+  informational). "Required" governs *execution*, not findings (see below). A
+  required check is required **where applicable**: one that resolves to
+  `not_applicable` for the repo's ecosystem (e.g. `test` in a docs-only repo with
+  no test ecosystem) is satisfied and recorded N/A — it does **not** violate the
+  floor. (Operators may also ship a `docs` profile.)
+- **optional** — runs if its tool is present; absence is fine.
+- **informational** — runs if present; its findings never block; surfaced to
+  coder + reviewers.
+- **not_applicable** — inapplicable for this repo's ecosystem; recorded N/A (not
+  a silent pass).
 
-**Auto-format precondition.** loom deterministically applies the project
-formatter to each round commit **before review and before PR**. *Because* of
-that, `format` is a required-but-non-blocking check (it should always be clean);
-without auto-format we would knowingly ship unformatted code, so the two are a
-package.
+**Execution success and finding-blocking are separate axes.** A check's
+*execution outcome* (`ran` / `absent` / `errored` / `timed_out` / `n_a`) is
+distinct from whether its *findings* block approval. A required check must
+**execute** (`ran`); whether the findings it produces block is governed solely by
+the severity mapping + blocking policy (§5), **not** by the tool's raw exit code.
+Each check has an adapter that turns `(exit_code, output)` into
+`(execution_outcome, findings[])` — so Bandit's "non-zero on any finding" or a
+test runner's "non-zero on a failing test" becomes structured findings, and
+*policy* decides blocking rather than the exit code deciding policy by accident.
+(For `test`, a failing-test finding is blocking under the default policy; for
+SAST, only the mapped high/critical findings block.)
+
+**Auto-format sequence (exact, per round).** Immediately after the coder's
+commit: (1) run the formatter in the sandbox; (2) if it changed anything, commit
+the formatting as a **separate commit** on the round; (3) run the full check-set
+on **that formatted tree**; (4) the reviewers review **that exact formatted
+tree**. Formatting therefore always precedes the gate and the panel. loom
+**never** formats after approval (a post-approval format would invalidate what
+the reviewers signed off; if it ever must, it re-runs the gate + review). Because
+formatting is applied deterministically up front, `format` is a required-but-
+non-blocking check — it should always already be clean by the time it runs.
 
 **Ecosystem applicability (no Python-biased default).** Each check declares the
 ecosystem(s) it applies to; a profile resolves its check-set against the repo's
@@ -167,7 +203,10 @@ lifecycle, parallel to (not folded into) the reviewer `FindingLedger`:
 - **Severity mapping per check** — an explicit table maps each tool's native
   levels onto loom's `minor|major|critical` (e.g. bandit HIGH→critical,
   MEDIUM→major; a ruff error→major; pip-audit CVE by CVSS). The mapping is part
-  of the ADR's follow-up, reviewable and tunable.
+  of the ADR's follow-up, reviewable and tunable. **Whether a mapped finding
+  blocks is the severity policy's call (§4), independent of the tool's exit
+  code** — the check adapter never lets a tool's "non-zero on any hit" decide
+  approval by itself.
 - **Closure only by re-running the check green** — a `gate/*` finding is "fixed"
   when the next round's gate no longer reports it, never by the coder's word.
 - **No human-dispute arbitration; instead, suppression.** A subjective reviewer
@@ -195,11 +234,22 @@ checks/reviewers) when **risk signals** fire in the change:
 > tests · coverage drop · large diff · repeated RED gates across rounds · weak /
 > missing acceptance criteria.
 
-Escalation **never lowers** below the floor. Manual selection sets the floor;
-`allow_escalation = false` is the explicit opt-out for a deliberate force-down
-(e.g. forcing `minimal` on a touches-auth task — possible, but a conscious
-override, not the default). The **risk-signal detection engine is a follow-up
-phase**; this ADR fixes the *principle* (floor + escalation) and the signal list
+Escalation **never lowers** below the floor. Manual selection sets the floor.
+
+`allow_escalation = false` is an opt-out for cost-sensitive cases, but it is
+**bounded**, not a blanket kill-switch:
+
+- It silences only **soft signals** (diff size, coverage drop, repeated RED).
+- **Critical signals — auth/authz, secrets, DB migrations, new/bumped
+  dependencies — are non-suppressible**: their escalation fires regardless of
+  `allow_escalation`. A "force `minimal` on a touches-auth change" is therefore
+  *not expressible*; the floor still rises for the auth signal.
+- Any opt-out **requires a recorded reason**, emits a **stable auditable
+  finding**, and is logged to calibration (§11) — so a habit of opting out is
+  visible, not silent.
+
+The **risk-signal detection engine is a follow-up phase**; this ADR fixes the
+*principle* (floor + escalation + non-suppressible criticals) and the signal list
 so the schema reserves room for it now.
 
 ### 8. Reviewer personas are one-dimension-each, with prompt discipline
@@ -222,11 +272,32 @@ a project **severity-calibration table**, and a pre-injected `git diff --stat`.
 
 The local sandbox gate is **necessary but not sufficient** — the sandbox lacks
 CI's services/secrets/matrix, so local-green can still be CI-red. After PR open,
-loom **consumes the PR's CI check-runs** as a deterministic gate; a **RED CI
-feeds back into the develop loop** (re-open a coder turn with the CI failure as a
-`gate/ci-*` finding) rather than leaving a broken branch for the human. This
-extends the existing post-PR machinery ([#87] merge watcher / story-review-human).
-Local checks catch most issues cheaply and early; CI is the final word.
+loom **consumes the PR's CI check-runs** as a deterministic gate. Local checks
+catch most issues cheaply and early; CI is the final word.
+
+**Check-run semantics (so "CI RED" is implemented consistently).** loom treats as
+RED a failure of the repo's **branch-protection required checks** when configured,
+else any failed check suite on the head SHA. `pending` is awaited up to a
+timeout, then surfaced (never merged); `cancelled` / `skipped` / `neutral` are
+**non-blocking**; a repo with **no CI** makes the local gate final (the CI gate is
+`not_applicable`, not a block).
+
+**Lifecycle contract (reconciled with delivery).** Today, on approval loom marks
+`loom_delivered`, releases the claim, and opens the PR; the watcher owns
+merge/close ([#87]). A delivered-but-CI-red PR is reconciled by **the same watcher
+sweep**, following loom's existing marker pattern (cf. `develop_pr_merge_state`,
+[#87]/[#69]):
+
+- it posts a `gate/ci-*` deterministic finding on the task and **clears
+  `loom_delivered`**, re-opening the task for development — **only while the PR is
+  open and unmerged** (a concurrent human merge wins; the sweep no-ops);
+- re-development pushes **to the same PR branch** (append commits), so there is
+  one PR, not a fork;
+- de-duped via a **CI-state marker scoped to the head SHA**, so a given red result
+  re-triggers once, and a new push re-evaluates.
+
+This keeps exactly one owner of the task at a time and prevents duplicate / raced
+runs. The CI re-open consumes rounds against the same `max_rounds` / cost ceilings.
 
 ### 10. Composition with [#92] and [#127] — no double-building
 
@@ -234,10 +305,17 @@ Local checks catch most issues cheaply and early; CI is the final word.
   *who + how strict*; capability profile = *what each agent can do* (incl. a
   reviewer's codegraph MCP for cross-file context). Only the cross-file slice
   hard-depends on [#92].
-- **[#127] gate keys are subsumed, not reworked** — flat `develop_test_command` /
-  `develop_block_on_red` / `develop_test_gate` become **shorthand over the active
-  profile's `test` check** (command / block-flag / whole-gate-off). One
-  gate-config truth, with the flat keys as a convenience layer.
+- **[#127] gate keys are subsumed, not reworked, and cannot backdoor the floor** —
+  flat `develop_test_command` / `develop_block_on_red` / `develop_test_gate`
+  become **shorthand over the active profile's `test` check only** (its command /
+  block-flag / on-off). Critically, **`develop_test_gate = false` disables only
+  the `test` check — never the floor's required lint/type/SAST/format.** Disabling
+  the *whole* gate is a floor-weakening that requires an explicit
+  `allow_weaken_floor = true` and emits an **audited** `[Friction]` + deterministic
+  finding — it is never a side effect of a convenience key. (Migration note: [#127]
+  ships before the profile model, where `develop_test_gate` toggles the only gate
+  — the §4 slice re-scopes it to the `test` check when profiles land.) One
+  gate-config truth, with the flat keys as a thin convenience layer.
 
 ### 11. Calibration: outcomes, not just "merged"
 
@@ -263,8 +341,17 @@ requests — not a dependency of this design.
 ## Consequences
 
 - **A real strength dial with a safe floor.** Per-task selection sets the floor;
-  risk escalates above it; explicit-unknown fails closed; required checks can't
-  silently vanish. Typoing the dial or missing a tool cannot quietly weaken a run.
+  risk escalates above it (criticals non-suppressibly); explicit-unknown fails
+  closed; required checks can't silently vanish; the legacy `develop_test_gate`
+  key can't disable the floor. Typoing the dial, missing a tool, or flipping a
+  convenience key cannot quietly weaken a run.
+- **Tool exit codes don't set policy.** Separating execution-success from
+  severity-blocking means a linter/SAST tool's "non-zero on any hit" convention
+  can't silently turn every minor finding into a merge blocker; the severity map
+  + policy decide, per check.
+- **CI failures don't strand a branch.** The lifecycle contract re-opens a
+  delivered-but-CI-red task on the same PR, with merge-race and duplicate-run
+  guards reusing the existing watcher marker pattern.
 - **One honest quality signal.** Static tooling and the panel reinforce each
   other and share a finding model — but deterministic findings have their *own*
   ledger (IDs, gate-ownership, tool-closure, suppression) rather than being
@@ -307,6 +394,14 @@ requests — not a dependency of this design.
   coverage gates are brittle for agent PRs (informational input instead).
 - **Calibrate on merge outcome alone.** Rejected — "merged" ≠ "good"; broadened to
   the revert/CI/edit/FP/defect basket.
+- **Let each check's exit code decide approval.** Simplest, but conflates "the
+  tool executed" with "its findings should block" — Bandit's non-zero-on-any-hit
+  would silently override the severity policy. Rejected for the
+  execution-outcome / finding-blocking split.
+- **Keep `develop_test_gate` able to disable the whole gate.** Convenient
+  backward-compat, but a backdoor around the required-check floor. Rejected — it
+  scopes to the `test` check; whole-gate-off requires an explicit, audited
+  floor-weaken.
 - **External bots (Greptile/CodeRabbit) as core.** Rejected — out-of-sandbox,
   SaaS-coupled; the gap is closable in-system via [#92].
 
@@ -314,7 +409,7 @@ requests — not a dependency of this design.
 
 | Phase | Slice | Depends on |
 |---|---|---|
-| 2 — det. gate | generalise gate → ordered check-set with required/optional/informational/N-A states + preflight | [#127] |
+| 2 — det. gate | generalise gate → ordered check-set with required/optional/informational/N-A states + preflight; per-check `(exit_code, output)` → `(execution_outcome, findings)` adapter; re-scope `develop_test_gate` to the `test` check | [#127] |
 | | per-ecosystem check mappings + ecosystem-applicability validation | |
 | | auto-format-before-review pass | |
 | | bake ruff/bandit/pip-audit into `ralph-sandbox` + cache | [#116] |
@@ -327,7 +422,7 @@ requests — not a dependency of this design.
 | | additive per-task overrides; `allow_escalation` opt-out | |
 | | wire profile → panel + check-set in `DevelopConfig` | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
-| 5 — CI + calibration | consume PR CI check-runs as a `gate/ci-*` deterministic gate; feed RED back into the loop | [#87] |
+| 5 — CI + calibration | consume PR CI check-runs (branch-protection-aware) as a `gate/ci-*` gate; lifecycle contract: re-open delivered-but-red on the same PR with merge-race + SHA-marker dedup | [#87] |
 | | record review metadata; build the outcome-signal basket + success metrics | [#87] |
 
 Each slice is an independently grabbable tracer-bullet issue, linked back to #128.
