@@ -174,8 +174,10 @@ def render_check_summary(check_set: CheckSetResult | None, *, for_coder: bool) -
     lines = [
         "## Deterministic gate (this commit)",
         "",
+        # Explicit ``+`` (not implicit adjacency) so this reads unambiguously as
+        # one wrapped sentence in the list literal — no silent missing-comma risk.
         "The orchestrator ran these checks on the exact commit you are reviewing. "
-        "Use them to focus on what tools cannot catch:",
+        + "Use them to focus on what tools cannot catch:",
         "",
     ]
     for r in check_set.results:
