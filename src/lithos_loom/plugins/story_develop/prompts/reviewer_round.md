@@ -10,6 +10,14 @@ and committed its work; review the latest commit against the acceptance criteria
 
 {coder_summary}
 
+## Files changed (`git diff --stat`)
+
+```
+{diff_stat}
+```
+
+{gate_summary}
+
 ## Your job
 
 1. Inspect the change: `git -C /workspace show HEAD` (the coder's commit), and

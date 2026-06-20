@@ -17,6 +17,7 @@ from lithos_loom.plugins.story_develop.check_set import (
     CheckResult,
     CheckSetResult,
     classify_execution,
+    render_check_summary,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import build_default_check_set
@@ -192,3 +193,62 @@ def test_no_detected_command_yields_empty_set(
 ) -> None:
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
     assert build_default_check_set(_config(tmp_path, test_gate=True), tmp_path) == ()
+
+
+# --- render_check_summary: feed the gate to coder + reviewer prompts (#136) ---
+
+
+def _cs(*results: CheckResult) -> CheckSetResult:
+    return CheckSetResult(results)
+
+
+def test_summary_none_is_empty_for_coder() -> None:
+    assert render_check_summary(None, for_coder=True) == ""
+
+
+def test_summary_none_notes_no_gate_for_reviewer() -> None:
+    assert (
+        "no deterministic gate" in render_check_summary(None, for_coder=False).lower()
+    )
+
+
+def test_summary_coder_empty_when_all_pass() -> None:
+    cs = _cs(CheckResult(Check("test", "pytest", "required"), "ran", _green()))
+    assert render_check_summary(cs, for_coder=True) == ""
+
+
+def test_summary_coder_failing_check_is_behaviour_preserving() -> None:
+    # The coder side must reproduce the old `_gate_note`: the heading + output
+    # tail + "authoritative" framing the regression test in core asserts on.
+    cs = _cs(CheckResult(Check("test", "pytest", "required"), "ran", _red()))
+    out = render_check_summary(cs, for_coder=True)
+    assert "## Independent test gate (FAILED)" in out
+    assert "boom" in out  # _red() output_tail
+    assert "authoritative" in out
+
+
+def test_summary_coder_shows_only_failing_checks() -> None:
+    cs = _cs(
+        CheckResult(Check("test", "pytest", "required"), "ran", _green()),
+        CheckResult(Check("lint", "ruff", "informational"), "ran", _red()),
+    )
+    out = render_check_summary(cs, for_coder=True)
+    assert "## Independent lint gate (FAILED)" in out
+    assert "Independent test gate" not in out  # the green test check is omitted
+
+
+def test_summary_reviewer_lists_every_check_with_verdict() -> None:
+    cs = _cs(
+        CheckResult(Check("test", "pytest", "required"), "ran", _green()),
+        CheckResult(Check("lint", "ruff", "informational"), "ran", _red()),
+    )
+    out = render_check_summary(cs, for_coder=False)
+    assert "`test`" in out and "GREEN" in out  # green checks shown to reviewers
+    assert "`lint`" in out and "RED" in out
+    assert "boom" in out  # the failing check's output tail is appended
+
+
+def test_summary_reviewer_empty_set_notes_no_gate() -> None:
+    assert (
+        "no deterministic gate" in render_check_summary(_cs(), for_coder=False).lower()
+    )

@@ -134,3 +134,61 @@ def classify_execution(gate: GateResult | None) -> ExecutionOutcome:
     if gate.timed_out:
         return "timed_out"
     return "ran"
+
+
+def render_check_summary(check_set: CheckSetResult | None, *, for_coder: bool) -> str:
+    """Render the round's check-set for prompt injection (ADR §6).
+
+    ``for_coder=True`` mirrors the old ``_gate_note``: a section per **failing**
+    check (RED / TIMEOUT) with the authoritative "fix it" framing, and the empty
+    string when nothing failed — so the coder prompt grows a section only when
+    there is something to fix. For the single-``test`` set this reproduces the old
+    note (heading + output tail) byte-for-byte.
+
+    ``for_coder=False`` (reviewers) lists **every** check's verdict — green
+    included, so a reviewer sees what the deterministic tools already covered —
+    and appends each failing check's output tail. A missing / empty gate is
+    stated explicitly. Raw output only; #132 enriches this with structured
+    findings.
+    """
+    if for_coder:
+        parts: list[str] = []
+        results = check_set.results if check_set is not None else ()
+        for r in results:
+            g = r.gate
+            if g is None or g.passed:
+                continue
+            how = "timed out" if g.timed_out else f"exit {g.exit_code}"
+            parts.append(
+                f"\n## Independent {r.check.name} gate (FAILED)\n\n"
+                f"The orchestrator independently ran `{g.command}` against your "
+                f"last commit in a clean container and it failed ({how}). This "
+                "result is authoritative — fix the failures regardless of how it "
+                "behaved in your own environment. Output tail:\n\n"
+                "```\n" + g.output_tail + "\n```\n"
+            )
+        return "".join(parts)
+
+    if check_set is None or not check_set.results:
+        return "_(no deterministic gate ran this round)_"
+    lines = [
+        "## Deterministic gate (this commit)",
+        "",
+        # Explicit ``+`` (not implicit adjacency) so this reads unambiguously as
+        # one wrapped sentence in the list literal — no silent missing-comma risk.
+        "The orchestrator ran these checks on the exact commit you are reviewing. "
+        + "Use them to focus on what tools cannot catch:",
+        "",
+    ]
+    for r in check_set.results:
+        verdict = r.gate.verdict if r.gate is not None else r.execution_outcome.upper()
+        lines.append(f"- `{r.check.name}` ({r.check.state}): **{verdict}**")
+    agg = check_set.aggregate_verdict
+    if agg is not None:
+        lines += ["", f"Overall: **{agg}**"]
+    for r in check_set.results:
+        g = r.gate
+        if g is None or g.passed:
+            continue
+        lines += ["", f"`{r.check.name}` output tail:", "```", g.output_tail, "```"]
+    return "\n".join(lines)

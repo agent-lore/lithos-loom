@@ -16,6 +16,14 @@ changed — and any points it disputes.
 
 {open_findings}
 
+## Files changed (`git diff --stat`)
+
+```
+{diff_stat}
+```
+
+{gate_summary}
+
 ## Your job
 
 1. Inspect the current state (the worktree is **read-only**):
