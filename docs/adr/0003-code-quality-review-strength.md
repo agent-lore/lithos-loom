@@ -1,14 +1,19 @@
 # ADR 0003 — Code quality & review strength: selectable Review Profiles + a multi-check deterministic gate
 
-- **Status:** Proposed (drafted from the 2026-06-20 planning session; supersedes nothing, composes [#92] capability profiles and [#127] gate keys)
+- **Status:** Proposed (drafted from the 2026-06-20 planning session; composes [#92] capability profiles and [#127] gate keys)
 - **Date:** 2026-06-20
 - **Deciders:** Dave Snowdon
 
 > Tracking issue: **#128**. Quick wins already filed: **#129** (dogfood ruff `S`
 > on loom itself), **#127** (per-project gate keys — the foundation this
 > generalises). An advisory "state of the art in automated code review" report
-> informed this design but was treated as advisory only; the divergences are
-> recorded under *Alternatives considered*.
+> informed this design but was treated as advisory only.
+>
+> **Revised 2026-06-20 after review (PR #130):** added fail-closed profile
+> resolution, required/optional/informational/not-applicable check states, a
+> first-class deterministic-finding ledger, risk-based escalation (profiles are a
+> *floor*, not a fixed level), auto-format-before-review, CI-as-authoritative-final-gate,
+> explicit ecosystem applicability, and a broadened calibration metric set.
 
 ## Context
 
@@ -17,56 +22,54 @@ already strong: a `ReviewerSpec` panel with per-reviewer `tool` (claude/codex),
 `model`, `effort`, `block_threshold`, `system_prompt` and `fallback_chain`; a
 `FindingLedger` with monotonic IDs carried across rounds; stall/dispute guards;
 and an **objective test gate** that re-runs the project's tests against a
-`git archive` of each round commit in a throwaway hardened container, so agents
-cannot fudge the result.
+`git archive` of each round commit in a throwaway hardened container.
 
 But review *strength* is implicit and uniform, and that is the gap:
 
-- The **default panel is a single `code-quality` reviewer** (`BUILTIN_REVIEWERS`).
-  A heterogeneous panel exists only as an example config.
-- The **deterministic gate runs exactly one command** (the test command —
-  `make test`→`pytest`/etc., or an explicit override). There is **no static
-  analysis anywhere in the loop**: no lint, type-check, SAST, dependency audit,
-  or coverage.
-- The gate's result feeds **only the coder, and only on RED** (`_gate_note`).
-  The reviewers never see it.
-- There is **no way to dial review intensity**. "Give this trivial task the
-  light treatment; give that security-sensitive one the full panel" is not
-  expressible per project, let alone per task. Strength is hand-edited by
-  rewriting a project's `develop_reviewers` list.
+- The **default panel is a single `code-quality` reviewer**.
+- The **deterministic gate runs exactly one command** (the test command). There
+  is **no static analysis in the loop** — no lint, type-check, SAST, dependency
+  audit, or coverage.
+- The gate's result feeds **only the coder, and only on RED**. Reviewers never
+  see it.
+- There is **no way to dial review intensity** per project or per task.
+- loom approves **locally** and opens a PR — GitHub **CI runs after push** and is
+  never fed back, so a locally-green run can hand over a CI-red branch.
 
-The operator goal driving this ADR: ensure code quality via a **heterogeneous
-panel of reviewers combined with static deterministic tooling**, where the
-**strength is selectable** — sometimes the full panel, sometimes not.
+The operator goal: ensure code quality via a **heterogeneous panel of reviewers
+combined with static deterministic tooling**, where the **strength is
+selectable** — sometimes the full panel, sometimes not — and, where the *floor*
+is selected but risk can push strength higher automatically.
 
-This needs a decision now (not incremental bolt-ons) because the organising
-abstraction is load-bearing: get it wrong and we re-plumb both the gate and the
-panel-config surface. A future reader will reasonably ask "why not just keep
-adding reviewers to `develop_reviewers` and chain a linter onto the test
-command?" — answered below.
+This needs a decision now because the organising abstraction is load-bearing:
+get it wrong and we re-plumb both the gate and the panel-config surface.
 
 ## Decision
 
-### 1. The unit of selection is a **Review Profile**
+### 1. The unit of selection is a **Review Profile** (a coherent bundle, additively overridable)
 
-A Review Profile is a **named bundle** of three things:
+A Review Profile is a **named bundle** of:
 
-1. **Panel** — which reviewer personas run, with their engine / model / effort /
-   `block_threshold` (reusing `ReviewerSpec`; a persona may also name a [#92]
+1. **Panel** — which reviewer personas run, with engine / model / effort /
+   `block_threshold` (reusing `ReviewerSpec`; a persona may name a [#92]
    capability profile for its skills/MCP).
-2. **Check-set** — which deterministic checks the gate runs, and which **block**
-   vs merely **inform**.
-3. **Blocking policy** — which finding severities block approval; whether a RED
-   check blocks.
+2. **Check-set** — which deterministic checks the gate runs, each tagged with a
+   **state** (see §4).
+3. **Blocking policy** — which severities block; which checks block.
 
-A profile binds the panel and the gate **together**, deliberately: a "thorough"
-review with a tests-only gate, or a "minimal" review with a five-engine panel,
-are incoherent combinations we do not want to be expressible by accident.
+A profile binds panel and gate **together** so incoherent *weakenings* (a
+"thorough" review with a tests-only gate) are not casually expressible. The
+bundle is the **default, recommended path**, but a task may **additively
+override** — add specific checks or reviewers — for genuine edge cases (a
+docs-only task wanting link/spell checks but no LLM panel is just the gate-only
+`minimal` profile; a security patch wanting strict SAST + only security and
+correctness reviewers is a `security` profile). Overrides are **additive /
+escalating only** (see §7); they cannot silently drop a floor's required checks.
 
-### 2. Profiles are selected by a precedence chain (mirrors `develop_image` / [#127])
+### 2. Profile selection — precedence, and **fail closed on an explicit unknown**
 
 ```
-per-task    task.metadata.develop_review_profile      ← the dial, per task
+per-task    task.metadata.develop_review_profile      ← sets the floor, per task
    ▼ overrides
 per-project develop_review_profile  (context-doc metadata)
    ▼ overrides
@@ -75,190 +78,257 @@ host        [story_develop].default_review_profile     (loom TOML)
 built-in    "standard"
 ```
 
-"Unset" at a layer inherits the layer below. An unknown profile name resolves to
-an operator-actionable `[Friction]` and falls through — it never fails the run,
-consistent with every other daemon-resolution path. The **per-task override is
-the primary dial-down knob**: a single `task.metadata.develop_review_profile =
-"minimal"` is how you say "not the full panel this time."
+Distinguish two cases:
 
-### 3. Three canonical profiles ship; operators extend
+- **Unset** at a layer → inherit the layer below. Normal, silent.
+- **Set but unknown** (a typo'd or undefined profile name) → **fail closed.** The
+  run does **not** proceed at a *lower* strength than the operator asked for. By
+  default it **halts before any agent runs**, surfaced as a **blocking**
+  `[Friction]` ("profile `thorogh` is not defined") for the operator to fix.
 
-| Profile | Panel | Check-set | For |
-|---|---|---|---|
-| `minimal` | gate-only, or 1 correctness reviewer | format + lint + test | mechanical / trivial / docs |
-| **`standard`** *(default)* | correctness + security (2, heterogeneous engines) | format + lint + type + SAST + test | normal feature work |
-| `thorough` | correctness + security + architecture + test-quality + dependency-hygiene (5, mixed claude/codex) | + dep-audit + coverage + semgrep (informational) | risky / security-sensitive / large |
+This is a deliberate exception to loom's usual "friction-not-fail" norm:
+silently substituting *any* other profile for a quality-dial typo defeats the
+dial's purpose. For hosts that must never block, a config switch
+(`unknown_profile = "strongest"`) falls back to the **strongest configured**
+profile + friction — **never a weaker one**.
 
-**`standard` is the default, not `thorough`.** The full panel is real money ×
-wall-clock × rounds × containers; the dial exists *because* maximal review is
-expensive, so escalation must be deliberate rather than ambient.
+### 3. Three canonical profiles ship, each stating a **quality floor**
 
-### 4. The gate becomes a **multi-check gate**, not a chained command
+Each profile declares not just *which tools it tries to run* but a **quality-floor
+guarantee** — the set of **required** checks and panel personas that MUST pass
+for approval (see §4 states). "Tries to run" is not a guarantee; "required and
+passed" is.
 
-Generalise the existing gate harness (`git archive` → throwaway hardened
-container — keep it; it is already the right shape) from a single command into an
-**ordered set of named checks**, each `{command, blocking, tool-probe, verdict,
-output_tail}`:
+| Profile | Required panel | Required checks | Informational | For |
+|---|---|---|---|---|
+| `minimal` | — (gate-only) | format†, lint, test | — | mechanical / trivial / docs |
+| **`standard`** *(default)* | correctness + security | format†, lint, typecheck, sast, test | — | normal feature work |
+| `thorough` | correctness + security + architecture + test-quality + dep-hygiene | + dep-audit, coverage‡ | semgrep | risky / security-sensitive / large |
+
+† `format` is required-as-clean but satisfied by auto-format (§4), so it never
+blocks a round on whitespace. ‡ `coverage` in `thorough` is required-present but
+its *threshold* is informational input to the test-quality reviewer, not a hard
+percentage gate.
+
+**`standard` is the default, not `thorough`** — the full panel is real money ×
+wall-clock × rounds × containers, so maximal review is a deliberate escalation.
+
+### 4. The gate is a **multi-check gate** with explicit check **states**
+
+Generalise the gate harness (`git archive` → throwaway hardened container — keep
+it) from one command into an **ordered set of named checks**, each
+`{command, state, ecosystem, verdict, output_tail}`, run independently (no
+shell-chaining — that would collapse per-check verdicts and blocking):
 
 ```
-format → lint → typecheck → sast → dep-audit → test → coverage
+format → lint → typecheck → sast → dep-audit → test → coverage → semgrep
 ```
 
-Each check is probed for tool availability (as the test gate already probes),
-runs independently, and yields its own verdict reusing the `GateResult` shape.
-We do **not** shell-chain checks into one command (`ruff && pyright && pytest`):
-chaining throws away per-check verdicts, per-check blocking, and a clean RED
-signal, and muddies what we can tell the coder and reviewers.
+Each check carries a **state**, which is what makes a profile's quality floor
+real rather than aspirational:
 
-**Default blocking policy:** block on **lint**, **typecheck**, **test** failures
-and **SAST high-severity**; **coverage**, **semgrep**, and **format** are
-**informational** (surfaced, never block). Format is informational so a whitespace
-drift never burns a whole review round; coverage is informational because a hard
-percentage gate is brittle for agent-authored PRs. A profile may override any
-check's block flag.
+- **required** — must be present *and* pass. **A required check whose tool is
+  absent fails at preflight and blocks the run** (it does NOT silently downgrade
+  to informational). This is the fix for "thorough approves without the SAST that
+  justifies it."
+- **optional** — runs if its tool is present; absence is fine; a failure blocks.
+- **informational** — runs if present; never blocks; surfaced to coder + reviewers.
+- **not_applicable** — declared inapplicable for this repo's ecosystem; skipped,
+  recorded as N/A (not a silent pass).
 
-Tooling, mostly zero-new-dependency via `uv run`/`npx`, the rest baked into
-`ralph-sandbox`: ruff (with the `S` security family), `ruff format --check`,
-`pyright`, `bandit -ll`, `pip-audit`, `coverage --cov-branch`, `semgrep
---config=auto`, with per-ecosystem analogues for non-Python repos.
+**Auto-format precondition.** loom deterministically applies the project
+formatter to each round commit **before review and before PR**. *Because* of
+that, `format` is a required-but-non-blocking check (it should always be clean);
+without auto-format we would knowingly ship unformatted code, so the two are a
+package.
 
-### 5. Deterministic tooling feeds the LLM reviewers, not just the coder
+**Ecosystem applicability (no Python-biased default).** Each check declares the
+ecosystem(s) it applies to; a profile resolves its check-set against the repo's
+detected ecosystem(s). `standard` for a JS/Rust/Go repo means *that ecosystem's*
+required checks (eslint/tsc, clippy, vet, …), not a degraded Python set wearing
+the same name. A repo whose ecosystem has **no mapping for a required check**
+**fails validation** rather than pretending `standard` means the same thing
+everywhere.
 
-The gate runs **before** the panel each round, and its aggregate result is
-injected into **both** prompt surfaces:
+**Default blocking policy:** block on **lint**, **typecheck**, **test**, and
+**SAST high-severity**; **coverage**, **semgrep**, **format** are informational —
+*except* a deterministic finding whose mapped severity is **critical/high-confidence
+blocks regardless of its check's default tier** (a high-confidence critical
+semgrep hit blocks; a low-confidence one informs).
 
-- the **coder** prompt — generalise `_gate_note` to summarise *all* checks (green
-  and red), replacing the RED-test-only note;
-- the **reviewer** prompt — a new section in `reviewer_round.md` so the security
-  reviewer *sees* the bandit/ruff-`S` output and spends its budget on what tools
-  cannot catch, instead of re-deriving it.
+### 5. Deterministic findings get a **first-class ledger**, not a hand-wave
 
-Deterministic findings **participate in the existing severity/blocking model** —
-a blocking SAST-high blocks approval exactly like a reviewer `major`. Static
-tooling and the panel become one quality signal, not two disconnected ones.
+Static-tool output joins the review as **deterministic findings** with their own
+lifecycle, parallel to (not folded into) the reviewer `FindingLedger`:
 
-### 6. Reviewer personas are one-dimension-each, with prompt discipline
+- **Stable IDs**, namespaced by check: `gate/sast-001`, `gate/lint-014`.
+- **Owner = the gate**, not a reviewer. The coder cannot mark one "fixed" by
+  assertion.
+- **Severity mapping per check** — an explicit table maps each tool's native
+  levels onto loom's `minor|major|critical` (e.g. bandit HIGH→critical,
+  MEDIUM→major; a ruff error→major; pip-audit CVE by CVSS). The mapping is part
+  of the ADR's follow-up, reviewable and tunable.
+- **Closure only by re-running the check green** — a `gate/*` finding is "fixed"
+  when the next round's gate no longer reports it, never by the coder's word.
+- **No human-dispute arbitration; instead, suppression.** A subjective reviewer
+  finding can be disputed → escalated. A deterministic finding that is a **false
+  positive** is handled by a **reviewable suppression** (an inline `# noqa`/ignore
+  or a checked-in baseline) — which is itself a diff the panel sees — not by the
+  coder "disagreeing." This keeps the deterministic signal honest.
+
+### 6. Deterministic tooling feeds the LLM reviewers, not just the coder
+
+The gate runs **before** the panel each round; its aggregate (all checks +
+deterministic findings) is injected into **both** the **coder** prompt
+(generalise `_gate_note` to summarise all checks, green and red) and the
+**reviewer** prompt (a new `reviewer_round.md` section) so e.g. security spends
+its budget on what tools can't catch instead of re-deriving SAST output.
+
+### 7. Profiles are a **floor**; risk signals **escalate** above it
+
+The selected profile is the **minimum** strength, not a fixed level. loom MAY
+**auto-escalate** above the floor (to a higher profile, or by additively adding
+checks/reviewers) when **risk signals** fire in the change:
+
+> touched auth/authz or security-sensitive paths · DB migrations · public-API /
+> exported-surface changes · new or bumped dependencies · deleted or weakened
+> tests · coverage drop · large diff · repeated RED gates across rounds · weak /
+> missing acceptance criteria.
+
+Escalation **never lowers** below the floor. Manual selection sets the floor;
+`allow_escalation = false` is the explicit opt-out for a deliberate force-down
+(e.g. forcing `minimal` on a touches-auth task — possible, but a conscious
+override, not the default). The **risk-signal detection engine is a follow-up
+phase**; this ADR fixes the *principle* (floor + escalation) and the signal list
+so the schema reserves room for it now.
+
+### 8. Reviewer personas are one-dimension-each, with prompt discipline
 
 Canonical personas, heterogeneous engines on purpose (different blind spots —
-proven in the [#94] mixed-panel work):
+[#94]):
 
 | Persona | Focus | Threshold | Engine |
 |---|---|---|---|
 | correctness | boundaries, off-by-one, races, error handling, idempotency; no style | major | claude |
-| security | OWASP + CWE#, blast radius, secrets, injection, SSRF, IDOR, deserialization | minor (strict) | claude (xhigh) |
-| architecture | module boundaries per `AGENTS.md`, right abstractions; sees `base..HEAD`, not just `HEAD` | major | codex/sonnet |
+| security | OWASP + CWE#, blast radius, secrets, injection, SSRF, IDOR, deser. | minor (strict) | claude (xhigh) |
+| architecture | module boundaries per `AGENTS.md`, abstractions; sees `base..HEAD` | major | codex/sonnet |
 | test-quality | edge cases, mocks that hide behaviour, determinism, AC coverage; fed the coverage tail | minor | codex |
 | dependency-hygiene | new-dep justification, supply-chain reputation, pinning | minor | sonnet |
 
-The base `reviewer_round.md` template gains: **"stay strictly within your focus
-— do not comment outside it"**, a project **severity-calibration table**, and a
-pre-injected `git diff --stat` for orientation. The literature is consistent
-that single-dimension "check ONLY X" passes beat monolithic "review everything"
-prompts on signal-to-noise, and that a high false-positive rate is what trains
-operators to dismiss the tool.
+The base `reviewer_round.md` template gains **"stay strictly within your focus"**,
+a project **severity-calibration table**, and a pre-injected `git diff --stat`.
 
-### 7. Composition with [#92] and [#127] — no double-building
+### 9. CI is the **authoritative final deterministic gate**
+
+The local sandbox gate is **necessary but not sufficient** — the sandbox lacks
+CI's services/secrets/matrix, so local-green can still be CI-red. After PR open,
+loom **consumes the PR's CI check-runs** as a deterministic gate; a **RED CI
+feeds back into the develop loop** (re-open a coder turn with the CI failure as a
+`gate/ci-*` finding) rather than leaving a broken branch for the human. This
+extends the existing post-PR machinery ([#87] merge watcher / story-review-human).
+Local checks catch most issues cheaply and early; CI is the final word.
+
+### 10. Composition with [#92] and [#127] — no double-building
 
 - **[#92] capability profiles supply per-persona skills/MCP.** Review Profile =
-  *who is on the panel and how strict*; capability profile = *what each agent can
-  do*. The security persona's OWASP skill, or a reviewer's codegraph MCP for
-  cross-file context, comes from its [#92] profile. Only the reviewer
-  cross-file-context slice hard-depends on [#92]; everything else here proceeds
-  without it (reviewers run credentials-only, as today).
-- **[#127] gate keys are subsumed, not reworked.** [#127] ships now with flat
-  project-metadata keys; under this model they become **shorthand over the active
-  profile's gate**: `develop_test_command` overrides the `test` check's command,
-  `develop_block_on_red` sets the `test` check's block flag, `develop_test_gate =
-  false` disables the whole gate. So [#127] is absorbed cleanly — there is exactly
-  one gate-config truth (the profile), with the flat keys as a convenience layer
-  on top.
+  *who + how strict*; capability profile = *what each agent can do* (incl. a
+  reviewer's codegraph MCP for cross-file context). Only the cross-file slice
+  hard-depends on [#92].
+- **[#127] gate keys are subsumed, not reworked** — flat `develop_test_command` /
+  `develop_block_on_red` / `develop_test_gate` become **shorthand over the active
+  profile's `test` check** (command / block-flag / whole-gate-off). One
+  gate-config truth, with the flat keys as a convenience layer.
 
-### 8. Calibration: record review outcomes, correlate with merge
+### 11. Calibration: outcomes, not just "merged"
 
-Record per run (in `[DevelopResult]` / run-state) the profile used, the panel,
-findings-by-severity, gate verdicts, and disputes — to later correlate against
-the **PR-merge outcome** the github-watcher already tracks ([#87]: merged-as-is /
-edited / closed-unmerged). This is the evidence that lets a noisy persona be
-pruned or a threshold relaxed deliberately, rather than by vibes. Without it,
-review *strength* silently degrades into review *noise*.
+"Merged as-is" is a weak quality signal (the human may have missed it). Record
+per run (in `[DevelopResult]` / run-state) the profile, panel, findings-by-severity,
+gate verdicts, disputes **and suppressions**, then correlate against a **basket of
+outcome signals**: post-merge **CI failures**, **reverts**, **hotfix/defect
+follow-up tasks**, **reopened issues**, **human edit rate** on the delivered branch,
+**human review comments**, **accepted-vs-dismissed** reviewer findings, and the
+deterministic **false-positive (suppression) rate**. Target success metrics:
+revert rate, CI-failure rate, human-edit rate, FP rate, post-merge defect rate.
+This is the evidence that lets a noisy persona be pruned or a threshold relaxed
+deliberately — guarding the adoption failure mode (false positives train the
+operator to dismiss the tool).
 
-### 9. External PR-level tools are out of core
+### 12. External PR-level tools are out of core
 
-Greptile (cross-file indexing) and CodeRabbit (convention-learning) are **not**
-core to loom's in-sandbox model. The cross-file gap they fill is addressed
-in-system by giving reviewers codegraph/lithos MCP via [#92]. They remain an
+Greptile / CodeRabbit are **not** core to loom's in-sandbox model; the cross-file
+gap is addressed in-system via [#92] reviewer MCP context. They remain an
 optional, later, GitHub-side spike alongside the Copilot review loom already
-requests on PR open — explicitly not a dependency of this design.
+requests — not a dependency of this design.
 
 ## Consequences
 
-- **A real strength dial.** Per-task `develop_review_profile` makes intensity a
-  one-line choice; the default stays modest; risk escalates deliberately.
-- **One quality signal.** Static tooling and the panel reinforce each other
-  (deterministic-feeds-LLM) instead of running blind to one another, and share a
-  single severity/blocking model.
-- **One gate-config truth.** The Review Profile owns the check-set; [#127]'s keys
-  become a convenience layer, so there is no competing second way to configure the
-  gate.
-- **Cost is now a lever, tied to [#102].** Profile selection has a direct cost
-  consequence; the resolved profile should surface an estimated cost where the
-  heterogeneous-agent cost measure ([#102]) allows.
-- **Sandbox image + egress work.** The check tools must exist in `ralph-sandbox`
-  (coordinate with the [#116] cache work), and `pip-audit` / `semgrep` need
-  network egress — tie this to the [#92] Phase-2 egress allowlist; until then they
-  are `thorough`-only and may be skipped when egress is unavailable (probe-and-skip,
-  as the gate already does for absent tools).
-- **Per-ecosystem mapping.** The canonical check-set is Python-shaped; non-Python
-  repos need per-ecosystem command mappings (eslint/tsc, cargo clippy, go vet,
-  …). The check-set schema must carry these, and a check whose tool is absent is
-  skipped (informational), never a false RED.
-- **Backward compatible.** With nothing declared, behaviour is the `standard`
-  profile's gate over today's auto-detected test command plus a 2-reviewer panel
-  — a stronger default than today's single reviewer, so this is a deliberate (and
-  documented) default-strength increase, mitigated by the dial for projects that
-  want less.
-- **Risk — adoption.** If the SAST checks or extra reviewers produce noise, they
-  train the operator to dismiss findings (the ICSE adoption failure mode). The
-  one-dimension prompts, informational-by-default coverage/semgrep, and the
-  calibration loop (decision 8) are the mitigations.
+- **A real strength dial with a safe floor.** Per-task selection sets the floor;
+  risk escalates above it; explicit-unknown fails closed; required checks can't
+  silently vanish. Typoing the dial or missing a tool cannot quietly weaken a run.
+- **One honest quality signal.** Static tooling and the panel reinforce each
+  other and share a finding model — but deterministic findings have their *own*
+  ledger (IDs, gate-ownership, tool-closure, suppression) rather than being
+  bolted onto reviewer semantics they don't fit.
+- **One gate-config truth.** The profile owns the check-set; [#127]'s keys are a
+  convenience layer.
+- **Cost is a lever ([#102]).** Profile + escalation has a direct cost
+  consequence; surface estimated cost where the heterogeneous-agent cost measure
+  allows.
+- **Image + egress work.** Required check tools must exist in `ralph-sandbox`
+  (coordinate [#116] cache); `pip-audit`/`semgrep` need egress — tie to the [#92]
+  Phase-2 allowlist. Until egress lands, they are `informational`/`thorough`-only,
+  and a profile that marks them **required** fails preflight on a no-egress host
+  (honest, per §4) rather than pretending to have run them.
+- **CI feedback closes the local↔remote gap** but adds a post-PR loop with its own
+  latency and cost budget (a CI re-open consumes rounds) — bounded by the same
+  `max_rounds`/cost ceilings.
+- **Risk-escalation is deferred mechanism, decided principle.** The schema
+  reserves the floor/escalation shape now; the detector ships later, so early
+  versions are floor-only (manual) without a breaking change when escalation lands.
 
 ## Alternatives considered
 
-- **Keep per-project `develop_reviewers` lists only (status quo).** No per-task
-  dial, and nothing binds the deterministic gate to the panel. Rejected: the
-  thing the operator wants to vary — intensity, per task — has no home, and the
-  gate stays tests-only.
-- **Chain SAST onto the test command** (the advisory report's first suggestion:
-  `ruff check && ruff format --check && pytest`). Cheapest to wire, but collapses
-  distinct checks into one verdict, loses per-check blocking, and muddies the RED
-  signal the coder/reviewer prompts depend on. Rejected in favour of a structured
-  check-set.
-- **Full heterogeneous panel as the default** (the report's recommendation).
-  Rejected: the dial exists precisely because the full panel is expensive;
-  `standard` (2 reviewers) is the default and `thorough` (5) is opt-in.
-- **Coverage as a hard gate** (`--cov-fail-under=80`). Rejected as a default —
-  too brittle for agent-authored PRs; coverage is informational input to the
-  test-quality reviewer instead.
-- **External bots (Greptile/CodeRabbit) as core.** Rejected for the core design:
-  out-of-sandbox, SaaS-coupled, and the cross-file gap is closable in-system via
-  [#92] reviewer MCP context. Kept only as an optional PR-side complement.
+- **Per-project `develop_reviewers` lists only (status quo).** No per-task dial,
+  no gate↔panel binding. Rejected.
+- **Chain SAST onto the test command** (`ruff && pyright && pytest`). Collapses
+  per-check verdicts/blocking, muddies RED. Rejected for the structured check-set.
+- **Probe-and-skip absent tools → informational** (the first draft). Lets a
+  profile approve without the checks that define it. Rejected in favour of
+  required/optional states with preflight failure on a missing *required* tool.
+- **Fold deterministic findings into the reviewer ledger.** Rejected — they have
+  different ownership, closure (tool re-run, not coder word), and dispute
+  (suppression, not arbitration) semantics; conflating them corrupts both.
+- **Fully unbundle panel and gate.** Rejected — reintroduces incoherent combos
+  and config sprawl; additive overrides on coherent profiles cover the real cases.
+- **Profile as a fixed level (no escalation).** Rejected — for "automated high
+  quality," risk signals should be able to raise strength without a human
+  remembering to; the floor model keeps the operator's dial while adding this.
+- **Full panel as default; coverage as a hard 80% gate.** Rejected — cost, and
+  coverage gates are brittle for agent PRs (informational input instead).
+- **Calibrate on merge outcome alone.** Rejected — "merged" ≠ "good"; broadened to
+  the revert/CI/edit/FP/defect basket.
+- **External bots (Greptile/CodeRabbit) as core.** Rejected — out-of-sandbox,
+  SaaS-coupled; the gap is closable in-system via [#92].
 
 ## Follow-up work (implementation slices to be filed from this ADR)
 
 | Phase | Slice | Depends on |
 |---|---|---|
-| 2 — det. gate | generalise gate → ordered check-set (per-check verdict + block) | [#127] |
+| 2 — det. gate | generalise gate → ordered check-set with required/optional/informational/N-A states + preflight | [#127] |
+| | per-ecosystem check mappings + ecosystem-applicability validation | |
+| | auto-format-before-review pass | |
 | | bake ruff/bandit/pip-audit into `ralph-sandbox` + cache | [#116] |
+| | deterministic-finding ledger (IDs, severity-map, tool-closure, suppression) | |
 | | aggregate gate → coder note + reviewer-prompt injection + diff-stat | |
-| | deterministic findings participate in approval/blocking per profile | |
-| 3 — panel | canonical personas + tightened `system_prompt`s as reusable reviewers | |
-| | `reviewer_round.md`: "check ONLY X" + severity table + gate summary | |
+| 3 — panel | canonical personas + tightened `system_prompt`s; `reviewer_round.md` discipline | |
 | | architecture/delta reviewer sees `base..HEAD` | |
 | | reviewer codebase-context via MCP/skill | [#92] |
-| 4 — the dial | review-profile resolution (host→project→task); ship the 3 profiles | |
+| 4 — the dial | review-profile resolution (precedence + fail-closed); ship the 3 profiles with quality floors | |
+| | additive per-task overrides; `allow_escalation` opt-out | |
 | | wire profile → panel + check-set in `DevelopConfig` | |
-| 5 — calibration | record review metadata in `[DevelopResult]`/run-state | |
-| | reviewer-effectiveness rollup vs merge outcome | [#87] |
+| | **risk-based auto-escalation** detector (signal list in §7) | |
+| 5 — CI + calibration | consume PR CI check-runs as a `gate/ci-*` deterministic gate; feed RED back into the loop | [#87] |
+| | record review metadata; build the outcome-signal basket + success metrics | [#87] |
 
 Each slice is an independently grabbable tracer-bullet issue, linked back to #128.
 
