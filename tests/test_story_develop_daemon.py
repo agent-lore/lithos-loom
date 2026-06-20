@@ -201,6 +201,49 @@ def test_resolve_pool_without_defaults_is_builtin(fake_client) -> None:
     assert settings.reviewers == BUILTIN_REVIEWERS
 
 
+def test_resolve_selects_canonical_persona_by_name(fake_client) -> None:
+    # A name in develop_default_reviewers that is NOT in the project's explicit
+    # pool resolves from the canonical registry (#137) — no prompt redefinition.
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_default_reviewers": ["correctness", "security"]},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert [s.name for s in settings.reviewers] == ["correctness", "security"]
+    sec = next(s for s in settings.reviewers if s.name == "security")
+    assert sec.tool == "claude"
+    assert sec.block_threshold == "minor"
+    assert sec.effort == "xhigh"
+    assert sec.system_prompt is not None and "OWASP" in sec.system_prompt
+    corr = next(s for s in settings.reviewers if s.name == "correctness")
+    assert corr.tool == "codex"
+
+
+def test_resolve_explicit_pool_entry_overrides_canonical(fake_client) -> None:
+    # A project pool entry with a canonical name wins over the canonical persona.
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {
+            "develop_reviewers": [{"name": "security", "block_threshold": "major"}],
+            "develop_default_reviewers": ["security"],
+        },
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    (sec,) = settings.reviewers
+    assert sec.block_threshold == "major"  # project override, not canonical minor
+    assert sec.system_prompt is None  # the explicit entry carried no prompt
+
+
+def test_resolve_unknown_non_canonical_name_falls_back(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_default_reviewers": ["no-such-persona"]},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.reviewers == BUILTIN_REVIEWERS
+    assert any("unknown reviewer" in f for f in settings.frictions)
+
+
 def test_resolve_full_config_with_task_override(fake_client) -> None:
     fake_client.note = _FakeNote(
         "projects/loom/loom-project-context.md",

@@ -46,6 +46,7 @@ from .config import (
     parse_test_command,
 )
 from .lithos_io import AGENT_ID, TaskContext
+from .personas import canonical_personas
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -193,8 +194,10 @@ def _select_reviewers(
 
     A populated pool WITHOUT a selection still resolves to the built-in
     single reviewer — opting a reviewer into the pool does not auto-run it.
-    Unknown names are skipped with friction; an empty effective selection
-    falls back to the built-in default.
+    A name absent from the explicit pool falls back to a canonical persona of
+    that name (#137); an explicit pool entry overrides the canonical of the
+    same name. Unknown names are skipped with friction; an empty effective
+    selection falls back to the built-in default.
     """
     raw = task_metadata.get("reviewers")
     source = "task metadata.reviewers"
@@ -206,6 +209,8 @@ def _select_reviewers(
     selected: list[ReviewerSpec] = []
     for name in raw:
         spec = pool.get(name) if isinstance(name, str) else None
+        if spec is None and isinstance(name, str):
+            spec = canonical_personas().get(name)
         if spec is None:
             frictions.append(f"{source} names unknown reviewer {name!r}; skipping")
             continue

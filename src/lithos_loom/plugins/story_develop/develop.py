@@ -177,11 +177,40 @@ def _render_panel_findings(outcomes: list[ReviewOutcome]) -> str:
     return "\n".join(parts).rstrip()
 
 
+# Shared severity rubric injected into every reviewer prompt (#137, ADR 0003 §8)
+# so the panel calibrates the same way; the orchestrator then applies each
+# reviewer's per-persona ``block_threshold`` to decide what actually blocks.
+SEVERITY_CALIBRATION = """## Severity calibration
+
+Give each finding the severity the orchestrator will weigh against this
+reviewer's threshold. Calibrate consistently across the panel:
+
+- **critical** — a security vulnerability, a data-loss risk, or a correctness
+  defect that breaks an acceptance criterion.
+- **major** — a real bug or a significant quality / maintainability problem that
+  should be fixed before merge.
+- **minor** — a style, naming, or low-impact maintainability nit; recorded but
+  usually non-blocking.
+
+Assign the honest severity — do not inflate to force a block or deflate to dodge
+one. The threshold decision is the orchestrator's, not yours."""
+
+
 def _reviewer_brief(spec) -> str:
-    """The optional per-reviewer focus paragraph for its prompts."""
+    """The optional per-reviewer focus paragraph + lane discipline for its prompts.
+
+    A focused persona (``system_prompt`` set) is told to stay strictly in its
+    dimension so the panel does not produce N overlapping general reviews. The
+    generalist default (no ``system_prompt``) is unchanged — empty string.
+    """
     if not spec.system_prompt:
         return ""
-    return f"\n## Your focus\n\n{spec.system_prompt}\n"
+    return (
+        f"\n## Your focus\n\n{spec.system_prompt}\n\n"
+        "**Stay strictly within this focus.** Record only findings in this "
+        "dimension — another reviewer owns the rest; do not report outside your "
+        "lane.\n"
+    )
 
 
 def _build_run_cmd(
@@ -1204,8 +1233,10 @@ def develop(
                         reviewer_brief=_reviewer_brief(rstate.spec),
                         acceptance_criteria=config.effective_acceptance_criteria,
                         coder_summary=_coder_summary(config, 1),
+                        base_sha=base[:12],
                         diff_stat=git.diff_stat(wt, base),
                         gate_summary=render_check_summary(check_set, for_coder=False),
+                        severity_calibration=SEVERITY_CALIBRATION,
                         review_file=handoff.reviewer_handoff_name(1, name),
                     )
                     review_resume = False
@@ -1221,6 +1252,7 @@ def develop(
                         open_findings=rstate.ledger.render_open(),
                         diff_stat=git.diff_stat(wt, base),
                         gate_summary=render_check_summary(check_set, for_coder=False),
+                        severity_calibration=SEVERITY_CALIBRATION,
                         review_file=handoff.reviewer_handoff_name(round_no, name),
                     )
                     review_resume = True

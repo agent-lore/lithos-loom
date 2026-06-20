@@ -24,6 +24,8 @@ changed — and any points it disputes.
 
 {gate_summary}
 
+{severity_calibration}
+
 ## Your job
 
 1. Inspect the current state (the worktree is **read-only**):

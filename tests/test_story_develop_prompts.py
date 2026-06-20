@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import pytest
 
-from lithos_loom.plugins.story_develop.develop import _coder_handoff_nudge
+from lithos_loom.plugins.story_develop.config import ReviewerSpec
+from lithos_loom.plugins.story_develop.develop import (
+    SEVERITY_CALIBRATION,
+    _coder_handoff_nudge,
+    _reviewer_brief,
+)
 from lithos_loom.plugins.story_develop.handoff import load_prompt
 
 
@@ -42,3 +47,38 @@ def test_coder_handoff_nudge_asks_only_for_the_handoff() -> None:
     assert "background" in nudge
     # the stable marker the orchestrator's salvage path is recognised by
     assert "never wrote your handoff" in nudge
+
+
+# --- reviewer prompt discipline + severity calibration (#137) ----------------
+
+
+@pytest.mark.parametrize("name", ["reviewer_round.md", "reviewer_rereview.md"])
+def test_reviewer_templates_carry_the_severity_calibration_slot(name: str) -> None:
+    assert "{severity_calibration}" in load_prompt(name)
+
+
+def test_round1_template_offers_the_full_base_head_diff() -> None:
+    # The architecture persona needs the cumulative change in round 1, not just
+    # the latest commit, so round 1 now injects base_sha and offers base..HEAD.
+    text = load_prompt("reviewer_round.md")
+    assert "{base_sha}" in text
+    assert "{base_sha}..HEAD" in text
+
+
+def test_severity_calibration_defines_all_three_levels() -> None:
+    cal = SEVERITY_CALIBRATION.lower()
+    assert "critical" in cal
+    assert "major" in cal
+    assert "minor" in cal
+
+
+def test_reviewer_brief_adds_focus_discipline_when_a_focus_is_set() -> None:
+    spec = ReviewerSpec(name="security", system_prompt="Find injection bugs.")
+    brief = _reviewer_brief(spec)
+    assert "Find injection bugs." in brief
+    assert "Stay strictly within this focus" in brief
+
+
+def test_reviewer_brief_is_empty_for_the_generalist_default() -> None:
+    # The zero-config code-quality reviewer has no focus; its prompt is unchanged.
+    assert _reviewer_brief(ReviewerSpec(name="code-quality")) == ""

@@ -18,10 +18,15 @@ and committed its work; review the latest commit against the acceptance criteria
 
 {gate_summary}
 
+{severity_calibration}
+
 ## Your job
 
-1. Inspect the change: `git -C /workspace show HEAD` (the coder's commit), and
-   read any files you need under `/workspace`.
+1. Inspect the change (the worktree is at `/workspace`):
+   - `git -C /workspace show HEAD` — the coder's latest commit.
+   - `git -C /workspace diff {base_sha}..HEAD` — the full change this run (use
+     this when your focus needs the whole delta, e.g. architecture).
+   - Read any files you need under `/workspace`.
 2. Judge whether it correctly, safely, and completely meets the acceptance
    criteria, from the perspective of a **{reviewer}** reviewer.
 3. Write your review to `/workspace/.handoff/{review_file}` using the handoff
