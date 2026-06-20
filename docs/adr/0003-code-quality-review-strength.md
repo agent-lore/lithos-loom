@@ -29,6 +29,12 @@
 > **N/A applicability is declared, not inferred from absence** (§4); CI required
 > set is **declared-contexts-then-N/A**, not "any failed suite" (§9);
 > `allow_weaken_floor` is **bounded** (cannot bypass CI or critical escalation, §10).
+>
+> **Self-review pass before implementation:** added an explicit **Scope: MVP vs
+> reserved-shape** section (the CI *autonomous* loop, auto-escalation detector, and
+> calibration basket are reserved-shape, not MVP); fixed a budget contradiction in
+> Consequences; noted **stageable checks** for per-round cost (§4) and
+> **suppression-is-reviewable** (§5).
 
 ## Context
 
@@ -79,7 +85,8 @@ override** — add specific checks or reviewers — for genuine edge cases (a
 docs-only task wanting link/spell checks but no LLM panel is just the gate-only
 `minimal` profile; a security patch wanting strict SAST + only security and
 correctness reviewers is a `security` profile). Overrides are **additive /
-escalating only** (see §7); they cannot silently drop a floor's required checks.
+escalating only** (§3 floor + §7 escalation); they cannot silently drop a floor's
+required checks.
 
 ### 2. Profile selection — precedence, and **fail closed on an explicit unknown**
 
@@ -211,6 +218,14 @@ everywhere.
 blocks regardless of its check's default tier** (a high-confidence critical
 semgrep hit blocks; a low-confidence one informs).
 
+**Per-round cost: checks are stageable.** The gate runs **every round**, so
+running the full set (incl. `dep-audit` / `semgrep` / full `coverage`) on every
+churning commit is wasteful and slow. A check may declare a **stage**: fast checks
+(format / lint / typecheck) run every round for tight coder feedback; expensive
+ones run on the **approval candidate** only — the round that would otherwise pass.
+A required expensive check that fails on the candidate just costs one more round,
+so the floor still holds; it is only *evaluated* later, not dropped.
+
 ### 5. Deterministic findings get a **first-class ledger**, not a hand-wave
 
 Static-tool output joins the review as **deterministic findings** with their own
@@ -232,7 +247,10 @@ lifecycle, parallel to (not folded into) the reviewer `FindingLedger`:
   finding can be disputed → escalated. A deterministic finding that is a **false
   positive** is handled by a **reviewable suppression** (an inline `# noqa`/ignore
   or a checked-in baseline) — which is itself a diff the panel sees — not by the
-  coder "disagreeing." This keeps the deterministic signal honest.
+  coder "disagreeing." An **unjustified or over-broad suppression is itself a
+  blocking reviewer concern**: the correctness/security persona reviews the
+  suppression diff and can block it, so the coder cannot `# noqa` its way to green.
+  This keeps the deterministic signal honest.
 
 ### 6. Deterministic tooling feeds the LLM reviewers, not just the coder
 
@@ -304,11 +322,13 @@ a failure as RED; `pending` is awaited up to a timeout, then surfaced (never
 merged); `cancelled` / `skipped` / `neutral` are **non-blocking**; a repo with no
 CI at all makes the local gate final.
 
-**Lifecycle contract (reconciled with delivery).** Today, on approval loom marks
-`loom_delivered`, releases the claim, and opens the PR; the watcher owns
-merge/close ([#87]). A delivered-but-CI-red PR is reconciled by **the same watcher
-sweep**, following loom's existing marker pattern (cf. `develop_pr_merge_state`,
-[#87]/[#69]):
+**Lifecycle contract (reconciled with delivery).** *(This contract is documented
+in full to reserve the shape; the **MVP ships only the read+surface half** — see
+**Scope** below. The autonomous re-develop loop is a later phase.)* Today, on
+approval loom marks `loom_delivered`, releases the claim, and opens the PR; the
+watcher owns merge/close ([#87]). A delivered-but-CI-red PR is reconciled by **the
+same watcher sweep**, following loom's existing marker pattern (cf.
+`develop_pr_merge_state`, [#87]/[#69]):
 
 - it posts a `gate/ci-*` deterministic finding on the task and **clears
   `loom_delivered`**, re-opening the task for development — **only while the PR is
@@ -319,7 +339,12 @@ sweep**, following loom's existing marker pattern (cf. `develop_pr_merge_state`,
   re-triggers once, and a new push re-evaluates.
 
 This keeps exactly one owner of the task at a time and prevents duplicate / raced
-runs.
+runs. Two consequences the autonomous-loop slice must handle: a re-opened run is a
+**fresh dispatch with no session continuity** from the original development (the
+CI-fix coder starts cold, so its prompt must carry the original task + the CI
+failure), and a re-open must **not collide with an in-flight human review** (if the
+PR is in `story-review-human`, surface the CI failure to that human rather than
+pushing commits under them).
 
 **Budget is cumulative across re-dispatches.** Clearing `loom_delivered` triggers
 a *fresh* route dispatch (new process, new `max_rounds` / cost), so per-run
@@ -373,6 +398,41 @@ gap is addressed in-system via [#92] reviewer MCP context. They remain an
 optional, later, GitHub-side spike alongside the Copilot review loom already
 requests — not a dependency of this design.
 
+## Scope: MVP vs reserved-shape
+
+Three review rounds grew this ADR past the original ask. To keep implementation
+honest, the decisions split into a **shippable core** and **reserved-shape** work
+whose *interfaces* are decided here but whose *mechanism* lands later — so adding
+it is not a breaking change, and an agent picking up a slice knows what is
+load-bearing now.
+
+**MVP — delivers the operator goal (selectable panel + static deterministic
+tooling).** §1–§6, §8, §10–§11(record-only): Review Profiles; precedence +
+fail-closed resolution; the multi-check gate (states, the
+`(exit,output)→(outcome,findings)` adapter, the deterministic-finding ledger,
+auto-format, stageable checks); deterministic-feeds-LLM; the canonical personas +
+prompt discipline; the three profiles + the per-task dial; and the
+[#127]/[#92] composition. This is Phases 2–4 and is the whole of what was asked
+for.
+
+**Reserved-shape — decided in principle, built when justified (Phase 5+):**
+
+- **Risk-based auto-escalation** (§7) — the floor/escalation principle + signal
+  list are fixed now; the *detector* is later. Until then, profiles are
+  floor-only (manually selected). No breaking change when it lands.
+- **CI as a feedback loop** (§9) — the MVP ships the **read+surface half**:
+  consume the PR's check-runs and, on CI-red, **post a `gate/ci-*` finding and
+  route to `story-review-human`**. The **autonomous half** (clear `loom_delivered`,
+  re-develop on the same PR branch, cumulative budget) is a later phase — it
+  reintroduces cold-start context, human-review races, and same-branch push
+  mechanics that warrant their own justification. The MVP **does not auto-push
+  after delivery**; the full contract is documented in §9 only to reserve the shape.
+- **Calibration outcome-correlation** (§11) — record the run metadata in the MVP;
+  the outcome-signal basket + success-metric rollup come later.
+
+If the autonomous CI loop is wanted sooner it can be pulled forward — but that
+should be a deliberate choice, not the default first increment.
+
 ## Consequences
 
 - **A real strength dial with a safe floor.** Per-task selection sets the floor;
@@ -402,8 +462,9 @@ requests — not a dependency of this design.
   and a profile that marks them **required** fails preflight on a no-egress host
   (honest, per §4) rather than pretending to have run them.
 - **CI feedback closes the local↔remote gap** but adds a post-PR loop with its own
-  latency and cost budget (a CI re-open consumes rounds) — bounded by the same
-  `max_rounds`/cost ceilings.
+  latency and cost — bounded by the **cumulative per-PR budget** (§9), *not* per-run
+  ceilings (which would reset on each re-dispatch), with human escalation on
+  exhaustion. (MVP ships only the read+surface half — see Scope.)
 - **Risk-escalation is deferred mechanism, decided principle.** The schema
   reserves the floor/escalation shape now; the detector ships later, so early
   versions are floor-only (manual) without a breaking change when escalation lands.
@@ -466,9 +527,9 @@ requests — not a dependency of this design.
 | | wire profile → panel + check-set in `DevelopConfig` | |
 | | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
-| 5 — CI + calibration | consume PR CI check-runs (branch-protection-aware) as a `gate/ci-*` gate; lifecycle contract: re-open delivered-but-red on the same PR with merge-race + SHA-marker dedup | [#87] |
-| | same-PR rerun mechanics: `develop_pr_url`/branch discovery, branch checkout, idempotent push, same-PR update; cumulative per-PR budget (rounds/cost/reopens) keyed by PR URL, exhaustion → human escalation | [#87] |
-| | record review metadata; build the outcome-signal basket + success metrics | [#87] |
+| 5a — CI read **(MVP)** | consume PR CI check-runs (branch-protection → declared-contexts → N/A) as a `gate/ci-*` finding; on red, surface to `story-review-human` | [#87] |
+| 5b — CI autonomous *(later)* | re-develop delivered-but-red on the **same PR**: `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87] |
+| 5 — calibration | record review metadata **(MVP)**; outcome-signal basket + success metrics *(later)* | [#87] |
 
 Each slice is an independently grabbable tracer-bullet issue, linked back to #128.
 
