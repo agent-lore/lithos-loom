@@ -121,7 +121,12 @@ def build_gate_command(
 
     The container is named so a timed-out run can be force-removed. The tree
     mounts RW (test runs create caches/venvs); the cache dir persists across
-    rounds of the same run so dependency downloads happen once.
+    rounds of the same run so per-tool downloads happen once. Each tool's cache
+    is redirected into a subdir of the mounted cache: ``uv`` / ``npm`` for deps,
+    ``pip`` for pip-audit's HTTP cache (it defaults to pip's HTTP cache), and
+    ``ruff`` for the live lint check's incremental cache. (semgrep has no
+    cache-dir env — only ``$HOME/.semgrep`` — so its cache is wired alongside its
+    adapter under #139 rather than guessed here.)
     """
     return [
         "docker",
@@ -144,6 +149,13 @@ def build_gate_command(
         f"UV_CACHE_DIR={CACHE_MOUNT}/uv",
         "-e",
         f"npm_config_cache={CACHE_MOUNT}/npm",
+        # SAST/lint caches: pip-audit defaults to pip's HTTP cache, so PIP_CACHE_DIR
+        # redirects it into the persisted mount; the live ruff lint check persists
+        # its incremental cache the same way.
+        "-e",
+        f"PIP_CACHE_DIR={CACHE_MOUNT}/pip",
+        "-e",
+        f"RUFF_CACHE_DIR={CACHE_MOUNT}/ruff",
         "-w",
         WORKSPACE_MOUNT,
         "--entrypoint",
