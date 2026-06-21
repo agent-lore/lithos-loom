@@ -327,6 +327,13 @@ class DevelopConfig:
         False  # ADR §10: the `test` check's block flag (RED blocks + feeds coder)
     )
     test_timeout: int = DEFAULT_TEST_TIMEOUT
+    # #140: the resolved Review Profile name, which selects WHICH deterministic
+    # checks the gate runs (``profiles.get_profile`` → its check-set). Always a
+    # known name — ``resolve_profile`` guarantees known-or-halt upstream. Kept a
+    # bare string (default mirrors ``profiles.DEFAULT_PROFILE_NAME``; a guard test
+    # pins the two) so ``config`` need not import ``profiles`` — that would cycle
+    # (config → profiles → check_set → test_gate → config).
+    review_profile: str = "standard"
     # T5: usage-limit reaction. The pause budget is shared across the run;
     # the fallback chain lists ALTERNATE reviewer tools tried in order when
     # the current one is usage-limited (empty = no alternate -> pause).

@@ -718,6 +718,55 @@ def test_gate_disabled_by_config(
     assert state["gate_calls"] == []
 
 
+def test_candidate_checks_run_only_on_the_approval_candidate(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#140/ADR §4: fast checks run every round for tight coder feedback; the
+    expensive candidate-staged checks run only on the approval candidate (the
+    round that would otherwise pass), not on every churning commit."""
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
+
+    fast = Check("lint", "ruff check --x", "informational", "fast")
+    candidate = Check("dep-audit", "pip-audit --x", "informational", "candidate")
+    monkeypatch.setattr(
+        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+    )
+    calls: list[tuple[int, tuple[str, ...]]] = []
+
+    def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
+        calls.append((round_no, tuple(c.name for c in checks)))
+        return CheckSetResult(
+            tuple(
+                CheckResult(
+                    c,
+                    "ran",
+                    GateResult(
+                        command=c.command, exit_code=0, passed=True, output_tail="ok"
+                    ),
+                )
+                for c in checks
+            )
+        )
+
+    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    # Round 1 FINDINGS (not approved) then round 2 LGTM (approved): proves the
+    # fast gate runs both rounds while the candidate gate fires only at approval.
+    _install_fakes(
+        monkeypatch, config, reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}]
+    )
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert result.rounds == 2
+    fast_rounds = sorted(r for r, names in calls if names == ("lint",))
+    candidate_calls = [(r, names) for r, names in calls if names == ("dep-audit",)]
+    assert fast_rounds == [1, 2]  # every round
+    assert candidate_calls == [(2, ("dep-audit",))]  # approval candidate only
+
+
 # --- termination guards (T7) ---------------------------------------------------
 
 _CODER_DISPUTE = (

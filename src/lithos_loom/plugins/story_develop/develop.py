@@ -36,13 +36,21 @@ import logging
 import subprocess
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ...runner import detection, git, worktree
-from . import check_catalog, containers, gate_adapters, handoff, limits, test_gate
+from . import (
+    check_catalog,
+    containers,
+    gate_adapters,
+    handoff,
+    limits,
+    profiles,
+    test_gate,
+)
 from .check_set import (
     Check,
     CheckResult,
@@ -325,77 +333,125 @@ def _resolve_test_command(config: DevelopConfig, wt: Path) -> str | None:
     return chosen
 
 
-def build_default_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
-    """The default check-set: the ``test`` check (#131) + a live ``lint`` check (#132).
+def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
+    """The Review-Profile-selected check-set for this run (#140, ADR §3/§4).
 
-    ADR §10: ``develop_test_gate=false`` **excludes the ``test`` check only** — it
-    is a test escape hatch, **not** a whole-gate kill switch, so the deterministic
-    lint/SAST floor still runs (disabling that would be a floor-weakening behind a
-    convenience key). The legacy ``block_on_red`` flag maps onto the test check's
-    ``state`` — ``required`` (a RED run blocks approval) vs ``informational``
-    (recorded, non-blocking). Review Profiles (#139) replace this constructor with
-    a profile-selected set resolved through :func:`check_catalog.resolve_check_set`;
-    the runner/aggregates below are unchanged.
+    The resolved profile (``config.review_profile`` -> :func:`profiles.get_profile`)
+    selects WHICH deterministic checks run, and each resulting :class:`Check` is
+    tagged with its profile ``stage`` (``fast`` every round / ``candidate`` on the
+    approval candidate — the round-loop filter in :func:`develop` acts on it).
 
-    #133/ADR §4: when no test command is runnable, a *required* test check in a
-    repo whose detected ecosystem expects tests is **expected-but-absent** — a
-    blocking, non-running placeholder (empty command; the runner records it
-    ``absent``), not a silent skip. A markerless / docs-only repo declares
-    ``test`` not-applicable, so the gate is simply empty.
+    The ``test`` check keeps its legacy ``test_gate`` / ``block_on_red`` /
+    ``test_command`` semantics verbatim (#127/#159, ADR §10). Every *other* profile
+    check runs **informational this slice** — surfaced + ledgered, never blocking —
+    so the profile's declared ``required`` floor is not yet enforced (that flip is
+    the next slice), and an informational check whose tool is absent from the image
+    is silently dropped (a skip, not a blocking placeholder). The ``format`` check is
+    declared by the profile but its live (auto-format) pass is #134, so it is not run
+    as a standalone check here. Checks are emitted in profile order.
     """
+    profile = profiles.get_profile(config.review_profile)
+    ecosystems = detection.detect_ecosystems(wt)
+    # Group the resolved informational checks back by bare name (a polyglot check is
+    # emitted once per ecosystem as ``<check>.<ecosystem>``), so they can be slotted
+    # into profile order alongside the specially-built ``test`` check.
+    by_name: dict[str, list[Check]] = {}
+    for c in _build_informational_checks(config, profile, ecosystems):
+        by_name.setdefault(c.name.split(".")[0], []).append(c)
     checks: list[Check] = []
-    if config.test_gate:
-        command = _resolve_test_command(config, wt)
-        state = "required" if config.block_on_red else "informational"
-        if command is not None:
-            checks.append(Check(name="test", command=command, state=state))
-        elif state == "required" and check_catalog.applies(
-            "test", detection.detect_ecosystems(wt)
-        ):
-            checks.append(Check(name="test", command="", state="required"))
-    # #132/ADR §10: the live informational lint check (ruff) exercises the
-    # deterministic-finding ledger end-to-end and runs **regardless of the
-    # ``test_gate`` toggle** — that flag scopes the ``test`` check only, never the
-    # lint/SAST floor. #139 governs the full per-profile set + a required floor.
-    checks.extend(_build_lint_checks(config, wt))
+    for pc in profile.checks:
+        if pc.name == "test":
+            checks.extend(_build_test_check(config, ecosystems, wt))
+        else:
+            checks.extend(by_name.get(pc.name, []))
     return tuple(checks)
 
 
-def _build_lint_checks(config: DevelopConfig, wt: Path) -> list[Check]:
-    """Informational ``lint`` check(s) for the detected ecosystem(s), gated on a
-    structured-finding-capable tool being present in the image (#132).
+def _build_test_check(
+    config: DevelopConfig,
+    ecosystems: Sequence[detection.Ecosystem],
+    wt: Path,
+) -> list[Check]:
+    """The ``test`` check with its legacy semantics (#127/#159, ADR §10).
 
-    Resolves the ecosystem's lint command via :func:`check_catalog.resolve_check_set`,
-    keeps only tools with a finding adapter (Slice 3: ruff), probes the image, and
-    machine-ifies the command (ruff -> ``--output-format=json --exit-zero``). The
-    check is **informational** — its findings are surfaced + ledgered, never
-    blocking; a *required* floor is #139's policy. Empty for non-Python / no-ruff.
+    ``develop_test_gate=false`` excludes it entirely (a test escape hatch, never a
+    whole-gate kill switch — the rest of the profile set still runs). ``block_on_red``
+    maps onto its ``state`` — ``required`` (a RED run blocks + feeds the coder) vs
+    ``informational`` (recorded, non-blocking). #133/ADR §4: when no command is
+    runnable but the detected ecosystem expects tests, a *required* test check is an
+    **expected-but-absent** blocking placeholder (empty command; the runner records
+    it ``absent``), not a silent skip.
     """
-    ecosystems = detection.detect_ecosystems(wt)
+    if not config.test_gate:
+        return []
+    command = _resolve_test_command(config, wt)
+    state = "required" if config.block_on_red else "informational"
+    if command is not None:
+        return [Check(name="test", command=command, state=state)]
+    if state == "required" and check_catalog.applies("test", ecosystems):
+        return [Check(name="test", command="", state="required")]
+    return []
+
+
+def _build_informational_checks(
+    config: DevelopConfig,
+    profile: profiles.ReviewProfile,
+    ecosystems: Sequence[detection.Ecosystem],
+) -> list[Check]:
+    """Resolve every *non-test* profile check, informational, for the detected
+    ecosystem(s) — #140 generalises the #132 informational ``lint`` check to the
+    whole profile set.
+
+    Each check is resolved against the catalog (pinned ``informational`` this slice —
+    the ``required`` floor is the next slice; an informational absent check is dropped
+    rather than a blocking placeholder), the image is probed **once** for all tools,
+    and surviving commands are machine-ified: a finding-producing tool (ruff / bandit
+    / pip-audit) emits JSON parsed into the gate ledger by :func:`_run_check_set`,
+    while a tool with no adapter (pyright / coverage / semgrep) runs as-is and
+    surfaces its output tail. Each resulting :class:`Check` carries its profile
+    ``stage``. ``format`` is skipped (its live pass is the #134 auto-format slice).
+    Empty for a markerless repo or when no tool is present.
+    """
     if not ecosystems:
         return []
-    candidate = [
-        c
+    resolved: list[Check] = []
+    for pc in profile.checks:
+        if pc.name in ("test", "format"):
+            continue
         for c in check_catalog.resolve_check_set(
-            [check_catalog.DesiredCheck("lint", "informational")],
+            [check_catalog.DesiredCheck(pc.name, "informational")],
             ecosystems,
             tool_available=lambda _t: True,
-        )
-        if c.command and c.command.split()[0] in gate_adapters.SUPPORTED_TOOLS
-    ]
-    if not candidate:
+        ):
+            if c.command:
+                resolved.append(replace(c, stage=pc.stage))
+    if not resolved:
         return []
     available = set(
-        test_gate.probe_tools(config.image, [c.command.split()[0] for c in candidate])
+        test_gate.probe_tools(config.image, [c.command.split()[0] for c in resolved])
     )
     return [
         replace(
-            c,
-            command=gate_adapters.machine_command(c.command.split()[0], c.command),
+            c, command=gate_adapters.machine_command(c.command.split()[0], c.command)
         )
-        for c in candidate
+        for c in resolved
         if c.command.split()[0] in available
     ]
+
+
+def _merge_check_sets(
+    base: CheckSetResult | None, extra: CheckSetResult | None
+) -> CheckSetResult | None:
+    """Append *extra*'s results to *base* (the approval-candidate merge, #140).
+
+    Either side may be ``None`` (no fast checks ran, or the candidate export
+    errored); the result preserves order — fast results then candidate results.
+    """
+    if base is None:
+        return extra
+    if extra is None:
+        return base
+    return CheckSetResult(results=base.results + extra.results)
 
 
 def _write_check_output(round_dir: Path, check: Check, gate: GateResult | None) -> None:
@@ -1159,10 +1215,16 @@ def develop(
     final_reviews: list[ReviewOutcome] = []
     # The per-round gate is an ordered check-set (#131); ``gate`` stays the
     # ``test`` check's back-compat view so the prompt/summary/result sites below
-    # are unchanged. ``checks`` is resolved once (detection probes the image).
+    # are unchanged. ``checks`` is the Review-Profile-selected set, resolved once
+    # (detection probes the image). #140/ADR §4: ``fast`` checks run every round
+    # for tight coder feedback; ``candidate`` checks (expensive — dep-audit /
+    # coverage / semgrep) run only on the approval candidate, the round that would
+    # otherwise pass.
     gate: GateResult | None = None
     check_set: CheckSetResult | None = None
-    checks = build_default_check_set(config, wt)
+    checks = build_check_set(config, wt)
+    fast_checks = tuple(c for c in checks if c.stage == "fast")
+    candidate_checks = tuple(c for c in checks if c.stage == "candidate")
     gate_ledger = _load_gate_ledger(config)  # #132: one per run; survives resume
     rounds_completed = 0
     coder_cost = 0.0
@@ -1171,6 +1233,8 @@ def develop(
     stall_strikes = 0  # T7: consecutive no-progress rounds
     prev_signature: frozenset | None = None
     resume_after: datetime | None = None  # set only on interrupted (T10)
+    gated_sha: str | None = None  # latest committed tree (the approval candidate)
+    candidate_ran_for_sha: str | None = None  # dedup the candidate run per commit
 
     try:
         containers.start_container(coder_cmd)
@@ -1318,6 +1382,11 @@ def develop(
                 failure_reason = "round 1: coder produced no commit"
                 status = "failed"
                 break
+            if new_commit is not None:
+                # Track the latest committed tree so the approval-candidate gate
+                # (#140) can run candidate-staged checks against it even on a later
+                # round that produced no fresh commit.
+                gated_sha = new_commit
 
             # T7: cost ceiling — check before spending more on reviews.
             if (
@@ -1332,14 +1401,16 @@ def develop(
                 break
 
             # --- deterministic gate (only when there is a new commit to gate) -
-            if checks and new_commit is not None:
+            # #140/ADR §4: the per-round gate runs the FAST checks only; the
+            # candidate-staged checks are deferred to the approval candidate below.
+            if fast_checks and new_commit is not None:
                 # Overwrite unconditionally: on a gate infra error this clears
                 # to None rather than letting a PRIOR commit's result (e.g. a
                 # stale RED under block_on_red) stand in for this commit. A
                 # round with no new commit keeps the prior result — the tree is
                 # unchanged, so it still describes HEAD.
                 check_set = _run_check_set(
-                    config, wt, new_commit, round_no, checks, gate_ledger
+                    config, wt, new_commit, round_no, fast_checks, gate_ledger
                 )
                 gate = check_set.test_gate if check_set is not None else None
                 _persist_gate_ledger(config, gate_ledger)
@@ -1443,6 +1514,24 @@ def develop(
             # finished, approved run as cost_exceeded would discard a good
             # branch for no protective benefit.
             if all(r.passed for r in round_reviews):
+                # #140/ADR §4: the approval candidate — run the expensive
+                # candidate-staged checks once on this tree before sealing approval.
+                # They are informational this slice, so they cannot block (the floor
+                # slice flips that via ``blocking_passed`` below, with no structural
+                # change here); they still surface into the ledger + result. Run once
+                # per committed tree (dedup on the sha).
+                if (
+                    candidate_checks
+                    and gated_sha is not None
+                    and candidate_ran_for_sha != gated_sha
+                ):
+                    candidate_ran_for_sha = gated_sha
+                    candidate_set = _run_check_set(
+                        config, wt, gated_sha, round_no, candidate_checks, gate_ledger
+                    )
+                    check_set = _merge_check_sets(check_set, candidate_set)
+                    gate = check_set.test_gate if check_set is not None else None
+                    _persist_gate_ledger(config, gate_ledger)
                 if check_set is not None and not check_set.blocking_passed:
                     logger.info(
                         "story-develop %s: round %d reviews passed but a blocking "
