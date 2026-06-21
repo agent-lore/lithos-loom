@@ -47,6 +47,7 @@ from .config import (
 )
 from .lithos_io import AGENT_ID, TaskContext
 from .personas import canonical_personas
+from .profiles import DEFAULT_PROFILE_NAME, resolve_profile
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -132,6 +133,14 @@ class ProjectDevelopSettings:
     test_command: str | None = None
     test_gate: bool | None = None
     block_on_red: bool | None = None
+    # Review Profile (#139). ``review_profile_project`` is the project-layer name
+    # (context-doc ``develop_review_profile``); :func:`apply_review_profile` then
+    # resolves task > project > host > builtin into ``review_profile`` (the
+    # resolved name) and ``review_profile_halt`` (an explicit-but-unknown name
+    # fails closed). Resolved but NOT yet applied to the panel/check-set (#140).
+    review_profile_project: str | None = None
+    review_profile: str = DEFAULT_PROFILE_NAME
+    review_profile_halt: bool = False
     frictions: tuple[str, ...] = ()
 
 
@@ -399,6 +408,19 @@ def resolve_project_settings(
         frictions.append(f"develop_max_cost_usd {max_cost!r} invalid; ignoring")
         max_cost = None
 
+    # Review Profile (#139): carry the project-layer name only; the full
+    # task > project > host resolution needs the host policy and runs in
+    # :func:`apply_review_profile` (this resolver stays host-config-free).
+    raw_profile = meta.get("develop_review_profile")
+    review_profile_project: str | None = None
+    if isinstance(raw_profile, str) and raw_profile.strip():
+        review_profile_project = raw_profile.strip()
+    elif raw_profile is not None:
+        frictions.append(
+            f"develop_review_profile {raw_profile!r} invalid; ignoring "
+            "(must be a non-empty string)"
+        )
+
     return ProjectDevelopSettings(
         reviewers=reviewers,
         coder=coder,
@@ -411,6 +433,7 @@ def resolve_project_settings(
         test_command=test_command,
         test_gate=test_gate,
         block_on_red=block_on_red,
+        review_profile_project=review_profile_project,
         frictions=tuple(frictions),
     )
 
@@ -548,6 +571,66 @@ def apply_tool_default_models(
         for spec in settings.reviewers
     )
     return replace(settings, coder_model=coder_model, reviewers=reviewers)
+
+
+def load_review_profile_policy() -> tuple[str | None, str, tuple[str, ...]]:
+    """The host loom config's ``[story_develop]`` review-profile policy (#139).
+
+    Returns ``(default_review_profile, unknown_profile, frictions)`` — mirrors
+    :func:`load_tool_default_models`. An unreadable / missing config, or no
+    ``[story_develop]`` section, yields ``(None, "halt", ())`` so resolution falls
+    through to the built-in ``standard`` with the fail-closed default. Never raises.
+    """
+    from ...config import load_config
+
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        return (
+            None,
+            "halt",
+            (
+                f"cannot load loom config for the review-profile policy ({exc}); "
+                "using the built-in standard profile",
+            ),
+        )
+    if cfg.story_develop is None:
+        return None, "halt", ()
+    return (
+        cfg.story_develop.default_review_profile,
+        cfg.story_develop.unknown_profile,
+        (),
+    )
+
+
+def apply_review_profile(
+    settings: ProjectDevelopSettings,
+    *,
+    task_value: object,
+    host_default: str | None,
+    unknown_profile: str,
+) -> ProjectDevelopSettings:
+    """Resolve the Review Profile (#139) and fold the outcome into *settings*.
+
+    Precedence: ``task_value`` > the project layer (``review_profile_project``) >
+    ``host_default`` > built-in ``standard``. Records the resolved name +
+    ``review_profile_halt`` (an explicit-but-unknown name fails closed) and merges
+    the resolution's frictions. Does **not** apply the profile to the panel /
+    check-set — that wiring is #140.
+    """
+    task_name = task_value.strip() if isinstance(task_value, str) else None
+    resolution = resolve_profile(
+        task_value=task_name,
+        project_value=settings.review_profile_project,
+        host_value=host_default,
+        unknown_profile=unknown_profile,
+    )
+    return replace(
+        settings,
+        review_profile=resolution.profile.name,
+        review_profile_halt=resolution.halt,
+        frictions=settings.frictions + resolution.frictions,
+    )
 
 
 def post_frictions(url: str, task_id: str, frictions: tuple[str, ...]) -> None:

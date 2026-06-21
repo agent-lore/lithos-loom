@@ -66,9 +66,11 @@ from .daemon_io import (
     EXIT_BAD_INPUT,
     EXIT_SUCCEEDED,
     apply_cli_fallbacks,
+    apply_review_profile,
     apply_tool_default_models,
     build_result_payload,
     load_operator_github_login,
+    load_review_profile_policy,
     load_tool_default_models,
     post_frictions,
     read_task_payload,
@@ -84,6 +86,7 @@ from .lithos_io import (
     post_results,
 )
 from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver
+from .profiles import resolve_profile
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -257,6 +260,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="A red test gate prevents approval (default: recorded, non-blocking)",
     )
     p.add_argument(
+        "--review-profile",
+        default=None,
+        help="Review Profile (#139): minimal | standard | thorough (or a custom "
+        "name). An unknown name halts (fail-closed). Default: a --task-id run's "
+        "develop_review_profile, else host [story_develop].default_review_profile, "
+        "else the built-in standard.",
+    )
+    p.add_argument(
         "--test-timeout",
         type=int,
         default=DEFAULT_TEST_TIMEOUT,
@@ -394,6 +405,18 @@ def _daemon_main(args: argparse.Namespace) -> int:
     settings = apply_tool_default_models(settings, default_models)
     if dm_frictions:
         settings = replace(settings, frictions=settings.frictions + dm_frictions)
+    # Review Profile (#139): resolve task > project > host > builtin. An
+    # explicit-but-unknown name fails closed below — but its friction is merged
+    # here so it posts even on a halt.
+    profile_default, unknown_policy, profile_frictions = load_review_profile_policy()
+    settings = apply_review_profile(
+        settings,
+        task_value=ctx.metadata.get("develop_review_profile"),
+        host_default=profile_default,
+        unknown_profile=unknown_policy,
+    )
+    if profile_frictions:
+        settings = replace(settings, frictions=settings.frictions + profile_frictions)
     for friction in settings.frictions:
         print(f"[Friction] {friction}", file=sys.stderr)
     post_frictions(args.lithos_url, ctx.task_id, settings.frictions)
@@ -462,6 +485,17 @@ def _daemon_main(args: argparse.Namespace) -> int:
         )
         print(f"error: {message}", file=sys.stderr)
         return exit_code
+
+    # Fail-closed on an explicit-but-unknown review profile (#139, ADR §2): halt
+    # before any agent runs / any run artifact is written. The precise bad name is
+    # in the [Friction] finding posted above.
+    if settings.review_profile_halt:
+        return _fail_payload(
+            "config",
+            "review profile is not defined; halting before any agent runs "
+            "(fail-closed). Define the profile or set unknown_profile=strongest.",
+            EXIT_BAD_INPUT,
+        )
 
     # Snapshot the task envelope into the run dir so `lithos-loom develop`
     # reports THIS run's title (and body/tags) even after the task is
@@ -584,6 +618,9 @@ def main(argv: list[str] | None = None) -> int:
 
     description = args.description
     github_issue_url: str | None = None
+    # Review Profile task-layer value (#139): the explicit --review-profile flag,
+    # else (for a --task-id run) the task's develop_review_profile metadata.
+    review_profile_task: str | None = args.review_profile
     if args.task_id is not None:
         try:
             ctx = fetch_task_context(args.lithos_url, args.task_id)
@@ -595,8 +632,37 @@ def main(argv: list[str] | None = None) -> int:
         acceptance_criteria = acceptance_criteria or ctx.acceptance_criteria
         raw_issue = ctx.metadata.get("github_issue_url")
         github_issue_url = raw_issue if isinstance(raw_issue, str) else None
+        if review_profile_task is None:
+            raw_profile = ctx.metadata.get("develop_review_profile")
+            review_profile_task = raw_profile if isinstance(raw_profile, str) else None
         print(f"developing Lithos task {ctx.task_id}: {ctx.title}")
     assert description is not None  # guaranteed by the validation above
+
+    # Review Profile (#139): resolve task > host > built-in standard (the
+    # standalone path has no project-context layer). An explicit-but-unknown name
+    # halts before any agent runs (fail-closed, ADR §2).
+    profile_default, unknown_policy, profile_frictions = load_review_profile_policy()
+    profile_resolution = resolve_profile(
+        task_value=review_profile_task,
+        project_value=None,
+        host_value=profile_default,
+        unknown_profile=unknown_policy,
+    )
+    for friction in (*profile_frictions, *profile_resolution.frictions):
+        print(f"[Friction] {friction}", file=sys.stderr)
+    if profile_resolution.halt:
+        if args.task_id is not None and not args.no_lithos:
+            post_frictions(
+                args.lithos_url,
+                args.task_id,
+                profile_frictions + profile_resolution.frictions,
+            )
+        print(
+            "error: review profile is not defined; halting before any agent runs "
+            "(fail-closed)",
+            file=sys.stderr,
+        )
+        return 2
 
     # --- resolve the reviewer panel (T6) ---------------------------------
     if args.develop_config is not None and args.reviewer:

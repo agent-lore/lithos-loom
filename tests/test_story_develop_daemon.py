@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,8 +27,10 @@ from lithos_loom.plugins.story_develop.daemon_io import (
     EXIT_SUCCEEDED,
     ProjectDevelopSettings,
     apply_cli_fallbacks,
+    apply_review_profile,
     apply_tool_default_models,
     build_result_payload,
+    load_review_profile_policy,
     load_tool_default_models,
     read_task_payload,
     resolve_project_settings,
@@ -150,6 +153,98 @@ def test_resolve_no_project_slug_uses_builtin_with_friction() -> None:
     settings = resolve_project_settings("http://x", {})
     assert settings.reviewers == BUILTIN_REVIEWERS
     assert any("metadata.project" in f for f in settings.frictions)
+
+
+# ── Review Profile resolution (#139) ───────────────────────────────────
+
+
+def test_resolve_review_profile_from_project(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_review_profile": "  thorough  "},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.review_profile_project == "thorough"
+
+
+def test_resolve_invalid_review_profile_frictioned(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_review_profile": 123},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.review_profile_project is None
+    assert any("develop_review_profile" in f for f in settings.frictions)
+
+
+def test_apply_review_profile_precedence_task_project_host() -> None:
+    base = ProjectDevelopSettings(review_profile_project="minimal")
+    # task wins over project + host
+    s = apply_review_profile(
+        base, task_value="thorough", host_default="standard", unknown_profile="halt"
+    )
+    assert s.review_profile == "thorough"
+    assert s.review_profile_halt is False
+    assert s.frictions == ()
+    # project (settings layer) wins when the task is unset
+    s = apply_review_profile(
+        base, task_value=None, host_default="standard", unknown_profile="halt"
+    )
+    assert s.review_profile == "minimal"
+    # host wins when task + project are both unset
+    s = apply_review_profile(
+        ProjectDevelopSettings(),
+        task_value=None,
+        host_default="thorough",
+        unknown_profile="halt",
+    )
+    assert s.review_profile == "thorough"
+
+
+def test_apply_review_profile_unknown_name_halts() -> None:
+    s = apply_review_profile(
+        ProjectDevelopSettings(),
+        task_value="thorogh",
+        host_default=None,
+        unknown_profile="halt",
+    )
+    assert s.review_profile_halt is True
+    assert any("thorogh" in f for f in s.frictions)
+
+
+def test_apply_review_profile_unset_inherits_standard_silently() -> None:
+    s = apply_review_profile(
+        ProjectDevelopSettings(),
+        task_value=None,
+        host_default=None,
+        unknown_profile="halt",
+    )
+    assert s.review_profile == "standard"
+    assert s.review_profile_halt is False
+    assert s.frictions == ()
+
+
+def test_load_review_profile_policy_reads_host_config(monkeypatch) -> None:
+    fake_cfg = SimpleNamespace(
+        story_develop=SimpleNamespace(
+            default_review_profile="thorough", unknown_profile="strongest"
+        )
+    )
+    monkeypatch.setattr("lithos_loom.config.load_config", lambda: fake_cfg)
+    default, policy, frictions = load_review_profile_policy()
+    assert default == "thorough"
+    assert policy == "strongest"
+    assert frictions == ()
+
+
+def test_load_review_profile_policy_no_section_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "lithos_loom.config.load_config", lambda: SimpleNamespace(story_develop=None)
+    )
+    default, policy, frictions = load_review_profile_policy()
+    assert default is None
+    assert policy == "halt"
+    assert frictions == ()
 
 
 def test_resolve_lithos_unreachable_degrades(fake_client) -> None:
@@ -940,6 +1035,60 @@ def test_result_file_without_task_json_rejected(
     assert "--result-file requires --task-json" in capsys.readouterr().err
 
 
+def test_daemon_mode_halts_on_unknown_review_profile(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """An explicit-but-unknown task review profile fails closed (#139): a
+    `failed`/EXIT_BAD_INPUT result, the agent never runs, friction posted."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "post_frictions",
+        lambda url, task_id, frictions: captured.setdefault("frictions", frictions),
+    )
+
+    def _boom(config, **kw):
+        raise AssertionError("develop must not run on a fail-closed halt")
+
+    monkeypatch.setattr(main_mod, "develop", _boom)
+
+    task_json = _write_task_json(
+        tmp_path / "task.json",
+        {
+            "id": "t-9",
+            "title": "T",
+            "metadata": {"project": "loom", "develop_review_profile": "thorogh"},
+        },
+    )
+    result_file = tmp_path / "result.json"
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--task-json",
+            str(task_json),
+            "--work-dir",
+            str(tmp_path / "work"),
+            "--result-file",
+            str(result_file),
+        ]
+    )
+    assert rc == EXIT_BAD_INPUT
+    payload = json.loads(result_file.read_text())
+    assert payload["status"] == "failed"
+    assert payload["error"]["category"] == "config"
+    assert any("thorogh" in f for f in captured.get("frictions", ()))
+
+
 def test_daemon_mode_happy_path_writes_result(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
@@ -963,6 +1112,9 @@ def test_daemon_mode_happy_path_writes_result(
     # loader so this test stays focused on friction *posting* (its real daemon
     # run always has a loadable config — that path is covered separately).
     monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
     monkeypatch.setattr(
         main_mod,
         "post_frictions",
@@ -1060,6 +1212,9 @@ def test_daemon_mode_metadata_image_flows_into_config(
         lambda url, meta: ProjectDevelopSettings(image="ghcr.io/acme/dev:2026-06"),
     )
     monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
     monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
     monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
 
@@ -1088,6 +1243,9 @@ def test_daemon_mode_image_falls_back_to_route_flag(
         lambda url, meta: ProjectDevelopSettings(),  # image=None
     )
     monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
     monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
     monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
 

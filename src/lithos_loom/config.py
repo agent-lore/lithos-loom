@@ -308,10 +308,20 @@ class StoryDevelopConfig:
     ``operator_github_login`` (#113): when set, a delivered PR requests this
     GitHub user as a reviewer so native notifications fire. ``None`` → no human
     reviewer is requested (today's behaviour; Copilot only).
+
+    ``default_review_profile`` (#139): the host-wide Review Profile selected when
+    neither the task nor the project sets one — the lowest layer of the profile
+    precedence (``None`` → built-in ``standard``). ``unknown_profile`` is the host
+    policy for an explicit-but-unknown profile name: ``"halt"`` (default) fails the
+    run closed with a blocking ``[Friction]``; ``"strongest"`` falls back to the
+    strongest configured profile + friction (never weaker). See SPECIFICATION.md
+    §5.5 and ``story_develop.profiles``.
     """
 
     default_models: Mapping[str, str] = field(default_factory=dict)
     operator_github_login: str | None = None
+    default_review_profile: str | None = None
+    unknown_profile: str = "halt"
 
 
 @dataclass(frozen=True)
@@ -824,8 +834,18 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
 
 
 _STORY_DEVELOP_KEYS: frozenset[str] = frozenset(
-    {"default_models", "operator_github_login"}
+    {
+        "default_models",
+        "operator_github_login",
+        "default_review_profile",
+        "unknown_profile",
+    }
 )
+
+# Host policy for an explicit-but-unknown develop_review_profile (#139). Mirrors
+# profiles.UNKNOWN_PROFILE_POLICIES; kept local so the root config loader doesn't
+# import plugin code.
+_UNKNOWN_PROFILE_POLICIES: frozenset[str] = frozenset({"halt", "strongest"})
 
 
 def _parse_story_develop(data: Any, config_path: Path) -> StoryDevelopConfig | None:
@@ -872,9 +892,25 @@ def _parse_story_develop(data: Any, config_path: Path) -> StoryDevelopConfig | N
             f"non-empty string (got {login!r})"
         )
 
+    profile = data.get("default_review_profile")
+    if profile is not None and (not isinstance(profile, str) or not profile.strip()):
+        raise ConfigError(
+            f"{config_path}: story_develop.default_review_profile must be a "
+            f"non-empty string (got {profile!r})"
+        )
+
+    unknown_profile = data.get("unknown_profile", "halt")
+    if unknown_profile not in _UNKNOWN_PROFILE_POLICIES:
+        raise ConfigError(
+            f"{config_path}: story_develop.unknown_profile must be one of "
+            f"{sorted(_UNKNOWN_PROFILE_POLICIES)} (got {unknown_profile!r})"
+        )
+
     return StoryDevelopConfig(
         default_models=default_models,
         operator_github_login=login.strip() if isinstance(login, str) else None,
+        default_review_profile=profile.strip() if isinstance(profile, str) else None,
+        unknown_profile=unknown_profile,
     )
 
 

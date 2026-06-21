@@ -522,10 +522,10 @@ should be a deliberate choice, not the default first increment.
 | 3 — panel | canonical personas + tightened `system_prompt`s; `reviewer_round.md` discipline | |
 | | architecture/delta reviewer sees `base..HEAD` | |
 | | reviewer codebase-context via MCP/skill | [#92] |
-| 4 — the dial | review-profile resolution (precedence + fail-closed); ship the 3 profiles with quality floors | |
+| 4 — the dial | review-profile resolution (precedence + fail-closed); ship the 3 profiles with quality floors — **✅ #139 (slice 1): `profiles.py` (`ReviewProfile` + `ProfileCheck` w/ `stage`, the 3 canonical profiles, `resolve_profile` precedence task>project>host>`standard`, fail-closed halt + `unknown_profile=strongest` opt-out); host `[story_develop].default_review_profile`/`unknown_profile`; `coverage`/`semgrep` added to `CANONICAL_CHECKS`. Resolved-but-inert — applying it to the panel/check-set is #140** | |
 | | additive per-task overrides; `allow_escalation` opt-out | |
 | | wire profile → panel + check-set in `DevelopConfig` | |
-| | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) | |
+| | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) — **✅ #139 (slice 1): `validate_monotonic` runs at module import over the canonical chain; non-monotonic → `MonotonicityError` (a `ConfigError`)** | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
 | 5a — CI read **(MVP)** | consume PR CI check-runs (branch-protection → declared-contexts → N/A) as a `gate/ci-*` finding; on red, surface to `story-review-human` | [#87] |
 | 5b — CI autonomous *(later)* | re-develop delivered-but-red on the **same PR**: `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87] |

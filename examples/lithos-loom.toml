@@ -405,6 +405,24 @@ tags = ["trigger:story-review-human"]
 # [story_develop]
 # operator_github_login = "your-github-login"
 #
+# default_review_profile (#139): the host-wide Review Profile when neither the
+# task (task.metadata.develop_review_profile) nor the project-context doc
+# (develop_review_profile) sets one. Unset → the built-in `standard`. The three
+# canonical profiles (strength_rank — panel — required checks):
+#   minimal  (10) — gate-only            — format, lint, test
+#   standard (20) — correctness+security — + typecheck, sast          ← default
+#   thorough (30) — + architecture,      — + dep-audit, coverage;
+#                     test-quality,         semgrep (informational)
+#                     dependency-hygiene
+# An explicit-but-unknown name fails closed: the run halts before any agent runs
+# with a blocking [Friction]. Set unknown_profile = "strongest" to instead fall
+# back to the strongest configured profile + a friction (never weaker).
+# NOTE: #139 resolves + validates the profile; applying it to the panel/check-set
+# is #140 — until then the panel + gate still come from develop_reviewers /
+# develop_test_* (above), and default_review_profile only drives the halt check.
+# default_review_profile = "standard"
+# unknown_profile = "halt"   # or "strongest"
+#
 # [story_develop.default_models]
 # claude = "opus"
 # codex  = "gpt-5.4"

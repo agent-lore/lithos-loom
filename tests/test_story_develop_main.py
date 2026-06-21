@@ -175,6 +175,71 @@ def test_main_threads_model_and_effort_into_config(
         assert spec.model == "sonnet" and spec.effort == "high"
 
 
+def test_main_standalone_halts_on_unknown_review_profile(
+    tmp_git_repo: Path, monkeypatch, capsys
+) -> None:
+    """An explicit-but-unknown --review-profile fails closed before develop (#139)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    def _boom(*a, **k):
+        raise AssertionError("develop must not run on a fail-closed halt")
+
+    monkeypatch.setattr(main_mod, "develop", _boom)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    rc = main_mod.main(
+        ["--repo", str(tmp_git_repo), "--description", "x", "--review-profile", "nope"]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err.lower()
+    assert "halting" in err
+    assert "nope" in err  # the [Friction] line names the bad profile
+
+
+def test_main_standalone_known_review_profile_runs(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A known --review-profile does not halt — the run proceeds to develop (#139)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["ran"] = True
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--review-profile",
+            "thorough",
+        ]
+    )
+    assert rc == 0
+    assert captured.get("ran") is True
+
+
 def test_main_accepts_codex_coder(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
