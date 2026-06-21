@@ -737,12 +737,13 @@ def deliver(
     gate_verdict: str | None = None
     if fix_committed:
         # Run the `test` check on the fix commit; its GateResult drives push/hold.
-        # Delivery holds the push on ANY red fix regardless of block_on_red, so read
-        # the test_gate view here (not blocking_passed, which would honour a
-        # non-blocking config and push a RED fix). #140: the profile set now also
-        # carries informational checks, but delivery keys only on `test` and passes
-        # no ledger, so gate just the `test` check (the advisory + candidate checks
-        # would burn containers without affecting the decision — or wrongly hold).
+        # Delivery holds the push on ANY red `test` fix regardless of the profile's
+        # blocking config, so read the test_gate view here (not blocking_passed /
+        # gate_floor_blocks, which would honour an informational `test` and push a RED
+        # fix). #140: the profile set now also carries informational checks, but
+        # delivery keys only on `test` and passes no ledger, so gate just the `test`
+        # check (the advisory + candidate checks would burn containers without
+        # affecting the decision — or wrongly hold).
         checks = tuple(c for c in build_check_set(config, wt) if c.name == "test")
         cs = _run_check_set(config, wt, new_sha, fix_round, checks) if checks else None
         gate = cs.test_gate if cs is not None else None

@@ -29,8 +29,8 @@ if TYPE_CHECKING:
     from .gate_findings import GateFinding, GateLedger
 
 # A check's role in the floor (ADR §4). #131 only emits "required"/"informational"
-# (mapped from the legacy block_on_red flag, ADR §10); "optional"/"not_applicable"
-# are reserved for #133/#139.
+# (the `test` check's state — now the resolved profile's ProfileCheck state, #140);
+# "optional"/"not_applicable" are reserved for #133/#139.
 CheckState = Literal["required", "optional", "informational", "not_applicable"]
 
 # When a check runs in the round loop (ADR §4): ``fast`` every round (tight coder

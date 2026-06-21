@@ -361,10 +361,13 @@ to the human** (a `[Friction]` / story-review-human handoff) rather than looping
   reviewer's codegraph MCP for cross-file context). Only the cross-file slice
   hard-depends on [#92].
 - **[#127] gate keys are subsumed, not reworked, and cannot backdoor the floor** —
-  flat `develop_test_command` / `develop_block_on_red` / `develop_test_gate`
-  become **shorthand over the active profile's `test` check only** (its command /
-  block-flag / on-off). Critically, **`develop_test_gate = false` disables only
-  the `test` check — never the floor's required lint/type/SAST/format.** Disabling
+  flat `develop_test_command` / `develop_test_gate` become **shorthand over the
+  active profile's `test` check only** (its command / on-off). Whether the `test`
+  check **blocks** is the profile's `ProfileCheck("test", …)` state — the single
+  source of truth, like every other check — so the old `develop_block_on_red` knob
+  is **removed** (#140; it could only weaken below the floor, which the floor model
+  forbids without `allow_weaken_floor`). Critically, **`develop_test_gate = false`
+  disables only the `test` check — never the floor's required lint/type/SAST/format.** Disabling
   the *whole* gate is a floor-weakening that requires an explicit
   `allow_weaken_floor = true` and emits an **audited** `[Friction]` + deterministic
   finding — it is never a side effect of a convenience key. (Migration note: [#127]
@@ -524,7 +527,7 @@ should be a deliberate choice, not the default first increment.
 | | reviewer codebase-context via MCP/skill | [#92] |
 | 4 — the dial | review-profile resolution (precedence + fail-closed); ship the 3 profiles with quality floors — **✅ #139 (slice 1): `profiles.py` (`ReviewProfile` + `ProfileCheck` w/ `stage`, the 3 canonical profiles, `resolve_profile` precedence task>project>host>`standard`, fail-closed halt + `unknown_profile=strongest` opt-out); host `[story_develop].default_review_profile`/`unknown_profile`; `coverage`/`semgrep` added to `CANONICAL_CHECKS`. Resolved-but-inert — applying it to the panel/check-set is #140** | |
 | | additive per-task overrides; `allow_escalation` opt-out | |
-| | wire profile → panel + check-set in `DevelopConfig` — **◐ #140 (slice 1): profile → **check-set** is live — `DevelopConfig.review_profile` selects the deterministic set via `build_check_set` (real per-image tool probing) with per-check **staging** (fast every round; candidate — `dep-audit`/`coverage`/`semgrep` — on the approval candidate). Non-`test` checks run **informational** (surfaced + ledgered, never blocking); `format`'s live pass is deferred to the auto-format slice. **Slice 2: profile → panel** (replace-default-only) — when no reviewers are explicitly selected, the profile's personas become the panel (`standard`→correctness+security, `minimal`→built-in reviewer + a gate-only friction until the floor lands); explicit selection wins (escalate-only floor = overrides slice). Remaining: the **required floor** (required→block), and additive overrides + `allow_escalation`** | |
+| | wire profile → panel + check-set in `DevelopConfig` — **◐ #140 (slice 1): profile → **check-set** is live — `DevelopConfig.review_profile` selects the deterministic set via `build_check_set` (real per-image tool probing) with per-check **staging** (fast every round; candidate — `dep-audit`/`coverage`/`semgrep` — on the approval candidate). **Slice 2: profile → panel** (replace-default-only) — when no reviewers are explicitly selected, the profile's personas become the panel (`standard`→correctness+security, `minimal`→built-in reviewer + a gate-only friction); explicit selection wins (escalate-only floor = overrides slice). **Floor slice: the required floor now blocks** — `gate_floor_blocks` gates approval on a *required* check that is expected-but-absent / timed-out, or (finding-producing tool) has a ledger finding ≥ `major`, or (no-adapter tool) exits non-zero; informational checks never block. Per **Option A** `standard` blocks `lint`/`typecheck`/`test` only (`sast` demoted to informational on `standard`, required on `thorough`); the builder honors each check's declared `state` (a required absent tool → blocking placeholder). Remaining: additive escalate-only **overrides** + `allow_escalation` (also makes `minimal` truly gate-only + the persona floor non-weakenable); `coverage` `--fail-under` (today a required `coverage` passes on exit 0)** | |
 | | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) — **✅ #139 (slice 1): `validate_monotonic` runs at module import over the canonical chain; non-monotonic → `MonotonicityError` (a `ConfigError`)** | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
 | 5a — CI read **(MVP)** | consume PR CI check-runs (branch-protection → declared-contexts → N/A) as a `gate/ci-*` finding; on red, surface to `story-review-human` | [#87] |

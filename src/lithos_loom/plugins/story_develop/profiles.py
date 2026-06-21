@@ -119,7 +119,14 @@ CANONICAL_PROFILES: tuple[ReviewProfile, ...] = (
             ProfileCheck("format", "required"),
             ProfileCheck("lint", "required"),
             ProfileCheck("typecheck", "required"),
-            ProfileCheck("sast", "required"),
+            # #140 floor slice (Option A): `sast` (bandit) is surfaced but does NOT
+            # block the default — its repo baseline is untriaged, so blocking it on
+            # `standard` would strand PRs on legacy findings. It is required (blocking)
+            # only on `thorough`, an explicit opt-in. lint/typecheck/test are exactly
+            # what `make check` already enforces, so blocking them adds no new
+            # false-positive surface. Monotonicity holds: standard.required
+            # {format,lint,typecheck,test} stays a subset of thorough's.
+            ProfileCheck("sast", "informational"),
             ProfileCheck("test", "required"),
         ),
     ),

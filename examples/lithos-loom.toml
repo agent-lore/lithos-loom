@@ -64,10 +64,12 @@ name = "story-develop"
 # per task via task.metadata.develop_image; the --image flag below is the
 # route-level fallback when metadata pins neither.
 # The per-round test gate is develop_test_command (trusted as-is, no auto-
-# detection) / develop_test_gate / develop_block_on_red (per-project, with the
-# same task.metadata.* per-task override) (#127); the --test-command /
-# --no-test-gate / --block-on-red flags are the route-level fallback. So a
-# project standardised on `make check` sets develop_test_command = "make check".
+# detection) / develop_test_gate (per-project, with the same task.metadata.*
+# per-task override) (#127); the --test-command / --no-test-gate flags are the
+# route-level fallback. So a project standardised on `make check` sets
+# develop_test_command = "make check". Whether a red test gate BLOCKS is the
+# review profile's `test` check state (#140; all canonical profiles require it) —
+# the old develop_block_on_red key is removed (inert + a deprecation friction).
 # With no develop_test_command, the test check is auto-detected per ecosystem
 # (Python/Node/Rust/Go); a code repo whose ecosystem expects tests but has no
 # runnable command is "expected-but-absent" and a required gate blocks rather

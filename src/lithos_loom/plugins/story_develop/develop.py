@@ -8,9 +8,10 @@
       -> tear both containers down; leave the branch + a conversation log.
 
 The test gate (T4) runs each round commit's tree in a fresh throwaway container
-— an agent-free check on the coder's self-reported test results. By default it
-is recorded but non-blocking; with ``block_on_red`` a red gate prevents
-approval and its output is fed to the coder next round.
+— an agent-free check on the coder's self-reported test results. Whether a red
+gate blocks approval is the resolved review profile's ``test`` check state (#140;
+all canonical profiles declare it required), and its output is fed to the coder
+next round.
 
 The two agents keep their sessions **across rounds** (ADR 0002): each round is a
 fresh ``docker exec`` that resumes the on-disk session, so the coder remembers
@@ -55,12 +56,14 @@ from .check_set import (
     Check,
     CheckResult,
     CheckSetResult,
+    CheckState,
     classify_execution,
     render_check_summary,
 )
 from .config import (
     CLAUDE_AUTH_FILES,
     CODEX_AUTH_FILES,
+    DEFAULT_BLOCK_THRESHOLD,
     HANDOFF_DIRNAME,
     DevelopConfig,
     is_valid_reviewer_name,
@@ -341,31 +344,35 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     tagged with its profile ``stage`` (``fast`` every round / ``candidate`` on the
     approval candidate — the round-loop filter in :func:`develop` acts on it).
 
-    The ``test`` check keeps its legacy ``test_gate`` / ``block_on_red`` /
-    ``test_command`` semantics verbatim (#127/#159, ADR §10). Every *other* profile
-    check runs **informational this slice** — never blocking — so the profile's
-    declared ``required`` floor is not yet enforced (that flip is the next slice), and
-    an informational check whose tool is absent from the image is silently dropped (a
-    skip, not a blocking placeholder). Where a check's result is *surfaced* depends on
-    its stage (see :func:`develop`): a ``fast`` check runs before the panel each round
-    and feeds the coder + reviewer prompts (ADR §6), while a ``candidate`` check runs
-    only on the approval candidate and so reaches the gate ledger + ``[DevelopResult]``
-    but — on the common approve-immediately path — not the panel this slice. The
-    ``format`` check is declared by the profile but its live (auto-format) pass is
-    #134, so it is not run as a standalone check here. Checks are in profile order.
+    The ``test`` check keeps its ``test_gate`` (include/exclude) / ``test_command``
+    semantics (#127/#159, ADR §10), with its blocking ``state`` from the profile's
+    ``ProfileCheck("test", ...)`` like every other check. Every *other* profile
+    check now runs at its **declared ``state``** (#140 floor slice): a ``required``
+    check blocks approval (its verdict read from the finding ledger's severity for
+    adapter tools, or the raw exit code otherwise — see :func:`gate_floor_blocks`),
+    while an ``informational`` check is surfaced-only. A *required* check whose tool is
+    absent from the image is an expected-but-absent **blocking placeholder**, not a
+    silent drop; an *informational* absent check is dropped. Where a check's result is
+    *surfaced* depends on its stage (see :func:`develop`): a ``fast`` check runs before
+    the panel each round and feeds the coder + reviewer prompts (ADR §6), while a
+    ``candidate`` check runs only on the approval candidate and so reaches the gate
+    ledger + ``[DevelopResult]`` but — on the common approve-immediately path — not the
+    panel. The ``format`` check is declared by the profile but its live (auto-format)
+    pass is #134, so it is not run as a standalone check here. Checks are in profile
+    order.
     """
     profile = profiles.get_profile(config.review_profile)
     ecosystems = detection.detect_ecosystems(wt)
-    # Group the resolved informational checks back by bare name (a polyglot check is
-    # emitted once per ecosystem as ``<check>.<ecosystem>``), so they can be slotted
-    # into profile order alongside the specially-built ``test`` check.
+    # Group the resolved profile checks back by bare name (a polyglot check is emitted
+    # once per ecosystem as ``<check>.<ecosystem>``), so they can be slotted into
+    # profile order alongside the specially-built ``test`` check.
     by_name: dict[str, list[Check]] = {}
-    for c in _build_informational_checks(config, profile, ecosystems):
+    for c in _build_profile_checks(config, profile, ecosystems):
         by_name.setdefault(c.name.split(".")[0], []).append(c)
     checks: list[Check] = []
     for pc in profile.checks:
         if pc.name == "test":
-            checks.extend(_build_test_check(config, ecosystems, wt))
+            checks.extend(_build_test_check(config, pc.state, ecosystems, wt))
         else:
             checks.extend(by_name.get(pc.name, []))
     return tuple(checks)
@@ -373,23 +380,25 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
 
 def _build_test_check(
     config: DevelopConfig,
+    state: CheckState,
     ecosystems: Sequence[detection.Ecosystem],
     wt: Path,
 ) -> list[Check]:
-    """The ``test`` check with its legacy semantics (#127/#159, ADR §10).
+    """The ``test`` check, with ``state`` from the resolved profile's
+    ``ProfileCheck("test", ...)`` (#127/#159, ADR §4/§10).
 
     ``develop_test_gate=false`` excludes it entirely (a test escape hatch, never a
-    whole-gate kill switch — the rest of the profile set still runs). ``block_on_red``
-    maps onto its ``state`` — ``required`` (a RED run blocks + feeds the coder) vs
-    ``informational`` (recorded, non-blocking). #133/ADR §4: when no command is
-    runnable but the detected ecosystem expects tests, a *required* test check is an
-    **expected-but-absent** blocking placeholder (empty command; the runner records
-    it ``absent``), not a silent skip.
+    whole-gate kill switch — the rest of the profile set still runs). Its blocking is
+    the profile's ``state`` — ``required`` (a RED run blocks + feeds the coder) vs
+    ``informational`` (recorded, non-blocking) — the single source of truth, like every
+    other check (the legacy ``block_on_red`` knob is removed; the floor governs).
+    #133/ADR §4: when no command is runnable but the detected ecosystem expects tests, a
+    *required* test check is an **expected-but-absent** blocking placeholder (empty
+    command; the runner records it ``absent``), not a silent skip.
     """
     if not config.test_gate:
         return []
     command = _resolve_test_command(config, wt)
-    state = "required" if config.block_on_red else "informational"
     if command is not None:
         return [Check(name="test", command=command, state=state)]
     if state == "required" and check_catalog.applies("test", ecosystems):
@@ -397,50 +406,71 @@ def _build_test_check(
     return []
 
 
-def _build_informational_checks(
+def _build_profile_checks(
     config: DevelopConfig,
     profile: profiles.ReviewProfile,
     ecosystems: Sequence[detection.Ecosystem],
 ) -> list[Check]:
-    """Resolve every *non-test* profile check, informational, for the detected
-    ecosystem(s) — #140 generalises the #132 informational ``lint`` check to the
-    whole profile set.
+    """Resolve every *non-test* profile check for the detected ecosystem(s), honouring
+    each check's **declared ``state``** — #140 floor slice.
 
-    Each check is resolved against the catalog (pinned ``informational`` this slice —
-    the ``required`` floor is the next slice; an informational absent check is dropped
-    rather than a blocking placeholder), the image is probed **once** for all tools,
-    and surviving commands are machine-ified: a finding-producing tool (ruff / bandit
-    / pip-audit) emits JSON parsed into the gate ledger by :func:`_run_check_set`,
-    while a tool with no adapter (pyright / coverage / semgrep) runs as-is and
-    surfaces its output tail. Each resulting :class:`Check` carries its profile
-    ``stage``. ``format`` is skipped (its live pass is the #134 auto-format slice).
-    Empty for a markerless repo or when no tool is present.
+    A profile check carries its own ``state`` (``required`` blocks, ``informational``
+    is surfaced-only). It is resolved against the catalog and the **real** image
+    availability so the catalog's designed classification applies: ``required`` +
+    tool-present -> a real command; ``required`` + tool-absent -> an expected-but-absent
+    **blocking placeholder** (empty command; the runner records ``absent``);
+    ``informational`` + tool-absent -> dropped (a silent skip). The image is probed
+    **once** (a first pass with every tool assumed present enumerates the candidate
+    tools); surviving real commands are machine-ified — a finding-producing tool
+    (ruff / bandit / pip-audit) emits JSON parsed into the gate ledger by
+    :func:`_run_check_set`, a no-adapter tool (pyright / coverage / semgrep) runs
+    as-is. Each resulting :class:`Check` carries its profile ``stage``. ``format`` is
+    skipped (its live pass is the #134 auto-format slice). Empty for a markerless repo.
     """
     if not ecosystems:
         return []
-    resolved: list[Check] = []
-    for pc in profile.checks:
-        if pc.name in ("test", "format"):
-            continue
-        for c in check_catalog.resolve_check_set(
-            [check_catalog.DesiredCheck(pc.name, "informational")],
-            ecosystems,
-            tool_available=lambda _t: True,
-        ):
-            if c.command:
-                resolved.append(replace(c, stage=pc.stage))
-    if not resolved:
-        return []
-    available = set(
-        test_gate.probe_tools(config.image, [c.command.split()[0] for c in resolved])
-    )
-    return [
-        replace(
-            c, command=gate_adapters.machine_command(c.command.split()[0], c.command)
-        )
-        for c in resolved
-        if c.command.split()[0] in available
+    # A profile declares its checks ecosystem-agnostically, but several are
+    # language-specific (typecheck → pyright/tsc, sast → bandit/semgrep — python/node
+    # only). A required such check on a repo whose ecosystem has no analogue (e.g.
+    # `typecheck` on Rust/Go) is **not** an operator error — it is simply N/A for that
+    # language. Pre-filter to checks that apply to a detected ecosystem so the canonical
+    # default profile degrades gracefully, rather than letting `resolve_check_set` raise
+    # `CheckApplicabilityError` (its error is reserved for a hand-curated desired set
+    # that explicitly requires an unsupported check, #133 AC3).
+    desired = [
+        check_catalog.DesiredCheck(pc.name, pc.state)
+        for pc in profile.checks
+        if pc.name not in ("test", "format")
+        and check_catalog.applies(pc.name, ecosystems)
     ]
+    # Pass 1: enumerate candidate commands (every tool assumed present) so the image
+    # can be probed once for the tools this profile would run.
+    candidates = check_catalog.resolve_check_set(
+        desired, ecosystems, tool_available=lambda _t: True
+    )
+    available = set(
+        test_gate.probe_tools(
+            config.image, [c.command.split()[0] for c in candidates if c.command]
+        )
+    )
+    # Pass 2: resolve with the real availability — now a *required* absent tool becomes
+    # an empty-command blocking placeholder and an *informational* absent tool is
+    # dropped (the catalog's own classification, not a hand-rolled post-filter).
+    resolved = check_catalog.resolve_check_set(
+        desired, ecosystems, tool_available=lambda t: t in available
+    )
+    stage_by_name = {pc.name: pc.stage for pc in profile.checks}
+    out: list[Check] = []
+    for c in resolved:
+        stage = stage_by_name.get(c.name.split(".")[0], "fast")
+        if c.command:
+            command = gate_adapters.machine_command(c.command.split()[0], c.command)
+            out.append(replace(c, command=command, stage=stage))
+        else:
+            # Expected-but-absent blocking placeholder: keep the empty command (the
+            # runner records ``absent``); never machine-ify "" (no ``"".split()[0]``).
+            out.append(replace(c, stage=stage))
+    return out
 
 
 def _merge_check_sets(
@@ -456,6 +486,51 @@ def _merge_check_sets(
     if extra is None:
         return base
     return CheckSetResult(results=base.results + extra.results)
+
+
+def gate_floor_blocks(
+    check_set: CheckSetResult | None,
+    gate_ledger: GateLedger | None,
+    threshold: str = DEFAULT_BLOCK_THRESHOLD,
+) -> bool:
+    """Whether the deterministic floor blocks approval (#140, ADR §4/§5).
+
+    Returns ``True`` iff a **required** check blocks. Unlike
+    :meth:`CheckSetResult.blocking_passed` (raw exit code), an adapter-backed
+    required check (ruff / bandit / pip-audit) reads its verdict from the finding
+    **ledger's mapped severity** at *threshold* — the exit code never decides
+    approval for a finding-producing tool (ADR §5/#132 finding-2). A check with no
+    adapter (pyright / pytest / coverage / semgrep) still reads the raw exit code.
+
+    Only ``required`` checks count, so an **informational** check never blocks even
+    though its findings share *gate_ledger* — this is what keeps `sast` (bandit),
+    informational on the default `standard` profile, from blocking the default. An
+    expected-but-absent or timed-out required check blocks structurally (the
+    timed-out branch is essential: an adapter check that timed out produced no
+    findings, so the ledger rule alone would wrongly pass it). An infra ``errored``
+    skip and a declared ``n_a`` never block. A ``None`` check-set (markerless repo)
+    never blocks.
+    """
+    if check_set is None:
+        return False
+    for r in check_set.results:
+        if r.check.state != "required":
+            continue
+        outcome = r.execution_outcome
+        if outcome in ("errored", "n_a"):
+            continue
+        if outcome in ("absent", "timed_out"):
+            return True
+        # Ran: the tool decides how to read the verdict. Extract it defensively —
+        # only reached when a container ran, so the command is non-empty, but guard
+        # anyway so a reorder can never hit ``"".split()[0]``.
+        tool = r.check.command.split()[0] if r.check.command else ""
+        if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
+            if any(f.check == r.check.name for f in gate_ledger.blocking(threshold)):
+                return True
+        elif r.gate is None or not r.gate.passed:
+            return True
+    return False
 
 
 def _write_check_output(round_dir: Path, check: Check, gate: GateResult | None) -> None:
@@ -1410,7 +1485,7 @@ def develop(
             if fast_checks and new_commit is not None:
                 # Overwrite unconditionally: on a gate infra error this clears
                 # to None rather than letting a PRIOR commit's result (e.g. a
-                # stale RED under block_on_red) stand in for this commit. A
+                # stale RED) stand in for this commit. A
                 # round with no new commit keeps the prior result — the tree is
                 # unchanged, so it still describes HEAD.
                 check_set = _run_check_set(
@@ -1520,14 +1595,11 @@ def develop(
             if all(r.passed for r in round_reviews):
                 # #140/ADR §4: the approval candidate — run the expensive
                 # candidate-staged checks once on this tree before sealing approval.
-                # They are informational this slice, so they cannot block (the floor
-                # slice flips that via ``blocking_passed`` below, with no structural
-                # change here). Their results merge into ``check_set`` + the ledger +
-                # the ``[DevelopResult]``; because the run approves immediately on the
-                # common path, candidate findings reach the coder/panel only if a
-                # later round runs — which this informational slice does not trigger
-                # on its own (the floor slice will, when a RED required candidate
-                # blocks). Run once per committed tree (dedup on the sha).
+                # A *required* candidate (e.g. thorough's dep-audit) now blocks via
+                # :func:`gate_floor_blocks` below, so its findings merge into
+                # ``check_set`` + the ledger + the ``[DevelopResult]`` and, when it
+                # blocks, hold approval so a later round surfaces them to the
+                # coder/panel. Run once per committed tree (dedup on the sha).
                 if (
                     candidate_checks
                     and gated_sha is not None
@@ -1540,10 +1612,13 @@ def develop(
                     check_set = _merge_check_sets(check_set, candidate_set)
                     gate = check_set.test_gate if check_set is not None else None
                     _persist_gate_ledger(config, gate_ledger)
-                if check_set is not None and not check_set.blocking_passed:
+                # #140 floor: a *required* check blocks approval — its verdict read
+                # from the ledger severity for adapter tools, the raw exit otherwise
+                # (informational checks never block, even if RED).
+                if gate_floor_blocks(check_set, gate_ledger):
                     logger.info(
-                        "story-develop %s: round %d reviews passed but a blocking "
-                        "check is RED; continuing",
+                        "story-develop %s: round %d reviews passed but a required "
+                        "check blocks approval; continuing",
                         config.run_id,
                         round_no,
                     )
