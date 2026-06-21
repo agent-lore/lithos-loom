@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...plugin_runner import (
     PluginContractError,
-    _validate_result_schema,
+    validate_result_schema,
     write_result_atomically,
 )
 
@@ -120,7 +120,7 @@ def _is_completed_record(payload: object) -> bool:
     ):
         return False
     try:
-        _validate_result_schema(payload)
+        validate_result_schema(payload)
     except PluginContractError:
         return False
     return True

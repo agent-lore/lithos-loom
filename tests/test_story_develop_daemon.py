@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from lithos_loom.plugin_runner import _validate_result_schema
+from lithos_loom.plugin_runner import validate_result_schema
 from lithos_loom.plugins.story_develop.config import ReviewerSpec
 from lithos_loom.plugins.story_develop.daemon_io import (
     BUILTIN_REVIEWERS,
@@ -819,7 +819,7 @@ def test_build_result_payload_approved_is_succeeded(tmp_path: Path) -> None:
     assert payload["error"] is None
     assert "resume" not in payload
     assert payload["artifacts"]["conversation_log"].endswith("conversation.md")
-    _validate_result_schema(payload)
+    validate_result_schema(payload)
 
 
 def test_build_result_payload_interrupted_carries_resume(tmp_path: Path) -> None:
@@ -848,7 +848,7 @@ def test_build_result_payload_interrupted_carries_resume(tmp_path: Path) -> None
     assert resume["run_id"] == "r1"
     assert resume["coder_session"] == "sess-coder"
     assert resume["reviewer_sessions"] == {"code-quality": "sess-r"}
-    _validate_result_schema(payload)
+    validate_result_schema(payload)
 
 
 @pytest.mark.parametrize(
@@ -867,7 +867,7 @@ def test_build_result_payload_other_stops_are_failed(
     assert exit_code == EXIT_FAILED
     assert payload["status"] == "failed"
     assert payload["error"]["category"] == "agent"
-    _validate_result_schema(payload)
+    validate_result_schema(payload)
 
 
 # ── __main__ daemon-mode wiring ────────────────────────────────────────
@@ -996,7 +996,7 @@ def test_daemon_mode_happy_path_writes_result(
     payload = json.loads(result_file.read_text(encoding="utf-8"))
     assert payload["task_id"] == "t-1"
     assert payload["status"] == "succeeded"
-    _validate_result_schema(payload)
+    validate_result_schema(payload)
 
     # #88: the run's task envelope is snapshotted into the run dir at start, so
     # `lithos-loom develop` reports THIS run's title even after a later
@@ -1170,7 +1170,7 @@ def test_daemon_mode_config_rejection_writes_failed_result(
     assert payload["status"] == "failed"
     assert payload["error"]["category"] == "config"
     assert "unsupported coder tool" in payload["error"]["message"]
-    _validate_result_schema(payload)
+    validate_result_schema(payload)
 
 
 def test_daemon_mode_interrupted_run_reports_resume(
@@ -1200,4 +1200,4 @@ def test_daemon_mode_interrupted_run_reports_resume(
     payload = json.loads(result_file.read_text(encoding="utf-8"))
     assert payload["status"] == "interrupted"
     assert payload["resume"]["resume_after"] == "2026-06-12T15:00:00+00:00"
-    _validate_result_schema(payload)
+    validate_result_schema(payload)
