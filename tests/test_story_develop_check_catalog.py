@@ -158,11 +158,59 @@ def test_resolve_without_ecosystem_records_na_and_never_raises() -> None:
     assert checks[0].state == "not_applicable"
 
 
-def test_resolve_polyglot_picks_the_first_mapped_ecosystem() -> None:
-    # A check resolves against the first detected ecosystem that maps it.
+def test_resolve_single_applicable_ecosystem_keeps_bare_name() -> None:
+    # typecheck applies to python but not go: only one applicable ecosystem, so
+    # the name stays bare and resolves to that ecosystem's command.
     checks = resolve_check_set(
         [DesiredCheck("typecheck", "required")],
         ("go", "python"),  # go has no typecheck; python does
         tool_available=_always,
     )
+    assert len(checks) == 1
+    assert checks[0].name == "typecheck"
     assert checks[0].command == "pyright"
+
+
+def test_resolve_polyglot_emits_one_check_per_applicable_ecosystem() -> None:
+    # The core #133 fix: a check that applies to >1 detected ecosystem runs once
+    # per ecosystem (a polyglot repo must check every side), name-qualified.
+    checks = resolve_check_set(
+        [DesiredCheck("lint", "required")], ("python", "node"), tool_available=_always
+    )
+    by_name = {c.name: c for c in checks}
+    assert set(by_name) == {"lint.python", "lint.node"}
+    assert by_name["lint.python"].command == "ruff check"
+    assert by_name["lint.node"].command == "eslint ."
+    assert all(c.state == "required" for c in checks)
+
+
+def test_resolve_polyglot_drops_only_the_absent_optional_side() -> None:
+    # Per-ecosystem availability: ruff present, eslint absent + informational ->
+    # only the python side survives (the absent optional side is dropped).
+    def _only_ruff(tool: str) -> bool:
+        return tool == "ruff"
+
+    checks = resolve_check_set(
+        [DesiredCheck("lint", "informational")],
+        ("python", "node"),
+        tool_available=_only_ruff,
+    )
+    assert [c.name for c in checks] == ["lint.python"]
+    assert checks[0].command == "ruff check"
+
+
+def test_resolve_polyglot_required_absent_side_blocks() -> None:
+    # ruff present, eslint absent + required -> python runs; node is
+    # expected-but-absent (empty-command placeholder that blocks).
+    def _only_ruff(tool: str) -> bool:
+        return tool == "ruff"
+
+    checks = resolve_check_set(
+        [DesiredCheck("lint", "required")],
+        ("python", "node"),
+        tool_available=_only_ruff,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["lint.python"].command == "ruff check"
+    assert by_name["lint.node"].command == ""  # expected-but-absent placeholder
+    assert by_name["lint.node"].state == "required"

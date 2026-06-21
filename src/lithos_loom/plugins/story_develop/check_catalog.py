@@ -129,24 +129,26 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
 _BY_NAME: dict[str, CheckMapping] = {m.name: m for m in CANONICAL_CHECKS}
 
 
-def _mapped_command(name: str, ecosystems: Sequence[Ecosystem]) -> str | None:
-    """The command for *name* against the first detected ecosystem that maps it,
-    or ``None`` when no detected ecosystem maps the check (declared N/A)."""
+def _applicable_commands(
+    name: str, ecosystems: Sequence[Ecosystem]
+) -> list[tuple[Ecosystem, str]]:
+    """The ``(ecosystem, command)`` pairs for *name* across **every** detected
+    ecosystem that maps it, in detection order. Empty when no detected ecosystem
+    maps the check (declared N/A). A polyglot repo therefore sees one entry per
+    applicable side (e.g. ``lint`` -> ruff *and* eslint), not just the first."""
     mapping = _BY_NAME.get(name)
     if mapping is None:
-        return None
-    for eco in ecosystems:
-        cmd = mapping.commands.get(eco)
-        if cmd is not None:
-            return cmd
-    return None
+        return []
+    return [
+        (eco, mapping.commands[eco]) for eco in ecosystems if eco in mapping.commands
+    ]
 
 
 def applies(name: str, ecosystems: Sequence[Ecosystem]) -> bool:
     """Whether the canonical check *name* applies to at least one detected
     ecosystem. ``applies(name, ())`` is always ``False`` — a markerless repo
     declares every check N/A."""
-    return _mapped_command(name, ecosystems) is not None
+    return bool(_applicable_commands(name, ecosystems))
 
 
 def resolve_check_set(
@@ -158,9 +160,13 @@ def resolve_check_set(
     """Resolve a *desired* check-set into concrete checks for *ecosystems*.
 
     ``tool_available(tool)`` reports whether a command's tool is runnable in the
-    image (injected — probe once at the call site, never here). Raises
-    :class:`CheckApplicabilityError` for a required check unsupported by the
-    detected ecosystem(s). See the module docstring for the full classification.
+    image (injected — probe once at the call site, never here). A check that
+    applies to **multiple** detected ecosystems is emitted **once per ecosystem**
+    (so a polyglot repo checks every side), with the name qualified
+    ``<check>.<ecosystem>``; a single applicable ecosystem keeps the bare name.
+    Raises :class:`CheckApplicabilityError` for a required check unsupported by
+    **any** detected ecosystem. See the module docstring for the full
+    classification.
     """
     if not ecosystems:
         # Markerless / docs-only repo: every check is declared N/A — never an
@@ -169,8 +175,8 @@ def resolve_check_set(
 
     resolved: list[Check] = []
     for d in desired:
-        command = _mapped_command(d.name, ecosystems)
-        if command is None:
+        applicable = _applicable_commands(d.name, ecosystems)
+        if not applicable:
             if d.state == "required":
                 raise CheckApplicabilityError(
                     f"check {d.name!r} is required but has no command for "
@@ -179,12 +185,18 @@ def resolve_check_set(
                 )
             resolved.append(Check(d.name, "", "not_applicable"))
             continue
-        if tool_available(command.split()[0]):
-            resolved.append(Check(d.name, command, d.state))
-        elif d.state == "required":
-            # Expected-but-absent: applies to the ecosystem, but its tool is
-            # missing — a blocking placeholder (the runner records it `absent`).
-            resolved.append(Check(d.name, "", "required"))
-        # else: optional/informational tool-absent -> fine, dropped (not run,
-        # not recorded N/A — the tool simply isn't installed).
+        # Qualify the name only when the check spans >1 ecosystem, so the common
+        # single-ecosystem case stays the bare ``test`` / ``lint``. ``.`` (not
+        # ``:``) keeps the name safe in container names + output filenames.
+        qualify = len(applicable) > 1
+        for eco, command in applicable:
+            check_name = f"{d.name}.{eco}" if qualify else d.name
+            if tool_available(command.split()[0]):
+                resolved.append(Check(check_name, command, d.state))
+            elif d.state == "required":
+                # Expected-but-absent: applies, but its tool is missing — a
+                # blocking placeholder (the runner records it `absent`).
+                resolved.append(Check(check_name, "", "required"))
+            # else: optional/informational tool-absent -> dropped (the tool is
+            # simply not installed; not a declared N/A).
     return tuple(resolved)
