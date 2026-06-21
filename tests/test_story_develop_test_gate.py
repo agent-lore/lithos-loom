@@ -173,3 +173,27 @@ def test_export_tree_exports_commit_content_only(
 def test_export_tree_bad_sha_raises(tmp_git_repo: Path, tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="git archive"):
         export_tree(tmp_git_repo, "0" * 40, tmp_path / "tree")
+
+
+# --- #132: full_output retained for parsing, output_tail still capped ----------
+
+
+class _Proc:
+    def __init__(self, stdout: str, stderr: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def test_run_gate_container_keeps_full_output_and_caps_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = test_gate_mod.OUTPUT_TAIL_CHARS
+    body = "x" * (cap + 500)
+    monkeypatch.setattr(
+        test_gate_mod.subprocess, "run", lambda *a, **k: _Proc(body, returncode=0)
+    )
+    res = run_gate_container(["docker"], name="n", command="ruff", timeout=10)
+    assert res.full_output == body  # full, untruncated — what the adapter parses
+    assert len(res.output_tail) == cap  # display tail stays capped
+    assert res.passed is True

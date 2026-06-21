@@ -21,6 +21,7 @@ from lithos_loom.plugins.story_develop.check_set import (
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import build_default_check_set
+from lithos_loom.plugins.story_develop.gate_findings import GateFinding, GateLedger
 from lithos_loom.plugins.story_develop.test_gate import GateResult
 
 
@@ -303,6 +304,8 @@ def test_required_test_absent_blocks_when_ecosystem_detected(
     # runnable test command -> expected-but-absent placeholder that blocks.
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
+    # isolate the test check; the live lint check is exercised separately below.
+    monkeypatch.setattr(develop_mod, "_build_lint_checks", lambda config, wt: [])
     checks = build_default_check_set(_config(tmp_path, block_on_red=True), tmp_path)
     assert checks == (Check(name="test", command="", state="required"),)
 
@@ -314,3 +317,154 @@ def test_markerless_repo_yields_no_gate_even_when_required(
     # gate with no command is simply empty rather than a blocking absent check.
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
     assert build_default_check_set(_config(tmp_path, block_on_red=True), tmp_path) == ()
+
+
+# --- #132 Slice 3: gate-ledger surfacing in render_check_summary ---------------
+
+
+def _ledger_with(check: str, rule: str = "E501", severity: str = "major") -> GateLedger:
+    led = GateLedger()
+    led.apply_round(
+        check,
+        [
+            GateFinding(
+                check=check,
+                tool="ruff",
+                rule=rule,
+                severity=severity,
+                message=f"{rule} msg",
+                file="a.py",
+                line=3,
+            )
+        ],
+        1,
+    )
+    return led
+
+
+def test_summary_coder_renders_gate_findings_from_ledger() -> None:
+    cs = _cs(CheckResult(Check("lint", "ruff …", "informational"), "ran", _green()))
+    out = render_check_summary(cs, for_coder=True, gate_ledger=_ledger_with("lint"))
+    assert "## Independent lint gate findings" in out
+    assert "gate/lint-001 (major): E501 [a.py:3] E501 msg" in out
+
+
+def test_summary_reviewer_renders_gate_findings_from_ledger() -> None:
+    cs = _cs(CheckResult(Check("lint", "ruff …", "informational"), "ran", _green()))
+    out = render_check_summary(cs, for_coder=False, gate_ledger=_ledger_with("lint"))
+    assert "`lint` deterministic findings:" in out
+    assert "gate/lint-001 (major): E501 [a.py:3] E501 msg" in out
+
+
+def test_summary_coder_keeps_raw_tail_for_checks_without_findings() -> None:
+    # The `test` check has no adapter -> no ledger findings -> raw-tail behaviour.
+    cs = _cs(CheckResult(Check("test", "pytest", "required"), "ran", _red()))
+    out = render_check_summary(cs, for_coder=True, gate_ledger=GateLedger())
+    assert "## Independent test gate (FAILED)" in out
+    assert "boom" in out
+
+
+# --- #132 Slice 3: live lint activation in build_default_check_set -------------
+
+
+def test_build_default_adds_informational_ruff_lint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(
+        develop_mod.detection, "detect_ecosystems", lambda wt: ("python",)
+    )
+    monkeypatch.setattr(
+        develop_mod.test_gate, "probe_tools", lambda image, tools: list(tools)
+    )
+    checks = build_default_check_set(_config(tmp_path), tmp_path)
+    by_name = {c.name: c for c in checks}
+    assert by_name["test"].command == "pytest"
+    assert by_name["lint"].state == "informational"
+    assert by_name["lint"].command == "ruff check --output-format=json --exit-zero"
+
+
+def test_build_default_no_lint_without_an_ecosystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(develop_mod.detection, "detect_ecosystems", lambda wt: ())
+    checks = build_default_check_set(_config(tmp_path), tmp_path)
+    assert [c.name for c in checks] == ["test"]
+
+
+# --- #132 Slice 3: _run_check_set ledgers findings + persistence ---------------
+
+_RUFF_ONE = '[{"code":"E501","filename":"a.py","location":{"row":3},"message":"long"}]'
+
+
+def _fake_export(wt: object, sha: object, dest: Path) -> None:
+    Path(dest).mkdir(parents=True, exist_ok=True)
+
+
+def test_run_check_set_ledgers_findings_and_drops_full_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(develop_mod.test_gate, "export_tree", _fake_export)
+    monkeypatch.setattr(
+        develop_mod.test_gate,
+        "run_gate_container",
+        lambda gate_cmd, *, name, command, timeout: GateResult(
+            command=command,
+            exit_code=0,
+            passed=True,
+            output_tail="t",
+            full_output=_RUFF_ONE,
+        ),
+    )
+    led = GateLedger()
+    lint = Check("lint", "ruff check --output-format=json --exit-zero", "informational")
+    cs = develop_mod._run_check_set(_config(tmp_path), tmp_path, "sha", 1, (lint,), led)
+    assert [f.rule for f in led.open_findings()] == ["E501"]
+    assert led.open_findings()[0].finding_id == "gate/lint-001"
+    assert cs is not None
+    assert cs.results[0].gate is not None
+    assert cs.results[0].gate.full_output == ""  # consumed + dropped
+    assert cs.results[0].gate.output_tail == "t"
+
+
+def test_run_check_set_closes_lint_finding_on_clean_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(develop_mod.test_gate, "export_tree", _fake_export)
+    outputs = iter([_RUFF_ONE, "[]"])
+    monkeypatch.setattr(
+        develop_mod.test_gate,
+        "run_gate_container",
+        lambda gate_cmd, *, name, command, timeout: GateResult(
+            command=command,
+            exit_code=0,
+            passed=True,
+            output_tail="t",
+            full_output=next(outputs),
+        ),
+    )
+    led = GateLedger()
+    lint = Check("lint", "ruff check --output-format=json --exit-zero", "informational")
+    develop_mod._run_check_set(_config(tmp_path), tmp_path, "s1", 1, (lint,), led)
+    develop_mod._run_check_set(_config(tmp_path), tmp_path, "s2", 2, (lint,), led)
+    assert led.open_findings() == []  # gone on the clean re-run -> closed
+    assert led.all_findings()[0].status == "fixed"
+
+
+def test_gate_ledger_persists_and_reloads(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    led = GateLedger()
+    led.apply_round(
+        "lint",
+        [
+            GateFinding(
+                check="lint", tool="ruff", rule="E501", severity="major", message="x"
+            )
+        ],
+        1,
+    )
+    develop_mod._persist_gate_ledger(cfg, led)
+    assert develop_mod._gate_ledger_path(cfg).is_file()
+    reloaded = develop_mod._load_gate_ledger(cfg)
+    assert [f.finding_id for f in reloaded.all_findings()] == ["gate/lint-001"]

@@ -517,7 +517,7 @@ should be a deliberate choice, not the default first increment.
 | | per-ecosystem check mappings + ecosystem-applicability validation — **✅ #133: `detect_ecosystems` + the per-ecosystem `CANONICAL_CHECKS` catalog + `resolve_check_set` (declared-N/A vs expected-but-absent; required-unmapped → operator-actionable error); the live `test` check now blocks when expected-but-absent rather than silently skipping. Profile selection over the resolver is #139; the first-class finding ledger is #132** | |
 | | auto-format-before-review pass | |
 | | bake ruff/bandit/pip-audit into `ralph-sandbox` + cache | [#116] |
-| | deterministic-finding ledger (IDs, severity-map, tool-closure, suppression) | |
+| | deterministic-finding ledger (IDs, severity-map, tool-closure, suppression) — **✅ #132: `GateFinding` + `GateLedger` (stable `gate/<check>-NNN`, fingerprint identity, closure-by-rerun, gate-owned, suppression modelled) + ruff/bandit/pip-audit adapters + severity tables; wired live via an informational `lint` check, surfaced to coder/reviewer prompts + `[DevelopResult]`. Required-floor blocking + non-`test` set membership is #139** | |
 | | aggregate gate → coder note + reviewer-prompt injection + diff-stat | |
 | 3 — panel | canonical personas + tightened `system_prompt`s; `reviewer_round.md` discipline | |
 | | architecture/delta reviewer sees `base..HEAD` | |

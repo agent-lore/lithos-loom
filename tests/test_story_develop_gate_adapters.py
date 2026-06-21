@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from lithos_loom.plugins.story_develop.gate_adapters import (
     SUPPORTED_TOOLS,
+    machine_command,
     parse_findings,
 )
 
@@ -118,3 +119,22 @@ def test_empty_and_malformed_output_yield_no_findings() -> None:
 
 def test_supported_tools_are_the_three_shipped() -> None:
     assert {"ruff", "bandit", "pip-audit"} == SUPPORTED_TOOLS
+
+
+# --- machine_command: the JSON + don't-fail-on-findings invocation ------------
+
+
+def test_machine_command_ruff_adds_json_and_exit_zero() -> None:
+    assert (
+        machine_command("ruff", "ruff check")
+        == "ruff check --output-format=json --exit-zero"
+    )
+
+
+def test_machine_command_bandit_and_pip_audit() -> None:
+    assert machine_command("bandit", "bandit -r .") == "bandit -r . -f json --exit-zero"
+    assert machine_command("pip-audit", "pip-audit") == "pip-audit --format=json"
+
+
+def test_machine_command_unknown_tool_is_unchanged() -> None:
+    assert machine_command("eslint", "eslint .") == "eslint ."

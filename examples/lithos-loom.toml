@@ -72,6 +72,9 @@ name = "story-develop"
 # (Python/Node/Rust/Go); a code repo whose ecosystem expects tests but has no
 # runnable command is "expected-but-absent" and a required gate blocks rather
 # than silently passing — a markerless/docs-only repo declares it N/A (#133).
+# On Python repos with ruff present, an informational `lint` check also runs and
+# its findings are structured into a stable gate/<check>-NNN ledger surfaced to
+# the panel + [DevelopResult] (non-blocking; #132).
 # See docs/SPECIFICATION.md §5.5 for the keys + resolution precedence.
 # Add --open-pr to push + open a PR (and run the Copilot review round) on
 # approval. The --coder-model/--coder-effort/--reviewer-model/--reviewer-effort

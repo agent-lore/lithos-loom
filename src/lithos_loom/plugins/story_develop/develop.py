@@ -42,7 +42,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ...runner import detection, git, worktree
-from . import check_catalog, containers, handoff, limits, test_gate
+from . import check_catalog, containers, gate_adapters, handoff, limits, test_gate
 from .check_set import (
     Check,
     CheckResult,
@@ -58,6 +58,7 @@ from .config import (
     is_valid_reviewer_name,
 )
 from .findings import FindingLedger
+from .gate_findings import GateFinding, GateLedger
 from .handoff import Finding, HandoffError, ReviewHandoff
 from .test_gate import GateResult
 from .turns import TurnResult, run_turn
@@ -103,6 +104,8 @@ class DevelopResult:
     # the coder's session id — the PR-delivery Copilot round resumes it (T9)
     coder_session: str = ""
     test_gate: GateResult | None = None  # the latest round's gate (T4)
+    # the latest round's open deterministic gate findings (#132)
+    gate_findings: tuple[GateFinding, ...] = ()
     conversation_log: Path | None = None
     # when an INTERRUPTED run is worth retrying: the provider's parsed reset
     # time, or now + a fixed delay when no hint was parseable (T10 — the
@@ -341,15 +344,56 @@ def build_default_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...
     """
     if not config.test_gate:
         return ()
+    checks: list[Check] = []
     command = _resolve_test_command(config, wt)
     state = "required" if config.block_on_red else "informational"
     if command is not None:
-        return (Check(name="test", command=command, state=state),)
-    if state == "required" and check_catalog.applies(
+        checks.append(Check(name="test", command=command, state=state))
+    elif state == "required" and check_catalog.applies(
         "test", detection.detect_ecosystems(wt)
     ):
-        return (Check(name="test", command="", state="required"),)
-    return ()
+        checks.append(Check(name="test", command="", state="required"))
+    # #132: a live informational lint check (ruff) exercises the deterministic-
+    # finding ledger end-to-end; #139 governs the full per-profile check-set.
+    checks.extend(_build_lint_checks(config, wt))
+    return tuple(checks)
+
+
+def _build_lint_checks(config: DevelopConfig, wt: Path) -> list[Check]:
+    """Informational ``lint`` check(s) for the detected ecosystem(s), gated on a
+    structured-finding-capable tool being present in the image (#132).
+
+    Resolves the ecosystem's lint command via :func:`check_catalog.resolve_check_set`,
+    keeps only tools with a finding adapter (Slice 3: ruff), probes the image, and
+    machine-ifies the command (ruff -> ``--output-format=json --exit-zero``). The
+    check is **informational** — its findings are surfaced + ledgered, never
+    blocking; a *required* floor is #139's policy. Empty for non-Python / no-ruff.
+    """
+    ecosystems = detection.detect_ecosystems(wt)
+    if not ecosystems:
+        return []
+    candidate = [
+        c
+        for c in check_catalog.resolve_check_set(
+            [check_catalog.DesiredCheck("lint", "informational")],
+            ecosystems,
+            tool_available=lambda _t: True,
+        )
+        if c.command and c.command.split()[0] in gate_adapters.SUPPORTED_TOOLS
+    ]
+    if not candidate:
+        return []
+    available = set(
+        test_gate.probe_tools(config.image, [c.command.split()[0] for c in candidate])
+    )
+    return [
+        replace(
+            c,
+            command=gate_adapters.machine_command(c.command.split()[0], c.command),
+        )
+        for c in candidate
+        if c.command.split()[0] in available
+    ]
 
 
 def _write_check_output(round_dir: Path, check: Check, gate: GateResult | None) -> None:
@@ -372,6 +416,7 @@ def _run_check_set(
     sha: str,
     round_no: int,
     checks: tuple[Check, ...],
+    gate_ledger: GateLedger | None = None,
 ) -> CheckSetResult | None:
     """Run an ordered check-set against one round commit.
 
@@ -382,6 +427,11 @@ def _run_check_set(
     set, and a per-check run failure yields a ``CheckResult`` with
     ``execution_outcome="errored"`` and ``gate=None``. Returns ``None`` when
     there are no checks.
+
+    #132: a finding-producing check (one whose tool has an adapter) has its full
+    output parsed into *gate_ledger* (``apply_round`` per check that ran, so a
+    green re-run closes its prior findings); the full output is then dropped so it
+    never propagates into the result.
     """
     if not checks:
         return None
@@ -435,6 +485,16 @@ def _run_check_set(
             gate = None
         _write_check_output(round_dir, check, gate)
         if gate is not None:
+            # #132: structure a finding-producing check's output into the ledger,
+            # then drop the full output so it never propagates into the result.
+            tool = check.command.split()[0] if check.command else ""
+            if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
+                gate_ledger.apply_round(
+                    check.name,
+                    gate_adapters.parse_findings(check.name, tool, gate.full_output),
+                    round_no,
+                )
+            gate = replace(gate, full_output="")
             logger.info(
                 "story-develop %s: round %d %s check %s (`%s`, exit %d)",
                 config.run_id,
@@ -450,6 +510,41 @@ def _run_check_set(
             )
         )
     return CheckSetResult(results=tuple(results))
+
+
+def _gate_ledger_path(config: DevelopConfig) -> Path:
+    return config.gate_dir / "gate_ledger.json"
+
+
+def _load_gate_ledger(config: DevelopConfig) -> GateLedger:
+    """The run's deterministic-finding ledger (#132) — reloaded from disk on a
+    resume (a re-dispatched run reuses ``gate_dir``), else a fresh ledger."""
+    path = _gate_ledger_path(config)
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return GateLedger.from_jsonable(data)
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.warning(
+                "story-develop %s: gate ledger reload failed; starting fresh",
+                config.run_id,
+            )
+    return GateLedger()
+
+
+def _persist_gate_ledger(config: DevelopConfig, ledger: GateLedger) -> None:
+    """Write the gate ledger so closure survives across rounds + a resume.
+    Best-effort: a write failure must not fail the run."""
+    path = _gate_ledger_path(config)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(ledger.to_jsonable(), indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning(
+            "story-develop %s: gate ledger persist failed: %s", config.run_id, exc
+        )
 
 
 # --- usage-limit reaction (T5) ----------------------------------------------
@@ -1066,6 +1161,7 @@ def develop(
     gate: GateResult | None = None
     check_set: CheckSetResult | None = None
     checks = build_default_check_set(config, wt)
+    gate_ledger = _load_gate_ledger(config)  # #132: one per run; survives resume
     rounds_completed = 0
     coder_cost = 0.0
     review_cost = 0.0
@@ -1115,7 +1211,9 @@ def develop(
                     round_no=str(round_no),
                     acceptance_criteria=config.effective_acceptance_criteria,
                     findings=_render_panel_findings(final_reviews),
-                    gate_summary=render_check_summary(check_set, for_coder=True),
+                    gate_summary=render_check_summary(
+                        check_set, for_coder=True, gate_ledger=gate_ledger
+                    ),
                     review_files=review_files,
                     handoff_file=handoff.coder_handoff_name(round_no),
                 )
@@ -1238,8 +1336,11 @@ def develop(
                 # stale RED under block_on_red) stand in for this commit. A
                 # round with no new commit keeps the prior result — the tree is
                 # unchanged, so it still describes HEAD.
-                check_set = _run_check_set(config, wt, new_commit, round_no, checks)
+                check_set = _run_check_set(
+                    config, wt, new_commit, round_no, checks, gate_ledger
+                )
                 gate = check_set.test_gate if check_set is not None else None
+                _persist_gate_ledger(config, gate_ledger)
 
             # --- reviewer turns (panel order, sequential) -------------------
             round_reviews: list[ReviewOutcome] = []
@@ -1256,7 +1357,9 @@ def develop(
                         coder_summary=_coder_summary(config, 1),
                         base_sha=base[:12],
                         diff_stat=git.diff_stat(wt, base),
-                        gate_summary=render_check_summary(check_set, for_coder=False),
+                        gate_summary=render_check_summary(
+                            check_set, for_coder=False, gate_ledger=gate_ledger
+                        ),
                         severity_calibration=SEVERITY_CALIBRATION,
                         review_file=handoff.reviewer_handoff_name(1, name),
                     )
@@ -1272,7 +1375,9 @@ def develop(
                         coder_handoff_file=handoff.coder_handoff_name(round_no),
                         open_findings=rstate.ledger.render_open(),
                         diff_stat=git.diff_stat(wt, base),
-                        gate_summary=render_check_summary(check_set, for_coder=False),
+                        gate_summary=render_check_summary(
+                            check_set, for_coder=False, gate_ledger=gate_ledger
+                        ),
                         severity_calibration=SEVERITY_CALIBRATION,
                         review_file=handoff.reviewer_handoff_name(round_no, name),
                     )
@@ -1502,6 +1607,7 @@ def develop(
         reviews=tuple(final_reviews),
         coder_session=coder_session,
         test_gate=gate,
+        gate_findings=tuple(gate_ledger.open_findings()),
         conversation_log=log_path,
         resume_after=resume_after,
     )

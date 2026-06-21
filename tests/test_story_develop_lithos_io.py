@@ -14,6 +14,7 @@ import pytest
 from lithos_loom.lithos_client import Task
 from lithos_loom.plugins.story_develop import lithos_io
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
+from lithos_loom.plugins.story_develop.gate_findings import GateFinding
 from lithos_loom.plugins.story_develop.handoff import Finding
 
 
@@ -166,6 +167,27 @@ def test_post_results_finding_and_metadata(fake_client) -> None:
     assert meta["develop_status"] == "approved"
     assert meta["develop_branch"] == "my-branch"
     assert meta["develop_cost_usd"] == 0.75
+
+
+def test_post_results_includes_deterministic_findings(fake_client) -> None:
+    result = _result(
+        gate_findings=(
+            GateFinding(
+                check="lint",
+                tool="ruff",
+                rule="E501",
+                severity="major",
+                message="line too long",
+                file="a.py",
+                line=5,
+                finding_id="gate/lint-001",
+            ),
+        )
+    )
+    lithos_io.post_results("http://x", "task-1", result)
+    body = fake_client.findings[0]
+    assert "deterministic findings at exit:" in body
+    assert "gate/lint-001 (major): E501 [a.py] line too long" in body
 
 
 def test_post_results_with_delivery_corrects_cost_and_reports_round(

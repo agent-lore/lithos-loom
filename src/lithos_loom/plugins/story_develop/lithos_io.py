@@ -127,6 +127,15 @@ def _result_summary(result: DevelopResult) -> str:
             "",
             f"test gate: {result.test_gate.verdict} (`{result.test_gate.command}`)",
         ]
+    if result.gate_findings:
+        det_lines: list[str] = []
+        for f in result.gate_findings:
+            locus = f.file or f.package
+            loc = f" [{locus}]" if locus else ""
+            det_lines.append(
+                f"- {f.finding_id} ({f.severity}): {f.rule}{loc} {f.message}"
+            )
+        lines += ["", "deterministic findings at exit:", *det_lines]
     return "\n".join(lines)
 
 

@@ -33,6 +33,25 @@ _BANDIT_SEVERITY: dict[str, str] = {
 # (critical for high CVSS) is a follow-up once pip-audit surfaces scores.
 _PIP_AUDIT_SEVERITY = "major"
 
+# --- machine-invocation flags (JSON output + don't-fail-on-findings) ----------
+
+# A finding-producing check runs in JSON mode so its output is parseable, and in
+# a "don't fail on findings" mode where available so its exit code stays GREEN —
+# blocking is the ledger's severity call (ADR §5), not the tool's exit code.
+_MACHINE_FLAGS: dict[str, str] = {
+    "ruff": "--output-format=json --exit-zero",
+    "bandit": "-f json --exit-zero",
+    "pip-audit": "--format=json",
+}
+
+
+def machine_command(tool: str, base: str) -> str:
+    """The machine (JSON) invocation of *base* for *tool*, or *base* unchanged
+    for a tool with no adapter. E.g. ``ruff check`` ->
+    ``ruff check --output-format=json --exit-zero``."""
+    flags = _MACHINE_FLAGS.get(tool)
+    return f"{base} {flags}" if flags else base
+
 
 def _ruff_severity(code: str) -> str:
     """ruff has no severity axis; ``W`` (warning) rules are minor, the rest major."""
