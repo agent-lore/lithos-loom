@@ -16,6 +16,7 @@ from lithos_loom.plugins.story_develop.check_set import (
     Check,
     CheckResult,
     CheckSetResult,
+    CheckState,
     classify_execution,
     render_check_summary,
 )
@@ -158,6 +159,145 @@ def test_errored_test_check_clears_the_gate_view() -> None:
     assert cs.aggregate_verdict is None  # no check produced a verdict
 
 
+# --- gate_floor_blocks: the #140 ledger-aware required-check floor -------------
+# The approval gate reads a REQUIRED check's blocking verdict from the finding
+# ledger's mapped severity (ADR §5/#159) for adapter-backed tools, and from the
+# raw exit code for tools with no adapter. Only `required` checks count; an
+# informational check (e.g. `sast` on `standard`) never blocks, even though its
+# findings share the ledger.
+
+
+def _ran(name: str, command: str, state: CheckState, gate: GateResult) -> CheckResult:
+    return CheckResult(Check(name, command, state), "ran", gate)
+
+
+def test_floor_required_adapter_check_blocks_on_major_ledger_finding() -> None:
+    # ruff (adapter) exited GREEN this round, yet the ledger carries a MAJOR `lint`
+    # finding -> the floor reads the ledger severity, NOT the exit code, and blocks.
+    cs = CheckSetResult(
+        (_ran("lint", "ruff check --output-format=json", "required", _green()),)
+    )
+    assert (
+        develop_mod.gate_floor_blocks(cs, _ledger_with("lint", severity="major"))
+        is True
+    )
+
+
+def test_floor_informational_sast_major_finding_does_not_block() -> None:
+    # THE central Option-A regression guard: bandit (`sast`) is INFORMATIONAL on
+    # `standard`; its MAJOR finding lands in the SHARED ledger, but the floor counts
+    # ledger findings ONLY for REQUIRED checks, so it must NOT block the default.
+    cs = CheckSetResult(
+        (
+            _ran("lint", "ruff check --output-format=json", "required", _green()),
+            _ran("sast", "bandit -r . -f json", "informational", _green()),
+        )
+    )
+    led = GateLedger()
+    led.apply_round(
+        "sast",
+        [
+            GateFinding(
+                check="sast",
+                tool="bandit",
+                rule="B602",
+                severity="major",
+                message="shell",
+            )
+        ],
+        1,
+    )
+    assert develop_mod.gate_floor_blocks(cs, led) is False
+
+
+def test_floor_required_no_adapter_check_reads_raw_exit() -> None:
+    # pyright has no adapter -> blocking reads the raw exit code.
+    red = CheckSetResult((_ran("typecheck", "pyright", "required", _red()),))
+    green = CheckSetResult((_ran("typecheck", "pyright", "required", _green()),))
+    assert develop_mod.gate_floor_blocks(red, None) is True
+    assert develop_mod.gate_floor_blocks(green, None) is False
+
+
+def test_floor_required_absent_check_blocks_without_indexerror() -> None:
+    # An expected-but-absent required check has an EMPTY command (no container ran).
+    # The floor must block it and must not crash on "".split()[0].
+    cs = CheckSetResult(
+        (CheckResult(Check("typecheck", "", "required"), "absent", None),)
+    )
+    assert develop_mod.gate_floor_blocks(cs, GateLedger()) is True
+
+
+def test_floor_required_adapter_timeout_blocks_with_empty_ledger() -> None:
+    # The essential branch: an ADAPTER check (ruff) that TIMED OUT produced no
+    # findings, so the ledger is empty. It must still block via the timed_out branch,
+    # not fall through to the adapter rule's "no findings -> pass".
+    cs = CheckSetResult(
+        (
+            CheckResult(
+                Check("lint", "ruff check --output-format=json", "required"),
+                "timed_out",
+                _timeout(),
+            ),
+        )
+    )
+    assert develop_mod.gate_floor_blocks(cs, GateLedger()) is True
+
+
+def test_floor_required_no_adapter_timeout_blocks() -> None:
+    cs = CheckSetResult(
+        (CheckResult(Check("test", "pytest", "required"), "timed_out", _timeout()),)
+    )
+    assert develop_mod.gate_floor_blocks(cs, None) is True
+
+
+def test_floor_errored_and_na_never_block() -> None:
+    errored = CheckSetResult(
+        (CheckResult(Check("test", "pytest", "required"), "errored", None),)
+    )
+    na = CheckSetResult(
+        (CheckResult(Check("dep-audit", "", "not_applicable"), "n_a", None),)
+    )
+    assert develop_mod.gate_floor_blocks(errored, None) is False
+    assert develop_mod.gate_floor_blocks(na, None) is False
+
+
+def test_floor_informational_red_never_blocks() -> None:
+    adapter = CheckSetResult(
+        (_ran("lint", "ruff check --output-format=json", "informational", _red()),)
+    )
+    no_adapter = CheckSetResult((_ran("semgrep", "semgrep", "informational", _red()),))
+    assert develop_mod.gate_floor_blocks(adapter, GateLedger()) is False
+    assert develop_mod.gate_floor_blocks(no_adapter, None) is False
+
+
+def test_floor_none_check_set_never_blocks() -> None:
+    assert develop_mod.gate_floor_blocks(None, GateLedger()) is False
+    assert develop_mod.gate_floor_blocks(None, None) is False
+
+
+def test_floor_minor_finding_below_threshold_does_not_block() -> None:
+    # A required adapter check whose only ledger finding is MINOR -> at the default
+    # `major` threshold it is surfaced, not blocking (ruff `W` rules map to minor).
+    cs = CheckSetResult(
+        (_ran("lint", "ruff check --output-format=json", "required", _red()),)
+    )
+    assert (
+        develop_mod.gate_floor_blocks(cs, _ledger_with("lint", severity="minor"))
+        is False
+    )
+
+
+def test_floor_single_required_test_matches_blocking_passed() -> None:
+    # Compatibility guard: for the legacy single-`test` set (no adapter, no ledger),
+    # gate_floor_blocks must be exactly the negation of blocking_passed.
+    for gate in (_green(), _red(), _timeout()):
+        outcome = "timed_out" if gate.exit_code == 124 else "ran"
+        cs = CheckSetResult(
+            (CheckResult(Check("test", "pytest", "required"), outcome, gate),)
+        )
+        assert develop_mod.gate_floor_blocks(cs, None) is (not cs.blocking_passed)
+
+
 # --- build_check_set: profile-selected set, informational-first (#140) --------
 
 
@@ -225,7 +365,7 @@ def test_test_gate_false_drops_test_check_but_keeps_the_informational_set(
     )
     monkeypatch.setattr(develop_mod, "_resolve_test_command", _boom)
     monkeypatch.setattr(
-        develop_mod, "_build_informational_checks", lambda config, profile, eco: [lint]
+        develop_mod, "_build_profile_checks", lambda config, profile, eco: [lint]
     )
     checks = build_check_set(_config(tmp_path, test_gate=False), tmp_path)
     assert checks == (lint,)
@@ -347,9 +487,9 @@ def test_required_test_absent_blocks_when_ecosystem_detected(
     # runnable test command -> expected-but-absent placeholder that blocks.
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
-    # isolate the test check; the informational set is exercised separately below.
+    # isolate the test check; the profile check-set is exercised separately below.
     monkeypatch.setattr(
-        develop_mod, "_build_informational_checks", lambda config, profile, eco: []
+        develop_mod, "_build_profile_checks", lambda config, profile, eco: []
     )
     checks = build_check_set(_config(tmp_path, block_on_red=True), tmp_path)
     assert checks == (Check(name="test", command="", state="required"),)
@@ -412,11 +552,13 @@ def test_summary_coder_keeps_raw_tail_for_checks_without_findings() -> None:
 # --- #140: the profile selects the informational check-set --------------------
 
 
-def test_standard_profile_adds_informational_typecheck_and_sast(
+def test_standard_profile_requires_lint_typecheck_surfaces_sast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # `standard` (the default) brings lint + typecheck + sast alongside test, all
-    # informational this slice. Finding-producing tools (ruff/bandit) are
+    # #140 floor slice (Option A): `standard` brings lint + typecheck + sast
+    # alongside test. lint/typecheck are now REQUIRED (they block — exactly what
+    # `make check` already enforces), while sast (bandit) stays INFORMATIONAL
+    # (surfaced, not blocking the default). Finding-producing tools (ruff/bandit) are
     # machine-ified for the ledger; a no-adapter tool (pyright) runs as-is.
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
     _python(monkeypatch)
@@ -426,9 +568,9 @@ def test_standard_profile_adds_informational_typecheck_and_sast(
     assert by_name["lint"].command == "ruff check --output-format=json --exit-zero"
     assert by_name["sast"].command == "bandit -r . -f json --exit-zero"
     assert by_name["typecheck"].command == "pyright"  # no adapter -> run as-is
-    assert all(
-        by_name[n].state == "informational" for n in ("lint", "typecheck", "sast")
-    )
+    assert by_name["lint"].state == "required"
+    assert by_name["typecheck"].state == "required"
+    assert by_name["sast"].state == "informational"
     # `format` is declared by the profile but its live pass is #134 -> not run.
     assert "format" not in by_name
     assert all(c.stage == "fast" for c in checks)
@@ -458,15 +600,22 @@ def test_thorough_profile_stages_the_expensive_checks_as_candidate(
     assert stage["test"] == "fast"
 
 
-def test_absent_tool_is_dropped_from_the_informational_set(
+def test_required_absent_tool_blocks_informational_absent_drops(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Only ruff present in the image -> typecheck/sast drop. An informational
-    # absent check is a silent skip this slice, not a blocking placeholder.
+    # #140 floor: with only ruff present in the image, the REQUIRED `typecheck`
+    # (pyright) is absent -> a blocking expected-but-absent placeholder (empty
+    # command, state required), while the INFORMATIONAL `sast` (bandit) absent stays
+    # a silent drop. The required floor is no longer silently weakened by a missing
+    # tool — it becomes an actionable block.
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
     _python(monkeypatch, present=("ruff",))
     checks = build_check_set(_config(tmp_path), tmp_path)
-    assert {c.name for c in checks} == {"lint", "test"}
+    by_name = {c.name: c for c in checks}
+    assert {c.name for c in checks} == {"lint", "typecheck", "test"}
+    assert by_name["typecheck"].command == ""  # expected-but-absent placeholder
+    assert by_name["typecheck"].state == "required"
+    assert "sast" not in by_name  # informational absent -> dropped
 
 
 def test_no_informational_checks_without_an_ecosystem(

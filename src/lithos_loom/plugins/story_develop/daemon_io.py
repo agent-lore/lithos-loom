@@ -660,15 +660,16 @@ def profile_panel(
     block threshold, effort, one-dimension system prompt baked in). A name missing
     from the registry is skipped with a friction (defensive — the canonical profiles
     only name the five known personas). A profile with no personas (``minimal``)
-    returns ``None`` + a friction: gate-only is unsafe until the deterministic floor
-    blocks (#140 floor slice), so the caller runs the built-in reviewer until then.
+    returns ``None`` + a friction: the deterministic floor now blocks (the floor slice
+    shipped), but wiring a true zero-reviewer gate-only panel is the #140 overrides
+    slice, so the caller still runs the built-in reviewer until then.
     """
     profile = get_profile(profile_name)
     if not profile.personas:
         frictions.append(
-            f"review profile {profile_name!r} is gate-only (no panel), but the "
-            "deterministic floor is not yet enforced (#140 floor slice); running the "
-            "built-in reviewer until then"
+            f"review profile {profile_name!r} is gate-only (no panel); a true "
+            "zero-reviewer panel is wired in the #140 overrides slice, so the "
+            "built-in reviewer runs until then"
         )
         return None
     registry = canonical_personas()

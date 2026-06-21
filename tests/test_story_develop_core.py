@@ -767,6 +767,91 @@ def test_candidate_checks_run_only_on_the_approval_candidate(
     assert candidate_calls == [(2, ("dep-audit",))]  # approval candidate only
 
 
+def test_required_adapter_red_exit_without_findings_does_not_block(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#140 floor: a *required* adapter check (ruff `lint`) that exits non-zero but
+    produced NO blocking ledger finding must NOT block approval — the floor reads the
+    finding ledger's severity, not the raw exit code, for finding-producing tools
+    (ADR §5/#132 finding-2). Under the old ``blocking_passed`` (exit-driven) the LGTM
+    round would be held back; under ``gate_floor_blocks`` it approves in round one."""
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
+
+    lint = Check("lint", "ruff check --x", "required", "fast")
+    monkeypatch.setattr(develop_mod, "build_check_set", lambda config, wt: (lint,))
+
+    def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
+        # RED exit, but the ledger is left empty (no parseable major finding) — the
+        # adapter path must consult the ledger and find nothing blocking.
+        return CheckSetResult(
+            tuple(
+                CheckResult(
+                    c,
+                    "ran",
+                    GateResult(
+                        command=c.command, exit_code=1, passed=False, output_tail="x"
+                    ),
+                )
+                for c in checks
+            )
+        )
+
+    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert result.rounds == 1
+
+
+def test_required_candidate_red_exit_blocks_approval(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#140 floor: a *required* no-adapter candidate check (e.g. `coverage`) that runs
+    RED on the approval candidate blocks approval even when reviewers LGTM. With no new
+    commit to fix it, the run stalls rather than sealing approval over a blocking
+    floor — the candidate stage gains teeth (previously informational-only)."""
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
+
+    fast = Check("lint", "ruff check --x", "required", "fast")
+    candidate = Check("coverage", "coverage report", "required", "candidate")
+    monkeypatch.setattr(
+        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+    )
+
+    def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
+        return CheckSetResult(
+            tuple(
+                CheckResult(
+                    c,
+                    "ran",
+                    GateResult(
+                        command=c.command,
+                        exit_code=0 if c.name != "coverage" else 1,
+                        passed=c.name != "coverage",
+                        output_tail="x",
+                    ),
+                )
+                for c in checks
+            )
+        )
+
+    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    # LGTM from round 1, but the coder commits only in round 1 -> the blocking required
+    # candidate can never be fixed -> the stall guard terminates the run.
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}], source_rounds={1})
+    result = develop_mod.develop(config)
+    assert result.status == "stalled"
+    assert result.succeeded is False
+
+
 # --- termination guards (T7) ---------------------------------------------------
 
 _CODER_DISPUTE = (

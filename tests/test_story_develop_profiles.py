@@ -33,7 +33,14 @@ def test_standard_is_the_default_and_its_floor() -> None:
     p = _BY_NAME["standard"]
     assert p.strength_rank == 20
     assert p.required_personas == {"correctness", "security"}
-    assert p.required_check_names == {"format", "lint", "typecheck", "sast", "test"}
+    # #140 floor slice (Option A): `standard` blocks on exactly what `make check`
+    # already enforces — lint / typecheck / test. `sast` (bandit) stays
+    # informational on the default (its repo baseline is untriaged); it is required
+    # only on `thorough` (explicit opt-in).
+    assert p.required_check_names == {"format", "lint", "typecheck", "test"}
+    assert "sast" not in p.required_check_names
+    sast = next(c for c in p.checks if c.name == "sast")
+    assert sast.state == "informational"
 
 
 def test_thorough_floor_and_staging() -> None:
