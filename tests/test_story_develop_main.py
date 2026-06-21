@@ -361,6 +361,54 @@ def test_main_standalone_minimal_keeps_default_reviewer_with_friction(
     assert "gate-only" in capsys.readouterr().err.lower()
 
 
+def test_main_standalone_profile_panel_gets_reviewer_cli_layering(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#140 slice 2 (review fix): --reviewer-model/-effort/-fallback layer onto the
+    profile's persona panel — filling only where a persona leaves it unset, mirroring
+    daemon mode (a persona's own effort, e.g. security=xhigh, is preserved)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _approved(tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--review-profile",
+            "standard",
+            "--reviewer-model",
+            "opus",
+            "--reviewer-effort",
+            "high",
+            "--reviewer-fallback",
+            "claude",
+        ]
+    )
+    assert rc == 0
+    by_name = {s.name: s for s in captured["config"].reviewers}
+    assert sorted(by_name) == ["correctness", "security"]
+    # model unset on both personas -> filled from --reviewer-model
+    assert by_name["correctness"].model == "opus"
+    assert by_name["security"].model == "opus"
+    # effort filled where unset; security's own xhigh is respected
+    assert by_name["correctness"].effort == "high"
+    assert by_name["security"].effort == "xhigh"
+    # personas carry no fallback chain -> the route --reviewer-fallback applies
+    assert by_name["correctness"].fallback_chain == ("claude",)
+    assert by_name["security"].fallback_chain == ("claude",)
+
+
 def test_main_accepts_codex_coder(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

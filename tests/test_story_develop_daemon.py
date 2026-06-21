@@ -339,6 +339,18 @@ def test_apply_review_profile_panel_noop_on_halt() -> None:
     assert out.reviewers is BUILTIN_REVIEWERS  # untouched on a fail-closed halt
 
 
+def test_apply_review_profile_panel_skips_invalid_explicit_selection() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import apply_review_profile_panel
+
+    # An explicit-but-invalid selection resolved to the BUILTIN sentinel, but
+    # `reviewers_explicit` records the attempt -> the profile panel must NOT
+    # substitute (it stays the built-in single reviewer, matching the 'using
+    # built-in' friction; the contract is panel-only-when-no-config).
+    s = ProjectDevelopSettings(review_profile="standard", reviewers_explicit=True)
+    out = apply_review_profile_panel(s)
+    assert out.reviewers is BUILTIN_REVIEWERS
+
+
 def test_resolve_lithos_unreachable_degrades(fake_client) -> None:
     fake_client.fail_connect = True
     settings = resolve_project_settings("http://x", {"project": "loom"})
@@ -429,6 +441,29 @@ def test_resolve_unknown_non_canonical_name_falls_back(fake_client) -> None:
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.reviewers == BUILTIN_REVIEWERS
     assert any("unknown reviewer" in f for f in settings.frictions)
+    # #140 slice 2 (review fix): a selection WAS attempted (even if it resolved to no
+    # known reviewers), so the profile panel must NOT replace the built-in fallback.
+    assert settings.reviewers_explicit is True
+
+
+def test_resolve_no_reviewer_config_is_not_explicit(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"tool": "claude"}},  # no reviewer keys at all
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.reviewers == BUILTIN_REVIEWERS
+    assert settings.reviewers_explicit is False  # nothing selected -> profile drives
+
+
+def test_resolve_explicit_selection_is_marked_explicit(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_default_reviewers": ["security"]},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert _names(settings.reviewers) == ["security"]
+    assert settings.reviewers_explicit is True
 
 
 def test_resolve_full_config_with_task_override(fake_client) -> None:

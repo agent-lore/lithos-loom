@@ -754,7 +754,22 @@ def main(argv: list[str] | None = None) -> int:
         panel_frictions: list[str] = []
         panel = profile_panel(profile_resolution.profile.name, panel_frictions)
         if panel is not None:
-            specs = panel
+            # Layer the route --reviewer-* tuning onto the persona panel, filling only
+            # where a persona leaves it unset (mirrors daemon apply_cli_fallbacks): a
+            # persona's curated model/effort (e.g. security=xhigh) is preserved, and
+            # its (empty) fallback chain picks up --reviewer-fallback. The chain must
+            # live on each spec — effective_reviewers ignores the config-level
+            # reviewer_fallback_chain once `reviewers` is non-empty.
+            route_fallback = tuple(args.reviewer_fallback or ())
+            specs = tuple(
+                replace(
+                    spec,
+                    model=spec.model if spec.model is not None else reviewer_model,
+                    effort=spec.effort if spec.effort is not None else reviewer_effort,
+                    fallback_chain=spec.fallback_chain or route_fallback,
+                )
+                for spec in panel
+            )
         for friction in panel_frictions:
             print(f"[Friction] {friction}", file=sys.stderr)
 
