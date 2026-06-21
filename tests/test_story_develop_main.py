@@ -243,6 +243,172 @@ def test_main_standalone_known_review_profile_runs(
     assert captured["config"].review_profile == "thorough"
 
 
+def _approved(tmp_path: Path):
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    return DevelopResult(
+        status="approved",
+        run_id="r1",
+        worktree=tmp_path,
+        branch="b",
+        base_sha="0" * 40,
+        commits=["c"],
+        rounds=1,
+        handoff_present=True,
+        coder_cost_usd=0.0,
+        review_cost_usd=0.0,
+        message="m",
+    )
+
+
+def test_main_standalone_profile_drives_panel(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#140 slice 2: with no --reviewer, the profile's personas become the panel."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _approved(tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--review-profile",
+            "thorough",
+        ]
+    )
+    assert rc == 0
+    assert [s.name for s in captured["config"].reviewers] == [
+        "correctness",
+        "security",
+        "architecture",
+        "test-quality",
+        "dependency-hygiene",
+    ]
+
+
+def test_main_standalone_explicit_reviewer_overrides_profile(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """An explicit --reviewer wins; the profile does NOT substitute the panel."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _approved(tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--review-profile",
+            "standard",
+            "--reviewer",
+            "security",
+        ]
+    )
+    assert rc == 0
+    assert [s.name for s in captured["config"].reviewers] == ["security"]
+
+
+def test_main_standalone_minimal_keeps_default_reviewer_with_friction(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """minimal is gate-only; until the floor slice it keeps the built-in reviewer +
+    a gate-only friction (no rubber-stamp)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _approved(tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--review-profile",
+            "minimal",
+        ]
+    )
+    assert rc == 0
+    assert [s.name for s in captured["config"].reviewers] == ["code-quality"]
+    assert "gate-only" in capsys.readouterr().err.lower()
+
+
+def test_main_standalone_profile_panel_gets_reviewer_cli_layering(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#140 slice 2 (review fix): --reviewer-model/-effort/-fallback layer onto the
+    profile's persona panel — filling only where a persona leaves it unset, mirroring
+    daemon mode (a persona's own effort, e.g. security=xhigh, is preserved)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _approved(tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--review-profile",
+            "standard",
+            "--reviewer-model",
+            "opus",
+            "--reviewer-effort",
+            "high",
+            "--reviewer-fallback",
+            "claude",
+        ]
+    )
+    assert rc == 0
+    by_name = {s.name: s for s in captured["config"].reviewers}
+    assert sorted(by_name) == ["correctness", "security"]
+    # model unset on both personas -> filled from --reviewer-model
+    assert by_name["correctness"].model == "opus"
+    assert by_name["security"].model == "opus"
+    # effort filled where unset; security's own xhigh is respected
+    assert by_name["correctness"].effort == "high"
+    assert by_name["security"].effort == "xhigh"
+    # personas carry no fallback chain -> the route --reviewer-fallback applies
+    assert by_name["correctness"].fallback_chain == ("claude",)
+    assert by_name["security"].fallback_chain == ("claude",)
+
+
 def test_main_accepts_codex_coder(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

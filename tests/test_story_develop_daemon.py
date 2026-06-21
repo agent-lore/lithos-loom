@@ -247,6 +247,118 @@ def test_load_review_profile_policy_no_section_defaults(monkeypatch) -> None:
     assert frictions == ()
 
 
+# ── profile_panel + apply_review_profile_panel (#140 slice 2) ──────────────
+
+
+def _names(specs) -> list[str]:
+    return [s.name for s in specs]
+
+
+def test_profile_panel_standard_is_correctness_and_security() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import profile_panel
+    from lithos_loom.plugins.story_develop.personas import canonical_personas
+
+    frictions: list[str] = []
+    panel = profile_panel("standard", frictions)
+    # full ReviewerSpec equality: the personas' baked-in specs come through verbatim.
+    assert panel == (
+        canonical_personas()["correctness"],
+        canonical_personas()["security"],
+    )
+    assert frictions == []
+
+
+def test_profile_panel_thorough_is_the_five_personas() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import profile_panel
+
+    frictions: list[str] = []
+    panel = profile_panel("thorough", frictions)
+    assert panel is not None
+    assert _names(panel) == [
+        "correctness",
+        "security",
+        "architecture",
+        "test-quality",
+        "dependency-hygiene",
+    ]
+    assert frictions == []
+
+
+def test_profile_panel_minimal_is_gate_only_none_with_friction() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import profile_panel
+
+    frictions: list[str] = []
+    panel = profile_panel("minimal", frictions)
+    assert panel is None  # gate-only -> caller keeps its default this slice
+    assert frictions and "gate-only" in frictions[0].lower()
+
+
+def test_profile_panel_skips_unknown_persona_with_friction(monkeypatch) -> None:
+    # Defensive: a profile persona missing from the registry is skipped + frictioned.
+    from lithos_loom.plugins.story_develop.daemon_io import (
+        canonical_personas,
+        profile_panel,
+    )
+
+    trimmed = {k: v for k, v in canonical_personas().items() if k != "security"}
+    # Patch where profile_panel resolves the registry — its DEFINING module's globals
+    # (daemon_io), not this test's namespace — so the trim actually takes effect.
+    monkeypatch.setattr(
+        "lithos_loom.plugins.story_develop.daemon_io.canonical_personas",
+        lambda: trimmed,
+    )
+    frictions: list[str] = []
+    panel = profile_panel("standard", frictions)
+    assert _names(panel) == ["correctness"]  # security dropped
+    assert any("security" in f for f in frictions)
+
+
+def test_apply_review_profile_panel_substitutes_when_builtin() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import apply_review_profile_panel
+
+    s = ProjectDevelopSettings(review_profile="standard")  # reviewers == BUILTIN
+    out = apply_review_profile_panel(s)
+    assert _names(out.reviewers) == ["correctness", "security"]
+
+
+def test_apply_review_profile_panel_preserves_explicit_selection() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import apply_review_profile_panel
+
+    explicit = (ReviewerSpec(name="security", block_threshold="minor"),)
+    s = ProjectDevelopSettings(review_profile="standard", reviewers=explicit)
+    out = apply_review_profile_panel(s)
+    assert out.reviewers == explicit  # explicit wins; not escalated this slice
+
+
+def test_apply_review_profile_panel_minimal_keeps_builtin_with_friction() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import apply_review_profile_panel
+
+    s = ProjectDevelopSettings(review_profile="minimal")  # reviewers == BUILTIN
+    out = apply_review_profile_panel(s)
+    assert out.reviewers is BUILTIN_REVIEWERS
+    assert any("gate-only" in f.lower() for f in out.frictions)
+
+
+def test_apply_review_profile_panel_noop_on_halt() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import apply_review_profile_panel
+
+    s = ProjectDevelopSettings(review_profile="standard", review_profile_halt=True)
+    out = apply_review_profile_panel(s)
+    assert out.reviewers is BUILTIN_REVIEWERS  # untouched on a fail-closed halt
+
+
+def test_apply_review_profile_panel_skips_invalid_explicit_selection() -> None:
+    from lithos_loom.plugins.story_develop.daemon_io import apply_review_profile_panel
+
+    # An explicit-but-invalid selection resolved to the BUILTIN sentinel, but
+    # `reviewers_explicit` records the attempt -> the profile panel must NOT
+    # substitute (it stays the built-in single reviewer, matching the 'using
+    # built-in' friction; the contract is panel-only-when-no-config).
+    s = ProjectDevelopSettings(review_profile="standard", reviewers_explicit=True)
+    out = apply_review_profile_panel(s)
+    assert out.reviewers is BUILTIN_REVIEWERS
+
+
 def test_resolve_lithos_unreachable_degrades(fake_client) -> None:
     fake_client.fail_connect = True
     settings = resolve_project_settings("http://x", {"project": "loom"})
@@ -337,6 +449,29 @@ def test_resolve_unknown_non_canonical_name_falls_back(fake_client) -> None:
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.reviewers == BUILTIN_REVIEWERS
     assert any("unknown reviewer" in f for f in settings.frictions)
+    # #140 slice 2 (review fix): a selection WAS attempted (even if it resolved to no
+    # known reviewers), so the profile panel must NOT replace the built-in fallback.
+    assert settings.reviewers_explicit is True
+
+
+def test_resolve_no_reviewer_config_is_not_explicit(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_coder": {"tool": "claude"}},  # no reviewer keys at all
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert settings.reviewers == BUILTIN_REVIEWERS
+    assert settings.reviewers_explicit is False  # nothing selected -> profile drives
+
+
+def test_resolve_explicit_selection_is_marked_explicit(fake_client) -> None:
+    fake_client.note = _FakeNote(
+        "projects/loom/loom-project-context.md",
+        {"develop_default_reviewers": ["security"]},
+    )
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert _names(settings.reviewers) == ["security"]
+    assert settings.reviewers_explicit is True
 
 
 def test_resolve_full_config_with_task_override(fake_client) -> None:
@@ -1196,8 +1331,15 @@ def test_daemon_mode_cli_model_effort_fallback_used(
     assert main_mod.main(argv) == EXIT_SUCCEEDED
     cfg = captured["config"]
     assert cfg.coder_model == "opus" and cfg.coder_effort == "xhigh"
-    # reviewer flags fill the built-in reviewer too (finding 2: not ignored)
-    assert all(s.model == "sonnet" and s.effort == "medium" for s in cfg.reviewers)
+    # Zero-config now resolves the `standard` persona panel (#140 slice 2). The route
+    # --reviewer-model fills each persona's unset model; --reviewer-effort fills only
+    # where unset, so a persona's own effort (security=xhigh, #137) is respected, not
+    # blanket-downgraded.
+    by_name = {s.name: s for s in cfg.reviewers}
+    assert sorted(by_name) == ["correctness", "security"]
+    assert all(s.model == "sonnet" for s in cfg.reviewers)  # model unset on both
+    assert by_name["correctness"].effort == "medium"  # was unset -> filled
+    assert by_name["security"].effort == "xhigh"  # persona's own effort respected
 
 
 def test_daemon_mode_metadata_image_flows_into_config(
@@ -1289,6 +1431,48 @@ def test_daemon_mode_review_profile_flows_into_config(
     argv, _ = _daemon_args(tmp_git_repo, tmp_path)
     assert main_mod.main(argv) == EXIT_SUCCEEDED
     assert captured["config"].review_profile == "thorough"
+
+
+def test_daemon_mode_profile_drives_panel_with_model_layering(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#140 slice 2: zero-config → the standard profile's personas BECOME the panel,
+    and they pick up the host per-tool default models — proving the panel substitution
+    runs BEFORE apply_tool_default_models."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    # Zero-config: no explicit reviewers (BUILTIN), no project profile (-> standard).
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(),
+    )
+    # correctness is codex, security is claude (#137) -> give each tool a default.
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"codex": "gpt-5-codex", "claude": "opus"}, ()),
+    )
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path)
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    panel = {s.name: s for s in captured["config"].reviewers}
+    assert sorted(panel) == ["correctness", "security"]  # standard's persona floor
+    # Model layering applied AFTER the substitution (ordering proof):
+    assert panel["correctness"].model == "gpt-5-codex"  # codex default
+    assert panel["security"].model == "opus"  # claude default
 
 
 def test_daemon_mode_bad_cli_fallback_degrades_with_friction(

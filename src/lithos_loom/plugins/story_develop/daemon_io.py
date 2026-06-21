@@ -47,7 +47,7 @@ from .config import (
 )
 from .lithos_io import AGENT_ID, TaskContext
 from .personas import canonical_personas
-from .profiles import DEFAULT_PROFILE_NAME, resolve_profile
+from .profiles import DEFAULT_PROFILE_NAME, get_profile, resolve_profile
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -117,6 +117,14 @@ class ProjectDevelopSettings:
     """
 
     reviewers: tuple[ReviewerSpec, ...] = BUILTIN_REVIEWERS
+    # Whether an explicit reviewer selection was *attempted* (a non-empty task
+    # ``reviewers`` or project ``develop_default_reviewers``), even if it resolved to
+    # no known reviewers and fell back to ``BUILTIN_REVIEWERS``. #140 slice 2 keys the
+    # profile-panel substitution off this — not the ``BUILTIN_REVIEWERS`` identity,
+    # which can't tell "no selection" from "invalid selection" apart — so a typo'd
+    # selection keeps the built-in reviewer (its friction) rather than escalating to
+    # the profile panel.
+    reviewers_explicit: bool = False
     coder: str = DEFAULT_CODER_TOOL
     coder_model: str | None = None
     coder_effort: str | None = None
@@ -268,6 +276,13 @@ def resolve_project_settings(
 
     pool = _parse_pool(meta, frictions)
     reviewers = _select_reviewers(pool, meta, task_metadata, frictions)
+    # Whether a selection was *attempted* (mirrors _select_reviewers' raw lookup), so
+    # the #140 profile-panel substitution can tell "no config" from "invalid config"
+    # — both of which _select_reviewers collapses onto the BUILTIN_REVIEWERS sentinel.
+    _selection = task_metadata.get("reviewers")
+    if not isinstance(_selection, list) or not _selection:
+        _selection = meta.get("develop_default_reviewers")
+    reviewers_explicit = isinstance(_selection, list) and bool(_selection)
 
     coder = DEFAULT_CODER_TOOL
     coder_model: str | None = None
@@ -423,6 +438,7 @@ def resolve_project_settings(
 
     return ProjectDevelopSettings(
         reviewers=reviewers,
+        reviewers_explicit=reviewers_explicit,
         coder=coder,
         coder_model=coder_model,
         coder_effort=coder_effort,
@@ -615,8 +631,9 @@ def apply_review_profile(
     Precedence: ``task_value`` > the project layer (``review_profile_project``) >
     ``host_default`` > built-in ``standard``. Records the resolved name +
     ``review_profile_halt`` (an explicit-but-unknown name fails closed) and merges
-    the resolution's frictions. Does **not** apply the profile to the panel /
-    check-set — that wiring is #140.
+    the resolution's frictions. Resolves the *name* only; the profile's check-set is
+    applied in :func:`develop.build_check_set` (#140 slice 1) and its persona panel by
+    :func:`apply_review_profile_panel` (#140 slice 2).
     """
     task_name = task_value.strip() if isinstance(task_value, str) else None
     resolution = resolve_profile(
@@ -631,6 +648,70 @@ def apply_review_profile(
         review_profile_halt=resolution.halt,
         frictions=settings.frictions + resolution.frictions,
     )
+
+
+def profile_panel(
+    profile_name: str, frictions: list[str]
+) -> tuple[ReviewerSpec, ...] | None:
+    """The reviewer panel for a Review Profile's personas (#140 slice 2), or ``None``
+    for a gate-only profile (``minimal``) so the caller keeps its built-in default.
+
+    Each persona name resolves to its canonical :class:`ReviewerSpec` (#137 — engine,
+    block threshold, effort, one-dimension system prompt baked in). A name missing
+    from the registry is skipped with a friction (defensive — the canonical profiles
+    only name the five known personas). A profile with no personas (``minimal``)
+    returns ``None`` + a friction: gate-only is unsafe until the deterministic floor
+    blocks (#140 floor slice), so the caller runs the built-in reviewer until then.
+    """
+    profile = get_profile(profile_name)
+    if not profile.personas:
+        frictions.append(
+            f"review profile {profile_name!r} is gate-only (no panel), but the "
+            "deterministic floor is not yet enforced (#140 floor slice); running the "
+            "built-in reviewer until then"
+        )
+        return None
+    registry = canonical_personas()
+    specs: list[ReviewerSpec] = []
+    for name in profile.personas:
+        spec = registry.get(name)
+        if spec is None:
+            frictions.append(
+                f"review profile {profile_name!r} names unknown persona {name!r}; "
+                "skipping"
+            )
+            continue
+        specs.append(spec)
+    return tuple(specs) if specs else None
+
+
+def apply_review_profile_panel(
+    settings: ProjectDevelopSettings,
+) -> ProjectDevelopSettings:
+    """Substitute the resolved profile's persona panel for the *default* reviewer
+    (#140 slice 2 — replace-default-only).
+
+    The profile drives the panel **only when no reviewers were explicitly selected** —
+    ``settings.reviewers_explicit`` is False (no non-empty ``develop_default_reviewers``
+    / task ``reviewers``). An explicit selection always wins this slice — including one
+    that resolved to *no known reviewers* and fell back to the built-in single reviewer
+    (the friction says "using built-in", so the panel must not silently escalate over a
+    typo); the escalate-only floor (you cannot select *below* the profile's persona
+    floor) is #140's overrides slice. A gate-only profile (``minimal``) keeps the
+    built-in reviewer + a friction. No-op on a fail-closed halt (we never reach a run).
+    Must run BEFORE :func:`apply_cli_fallbacks` / :func:`apply_tool_default_models` —
+    those rebuild ``reviewers`` into a fresh tuple, and the substituted persona specs
+    must flow through their model/effort layering.
+    """
+    if settings.review_profile_halt:
+        return settings
+    if settings.reviewers_explicit or settings.reviewers is not BUILTIN_REVIEWERS:
+        return settings  # explicit selection (valid or invalid) wins
+    frictions = list(settings.frictions)
+    panel = profile_panel(settings.review_profile, frictions)
+    if panel is None:  # gate-only (minimal): keep the built-in reviewer + friction
+        return replace(settings, frictions=tuple(frictions))
+    return replace(settings, reviewers=panel, frictions=tuple(frictions))
 
 
 def post_frictions(url: str, task_id: str, frictions: tuple[str, ...]) -> None:
