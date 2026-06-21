@@ -73,11 +73,11 @@ def test_canonical_profiles_are_monotonic() -> None:
 
 
 def test_module_import_validated_the_builtins() -> None:
-    # The module ran validate_monotonic(CANONICAL_PROFILES) at import; a successful
-    # import (this test collecting at all) means the built-in chain is monotonic.
-    import lithos_loom.plugins.story_develop.profiles as mod
-
-    assert mod.CANONICAL_PROFILES
+    # The module runs validate_monotonic(CANONICAL_PROFILES) at import, so this
+    # file importing at all (top-level `from ...profiles import ...`) already
+    # proves the built-in chain is monotonic — a non-monotonic edit would raise
+    # MonotonicityError on import and fail collection.
+    assert CANONICAL_PROFILES
 
 
 def test_non_monotonic_dropped_required_check_is_a_load_error() -> None:
