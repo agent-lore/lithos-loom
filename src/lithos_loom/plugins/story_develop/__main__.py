@@ -67,12 +67,14 @@ from .daemon_io import (
     EXIT_SUCCEEDED,
     apply_cli_fallbacks,
     apply_review_profile,
+    apply_review_profile_panel,
     apply_tool_default_models,
     build_result_payload,
     load_operator_github_login,
     load_review_profile_policy,
     load_tool_default_models,
     post_frictions,
+    profile_panel,
     read_task_payload,
     resolve_project_settings,
 )
@@ -389,6 +391,23 @@ def _daemon_main(args: argparse.Namespace) -> int:
 
     started_at = datetime.now(UTC)
     settings = resolve_project_settings(args.lithos_url, ctx.metadata)
+    # Review Profile (#139/#140): resolve the name (task > project > host > builtin),
+    # then — when no reviewers were explicitly selected — substitute the profile's
+    # persona panel for the built-in default (#140 slice 2). Both run BEFORE the
+    # model/effort layers below so the substituted persona specs flow through them
+    # (and while ``settings.reviewers`` is still the BUILTIN identity the panel
+    # substitution keys off). An explicit-but-unknown name fails closed further down;
+    # its friction is merged here so it posts even on a halt.
+    profile_default, unknown_policy, profile_frictions = load_review_profile_policy()
+    settings = apply_review_profile(
+        settings,
+        task_value=ctx.metadata.get("develop_review_profile"),
+        host_default=profile_default,
+        unknown_profile=unknown_policy,
+    )
+    settings = apply_review_profile_panel(settings)
+    if profile_frictions:
+        settings = replace(settings, frictions=settings.frictions + profile_frictions)
     # Route-level --coder-*/--reviewer-* flags are blanket fallbacks under the
     # resolved metadata (#93); bad values drop with friction, never error.
     settings = apply_cli_fallbacks(
@@ -405,18 +424,6 @@ def _daemon_main(args: argparse.Namespace) -> int:
     settings = apply_tool_default_models(settings, default_models)
     if dm_frictions:
         settings = replace(settings, frictions=settings.frictions + dm_frictions)
-    # Review Profile (#139): resolve task > project > host > builtin. An
-    # explicit-but-unknown name fails closed below — but its friction is merged
-    # here so it posts even on a halt.
-    profile_default, unknown_policy, profile_frictions = load_review_profile_policy()
-    settings = apply_review_profile(
-        settings,
-        task_value=ctx.metadata.get("develop_review_profile"),
-        host_default=profile_default,
-        unknown_profile=unknown_policy,
-    )
-    if profile_frictions:
-        settings = replace(settings, frictions=settings.frictions + profile_frictions)
     for friction in settings.frictions:
         print(f"[Friction] {friction}", file=sys.stderr)
     post_frictions(args.lithos_url, ctx.task_id, settings.frictions)
@@ -737,6 +744,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             for name in names
         )
+
+    # #140 slice 2: when no reviewers were explicitly selected (no --develop-config,
+    # no --reviewer), the resolved profile's personas drive the panel. An explicit
+    # selection wins (the escalate-only floor is the overrides slice). `minimal` is
+    # gate-only -> keep the default reviewer + a friction (the deterministic floor
+    # that makes gate-only safe is the floor slice).
+    if args.develop_config is None and not args.reviewer:
+        panel_frictions: list[str] = []
+        panel = profile_panel(profile_resolution.profile.name, panel_frictions)
+        if panel is not None:
+            specs = panel
+        for friction in panel_frictions:
+            print(f"[Friction] {friction}", file=sys.stderr)
 
     if args.max_rounds < 1:
         print("error: --max-rounds must be >= 1", file=sys.stderr)
