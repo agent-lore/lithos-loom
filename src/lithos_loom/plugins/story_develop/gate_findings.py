@@ -38,11 +38,13 @@ _OPEN = "open"
 _FIXED = "fixed"
 _SUPPRESSED = "suppressed"
 
-# Cross-round identity of a gate finding: the check it came from, the tool's
-# native rule code, and the location. Deliberately id- and severity-independent
-# so the same violation keeps its id across rounds. (Line is part of identity for
-# the MVP; a snippet-hash that survives unrelated edits above it is a follow-up.)
-Fingerprint = tuple[str, str, str, "int | None"]
+# Cross-round identity of a gate finding: the check, the tool's native rule code,
+# and the locus — source ``(file, line)`` for file tools, or the ``package`` for a
+# dependency-audit finding (two packages sharing one CVE id are distinct findings).
+# Deliberately id- and severity-independent so the same violation keeps its id
+# across rounds. (Line is part of identity for the MVP; a snippet-hash that
+# survives unrelated edits above it is a follow-up.)
+Fingerprint = tuple[str, str, str, "int | None", str]
 
 
 @dataclass(frozen=True)
@@ -56,12 +58,13 @@ class GateFinding:
     message: str
     file: str = ""
     line: int | None = None
+    package: str = ""  # dep-audit locus: the vulnerable package (part of identity)
     finding_id: str = ""  # gate/<check>-NNN, assigned by the ledger
     status: str = _OPEN  # open | fixed | suppressed
 
     @property
     def fingerprint(self) -> Fingerprint:
-        return (self.check, self.rule, self.file, self.line)
+        return (self.check, self.rule, self.file, self.line, self.package)
 
     @property
     def is_open(self) -> bool:

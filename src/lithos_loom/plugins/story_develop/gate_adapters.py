@@ -138,6 +138,7 @@ def _parse_pip_audit(check: str, output: str) -> list[GateFinding]:
                     rule=vuln_id,
                     severity=_PIP_AUDIT_SEVERITY,
                     message=f"{name} {version}: {vuln_id}{fix_note}",
+                    package=name,
                 )
             )
     return findings

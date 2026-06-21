@@ -80,9 +80,26 @@ def test_pip_audit_one_finding_per_vuln_skips_clean_deps() -> None:
     }  # safe-pkg dropped
     assert all(f.severity == "major" for f in findings)
     by_rule = {f.rule: f for f in findings}
+    assert by_rule["PYSEC-2019-179"].package == "flask"  # locus = the package
     assert "flask 0.5" in by_rule["PYSEC-2019-179"].message
     assert "0.12.3" in by_rule["PYSEC-2019-179"].message  # fix version surfaced
     assert "no fix available" in by_rule["GHSA-xxxx"].message
+
+
+_PIP_AUDIT_SHARED_CVE = """{"dependencies": [
+  {"name": "pkg-a", "version": "1.0", "vulns": [{"id": "CVE-2020-1"}]},
+  {"name": "pkg-b", "version": "2.0", "vulns": [{"id": "CVE-2020-1"}]}
+]}"""
+
+
+def test_pip_audit_same_cve_in_two_packages_is_two_distinct_findings() -> None:
+    # Regression: two packages sharing one CVE id must not collapse — the package
+    # is part of the finding's identity (its fingerprint).
+    findings = parse_findings("dep-audit", "pip-audit", _PIP_AUDIT_SHARED_CVE)
+    assert len(findings) == 2
+    assert {f.package for f in findings} == {"pkg-a", "pkg-b"}
+    assert all(f.rule == "CVE-2020-1" for f in findings)
+    assert findings[0].fingerprint != findings[1].fingerprint
 
 
 # --- defensive behaviour ------------------------------------------------------

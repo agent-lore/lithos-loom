@@ -158,3 +158,34 @@ def test_persistence_round_trips_ids_status_and_counter() -> None:
     )
     new = next(f for f in restored.all_findings() if f.rule == "E711")
     assert new.finding_id == "gate/lint-003"
+
+
+# --- dep-audit identity: a shared CVE across packages must not collide ----------
+
+
+def test_same_cve_in_distinct_packages_do_not_collide_in_the_ledger() -> None:
+    led = GateLedger()
+    a = GateFinding(
+        check="dep-audit",
+        tool="pip-audit",
+        rule="CVE-1",
+        severity="major",
+        message="pkg-a 1.0",
+        package="pkg-a",
+    )
+    b = GateFinding(
+        check="dep-audit",
+        tool="pip-audit",
+        rule="CVE-1",
+        severity="major",
+        message="pkg-b 2.0",
+        package="pkg-b",
+    )
+    led.apply_round("dep-audit", [a, b], 1)
+    findings = led.all_findings()
+    assert len(findings) == 2  # not collapsed onto one entry
+    assert {f.finding_id for f in findings} == {
+        "gate/dep-audit-001",
+        "gate/dep-audit-002",
+    }
+    assert {f.package for f in findings} == {"pkg-a", "pkg-b"}
