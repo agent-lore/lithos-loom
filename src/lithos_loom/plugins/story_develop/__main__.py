@@ -64,6 +64,7 @@ from .config import (
 )
 from .daemon_io import (
     EXIT_BAD_INPUT,
+    EXIT_SUCCEEDED,
     apply_cli_fallbacks,
     apply_tool_default_models,
     build_result_payload,
@@ -74,6 +75,7 @@ from .daemon_io import (
     resolve_project_settings,
 )
 from .develop import develop
+from .idempotency import lookup_completed, record_completion
 from .lithos_io import (
     DEFAULT_LITHOS_URL,
     LithosIOError,
@@ -104,6 +106,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="DAEMON MODE: where to write the atomic result.json",
+    )
+    p.add_argument(
+        "--idempotency-key",
+        default=None,
+        metavar="KEY",
+        help="DAEMON MODE: dedup key for this run (default: the task id from "
+        "--task-json). If a prior COMPLETED run with this key is on record, "
+        "its result.json is replayed and the plugin exits without re-running "
+        "(no second agent loop, no second PR). Only a succeeded record "
+        "short-circuits; failed/interrupted runs stay retriable",
     )
     p.add_argument(
         "--description",
@@ -347,6 +359,23 @@ def _daemon_main(args: argparse.Namespace) -> int:
         return EXIT_BAD_INPUT
 
     result_file = args.result_file.expanduser().resolve()
+
+    # Idempotency short-circuit (US-18): replay a prior COMPLETED run keyed by
+    # --idempotency-key (default: the task id). Checked before any config
+    # resolution, the agent loop, or PR delivery — a replay must not re-run the
+    # coder, re-open a PR, or even re-probe project metadata. Only a
+    # succeeded/completed record replays; a failed/interrupted/malformed record
+    # is ignored so the task stays retriable.
+    idempotency_key = args.idempotency_key or ctx.task_id
+    prior = lookup_completed(idempotency_key)
+    if prior is not None:
+        write_result_atomically(result_file, prior)
+        print(
+            f"story-develop: idempotency key {idempotency_key!r} already "
+            "completed; replaying recorded result (no re-run)"
+        )
+        return EXIT_SUCCEEDED
+
     started_at = datetime.now(UTC)
     settings = resolve_project_settings(args.lithos_url, ctx.metadata)
     # Route-level --coder-*/--reviewer-* flags are blanket fallbacks under the
@@ -485,6 +514,13 @@ def _daemon_main(args: argparse.Namespace) -> int:
         run_dir=config.run_dir,
     )
     write_result_atomically(result_file, payload)
+    # Record the completion under the run's idempotency key so a later dispatch
+    # with the same key replays this result instead of re-developing the task.
+    # Only a succeeded run is recorded — a failed/interrupted run leaves no
+    # marker, keeping the task retriable. Keys off the explicit
+    # --idempotency-key when given, NOT the task id.
+    if payload["status"] == "succeeded":
+        record_completion(idempotency_key, payload)
     print(
         f"story-develop daemon run {result.run_id}: {result.status.upper()} — "
         f"{result.message}"
