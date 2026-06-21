@@ -42,7 +42,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ...runner import detection, git, worktree
-from . import containers, handoff, limits, test_gate
+from . import check_catalog, containers, handoff, limits, test_gate
 from .check_set import (
     Check,
     CheckResult,
@@ -329,16 +329,27 @@ def build_default_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...
     one-element default set this is observably "no gate"), and the legacy
     ``block_on_red`` flag maps onto the check's ``state`` — ``required`` (a RED
     run blocks approval) vs ``informational`` (recorded, non-blocking). Review
-    Profiles (#139) replace this constructor with a profile-selected set; the
-    runner/aggregates below are unchanged.
+    Profiles (#139) replace this constructor with a profile-selected set resolved
+    through :func:`check_catalog.resolve_check_set`; the runner/aggregates below
+    are unchanged.
+
+    #133/ADR §4: when no test command is runnable, a *required* test check in a
+    repo whose detected ecosystem expects tests is **expected-but-absent** — a
+    blocking, non-running placeholder (empty command; the runner records it
+    ``absent``), not a silent skip. A markerless / docs-only repo declares
+    ``test`` not-applicable, so the gate is simply empty.
     """
     if not config.test_gate:
         return ()
     command = _resolve_test_command(config, wt)
-    if command is None:
-        return ()
     state = "required" if config.block_on_red else "informational"
-    return (Check(name="test", command=command, state=state),)
+    if command is not None:
+        return (Check(name="test", command=command, state=state),)
+    if state == "required" and check_catalog.applies(
+        "test", detection.detect_ecosystems(wt)
+    ):
+        return (Check(name="test", command="", state="required"),)
+    return ()
 
 
 def _write_check_output(round_dir: Path, check: Check, gate: GateResult | None) -> None:
@@ -389,6 +400,16 @@ def _run_check_set(
         return None
     results: list[CheckResult] = []
     for check in checks:
+        # #133: an empty command is a non-running placeholder — an
+        # expected-but-absent check (records ``absent``; a required one blocks)
+        # or a declared not-applicable check (records ``n_a``). Neither runs a
+        # container; their state in :class:`CheckResult.passed` decides blocking.
+        if not check.command:
+            outcome = "n_a" if check.state == "not_applicable" else "absent"
+            results.append(
+                CheckResult(check=check, execution_outcome=outcome, gate=None)
+            )
+            continue
         name = containers.container_name(
             config.run_id, f"gate-{check.name}-r{round_no}"
         )
