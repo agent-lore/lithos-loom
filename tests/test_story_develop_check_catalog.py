@@ -48,6 +48,19 @@ def test_catalog_covers_the_canonical_checks() -> None:
     assert {"format", "lint", "typecheck", "test"} <= names
 
 
+def test_catalog_includes_coverage_and_semgrep_for_profiles() -> None:
+    # #139: `thorough` references coverage (required) + semgrep (informational);
+    # both must resolve for python so a profile doesn't raise when #140 wires it.
+    cov = resolve_check_set(
+        [DesiredCheck("coverage", "required")], ("python",), tool_available=_always
+    )
+    assert cov[0].name == "coverage" and cov[0].command == "coverage report"
+    sg = resolve_check_set(
+        [DesiredCheck("semgrep", "informational")], ("python",), tool_available=_always
+    )
+    assert sg[0].name == "semgrep" and sg[0].command == "semgrep --error"
+
+
 def test_test_check_maps_python_and_at_least_one_other_ecosystem() -> None:
     # AC1: "at least Python + one other". We ship all four.
     cmds = _mapping("test").commands

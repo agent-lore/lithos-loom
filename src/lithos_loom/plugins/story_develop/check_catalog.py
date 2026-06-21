@@ -2,8 +2,9 @@
 
 The deterministic gate (:mod:`check_set`) is an ordered set of named **checks**.
 This module makes that set *ecosystem-aware*: each canonical check (``format`` /
-``lint`` / ``typecheck`` / ``test`` / ``sast`` / ``dep-audit``) declares a command
-**per ecosystem**, and :func:`resolve_check_set` turns a *desired* check-set (what
+``lint`` / ``typecheck`` / ``test`` / ``sast`` / ``dep-audit`` / ``coverage`` /
+``semgrep``) declares a command **per ecosystem**, and :func:`resolve_check_set`
+turns a *desired* check-set (what
 a Review Profile asks for — #139) into the concrete :class:`~.check_set.Check`
 objects to run against the repo's detected ecosystem(s).
 
@@ -72,9 +73,11 @@ class CheckApplicabilityError(ValueError):
     """
 
 
-# The canonical catalog. ``sast`` / ``dep-audit`` are declared for #139 to opt
-# into once #135 provisions their tools in the sandbox; until then their tools
-# are absent, so a profile must not mark them required (every repo would block).
+# The canonical catalog. ``sast`` / ``dep-audit`` / ``coverage`` / ``semgrep`` are
+# declared here as pure data for a Review Profile (#139) to reference; they only
+# *run* once #140 resolves a profile's check-set against a repo (their tools ship
+# in the sandbox as of #135). ``coverage`` is required only in ``thorough``;
+# ``semgrep`` is always informational (ADR §3).
 CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
     CheckMapping(
         "format",
@@ -122,6 +125,22 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
         {
             "python": "pip-audit",
             "node": "npm audit",
+        },
+    ),
+    CheckMapping(
+        "coverage",
+        {
+            # `thorough`'s coverage is required-present; the exact runner command
+            # (e.g. a `coverage run` preface) is tuned when #140 wires it live.
+            "python": "coverage report",
+        },
+    ),
+    CheckMapping(
+        "semgrep",
+        {
+            # semgrep is its own informational check (distinct from python `sast`
+            # = bandit); node's `sast` already runs semgrep, so it is python-only.
+            "python": "semgrep --error",
         },
     ),
 )

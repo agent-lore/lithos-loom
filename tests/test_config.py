@@ -927,3 +927,76 @@ def test_story_develop_default_model_value_must_be_nonempty_string(
     )
     with pytest.raises(ConfigError, match="default_models.claude must be a non-empty"):
         load_config()
+
+
+def test_story_develop_review_profile_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [story_develop]
+            default_review_profile = "  thorough  "
+            unknown_profile = "strongest"
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.story_develop is not None
+    assert cfg.story_develop.default_review_profile == "thorough"
+    assert cfg.story_develop.unknown_profile == "strongest"
+
+
+def test_story_develop_review_profile_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent profile keys → None profile + the fail-closed "halt" default."""
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [story_develop]
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.story_develop is not None
+    assert cfg.story_develop.default_review_profile is None
+    assert cfg.story_develop.unknown_profile == "halt"
+
+
+def test_story_develop_rejects_blank_review_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [story_develop]
+            default_review_profile = ""
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="default_review_profile"):
+        load_config()
+
+
+def test_story_develop_rejects_invalid_unknown_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [story_develop]
+            unknown_profile = "weakest"
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="unknown_profile must be one of"):
+        load_config()
