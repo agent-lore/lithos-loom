@@ -35,7 +35,7 @@ import jsonschema
 
 from lithos_loom.errors import PluginContractError
 
-__all__ = ["run_plugin", "write_result_atomically"]
+__all__ = ["run_plugin", "write_result_atomically", "validate_result_schema"]
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,7 @@ async def run_plugin(
             f"plugin result file at {result_file} is not valid JSON: {exc}"
         ) from exc
 
-    _validate_result_schema(payload)
+    validate_result_schema(payload)
     return payload
 
 
@@ -199,7 +199,7 @@ def _packaged_schema_path() -> Path:
     )
 
 
-def _validate_result_schema(payload: Any) -> None:
+def validate_result_schema(payload: Any) -> None:
     schema = _load_result_schema()
     try:
         jsonschema.validate(payload, schema)

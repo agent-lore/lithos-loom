@@ -28,11 +28,17 @@ def tmp_git_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def clean_loom_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def clean_loom_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Clear ``LITHOS_*`` env vars so a developer's shell cannot leak into tests.
 
     Tests that need a specific env should set vars explicitly via
     ``monkeypatch`` inside the test body.
+
+    Also pins the story-develop idempotency store (US-18) to a per-test temp
+    dir so a daemon-mode run's completion record never lands in the developer's
+    real ``~/.local/state`` (a test that exercises the daemon happy path now
+    records a completion); a test that wants to drive the store explicitly just
+    re-points the same var.
     """
     for var in (
         "LITHOS_URL",
@@ -40,6 +46,9 @@ def clean_loom_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LITHOS_LOOM_ENVIRONMENT",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv(
+        "LITHOS_LOOM_IDEMPOTENCY_DIR", str(tmp_path / "idempotency-store")
+    )
 
 
 _FIXTURE_ROUTE_CMD = (
