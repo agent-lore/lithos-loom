@@ -33,6 +33,37 @@ _BANDIT_SEVERITY: dict[str, str] = {
 # (critical for high CVSS) is a follow-up once pip-audit surfaces scores.
 _PIP_AUDIT_SEVERITY = "major"
 
+# --- machine-invocation flags (JSON output + decouple exit code from findings) -
+
+# A finding-producing check runs in JSON mode so its output is parseable. Where
+# the tool offers it we also pass its "exit 0 even with findings" flag (ruff /
+# bandit: --exit-zero) so the check's *aggregate/display* verdict stays GREEN for
+# the informational case. That flag is a display convenience, **not** the blocking
+# mechanism: per ADR §5 a finding-producing check's exit code never decides
+# approval — the ledger's severity policy does.
+#
+# pip-audit has no such flag (verified against the image: only -S/--strict, which
+# is the *opposite*), so its process still exits non-zero on findings. That is
+# harmless *only* as long as a required finding-producing check derives blocking
+# from the ledger (``GateLedger.blocking``), never from ``CheckResult.passed`` /
+# ``gate.passed`` — otherwise pip-audit's "non-zero on any hit" would silently
+# decide approval, which ADR §5 forbids. Wiring that required-floor blocking off
+# the ledger is #139; until then every finding-producing check here is
+# informational, so the gate exit code is ignored for approval regardless.
+_MACHINE_FLAGS: dict[str, str] = {
+    "ruff": "--output-format=json --exit-zero",
+    "bandit": "-f json --exit-zero",
+    "pip-audit": "--format=json",  # no exit-zero flag; #139 must block via the ledger
+}
+
+
+def machine_command(tool: str, base: str) -> str:
+    """The machine (JSON) invocation of *base* for *tool*, or *base* unchanged
+    for a tool with no adapter. E.g. ``ruff check`` ->
+    ``ruff check --output-format=json --exit-zero``."""
+    flags = _MACHINE_FLAGS.get(tool)
+    return f"{base} {flags}" if flags else base
+
 
 def _ruff_severity(code: str) -> str:
     """ruff has no severity axis; ``W`` (warning) rules are minor, the rest major."""

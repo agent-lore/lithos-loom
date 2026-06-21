@@ -21,9 +21,12 @@ follow-on slices extend: #132 turns ``CheckResult.gate`` into a finding ledger,
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .test_gate import GateResult
+
+if TYPE_CHECKING:
+    from .gate_findings import GateFinding, GateLedger
 
 # A check's role in the floor (ADR §4). #131 only emits "required"/"informational"
 # (mapped from the legacy block_on_red flag, ADR §10); "optional"/"not_applicable"
@@ -138,25 +141,69 @@ def classify_execution(gate: GateResult | None) -> ExecutionOutcome:
     return "ran"
 
 
-def render_check_summary(check_set: CheckSetResult | None, *, for_coder: bool) -> str:
+_GATE_FINDINGS_CAP = 25
+
+
+def _open_gate_findings(
+    check_name: str, gate_ledger: GateLedger | None
+) -> list[GateFinding]:
+    """This check's currently-open deterministic findings (empty when no ledger)."""
+    if gate_ledger is None:
+        return []
+    return [f for f in gate_ledger.open_findings() if f.check == check_name]
+
+
+def _gate_finding_lines(findings: list[GateFinding]) -> list[str]:
+    """One bullet per finding (id, severity, rule, locus, message), capped."""
+    lines: list[str] = []
+    for f in findings[:_GATE_FINDINGS_CAP]:
+        if f.file:
+            locus = f" [{f.file}:{f.line}]" if f.line is not None else f" [{f.file}]"
+        elif f.package:
+            locus = f" [{f.package}]"
+        else:
+            locus = ""
+        line = f"- {f.finding_id} ({f.severity}): {f.rule}{locus} {f.message}"
+        lines.append(line.rstrip())
+    extra = len(findings) - _GATE_FINDINGS_CAP
+    if extra > 0:
+        lines.append(f"- (+{extra} more)")
+    return lines
+
+
+def render_check_summary(
+    check_set: CheckSetResult | None,
+    *,
+    for_coder: bool,
+    gate_ledger: GateLedger | None = None,
+) -> str:
     """Render the round's check-set for prompt injection (ADR §6).
 
-    ``for_coder=True`` mirrors the old ``_gate_note``: a section per **failing**
-    check (RED / TIMEOUT) with the authoritative "fix it" framing, and the empty
-    string when nothing failed — so the coder prompt grows a section only when
-    there is something to fix. For the single-``test`` set this reproduces the old
-    note (heading + output tail) byte-for-byte.
+    ``for_coder=True`` grows a section per **failing** check (RED / TIMEOUT) with
+    the authoritative "fix it" framing, plus a section per check that has open
+    **deterministic findings** (#132) — and the empty string when there is
+    nothing to surface. For the single-``test`` set with no ledger this reproduces
+    the old note (heading + output tail) byte-for-byte.
 
-    ``for_coder=False`` (reviewers) lists **every** check's verdict — green
-    included, so a reviewer sees what the deterministic tools already covered —
-    and appends each failing check's output tail. A missing / empty gate is
-    stated explicitly. Raw output only; #132 enriches this with structured
-    findings.
+    ``for_coder=False`` (reviewers) lists **every** check's verdict, then for each
+    check renders its structured deterministic findings (#132) when present, else
+    its raw output tail on failure. A missing / empty gate is stated explicitly.
+    ``gate_ledger=None`` disables the structured enrichment (identical old output).
     """
     if for_coder:
         parts: list[str] = []
         results = check_set.results if check_set is not None else ()
         for r in results:
+            findings = _open_gate_findings(r.check.name, gate_ledger)
+            if findings:
+                body = "\n".join(_gate_finding_lines(findings))
+                parts.append(
+                    f"\n## Independent {r.check.name} gate findings\n\n"
+                    f"The orchestrator ran `{r.check.name}` against your last "
+                    "commit in a clean container and recorded these deterministic "
+                    f"findings (authoritative — address them):\n\n{body}\n"
+                )
+                continue
             g = r.gate
             if g is None:
                 # A required check that is expected-but-absent (#133) blocks but
@@ -203,6 +250,11 @@ def render_check_summary(check_set: CheckSetResult | None, *, for_coder: bool) -
     if agg is not None:
         lines += ["", f"Overall: **{agg}**"]
     for r in check_set.results:
+        findings = _open_gate_findings(r.check.name, gate_ledger)
+        if findings:
+            lines += ["", f"`{r.check.name}` deterministic findings:"]
+            lines += _gate_finding_lines(findings)
+            continue
         g = r.gate
         if g is None or g.passed:
             continue

@@ -40,6 +40,10 @@ class GateResult:
     exit_code: int
     passed: bool
     output_tail: str
+    # The full, untruncated stdout+stderr — needed to parse a finding-producing
+    # tool's JSON (#132); ``output_tail`` is the capped view for display. The
+    # orchestrator consumes + drops this so it never propagates into the result.
+    full_output: str = ""
 
     @property
     def timed_out(self) -> bool:
@@ -209,10 +213,11 @@ def run_gate_container(
             passed=False,
             output_tail=f"test gate timed out after {timeout}s",
         )
-    tail = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
+    full = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
     return GateResult(
         command=command,
         exit_code=proc.returncode,
         passed=proc.returncode == 0,
-        output_tail=tail[-OUTPUT_TAIL_CHARS:],
+        output_tail=full[-OUTPUT_TAIL_CHARS:],
+        full_output=full,
     )
