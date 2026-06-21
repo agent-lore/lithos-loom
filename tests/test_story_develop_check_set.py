@@ -81,6 +81,20 @@ def test_required_check_errored_does_not_block() -> None:
     assert r.passed is True
 
 
+def test_finding_producing_check_exit_code_does_not_decide_blocking() -> None:
+    # ADR §5 / #132 finding-2 contract: a finding-producing tool's exit code never
+    # decides approval. pip-audit has no --exit-zero flag, so its process exits
+    # non-zero on findings — while the check is informational that must not block,
+    # and a required floor (#139) must read the ledger severity, not ``gate.passed``.
+    nonzero = GateResult(
+        command="pip-audit --format=json", exit_code=1, passed=False, output_tail="[]"
+    )
+    r = CheckResult(
+        Check("dep-audit", "pip-audit --format=json", "informational"), "ran", nonzero
+    )
+    assert r.passed is True
+
+
 # --- CheckSetResult aggregate views ------------------------------------------
 
 
@@ -177,16 +191,25 @@ def test_block_on_red_makes_the_test_check_required(
     assert checks[0].state == "required"
 
 
-def test_test_gate_false_excludes_the_test_check(
+def test_test_gate_false_drops_test_check_but_keeps_lint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # ADR §10: develop_test_gate=false drops only the `test` check; with a
-    # one-element default set that is an empty set (observably "no gate").
+    # ADR §10 / #132: develop_test_gate=false is a *test* escape hatch — it scopes
+    # off the `test` check only, never the deterministic lint floor. The test
+    # command must not even be resolved, but the lint check survives.
     def _boom(config: object, wt: object) -> str:
-        raise AssertionError("must not resolve a command when the gate is off")
+        raise AssertionError("must not resolve a test command when the gate is off")
 
+    lint = Check(
+        name="lint",
+        command="ruff check --output-format=json --exit-zero",
+        state="informational",
+    )
     monkeypatch.setattr(develop_mod, "_resolve_test_command", _boom)
-    assert build_default_check_set(_config(tmp_path, test_gate=False), tmp_path) == ()
+    monkeypatch.setattr(develop_mod, "_build_lint_checks", lambda config, wt: [lint])
+    checks = build_default_check_set(_config(tmp_path, test_gate=False), tmp_path)
+    assert checks == (lint,)
+    assert all(c.name != "test" for c in checks)
 
 
 def test_no_detected_command_yields_empty_set(

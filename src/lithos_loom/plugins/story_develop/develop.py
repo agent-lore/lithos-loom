@@ -326,15 +326,16 @@ def _resolve_test_command(config: DevelopConfig, wt: Path) -> str | None:
 
 
 def build_default_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
-    """The default check-set: today just the ``test`` check (#131).
+    """The default check-set: the ``test`` check (#131) + a live ``lint`` check (#132).
 
-    ADR §10: ``develop_test_gate=false`` **excludes the ``test`` check** (with a
-    one-element default set this is observably "no gate"), and the legacy
-    ``block_on_red`` flag maps onto the check's ``state`` — ``required`` (a RED
-    run blocks approval) vs ``informational`` (recorded, non-blocking). Review
-    Profiles (#139) replace this constructor with a profile-selected set resolved
-    through :func:`check_catalog.resolve_check_set`; the runner/aggregates below
-    are unchanged.
+    ADR §10: ``develop_test_gate=false`` **excludes the ``test`` check only** — it
+    is a test escape hatch, **not** a whole-gate kill switch, so the deterministic
+    lint/SAST floor still runs (disabling that would be a floor-weakening behind a
+    convenience key). The legacy ``block_on_red`` flag maps onto the test check's
+    ``state`` — ``required`` (a RED run blocks approval) vs ``informational``
+    (recorded, non-blocking). Review Profiles (#139) replace this constructor with
+    a profile-selected set resolved through :func:`check_catalog.resolve_check_set`;
+    the runner/aggregates below are unchanged.
 
     #133/ADR §4: when no test command is runnable, a *required* test check in a
     repo whose detected ecosystem expects tests is **expected-but-absent** — a
@@ -342,19 +343,20 @@ def build_default_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...
     ``absent``), not a silent skip. A markerless / docs-only repo declares
     ``test`` not-applicable, so the gate is simply empty.
     """
-    if not config.test_gate:
-        return ()
     checks: list[Check] = []
-    command = _resolve_test_command(config, wt)
-    state = "required" if config.block_on_red else "informational"
-    if command is not None:
-        checks.append(Check(name="test", command=command, state=state))
-    elif state == "required" and check_catalog.applies(
-        "test", detection.detect_ecosystems(wt)
-    ):
-        checks.append(Check(name="test", command="", state="required"))
-    # #132: a live informational lint check (ruff) exercises the deterministic-
-    # finding ledger end-to-end; #139 governs the full per-profile check-set.
+    if config.test_gate:
+        command = _resolve_test_command(config, wt)
+        state = "required" if config.block_on_red else "informational"
+        if command is not None:
+            checks.append(Check(name="test", command=command, state=state))
+        elif state == "required" and check_catalog.applies(
+            "test", detection.detect_ecosystems(wt)
+        ):
+            checks.append(Check(name="test", command="", state="required"))
+    # #132/ADR §10: the live informational lint check (ruff) exercises the
+    # deterministic-finding ledger end-to-end and runs **regardless of the
+    # ``test_gate`` toggle** — that flag scopes the ``test`` check only, never the
+    # lint/SAST floor. #139 governs the full per-profile set + a required floor.
     checks.extend(_build_lint_checks(config, wt))
     return tuple(checks)
 

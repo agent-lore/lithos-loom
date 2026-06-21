@@ -33,15 +33,27 @@ _BANDIT_SEVERITY: dict[str, str] = {
 # (critical for high CVSS) is a follow-up once pip-audit surfaces scores.
 _PIP_AUDIT_SEVERITY = "major"
 
-# --- machine-invocation flags (JSON output + don't-fail-on-findings) ----------
+# --- machine-invocation flags (JSON output + decouple exit code from findings) -
 
-# A finding-producing check runs in JSON mode so its output is parseable, and in
-# a "don't fail on findings" mode where available so its exit code stays GREEN —
-# blocking is the ledger's severity call (ADR §5), not the tool's exit code.
+# A finding-producing check runs in JSON mode so its output is parseable. Where
+# the tool offers it we also pass its "exit 0 even with findings" flag (ruff /
+# bandit: --exit-zero) so the check's *aggregate/display* verdict stays GREEN for
+# the informational case. That flag is a display convenience, **not** the blocking
+# mechanism: per ADR §5 a finding-producing check's exit code never decides
+# approval — the ledger's severity policy does.
+#
+# pip-audit has no such flag (verified against the image: only -S/--strict, which
+# is the *opposite*), so its process still exits non-zero on findings. That is
+# harmless *only* as long as a required finding-producing check derives blocking
+# from the ledger (``GateLedger.blocking``), never from ``CheckResult.passed`` /
+# ``gate.passed`` — otherwise pip-audit's "non-zero on any hit" would silently
+# decide approval, which ADR §5 forbids. Wiring that required-floor blocking off
+# the ledger is #139; until then every finding-producing check here is
+# informational, so the gate exit code is ignored for approval regardless.
 _MACHINE_FLAGS: dict[str, str] = {
     "ruff": "--output-format=json --exit-zero",
     "bandit": "-f json --exit-zero",
-    "pip-audit": "--format=json",
+    "pip-audit": "--format=json",  # no exit-zero flag; #139 must block via the ledger
 }
 
 
