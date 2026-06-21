@@ -68,6 +68,10 @@ name = "story-develop"
 # same task.metadata.* per-task override) (#127); the --test-command /
 # --no-test-gate / --block-on-red flags are the route-level fallback. So a
 # project standardised on `make check` sets develop_test_command = "make check".
+# With no develop_test_command, the test check is auto-detected per ecosystem
+# (Python/Node/Rust/Go); a code repo whose ecosystem expects tests but has no
+# runnable command is "expected-but-absent" and a required gate blocks rather
+# than silently passing — a markerless/docs-only repo declares it N/A (#133).
 # See docs/SPECIFICATION.md §5.5 for the keys + resolution precedence.
 # Add --open-pr to push + open a PR (and run the Copilot review round) on
 # approval. The --coder-model/--coder-effort/--reviewer-model/--reviewer-effort

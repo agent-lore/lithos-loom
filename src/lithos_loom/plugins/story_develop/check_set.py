@@ -37,9 +37,11 @@ ExecutionOutcome = Literal["ran", "absent", "errored", "timed_out", "n_a"]
 _NON_BLOCKING_STATES: frozenset[str] = frozenset(
     {"informational", "optional", "not_applicable"}
 )
-# Outcomes where the check produced no verdict — an infra skip, which (in the
-# foundation slice) never blocks, matching the old gate's "infra error skips it".
-_NON_VERDICT_OUTCOMES: frozenset[str] = frozenset({"absent", "errored", "n_a"})
+# Outcomes that produced no verdict but still must not block: an infra skip
+# (``errored``) and a declared not-applicable (``n_a``). ``absent`` is NOT here —
+# a *required* check that is expected-but-absent blocks (#133, ADR §4); for a
+# non-required check, its state already short-circuits to non-blocking above.
+_NON_VERDICT_OUTCOMES: frozenset[str] = frozenset({"errored", "n_a"})
 
 
 @dataclass(frozen=True)
@@ -73,11 +75,11 @@ class CheckResult:
         """Whether this check is satisfied *for approval* (i.e. does not block).
 
         Non-blocking states (informational / optional / not_applicable) always
-        pass. An infra skip (errored / absent / n_a) never blocks in the
-        foundation slice — matching the old gate, where an infra error skipped the
-        check rather than failing the run; #132/#133 tighten
-        "required-but-absent -> blocks" once absent checks become possible.
-        Otherwise a check passes iff it ran green.
+        pass. An infra skip (``errored``) or declared not-applicable (``n_a``)
+        never blocks. A *required* check that is **expected-but-absent**
+        (``absent`` — its tool/target should be present but isn't) **blocks**
+        (#133, ADR §4): it is distinct from an infra error, which skips. Otherwise
+        a check passes iff it ran green.
         """
         if self.check.state in _NON_BLOCKING_STATES:
             return True
@@ -156,7 +158,21 @@ def render_check_summary(check_set: CheckSetResult | None, *, for_coder: bool) -
         results = check_set.results if check_set is not None else ()
         for r in results:
             g = r.gate
-            if g is None or g.passed:
+            if g is None:
+                # A required check that is expected-but-absent (#133) blocks but
+                # ran no container, so it has no output tail — surface it so the
+                # coder knows what to add. (errored / n_a don't block, so skip.)
+                if r.execution_outcome == "absent" and not r.passed:
+                    parts.append(
+                        f"\n## Independent {r.check.name} gate "
+                        "(EXPECTED BUT ABSENT)\n\n"
+                        f"No runnable `{r.check.name}` command was found for this "
+                        f"repo's ecosystem, yet the `{r.check.name}` check is "
+                        "required — this blocks approval. Add the missing "
+                        "tests/tool so the check can run.\n"
+                    )
+                continue
+            if g.passed:
                 continue
             how = "timed out" if g.timed_out else f"exit {g.exit_code}"
             parts.append(

@@ -514,7 +514,7 @@ should be a deliberate choice, not the default first increment.
 | Phase | Slice | Depends on |
 |---|---|---|
 | 2 — det. gate | generalise gate → ordered check-set with required/optional/informational/N-A states + preflight; per-check `(exit_code, output)` → `(execution_outcome, findings)` adapter; re-scope `develop_test_gate` to the `test` check — **✅ #131 landed the harness, the `CheckState`/`execution_outcome` axes, and the re-scope (default set = the `test` check); the *findings* half of the adapter is #132, required-absent→preflight-block follows in #132/#133** | [#127] |
-| | per-ecosystem check mappings + ecosystem-applicability validation | |
+| | per-ecosystem check mappings + ecosystem-applicability validation — **✅ #133: `detect_ecosystems` + the per-ecosystem `CANONICAL_CHECKS` catalog + `resolve_check_set` (declared-N/A vs expected-but-absent; required-unmapped → operator-actionable error); the live `test` check now blocks when expected-but-absent rather than silently skipping. Profile selection over the resolver is #139; the first-class finding ledger is #132** | |
 | | auto-format-before-review pass | |
 | | bake ruff/bandit/pip-audit into `ralph-sandbox` + cache | [#116] |
 | | deterministic-finding ledger (IDs, severity-map, tool-closure, suppression) | |

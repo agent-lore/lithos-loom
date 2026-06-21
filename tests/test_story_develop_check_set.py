@@ -252,3 +252,65 @@ def test_summary_reviewer_empty_set_notes_no_gate() -> None:
     assert (
         "no deterministic gate" in render_check_summary(_cs(), for_coder=False).lower()
     )
+
+
+# --- #133: expected-but-absent blocks; declared N/A does not --------------------
+
+
+def test_required_check_blocks_when_expected_but_absent() -> None:
+    # A required check whose tool/target is expected-but-absent (empty command ->
+    # `absent`, no gate) BLOCKS — distinct from an infra error, which skips.
+    r = CheckResult(Check("test", "", "required"), "absent", None)
+    assert r.passed is False
+
+
+def test_informational_check_passes_when_absent() -> None:
+    r = CheckResult(Check("lint", "", "informational"), "absent", None)
+    assert r.passed is True
+
+
+def test_not_applicable_check_passes_when_na() -> None:
+    r = CheckResult(Check("typecheck", "", "not_applicable"), "n_a", None)
+    assert r.passed is True
+
+
+def test_required_absent_check_blocks_the_whole_set() -> None:
+    cs = CheckSetResult((CheckResult(Check("test", "", "required"), "absent", None),))
+    assert cs.blocking_passed is False
+    assert cs.aggregate_verdict is None  # no check produced a verdict
+
+
+def test_summary_coder_surfaces_expected_but_absent_required_check() -> None:
+    cs = _cs(CheckResult(Check("test", "", "required"), "absent", None))
+    out = render_check_summary(cs, for_coder=True)
+    assert "EXPECTED BUT ABSENT" in out
+    assert "`test`" in out
+
+
+def test_summary_coder_omits_absent_non_blocking_check() -> None:
+    # An informational absent check does not block, so it is not surfaced.
+    cs = _cs(CheckResult(Check("lint", "", "informational"), "absent", None))
+    assert render_check_summary(cs, for_coder=True) == ""
+
+
+# --- #133: build_default_check_set applicability of the `test` check ------------
+
+
+def test_required_test_absent_blocks_when_ecosystem_detected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A code repo (pyproject => python) with a *required* test check but no
+    # runnable test command -> expected-but-absent placeholder that blocks.
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
+    checks = build_default_check_set(_config(tmp_path, block_on_red=True), tmp_path)
+    assert checks == (Check(name="test", command="", state="required"),)
+
+
+def test_markerless_repo_yields_no_gate_even_when_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No ecosystem marker: `test` is declared N/A (docs-only), so even a required
+    # gate with no command is simply empty rather than a blocking absent check.
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
+    assert build_default_check_set(_config(tmp_path, block_on_red=True), tmp_path) == ()

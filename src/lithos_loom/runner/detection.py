@@ -15,6 +15,39 @@ container, whereas bare ``pytest`` is rarely on PATH.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
+
+# The language ecosystems story-develop knows how to map canonical checks onto
+# (ADR 0003 §4). Detection is by marker file; resolution of a check to its
+# per-ecosystem command lives in the story-develop check catalog.
+Ecosystem = Literal["python", "node", "rust", "go"]
+
+# Ordered marker table — fixed precedence (python, node, rust, go) so a polyglot
+# repo's ecosystems come back deterministically. A repo "is" an ecosystem if any
+# of its markers is present; ``pyproject.toml`` alone makes a repo Python (unlike
+# ``detect_test_commands``, which additionally requires a ``[tool.pytest`` section
+# before it will *run* pytest).
+_ECOSYSTEM_MARKERS: tuple[tuple[Ecosystem, tuple[str, ...]], ...] = (
+    ("python", ("pyproject.toml", "setup.cfg", "setup.py", "pytest.ini")),
+    ("node", ("package.json",)),
+    ("rust", ("Cargo.toml",)),
+    ("go", ("go.mod",)),
+)
+
+
+def detect_ecosystems(repo_path: Path) -> tuple[Ecosystem, ...]:
+    """Detect the language ecosystem(s) present in *repo_path*, in fixed order.
+
+    Returns every ecosystem whose marker file is present (polyglot-aware), so a
+    Python+Node repo returns ``("python", "node")``. An empty tuple means no
+    recognised ecosystem — a markerless / docs-only repo, where canonical checks
+    are declared not-applicable rather than expected-but-absent.
+    """
+    return tuple(
+        eco
+        for eco, markers in _ECOSYSTEM_MARKERS
+        if any((repo_path / m).is_file() for m in markers)
+    )
 
 
 def _makefile_has_test_target(repo_path: Path) -> bool:

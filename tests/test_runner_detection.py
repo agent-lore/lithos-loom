@@ -7,7 +7,7 @@ the gate can fall back when the container image lacks a tool.
 
 from __future__ import annotations
 
-from lithos_loom.runner.detection import detect_test_commands
+from lithos_loom.runner.detection import detect_ecosystems, detect_test_commands
 
 
 def test_makefile(tmp_path) -> None:
@@ -89,3 +89,44 @@ def test_polyglot_node_and_rust(tmp_path) -> None:
     (tmp_path / "package.json").write_text('{"name": "test"}')
     (tmp_path / "Cargo.toml").write_text("[package]\n")
     assert detect_test_commands(tmp_path) == ["npm test"]
+
+
+# --- detect_ecosystems (#133): polyglot-aware ecosystem markers ----------------
+
+
+def test_detect_ecosystems_python_from_pyproject(tmp_path) -> None:
+    # Unlike detect_test_commands, ecosystem detection needs no [tool.pytest] —
+    # a bare pyproject.toml makes the repo Python.
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    assert detect_ecosystems(tmp_path) == ("python",)
+
+
+def test_detect_ecosystems_python_from_setup_cfg_and_pytest_ini(tmp_path) -> None:
+    (tmp_path / "setup.cfg").write_text("[metadata]\n")
+    assert detect_ecosystems(tmp_path) == ("python",)
+    (tmp_path / "setup.cfg").unlink()
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    assert detect_ecosystems(tmp_path) == ("python",)
+
+
+def test_detect_ecosystems_node_rust_go(tmp_path) -> None:
+    (tmp_path / "package.json").write_text('{"name": "x"}')
+    assert detect_ecosystems(tmp_path) == ("node",)
+    (tmp_path / "package.json").unlink()
+    (tmp_path / "Cargo.toml").write_text("[package]\n")
+    assert detect_ecosystems(tmp_path) == ("rust",)
+    (tmp_path / "Cargo.toml").unlink()
+    (tmp_path / "go.mod").write_text("module example.com/foo\n")
+    assert detect_ecosystems(tmp_path) == ("go",)
+
+
+def test_detect_ecosystems_polyglot_in_fixed_order(tmp_path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/foo\n")
+    (tmp_path / "package.json").write_text('{"name": "x"}')
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    # Fixed precedence python, node, rust, go — independent of creation order.
+    assert detect_ecosystems(tmp_path) == ("python", "node", "go")
+
+
+def test_detect_ecosystems_markerless_is_empty(tmp_path) -> None:
+    assert detect_ecosystems(tmp_path) == ()
