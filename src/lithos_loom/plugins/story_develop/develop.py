@@ -343,12 +343,16 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
 
     The ``test`` check keeps its legacy ``test_gate`` / ``block_on_red`` /
     ``test_command`` semantics verbatim (#127/#159, ADR §10). Every *other* profile
-    check runs **informational this slice** — surfaced + ledgered, never blocking —
-    so the profile's declared ``required`` floor is not yet enforced (that flip is
-    the next slice), and an informational check whose tool is absent from the image
-    is silently dropped (a skip, not a blocking placeholder). The ``format`` check is
-    declared by the profile but its live (auto-format) pass is #134, so it is not run
-    as a standalone check here. Checks are emitted in profile order.
+    check runs **informational this slice** — never blocking — so the profile's
+    declared ``required`` floor is not yet enforced (that flip is the next slice), and
+    an informational check whose tool is absent from the image is silently dropped (a
+    skip, not a blocking placeholder). Where a check's result is *surfaced* depends on
+    its stage (see :func:`develop`): a ``fast`` check runs before the panel each round
+    and feeds the coder + reviewer prompts (ADR §6), while a ``candidate`` check runs
+    only on the approval candidate and so reaches the gate ledger + ``[DevelopResult]``
+    but — on the common approve-immediately path — not the panel this slice. The
+    ``format`` check is declared by the profile but its live (auto-format) pass is
+    #134, so it is not run as a standalone check here. Checks are in profile order.
     """
     profile = profiles.get_profile(config.review_profile)
     ecosystems = detection.detect_ecosystems(wt)
@@ -1518,8 +1522,12 @@ def develop(
                 # candidate-staged checks once on this tree before sealing approval.
                 # They are informational this slice, so they cannot block (the floor
                 # slice flips that via ``blocking_passed`` below, with no structural
-                # change here); they still surface into the ledger + result. Run once
-                # per committed tree (dedup on the sha).
+                # change here). Their results merge into ``check_set`` + the ledger +
+                # the ``[DevelopResult]``; because the run approves immediately on the
+                # common path, candidate findings reach the coder/panel only if a
+                # later round runs — which this informational slice does not trigger
+                # on its own (the floor slice will, when a RED required candidate
+                # blocks). Run once per committed tree (dedup on the sha).
                 if (
                     candidate_checks
                     and gated_sha is not None
