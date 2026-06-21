@@ -295,12 +295,20 @@ def test_profile_panel_minimal_is_gate_only_none_with_friction() -> None:
 
 def test_profile_panel_skips_unknown_persona_with_friction(monkeypatch) -> None:
     # Defensive: a profile persona missing from the registry is skipped + frictioned.
-    import lithos_loom.plugins.story_develop.daemon_io as dio
+    from lithos_loom.plugins.story_develop.daemon_io import (
+        canonical_personas,
+        profile_panel,
+    )
 
-    trimmed = {k: v for k, v in dio.canonical_personas().items() if k != "security"}
-    monkeypatch.setattr(dio, "canonical_personas", lambda: trimmed)
+    trimmed = {k: v for k, v in canonical_personas().items() if k != "security"}
+    # Patch where profile_panel resolves the registry — its DEFINING module's globals
+    # (daemon_io), not this test's namespace — so the trim actually takes effect.
+    monkeypatch.setattr(
+        "lithos_loom.plugins.story_develop.daemon_io.canonical_personas",
+        lambda: trimmed,
+    )
     frictions: list[str] = []
-    panel = dio.profile_panel("standard", frictions)
+    panel = profile_panel("standard", frictions)
     assert _names(panel) == ["correctness"]  # security dropped
     assert any("security" in f for f in frictions)
 
