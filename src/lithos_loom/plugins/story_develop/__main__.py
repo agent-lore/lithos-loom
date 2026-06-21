@@ -367,7 +367,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
     # succeeded/completed record replays; a failed/interrupted/malformed record
     # is ignored so the task stays retriable.
     idempotency_key = args.idempotency_key or ctx.task_id
-    prior = lookup_completed(idempotency_key)
+    prior = lookup_completed(idempotency_key, expected_task_id=ctx.task_id)
     if prior is not None:
         write_result_atomically(result_file, prior)
         print(

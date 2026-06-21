@@ -92,13 +92,33 @@ def test_record_keys_are_independent(tmp_path: Path, monkeypatch) -> None:
         # not even an object
         ["succeeded"],
         "succeeded",
+        # AC4 boundary: claims success (status + exit_code BOTH say "completed")
+        # but is schema-malformed — missing required result.json fields. A guard
+        # that only checked status/exit_code would wrongly replay these.
+        {"status": "succeeded", "exit_code": 0},  # missing schema_version+task_id
+        {"status": "succeeded", "exit_code": 0, "task_id": "t-1"},  # no schema_version
+        {"status": "succeeded", "exit_code": 0, "schema_version": 1},  # no task_id
+        {  # all required fields present but a stray field (additionalProperties)
+            "status": "succeeded",
+            "exit_code": 0,
+            "schema_version": 1,
+            "task_id": "t-1",
+            "bogus": "field",
+        },
+        {  # wrong schema_version const
+            "status": "succeeded",
+            "exit_code": 0,
+            "schema_version": 2,
+            "task_id": "t-1",
+        },
     ],
 )
 def test_lookup_ignores_non_completed_records(
     tmp_path: Path, monkeypatch, payload: Any
 ) -> None:
-    """AC4: failed / interrupted / malformed records (even ones claiming
-    success) are ignored so the task stays retriable."""
+    """AC4: failed / interrupted / malformed records — including ones that claim
+    success but violate the result.json schema — are ignored so the task stays
+    retriable."""
     monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(tmp_path / "store"))
     path = idempotency._record_path("k")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +132,29 @@ def test_lookup_ignores_malformed_json(tmp_path: Path, monkeypatch) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json", encoding="utf-8")
     assert lookup_completed("k") is None
+
+
+def test_lookup_binds_record_to_expected_task_id(tmp_path: Path, monkeypatch) -> None:
+    """security/f-001 (CWE-345): a record is replayed only for the task it names
+    — a mismatched expected_task_id (reused key / tampered store) never replays
+    one task's result into another's."""
+    monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(tmp_path / "store"))
+    record_completion("shared-key", _completed_payload("t-1"))
+    # Same task → replays; different task → ignored; no expectation → replays.
+    assert lookup_completed("shared-key", expected_task_id="t-1") is not None
+    assert lookup_completed("shared-key", expected_task_id="t-2") is None
+    assert lookup_completed("shared-key") is not None
+
+
+def test_record_completion_prunes_store_to_bound(tmp_path: Path, monkeypatch) -> None:
+    """security/f-002 (CWE-770): the store is bounded — each write prunes back to
+    LITHOS_LOOM_IDEMPOTENCY_MAX_RECORDS so it cannot grow without limit."""
+    monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_MAX_RECORDS", "2")
+    for i in range(5):
+        record_completion(f"key-{i}", _completed_payload(f"t-{i}"))
+    remaining = list((tmp_path / "store").glob("*.json"))
+    assert len(remaining) == 2
 
 
 # ── daemon-mode wiring ─────────────────────────────────────────────────
@@ -302,3 +345,45 @@ def test_default_idempotency_key_is_task_id(
     assert main_mod.main(argv) == EXIT_SUCCEEDED
     assert captured["develop_calls"] == 1
     assert lookup_completed("t-99") is not None
+
+
+def test_reused_key_across_tasks_does_not_replay(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """security/f-001: a second, DIFFERENT task reusing one --idempotency-key
+    does not replay the first task's result — the task-id binding forces a real
+    run so the second task gets its own result.json."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured = _stub_daemon(monkeypatch, tmp_path)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+
+    # Task t-1 records under the shared key.
+    argv1, _ = _daemon_args(
+        tmp_git_repo,
+        tmp_path / "a",
+        "--idempotency-key",
+        "shared",
+        task_id="t-1",
+    )
+    assert main_mod.main(argv1) == EXIT_SUCCEEDED
+    assert captured["develop_calls"] == 1
+
+    # Task t-2 reuses the SAME key: binding mismatch → real run, own result.
+    result_file2 = tmp_path / "b" / "result.json"
+    argv2 = [
+        "--repo",
+        str(tmp_git_repo),
+        "--task-json",
+        str(_write_task_json(tmp_path / "b" / "task.json", "t-2")),
+        "--work-dir",
+        str(tmp_path / "b" / "work"),
+        "--result-file",
+        str(result_file2),
+        "--idempotency-key",
+        "shared",
+    ]
+    assert main_mod.main(argv2) == EXIT_SUCCEEDED
+    assert captured["develop_calls"] == 2  # ran again, not replayed
+    assert json.loads(result_file2.read_text(encoding="utf-8"))["task_id"] == "t-2"
