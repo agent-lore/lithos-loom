@@ -51,6 +51,8 @@ Runs:
 
 All three must pass. CI runs the same on every PR.
 
+**The gate stays hermetic — no live Lithos.** `make check` (and the in-sandbox `story-develop` test gate) must run without a live Lithos server: unit/gate tests stub the client (e.g. `_FakeClient` in `tests/test_story_develop_daemon.py`; `conftest.py` clears `LITHOS_*` per test). A test that genuinely needs a live Lithos round-trip guards on `LITHOS_URL` (skip when unset) and runs on the host / CI, never inside the sandbox. A coder implementing Lithos-calling code works from the vendored tool/API contract, not a running server. Spinning an ephemeral Lithos per run (for write-heavy integration tests *inside* the gate) is deferred to its own PRD — see [#148](https://github.com/agent-lore/lithos-loom/issues/148).
+
 When changing the plugin contract, update `docs/result-schema.json` AND `tests/test_plugin_runner.py`. When changing config schema, update `examples/lithos-loom.toml` AND `tests/test_config.py`. When adding a new plugin, ship it under `src/lithos_loom/plugins/<name>/` with a `__main__.py` entry point and add an example route stanza to `examples/lithos-loom.toml`. When changing any operator-visible surface (CLI flag, projection rule, event name, finding prefix), update `docs/SPECIFICATION.md` in the same diff.
 
 ## Agent skills
