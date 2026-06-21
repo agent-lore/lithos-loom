@@ -20,10 +20,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 from ...errors import ConfigError
-from .check_set import CheckState
+from .check_set import CheckState, Stage
 
 __all__ = [
     "Stage",
@@ -36,13 +35,12 @@ __all__ = [
     "validate_monotonic",
     "ProfileResolution",
     "resolve_profile",
+    "get_profile",
 ]
 
-# When a check runs in the round loop: ``fast`` every round (tight coder feedback),
-# ``candidate`` only on the approval-candidate round (expensive checks — dep-audit /
-# coverage / semgrep). The field is populated + validated here; the round-loop
-# stage-filter that *acts* on it is #140 (ADR §4).
-Stage = Literal["fast", "candidate"]
+# ``Stage`` (when a check runs — ``fast``/``candidate``) is owned by :mod:`check_set`
+# and re-exported here, since the concrete :class:`check_set.Check` now carries it;
+# the round-loop stage-filter that acts on it is #140 (ADR §4).
 
 # Host policy for an explicit-but-unknown profile name (ADR §2).
 UNKNOWN_PROFILE_POLICIES: frozenset[str] = frozenset({"halt", "strongest"})
@@ -185,6 +183,17 @@ def validate_monotonic(profiles: Sequence[ReviewProfile]) -> None:
 validate_monotonic(CANONICAL_PROFILES)
 
 _BY_NAME: dict[str, ReviewProfile] = {p.name: p for p in CANONICAL_PROFILES}
+
+
+def get_profile(name: str) -> ReviewProfile:
+    """The canonical :class:`ReviewProfile` for *name*, or the built-in default.
+
+    A run only reaches this with a name :func:`resolve_profile` already accepted
+    (known, or a halt the caller short-circuits), so an unknown name here is a
+    defensive fallthrough — return ``standard`` rather than raise, since the
+    check-set builder must always produce *some* set.
+    """
+    return _BY_NAME.get(name, _BY_NAME[DEFAULT_PROFILE_NAME])
 
 
 @dataclass(frozen=True)

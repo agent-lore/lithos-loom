@@ -33,6 +33,13 @@ if TYPE_CHECKING:
 # are reserved for #133/#139.
 CheckState = Literal["required", "optional", "informational", "not_applicable"]
 
+# When a check runs in the round loop (ADR §4): ``fast`` every round (tight coder
+# feedback — format/lint/typecheck); ``candidate`` only on the approval-candidate
+# round (expensive — dep-audit/coverage/semgrep). Owned here (the lower-level
+# module); :mod:`profiles` re-exports it. The round-loop stage-filter that acts on
+# it is #140.
+Stage = Literal["fast", "candidate"]
+
 # "Did the tool run", kept separate from "did its result block" (ADR §4). A RED
 # run is still ``ran``; ``errored`` is an infra failure (the tool never executed).
 ExecutionOutcome = Literal["ran", "absent", "errored", "timed_out", "n_a"]
@@ -53,12 +60,16 @@ class Check:
 
     Carries no result state. A Review Profile (#139) is a list of these; #131
     ships exactly one (the ``test`` check). ``state`` is the §4 axis that #133
-    (applicability) and #139 (profiles) extend.
+    (applicability) and #139 (profiles) extend; ``stage`` (#140) governs *when* a
+    check runs (``fast`` every round / ``candidate`` on the approval candidate),
+    not whether it blocks — the resolver tags it from the profile's
+    :class:`profiles.ProfileCheck`.
     """
 
     name: str
     command: str
     state: CheckState
+    stage: Stage = "fast"
 
 
 @dataclass(frozen=True)

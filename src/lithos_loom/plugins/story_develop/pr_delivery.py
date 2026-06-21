@@ -538,7 +538,7 @@ def deliver(
         _render,
         _render_findings,
         _run_check_set,
-        build_default_check_set,
+        build_check_set,
     )
     from .findings import FindingLedger
     from .turns import run_turn
@@ -736,12 +736,14 @@ def deliver(
     fix_pushed = False
     gate_verdict: str | None = None
     if fix_committed:
-        # Run the same default check-set on the fix commit; the `test` check's
-        # GateResult drives push/hold. Delivery holds the push on ANY red fix
-        # regardless of block_on_red, so read the test_gate view here (not
-        # blocking_passed, which would honour a non-blocking config and push a
-        # RED fix).
-        checks = build_default_check_set(config, wt)
+        # Run the `test` check on the fix commit; its GateResult drives push/hold.
+        # Delivery holds the push on ANY red fix regardless of block_on_red, so read
+        # the test_gate view here (not blocking_passed, which would honour a
+        # non-blocking config and push a RED fix). #140: the profile set now also
+        # carries informational checks, but delivery keys only on `test` and passes
+        # no ledger, so gate just the `test` check (the advisory + candidate checks
+        # would burn containers without affecting the decision — or wrongly hold).
+        checks = tuple(c for c in build_check_set(config, wt) if c.name == "test")
         cs = _run_check_set(config, wt, new_sha, fix_round, checks) if checks else None
         gate = cs.test_gate if cs is not None else None
         gate_verdict = gate.verdict if gate else None

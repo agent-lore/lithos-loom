@@ -200,7 +200,8 @@ def test_main_standalone_halts_on_unknown_review_profile(
 def test_main_standalone_known_review_profile_runs(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """A known --review-profile does not halt — the run proceeds to develop (#139)."""
+    """A known --review-profile does not halt — the run proceeds to develop (#139)
+    and the resolved name threads onto the config (#140)."""
     from lithos_loom.plugins.story_develop import __main__ as main_mod
     from lithos_loom.plugins.story_develop.develop import DevelopResult
 
@@ -208,6 +209,7 @@ def test_main_standalone_known_review_profile_runs(
 
     def fake_develop(config, **kw):
         captured["ran"] = True
+        captured["config"] = config
         return DevelopResult(
             status="approved",
             run_id="r1",
@@ -238,6 +240,7 @@ def test_main_standalone_known_review_profile_runs(
     )
     assert rc == 0
     assert captured.get("ran") is True
+    assert captured["config"].review_profile == "thorough"
 
 
 def test_main_accepts_codex_coder(

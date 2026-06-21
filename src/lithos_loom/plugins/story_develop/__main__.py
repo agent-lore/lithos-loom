@@ -431,6 +431,8 @@ def _daemon_main(args: argparse.Namespace) -> int:
         coder_model=settings.coder_model,
         coder_effort=settings.coder_effort,
         reviewers=settings.reviewers,
+        # #140: the resolved Review Profile selects the deterministic check-set.
+        review_profile=settings.review_profile,
         max_rounds=settings.max_rounds or args.max_rounds,
         # Per-project / per-task test-gate config from project-context metadata
         # (#127) wins; the route-level flags (--no-test-gate / --test-command /
@@ -772,6 +774,8 @@ def main(argv: list[str] | None = None) -> int:
         coder_model=coder_model,
         coder_effort=coder_effort,
         reviewers=specs,
+        # #140: the resolved Review Profile selects the deterministic check-set.
+        review_profile=profile_resolution.profile.name,
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,
         test_command=args.test_command,

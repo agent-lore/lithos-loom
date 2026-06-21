@@ -1142,6 +1142,8 @@ def test_daemon_mode_happy_path_writes_result(
     assert cfg.max_rounds == 3
     assert cfg.max_cost_usd == 12.0
     assert cfg.reviewer_fallback_chain == ("codex",)
+    # #140: the resolved Review Profile threads onto the config (unset → standard).
+    assert cfg.review_profile == "standard"
     assert captured["frictions"] == ("note one",)
     assert captured["posted"] == "t-1"
 
@@ -1257,6 +1259,36 @@ def test_daemon_mode_image_falls_back_to_route_flag(
     argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--image", "route-image:latest")
     assert main_mod.main(argv) == EXIT_SUCCEEDED
     assert captured["config"].image == "route-image:latest"
+
+
+def test_daemon_mode_review_profile_flows_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#140: a resolved project-layer Review Profile threads onto the config."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(review_profile_project="thorough"),
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path)
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].review_profile == "thorough"
 
 
 def test_daemon_mode_bad_cli_fallback_degrades_with_friction(

@@ -1,8 +1,8 @@
 """Tests for the multi-check check-set abstraction (#131).
 
-Pure types + the execution-outcome adapter, plus the ``build_default_check_set``
-constructor. No Docker — the container run is exercised via the existing
-``test_gate`` seam in the core orchestration tests.
+Pure types + the execution-outcome adapter, plus the ``build_check_set``
+constructor (the Review-Profile-selected set, #140). No Docker — the container run
+is exercised via the existing ``test_gate`` seam in the core orchestration tests.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from lithos_loom.plugins.story_develop.check_set import (
     render_check_summary,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
-from lithos_loom.plugins.story_develop.develop import build_default_check_set
+from lithos_loom.plugins.story_develop.develop import build_check_set
 from lithos_loom.plugins.story_develop.gate_findings import GateFinding, GateLedger
 from lithos_loom.plugins.story_develop.test_gate import GateResult
 
@@ -158,7 +158,7 @@ def test_errored_test_check_clears_the_gate_view() -> None:
     assert cs.aggregate_verdict is None  # no check produced a verdict
 
 
-# --- build_default_check_set: the {test} default + the §10 re-scope ----------
+# --- build_check_set: profile-selected set, informational-first (#140) --------
 
 
 def _config(tmp_path: Path, **kw: object) -> DevelopConfig:
@@ -170,15 +170,33 @@ def _config(tmp_path: Path, **kw: object) -> DevelopConfig:
     )
 
 
+def _python(
+    monkeypatch: pytest.MonkeyPatch, *, present: tuple[str, ...] | None = None
+) -> None:
+    """Stub a python ecosystem with the named tools present (all tools, if None) —
+    so ``build_check_set`` resolves the profile's checks without touching Docker."""
+    monkeypatch.setattr(
+        develop_mod.detection, "detect_ecosystems", lambda wt: ("python",)
+    )
+    monkeypatch.setattr(
+        develop_mod.test_gate,
+        "probe_tools",
+        lambda image, tools: (
+            list(tools) if present is None else [t for t in tools if t in present]
+        ),
+    )
+
+
 def test_default_set_is_one_informational_test_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Markerless repo: the profile's non-test checks all resolve absent and drop,
+    # leaving just the `test` check (default `standard` profile, block_on_red off).
     monkeypatch.setattr(
         develop_mod, "_resolve_test_command", lambda config, wt: "pytest"
     )
-    checks = build_default_check_set(_config(tmp_path, block_on_red=False), tmp_path)
-    assert len(checks) == 1
-    assert checks[0] == Check(name="test", command="pytest", state="informational")
+    checks = build_check_set(_config(tmp_path, block_on_red=False), tmp_path)
+    assert checks == (Check(name="test", command="pytest", state="informational"),)
 
 
 def test_block_on_red_makes_the_test_check_required(
@@ -187,16 +205,16 @@ def test_block_on_red_makes_the_test_check_required(
     monkeypatch.setattr(
         develop_mod, "_resolve_test_command", lambda config, wt: "pytest"
     )
-    checks = build_default_check_set(_config(tmp_path, block_on_red=True), tmp_path)
+    checks = build_check_set(_config(tmp_path, block_on_red=True), tmp_path)
     assert checks[0].state == "required"
 
 
-def test_test_gate_false_drops_test_check_but_keeps_lint(
+def test_test_gate_false_drops_test_check_but_keeps_the_informational_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # ADR §10 / #132: develop_test_gate=false is a *test* escape hatch — it scopes
-    # off the `test` check only, never the deterministic lint floor. The test
-    # command must not even be resolved, but the lint check survives.
+    # ADR §10 / #159: develop_test_gate=false is a *test* escape hatch — it scopes
+    # off the `test` check only, never the rest of the profile's (informational)
+    # set. The test command must not even be resolved; the lint check survives.
     def _boom(config: object, wt: object) -> str:
         raise AssertionError("must not resolve a test command when the gate is off")
 
@@ -206,8 +224,10 @@ def test_test_gate_false_drops_test_check_but_keeps_lint(
         state="informational",
     )
     monkeypatch.setattr(develop_mod, "_resolve_test_command", _boom)
-    monkeypatch.setattr(develop_mod, "_build_lint_checks", lambda config, wt: [lint])
-    checks = build_default_check_set(_config(tmp_path, test_gate=False), tmp_path)
+    monkeypatch.setattr(
+        develop_mod, "_build_informational_checks", lambda config, profile, eco: [lint]
+    )
+    checks = build_check_set(_config(tmp_path, test_gate=False), tmp_path)
     assert checks == (lint,)
     assert all(c.name != "test" for c in checks)
 
@@ -216,7 +236,7 @@ def test_no_detected_command_yields_empty_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
-    assert build_default_check_set(_config(tmp_path, test_gate=True), tmp_path) == ()
+    assert build_check_set(_config(tmp_path, test_gate=True), tmp_path) == ()
 
 
 # --- render_check_summary: feed the gate to coder + reviewer prompts (#136) ---
@@ -317,7 +337,7 @@ def test_summary_coder_omits_absent_non_blocking_check() -> None:
     assert render_check_summary(cs, for_coder=True) == ""
 
 
-# --- #133: build_default_check_set applicability of the `test` check ------------
+# --- #133/#140: build_check_set applicability of the `test` check --------------
 
 
 def test_required_test_absent_blocks_when_ecosystem_detected(
@@ -327,9 +347,11 @@ def test_required_test_absent_blocks_when_ecosystem_detected(
     # runnable test command -> expected-but-absent placeholder that blocks.
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
-    # isolate the test check; the live lint check is exercised separately below.
-    monkeypatch.setattr(develop_mod, "_build_lint_checks", lambda config, wt: [])
-    checks = build_default_check_set(_config(tmp_path, block_on_red=True), tmp_path)
+    # isolate the test check; the informational set is exercised separately below.
+    monkeypatch.setattr(
+        develop_mod, "_build_informational_checks", lambda config, profile, eco: []
+    )
+    checks = build_check_set(_config(tmp_path, block_on_red=True), tmp_path)
     assert checks == (Check(name="test", command="", state="required"),)
 
 
@@ -339,7 +361,7 @@ def test_markerless_repo_yields_no_gate_even_when_required(
     # No ecosystem marker: `test` is declared N/A (docs-only), so even a required
     # gate with no command is simply empty rather than a blocking absent check.
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
-    assert build_default_check_set(_config(tmp_path, block_on_red=True), tmp_path) == ()
+    assert build_check_set(_config(tmp_path, block_on_red=True), tmp_path) == ()
 
 
 # --- #132 Slice 3: gate-ledger surfacing in render_check_summary ---------------
@@ -387,33 +409,77 @@ def test_summary_coder_keeps_raw_tail_for_checks_without_findings() -> None:
     assert "boom" in out
 
 
-# --- #132 Slice 3: live lint activation in build_default_check_set -------------
+# --- #140: the profile selects the informational check-set --------------------
 
 
-def test_build_default_adds_informational_ruff_lint(
+def test_standard_profile_adds_informational_typecheck_and_sast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `standard` (the default) brings lint + typecheck + sast alongside test, all
+    # informational this slice. Finding-producing tools (ruff/bandit) are
+    # machine-ified for the ledger; a no-adapter tool (pyright) runs as-is.
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    _python(monkeypatch)
+    checks = build_check_set(_config(tmp_path), tmp_path)
+    by_name = {c.name: c for c in checks}
+    assert by_name["test"].command == "pytest"
+    assert by_name["lint"].command == "ruff check --output-format=json --exit-zero"
+    assert by_name["sast"].command == "bandit -r . -f json --exit-zero"
+    assert by_name["typecheck"].command == "pyright"  # no adapter -> run as-is
+    assert all(
+        by_name[n].state == "informational" for n in ("lint", "typecheck", "sast")
+    )
+    # `format` is declared by the profile but its live pass is #134 -> not run.
+    assert "format" not in by_name
+    assert all(c.stage == "fast" for c in checks)
+
+
+def test_minimal_profile_runs_only_lint_and_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
-    monkeypatch.setattr(
-        develop_mod.detection, "detect_ecosystems", lambda wt: ("python",)
-    )
-    monkeypatch.setattr(
-        develop_mod.test_gate, "probe_tools", lambda image, tools: list(tools)
-    )
-    checks = build_default_check_set(_config(tmp_path), tmp_path)
-    by_name = {c.name: c for c in checks}
-    assert by_name["test"].command == "pytest"
-    assert by_name["lint"].state == "informational"
-    assert by_name["lint"].command == "ruff check --output-format=json --exit-zero"
+    _python(monkeypatch)
+    checks = build_check_set(_config(tmp_path, review_profile="minimal"), tmp_path)
+    assert {c.name for c in checks} == {"lint", "test"}
 
 
-def test_build_default_no_lint_without_an_ecosystem(
+def test_thorough_profile_stages_the_expensive_checks_as_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    _python(monkeypatch)
+    checks = build_check_set(_config(tmp_path, review_profile="thorough"), tmp_path)
+    stage = {c.name: c.stage for c in checks}
+    assert stage["dep-audit"] == "candidate"
+    assert stage["coverage"] == "candidate"
+    assert stage["semgrep"] == "candidate"
+    assert stage["lint"] == "fast"
+    assert stage["typecheck"] == "fast"
+    assert stage["test"] == "fast"
+
+
+def test_absent_tool_is_dropped_from_the_informational_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only ruff present in the image -> typecheck/sast drop. An informational
+    # absent check is a silent skip this slice, not a blocking placeholder.
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    _python(monkeypatch, present=("ruff",))
+    checks = build_check_set(_config(tmp_path), tmp_path)
+    assert {c.name for c in checks} == {"lint", "test"}
+
+
+def test_no_informational_checks_without_an_ecosystem(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
     monkeypatch.setattr(develop_mod.detection, "detect_ecosystems", lambda wt: ())
-    checks = build_default_check_set(_config(tmp_path), tmp_path)
+    checks = build_check_set(_config(tmp_path), tmp_path)
     assert [c.name for c in checks] == ["test"]
+
+
+def test_check_stage_defaults_to_fast() -> None:
+    assert Check(name="lint", command="x", state="informational").stage == "fast"
 
 
 # --- #132 Slice 3: _run_check_set ledgers findings + persistence ---------------

@@ -174,3 +174,24 @@ def test_unknown_name_strongest_falls_back_never_weaker() -> None:
     strongest_rank = max(p.strength_rank for p in CANONICAL_PROFILES)
     assert r.profile.strength_rank == strongest_rank
     assert r.profile.name == "thorough"
+
+
+# --- get_profile + the DevelopConfig default (#140) ---------------------------
+
+
+def test_get_profile_known_and_unknown_fallback() -> None:
+    from lithos_loom.plugins.story_develop.profiles import get_profile
+
+    assert get_profile("thorough").name == "thorough"
+    # An unknown name is a defensive fallthrough to the default, never a raise —
+    # the builder must always produce some set.
+    assert get_profile("bogus").name == DEFAULT_PROFILE_NAME
+
+
+def test_develop_config_default_matches_default_profile_name() -> None:
+    # config.py keeps a bare-string default to avoid a config→profiles import
+    # cycle; this guard pins it to the canonical DEFAULT_PROFILE_NAME.
+    from lithos_loom.plugins.story_develop.config import DevelopConfig
+
+    field = DevelopConfig.__dataclass_fields__["review_profile"]
+    assert field.default == DEFAULT_PROFILE_NAME
