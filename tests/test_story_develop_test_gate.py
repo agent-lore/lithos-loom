@@ -68,6 +68,10 @@ def test_gate_command_shape(tmp_path: Path) -> None:
     assert f"{tree}:/workspace" in cmd
     assert f"{cache}:/gate_cache" in cmd
     assert "UV_CACHE_DIR=/gate_cache/uv" in cmd
+    assert "npm_config_cache=/gate_cache/npm" in cmd
+    # SAST/lint caches persist across rounds in the same mounted cache dir (#132).
+    assert "PIP_CACHE_DIR=/gate_cache/pip" in cmd
+    assert "RUFF_CACHE_DIR=/gate_cache/ruff" in cmd
     assert cmd[-1] == "uv run pytest"  # runs via sh -c
     assert cmd[-2] == "-c"
     # hardened profile + no agent config mounts (agent-free by construction)
