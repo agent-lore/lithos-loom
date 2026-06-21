@@ -136,11 +136,11 @@ class ProjectDevelopSettings:
     # the route-level ``--image`` flag / the built-in default".
     image: str | None = None
     # Per-project test-gate overrides (#127), each ``None`` = "inherit the
-    # route-level flag" (``--test-command`` / ``--no-test-gate`` /
-    # ``--block-on-red``). ``test_command`` is trusted as-is by the gate.
+    # route-level flag" (``--test-command`` / ``--no-test-gate``).
+    # ``test_command`` is trusted as-is by the gate. (#140: the `test` check's
+    # blocking is the review profile's, not a separate knob — `block_on_red` removed.)
     test_command: str | None = None
     test_gate: bool | None = None
-    block_on_red: bool | None = None
     # Review Profile (#139). ``review_profile_project`` is the project-layer name
     # (context-doc ``develop_review_profile``); :func:`apply_review_profile` then
     # resolves task > project > host > builtin into ``review_profile`` (the
@@ -354,8 +354,8 @@ def resolve_project_settings(
     # Per-project test-gate overrides (#127), each with an optional per-task
     # override and a friction (never a failure) on a bad value — mirroring
     # ``develop_image``. ``develop_test_command`` is trusted as-is by the gate
-    # (no auto-detection); ``develop_test_gate`` / ``develop_block_on_red`` are
-    # booleans. ``None`` at every layer means "inherit the route-level flag".
+    # (no auto-detection); ``develop_test_gate`` is a boolean. ``None`` at every
+    # layer means "inherit the route-level flag".
     test_command: str | None = None
     try:
         test_command = parse_test_command(
@@ -388,21 +388,19 @@ def resolve_project_settings(
         except ValueError as exc:
             frictions.append(f"{exc}; keeping project default")
 
-    block_on_red: bool | None = None
-    try:
-        block_on_red = parse_bool_setting(
-            meta.get("develop_block_on_red"), where="develop_block_on_red"
+    # #140: `develop_block_on_red` is removed — the `test` check's blocking is now
+    # the resolved review profile's `ProfileCheck("test", ...)` (single source of
+    # truth). A lingering key is inert; surface a one-shot deprecation friction so
+    # the change in behaviour (the profile floor governs test) is not silent.
+    if (
+        meta.get("develop_block_on_red") is not None
+        or task_metadata.get("develop_block_on_red") is not None
+    ):
+        frictions.append(
+            "develop_block_on_red is removed and ignored; the `test` check's blocking "
+            "is now governed by the review profile (its ProfileCheck state) — use "
+            "develop_review_profile / develop_test_gate instead"
         )
-    except ValueError as exc:
-        frictions.append(f"{exc}; ignoring")
-    if task_metadata.get("develop_block_on_red") is not None:
-        try:
-            block_on_red = parse_bool_setting(
-                task_metadata["develop_block_on_red"],
-                where="task metadata.develop_block_on_red",
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; keeping project default")
 
     raw_chain = meta.get("develop_fallback_chain")
     chain: tuple[str, ...] = ()
@@ -448,7 +446,6 @@ def resolve_project_settings(
         image=image,
         test_command=test_command,
         test_gate=test_gate,
-        block_on_red=block_on_red,
         review_profile_project=review_profile_project,
         frictions=tuple(frictions),
     )

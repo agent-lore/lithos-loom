@@ -327,26 +327,17 @@ def _python(
     )
 
 
-def test_default_set_is_one_informational_test_check(
+def test_default_set_is_one_required_test_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Markerless repo: the profile's non-test checks all resolve absent and drop,
-    # leaving just the `test` check (default `standard` profile, block_on_red off).
+    # leaving just the `test` check — required under the default `standard` profile
+    # (#140: its state is the profile's, blocking on RED with no extra config).
     monkeypatch.setattr(
         develop_mod, "_resolve_test_command", lambda config, wt: "pytest"
     )
-    checks = build_check_set(_config(tmp_path, block_on_red=False), tmp_path)
-    assert checks == (Check(name="test", command="pytest", state="informational"),)
-
-
-def test_block_on_red_makes_the_test_check_required(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        develop_mod, "_resolve_test_command", lambda config, wt: "pytest"
-    )
-    checks = build_check_set(_config(tmp_path, block_on_red=True), tmp_path)
-    assert checks[0].state == "required"
+    checks = build_check_set(_config(tmp_path), tmp_path)
+    assert checks == (Check(name="test", command="pytest", state="required"),)
 
 
 def test_test_gate_false_drops_test_check_but_keeps_the_informational_set(
@@ -491,7 +482,9 @@ def test_required_test_absent_blocks_when_ecosystem_detected(
     monkeypatch.setattr(
         develop_mod, "_build_profile_checks", lambda config, profile, eco: []
     )
-    checks = build_check_set(_config(tmp_path, block_on_red=True), tmp_path)
+    # `standard` declares test required, so an absent test command is a blocking
+    # expected-but-absent placeholder (no block_on_red knob needed — #140).
+    checks = build_check_set(_config(tmp_path), tmp_path)
     assert checks == (Check(name="test", command="", state="required"),)
 
 
@@ -501,7 +494,7 @@ def test_markerless_repo_yields_no_gate_even_when_required(
     # No ecosystem marker: `test` is declared N/A (docs-only), so even a required
     # gate with no command is simply empty rather than a blocking absent check.
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
-    assert build_check_set(_config(tmp_path, block_on_red=True), tmp_path) == ()
+    assert build_check_set(_config(tmp_path), tmp_path) == ()
 
 
 # --- #132 Slice 3: gate-ledger surfacing in render_check_summary ---------------
@@ -576,6 +569,19 @@ def test_standard_profile_requires_lint_typecheck_surfaces_sast(
     assert all(c.stage == "fast" for c in checks)
 
 
+def test_default_profile_makes_the_test_check_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #140 finding-1 fix: the `test` check's blocking is governed by the resolved
+    # profile's `ProfileCheck("test", ...)` — the single source of truth — NOT a
+    # separate `block_on_red` knob (removed). `standard` declares test required, so
+    # the default test check blocks on RED with no extra config.
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    checks = build_check_set(_config(tmp_path), tmp_path)
+    test = next(c for c in checks if c.name == "test")
+    assert test.state == "required"
+
+
 def test_minimal_profile_runs_only_lint_and_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -616,6 +622,29 @@ def test_required_absent_tool_blocks_informational_absent_drops(
     assert by_name["typecheck"].command == ""  # expected-but-absent placeholder
     assert by_name["typecheck"].state == "required"
     assert "sast" not in by_name  # informational absent -> dropped
+
+
+def test_required_check_inapplicable_to_ecosystem_is_na_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #140 floor + #133: `standard` declares `typecheck` (pyright) + `sast` (bandit)
+    # required, but both are python/node-only. On a Rust repo they have no analogue —
+    # they must resolve N/A (dropped), NOT raise CheckApplicabilityError before any
+    # agent work (which would turn the default profile into a config failure for a
+    # supported ecosystem). `lint` (cargo clippy) + `test` still apply.
+    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "cargo test")
+    monkeypatch.setattr(
+        develop_mod.detection, "detect_ecosystems", lambda wt: ("rust",)
+    )
+    monkeypatch.setattr(
+        develop_mod.test_gate, "probe_tools", lambda image, tools: list(tools)
+    )
+    checks = build_check_set(_config(tmp_path), tmp_path)  # must not raise
+    by_name = {c.name: c for c in checks}
+    assert "typecheck" not in by_name  # python/node-only -> N/A for rust
+    assert "sast" not in by_name  # bandit is python/node-only -> N/A for rust
+    assert "lint" in by_name  # cargo clippy applies
+    assert "test" in by_name
 
 
 def test_no_informational_checks_without_an_ecosystem(

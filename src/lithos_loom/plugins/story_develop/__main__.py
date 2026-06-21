@@ -257,11 +257,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Test command for the gate (overrides auto-detection)",
     )
     p.add_argument(
-        "--block-on-red",
-        action="store_true",
-        help="A red test gate prevents approval (default: recorded, non-blocking)",
-    )
-    p.add_argument(
         "--review-profile",
         default=None,
         help="Review Profile (#139): minimal | standard | thorough (or a custom "
@@ -442,9 +437,10 @@ def _daemon_main(args: argparse.Namespace) -> int:
         review_profile=settings.review_profile,
         max_rounds=settings.max_rounds or args.max_rounds,
         # Per-project / per-task test-gate config from project-context metadata
-        # (#127) wins; the route-level flags (--no-test-gate / --test-command /
-        # --block-on-red) are the fallback when metadata pins nothing. ``None``
-        # from the resolver means "inherit the flag".
+        # (#127) wins; the route-level flags (--no-test-gate / --test-command) are
+        # the fallback when metadata pins nothing. ``None`` from the resolver means
+        # "inherit the flag". (#140: the `test` check's blocking is the review
+        # profile's, not a separate knob — `block_on_red` removed.)
         test_gate=(
             settings.test_gate
             if settings.test_gate is not None
@@ -454,11 +450,6 @@ def _daemon_main(args: argparse.Namespace) -> int:
             settings.test_command
             if settings.test_command is not None
             else args.test_command
-        ),
-        block_on_red=(
-            settings.block_on_red
-            if settings.block_on_red is not None
-            else args.block_on_red
         ),
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
@@ -814,7 +805,6 @@ def main(argv: list[str] | None = None) -> int:
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,
         test_command=args.test_command,
-        block_on_red=args.block_on_red,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
@@ -846,7 +836,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if result.test_gate is not None:
         g = result.test_gate
-        blocking = " — BLOCKS approval" if (not g.passed and args.block_on_red) else ""
+        # #140: the `test` check blocks iff the resolved profile declares it required.
+        test_required = any(
+            pc.name == "test" and pc.state == "required"
+            for pc in profile_resolution.profile.checks
+        )
+        blocking = " — BLOCKS approval" if (not g.passed and test_required) else ""
         print(f"  gate:     {g.verdict} (`{g.command}`, exit {g.exit_code}){blocking}")
     if result.conversation_log is not None:
         print(f"  log:      {result.conversation_log}")

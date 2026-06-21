@@ -323,9 +323,8 @@ class DevelopConfig:
     # in throwaway containers; the default set is the single `test` check.
     test_gate: bool = True  # #131/ADR §10: scopes the `test` check (False = exclude it)
     test_command: str | None = None  # explicit `test`-check command; beats detection
-    block_on_red: bool = (
-        False  # ADR §10: the `test` check's block flag (RED blocks + feeds coder)
-    )
+    # #140: the `test` check's blocking is the resolved profile's ProfileCheck("test",
+    # ...) state — the single source of truth (the legacy `block_on_red` knob is gone).
     test_timeout: int = DEFAULT_TEST_TIMEOUT
     # #140: the resolved Review Profile name, which selects WHICH deterministic
     # checks the gate runs (``profiles.get_profile`` → its check-set). Always a

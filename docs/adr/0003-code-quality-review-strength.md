@@ -361,10 +361,13 @@ to the human** (a `[Friction]` / story-review-human handoff) rather than looping
   reviewer's codegraph MCP for cross-file context). Only the cross-file slice
   hard-depends on [#92].
 - **[#127] gate keys are subsumed, not reworked, and cannot backdoor the floor** —
-  flat `develop_test_command` / `develop_block_on_red` / `develop_test_gate`
-  become **shorthand over the active profile's `test` check only** (its command /
-  block-flag / on-off). Critically, **`develop_test_gate = false` disables only
-  the `test` check — never the floor's required lint/type/SAST/format.** Disabling
+  flat `develop_test_command` / `develop_test_gate` become **shorthand over the
+  active profile's `test` check only** (its command / on-off). Whether the `test`
+  check **blocks** is the profile's `ProfileCheck("test", …)` state — the single
+  source of truth, like every other check — so the old `develop_block_on_red` knob
+  is **removed** (#140; it could only weaken below the floor, which the floor model
+  forbids without `allow_weaken_floor`). Critically, **`develop_test_gate = false`
+  disables only the `test` check — never the floor's required lint/type/SAST/format.** Disabling
   the *whole* gate is a floor-weakening that requires an explicit
   `allow_weaken_floor = true` and emits an **audited** `[Friction]` + deterministic
   finding — it is never a side effect of a convenience key. (Migration note: [#127]

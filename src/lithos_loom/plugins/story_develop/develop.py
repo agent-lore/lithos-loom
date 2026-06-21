@@ -8,9 +8,10 @@
       -> tear both containers down; leave the branch + a conversation log.
 
 The test gate (T4) runs each round commit's tree in a fresh throwaway container
-— an agent-free check on the coder's self-reported test results. By default it
-is recorded but non-blocking; with ``block_on_red`` a red gate prevents
-approval and its output is fed to the coder next round.
+— an agent-free check on the coder's self-reported test results. Whether a red
+gate blocks approval is the resolved review profile's ``test`` check state (#140;
+all canonical profiles declare it required), and its output is fed to the coder
+next round.
 
 The two agents keep their sessions **across rounds** (ADR 0002): each round is a
 fresh ``docker exec`` that resumes the on-disk session, so the coder remembers
@@ -55,6 +56,7 @@ from .check_set import (
     Check,
     CheckResult,
     CheckSetResult,
+    CheckState,
     classify_execution,
     render_check_summary,
 )
@@ -342,8 +344,9 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     tagged with its profile ``stage`` (``fast`` every round / ``candidate`` on the
     approval candidate — the round-loop filter in :func:`develop` acts on it).
 
-    The ``test`` check keeps its legacy ``test_gate`` / ``block_on_red`` /
-    ``test_command`` semantics verbatim (#127/#159, ADR §10). Every *other* profile
+    The ``test`` check keeps its ``test_gate`` (include/exclude) / ``test_command``
+    semantics (#127/#159, ADR §10), with its blocking ``state`` from the profile's
+    ``ProfileCheck("test", ...)`` like every other check. Every *other* profile
     check now runs at its **declared ``state``** (#140 floor slice): a ``required``
     check blocks approval (its verdict read from the finding ledger's severity for
     adapter tools, or the raw exit code otherwise — see :func:`gate_floor_blocks`),
@@ -369,7 +372,7 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     checks: list[Check] = []
     for pc in profile.checks:
         if pc.name == "test":
-            checks.extend(_build_test_check(config, ecosystems, wt))
+            checks.extend(_build_test_check(config, pc.state, ecosystems, wt))
         else:
             checks.extend(by_name.get(pc.name, []))
     return tuple(checks)
@@ -377,23 +380,25 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
 
 def _build_test_check(
     config: DevelopConfig,
+    state: CheckState,
     ecosystems: Sequence[detection.Ecosystem],
     wt: Path,
 ) -> list[Check]:
-    """The ``test`` check with its legacy semantics (#127/#159, ADR §10).
+    """The ``test`` check, with ``state`` from the resolved profile's
+    ``ProfileCheck("test", ...)`` (#127/#159, ADR §4/§10).
 
     ``develop_test_gate=false`` excludes it entirely (a test escape hatch, never a
-    whole-gate kill switch — the rest of the profile set still runs). ``block_on_red``
-    maps onto its ``state`` — ``required`` (a RED run blocks + feeds the coder) vs
-    ``informational`` (recorded, non-blocking). #133/ADR §4: when no command is
-    runnable but the detected ecosystem expects tests, a *required* test check is an
-    **expected-but-absent** blocking placeholder (empty command; the runner records
-    it ``absent``), not a silent skip.
+    whole-gate kill switch — the rest of the profile set still runs). Its blocking is
+    the profile's ``state`` — ``required`` (a RED run blocks + feeds the coder) vs
+    ``informational`` (recorded, non-blocking) — the single source of truth, like every
+    other check (the legacy ``block_on_red`` knob is removed; the floor governs).
+    #133/ADR §4: when no command is runnable but the detected ecosystem expects tests, a
+    *required* test check is an **expected-but-absent** blocking placeholder (empty
+    command; the runner records it ``absent``), not a silent skip.
     """
     if not config.test_gate:
         return []
     command = _resolve_test_command(config, wt)
-    state = "required" if config.block_on_red else "informational"
     if command is not None:
         return [Check(name="test", command=command, state=state)]
     if state == "required" and check_catalog.applies("test", ecosystems):
@@ -424,10 +429,19 @@ def _build_profile_checks(
     """
     if not ecosystems:
         return []
+    # A profile declares its checks ecosystem-agnostically, but several are
+    # language-specific (typecheck → pyright/tsc, sast → bandit/semgrep — python/node
+    # only). A required such check on a repo whose ecosystem has no analogue (e.g.
+    # `typecheck` on Rust/Go) is **not** an operator error — it is simply N/A for that
+    # language. Pre-filter to checks that apply to a detected ecosystem so the canonical
+    # default profile degrades gracefully, rather than letting `resolve_check_set` raise
+    # `CheckApplicabilityError` (its error is reserved for a hand-curated desired set
+    # that explicitly requires an unsupported check, #133 AC3).
     desired = [
         check_catalog.DesiredCheck(pc.name, pc.state)
         for pc in profile.checks
         if pc.name not in ("test", "format")
+        and check_catalog.applies(pc.name, ecosystems)
     ]
     # Pass 1: enumerate candidate commands (every tool assumed present) so the image
     # can be probed once for the tools this profile would run.
@@ -1471,7 +1485,7 @@ def develop(
             if fast_checks and new_commit is not None:
                 # Overwrite unconditionally: on a gate infra error this clears
                 # to None rather than letting a PRIOR commit's result (e.g. a
-                # stale RED under block_on_red) stand in for this commit. A
+                # stale RED) stand in for this commit. A
                 # round with no new commit keeps the prior result — the tree is
                 # unchanged, so it still describes HEAD.
                 check_set = _run_check_set(
