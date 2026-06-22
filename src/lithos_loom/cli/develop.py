@@ -273,10 +273,18 @@ def _format_mtime(mtime: float) -> str:
     """Local wall-clock timestamp of a run's last on-disk activity.
 
     ``0.0`` (an unstat-able run dir) renders as ``—`` rather than the 1970 epoch.
+    An out-of-range value also renders as ``—``: handoff files are bind-mounted
+    RW into agent containers, so a misbehaving/compromised agent can poison a
+    handoff mtime (e.g. ``os.utime(..., (9e18, 9e18))``); without this guard
+    ``time.localtime`` would raise and abort the whole text listing — denying the
+    operator a view of *every* run, not just the poisoned one.
     """
     if not mtime:
         return _UNKNOWN
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+    except (OverflowError, OSError, ValueError):
+        return _UNKNOWN
 
 
 def _agent_state(info: RunInfo) -> str:

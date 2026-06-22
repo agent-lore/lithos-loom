@@ -316,18 +316,74 @@ def test_latest_mtime_tracks_handoff_writes(tmp_path: Path) -> None:
     assert develop._latest_mtime(run_dir) == pytest.approx(later)
 
 
-def test_format_mtime_renders_dash_for_zero(
-    monkeypatch: pytest.MonkeyPatch,
+def test_list_output_reflects_latest_handoff_mtime(
+    patched: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert develop._format_mtime(0.0) == "—"
-    # exact wall-clock string under a pinned timezone for a known epoch
-    monkeypatch.setenv("TZ", "UTC")
-    time.tzset()
-    assert develop._format_mtime(1_700_000_000.0) == "2023-11-14 22:13:20"
-    assert re.fullmatch(
-        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
-        develop._format_mtime(1_700_000_000.0),
+    # Command-level guard (not just the helper): develop_list must surface the
+    # *handoff* activity, not the stale parent run-dir mtime, in both json + text.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    later = run_dir.stat().st_mtime + 10_000
+    os.utime(run_dir / "handoff" / "round_01_coder_done.md", (later, later))
+    os.utime(run_dir / "handoff", (later, later))
+    # the parent run dir stays stale; only the handoff moved forward
+    assert run_dir.stat().st_mtime < later
+
+    develop.develop_list(config=None, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["mtime"] == pytest.approx(later)
+
+    develop.develop_list(config=None, output_format="text")
+    data_row = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("r1")
     )
+    assert develop._format_mtime(later) in data_row
+
+
+def test_list_text_survives_poisoned_handoff_mtime(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A single run with an out-of-range handoff mtime must not crash the whole
+    # text listing — the operator still gets every run (security/f-001).
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    handoff = run_dir / "handoff" / "round_01_coder_done.md"
+    try:
+        os.utime(handoff, (9e18, 9e18))
+    except (OverflowError, OSError):
+        pytest.skip("platform rejects an out-of-range utime")
+    develop.develop_list(config=None, output_format="text")  # must not raise
+    out = capsys.readouterr().out
+    assert "r1" in out and "—" in out
+
+
+def test_format_mtime_zero_and_out_of_range_render_dash() -> None:
+    assert develop._format_mtime(0.0) == "—"
+    # A poisoned mtime renders as "—" instead of crashing: handoff files are
+    # bind-mounted RW into agent containers, so an agent can set an arbitrary
+    # out-of-range utime; time.localtime would otherwise raise and abort the
+    # whole text listing (security/f-001).
+    assert develop._format_mtime(9e18) == "—"
+    assert develop._format_mtime(-9e18) == "—"
+
+
+def test_format_mtime_exact_string_under_fixed_tz() -> None:
+    # exact wall-clock string under a pinned timezone for a known epoch.
+    # Restore the process-global tz afterwards (tzset mutates C-library state),
+    # so we don't leak UTC into later tests on a non-UTC host (test-quality/f-003).
+    original_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        assert develop._format_mtime(1_700_000_000.0) == "2023-11-14 22:13:20"
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+            develop._format_mtime(1_700_000_000.0),
+        )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
 
 
 def test_attach_once_snapshot(
