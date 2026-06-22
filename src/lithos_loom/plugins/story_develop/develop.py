@@ -118,6 +118,9 @@ class DevelopResult:
     # the latest round's open deterministic gate findings (#132)
     gate_findings: tuple[GateFinding, ...] = ()
     conversation_log: Path | None = None
+    # the resolved Review Profile this run ran under (#139/ADR 0003 §11): part
+    # of the per-run review-metadata record correlated against outcome signals
+    review_profile: str = ""
     # when an INTERRUPTED run is worth retrying: the provider's parsed reset
     # time, or now + a fixed delay when no hint was parseable (T10 — the
     # daemon schedules a re-dispatch at this instant)
@@ -1779,6 +1782,7 @@ def develop(
                 "worktree": str(wt),
                 "base_sha": base,
                 "rounds": rounds_completed,
+                "review_profile": config.review_profile,
                 "coder_session": coder_session,
                 "reviewers": {
                     r.spec.name: {"session": r.session, "tool": r.tool_now}
@@ -1814,5 +1818,6 @@ def develop(
         test_gate=gate,
         gate_findings=tuple(gate_ledger.open_findings()),
         conversation_log=log_path,
+        review_profile=config.review_profile,
         resume_after=resume_after,
     )

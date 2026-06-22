@@ -5,7 +5,9 @@ directly: it fetches the task up front (title, description, acceptance
 criteria, metadata) and posts the outcome back when the run ends — a
 ``[DevelopResult]`` finding carrying the verdicts + open findings, a
 ``[ReviewDispute]`` finding when a dispute deadlock stopped the run, and a
-metadata update with the branch / status / cost. The daemon (T10) reuses the
+metadata update with the branch / status / cost plus the per-run review-metadata
+record (profile, panel, findings-by-severity, gate verdict — ADR 0003 §11). The
+daemon (T10) reuses the
 identical path, and ``result.json`` still carries only ``status`` for the
 runner — no double-application.
 
@@ -139,6 +141,22 @@ def _result_summary(result: DevelopResult) -> str:
     return "\n".join(lines)
 
 
+def _findings_by_severity(result: DevelopResult) -> dict[str, int]:
+    """Count the final panel's findings by severity (ADR 0003 §11 calibration).
+
+    Spans every reviewer's findings in the final round, all statuses — the
+    review-output signal correlated against post-merge outcomes later. Canonical
+    severities are always present (zero-filled) so the record has a stable shape;
+    any off-rubric severity an `invalid` review emits is still counted under its
+    own key rather than dropped.
+    """
+    counts: dict[str, int] = {"critical": 0, "major": 0, "minor": 0}
+    for review in result.reviews:
+        for f in review.findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+    return counts
+
+
 def _delivery_section(delivery: Any) -> str:
     """The Copilot-round block of the ``[DevelopResult]`` finding."""
     lines = [f"pull request: {delivery.pr_url}"]
@@ -207,7 +225,18 @@ def post_results(
                 "develop_run_id": result.run_id,
                 "develop_rounds": result.rounds,
                 "develop_cost_usd": round(total_cost, 4),
+                # Review-metadata record (#139/ADR 0003 §11): the profile that
+                # ran, the panel, and its findings-by-severity + gate verdict —
+                # the per-run signal correlated against post-merge outcomes. Kept
+                # under output-only keys so they never clash with the operator's
+                # `develop_review_profile` *input* selection key.
+                "develop_review_panel": [r.reviewer for r in result.reviews],
+                "develop_findings_by_severity": _findings_by_severity(result),
             }
+            if result.review_profile:
+                metadata["develop_review_profile_used"] = result.review_profile
+            if result.test_gate is not None:
+                metadata["develop_test_gate_verdict"] = result.test_gate.verdict
             effective_pr_url = delivery.pr_url if delivery is not None else pr_url
             if effective_pr_url:
                 metadata["develop_pr_url"] = effective_pr_url

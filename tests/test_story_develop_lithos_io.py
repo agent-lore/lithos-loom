@@ -167,6 +167,46 @@ def test_post_results_finding_and_metadata(fake_client) -> None:
     assert meta["develop_status"] == "approved"
     assert meta["develop_branch"] == "my-branch"
     assert meta["develop_cost_usd"] == 0.75
+    # review-metadata record (#139/ADR 0003 §11)
+    assert meta["develop_review_panel"] == ["cq"]
+    assert meta["develop_findings_by_severity"] == {
+        "critical": 0,
+        "major": 1,
+        "minor": 1,
+    }
+
+
+def test_post_results_records_review_metadata(fake_client) -> None:
+    from lithos_loom.plugins.story_develop.test_gate import GateResult
+
+    result = _result(
+        review_profile="thorough",
+        test_gate=GateResult(
+            command="pytest", exit_code=1, passed=False, output_tail=""
+        ),
+    )
+    lithos_io.post_results("http://x", "task-1", result)
+    (meta,) = fake_client.metadata_updates
+    # the resolved profile that ran is recorded under an output-only key, kept
+    # distinct from the operator's `develop_review_profile` *input* selection
+    assert meta["develop_review_profile_used"] == "thorough"
+    assert "develop_review_profile" not in meta
+    assert meta["develop_test_gate_verdict"] == "RED"
+    assert meta["develop_findings_by_severity"] == {
+        "critical": 0,
+        "major": 1,
+        "minor": 1,
+    }
+
+
+def test_post_results_omits_optional_review_metadata_when_absent(fake_client) -> None:
+    # No profile resolved (empty) and no test gate: the optional keys are dropped
+    # rather than recorded blank, but the always-present panel/severity record stays.
+    lithos_io.post_results("http://x", "task-1", _result())
+    (meta,) = fake_client.metadata_updates
+    assert "develop_review_profile_used" not in meta
+    assert "develop_test_gate_verdict" not in meta
+    assert meta["develop_review_panel"] == ["cq"]
 
 
 def test_post_results_includes_deterministic_findings(fake_client) -> None:
