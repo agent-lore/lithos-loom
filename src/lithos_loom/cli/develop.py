@@ -1,7 +1,7 @@
 """``lithos-loom develop`` — observe in-flight story-develop runs (#88).
 
-A read-only operator surface over the per-run state a daemon-mode
-``story-develop`` run leaves on disk + its live agent containers. Three
+A mostly read-only operator surface over the per-run state a daemon-mode
+``story-develop`` run leaves on disk + its live agent containers. Four
 commands:
 
 * ``develop list`` — enumerate inspectable runs (run id, task, current round,
@@ -10,8 +10,11 @@ commands:
   printing each handoff as it lands, until the run's containers stop.
 * ``develop dump <run-id|task-id>`` — print the assembled conversation log so
   far.
+* ``develop prune`` — delete the on-disk run-state dirs of finished runs (the
+  one mutating command; ``--dry-run`` previews). Finished = no longer in flight,
+  so an in-flight run is never removed out from under a live daemon.
 
-**Read-only and zero-state.** Discovery scans the orchestrator ``work_dir`` for
+**Discovery is zero-state.** It scans the orchestrator ``work_dir`` for
 the ``<work_dir>/<task_id>/<run_id>/`` layout the route-runner + plugin produce,
 and queries ``docker`` for container/agent liveness — no new index file (issue
 #88 open-Q 1). Note the route-runner reaps the work dir on **success**, so this
@@ -25,8 +28,10 @@ files via :func:`story_develop.handoff.conversation_log`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -267,6 +272,35 @@ def _still_running(run_dir: Path, containers: list[ContainerStatus] | None) -> b
     return any(c.running for c in containers)
 
 
+def _is_finished(run_dir: Path) -> bool:
+    """Whether a run is terminal — i.e. safe for ``prune`` to remove.
+
+    The inverse of :func:`_still_running`: with docker present a run is finished
+    once no agent container is running; with docker absent we fall back to the
+    file signal (the terminal ``conversation.md`` has been written). An in-flight
+    run we can't probe (docker absent, no ``conversation.md`` yet) is *not*
+    finished, so it is never pruned out from under a live daemon.
+    """
+    return not _still_running(run_dir, _run_containers(run_dir.name))
+
+
+def _reap_empty_task_dir(task_dir: Path) -> None:
+    """Remove a per-task staging dir once it holds no run dirs (best-effort).
+
+    After pruning a task's last retained run the only thing left under
+    ``<work_dir>/<task_id>/`` is the shared ``task.json``; dropping the whole
+    dir keeps ``work_dir`` as clean as the route-runner leaves it on success.
+    Other run dirs (in-flight / not-yet-finished) keep the task dir alive.
+    """
+    try:
+        if any(_is_run_dir(child) for child in task_dir.iterdir()):
+            return
+    except OSError:
+        return
+    with contextlib.suppress(OSError):
+        shutil.rmtree(task_dir)
+
+
 def _fail(msg: str, code: int = 1) -> NoReturn:
     typer.echo(f"lithos-loom: {msg}", err=True)
     sys.exit(code)
@@ -330,6 +364,58 @@ def develop_list(
     typer.echo("  ".join(h.ljust(widths[c]) for c, h in enumerate(headers)))
     for row in rows:
         typer.echo("  ".join(str(v).ljust(widths[c]) for c, v in enumerate(row)))
+
+
+@develop_app.command("prune")
+def develop_prune(
+    config: Path | None = typer.Option(  # noqa: B008
+        None, "--config", "-c", help="Explicit TOML config path."
+    ),
+    dry_run: bool = typer.Option(  # noqa: B008
+        False, "--dry-run", "-n", help="List what would be removed; delete nothing."
+    ),
+    output_format: str = typer.Option(  # noqa: B008
+        _FORMAT_TEXT, "--format", "-f", help="Output format: 'text' or 'json'."
+    ),
+) -> None:
+    """Remove the on-disk run-state dirs of **finished** story-develop runs.
+
+    Succeeded runs are reaped by the route-runner; this clears the failed /
+    interrupted dirs that accumulate. A run is *finished* when it is no longer in
+    flight — with docker present, no agent container is running; with docker
+    absent, its terminal ``conversation.md`` has been written. An in-flight run
+    we can't probe is left untouched. ``--dry-run`` previews without deleting.
+    """
+    if output_format not in (_FORMAT_TEXT, _FORMAT_JSON):
+        _fail(
+            f"unknown --format {output_format!r} "
+            f"(expected {_FORMAT_TEXT}/{_FORMAT_JSON})",
+            code=2,
+        )
+    try:
+        cfg = load_config(config)
+    except LithosLoomError as exc:
+        _fail(str(exc))
+    work_dir = cfg.orchestrator.work_dir
+    finished = [d for d in _iter_run_dirs(work_dir) if _is_finished(d)]
+
+    pruned = [_run_info(d) for d in finished]
+    if not dry_run:
+        for run_dir in finished:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(run_dir)
+            _reap_empty_task_dir(run_dir.parent)
+
+    if output_format == _FORMAT_JSON:
+        typer.echo(json.dumps([{**asdict(i), "pruned": not dry_run} for i in pruned]))
+        return
+    if not pruned:
+        typer.echo(f"no finished story-develop runs to prune under {work_dir}")
+        return
+    verb = "would remove" if dry_run else "removed"
+    for i in pruned:
+        typer.echo(f"{verb} {i.run_id} (task {i.task_id})  {i.run_dir}")
+    typer.echo(f"{verb} {len(pruned)} finished run{'s' if len(pruned) != 1 else ''}")
 
 
 @develop_app.command("dump")

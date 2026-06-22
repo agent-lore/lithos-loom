@@ -304,6 +304,69 @@ def test_attach_follows_handoffs_when_docker_absent(
     assert "not running" in out
 
 
+def test_prune_removes_finished_keeps_inflight_when_docker_absent(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # docker absent → finished is the file signal (conversation.md present).
+    finished = _make_run(
+        patched, task_id="t-1", run_id="done", conversation="end", rounds={1: ["cq"]}
+    )
+    inflight = _make_run(patched, task_id="t-2", run_id="live", rounds={1: ["cq"]})
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert "removed done" in out and "removed 1 finished run" in out
+    assert not finished.exists()  # finished run dir gone
+    assert not finished.parent.exists()  # empty task dir reaped too
+    assert inflight.exists()  # in-flight run untouched (can't probe → keep)
+
+
+def test_prune_dry_run_deletes_nothing(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", conversation="end")
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    out = capsys.readouterr().out
+    assert "would remove r1" in out and "would remove 1 finished run" in out
+    assert run_dir.exists()  # dry-run keeps everything on disk
+
+
+def test_prune_uses_docker_liveness_when_present(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # docker present: a run with no running containers is finished even without
+    # conversation.md; a run with a live container is not.
+    done = _make_run(patched, task_id="t-1", run_id="done", rounds={1: ["cq"]})
+    live = _make_run(patched, task_id="t-2", run_id="live", rounds={1: ["cq"]})
+
+    def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
+        running = run_id == "live"
+        return [
+            develop.ContainerStatus(
+                f"loom-develop-{run_id}-coder",
+                "coder",
+                "Up" if running else "Exited",
+                running,
+            )
+        ]
+
+    monkeypatch.setattr(develop, "_run_containers", fake_containers)
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert not done.exists()  # exited containers → finished → pruned
+    assert live.exists()  # live container → in flight → kept
+
+
+def test_prune_json_shape_and_empty(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    develop.develop_prune(config=None, dry_run=False, output_format="json")
+    assert json.loads(capsys.readouterr().out) == []
+    _make_run(patched, task_id="t-7", run_id="rr", conversation="end")
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "rr" and rows[0]["pruned"] is False
+
+
 def test_attach_follows_until_containers_stop(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

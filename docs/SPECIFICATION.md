@@ -531,19 +531,21 @@ lithos-loom obsidian-sync show [-f text|json] [-c config.toml]
 
 Prints the resolved `[obsidian_sync]` block. Used by the capture-task macro to discover the configured `tasks_file` path at runtime, so vaults that customise it get the wikilink target right without editing the macro.
 
-### 4.14 `lithos-loom develop list` / `attach` / `dump`
+### 4.14 `lithos-loom develop list` / `attach` / `dump` / `prune`
 
 ```
 lithos-loom develop list   [-f text|json] [-c config.toml]
 lithos-loom develop attach <run-id|task-id> [--once] [-c config.toml]
 lithos-loom develop dump   <run-id|task-id> [-c config.toml]
+lithos-loom develop prune  [--dry-run] [-f text|json] [-c config.toml]
 ```
 
-Read-only observability over in-flight `story-develop` runs (#88) — no intervention. Discovery is zero-state: it scans the orchestrator `work_dir` for the `<work_dir>/<task_id>/<run_id>/` layout the route-runner + plugin produce, reads the per-round `handoff/` files, and queries `docker` for the run's `loom-develop-<run_id>-*` agent containers (the **active** agent is the one with a live `claude`/`codex` process — a turn is one `docker exec`). The route-runner **reaps the work dir on success**, so these commands observe **in-flight + failed/interrupted** runs; a succeeded run's dir is gone (its outcome is the `[DevelopResult]` finding).
+Mostly read-only observability over in-flight `story-develop` runs (#88) — `prune` is the one mutating command. Discovery is zero-state: it scans the orchestrator `work_dir` for the `<work_dir>/<task_id>/<run_id>/` layout the route-runner + plugin produce, reads the per-round `handoff/` files, and queries `docker` for the run's `loom-develop-<run_id>-*` agent containers (the **active** agent is the one with a live `claude`/`codex` process — a turn is one `docker exec`). The route-runner **reaps the work dir on success**, so these commands observe **in-flight + failed/interrupted** runs; a succeeded run's dir is gone (its outcome is the `[DevelopResult]` finding).
 
 - **`list`** — table (or `json`) of inspectable runs: run id, task id + title, current round, the active agent (or `idle` / `done`). The title is the one **this run started with** — story-develop snapshots the task envelope into the run dir at start, so an older retained run keeps its own title even after the task is re-dispatched (the shared per-task `task.json` is overwritten each dispatch); it falls back to the per-task file for in-flight runs predating the snapshot.
 - **`attach <run-id|task-id>`** — follow a live run, printing each handoff as it lands plus the current round + active agent, until the run's containers stop. `--once` prints a single snapshot and exits. Read-only; `Ctrl-C` exits cleanly.
 - **`dump <run-id|task-id>`** — print the assembled conversation log: `conversation.md` for a finished run, else the per-round handoffs assembled live (the plugin writes `conversation.md` / `state.json` only at run end). Keyed by run id or task id.
+- **`prune`** — delete the on-disk run-state dirs of **finished** runs (the failed / interrupted dirs that accumulate, since succeeded runs are already reaped). A run is *finished* when it is no longer in flight: with `docker` present, no `loom-develop-<run_id>-*` agent container is running; with `docker` absent, its terminal `conversation.md` has been written — an in-flight run we can't probe is left untouched. Emptied per-task dirs are reaped too. `--dry-run` lists what would be removed without deleting; `-f json` reports each run with a `pruned` flag.
 
 Live `docker exec` transcript streaming (watch the agent think token-by-token) is a deferred follow-up; v1 is handoff/status based. When `docker` is absent the file-based views still work; the active agent shows as `—`.
 
