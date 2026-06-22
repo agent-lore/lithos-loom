@@ -85,6 +85,7 @@ class RunInfo:
     round: int  # highest round with any handoff (0 = no handoff yet)
     reviewers: tuple[str, ...]
     run_dir: str
+    mtime: float = 0.0  # run-dir mtime — last on-disk activity, the sort key
 
 
 def _is_run_dir(path: Path) -> bool:
@@ -149,6 +150,10 @@ def _round_and_reviewers(handoff_dir: Path) -> tuple[int, tuple[str, ...]]:
 
 def _run_info(run_dir: Path) -> RunInfo:
     round_no, reviewers = _round_and_reviewers(run_dir / "handoff")
+    try:
+        mtime = run_dir.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     return RunInfo(
         run_id=run_dir.name,
         task_id=run_dir.parent.name,
@@ -156,6 +161,7 @@ def _run_info(run_dir: Path) -> RunInfo:
         round=round_no,
         reviewers=reviewers,
         run_dir=str(run_dir),
+        mtime=mtime,
     )
 
 
@@ -244,6 +250,16 @@ def _active_agent(containers: list[ContainerStatus]) -> str | None:
 
 
 # ── output helpers ─────────────────────────────────────────────────────
+
+
+def _format_mtime(mtime: float) -> str:
+    """Local wall-clock timestamp of a run's last on-disk activity.
+
+    ``0.0`` (an unstat-able run dir) renders as ``—`` rather than the 1970 epoch.
+    """
+    if not mtime:
+        return _UNKNOWN
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
 
 
 def _agent_state(info: RunInfo) -> str:
@@ -368,10 +384,11 @@ def develop_list(
             (i.title[:40] + "…") if len(i.title) > 41 else i.title,
             f"r{i.round}",
             _agent_state(i),
+            _format_mtime(i.mtime),
         )
         for i in infos
     ]
-    headers = ("run", "task", "title", "round", "active")
+    headers = ("run", "task", "title", "round", "active", "updated")
     widths = [
         max(len(h), max((len(r[c]) for r in rows), default=0))
         for c, h in enumerate(headers)

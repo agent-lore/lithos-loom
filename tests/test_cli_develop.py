@@ -205,7 +205,7 @@ def test_run_containers_none_when_docker_absent(
 def test_agent_state_distinguishes_no_docker_from_done(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    info = develop.RunInfo("r", "t", "", 1, (), str(tmp_path))
+    info = develop.RunInfo("r", "t", "", 1, (), str(tmp_path), 0.0)
     monkeypatch.setattr(develop, "_run_containers", lambda rid: None)
     assert develop._agent_state(info) == "—"  # docker absent → can't tell
     monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
@@ -262,6 +262,9 @@ def test_list_json_shape(patched: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert rows[0]["task_id"] == "t-7"
     assert rows[0]["round"] == 1
     assert rows[0]["active"] == "—"  # docker absent → can't tell (not "done")
+    # the timestamp column is exposed raw (epoch float) for machine consumers
+    assert isinstance(rows[0]["mtime"], float)
+    assert rows[0]["mtime"] > 0
 
 
 def test_list_text_table_and_empty(
@@ -273,6 +276,23 @@ def test_list_text_table_and_empty(
     develop.develop_list(config=None, output_format="text")
     out = capsys.readouterr().out
     assert "run" in out and "active" in out and "r1" in out
+    # the timestamp column is present, with a rendered wall-clock value
+    assert "updated" in out
+    info = develop._run_info(patched / "t-1" / "r1")
+    assert develop._format_mtime(info.mtime) in out
+
+
+def test_run_info_captures_mtime(tmp_path: Path) -> None:
+    run_dir = _make_run(tmp_path, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    info = develop._run_info(run_dir)
+    assert info.mtime == pytest.approx(run_dir.stat().st_mtime)
+
+
+def test_format_mtime_renders_dash_for_zero() -> None:
+    assert develop._format_mtime(0.0) == "—"
+    # a real epoch renders as an ISO-ish local wall-clock string, not the dash
+    assert develop._format_mtime(1_700_000_000.0) != "—"
+    assert develop._format_mtime(1_700_000_000.0).startswith("20")
 
 
 def test_attach_once_snapshot(
