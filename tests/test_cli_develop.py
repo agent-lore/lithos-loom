@@ -259,40 +259,26 @@ def test_run_phase_classification(tmp_path: Path) -> None:
     assert develop._run_phase(rd, None, none, seen_container=False) == "terminal"
 
 
-def test_recover_reaped_outcome_binds_to_this_run(
+def test_recover_reaped_outcome_delegates_to_completion_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # correctness/f-003: a reaped (success-cleaned) run's outcome is recovered
-    # from the completion store, bound to THIS run via the recorded
-    # conversation-log path's run id so a prior success of the same task can't
-    # be claimed.
+    # from the completion store, keyed by this run id (so an explicit
+    # --idempotency-key is found too — the run-id binding lives in
+    # idempotency.lookup_completed_for_run).
     run_dir = tmp_path / "t-1" / "r1"
     run_dir.mkdir(parents=True)
-    record = {
-        "task_id": "t-1",
-        "status": "succeeded",
-        "artifacts": {"conversation_log": str(run_dir / "conversation.md")},
-    }
-    monkeypatch.setattr(
-        develop, "lookup_completed", lambda k, expected_task_id=None: record
-    )
+    seen: dict[str, tuple[str, str]] = {}
+
+    def fake_lookup(task_id: str, run_id: str) -> dict | None:
+        seen["args"] = (task_id, run_id)
+        return {"task_id": task_id, "status": "succeeded"}
+
+    monkeypatch.setattr(develop, "lookup_completed_for_run", fake_lookup)
     assert develop._recover_reaped_outcome(run_dir) == {"status": "approved"}
-    # a record for a DIFFERENT run of the same task must NOT be claimed as ours
-    stale = {
-        "task_id": "t-1",
-        "status": "succeeded",
-        "artifacts": {
-            "conversation_log": str(tmp_path / "t-1" / "OLD" / "conversation.md")
-        },
-    }
-    monkeypatch.setattr(
-        develop, "lookup_completed", lambda k, expected_task_id=None: stale
-    )
-    assert develop._recover_reaped_outcome(run_dir) is None
-    # no record at all → nothing to recover
-    monkeypatch.setattr(
-        develop, "lookup_completed", lambda k, expected_task_id=None: None
-    )
+    assert seen["args"] == ("t-1", "r1")  # looked up by task id + run id
+    # no matching record → nothing to recover
+    monkeypatch.setattr(develop, "lookup_completed_for_run", lambda t, r: None)
     assert develop._recover_reaped_outcome(run_dir) is None
 
 
@@ -851,9 +837,9 @@ def test_attach_wait_recovers_reaped_success_when_state_never_seen(
     monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
     monkeypatch.setattr(
         develop,
-        "lookup_completed",
-        lambda key, expected_task_id=None: {
-            "task_id": "t-1",
+        "lookup_completed_for_run",
+        lambda task_id, run_id: {
+            "task_id": task_id,
             "status": "succeeded",
             "artifacts": {"conversation_log": str(run_dir / "conversation.md")},
         },
@@ -879,7 +865,7 @@ def test_attach_wait_reaped_without_recoverable_record_is_not_a_false_crash(
 
     monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
     monkeypatch.setattr(
-        develop, "lookup_completed", lambda key, expected_task_id=None: None
+        develop, "lookup_completed_for_run", lambda task_id, run_id: None
     )
     with pytest.raises(SystemExit) as exc:
         develop.develop_attach(

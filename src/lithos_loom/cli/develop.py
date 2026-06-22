@@ -49,7 +49,7 @@ import typer
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import handoff
-from lithos_loom.plugins.story_develop.idempotency import lookup_completed
+from lithos_loom.plugins.story_develop.idempotency import lookup_completed_for_run
 
 develop_app = typer.Typer(
     name="develop",
@@ -464,21 +464,15 @@ def _recover_reaped_outcome(run_dir: Path) -> dict | None:
     The route-runner removes the whole work dir on a succeeded result, taking
     ``state.json`` with it — and a follow can miss the brief window where the
     file exists (a poll lands before it is written, then the dir is gone by the
-    next poll). The plugin records that success in the idempotency store (keyed
-    by task id) *before* the dir is reaped, a source the route-runner never
-    touches. A matching record means the run was approved (the only success). It
-    is bound to **this** run via the recorded conversation-log path's run id, so
-    a prior success of the same task can't be mistaken for the current run.
+    next poll). The plugin records that success in the idempotency store *before*
+    the dir is reaped, a source the route-runner never touches. The record is
+    keyed by the (possibly explicit ``--idempotency-key``) key, so it is located
+    by this run's id — bound to **this** run, not a prior success of the same
+    task. A match means the run was approved (the only success).
     """
-    task_id = run_dir.parent.name
-    record = lookup_completed(task_id, expected_task_id=task_id)
-    if not record:
-        return None
-    artifacts = record.get("artifacts")
-    log = artifacts.get("conversation_log") if isinstance(artifacts, dict) else None
-    if not (isinstance(log, str) and Path(log).parent.name == run_dir.name):
-        return None  # a record for a different run of this task — not ours
-    return {"status": "approved"}
+    if lookup_completed_for_run(run_dir.parent.name, run_dir.name):
+        return {"status": "approved"}
+    return None
 
 
 def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> None:
