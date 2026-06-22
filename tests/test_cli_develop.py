@@ -231,24 +231,45 @@ def test_agent_state_distinguishes_no_docker_from_done(
     assert develop._agent_state(info) == "done"  # docker present, no containers
 
 
-def test_still_running_predicate(tmp_path: Path) -> None:
+def test_run_phase_classification(tmp_path: Path) -> None:
     rd = tmp_path / "run"
     rd.mkdir()
     running = [develop.ContainerStatus("n", "coder", "Up", True)]
     exited = [develop.ContainerStatus("n", "coder", "Exited", False)]
-    # docker present: live while a container runs...
-    assert develop._still_running(rd, running, seen_container=True) is True
-    # ...terminal once a seen container is gone (crash / teardown before marker)
-    assert develop._still_running(rd, exited, seen_container=True) is False
+    # docker present: live while a container runs
+    assert develop._run_phase(rd, running, seen_container=True) == "running"
     # startup window: zero containers and none seen yet → keep following (the
     # old container-liveness check exited here, the bug this fixes)
-    assert develop._still_running(rd, [], seen_container=False) is True
-    # docker absent (None): live until conversation.md appears (or dir reaped)
-    assert develop._still_running(rd, None, seen_container=False) is True
-    (rd / "conversation.md").write_text("done")
-    assert develop._still_running(rd, None, seen_container=False) is False
-    # the terminal marker overrides a still-live container too
-    assert develop._still_running(rd, running, seen_container=True) is False
+    assert develop._run_phase(rd, [], seen_container=False) == "running"
+    # a seen container gone with no recorded outcome yet → ambiguous (teardown
+    # window vs crash); the caller grace-polls before deciding
+    assert develop._run_phase(rd, exited, seen_container=True) == "vanished"
+    # docker absent (None): live until the outcome lands (or the dir is reaped)
+    assert develop._run_phase(rd, None, seen_container=False) == "running"
+    # the recorded OUTCOME (state.json with a status) is the graceful terminal —
+    # NOT conversation.md, which the plugin writes first, and NOT liveness.
+    (rd / "conversation.md").write_text("log")  # log alone is not terminal
+    assert develop._run_phase(rd, exited, seen_container=True) == "vanished"
+    (rd / "state.json").write_text(json.dumps({"status": "approved"}))
+    assert develop._run_phase(rd, running, seen_container=True) == "terminal"
+    assert develop._run_phase(rd, None, seen_container=False) == "terminal"
+
+
+def test_read_handoff_bounds_size_and_decodes_leniently(tmp_path: Path) -> None:
+    # f-002: an oversized agent-written handoff must be read bounded, not slurped.
+    p = tmp_path / "h.md"
+    p.write_bytes(b"A" * (develop._MAX_HANDOFF_BYTES + 5000))
+    body = develop._read_handoff(p)
+    assert "truncated" in body
+    assert body.count("A") == develop._MAX_HANDOFF_BYTES  # capped, not the full file
+    # invalid utf-8 (an agent can write arbitrary bytes) must not raise
+    p.write_bytes(b"\xff\xfe ok")
+    assert "ok" in develop._read_handoff(p)
+
+
+def test_sanitize_strips_control_keeps_tab_and_newline() -> None:
+    # f-001: ESC (0x1b) and BEL (0x07) stripped; TAB/LF preserved.
+    assert develop._sanitize("a\x1b[31mb\x07\n\tc") == "a[31mb\n\tc"
 
 
 # ── commands ───────────────────────────────────────────────────────────
@@ -560,16 +581,18 @@ def test_prune_json_shape_and_empty(
 def test_attach_stops_when_seen_containers_vanish_without_marker(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A run whose seen agent containers disappear without writing a terminal
-    # marker (a hard crash) must not hang the follow forever: it stops and
-    # reports the missing outcome rather than looping.
+    # A run whose seen agent containers disappear and never record an outcome (a
+    # hard crash) must not hang the follow forever: after the teardown grace
+    # window elapses with no state.json, it stops and reports the missing
+    # outcome rather than looping.
     monkeypatch.setattr(develop.time, "sleep", lambda s: None)  # no real wait
+    monkeypatch.setattr(develop, "_TEARDOWN_GRACE_POLLS", 2)  # short grace for the test
     _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["code-quality"]})
     polls = {"n": 0}
 
     def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
         polls["n"] += 1
-        running = polls["n"] == 1  # live on poll 1, gone on poll 2
+        running = polls["n"] == 1  # live on poll 1, gone (and never returns) after
         return [
             develop.ContainerStatus(
                 "loom-develop-r1-coder", "coder", "Up" if running else "Exited", running
@@ -583,6 +606,65 @@ def test_attach_stops_when_seen_containers_vanish_without_marker(
     assert "coder working" in out
     assert "round_01_coder_done.md" in out
     assert "without recording an outcome" in out  # crash outcome, not a hang
+
+
+def test_attach_waits_through_teardown_window_for_recorded_outcome(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-001): the plugin force-removes its agent
+    # containers BEFORE it computes commits and writes the terminal state.json,
+    # so a normally-completing run spends a window with no containers and no
+    # outcome. attach must grace-poll through that window and report the real
+    # recorded outcome — not declare a crash on container disappearance.
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    polls = {"n": 0}
+
+    def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
+        polls["n"] += 1
+        if polls["n"] == 1:  # agent working
+            return [
+                develop.ContainerStatus("loom-develop-r1-coder", "coder", "Up", True)
+            ]
+        if polls["n"] in (2, 3):  # teardown window: containers gone, no outcome yet
+            return []
+        # the plugin finishes writing the terminal outcome
+        (run_dir / "conversation.md").write_text("log")
+        (run_dir / "state.json").write_text(
+            json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
+        )
+        return []
+
+    monkeypatch.setattr(develop, "_run_containers", fake_containers)
+    monkeypatch.setattr(develop, "_active_agent", lambda cs: "coder" if cs else None)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out and "after 1 round" in out  # real outcome
+    assert "without recording an outcome" not in out  # NOT misreported as a crash
+
+
+def test_attach_wait_waits_for_recorded_outcome_not_just_the_log(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-002): conversation.md is written BEFORE
+    # state.json. --wait must wait for the recorded outcome (state.json), not
+    # stop at the log and exit non-zero for an approved run.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    (run_dir / "conversation.md").write_text("log")  # log present, NO state.json yet
+    sleeps = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 2:  # the outcome lands a couple polls later
+            (run_dir / "state.json").write_text(
+                json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
+            )
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    # docker absent (patched) → terminal keys on the recorded outcome, not the log.
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out  # exited 0 (no SystemExit) and reported the outcome
 
 
 def test_attach_follows_through_startup_window_to_terminal_state(
@@ -684,3 +766,42 @@ def test_attach_rejects_conflicting_modes(patched: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         develop.develop_attach(key="r1", config=None, once=True, wait=True)
     assert exc.value.code == 2
+
+
+def test_attach_text_output_strips_handoff_escape_sequences(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression (security/f-001): handoff name + body are agent-writable, so the
+    # text view must strip terminal control/escape bytes (no forged/hidden
+    # output on the operator's terminal) while preserving the visible content.
+    run_dir = _make_run(
+        patched, task_id="t-1", run_id="r1", conversation="log", status="approved"
+    )
+    hd = run_dir / "handoff"
+    (hd / "round_01_coder_done.md").write_text("clean\x1b[2Jspoofed")
+    # ESC also smuggled into the reviewer-name segment of the filename
+    (hd / "round_01_review_cq\x1b[31m.md").write_text("review\x1b]0;title\x07body")
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out  # no escapes reach the terminal
+    assert "clean" in out and "spoofed" in out  # content preserved, just de-fanged
+
+
+def test_attach_stream_handoff_body_is_escape_safe_via_json(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --stream stays raw-fidelity but escape-safe: json.dumps encodes control
+    # bytes as \uXXXX, so no literal ESC reaches the consumer's terminal either.
+    run_dir = _make_run(
+        patched, task_id="t-1", run_id="r1", conversation="log", status="approved"
+    )
+    (run_dir / "handoff" / "round_01_coder_done.md").write_text("x\x1by")
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=True)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    handoff_events = [
+        json.loads(line)
+        for line in out.splitlines()
+        if line.strip() and json.loads(line).get("event") == "handoff"
+    ]
+    assert any(e["body"] == "x\x1by" for e in handoff_events)  # decoded value intact

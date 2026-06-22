@@ -8,7 +8,7 @@ commands:
   which agent is active, container status, run dir).
 * ``develop attach <run-id|task-id>`` — follow a live run: round + active agent,
   printing each handoff as it lands, until the run reaches a terminal state (its
-  durable ``conversation.md`` / ``state.json`` marker), then a one-line outcome
+  recorded outcome — ``state.json`` with a status), then a one-line outcome
   summary. ``--wait`` blocks quietly for the outcome (exit non-zero unless
   approved); ``--stream`` emits JSONL events.
 * ``develop dump <run-id|task-id>`` — print the assembled conversation log so
@@ -74,6 +74,24 @@ _CODER_DONE_RE = re.compile(r"^round_(\d+)_coder_done\.md$")
 _REVIEW_RE = re.compile(r"^round_(\d+)_review_(.+)\.md$")
 
 _ATTACH_POLL_SECONDS = 2.0
+# Grace after a run's agent containers vanish before we call it a crash. The
+# plugin force-removes its containers (containers.stop_container) *before* it
+# computes commits and writes the terminal state.json/conversation.md, so a
+# normally-completing run spends a short window with no containers and no
+# outcome yet. We keep polling for the outcome across that window; only if it
+# never lands do we report a crash — following terminal *state*, not liveness.
+_TEARDOWN_GRACE_SECONDS = 30.0
+_TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECONDS))
+
+# Handoff files are bind-mounted RW into agent containers (containers.py), so an
+# agent can write arbitrary bytes — both the body and (via the reviewer-name
+# segment) the filename. Treat them as adversarial: cap the read so one poisoned
+# multi-GB file can't OOM this observability process, and strip terminal control
+# bytes before echoing so a crafted handoff can't forge/hide output on the
+# operator's terminal. The JSON `--stream` path is escape-safe via json.dumps.
+_MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
+# C0 controls except TAB/LF, plus DEL and the C1 range (covers ESC 0x1b).
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 # ── run-dir model (pure; unit-tested) ──────────────────────────────────
@@ -304,36 +322,39 @@ def _agent_state(info: RunInfo) -> str:
     return "idle" if any(c.running for c in containers) else "done"
 
 
-def _still_running(
+def _run_phase(
     run_dir: Path,
     containers: list[ContainerStatus] | None,
     *,
     seen_container: bool,
-) -> bool:
-    """Whether ``attach`` should keep following — i.e. the run has **not** yet
-    reached a terminal state.
+) -> str:
+    """Classify the run for ``attach``: ``"running"`` / ``"terminal"`` / ``"vanished"``.
 
-    Terminal *state*, not agent *liveness*. A run is done when it writes the
-    durable terminal marker ``conversation.md`` (graceful end), or — with docker
-    — once its agent containers, **having been seen**, are all gone (a teardown
-    race before the marker lands, or a hard crash that never writes one). Keying
-    on container liveness alone would (a) exit instantly during the **startup
-    window** before the first container comes up (``docker`` reports zero
-    containers, indistinguishable from a finished run except that none has been
-    seen yet), and (b) stop the moment the last agent turn ends — missing the
-    commit / test-gate / outcome the plugin produces afterwards.
+    Terminal *state*, not agent *liveness*. The graceful terminal signal is the
+    run's recorded **outcome** — a parseable ``state.json`` with a status — not
+    container liveness and not ``conversation.md``: the plugin writes
+    ``conversation.md`` *before* ``state.json``, so stopping on the log would
+    leave ``--wait`` / the outcome summary unable to read the status (it'd
+    misreport an approved run). We therefore follow until the outcome lands.
+
+    - ``"terminal"`` — outcome recorded (graceful), or, with docker absent, the
+      run dir was reaped on success (nothing left to read).
+    - ``"running"`` — an agent container is up, or we're still in the **startup
+      window** (no container seen yet), or docker is absent and the run dir is
+      still present (can't observe containers — keep following for the outcome).
+    - ``"vanished"`` — docker shows the agent containers, having been **seen**,
+      are now all gone but no outcome is recorded yet. Ambiguous: either the
+      normal teardown window before ``state.json`` is written, or a hard crash.
+      The caller grace-polls before deciding (see ``_TEARDOWN_GRACE_POLLS``).
     """
-    if (run_dir / "conversation.md").is_file():
-        return False  # durable terminal marker → done
+    state = _read_state(run_dir)
+    if state is not None and state.get("status"):
+        return "terminal"
     if containers is None:
-        # docker absent: the marker (above) or a reaped run dir (success) are
-        # the only end signals; keep following until one of them appears.
-        return run_dir.is_dir()
+        return "running" if run_dir.is_dir() else "terminal"
     if any(c.running for c in containers):
-        return True
-    # No running container: still in the startup window until one is seen;
-    # once one has been, their disappearance means the run has ended.
-    return not seen_container
+        return "running"
+    return "vanished" if seen_container else "running"
 
 
 def _is_finished(run_dir: Path) -> bool:
@@ -665,11 +686,13 @@ def develop_attach(
 ) -> None:
     """Follow a live run until it reaches a **terminal state**, printing handoffs
     as they land plus the current round + active agent, then a one-line outcome
-    summary. Following keys on terminal state (the durable ``conversation.md`` /
-    ``state.json`` marker), not agent liveness, so it spans both the startup
-    window before the first container and the commit / test-gate / teardown after
-    the last agent turn. Read-only; ``Ctrl-C`` exits cleanly. When docker is
-    unavailable it still follows the handoff files (active agent shows as ``—``).
+    summary. Following keys on terminal state (the recorded outcome —
+    ``state.json`` with a status), not agent liveness, so it spans both the
+    startup window before the first container and the commit / test-gate /
+    teardown after the last agent turn, grace-polling through the window where
+    the plugin has stopped its containers but not yet written the outcome.
+    Read-only; ``Ctrl-C`` exits cleanly. When docker is unavailable it still
+    follows the handoff files (active agent shows as ``—``).
 
     ``--once`` prints a single snapshot and exits. ``--wait`` blocks quietly and
     prints only the outcome. ``--stream`` emits JSONL events. The three are
@@ -714,8 +737,8 @@ def develop_attach(
     for event in _follow_events(run_dir, info):
         if event["event"] == "state":
             typer.echo(event["label"])
-        else:  # handoff
-            typer.echo(f"\n── {event['name']}\n{event['body']}")
+        else:  # handoff — sanitize agent-written name/body before the terminal
+            typer.echo(f"\n── {_sanitize(event['name'])}\n{_sanitize(event['body'])}")
     typer.echo(_outcome_line(run_dir, info.run_id))
     typer.echo(f"── `lithos-loom develop dump {key}` for the full log")
 
@@ -747,19 +770,25 @@ def _follow_events(run_dir: Path, info: RunInfo) -> Iterator[dict]:
 
     Each event is a dict tagged by ``event``: ``state`` (label / round / agent,
     re-emitted only when the label changes) or ``handoff`` (name / body, once
-    per file). The loop exits on terminal *state* — see :func:`_still_running` —
-    not agent liveness, so it survives the startup window and the post-agent
-    teardown. The final handoffs are surfaced on the last poll before exit.
+    per file). The loop exits on terminal *state* — see :func:`_run_phase` — not
+    agent liveness, so it survives the startup window and the post-agent
+    teardown. When the agent containers vanish before the outcome is recorded
+    (the normal window where the plugin has stopped its containers but not yet
+    written ``state.json``) it grace-polls rather than declaring a crash. The
+    final handoffs are surfaced on the last poll before exit.
     """
     seen: set[str] = set()
     seen_container = False
     last_label: str | None = None
+    grace = _TEARDOWN_GRACE_POLLS
     while True:
         containers = _run_containers(info.run_id)
         if containers:
             seen_container = True
-        running = _still_running(run_dir, containers, seen_container=seen_container)
-        if running:
+        phase = _run_phase(run_dir, containers, seen_container=seen_container)
+        if phase != "vanished":
+            grace = _TEARDOWN_GRACE_POLLS  # only count down once truly ending
+        if phase == "running":
             label, round_no, agent = _follow_state(run_dir, containers)
             if label != last_label:  # re-announce only on a state change
                 yield {
@@ -772,8 +801,12 @@ def _follow_events(run_dir: Path, info: RunInfo) -> Iterator[dict]:
         for name, body in _iter_new_handoffs(run_dir / "handoff", seen):
             seen.add(name)
             yield {"event": "handoff", "name": name, "body": body}
-        if not running:
+        if phase == "terminal":
             return
+        if phase == "vanished":
+            grace -= 1
+            if grace <= 0:  # outcome never landed across the grace window → crash
+                return
         time.sleep(_ATTACH_POLL_SECONDS)
 
 
@@ -784,6 +817,34 @@ def _print_snapshot(run_dir: Path) -> None:
         typer.echo(f"reviewers: {', '.join(info.reviewers)}")
     typer.echo(f"run_dir: {info.run_dir}")
     _print_new_handoffs(run_dir / "handoff", set())
+
+
+def _sanitize(text: str) -> str:
+    """Strip terminal control/escape bytes (keeping TAB/LF) from agent-written
+    text before echoing it to the operator's terminal.
+
+    Handoff bodies and filenames are agent-writable (RW bind mount), so a crafted
+    handoff could otherwise inject ANSI escapes to forge a fake outcome line,
+    clear the screen, or set the window title. Plain text is unaffected.
+    """
+    return _CONTROL_CHARS_RE.sub("", text)
+
+
+def _read_handoff(path: Path) -> str:
+    """Read a handoff body, bounded to :data:`_MAX_HANDOFF_BYTES`.
+
+    The file is agent-writable, so a slurp (``read_text``) of a poisoned multi-GB
+    file would OOM this read-only process. We read at most the cap (+1 to detect
+    overflow) and decode leniently — adversarial bytes must not raise either.
+    """
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(_MAX_HANDOFF_BYTES + 1)
+    except OSError:
+        return ""
+    truncated = len(raw) > _MAX_HANDOFF_BYTES
+    text = raw[:_MAX_HANDOFF_BYTES].decode("utf-8", errors="replace").strip()
+    return f"{text}\n…(handoff truncated)" if truncated else text
 
 
 def _iter_new_handoffs(handoff_dir: Path, seen: set[str]) -> list[tuple[str, str]]:
@@ -800,8 +861,7 @@ def _iter_new_handoffs(handoff_dir: Path, seen: set[str]) -> list[tuple[str, str
     for name in names:
         if name in seen:
             continue
-        body = (handoff_dir / name).read_text(encoding="utf-8").strip()
-        out.append((name, body))
+        out.append((name, _read_handoff(handoff_dir / name)))
     return out
 
 
@@ -810,5 +870,5 @@ def _print_new_handoffs(handoff_dir: Path, seen: set[str]) -> set[str]:
     updated = set(seen)
     for name, body in _iter_new_handoffs(handoff_dir, seen):
         updated.add(name)
-        typer.echo(f"\n── {name}\n{body}")
+        typer.echo(f"\n── {_sanitize(name)}\n{_sanitize(body)}")
     return updated
