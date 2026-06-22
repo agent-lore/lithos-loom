@@ -7,7 +7,10 @@ commands:
 * ``develop list`` — enumerate inspectable runs (run id, task, current round,
   which agent is active, container status, run dir).
 * ``develop attach <run-id|task-id>`` — follow a live run: round + active agent,
-  printing each handoff as it lands, until the run's containers stop.
+  printing each handoff as it lands, until the run reaches a terminal state (its
+  durable ``conversation.md`` / ``state.json`` marker), then a one-line outcome
+  summary. ``--wait`` blocks quietly for the outcome (exit non-zero unless
+  approved); ``--stream`` emits JSONL events.
 * ``develop dump <run-id|task-id>`` — print the assembled conversation log so
   far.
 * ``develop prune`` — delete the on-disk run-state dirs of finished runs (the
@@ -35,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -300,17 +304,36 @@ def _agent_state(info: RunInfo) -> str:
     return "idle" if any(c.running for c in containers) else "done"
 
 
-def _still_running(run_dir: Path, containers: list[ContainerStatus] | None) -> bool:
-    """Whether ``attach`` should keep following.
+def _still_running(
+    run_dir: Path,
+    containers: list[ContainerStatus] | None,
+    *,
+    seen_container: bool,
+) -> bool:
+    """Whether ``attach`` should keep following — i.e. the run has **not** yet
+    reached a terminal state.
 
-    With docker, the run is live while any agent container runs. Without docker
-    (``containers is None``), fall back to a file-based end signal so the
-    handoff view still follows: the run dir is reaped on success, and
-    ``conversation.md`` is written on a non-success end — either means done.
+    Terminal *state*, not agent *liveness*. A run is done when it writes the
+    durable terminal marker ``conversation.md`` (graceful end), or — with docker
+    — once its agent containers, **having been seen**, are all gone (a teardown
+    race before the marker lands, or a hard crash that never writes one). Keying
+    on container liveness alone would (a) exit instantly during the **startup
+    window** before the first container comes up (``docker`` reports zero
+    containers, indistinguishable from a finished run except that none has been
+    seen yet), and (b) stop the moment the last agent turn ends — missing the
+    commit / test-gate / outcome the plugin produces afterwards.
     """
+    if (run_dir / "conversation.md").is_file():
+        return False  # durable terminal marker → done
     if containers is None:
-        return run_dir.is_dir() and not (run_dir / "conversation.md").is_file()
-    return any(c.running for c in containers)
+        # docker absent: the marker (above) or a reaped run dir (success) are
+        # the only end signals; keep following until one of them appears.
+        return run_dir.is_dir()
+    if any(c.running for c in containers):
+        return True
+    # No running container: still in the startup window until one is seen;
+    # once one has been, their disappearance means the run has ended.
+    return not seen_container
 
 
 def _is_finished(run_dir: Path) -> bool:
@@ -355,6 +378,76 @@ def _reap_empty_task_dir(task_dir: Path) -> None:
         return
     with contextlib.suppress(OSError):
         shutil.rmtree(task_dir)
+
+
+# Human phrasing for a finished run's terminal status (story_develop writes
+# these into state.json — see develop.py). Kept terse + greppable; an unknown
+# status falls through to its raw value.
+_OUTCOME_PHRASES = {
+    "approved": "approved",
+    "max_rounds": "NOT approved (max rounds reached)",
+    "failed": "failed",
+    "interrupted": "interrupted (re-run to retry)",
+    "stalled": "stopped (stalled)",
+    "disputed": "stopped (dispute needs human arbitration)",
+    "cost_exceeded": "stopped (cost ceiling reached)",
+}
+
+
+def _read_state(run_dir: Path) -> dict | None:
+    """The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
+
+    Written by the plugin only at run end, alongside ``conversation.md``.
+    """
+    try:
+        data = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _approved(run_dir: Path) -> bool:
+    """Whether the run reached the only success status (``approved``)."""
+    state = _read_state(run_dir)
+    return bool(state and state.get("status") == "approved")
+
+
+def _outcome_line(run_dir: Path, run_id: str) -> str:
+    """One-line outcome summary for a run that has reached a terminal state.
+
+    Prefers the recorded ``state.json`` status; falls back to the bare terminal
+    marker (``conversation.md`` present but no status) and, failing that, to a
+    crash (containers gone with neither artifact written).
+    """
+    state = _read_state(run_dir)
+    if state and state.get("status"):
+        status = str(state["status"])
+        phrase = _OUTCOME_PHRASES.get(status, status)
+        parts = [f"── run {run_id} {phrase}"]
+        rounds = state.get("rounds")
+        if isinstance(rounds, int):
+            parts.append(f"after {rounds} round{'s' if rounds != 1 else ''}")
+        if state.get("branch"):
+            parts.append(f"on {state['branch']}")
+        return " ".join(parts)
+    if (run_dir / "conversation.md").is_file():
+        return f"── run {run_id} finished (status not recorded)"
+    return f"── run {run_id} ended without recording an outcome (crashed?)"
+
+
+def _outcome_event(run_dir: Path, run_id: str) -> dict:
+    """The ``--stream`` terminal event mirroring :func:`_outcome_line`."""
+    state = _read_state(run_dir)
+    event: dict = {"event": "outcome", "run_id": run_id, "status": None}
+    if state and state.get("status"):
+        event["status"] = str(state["status"])
+        if isinstance(state.get("rounds"), int):
+            event["rounds"] = state["rounds"]
+        if state.get("branch"):
+            event["branch"] = str(state["branch"])
+    elif not (run_dir / "conversation.md").is_file():
+        event["crashed"] = True
+    return event
 
 
 def _fail(msg: str, code: int = 1) -> NoReturn:
@@ -557,10 +650,38 @@ def develop_attach(
     once: bool = typer.Option(  # noqa: B008
         False, "--once", help="Print one snapshot and exit (no follow)."
     ),
+    wait: bool = typer.Option(  # noqa: B008
+        False,
+        "--wait",
+        help="Block silently until the run reaches a terminal state, then print "
+        "only the outcome (exit non-zero unless approved).",
+    ),
+    stream: bool = typer.Option(  # noqa: B008
+        False,
+        "--stream",
+        help="Emit newline-delimited JSON events (state / handoff / outcome) for "
+        "machine consumption.",
+    ),
 ) -> None:
-    """Follow a live run: current round + active agent, printing handoffs as
-    they land, until the run ends. Read-only. When docker is unavailable it
-    still follows the handoff files (active agent shows as ``—``)."""
+    """Follow a live run until it reaches a **terminal state**, printing handoffs
+    as they land plus the current round + active agent, then a one-line outcome
+    summary. Following keys on terminal state (the durable ``conversation.md`` /
+    ``state.json`` marker), not agent liveness, so it spans both the startup
+    window before the first container and the commit / test-gate / teardown after
+    the last agent turn. Read-only; ``Ctrl-C`` exits cleanly. When docker is
+    unavailable it still follows the handoff files (active agent shows as ``—``).
+
+    ``--once`` prints a single snapshot and exits. ``--wait`` blocks quietly and
+    prints only the outcome. ``--stream`` emits JSONL events. The three are
+    mutually exclusive.
+    """
+    chosen = [
+        flag
+        for flag, on in (("--once", once), ("--wait", wait), ("--stream", stream))
+        if on
+    ]
+    if len(chosen) > 1:
+        _fail(f"pass at most one of {' / '.join(chosen)}", code=2)
     try:
         cfg = load_config(config)
     except LithosLoomError as exc:
@@ -569,42 +690,91 @@ def develop_attach(
     if run_dir is None:
         _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")
     info = _run_info(run_dir)
-    typer.echo(
+
+    if once:
+        typer.echo(_attach_header(info))
+        _print_snapshot(run_dir)
+        return
+
+    if stream:
+        for event in _follow_events(run_dir, info):
+            typer.echo(json.dumps(event))
+        typer.echo(json.dumps(_outcome_event(run_dir, info.run_id)))
+        return
+
+    if wait:
+        for _event in _follow_events(run_dir, info):
+            pass  # quiet — drain the follow, surface only the outcome
+        typer.echo(_outcome_line(run_dir, info.run_id))
+        if not _approved(run_dir):
+            sys.exit(1)
+        return
+
+    typer.echo(_attach_header(info))
+    for event in _follow_events(run_dir, info):
+        if event["event"] == "state":
+            typer.echo(event["label"])
+        else:  # handoff
+            typer.echo(f"\n── {event['name']}\n{event['body']}")
+    typer.echo(_outcome_line(run_dir, info.run_id))
+    typer.echo(f"── `lithos-loom develop dump {key}` for the full log")
+
+
+def _attach_header(info: RunInfo) -> str:
+    return (
         f"── attached to run {info.run_id} (task {info.task_id}"
         f"{f': {info.title}' if info.title else ''})"
     )
 
-    if once:
-        _print_snapshot(run_dir)
-        return
 
+def _follow_state(
+    run_dir: Path, containers: list[ContainerStatus] | None
+) -> tuple[str, int, str | None]:
+    """Human label, round, and active agent for the current poll while running."""
+    round_no = _round_and_reviewers(run_dir / "handoff")[0]
+    if containers is None:
+        return "── (docker unavailable — following handoffs only)", round_no, None
+    active = _active_agent(containers)
+    if active is not None:
+        return f"── round {round_no}: {active} working…", round_no, active
+    if any(c.running for c in containers):
+        return "── (between turns: commit / test gate / next prompt…)", round_no, None
+    return "── (starting up — waiting for agent containers…)", round_no, None
+
+
+def _follow_events(run_dir: Path, info: RunInfo) -> Iterator[dict]:
+    """Yield follow events until the run reaches a terminal state.
+
+    Each event is a dict tagged by ``event``: ``state`` (label / round / agent,
+    re-emitted only when the label changes) or ``handoff`` (name / body, once
+    per file). The loop exits on terminal *state* — see :func:`_still_running` —
+    not agent liveness, so it survives the startup window and the post-agent
+    teardown. The final handoffs are surfaced on the last poll before exit.
+    """
     seen: set[str] = set()
-    last_line: str | None = None
+    seen_container = False
+    last_label: str | None = None
     while True:
         containers = _run_containers(info.run_id)
-        running = _still_running(run_dir, containers)
+        if containers:
+            seen_container = True
+        running = _still_running(run_dir, containers, seen_container=seen_container)
         if running:
-            if containers is None:
-                line = "── (docker unavailable — following handoffs only)"
-            elif (active := _active_agent(containers)) is not None:
-                round_no = _round_and_reviewers(run_dir / "handoff")[0]
-                line = f"── round {round_no}: {active} working…"
-            else:
-                line = "── (between turns: commit / test gate / next prompt…)"
-            if line != last_line:  # re-announce only on a state change
-                typer.echo(line)
-                last_line = line
-        # Print new handoffs every poll — including the final one before we
-        # stop — so a docker-absent follow still surfaces them as they land.
-        seen = _print_new_handoffs(run_dir / "handoff", seen)
+            label, round_no, agent = _follow_state(run_dir, containers)
+            if label != last_label:  # re-announce only on a state change
+                yield {
+                    "event": "state",
+                    "label": label,
+                    "round": round_no,
+                    "agent": agent,
+                }
+                last_label = label
+        for name, body in _iter_new_handoffs(run_dir / "handoff", seen):
+            seen.add(name)
+            yield {"event": "handoff", "name": name, "body": body}
         if not running:
-            break
+            return
         time.sleep(_ATTACH_POLL_SECONDS)
-
-    typer.echo(
-        f"── run {info.run_id} not running — "
-        f"`lithos-loom develop dump {key}` for the full log"
-    )
 
 
 def _print_snapshot(run_dir: Path) -> None:
@@ -616,8 +786,8 @@ def _print_snapshot(run_dir: Path) -> None:
     _print_new_handoffs(run_dir / "handoff", set())
 
 
-def _print_new_handoffs(handoff_dir: Path, seen: set[str]) -> set[str]:
-    """Echo handoff files not yet shown; return the updated seen-set."""
+def _iter_new_handoffs(handoff_dir: Path, seen: set[str]) -> list[tuple[str, str]]:
+    """New ``(name, body)`` handoff pairs not in *seen*, sorted by filename."""
     try:
         names = sorted(
             p.name
@@ -625,12 +795,20 @@ def _print_new_handoffs(handoff_dir: Path, seen: set[str]) -> set[str]:
             if _CODER_DONE_RE.match(p.name) or _REVIEW_RE.match(p.name)
         )
     except OSError:
-        return seen
-    updated = set(seen)
+        return []
+    out = []
     for name in names:
-        if name in updated:
+        if name in seen:
             continue
-        updated.add(name)
         body = (handoff_dir / name).read_text(encoding="utf-8").strip()
+        out.append((name, body))
+    return out
+
+
+def _print_new_handoffs(handoff_dir: Path, seen: set[str]) -> set[str]:
+    """Echo handoff files not yet shown; return the updated seen-set."""
+    updated = set(seen)
+    for name, body in _iter_new_handoffs(handoff_dir, seen):
+        updated.add(name)
         typer.echo(f"\n── {name}\n{body}")
     return updated

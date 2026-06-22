@@ -30,6 +30,8 @@ def _make_run(
     run_title: str | None = None,
     rounds: dict[int, list[str]] | None = None,
     conversation: str | None = None,
+    status: str | None = None,
+    branch: str | None = None,
 ) -> Path:
     run_dir = work_dir / task_id / run_id
     (run_dir / "handoff").mkdir(parents=True)
@@ -53,6 +55,19 @@ def _make_run(
             )
     if conversation is not None:
         (run_dir / "conversation.md").write_text(conversation)
+    if status is not None:
+        # the terminal state.json the plugin writes alongside conversation.md
+        max_round = max(rounds or {0: []}, default=0)
+        (run_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "status": status,
+                    "run_id": run_id,
+                    "rounds": max_round,
+                    "branch": branch or f"feat/{task_id}",
+                }
+            )
+        )
     return run_dir
 
 
@@ -221,12 +236,19 @@ def test_still_running_predicate(tmp_path: Path) -> None:
     rd.mkdir()
     running = [develop.ContainerStatus("n", "coder", "Up", True)]
     exited = [develop.ContainerStatus("n", "coder", "Exited", False)]
-    assert develop._still_running(rd, running) is True
-    assert develop._still_running(rd, exited) is False
+    # docker present: live while a container runs...
+    assert develop._still_running(rd, running, seen_container=True) is True
+    # ...terminal once a seen container is gone (crash / teardown before marker)
+    assert develop._still_running(rd, exited, seen_container=True) is False
+    # startup window: zero containers and none seen yet → keep following (the
+    # old container-liveness check exited here, the bug this fixes)
+    assert develop._still_running(rd, [], seen_container=False) is True
     # docker absent (None): live until conversation.md appears (or dir reaped)
-    assert develop._still_running(rd, None) is True
+    assert develop._still_running(rd, None, seen_container=False) is True
     (rd / "conversation.md").write_text("done")
-    assert develop._still_running(rd, None) is False
+    assert develop._still_running(rd, None, seen_container=False) is False
+    # the terminal marker overrides a still-live container too
+    assert develop._still_running(rd, running, seen_container=True) is False
 
 
 # ── commands ───────────────────────────────────────────────────────────
@@ -390,7 +412,7 @@ def test_attach_once_snapshot(
     patched: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["code-quality"]})
-    develop.develop_attach(key="t-1", config=None, once=True)
+    develop.develop_attach(key="t-1", config=None, once=True, wait=False, stream=False)
     out = capsys.readouterr().out
     assert "attached to run r1" in out
     assert "round_01_coder_done.md" in out  # handoff printed in the snapshot
@@ -401,18 +423,19 @@ def test_attach_follows_handoffs_when_docker_absent(
 ) -> None:
     # Regression: docker absent must NOT make attach exit instantly as "done".
     # A finished run (conversation.md present) still prints its handoffs and
-    # terminates via the file-based end signal.
+    # terminates via the file-based end signal, then its outcome summary.
     _make_run(
         patched,
         task_id="t-1",
         run_id="r1",
         rounds={1: ["code-quality"]},
         conversation="done",
+        status="approved",
     )
-    develop.develop_attach(key="r1", config=None, once=False)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
     out = capsys.readouterr().out
     assert "round_01_coder_done.md" in out  # handoffs followed despite no docker
-    assert "not running" in out
+    assert "approved" in out  # terminal-state outcome summary
 
 
 def test_prune_removes_finished_keeps_inflight_when_docker_absent(
@@ -534,16 +557,19 @@ def test_prune_json_shape_and_empty(
     assert rows[0]["run_id"] == "rr" and rows[0]["pruned"] is False
 
 
-def test_attach_follows_until_containers_stop(
+def test_attach_stops_when_seen_containers_vanish_without_marker(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A run whose seen agent containers disappear without writing a terminal
+    # marker (a hard crash) must not hang the follow forever: it stops and
+    # reports the missing outcome rather than looping.
     monkeypatch.setattr(develop.time, "sleep", lambda s: None)  # no real wait
     _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["code-quality"]})
     polls = {"n": 0}
 
     def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
         polls["n"] += 1
-        running = polls["n"] == 1  # live on poll 1, stopped on poll 2
+        running = polls["n"] == 1  # live on poll 1, gone on poll 2
         return [
             develop.ContainerStatus(
                 "loom-develop-r1-coder", "coder", "Up" if running else "Exited", running
@@ -552,8 +578,109 @@ def test_attach_follows_until_containers_stop(
 
     monkeypatch.setattr(develop, "_run_containers", fake_containers)
     monkeypatch.setattr(develop, "_active_agent", lambda cs: "coder")
-    develop.develop_attach(key="r1", config=None, once=False)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
     out = capsys.readouterr().out
     assert "coder working" in out
     assert "round_01_coder_done.md" in out
-    assert "not running" in out
+    assert "without recording an outcome" in out  # crash outcome, not a hang
+
+
+def test_attach_follows_through_startup_window_to_terminal_state(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The headline behaviour: attach follows to TERMINAL STATE, not agent
+    # liveness. During the startup window docker reports zero containers — the
+    # old check exited instantly as "done". Now it keeps polling through startup
+    # → working → teardown, then prints the recorded outcome summary.
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1")  # no handoffs yet
+    polls = {"n": 0}
+
+    def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
+        polls["n"] += 1
+        if polls["n"] == 1:
+            return []  # startup window: handoff dir seeded, containers not up
+        if polls["n"] == 2:
+            (run_dir / "handoff" / "round_01_coder_done.md").write_text(
+                "## Status: LGTM\nwork"
+            )
+            return [
+                develop.ContainerStatus("loom-develop-r1-coder", "coder", "Up", True)
+            ]
+        # run reaches terminal state: marker + state written, containers reaped
+        (run_dir / "conversation.md").write_text("log")
+        (run_dir / "state.json").write_text(
+            json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
+        )
+        return []
+
+    monkeypatch.setattr(develop, "_run_containers", fake_containers)
+    monkeypatch.setattr(develop, "_active_agent", lambda cs: "coder" if cs else None)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "starting up" in out  # did NOT exit during the startup window
+    assert "coder working" in out
+    assert "round_01_coder_done.md" in out
+    assert "approved" in out and "after 1 round" in out  # outcome summary
+
+
+def test_attach_wait_is_quiet_and_summarises_outcome(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --wait suppresses the play-by-play and prints only the outcome line.
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        conversation="log",
+        status="approved",
+        branch="feat/win",
+    )
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "round_01_coder_done.md" not in out  # no streamed handoffs
+    assert "approved" in out and "feat/win" in out
+
+
+def test_attach_wait_exits_nonzero_when_not_approved(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_run(patched, task_id="t-1", run_id="r1", conversation="log", status="failed")
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(
+            key="r1", config=None, once=False, wait=True, stream=False
+        )
+    assert exc.value.code == 1
+    assert "failed" in capsys.readouterr().out
+
+
+def test_attach_stream_emits_jsonl_events(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        conversation="log",
+        status="approved",
+    )
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=True)
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    kinds = [e["event"] for e in events]
+    assert "handoff" in kinds
+    assert kinds[-1] == "outcome"  # terminal event last
+    outcome = events[-1]
+    assert outcome["status"] == "approved" and outcome["rounds"] == 1
+
+
+def test_attach_rejects_conflicting_modes(patched: Path) -> None:
+    # --once / --wait / --stream are mutually exclusive.
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(key="r1", config=None, once=True, wait=True)
+    assert exc.value.code == 2
