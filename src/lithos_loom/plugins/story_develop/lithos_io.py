@@ -5,7 +5,9 @@ directly: it fetches the task up front (title, description, acceptance
 criteria, metadata) and posts the outcome back when the run ends — a
 ``[DevelopResult]`` finding carrying the verdicts + open findings, a
 ``[ReviewDispute]`` finding when a dispute deadlock stopped the run, and a
-metadata update with the branch / status / cost. The daemon (T10) reuses the
+metadata update with the branch / status / cost plus the per-run review-metadata
+record (profile, panel, findings-by-severity, gate verdict — ADR 0003 §11). The
+daemon (T10) reuses the
 identical path, and ``result.json`` still carries only ``status`` for the
 runner — no double-application.
 
@@ -180,6 +182,10 @@ def post_results(
     total_cost = result.total_cost_usd + (
         delivery.extra_cost_usd if delivery is not None else 0.0
     )
+    # Local import: the module keeps `develop` out of its runtime import surface
+    # (DevelopResult is TYPE_CHECKING-only) — reuse the one severity-count helper
+    # so the metadata patch + state.json can't drift.
+    from .develop import findings_by_severity
 
     async def _post() -> None:
         async with LithosClient(url, agent_id=AGENT_ID) as client:
@@ -207,7 +213,18 @@ def post_results(
                 "develop_run_id": result.run_id,
                 "develop_rounds": result.rounds,
                 "develop_cost_usd": round(total_cost, 4),
+                # Review-metadata record (#139/ADR 0003 §11): the profile that
+                # ran, the panel, and its findings-by-severity + gate verdict —
+                # the per-run signal correlated against post-merge outcomes. Kept
+                # under output-only keys so they never clash with the operator's
+                # `develop_review_profile` *input* selection key.
+                "develop_review_panel": [r.reviewer for r in result.reviews],
+                "develop_findings_by_severity": findings_by_severity(result.reviews),
             }
+            if result.review_profile:
+                metadata["develop_review_profile_used"] = result.review_profile
+            if result.test_gate is not None:
+                metadata["develop_test_gate_verdict"] = result.test_gate.verdict
             effective_pr_url = delivery.pr_url if delivery is not None else pr_url
             if effective_pr_url:
                 metadata["develop_pr_url"] = effective_pr_url

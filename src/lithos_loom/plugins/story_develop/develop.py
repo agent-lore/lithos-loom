@@ -94,6 +94,22 @@ class ReviewOutcome:
         return len(self.findings)
 
 
+def findings_by_severity(reviews: Sequence[ReviewOutcome]) -> dict[str, int]:
+    """Count a panel's findings by severity (ADR 0003 §11 review-metadata record).
+
+    Spans every reviewer's findings, all statuses. Canonical severities are
+    always present (zero-filled) so the record has a stable shape; an off-rubric
+    severity an ``invalid`` review emits is still counted under its own key. The
+    single source of truth shared by the Lithos metadata patch (``lithos_io``)
+    and the durable ``state.json``, so both carry an identical record.
+    """
+    counts: dict[str, int] = {"critical": 0, "major": 0, "minor": 0}
+    for review in reviews:
+        for f in review.findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+    return counts
+
+
 @dataclass(frozen=True)
 class DevelopResult:
     """Outcome of a ``develop()`` run."""
@@ -119,6 +135,9 @@ class DevelopResult:
     # the latest round's open deterministic gate findings (#132)
     gate_findings: tuple[GateFinding, ...] = ()
     conversation_log: Path | None = None
+    # the resolved Review Profile this run ran under (#139/ADR 0003 §11): part
+    # of the per-run review-metadata record correlated against outcome signals
+    review_profile: str = ""
     # when an INTERRUPTED run is worth retrying: the provider's parsed reset
     # time, or now + a fixed delay when no hint was parseable (T10 — the
     # daemon schedules a re-dispatch at this instant)
@@ -1796,6 +1815,12 @@ def develop(
                 "worktree": str(wt),
                 "base_sha": base,
                 "rounds": rounds_completed,
+                # Review-metadata record (ADR 0003 §11) — the same profile +
+                # panel + findings-by-severity written to Lithos metadata, kept
+                # in the durable run-state for local outcome correlation.
+                "review_profile": config.review_profile,
+                "review_panel": [r.reviewer for r in final_reviews],
+                "findings_by_severity": findings_by_severity(final_reviews),
                 "coder_session": coder_session,
                 "reviewers": {
                     r.spec.name: {"session": r.session, "tool": r.tool_now}
@@ -1831,5 +1856,6 @@ def develop(
         test_gate=gate,
         gate_findings=tuple(gate_ledger.open_findings()),
         conversation_log=log_path,
+        review_profile=config.review_profile,
         resume_after=resume_after,
     )
