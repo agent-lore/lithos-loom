@@ -330,29 +330,59 @@ def test_prune_dry_run_deletes_nothing(
     assert run_dir.exists()  # dry-run keeps everything on disk
 
 
-def test_prune_uses_docker_liveness_when_present(
+def test_prune_keeps_startup_window_run_with_docker_present(
     patched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # docker present: a run with no running containers is finished even without
-    # conversation.md; a run with a live container is not.
-    done = _make_run(patched, task_id="t-1", run_id="done", rounds={1: ["cq"]})
-    live = _make_run(patched, task_id="t-2", run_id="live", rounds={1: ["cq"]})
-
-    def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
-        running = run_id == "live"
-        return [
-            develop.ContainerStatus(
-                f"loom-develop-{run_id}-coder",
-                "coder",
-                "Up" if running else "Exited",
-                running,
-            )
-        ]
-
-    monkeypatch.setattr(develop, "_run_containers", fake_containers)
+    # Regression (f-001): a genuinely in-flight run during its startup window has
+    # its handoff dir seeded but no containers yet — and agent containers run
+    # with `--rm`, so docker reports zero containers exactly as a finished run
+    # would. Pruning on "no running container" would delete the live run dir out
+    # from under the daemon. Only the terminal conversation.md marks a run done.
+    startup = _make_run(patched, task_id="t-1", run_id="boot", rounds={})
+    finished = _make_run(patched, task_id="t-2", run_id="done", conversation="end")
+    # docker present, but no containers for either run (startup-window / reaped).
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
     develop.develop_prune(config=None, dry_run=False, output_format="text")
-    assert not done.exists()  # exited containers → finished → pruned
-    assert live.exists()  # live container → in flight → kept
+    assert startup.exists()  # no conversation.md → in flight → kept
+    assert not finished.exists()  # terminal marker → pruned
+
+
+def test_prune_keeps_run_with_marker_but_live_container(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Defensive: even with a conversation.md present, a still-live agent
+    # container means the run is not finished and must be kept.
+    run = _make_run(patched, task_id="t-1", run_id="r1", conversation="end")
+    monkeypatch.setattr(
+        develop,
+        "_run_containers",
+        lambda rid: [
+            develop.ContainerStatus("loom-develop-r1-coder", "coder", "Up", True)
+        ],
+    )
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert run.exists()
+
+
+def test_prune_reports_failed_deletion_and_exits_nonzero(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression (f-002): a deletion that fails must be reported as an error and
+    # exit non-zero — never silently swallowed and reported as a success.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", conversation="end")
+
+    def boom(path: object, *a: object, **k: object) -> None:
+        raise OSError("EBUSY")
+
+    monkeypatch.setattr(develop.shutil, "rmtree", boom)
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_prune(config=None, dry_run=False, output_format="json")
+    assert exc.value.code == 1
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["run_id"] == "r1"
+    assert rows[0]["pruned"] is False  # not falsely claimed removed
+    assert "EBUSY" in rows[0]["error"]
+    assert run_dir.exists()  # still on disk — caller can retry
 
 
 def test_prune_json_shape_and_empty(

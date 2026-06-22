@@ -275,13 +275,22 @@ def _still_running(run_dir: Path, containers: list[ContainerStatus] | None) -> b
 def _is_finished(run_dir: Path) -> bool:
     """Whether a run is terminal — i.e. safe for ``prune`` to remove.
 
-    The inverse of :func:`_still_running`: with docker present a run is finished
-    once no agent container is running; with docker absent we fall back to the
-    file signal (the terminal ``conversation.md`` has been written). An in-flight
-    run we can't probe (docker absent, no ``conversation.md`` yet) is *not*
-    finished, so it is never pruned out from under a live daemon.
+    The signal is the on-disk terminal marker: the plugin writes
+    ``conversation.md`` only after the agent containers stop, so its presence
+    means the run reached teardown. Container state alone is *not* sufficient —
+    agent containers run with ``--rm`` (``containers.py``), so a finished run and
+    a run still in its **startup window** (handoff dir seeded, containers not yet
+    started) both report zero containers. Pruning on "no running container" would
+    delete a live run out from under the daemon during that window. Requiring the
+    durable marker leaves every in-flight run (and any hard-crashed run that
+    never wrote the marker) untouched, erring conservative. A still-live agent
+    container is treated as a definitive override in case a future change writes
+    the marker earlier.
     """
-    return not _still_running(run_dir, _run_containers(run_dir.name))
+    if not (run_dir / "conversation.md").is_file():
+        return False
+    containers = _run_containers(run_dir.name)
+    return not (containers and any(c.running for c in containers))
 
 
 def _reap_empty_task_dir(task_dir: Path) -> None:
@@ -381,10 +390,12 @@ def develop_prune(
     """Remove the on-disk run-state dirs of **finished** story-develop runs.
 
     Succeeded runs are reaped by the route-runner; this clears the failed /
-    interrupted dirs that accumulate. A run is *finished* when it is no longer in
-    flight — with docker present, no agent container is running; with docker
-    absent, its terminal ``conversation.md`` has been written. An in-flight run
-    we can't probe is left untouched. ``--dry-run`` previews without deleting.
+    interrupted dirs that accumulate. A run is *finished* once it has written its
+    terminal ``conversation.md`` (after its agent containers stop); an in-flight
+    run — including one still in its startup window — is left untouched.
+    ``--dry-run`` previews without deleting. A deletion that fails (permissions,
+    busy filesystem) is reported as an error, never as a success, and makes the
+    command exit non-zero so automation can tell a clean sweep from a partial one.
     """
     if output_format not in (_FORMAT_TEXT, _FORMAT_JSON):
         _fail(
@@ -399,23 +410,56 @@ def develop_prune(
     work_dir = cfg.orchestrator.work_dir
     finished = [d for d in _iter_run_dirs(work_dir) if _is_finished(d)]
 
-    pruned = [_run_info(d) for d in finished]
-    if not dry_run:
-        for run_dir in finished:
-            with contextlib.suppress(OSError):
-                shutil.rmtree(run_dir)
-            _reap_empty_task_dir(run_dir.parent)
+    # (info, removed, error) — `removed` is the *actual* outcome, not an
+    # assumption: a swallowed rmtree failure that still claimed success would
+    # leave callers acting on a dir that is still on disk (f-002).
+    results: list[tuple[RunInfo, bool, str | None]] = []
+    for run_dir in finished:
+        info = _run_info(run_dir)
+        if dry_run:
+            results.append((info, False, None))
+            continue
+        try:
+            shutil.rmtree(run_dir)
+        except OSError as exc:
+            results.append((info, False, str(exc)))
+            continue
+        _reap_empty_task_dir(run_dir.parent)
+        results.append((info, True, None))
+
+    failed = any(err is not None for _, _, err in results)
 
     if output_format == _FORMAT_JSON:
-        typer.echo(json.dumps([{**asdict(i), "pruned": not dry_run} for i in pruned]))
+        typer.echo(
+            json.dumps(
+                [
+                    {**asdict(i), "pruned": removed}
+                    | ({"error": err} if err is not None else {})
+                    for i, removed, err in results
+                ]
+            )
+        )
+        if failed:
+            sys.exit(1)
         return
-    if not pruned:
+    if not results:
         typer.echo(f"no finished story-develop runs to prune under {work_dir}")
         return
     verb = "would remove" if dry_run else "removed"
-    for i in pruned:
-        typer.echo(f"{verb} {i.run_id} (task {i.task_id})  {i.run_dir}")
-    typer.echo(f"{verb} {len(pruned)} finished run{'s' if len(pruned) != 1 else ''}")
+    done = 0
+    for info, _removed, err in results:
+        if err is not None:
+            typer.echo(
+                f"lithos-loom: failed to remove {info.run_id} "
+                f"(task {info.task_id}): {err}",
+                err=True,
+            )
+            continue
+        done += 1
+        typer.echo(f"{verb} {info.run_id} (task {info.task_id})  {info.run_dir}")
+    typer.echo(f"{verb} {done} finished run{'s' if done != 1 else ''}")
+    if failed:
+        sys.exit(1)
 
 
 @develop_app.command("dump")
