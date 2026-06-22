@@ -8,9 +8,10 @@ commands:
   which agent is active, container status, run dir).
 * ``develop attach <run-id|task-id>`` — follow a live run: round + active agent,
   printing each handoff as it lands, until the run reaches a terminal state (its
-  recorded outcome — ``state.json`` with a status), then a one-line outcome
-  summary. ``--wait`` blocks quietly for the outcome (exit non-zero unless
-  approved); ``--stream`` emits JSONL events.
+  recorded outcome — ``state.json`` with a status, or, when the work dir was
+  reaped on success before a poll saw it, the outcome recovered from the
+  completion store), then a one-line outcome summary. ``--wait`` blocks quietly
+  for the outcome (exit non-zero unless approved); ``--stream`` emits JSONL events.
 * ``develop dump <run-id|task-id>`` — print the assembled conversation log so
   far.
 * ``develop prune`` — delete the on-disk run-state dirs of finished runs (the
@@ -48,6 +49,7 @@ import typer
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import handoff
+from lithos_loom.plugins.story_develop.idempotency import lookup_completed
 
 develop_app = typer.Typer(
     name="develop",
@@ -344,8 +346,10 @@ def _run_phase(
     leave ``--wait`` / the outcome summary unable to read the status (it'd
     misreport an approved run). We therefore follow until the outcome lands.
 
-    - ``"terminal"`` — outcome recorded (graceful), or, with docker absent, the
-      run dir was reaped on success (nothing left to read).
+    - ``"terminal"`` — outcome recorded (graceful), or the run dir was **reaped**
+      (the route-runner removes it after applying the result, so its absence is
+      itself an end signal; the outcome is then recovered from the completion
+      store — see :func:`_recover_reaped_outcome`).
     - ``"running"`` — an agent container is up, or we're still in the **startup
       window** (no container seen yet), or docker is absent and the run dir is
       still present (can't observe containers — keep following for the outcome).
@@ -360,8 +364,10 @@ def _run_phase(
     """
     if state is not None and state.get("status"):
         return "terminal"
+    if not run_dir.is_dir():
+        return "terminal"  # reaped by the route-runner after applying the result
     if containers is None:
-        return "running" if run_dir.is_dir() else "terminal"
+        return "running"
     if any(c.running for c in containers):
         return "running"
     return "vanished" if seen_container else "running"
@@ -447,16 +453,45 @@ class _Outcome:
     crash (correctness/f-003).
     """
 
-    state: dict | None = None  # parsed state.json at capture time, or None
+    state: dict | None = None  # parsed state.json (or recovered) at capture time
     has_log: bool = False  # conversation.md present at capture time
+    reaped: bool = False  # run dir removed by the route-runner's success cleanup
+
+
+def _recover_reaped_outcome(run_dir: Path) -> dict | None:
+    """Recover a **reaped** run's outcome from the host-persistent completion store.
+
+    The route-runner removes the whole work dir on a succeeded result, taking
+    ``state.json`` with it — and a follow can miss the brief window where the
+    file exists (a poll lands before it is written, then the dir is gone by the
+    next poll). The plugin records that success in the idempotency store (keyed
+    by task id) *before* the dir is reaped, a source the route-runner never
+    touches. A matching record means the run was approved (the only success). It
+    is bound to **this** run via the recorded conversation-log path's run id, so
+    a prior success of the same task can't be mistaken for the current run.
+    """
+    task_id = run_dir.parent.name
+    record = lookup_completed(task_id, expected_task_id=task_id)
+    if not record:
+        return None
+    artifacts = record.get("artifacts")
+    log = artifacts.get("conversation_log") if isinstance(artifacts, dict) else None
+    if not (isinstance(log, str) and Path(log).parent.name == run_dir.name):
+        return None  # a record for a different run of this task — not ours
+    return {"status": "approved"}
 
 
 def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> None:
     """Snapshot the terminal outcome into *outcome* from the already-read *state*.
 
-    Done before the follow loop returns, while *run_dir* is still on disk — the
-    log marker is checked here, not lazily after a possible reap.
+    Done before the follow loop returns, while the result is still recoverable.
+    When the run dir has been reaped (success cleanup) with no ``state.json``
+    captured, the outcome is recovered from the completion store
+    (:func:`_recover_reaped_outcome`).
     """
+    outcome.reaped = not run_dir.is_dir()
+    if state is None and outcome.reaped:
+        state = _recover_reaped_outcome(run_dir)
     outcome.state = state
     outcome.has_log = (run_dir / "conversation.md").is_file()
 
@@ -469,9 +504,9 @@ def _approved(outcome: _Outcome) -> bool:
 def _outcome_line(run_id: str, outcome: _Outcome) -> str:
     """One-line outcome summary for a run that has reached a terminal state.
 
-    Prefers the recorded ``state.json`` status; falls back to the bare terminal
-    marker (``conversation.md`` present but no status) and, failing that, to a
-    crash (containers gone with neither artifact written).
+    Prefers the recorded (or recovered) ``state.json`` status; then the bare
+    terminal marker (``conversation.md`` present but no status); then a reaped
+    run whose success could not be recovered; failing all, a crash.
     """
     state = outcome.state
     if state and state.get("status"):
@@ -486,6 +521,8 @@ def _outcome_line(run_id: str, outcome: _Outcome) -> str:
         return " ".join(parts)
     if outcome.has_log:
         return f"── run {run_id} finished (status not recorded)"
+    if outcome.reaped:
+        return f"── run {run_id} finished (work dir reaped; outcome not recovered)"
     return f"── run {run_id} ended without recording an outcome (crashed?)"
 
 
@@ -499,6 +536,8 @@ def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
             event["rounds"] = state["rounds"]
         if state.get("branch"):
             event["branch"] = str(state["branch"])
+    elif outcome.reaped:
+        event["reaped"] = True
     elif not outcome.has_log:
         event["crashed"] = True
     return event
@@ -723,9 +762,11 @@ def develop_attach(
     ``state.json`` with a status), not agent liveness, so it spans both the
     startup window before the first container and the commit / test-gate /
     teardown after the last agent turn, grace-polling through the window where
-    the plugin has stopped its containers but not yet written the outcome.
-    Read-only; ``Ctrl-C`` exits cleanly. When docker is unavailable it still
-    follows the handoff files (active agent shows as ``—``).
+    the plugin has stopped its containers but not yet written the outcome. If
+    the work dir is reaped on success before a poll observes ``state.json``, the
+    outcome is recovered from the plugin's completion store. Read-only; ``Ctrl-C``
+    exits cleanly. When docker is unavailable it still follows the handoff files
+    (active agent shows as ``—``).
 
     ``--once`` prints a single snapshot and exits. ``--wait`` blocks quietly and
     prints only the outcome. ``--stream`` emits JSONL events. The three are

@@ -259,6 +259,43 @@ def test_run_phase_classification(tmp_path: Path) -> None:
     assert develop._run_phase(rd, None, none, seen_container=False) == "terminal"
 
 
+def test_recover_reaped_outcome_binds_to_this_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # correctness/f-003: a reaped (success-cleaned) run's outcome is recovered
+    # from the completion store, bound to THIS run via the recorded
+    # conversation-log path's run id so a prior success of the same task can't
+    # be claimed.
+    run_dir = tmp_path / "t-1" / "r1"
+    run_dir.mkdir(parents=True)
+    record = {
+        "task_id": "t-1",
+        "status": "succeeded",
+        "artifacts": {"conversation_log": str(run_dir / "conversation.md")},
+    }
+    monkeypatch.setattr(
+        develop, "lookup_completed", lambda k, expected_task_id=None: record
+    )
+    assert develop._recover_reaped_outcome(run_dir) == {"status": "approved"}
+    # a record for a DIFFERENT run of the same task must NOT be claimed as ours
+    stale = {
+        "task_id": "t-1",
+        "status": "succeeded",
+        "artifacts": {
+            "conversation_log": str(tmp_path / "t-1" / "OLD" / "conversation.md")
+        },
+    }
+    monkeypatch.setattr(
+        develop, "lookup_completed", lambda k, expected_task_id=None: stale
+    )
+    assert develop._recover_reaped_outcome(run_dir) is None
+    # no record at all → nothing to recover
+    monkeypatch.setattr(
+        develop, "lookup_completed", lambda k, expected_task_id=None: None
+    )
+    assert develop._recover_reaped_outcome(run_dir) is None
+
+
 def test_iter_new_handoffs_caps_count_per_poll(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -795,6 +832,63 @@ def test_attach_wait_captures_outcome_before_workdir_is_reaped(
     assert "approved" in out
     assert "without recording an outcome" not in out
     assert not run_dir.exists()  # the dir really was reaped during the follow
+
+
+def test_attach_wait_recovers_reaped_success_when_state_never_seen(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-003 r4): attach can miss state.json entirely — a
+    # fast approved run writes it and the route-runner reaps the whole work dir
+    # between two polls. The outcome is then recovered from the host-persistent
+    # completion store (a source the route-runner never removes), so --wait
+    # reports approved and exits 0 instead of misreporting a crash + exit 1.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+
+    # state.json is NEVER written into the run dir (attach never observes it).
+    def reaping_sleep(_seconds: float) -> None:
+        shutil.rmtree(run_dir.parent, ignore_errors=True)  # route-runner success reap
+
+    monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
+    monkeypatch.setattr(
+        develop,
+        "lookup_completed",
+        lambda key, expected_task_id=None: {
+            "task_id": "t-1",
+            "status": "succeeded",
+            "artifacts": {"conversation_log": str(run_dir / "conversation.md")},
+        },
+    )
+    # approved (recovered) → must NOT raise SystemExit and must report approved
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out
+    assert "without recording an outcome" not in out
+    assert not run_dir.exists()  # the work dir really was reaped mid-follow
+
+
+def test_attach_wait_reaped_without_recoverable_record_is_not_a_false_crash(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A reaped run with no recoverable success record (e.g. a non-default
+    # idempotency key, or a failure reaped under retain_failed_workdirs=False)
+    # reports "work dir reaped" rather than the misleading "crashed?" line.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+
+    def reaping_sleep(_seconds: float) -> None:
+        shutil.rmtree(run_dir.parent, ignore_errors=True)
+
+    monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
+    monkeypatch.setattr(
+        develop, "lookup_completed", lambda key, expected_task_id=None: None
+    )
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(
+            key="r1", config=None, once=False, wait=True, stream=False
+        )
+    assert exc.value.code == 1  # success unconfirmed → non-zero
+    out = capsys.readouterr().out
+    assert "work dir reaped" in out
+    assert "crashed" not in out
 
 
 def test_attach_stream_emits_jsonl_events(
