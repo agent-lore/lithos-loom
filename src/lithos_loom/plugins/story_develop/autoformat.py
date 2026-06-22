@@ -12,11 +12,22 @@ check (the read-only ``ruff format --check`` form in :mod:`check_catalog`) shoul
 always already be clean by the time it would run — it is required-but-non-blocking and
 is not run as a standalone gate check yet (see ``develop._build_profile_checks``).
 
-The pass is **best-effort**: a formatter that is absent from the image or errors out
-is skipped with a warning rather than failing the run — the read-only ``format`` floor
-(when it lands) and the reviewers remain the backstop. Layered like :mod:`test_gate`:
-the worktree is mounted RW into the same hardened throwaway container, the formatter
-rewrites source in place, and :func:`...runner.git.commit_all` captures the diff.
+**Isolation (like the gate, not the coder).** Repo-controlled formatter config can run
+arbitrary code (a `prettier.config.js`, a repo-local plugin), so the formatter is
+treated as untrusted: each runs against an **isolated ``git archive`` export** of the
+coder's commit — never the live worktree — in a hardened container with
+``--network none`` and a cache **separate** from the deterministic gate's, so it cannot
+reach the orchestration trust channel (``.handoff`` lives only in the worktree, not the
+export), poison the gate's package cache, or egress. Only when a formatter **exits
+clean** are its changes applied back to the worktree's tracked files (success-gated):
+a formatter that exits nonzero or times out may have left a partially-rewritten tree,
+so its edits are discarded and never reach the gate or panel.
+
+The pass is **best-effort**: an absent / erroring / nonzero formatter is skipped with a
+warning rather than failing the run — the read-only ``format`` floor (when it lands) and
+the reviewers remain the backstop. Layered like :mod:`test_gate`: pure command builder
+(unit-tested without Docker) + the thin side-effecting wrapper it reuses
+(:func:`test_gate.run_gate_container`, monkeypatched in orchestration tests).
 """
 
 from __future__ import annotations
@@ -27,9 +38,70 @@ from pathlib import Path
 
 from ...runner import detection, git
 from . import check_catalog, containers, test_gate
-from .config import HANDOFF_DIRNAME, DevelopConfig
+from .config import (
+    CONTAINER_NOFILE_ULIMIT,
+    HANDOFF_DIRNAME,
+    WORKSPACE_MOUNT,
+    DevelopConfig,
+)
+from .test_gate import CACHE_MOUNT
 
 logger = logging.getLogger(__name__)
+
+
+def build_format_command(
+    *,
+    name: str,
+    image: str,
+    tree: Path,
+    cache_dir: Path,
+    command: str,
+) -> list[str]:
+    """Build the one-shot ``docker run`` argv for one formatter run.
+
+    Mirrors :func:`test_gate.build_gate_command`'s hardened profile (``cap-drop ALL``,
+    ``no-new-privileges``, nofile ulimit) but is **stricter**, because the formatter is
+    repo-controlled and runs *before* the deterministic gate (#134 review, ADR §4):
+
+    - ``--network none`` — formatters need no network; deny egress (no exfiltration /
+      SSRF path from a malicious formatter config or plugin).
+    - *tree* is an **isolated ``git archive`` export**, not the live worktree, so a
+      formatter cannot reach ``.handoff`` (absent from the export) or write the branch
+      directly — the host applies only a *successful* formatter's diff back.
+    - *cache_dir* is the **format-pass** cache, distinct from the gate's, so a formatter
+      cannot poison the package cache the "independent" gate later trusts.
+    """
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--init",
+        "--name",
+        name,
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--ulimit",
+        f"nofile={CONTAINER_NOFILE_ULIMIT}",
+        "-v",
+        f"{tree}:{WORKSPACE_MOUNT}",
+        "-v",
+        f"{cache_dir}:{CACHE_MOUNT}",
+        "-e",
+        f"RUFF_CACHE_DIR={CACHE_MOUNT}/ruff",
+        "-e",
+        f"npm_config_cache={CACHE_MOUNT}/npm",
+        "-w",
+        WORKSPACE_MOUNT,
+        "--entrypoint",
+        "sh",
+        image,
+        "-c",
+        command,
+    ]
 
 
 def resolve_formatters(config: DevelopConfig, wt: Path) -> list[str]:
@@ -55,35 +127,67 @@ def resolve_formatters(config: DevelopConfig, wt: Path) -> list[str]:
     return [c for c in commands if c.split()[0] in available]
 
 
+def _apply_formatted_tree(formatted: Path, wt: Path) -> bool:
+    """Copy *formatted*'s files back over *wt*'s matching files; report any change.
+
+    *formatted* is a ``git archive`` export (only the coder commit's **tracked** files),
+    so this never creates or touches untracked worktree paths — in particular not the
+    ``.handoff`` orchestration channel, which lives only in the worktree. Formatters
+    only rewrite content (never add/delete files), so a plain content-compare-and-copy
+    is sufficient; unchanged files are left alone to avoid churn. Returns ``True`` iff
+    at least one file's content changed.
+    """
+    changed = False
+    for src in formatted.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(formatted)
+        dst = wt / rel
+        new = src.read_bytes()
+        if dst.is_file() and dst.read_bytes() == new:
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(new)
+        changed = True
+    return changed
+
+
 def run_format_pass(
     config: DevelopConfig,
     wt: Path,
     round_no: int,
     formatters: list[str],
 ) -> str | None:
-    """Run *formatters* against the worktree and commit any change separately.
+    """Format the coder's commit in isolation and commit any change separately.
 
-    Each formatter runs in its own throwaway container (the hardened gate profile)
-    with the worktree mounted **RW** so it rewrites source in place. After all run, a
-    single commit captures the cumulative formatting diff (``.handoff`` excluded, like
-    the round commit). Returns the new commit SHA when formatting changed something,
-    or ``None`` when nothing was reformatted (or no formatters ran). Best-effort: a
-    per-formatter container failure is logged and skipped, never raised — the run
-    proceeds against the unformatted (or partially-formatted) tree.
+    Each formatter runs against its **own** ``git archive`` export of the worktree's
+    ``HEAD`` (the coder's just-made commit) in a hardened, network-less throwaway
+    container (:func:`build_format_command`). Only a formatter that **exits clean** has
+    its result applied back to the worktree's tracked files
+    (:func:`_apply_formatted_tree`) — a nonzero / timed-out run may have left a
+    partially-rewritten tree, so its edits are discarded so the gate + panel never see
+    them. After every formatter, one commit captures the cumulative diff (``.handoff``
+    excluded, like the round commit). Returns the new commit SHA when formatting changed
+    something, or ``None`` when nothing was reformatted (or no formatters ran).
+    Best-effort: a per-formatter export / container failure is logged and skipped, never
+    raised — the run proceeds against the unformatted tree.
     """
     if not formatters:
         return None
-    cache = config.gate_dir / "cache"
+    cache = config.gate_dir / "format_cache"
     cache.mkdir(parents=True, exist_ok=True)
+    scratch_root = config.gate_dir / f"round_{round_no:02d}" / "format"
+    applied = False
     for command in formatters:
-        name = containers.container_name(
-            config.run_id, f"format-{command.split()[0]}-r{round_no}"
-        )
+        tool = command.split()[0]
+        export = scratch_root / tool
+        name = containers.container_name(config.run_id, f"format-{tool}-r{round_no}")
         try:
-            fmt_cmd = test_gate.build_gate_command(
+            test_gate.export_tree(wt, "HEAD", export)
+            fmt_cmd = build_format_command(
                 name=name,
                 image=config.image,
-                tree=wt,
+                tree=export,
                 cache_dir=cache,
                 command=command,
             )
@@ -99,6 +203,21 @@ def run_format_pass(
                 exc,
             )
             continue
+        if not result.passed:
+            # Nonzero / timeout: the export may be partially rewritten (a formatter can
+            # touch some files then fail on an invalid one, or be killed mid-write), so
+            # discard its edits rather than commit a half-formatted tree (#134 review).
+            logger.warning(
+                "story-develop %s: round %d formatter `%s` exited %d — discarding its "
+                "edits",
+                config.run_id,
+                round_no,
+                command,
+                result.exit_code,
+            )
+            continue
+        if _apply_formatted_tree(export, wt):
+            applied = True
         logger.info(
             "story-develop %s: round %d formatter `%s` (exit %d)",
             config.run_id,
@@ -106,6 +225,8 @@ def run_format_pass(
             command,
             result.exit_code,
         )
+    if not applied:
+        return None
     format_sha = git.commit_all(
         wt,
         f"story-develop r{round_no}: auto-format",

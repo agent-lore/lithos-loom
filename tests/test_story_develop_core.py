@@ -721,11 +721,16 @@ def test_auto_format_pass_commits_separately_before_review(
     monkeypatch.setattr(
         autoformat_mod, "resolve_formatters", lambda config, wt: ["ruff format"]
     )
-    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
 
     def fake_formatter(gate_cmd, *, name, command, timeout):
-        # Simulate a real formatter rewriting the coder's file in place.
-        (state["worktree"] / "greeting.txt").write_text("HELLO ROUND 1\n")
+        # A real formatter rewrites the ISOLATED export (the /workspace mount), not the
+        # live worktree; the host applies a successful run's result back.
+        for i, arg in enumerate(gate_cmd):
+            if arg == "-v":
+                host, _, mount = gate_cmd[i + 1].rpartition(":")
+                if mount == "/workspace":
+                    (Path(host) / "greeting.txt").write_text("HELLO ROUND 1\n")
         return GateResult(command=command, exit_code=0, passed=True, output_tail="")
 
     monkeypatch.setattr(test_gate_mod, "run_gate_container", fake_formatter)
