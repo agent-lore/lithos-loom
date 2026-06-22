@@ -304,6 +304,125 @@ def test_attach_follows_handoffs_when_docker_absent(
     assert "not running" in out
 
 
+def test_prune_removes_finished_keeps_inflight_when_docker_absent(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # docker absent → finished is the file signal (conversation.md present).
+    finished = _make_run(
+        patched, task_id="t-1", run_id="done", conversation="end", rounds={1: ["cq"]}
+    )
+    inflight = _make_run(patched, task_id="t-2", run_id="live", rounds={1: ["cq"]})
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert "removed done" in out and "removed 1 finished run" in out
+    assert not finished.exists()  # finished run dir gone
+    assert not finished.parent.exists()  # empty task dir reaped too
+    assert inflight.exists()  # in-flight run untouched (can't probe → keep)
+
+
+def test_prune_dry_run_deletes_nothing(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", conversation="end")
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    out = capsys.readouterr().out
+    assert "would remove r1" in out and "would remove 1 finished run" in out
+    assert run_dir.exists()  # dry-run keeps everything on disk
+
+
+def test_prune_keeps_startup_window_run_with_docker_present(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (f-001): a genuinely in-flight run during its startup window has
+    # its handoff dir seeded but no containers yet — and agent containers run
+    # with `--rm`, so docker reports zero containers exactly as a finished run
+    # would. Pruning on "no running container" would delete the live run dir out
+    # from under the daemon. Only the terminal conversation.md marks a run done.
+    startup = _make_run(patched, task_id="t-1", run_id="boot", rounds={})
+    finished = _make_run(patched, task_id="t-2", run_id="done", conversation="end")
+    # docker present, but no containers for either run (startup-window / reaped).
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert startup.exists()  # no conversation.md → in flight → kept
+    assert not finished.exists()  # terminal marker → pruned
+
+
+def test_prune_keeps_unseeded_startup_run_in_shared_task_dir(
+    patched: Path,
+) -> None:
+    # Regression (f-001 r3): a task with an old finished run AND a brand-new
+    # dispatch whose run dir exists but hasn't seeded handoff/ yet. Pruning the
+    # old run must not reap the shared task dir out from under the unseeded
+    # startup run (which `_is_run_dir` doesn't recognise without handoff/).
+    old = _make_run(patched, task_id="t-1", run_id="old", conversation="end")
+    new = patched / "t-1" / "new"  # created by __main__ before develop() seeds it
+    new.mkdir()
+    (new / "task.json").write_text("{}")  # snapshot copied at run start
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert not old.exists()  # finished run pruned
+    assert new.exists()  # unseeded startup run kept
+    assert (patched / "t-1").exists()  # task dir not reaped
+
+
+def test_prune_reaps_task_dir_when_only_files_remain(patched: Path) -> None:
+    # The cleanup still fires when the task's last run is gone and only the
+    # stale per-task task.json remains (no run subdirs left).
+    run = _make_run(patched, task_id="t-1", run_id="only", conversation="end")
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert not run.exists()
+    assert not (patched / "t-1").exists()  # emptied task dir reaped
+
+
+def test_prune_keeps_run_with_marker_but_live_container(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Defensive: even with a conversation.md present, a still-live agent
+    # container means the run is not finished and must be kept.
+    run = _make_run(patched, task_id="t-1", run_id="r1", conversation="end")
+    monkeypatch.setattr(
+        develop,
+        "_run_containers",
+        lambda rid: [
+            develop.ContainerStatus("loom-develop-r1-coder", "coder", "Up", True)
+        ],
+    )
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert run.exists()
+
+
+def test_prune_reports_failed_deletion_and_exits_nonzero(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression (f-002): a deletion that fails must be reported as an error and
+    # exit non-zero — never silently swallowed and reported as a success.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", conversation="end")
+
+    def boom(path: object, *a: object, **k: object) -> None:
+        raise OSError("EBUSY")
+
+    monkeypatch.setattr(develop.shutil, "rmtree", boom)
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_prune(config=None, dry_run=False, output_format="json")
+    assert exc.value.code == 1
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["run_id"] == "r1"
+    assert rows[0]["pruned"] is False  # not falsely claimed removed
+    assert "EBUSY" in rows[0]["error"]
+    assert run_dir.exists()  # still on disk — caller can retry
+
+
+def test_prune_json_shape_and_empty(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    develop.develop_prune(config=None, dry_run=False, output_format="json")
+    assert json.loads(capsys.readouterr().out) == []
+    _make_run(patched, task_id="t-7", run_id="rr", conversation="end")
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "rr" and rows[0]["pruned"] is False
+
+
 def test_attach_follows_until_containers_stop(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
