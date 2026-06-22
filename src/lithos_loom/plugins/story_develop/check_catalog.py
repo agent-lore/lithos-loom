@@ -146,18 +146,23 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
     ),
 )
 
-# The checks whose tool resolves against the project's **dependency graph** — it
-# imports the code (pyright/test), or audits/measures installed packages (pip-audit,
-# coverage). On a uv-managed repo these must run via ``uv run`` so the project venv
-# (dev group included) is materialised in the gate container; bare, they see the
-# container's empty ambient environment and false-positive (#165). The pure
-# static-analysis checks (ruff/bandit/semgrep — AST/source only) are deliberately
-# excluded: they need no env and stay bare. ``test`` is included for completeness
-# (it is the precedent — its command is resolved via ``detect_test_commands``, not
-# :func:`resolve_check_set`).
-ENV_DEPENDENT_CHECKS: frozenset[str] = frozenset(
-    {"typecheck", "dep-audit", "coverage", "test"}
-)
+# The checks whose tool must run **inside the project venv** — it imports/executes
+# the project or its deps: ``pyright`` resolves third-party imports, ``pytest`` /
+# ``coverage`` run the code. On a uv-managed repo these run via ``uv run`` so the
+# project venv (dev group included) is materialised in the gate container; bare, they
+# see the container's empty ambient environment and false-positive (#165). ``test`` is
+# included for completeness (it is the precedent — its command is resolved via
+# ``detect_test_commands``, not :func:`resolve_check_set`).
+#
+# Deliberately EXCLUDED — they need no project venv, so they stay bare and image-global:
+#   - static-analysis checks (ruff / bandit / semgrep): AST/source only;
+#   - ``dep-audit`` (pip-audit): an *external auditor* that reads the lock / queries a
+#     vuln DB — it is NOT a project dependency, so ``uv run pip-audit`` would fail to
+#     spawn; bare keeps the probe on ``pip-audit`` itself so a *required* dep-audit
+#     blocks as expected-but-absent rather than silently passing via the floor's
+#     adapter ledger read (#166 review). Auditing a uv project's *resolved* deps
+#     correctly (vs the container's ambient env) is a separate follow-up.
+ENV_DEPENDENT_CHECKS: frozenset[str] = frozenset({"typecheck", "coverage", "test"})
 
 _BY_NAME: dict[str, CheckMapping] = {m.name: m for m in CANONICAL_CHECKS}
 

@@ -42,27 +42,24 @@ def _mapping(name: str) -> CheckMapping:
 
 
 # --- uv-aware resolution for env-dependent checks (#165) ---------------------
-# Checks whose tool resolves against the project's dependency graph (typecheck →
-# pyright, dep-audit → pip-audit, coverage, test) must run via `uv run` on a
-# uv-managed repo, exactly like the `test` check already does — otherwise the tool
-# runs against the gate container's empty environment and false-positives. Pure
-# static-analysis checks (ruff/bandit/semgrep) need no env and stay bare.
+# Checks that must run INSIDE the project venv — they import/execute the project or
+# its deps (pyright resolves imports; pytest/coverage run the code) — get `uv run`
+# on a uv-managed repo, exactly like the `test` check already does; bare, they run
+# against the gate container's empty environment and false-positive. Static-analysis
+# checks (ruff/bandit/semgrep — AST/source only) AND external auditors (pip-audit
+# reads the lock, doesn't run in the venv) need no project venv and stay bare.
 
 
 def test_env_dependent_checks_are_the_project_env_consumers() -> None:
-    # The single data-driven source of truth for which checks need the resolved
-    # project environment. Static-analysis tools are deliberately excluded.
-    assert (
-        frozenset({"typecheck", "dep-audit", "coverage", "test"})
-        == ENV_DEPENDENT_CHECKS
-    )
+    # The single data-driven source of truth for checks that run inside the project
+    # venv. Static-analysis tools AND external auditors (pip-audit) are excluded.
+    assert frozenset({"typecheck", "coverage", "test"}) == ENV_DEPENDENT_CHECKS
 
 
 def test_resolve_uv_managed_wraps_env_dependent_python_checks() -> None:
     checks = resolve_check_set(
         [
             DesiredCheck("typecheck", "required"),
-            DesiredCheck("dep-audit", "informational"),
             DesiredCheck("lint", "required"),
         ],
         ("python",),
@@ -71,9 +68,23 @@ def test_resolve_uv_managed_wraps_env_dependent_python_checks() -> None:
     )
     by = {c.name: c for c in checks}
     assert by["typecheck"].command == "uv run pyright"
-    assert by["dep-audit"].command == "uv run pip-audit"
     # lint (ruff) is static-analysis only — NOT wrapped.
     assert by["lint"].command == "ruff check"
+
+
+def test_resolve_uv_managed_does_not_wrap_dep_audit_external_auditor() -> None:
+    # Regression guard (#166 review): pip-audit is an *external auditor* (reads the
+    # lock, queries a vuln DB) — NOT a project dependency, so `uv run pip-audit` would
+    # fail to spawn. It must stay bare even on a uv repo, so the probe checks
+    # `pip-audit` directly → absent → expected-but-absent → blocks (never a silent
+    # pass via the floor's adapter ledger read).
+    checks = resolve_check_set(
+        [DesiredCheck("dep-audit", "required")],
+        ("python",),
+        tool_available=_always,
+        uv_managed=True,
+    )
+    assert checks[0].command == "pip-audit"
 
 
 def test_resolve_uv_managed_false_leaves_env_checks_bare() -> None:
