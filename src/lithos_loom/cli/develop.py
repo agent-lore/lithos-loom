@@ -85,12 +85,33 @@ class RunInfo:
     round: int  # highest round with any handoff (0 = no handoff yet)
     reviewers: tuple[str, ...]
     run_dir: str
-    mtime: float = 0.0  # run-dir mtime — last on-disk activity, the sort key
 
 
 def _is_run_dir(path: Path) -> bool:
     """A run dir is recognised by its seeded ``handoff/`` subdir."""
     return path.is_dir() and (path / "handoff").is_dir()
+
+
+def _latest_mtime(run_dir: Path) -> float:
+    """Newest mtime under *run_dir* — its last on-disk activity (``0.0`` if none).
+
+    The bare ``run_dir`` mtime is stale for a live run: handoff files land in
+    ``run_dir/handoff/``, and on POSIX writing a child bumps the *handoff* dir's
+    mtime, not its parent's. So a run whose only change is a fresh round handoff
+    would otherwise report its seed time. We take the max over the run dir, its
+    handoff dir + handoff files, and any terminal ``conversation.md`` — the round
+    activity ``develop list`` actually observes.
+    """
+    candidates = [run_dir, run_dir / "handoff", run_dir / "conversation.md"]
+    with contextlib.suppress(OSError):
+        candidates.extend((run_dir / "handoff").iterdir())
+    latest = 0.0
+    for path in candidates:
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return latest
 
 
 def _iter_run_dirs(work_dir: Path) -> list[Path]:
@@ -104,8 +125,9 @@ def _iter_run_dirs(work_dir: Path) -> list[Path]:
         for run_dir in task_dir.iterdir()
         if _is_run_dir(run_dir)
     ]
-    # newest first; mtime is stable enough for an operator listing.
-    return sorted(runs, key=lambda p: p.stat().st_mtime, reverse=True)
+    # newest first by last on-disk activity (handoff writes included), so the
+    # ordering matches the `updated` column `develop list` renders.
+    return sorted(runs, key=_latest_mtime, reverse=True)
 
 
 def _task_title(run_dir: Path) -> str:
@@ -150,10 +172,6 @@ def _round_and_reviewers(handoff_dir: Path) -> tuple[int, tuple[str, ...]]:
 
 def _run_info(run_dir: Path) -> RunInfo:
     round_no, reviewers = _round_and_reviewers(run_dir / "handoff")
-    try:
-        mtime = run_dir.stat().st_mtime
-    except OSError:
-        mtime = 0.0
     return RunInfo(
         run_id=run_dir.name,
         task_id=run_dir.parent.name,
@@ -161,7 +179,6 @@ def _run_info(run_dir: Path) -> RunInfo:
         round=round_no,
         reviewers=reviewers,
         run_dir=str(run_dir),
-        mtime=mtime,
     )
 
 
@@ -362,7 +379,16 @@ def develop_list(
 
     if output_format == _FORMAT_JSON:
         typer.echo(
-            json.dumps([{**asdict(i), "active": _agent_state(i)} for i in infos])
+            json.dumps(
+                [
+                    {
+                        **asdict(i),
+                        "active": _agent_state(i),
+                        "mtime": _latest_mtime(Path(i.run_dir)),
+                    }
+                    for i in infos
+                ]
+            )
         )
         return
     if output_format != _FORMAT_TEXT:
@@ -384,7 +410,7 @@ def develop_list(
             (i.title[:40] + "…") if len(i.title) > 41 else i.title,
             f"r{i.round}",
             _agent_state(i),
-            _format_mtime(i.mtime),
+            _format_mtime(_latest_mtime(Path(i.run_dir))),
         )
         for i in infos
     ]

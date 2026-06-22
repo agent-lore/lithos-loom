@@ -9,6 +9,10 @@ codex process, the salvage fix the bash prototype missed.
 from __future__ import annotations
 
 import json
+import os
+import re
+import time
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -205,7 +209,7 @@ def test_run_containers_none_when_docker_absent(
 def test_agent_state_distinguishes_no_docker_from_done(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    info = develop.RunInfo("r", "t", "", 1, (), str(tmp_path), 0.0)
+    info = develop.RunInfo("r", "t", "", 1, (), str(tmp_path))
     monkeypatch.setattr(develop, "_run_containers", lambda rid: None)
     assert develop._agent_state(info) == "—"  # docker absent → can't tell
     monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
@@ -262,9 +266,11 @@ def test_list_json_shape(patched: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert rows[0]["task_id"] == "t-7"
     assert rows[0]["round"] == 1
     assert rows[0]["active"] == "—"  # docker absent → can't tell (not "done")
-    # the timestamp column is exposed raw (epoch float) for machine consumers
+    # the timestamp column is exposed raw (epoch float) for machine consumers,
+    # and is confined to `list` — it is NOT a field on the shared RunInfo model.
     assert isinstance(rows[0]["mtime"], float)
     assert rows[0]["mtime"] > 0
+    assert "mtime" not in {f.name for f in fields(develop.RunInfo)}
 
 
 def test_list_text_table_and_empty(
@@ -276,23 +282,52 @@ def test_list_text_table_and_empty(
     develop.develop_list(config=None, output_format="text")
     out = capsys.readouterr().out
     assert "run" in out and "active" in out and "r1" in out
-    # the timestamp column is present, with a rendered wall-clock value
+    # the timestamp column is present, and the data row carries a full
+    # wall-clock value of the documented YYYY-MM-DD HH:MM:SS shape.
     assert "updated" in out
-    info = develop._run_info(patched / "t-1" / "r1")
-    assert develop._format_mtime(info.mtime) in out
+    data_row = next(line for line in out.splitlines() if line.startswith("r1"))
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", data_row)
 
 
-def test_run_info_captures_mtime(tmp_path: Path) -> None:
-    run_dir = _make_run(tmp_path, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
-    info = develop._run_info(run_dir)
-    assert info.mtime == pytest.approx(run_dir.stat().st_mtime)
+def test_prune_json_omits_list_only_mtime(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `mtime` is a `list`-only projection; it must not leak into `prune`'s JSON.
+    _make_run(patched, task_id="t-1", run_id="r1", conversation="done")
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert rows and "mtime" not in rows[0]
+    assert "pruned" in rows[0]
 
 
-def test_format_mtime_renders_dash_for_zero() -> None:
+def test_latest_mtime_tracks_handoff_writes(tmp_path: Path) -> None:
+    # Regression for the stale-parent bug: a handoff written into run_dir/handoff/
+    # bumps the handoff dir, not the parent run_dir, so the parent mtime alone is
+    # stale. _latest_mtime must reflect the newer handoff activity.
+    run_dir = _make_run(tmp_path, task_id="t-1", run_id="r1")  # seed only, no round
+    parent_mtime = run_dir.stat().st_mtime
+    later = parent_mtime + 1000
+    handoff = run_dir / "handoff" / "round_01_coder_done.md"
+    handoff.write_text("## Status: LGTM\n")
+    os.utime(handoff, (later, later))
+    os.utime(run_dir / "handoff", (later, later))
+    # parent run_dir is untouched, yet the run's last activity is `later`
+    assert run_dir.stat().st_mtime == pytest.approx(parent_mtime)
+    assert develop._latest_mtime(run_dir) == pytest.approx(later)
+
+
+def test_format_mtime_renders_dash_for_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert develop._format_mtime(0.0) == "—"
-    # a real epoch renders as an ISO-ish local wall-clock string, not the dash
-    assert develop._format_mtime(1_700_000_000.0) != "—"
-    assert develop._format_mtime(1_700_000_000.0).startswith("20")
+    # exact wall-clock string under a pinned timezone for a known epoch
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    assert develop._format_mtime(1_700_000_000.0) == "2023-11-14 22:13:20"
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+        develop._format_mtime(1_700_000_000.0),
+    )
 
 
 def test_attach_once_snapshot(
