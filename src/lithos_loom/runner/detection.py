@@ -61,9 +61,21 @@ def _makefile_has_test_target(repo_path: Path) -> bool:
     return "\ntest:" in text or "\ntest :" in text or text.startswith("test:")
 
 
+def is_uv_managed(repo_path: Path) -> bool:
+    """Whether *repo_path* is a uv-managed project (has a ``uv.lock``).
+
+    The signal for prefixing ``uv run`` so a command runs inside the project venv
+    (dev group included) — ``uv run`` bootstraps that venv in a fresh container,
+    whereas a bare tool sees the container's empty ambient environment. Used by the
+    ``test`` check and (via the story-develop check catalog) by every other
+    *env-dependent* check — typecheck / dep-audit / coverage (#165).
+    """
+    return (repo_path / "uv.lock").is_file()
+
+
 def _python_test_command(repo_path: Path) -> str:
     """``uv run pytest`` for uv-managed projects, bare ``pytest`` otherwise."""
-    if (repo_path / "uv.lock").is_file():
+    if is_uv_managed(repo_path):
         return "uv run pytest"
     return "pytest"
 

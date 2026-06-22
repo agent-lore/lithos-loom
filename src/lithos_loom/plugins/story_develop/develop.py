@@ -367,7 +367,7 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     # once per ecosystem as ``<check>.<ecosystem>``), so they can be slotted into
     # profile order alongside the specially-built ``test`` check.
     by_name: dict[str, list[Check]] = {}
-    for c in _build_profile_checks(config, profile, ecosystems):
+    for c in _build_profile_checks(config, profile, ecosystems, wt):
         by_name.setdefault(c.name.split(".")[0], []).append(c)
     checks: list[Check] = []
     for pc in profile.checks:
@@ -410,6 +410,7 @@ def _build_profile_checks(
     config: DevelopConfig,
     profile: profiles.ReviewProfile,
     ecosystems: Sequence[detection.Ecosystem],
+    wt: Path,
 ) -> list[Check]:
     """Resolve every *non-test* profile check for the detected ecosystem(s), honouring
     each check's **declared ``state``** — #140 floor slice.
@@ -429,6 +430,11 @@ def _build_profile_checks(
     """
     if not ecosystems:
         return []
+    # Env-dependent checks (typecheck/dep-audit/coverage) run via `uv run` on a
+    # uv-managed repo so they resolve against the project venv in the gate container,
+    # like the `test` check already does (#165). Bare, pyright/pip-audit see the
+    # container's empty environment and false-positive.
+    uv_managed = detection.is_uv_managed(wt)
     # A profile declares its checks ecosystem-agnostically, but several are
     # language-specific (typecheck → pyright/tsc, sast → bandit/semgrep — python/node
     # only). A required such check on a repo whose ecosystem has no analogue (e.g.
@@ -446,7 +452,7 @@ def _build_profile_checks(
     # Pass 1: enumerate candidate commands (every tool assumed present) so the image
     # can be probed once for the tools this profile would run.
     candidates = check_catalog.resolve_check_set(
-        desired, ecosystems, tool_available=lambda _t: True
+        desired, ecosystems, tool_available=lambda _t: True, uv_managed=uv_managed
     )
     available = set(
         test_gate.probe_tools(
@@ -457,14 +463,21 @@ def _build_profile_checks(
     # an empty-command blocking placeholder and an *informational* absent tool is
     # dropped (the catalog's own classification, not a hand-rolled post-filter).
     resolved = check_catalog.resolve_check_set(
-        desired, ecosystems, tool_available=lambda t: t in available
+        desired,
+        ecosystems,
+        tool_available=lambda t: t in available,
+        uv_managed=uv_managed,
     )
     stage_by_name = {pc.name: pc.stage for pc in profile.checks}
     out: list[Check] = []
     for c in resolved:
         stage = stage_by_name.get(c.name.split(".")[0], "fast")
         if c.command:
-            command = gate_adapters.machine_command(c.command.split()[0], c.command)
+            # Resolve the real tool past any `uv run` prefix so a uv-wrapped adapter
+            # (e.g. `uv run pip-audit`) is still machine-ified (#165).
+            command = gate_adapters.machine_command(
+                gate_adapters.command_tool(c.command), c.command
+            )
             out.append(replace(c, command=command, stage=stage))
         else:
             # Expected-but-absent blocking placeholder: keep the empty command (the
@@ -521,10 +534,11 @@ def gate_floor_blocks(
             continue
         if outcome in ("absent", "timed_out"):
             return True
-        # Ran: the tool decides how to read the verdict. Extract it defensively —
-        # only reached when a container ran, so the command is non-empty, but guard
-        # anyway so a reorder can never hit ``"".split()[0]``.
-        tool = r.check.command.split()[0] if r.check.command else ""
+        # Ran: the tool decides how to read the verdict. Resolve the real tool past
+        # any `uv run` prefix (#165) so a uv-wrapped adapter (`uv run pip-audit`) is
+        # detected — `command_tool` is "" for an empty command, so a reorder can never
+        # hit ``"".split()[0]``.
+        tool = gate_adapters.command_tool(r.check.command)
         if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
             if any(f.check == r.check.name for f in gate_ledger.blocking(threshold)):
                 return True

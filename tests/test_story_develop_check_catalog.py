@@ -20,6 +20,7 @@ import pytest
 
 from lithos_loom.plugins.story_develop.check_catalog import (
     CANONICAL_CHECKS,
+    ENV_DEPENDENT_CHECKS,
     CheckApplicabilityError,
     CheckMapping,
     DesiredCheck,
@@ -38,6 +39,92 @@ def _never(_tool: str) -> bool:
 
 def _mapping(name: str) -> CheckMapping:
     return next(m for m in CANONICAL_CHECKS if m.name == name)
+
+
+# --- uv-aware resolution for env-dependent checks (#165) ---------------------
+# Checks whose tool resolves against the project's dependency graph (typecheck →
+# pyright, dep-audit → pip-audit, coverage, test) must run via `uv run` on a
+# uv-managed repo, exactly like the `test` check already does — otherwise the tool
+# runs against the gate container's empty environment and false-positives. Pure
+# static-analysis checks (ruff/bandit/semgrep) need no env and stay bare.
+
+
+def test_env_dependent_checks_are_the_project_env_consumers() -> None:
+    # The single data-driven source of truth for which checks need the resolved
+    # project environment. Static-analysis tools are deliberately excluded.
+    assert (
+        frozenset({"typecheck", "dep-audit", "coverage", "test"})
+        == ENV_DEPENDENT_CHECKS
+    )
+
+
+def test_resolve_uv_managed_wraps_env_dependent_python_checks() -> None:
+    checks = resolve_check_set(
+        [
+            DesiredCheck("typecheck", "required"),
+            DesiredCheck("dep-audit", "informational"),
+            DesiredCheck("lint", "required"),
+        ],
+        ("python",),
+        tool_available=_always,
+        uv_managed=True,
+    )
+    by = {c.name: c for c in checks}
+    assert by["typecheck"].command == "uv run pyright"
+    assert by["dep-audit"].command == "uv run pip-audit"
+    # lint (ruff) is static-analysis only — NOT wrapped.
+    assert by["lint"].command == "ruff check"
+
+
+def test_resolve_uv_managed_false_leaves_env_checks_bare() -> None:
+    checks = resolve_check_set(
+        [DesiredCheck("typecheck", "required")],
+        ("python",),
+        tool_available=_always,
+        uv_managed=False,
+    )
+    assert checks[0].command == "pyright"
+
+
+def test_resolve_uv_managed_defaults_to_false() -> None:
+    # Back-compat: callers that don't pass uv_managed get the bare command (a non-uv
+    # project, and every existing #133 call site, is unchanged).
+    checks = resolve_check_set(
+        [DesiredCheck("typecheck", "required")], ("python",), tool_available=_always
+    )
+    assert checks[0].command == "pyright"
+
+
+def test_resolve_uv_managed_only_wraps_the_python_side_in_polyglot() -> None:
+    checks = resolve_check_set(
+        [DesiredCheck("typecheck", "required")],
+        ("python", "node"),
+        tool_available=_always,
+        uv_managed=True,
+    )
+    by = {c.name: c for c in checks}
+    assert by["typecheck.python"].command == "uv run pyright"
+    # `uv run` is python-only — the node side keeps its native command.
+    assert by["typecheck.node"].command == "tsc --noEmit"
+
+
+def test_resolve_uv_managed_probes_the_uv_entrypoint() -> None:
+    # Availability is keyed on the `uv` entrypoint (like the `test` check's
+    # `uv run pytest`), since `uv run` materialises and invokes the real tool.
+    seen: list[str] = []
+
+    def _probe(tool: str) -> bool:
+        seen.append(tool)
+        return True
+
+    checks = resolve_check_set(
+        [DesiredCheck("typecheck", "required")],
+        ("python",),
+        tool_available=_probe,
+        uv_managed=True,
+    )
+    assert "uv" in seen
+    assert checks[0].command == "uv run pyright"
 
 
 # --- the catalog: per-ecosystem command mappings (AC1) -----------------------

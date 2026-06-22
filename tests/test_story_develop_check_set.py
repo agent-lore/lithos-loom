@@ -218,6 +218,20 @@ def test_floor_required_no_adapter_check_reads_raw_exit() -> None:
     assert develop_mod.gate_floor_blocks(green, None) is False
 
 
+def test_floor_uv_wrapped_adapter_reads_ledger_via_command_tool() -> None:
+    # #165: a required `uv run pip-audit` check exits GREEN this round, but the ledger
+    # carries a MAJOR `dep-audit` finding. The floor must resolve the REAL adapter tool
+    # (pip-audit) past the `uv` entrypoint via command_tool and read the ledger — not
+    # fall through to the raw-exit branch (which would wrongly pass it).
+    cs = CheckSetResult(
+        (_ran("dep-audit", "uv run pip-audit -f json", "required", _green()),)
+    )
+    assert (
+        develop_mod.gate_floor_blocks(cs, _ledger_with("dep-audit", severity="major"))
+        is True
+    )
+
+
 def test_floor_required_absent_check_blocks_without_indexerror() -> None:
     # An expected-but-absent required check has an EMPTY command (no container ran).
     # The floor must block it and must not crash on "".split()[0].
@@ -356,11 +370,28 @@ def test_test_gate_false_drops_test_check_but_keeps_the_informational_set(
     )
     monkeypatch.setattr(develop_mod, "_resolve_test_command", _boom)
     monkeypatch.setattr(
-        develop_mod, "_build_profile_checks", lambda config, profile, eco: [lint]
+        develop_mod, "_build_profile_checks", lambda config, profile, eco, wt: [lint]
     )
     checks = build_check_set(_config(tmp_path, test_gate=False), tmp_path)
     assert checks == (lint,)
     assert all(c.name != "test" for c in checks)
+
+
+def test_build_check_set_resolves_uv_aware_typecheck_on_a_uv_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # End-to-end (#165): a uv-managed python repo resolves the required `typecheck`
+    # check to `uv run pyright` (bare `pyright` false-positives in the gate container),
+    # while the static-analysis `lint` check stays bare `ruff`.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        develop_mod, "_resolve_test_command", lambda config, wt: "uv run pytest"
+    )
+    (tmp_path / "uv.lock").write_text("")
+    checks = build_check_set(_config(tmp_path, review_profile="standard"), tmp_path)
+    by = {c.name: c for c in checks}
+    assert by["typecheck"].command == "uv run pyright"
+    assert by["lint"].command.startswith("ruff check")
 
 
 def test_no_detected_command_yields_empty_set(
@@ -480,7 +511,7 @@ def test_required_test_absent_blocks_when_ecosystem_detected(
     monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
     # isolate the test check; the profile check-set is exercised separately below.
     monkeypatch.setattr(
-        develop_mod, "_build_profile_checks", lambda config, profile, eco: []
+        develop_mod, "_build_profile_checks", lambda config, profile, eco, wt: []
     )
     # `standard` declares test required, so an absent test command is a blocking
     # expected-but-absent placeholder (no block_on_red knob needed — #140).
