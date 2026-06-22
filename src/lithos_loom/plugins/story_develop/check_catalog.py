@@ -40,7 +40,9 @@ __all__ = [
     "CheckApplicabilityError",
     "CANONICAL_CHECKS",
     "ENV_DEPENDENT_CHECKS",
+    "FORMATTER_COMMANDS",
     "applies",
+    "formatter_commands",
     "resolve_check_set",
 ]
 
@@ -181,6 +183,36 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
 #     so the floor still reads its severity ledger (and a failed run blocks via the
 #     floor-liveness rule, #167, rather than silently passing on an empty ledger).
 ENV_DEPENDENT_CHECKS: frozenset[str] = frozenset({"typecheck", "coverage", "test"})
+
+# The auto-format pass (#134, ADR §4) runs each detected ecosystem's formatter in
+# **write** mode immediately after the coder's commit, so the ``format`` check (the
+# read-only ``--check`` form in CANONICAL_CHECKS) is always already clean by the time
+# it would run. These are the write-mode analogues of that mapping: ``ruff format``
+# (drop ``--check``), ``prettier --write`` (vs ``--check``), ``cargo fmt`` (drop
+# ``--check``), ``gofmt -w`` (vs ``-l``). Like the static-analysis checks, a formatter
+# is image-global and never ``uv run``-wrapped (it rewrites source, not project code).
+FORMATTER_COMMANDS: dict[Ecosystem, str] = {
+    "python": "ruff format",
+    "node": "prettier --write .",
+    "rust": "cargo fmt",
+    "go": "gofmt -w .",
+}
+
+
+def formatter_commands(
+    ecosystems: Sequence[Ecosystem],
+) -> list[tuple[Ecosystem, str]]:
+    """The write-mode formatter command for each detected ecosystem, in order.
+
+    Empty when no detected ecosystem has a formatter (e.g. a markerless repo) — the
+    auto-format pass is then a no-op. Mirrors :func:`_applicable_commands`'s shape.
+    """
+    return [
+        (eco, FORMATTER_COMMANDS[eco])
+        for eco in ecosystems
+        if eco in FORMATTER_COMMANDS
+    ]
+
 
 _BY_NAME: dict[str, CheckMapping] = {m.name: m for m in CANONICAL_CHECKS}
 

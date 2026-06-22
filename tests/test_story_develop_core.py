@@ -709,6 +709,66 @@ def test_gate_disabled_by_config(
     assert state["gate_calls"] == []
 
 
+def test_auto_format_pass_commits_separately_before_review(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#134/ADR §4: after the coder's commit, the formatter runs in the sandbox and
+    its change lands as a SEPARATE commit, so the gate + reviewers see the formatted
+    tree. Here the fake formatter rewrites the coder's file; the run must end with two
+    commits (coder + auto-format), the latter holding the reformatted content."""
+    from lithos_loom.plugins.story_develop import autoformat as autoformat_mod
+
+    monkeypatch.setattr(
+        autoformat_mod, "resolve_formatters", lambda config, wt: ["ruff format"]
+    )
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+
+    def fake_formatter(gate_cmd, *, name, command, timeout):
+        # A real formatter rewrites the ISOLATED export (the /workspace mount), not the
+        # live worktree; the host applies a successful run's result back.
+        for i, arg in enumerate(gate_cmd):
+            if arg == "-v":
+                host, _, mount = gate_cmd[i + 1].rpartition(":")
+                if mount == "/workspace":
+                    (Path(host) / "greeting.txt").write_text("HELLO ROUND 1\n")
+        return GateResult(command=command, exit_code=0, passed=True, output_tail="")
+
+    monkeypatch.setattr(test_gate_mod, "run_gate_container", fake_formatter)
+
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    # Two commits on the branch: the coder's round commit, then the auto-format commit.
+    assert _commit_count_since_base(result) == 2
+    subj = subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=result.worktree,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert "auto-format" in subj
+    assert (Path(result.worktree) / "greeting.txt").read_text() == "HELLO ROUND 1\n"
+
+
+def test_auto_format_pass_noop_leaves_single_commit(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """A markerless fixture repo resolves no formatters, so the pass never runs a
+    container and the round keeps exactly the coder's single commit."""
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+
+    def _boom(*a, **k):
+        raise AssertionError("no formatter should run for a markerless repo")
+
+    monkeypatch.setattr(test_gate_mod, "run_gate_container", _boom)
+
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    assert _commit_count_since_base(result) == 1
+    assert state["gate_calls"] == []
+
+
 def test_candidate_checks_run_only_on_the_approval_candidate(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

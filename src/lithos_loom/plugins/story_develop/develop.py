@@ -2,8 +2,8 @@
 
     worktree
       -> start coder (RW) + reviewer (RO) containers, both long-lived
-      -> round 1: coder implements, commit, test gate, reviewer reviews
-      -> round N: coder fixes (resume), commit, gate, reviewer re-reviews (resume)
+      -> round 1: coder implements, commit, auto-format, test gate, reviewer reviews
+      -> round N: coder fixes (resume), commit, auto-format, gate, reviewer re-reviews
       -> stop when the reviewer passes (approved) or max_rounds is hit
       -> tear both containers down; leave the branch + a conversation log.
 
@@ -44,6 +44,7 @@ from pathlib import Path
 
 from ...runner import detection, git, worktree
 from . import (
+    autoformat,
     check_catalog,
     containers,
     gate_adapters,
@@ -357,9 +358,10 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     the panel each round and feeds the coder + reviewer prompts (ADR §6), while a
     ``candidate`` check runs only on the approval candidate and so reaches the gate
     ledger + ``[DevelopResult]`` but — on the common approve-immediately path — not the
-    panel. The ``format`` check is declared by the profile but its live (auto-format)
-    pass is #134, so it is not run as a standalone check here. Checks are in profile
-    order.
+    panel. The ``format`` check is declared by the profile but is not run as a
+    standalone gate check — its live pass is the :mod:`autoformat` write-mode pass
+    (#134), which reformats the round commit before the gate + panel. Checks are in
+    profile order.
     """
     profile = profiles.get_profile(config.review_profile)
     ecosystems = detection.detect_ecosystems(wt)
@@ -426,7 +428,8 @@ def _build_profile_checks(
     (ruff / bandit / pip-audit) emits JSON parsed into the gate ledger by
     :func:`_run_check_set`, a no-adapter tool (pyright / coverage / semgrep) runs
     as-is. Each resulting :class:`Check` carries its profile ``stage``. ``format`` is
-    skipped (its live pass is the #134 auto-format slice). Empty for a markerless repo.
+    skipped here (its live pass is the :mod:`autoformat` write-mode pass, #134). Empty
+    for a markerless repo.
     """
     if not ecosystems:
         return []
@@ -1335,6 +1338,10 @@ def develop(
     checks = build_check_set(config, wt)
     fast_checks = tuple(c for c in checks if c.stage == "fast")
     candidate_checks = tuple(c for c in checks if c.stage == "candidate")
+    # #134/ADR §4: the auto-format pass rewrites the round commit in place before the
+    # gate + panel. Resolve the runnable formatters once (detection + one image probe),
+    # like the check-set; empty for a markerless repo, when the pass is a no-op.
+    formatters = autoformat.resolve_formatters(config, wt)
     gate_ledger = _load_gate_ledger(config)  # #132: one per run; survives resume
     rounds_completed = 0
     coder_cost = 0.0
@@ -1493,6 +1500,16 @@ def develop(
                 status = "failed"
                 break
             if new_commit is not None:
+                # #134/ADR §4: auto-format the round's commit BEFORE the gate + panel.
+                # The formatter rewrites source in place; any change is a SEPARATE
+                # commit whose SHA supersedes new_commit, so the gate runs on — and the
+                # reviewers review — that exact formatted tree. Best-effort: a no-op
+                # (already clean, or no formatter) leaves new_commit untouched.
+                format_sha = autoformat.run_format_pass(
+                    config, wt, round_no, formatters
+                )
+                if format_sha is not None:
+                    new_commit = format_sha
                 # Track the latest committed tree so the approval-candidate gate
                 # (#140) can run candidate-staged checks against it even on a later
                 # round that produced no fresh commit.
