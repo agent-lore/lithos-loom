@@ -21,10 +21,12 @@ import pytest
 from lithos_loom.plugins.story_develop.check_catalog import (
     CANONICAL_CHECKS,
     ENV_DEPENDENT_CHECKS,
+    FORMATTER_COMMANDS,
     CheckApplicabilityError,
     CheckMapping,
     DesiredCheck,
     applies,
+    formatter_commands,
     resolve_check_set,
 )
 
@@ -376,3 +378,26 @@ def test_resolve_polyglot_required_absent_side_blocks() -> None:
     assert by_name["lint.python"].command == "ruff check"
     assert by_name["lint.node"].command == ""  # expected-but-absent placeholder
     assert by_name["lint.node"].state == "required"
+
+
+# --- write-mode formatters for the auto-format pass (#134, ADR §4) -----------
+
+
+def test_formatter_commands_are_write_mode() -> None:
+    # The auto-format pass needs the WRITE form, not the read-only `--check` form
+    # the `format` check declares: `ruff format` (not `ruff format --check`).
+    assert formatter_commands(("python",)) == [("python", "ruff format")]
+    assert "--check" not in FORMATTER_COMMANDS["python"]
+    assert FORMATTER_COMMANDS["go"] == "gofmt -w ."  # write (-w), not list (-l)
+
+
+def test_formatter_commands_polyglot_in_detection_order() -> None:
+    assert formatter_commands(("python", "node")) == [
+        ("python", "ruff format"),
+        ("node", "prettier --write ."),
+    ]
+
+
+def test_formatter_commands_markerless_repo_is_empty() -> None:
+    # No detected ecosystem -> nothing to format (the pass is a no-op).
+    assert formatter_commands(()) == []
