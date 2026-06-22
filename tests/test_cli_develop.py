@@ -9,6 +9,10 @@ codex process, the salvage fix the bash prototype missed.
 from __future__ import annotations
 
 import json
+import os
+import re
+import time
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -262,6 +266,11 @@ def test_list_json_shape(patched: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert rows[0]["task_id"] == "t-7"
     assert rows[0]["round"] == 1
     assert rows[0]["active"] == "—"  # docker absent → can't tell (not "done")
+    # the timestamp column is exposed raw (epoch float) for machine consumers,
+    # and is confined to `list` — it is NOT a field on the shared RunInfo model.
+    assert isinstance(rows[0]["mtime"], float)
+    assert rows[0]["mtime"] > 0
+    assert "mtime" not in {f.name for f in fields(develop.RunInfo)}
 
 
 def test_list_text_table_and_empty(
@@ -273,6 +282,108 @@ def test_list_text_table_and_empty(
     develop.develop_list(config=None, output_format="text")
     out = capsys.readouterr().out
     assert "run" in out and "active" in out and "r1" in out
+    # the timestamp column is present, and the data row carries a full
+    # wall-clock value of the documented YYYY-MM-DD HH:MM:SS shape.
+    assert "updated" in out
+    data_row = next(line for line in out.splitlines() if line.startswith("r1"))
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", data_row)
+
+
+def test_prune_json_omits_list_only_mtime(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `mtime` is a `list`-only projection; it must not leak into `prune`'s JSON.
+    _make_run(patched, task_id="t-1", run_id="r1", conversation="done")
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert rows and "mtime" not in rows[0]
+    assert "pruned" in rows[0]
+
+
+def test_latest_mtime_tracks_handoff_writes(tmp_path: Path) -> None:
+    # Regression for the stale-parent bug: a handoff written into run_dir/handoff/
+    # bumps the handoff dir, not the parent run_dir, so the parent mtime alone is
+    # stale. _latest_mtime must reflect the newer handoff activity.
+    run_dir = _make_run(tmp_path, task_id="t-1", run_id="r1")  # seed only, no round
+    parent_mtime = run_dir.stat().st_mtime
+    later = parent_mtime + 1000
+    handoff = run_dir / "handoff" / "round_01_coder_done.md"
+    handoff.write_text("## Status: LGTM\n")
+    os.utime(handoff, (later, later))
+    os.utime(run_dir / "handoff", (later, later))
+    # parent run_dir is untouched, yet the run's last activity is `later`
+    assert run_dir.stat().st_mtime == pytest.approx(parent_mtime)
+    assert develop._latest_mtime(run_dir) == pytest.approx(later)
+
+
+def test_list_output_reflects_latest_handoff_mtime(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Command-level guard (not just the helper): develop_list must surface the
+    # *handoff* activity, not the stale parent run-dir mtime, in both json + text.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    later = run_dir.stat().st_mtime + 10_000
+    os.utime(run_dir / "handoff" / "round_01_coder_done.md", (later, later))
+    os.utime(run_dir / "handoff", (later, later))
+    # the parent run dir stays stale; only the handoff moved forward
+    assert run_dir.stat().st_mtime < later
+
+    develop.develop_list(config=None, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["mtime"] == pytest.approx(later)
+
+    develop.develop_list(config=None, output_format="text")
+    data_row = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("r1")
+    )
+    assert develop._format_mtime(later) in data_row
+
+
+def test_list_text_survives_poisoned_handoff_mtime(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A single run with an out-of-range handoff mtime must not crash the whole
+    # text listing — the operator still gets every run (security/f-001).
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    handoff = run_dir / "handoff" / "round_01_coder_done.md"
+    try:
+        os.utime(handoff, (9e18, 9e18))
+    except (OverflowError, OSError):
+        pytest.skip("platform rejects an out-of-range utime")
+    develop.develop_list(config=None, output_format="text")  # must not raise
+    out = capsys.readouterr().out
+    assert "r1" in out and "—" in out
+
+
+def test_format_mtime_zero_and_out_of_range_render_dash() -> None:
+    assert develop._format_mtime(0.0) == "—"
+    # A poisoned mtime renders as "—" instead of crashing: handoff files are
+    # bind-mounted RW into agent containers, so an agent can set an arbitrary
+    # out-of-range utime; time.localtime would otherwise raise and abort the
+    # whole text listing (security/f-001).
+    assert develop._format_mtime(9e18) == "—"
+    assert develop._format_mtime(-9e18) == "—"
+
+
+def test_format_mtime_exact_string_under_fixed_tz() -> None:
+    # exact wall-clock string under a pinned timezone for a known epoch.
+    # Restore the process-global tz afterwards (tzset mutates C-library state),
+    # so we don't leak UTC into later tests on a non-UTC host (test-quality/f-003).
+    original_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        assert develop._format_mtime(1_700_000_000.0) == "2023-11-14 22:13:20"
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+            develop._format_mtime(1_700_000_000.0),
+        )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
 
 
 def test_attach_once_snapshot(

@@ -92,6 +92,28 @@ def _is_run_dir(path: Path) -> bool:
     return path.is_dir() and (path / "handoff").is_dir()
 
 
+def _latest_mtime(run_dir: Path) -> float:
+    """Newest mtime under *run_dir* — its last on-disk activity (``0.0`` if none).
+
+    The bare ``run_dir`` mtime is stale for a live run: handoff files land in
+    ``run_dir/handoff/``, and on POSIX writing a child bumps the *handoff* dir's
+    mtime, not its parent's. So a run whose only change is a fresh round handoff
+    would otherwise report its seed time. We take the max over the run dir, its
+    handoff dir + handoff files, and any terminal ``conversation.md`` — the round
+    activity ``develop list`` actually observes.
+    """
+    candidates = [run_dir, run_dir / "handoff", run_dir / "conversation.md"]
+    with contextlib.suppress(OSError):
+        candidates.extend((run_dir / "handoff").iterdir())
+    latest = 0.0
+    for path in candidates:
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return latest
+
+
 def _iter_run_dirs(work_dir: Path) -> list[Path]:
     """All ``<work_dir>/<task_id>/<run_id>/`` run dirs, newest first."""
     if not work_dir.is_dir():
@@ -103,8 +125,9 @@ def _iter_run_dirs(work_dir: Path) -> list[Path]:
         for run_dir in task_dir.iterdir()
         if _is_run_dir(run_dir)
     ]
-    # newest first; mtime is stable enough for an operator listing.
-    return sorted(runs, key=lambda p: p.stat().st_mtime, reverse=True)
+    # newest first by last on-disk activity (handoff writes included), so the
+    # ordering matches the `updated` column `develop list` renders.
+    return sorted(runs, key=_latest_mtime, reverse=True)
 
 
 def _task_title(run_dir: Path) -> str:
@@ -246,6 +269,24 @@ def _active_agent(containers: list[ContainerStatus]) -> str | None:
 # ── output helpers ─────────────────────────────────────────────────────
 
 
+def _format_mtime(mtime: float) -> str:
+    """Local wall-clock timestamp of a run's last on-disk activity.
+
+    ``0.0`` (an unstat-able run dir) renders as ``—`` rather than the 1970 epoch.
+    An out-of-range value also renders as ``—``: handoff files are bind-mounted
+    RW into agent containers, so a misbehaving/compromised agent can poison a
+    handoff mtime (e.g. ``os.utime(..., (9e18, 9e18))``); without this guard
+    ``time.localtime`` would raise and abort the whole text listing — denying the
+    operator a view of *every* run, not just the poisoned one.
+    """
+    if not mtime:
+        return _UNKNOWN
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+    except (OverflowError, OSError, ValueError):
+        return _UNKNOWN
+
+
 def _agent_state(info: RunInfo) -> str:
     """Human label for what the run is doing now."""
     containers = _run_containers(info.run_id)
@@ -346,7 +387,16 @@ def develop_list(
 
     if output_format == _FORMAT_JSON:
         typer.echo(
-            json.dumps([{**asdict(i), "active": _agent_state(i)} for i in infos])
+            json.dumps(
+                [
+                    {
+                        **asdict(i),
+                        "active": _agent_state(i),
+                        "mtime": _latest_mtime(Path(i.run_dir)),
+                    }
+                    for i in infos
+                ]
+            )
         )
         return
     if output_format != _FORMAT_TEXT:
@@ -368,10 +418,11 @@ def develop_list(
             (i.title[:40] + "…") if len(i.title) > 41 else i.title,
             f"r{i.round}",
             _agent_state(i),
+            _format_mtime(_latest_mtime(Path(i.run_dir))),
         )
         for i in infos
     ]
-    headers = ("run", "task", "title", "round", "active")
+    headers = ("run", "task", "title", "round", "active", "updated")
     widths = [
         max(len(h), max((len(r[c]) for r in rows), default=0))
         for c, h in enumerate(headers)
