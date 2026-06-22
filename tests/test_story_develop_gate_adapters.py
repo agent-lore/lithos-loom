@@ -137,6 +137,16 @@ def test_pip_audit_one_finding_per_vuln_skips_clean_deps() -> None:
     assert "no fix available" in by_rule["GHSA-xxxx"].message
 
 
+def test_pip_audit_parser_tolerates_trailing_stderr_status_line() -> None:
+    # The gate concatenates the run's stdout (JSON) and stderr; pip-audit writes its
+    # findings JSON to stdout but a human status line ("No known vulnerabilities found"
+    # / "Found N ...") to stderr — so the combined gate output is JSON followed by
+    # non-JSON (#167). The parser must still extract findings, not silently yield none.
+    combined = _PIP_AUDIT_JSON + "\nFound 2 known vulnerabilities in 2 packages"
+    findings = parse_findings("dep-audit", "pip-audit", combined)
+    assert {f.rule for f in findings} == {"PYSEC-2019-179", "GHSA-xxxx"}
+
+
 _PIP_AUDIT_SHARED_CVE = """{"dependencies": [
   {"name": "pkg-a", "version": "1.0", "vulns": [{"id": "CVE-2020-1"}]},
   {"name": "pkg-b", "version": "2.0", "vulns": [{"id": "CVE-2020-1"}]}

@@ -651,7 +651,11 @@ def _run_check_set(
         if gate is not None:
             # #132: structure a finding-producing check's output into the ledger,
             # then drop the full output so it never propagates into the result.
-            tool = check.command.split()[0] if check.command else ""
+            # Resolve the real adapter tool past a `uv run` prefix or a pipeline
+            # producer (#167: `uv export … | pip-audit …` → pip-audit), exactly like
+            # the build (#166) and floor sites — a bare `split()[0]` would see `uv`
+            # and skip the ledger, so dep-audit findings would never be structured.
+            tool = gate_adapters.command_tool(check.command)
             if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
                 gate_ledger.apply_round(
                     check.name,

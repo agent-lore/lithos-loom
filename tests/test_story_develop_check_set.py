@@ -750,6 +750,41 @@ def test_run_check_set_ledgers_findings_and_drops_full_output(
     assert cs.results[0].gate.output_tail == "t"
 
 
+def test_run_check_set_ledgers_piped_dep_audit_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #167: dep-audit resolves to `uv export … | pip-audit …`, so the run/parse phase
+    # must resolve the adapter via command_tool (the pipe CONSUMER), not split()[0]
+    # (== "uv"), AND tolerate the stderr status line the gate appends after the JSON.
+    pip_audit_json = (
+        '{"dependencies": [{"name": "flask", "version": "0.5", "vulns": ['
+        '{"id": "PYSEC-2019-179", "fix_versions": ["0.12.3"]}]}]}'
+    )
+    full = pip_audit_json + "\nFound 1 known vulnerability in 1 package"
+    monkeypatch.setattr(develop_mod.test_gate, "export_tree", _fake_export)
+    monkeypatch.setattr(
+        develop_mod.test_gate,
+        "run_gate_container",
+        lambda gate_cmd, *, name, command, timeout: GateResult(
+            command=command,
+            exit_code=1,
+            passed=False,
+            output_tail="t",
+            full_output=full,
+        ),
+    )
+    led = GateLedger()
+    dep_audit = Check(
+        "dep-audit",
+        "uv export --no-emit-project --format requirements-txt "
+        "| pip-audit -r /dev/stdin --format=json",
+        "required",
+    )
+    develop_mod._run_check_set(_config(tmp_path), tmp_path, "sha", 1, (dep_audit,), led)
+    assert [f.rule for f in led.open_findings()] == ["PYSEC-2019-179"]
+    assert led.open_findings()[0].finding_id == "gate/dep-audit-001"
+
+
 def test_run_check_set_closes_lint_finding_on_clean_rerun(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

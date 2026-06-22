@@ -98,6 +98,16 @@ def _loads(output: str) -> Any:
     try:
         return json.loads(output)
     except (json.JSONDecodeError, ValueError):
+        pass
+    # The gate concatenates a check's stdout (the tool's JSON) and stderr; a tool that
+    # writes a human status line to stderr (pip-audit: "No known vulnerabilities found"
+    # / "Found N …") leaves the combined output as a leading JSON value followed by
+    # non-JSON (#167). stdout comes first (test_gate.run_gate_container), so decode the
+    # leading value and ignore the trailing text.
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(output.lstrip())
+        return obj
+    except (json.JSONDecodeError, ValueError):
         return None
 
 
