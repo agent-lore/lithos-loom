@@ -141,22 +141,6 @@ def _result_summary(result: DevelopResult) -> str:
     return "\n".join(lines)
 
 
-def _findings_by_severity(result: DevelopResult) -> dict[str, int]:
-    """Count the final panel's findings by severity (ADR 0003 §11 calibration).
-
-    Spans every reviewer's findings in the final round, all statuses — the
-    review-output signal correlated against post-merge outcomes later. Canonical
-    severities are always present (zero-filled) so the record has a stable shape;
-    any off-rubric severity an `invalid` review emits is still counted under its
-    own key rather than dropped.
-    """
-    counts: dict[str, int] = {"critical": 0, "major": 0, "minor": 0}
-    for review in result.reviews:
-        for f in review.findings:
-            counts[f.severity] = counts.get(f.severity, 0) + 1
-    return counts
-
-
 def _delivery_section(delivery: Any) -> str:
     """The Copilot-round block of the ``[DevelopResult]`` finding."""
     lines = [f"pull request: {delivery.pr_url}"]
@@ -198,6 +182,10 @@ def post_results(
     total_cost = result.total_cost_usd + (
         delivery.extra_cost_usd if delivery is not None else 0.0
     )
+    # Local import: the module keeps `develop` out of its runtime import surface
+    # (DevelopResult is TYPE_CHECKING-only) — reuse the one severity-count helper
+    # so the metadata patch + state.json can't drift.
+    from .develop import findings_by_severity
 
     async def _post() -> None:
         async with LithosClient(url, agent_id=AGENT_ID) as client:
@@ -231,7 +219,7 @@ def post_results(
                 # under output-only keys so they never clash with the operator's
                 # `develop_review_profile` *input* selection key.
                 "develop_review_panel": [r.reviewer for r in result.reviews],
-                "develop_findings_by_severity": _findings_by_severity(result),
+                "develop_findings_by_severity": findings_by_severity(result.reviews),
             }
             if result.review_profile:
                 metadata["develop_review_profile_used"] = result.review_profile

@@ -93,6 +93,22 @@ class ReviewOutcome:
         return len(self.findings)
 
 
+def findings_by_severity(reviews: Sequence[ReviewOutcome]) -> dict[str, int]:
+    """Count a panel's findings by severity (ADR 0003 §11 review-metadata record).
+
+    Spans every reviewer's findings, all statuses. Canonical severities are
+    always present (zero-filled) so the record has a stable shape; an off-rubric
+    severity an ``invalid`` review emits is still counted under its own key. The
+    single source of truth shared by the Lithos metadata patch (``lithos_io``)
+    and the durable ``state.json``, so both carry an identical record.
+    """
+    counts: dict[str, int] = {"critical": 0, "major": 0, "minor": 0}
+    for review in reviews:
+        for f in review.findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+    return counts
+
+
 @dataclass(frozen=True)
 class DevelopResult:
     """Outcome of a ``develop()`` run."""
@@ -1782,7 +1798,12 @@ def develop(
                 "worktree": str(wt),
                 "base_sha": base,
                 "rounds": rounds_completed,
+                # Review-metadata record (ADR 0003 §11) — the same profile +
+                # panel + findings-by-severity written to Lithos metadata, kept
+                # in the durable run-state for local outcome correlation.
                 "review_profile": config.review_profile,
+                "review_panel": [r.reviewer for r in final_reviews],
+                "findings_by_severity": findings_by_severity(final_reviews),
                 "coder_session": coder_session,
                 "reviewers": {
                     r.spec.name: {"session": r.session, "tool": r.tool_now}

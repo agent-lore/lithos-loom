@@ -1388,6 +1388,14 @@ def test_state_json_written_on_success(
     assert data["status"] == "approved"
     assert data["branch"] == result.branch
     assert data["rounds"] == result.rounds
+    # Review-metadata record (ADR 0003 §11): the durable run-state carries the
+    # SAME profile + panel + findings-by-severity written to Lithos metadata, so
+    # the local record is sufficient for outcome correlation.
+    assert data["review_profile"] == config.review_profile
+    assert data["review_panel"] == [r.reviewer for r in result.reviews]
+    assert data["findings_by_severity"] == develop_mod.findings_by_severity(
+        result.reviews
+    )
 
 
 # --- validation -------------------------------------------------------------
