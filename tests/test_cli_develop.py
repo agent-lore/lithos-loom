@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import fields
 from pathlib import Path
@@ -236,23 +237,48 @@ def test_run_phase_classification(tmp_path: Path) -> None:
     rd.mkdir()
     running = [develop.ContainerStatus("n", "coder", "Up", True)]
     exited = [develop.ContainerStatus("n", "coder", "Exited", False)]
+    none: dict | None = None  # no recorded outcome yet
+    approved = {"status": "approved"}
     # docker present: live while a container runs
-    assert develop._run_phase(rd, running, seen_container=True) == "running"
+    assert develop._run_phase(rd, running, none, seen_container=True) == "running"
     # startup window: zero containers and none seen yet → keep following (the
     # old container-liveness check exited here, the bug this fixes)
-    assert develop._run_phase(rd, [], seen_container=False) == "running"
+    assert develop._run_phase(rd, [], none, seen_container=False) == "running"
     # a seen container gone with no recorded outcome yet → ambiguous (teardown
     # window vs crash); the caller grace-polls before deciding
-    assert develop._run_phase(rd, exited, seen_container=True) == "vanished"
+    assert develop._run_phase(rd, exited, none, seen_container=True) == "vanished"
     # docker absent (None): live until the outcome lands (or the dir is reaped)
-    assert develop._run_phase(rd, None, seen_container=False) == "running"
+    assert develop._run_phase(rd, None, none, seen_container=False) == "running"
     # the recorded OUTCOME (state.json with a status) is the graceful terminal —
-    # NOT conversation.md, which the plugin writes first, and NOT liveness.
-    (rd / "conversation.md").write_text("log")  # log alone is not terminal
-    assert develop._run_phase(rd, exited, seen_container=True) == "vanished"
-    (rd / "state.json").write_text(json.dumps({"status": "approved"}))
-    assert develop._run_phase(rd, running, seen_container=True) == "terminal"
-    assert develop._run_phase(rd, None, seen_container=False) == "terminal"
+    # regardless of container state, and NOT conversation.md / liveness.
+    assert develop._run_phase(rd, exited, approved, seen_container=True) == "terminal"
+    assert develop._run_phase(rd, running, approved, seen_container=True) == "terminal"
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
+    # docker absent + the run dir reaped on success → terminal (nothing to read)
+    rd.rmdir()
+    assert develop._run_phase(rd, None, none, seen_container=False) == "terminal"
+
+
+def test_iter_new_handoffs_caps_count_per_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # security/f-003: a flood of agent-written handoff files must not all be read
+    # in one poll; the batch is capped and the remainder surfaces on later polls.
+    monkeypatch.setattr(develop, "_MAX_HANDOFFS_PER_POLL", 3)
+    hd = tmp_path / "handoff"
+    hd.mkdir()
+    for i in range(5):
+        (hd / f"round_01_review_r{i}.md").write_text("body")
+    pairs = develop._iter_new_handoffs(hd, set())
+    real = [(n, b) for n, b in pairs if n.startswith("round_")]
+    assert len(real) == 3  # capped, not all 5 slurped at once
+    assert any("more handoffs" in n for n, _ in pairs)  # overflow notice present
+    # the remainder surfaces once the first batch is marked seen (no loss)
+    seen = {n for n, _ in real}
+    more = [
+        n for n, _ in develop._iter_new_handoffs(hd, seen) if n.startswith("round_")
+    ]
+    assert len(more) == 2
 
 
 def test_read_handoff_bounds_size_and_decodes_leniently(tmp_path: Path) -> None:
@@ -735,6 +761,40 @@ def test_attach_wait_exits_nonzero_when_not_approved(
         )
     assert exc.value.code == 1
     assert "failed" in capsys.readouterr().out
+
+
+def test_attach_wait_captures_outcome_before_workdir_is_reaped(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-003): the route-runner reaps an approved run's
+    # work dir immediately after the plugin exits. attach must capture the
+    # outcome at terminal-detection time, not re-read a since-deleted run_dir —
+    # which would misreport approved as a crash and make --wait exit 1.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        conversation="log",
+        status="approved",
+    )
+    real_read = develop._read_state
+    calls = {"n": 0}
+
+    def reaping_read(rd: Path) -> dict | None:
+        calls["n"] += 1
+        state = real_read(rd)
+        if calls["n"] == 1 and state and state.get("status"):
+            shutil.rmtree(rd, ignore_errors=True)  # the success reap, mid-follow
+        return state
+
+    monkeypatch.setattr(develop, "_read_state", reaping_read)
+    # approved → must NOT raise SystemExit (exit 0); reported from the snapshot
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out
+    assert "without recording an outcome" not in out
+    assert not run_dir.exists()  # the dir really was reaped during the follow
 
 
 def test_attach_stream_emits_jsonl_events(

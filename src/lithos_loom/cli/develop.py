@@ -90,6 +90,12 @@ _TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECOND
 # bytes before echoing so a crafted handoff can't forge/hide output on the
 # operator's terminal. The JSON `--stream` path is escape-safe via json.dumps.
 _MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
+# Cap how many *new* handoffs we materialise in a single poll. A genuine round
+# adds a handful (1 coder + a few reviewers); an agent could otherwise drop
+# thousands of matching filenames into the RW mount, and reading them all at
+# once (count × ≤1 MiB) would balloon this process even with the per-file cap.
+# Overflow surfaces over subsequent polls (unprocessed files aren't marked seen).
+_MAX_HANDOFFS_PER_POLL = 64
 # C0 controls except TAB/LF, plus DEL and the C1 range (covers ESC 0x1b).
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
@@ -325,6 +331,7 @@ def _agent_state(info: RunInfo) -> str:
 def _run_phase(
     run_dir: Path,
     containers: list[ContainerStatus] | None,
+    state: dict | None,
     *,
     seen_container: bool,
 ) -> str:
@@ -346,8 +353,11 @@ def _run_phase(
       are now all gone but no outcome is recorded yet. Ambiguous: either the
       normal teardown window before ``state.json`` is written, or a hard crash.
       The caller grace-polls before deciding (see ``_TEARDOWN_GRACE_POLLS``).
+
+    *state* is the already-read ``state.json`` for this poll (passed in so the
+    caller can capture the exact dict it classified on, without a second read
+    that could race the work-dir reap).
     """
-    state = _read_state(run_dir)
     if state is not None and state.get("status"):
         return "terminal"
     if containers is None:
@@ -427,20 +437,43 @@ def _read_state(run_dir: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _approved(run_dir: Path) -> bool:
+@dataclass
+class _Outcome:
+    """A run's terminal outcome, captured the moment ``attach`` detects it.
+
+    The follow loop snapshots this **before returning**, so the rendered summary
+    survives the route-runner reaping the work dir on success — re-reading the
+    (now-deleted) ``run_dir`` afterwards would misreport an approved run as a
+    crash (correctness/f-003).
+    """
+
+    state: dict | None = None  # parsed state.json at capture time, or None
+    has_log: bool = False  # conversation.md present at capture time
+
+
+def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> None:
+    """Snapshot the terminal outcome into *outcome* from the already-read *state*.
+
+    Done before the follow loop returns, while *run_dir* is still on disk — the
+    log marker is checked here, not lazily after a possible reap.
+    """
+    outcome.state = state
+    outcome.has_log = (run_dir / "conversation.md").is_file()
+
+
+def _approved(outcome: _Outcome) -> bool:
     """Whether the run reached the only success status (``approved``)."""
-    state = _read_state(run_dir)
-    return bool(state and state.get("status") == "approved")
+    return bool(outcome.state and outcome.state.get("status") == "approved")
 
 
-def _outcome_line(run_dir: Path, run_id: str) -> str:
+def _outcome_line(run_id: str, outcome: _Outcome) -> str:
     """One-line outcome summary for a run that has reached a terminal state.
 
     Prefers the recorded ``state.json`` status; falls back to the bare terminal
     marker (``conversation.md`` present but no status) and, failing that, to a
     crash (containers gone with neither artifact written).
     """
-    state = _read_state(run_dir)
+    state = outcome.state
     if state and state.get("status"):
         status = str(state["status"])
         phrase = _OUTCOME_PHRASES.get(status, status)
@@ -451,14 +484,14 @@ def _outcome_line(run_dir: Path, run_id: str) -> str:
         if state.get("branch"):
             parts.append(f"on {state['branch']}")
         return " ".join(parts)
-    if (run_dir / "conversation.md").is_file():
+    if outcome.has_log:
         return f"── run {run_id} finished (status not recorded)"
     return f"── run {run_id} ended without recording an outcome (crashed?)"
 
 
-def _outcome_event(run_dir: Path, run_id: str) -> dict:
+def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
     """The ``--stream`` terminal event mirroring :func:`_outcome_line`."""
-    state = _read_state(run_dir)
+    state = outcome.state
     event: dict = {"event": "outcome", "run_id": run_id, "status": None}
     if state and state.get("status"):
         event["status"] = str(state["status"])
@@ -466,7 +499,7 @@ def _outcome_event(run_dir: Path, run_id: str) -> dict:
             event["rounds"] = state["rounds"]
         if state.get("branch"):
             event["branch"] = str(state["branch"])
-    elif not (run_dir / "conversation.md").is_file():
+    elif not outcome.has_log:
         event["crashed"] = True
     return event
 
@@ -719,27 +752,29 @@ def develop_attach(
         _print_snapshot(run_dir)
         return
 
+    outcome = _Outcome()
+
     if stream:
-        for event in _follow_events(run_dir, info):
+        for event in _follow_events(run_dir, info, outcome):
             typer.echo(json.dumps(event))
-        typer.echo(json.dumps(_outcome_event(run_dir, info.run_id)))
+        typer.echo(json.dumps(_outcome_event(info.run_id, outcome)))
         return
 
     if wait:
-        for _event in _follow_events(run_dir, info):
+        for _event in _follow_events(run_dir, info, outcome):
             pass  # quiet — drain the follow, surface only the outcome
-        typer.echo(_outcome_line(run_dir, info.run_id))
-        if not _approved(run_dir):
+        typer.echo(_outcome_line(info.run_id, outcome))
+        if not _approved(outcome):
             sys.exit(1)
         return
 
     typer.echo(_attach_header(info))
-    for event in _follow_events(run_dir, info):
+    for event in _follow_events(run_dir, info, outcome):
         if event["event"] == "state":
             typer.echo(event["label"])
         else:  # handoff — sanitize agent-written name/body before the terminal
             typer.echo(f"\n── {_sanitize(event['name'])}\n{_sanitize(event['body'])}")
-    typer.echo(_outcome_line(run_dir, info.run_id))
+    typer.echo(_outcome_line(info.run_id, outcome))
     typer.echo(f"── `lithos-loom develop dump {key}` for the full log")
 
 
@@ -765,7 +800,7 @@ def _follow_state(
     return "── (starting up — waiting for agent containers…)", round_no, None
 
 
-def _follow_events(run_dir: Path, info: RunInfo) -> Iterator[dict]:
+def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[dict]:
     """Yield follow events until the run reaches a terminal state.
 
     Each event is a dict tagged by ``event``: ``state`` (label / round / agent,
@@ -776,6 +811,13 @@ def _follow_events(run_dir: Path, info: RunInfo) -> Iterator[dict]:
     (the normal window where the plugin has stopped its containers but not yet
     written ``state.json``) it grace-polls rather than declaring a crash. The
     final handoffs are surfaced on the last poll before exit.
+
+    On exit it populates *outcome* from the ``state.json`` it classified on, so
+    the caller renders the summary from that snapshot — re-reading ``run_dir``
+    after the loop would race the route-runner reaping it on success
+    (correctness/f-003). ``state.json`` is read once per poll and reused for both
+    the classification and the capture, so the captured dict is exactly the one
+    that triggered the terminal decision.
     """
     seen: set[str] = set()
     seen_container = False
@@ -785,7 +827,8 @@ def _follow_events(run_dir: Path, info: RunInfo) -> Iterator[dict]:
         containers = _run_containers(info.run_id)
         if containers:
             seen_container = True
-        phase = _run_phase(run_dir, containers, seen_container=seen_container)
+        state = _read_state(run_dir)
+        phase = _run_phase(run_dir, containers, state, seen_container=seen_container)
         if phase != "vanished":
             grace = _TEARDOWN_GRACE_POLLS  # only count down once truly ending
         if phase == "running":
@@ -802,10 +845,12 @@ def _follow_events(run_dir: Path, info: RunInfo) -> Iterator[dict]:
             seen.add(name)
             yield {"event": "handoff", "name": name, "body": body}
         if phase == "terminal":
+            _capture_outcome(outcome, run_dir, state)
             return
         if phase == "vanished":
             grace -= 1
             if grace <= 0:  # outcome never landed across the grace window → crash
+                _capture_outcome(outcome, run_dir, state)
                 return
         time.sleep(_ATTACH_POLL_SECONDS)
 
@@ -848,7 +893,12 @@ def _read_handoff(path: Path) -> str:
 
 
 def _iter_new_handoffs(handoff_dir: Path, seen: set[str]) -> list[tuple[str, str]]:
-    """New ``(name, body)`` handoff pairs not in *seen*, sorted by filename."""
+    """New ``(name, body)`` handoff pairs not in *seen*, sorted by filename.
+
+    Bounded to :data:`_MAX_HANDOFFS_PER_POLL` per call so a flood of
+    agent-written handoff files can't be slurped all at once (security/f-003);
+    a final notice pair reports any overflow, which surfaces on later polls.
+    """
     try:
         names = sorted(
             p.name
@@ -857,11 +907,12 @@ def _iter_new_handoffs(handoff_dir: Path, seen: set[str]) -> list[tuple[str, str
         )
     except OSError:
         return []
-    out = []
-    for name in names:
-        if name in seen:
-            continue
-        out.append((name, _read_handoff(handoff_dir / name)))
+    new_names = [name for name in names if name not in seen]
+    capped = new_names[:_MAX_HANDOFFS_PER_POLL]
+    out = [(name, _read_handoff(handoff_dir / name)) for name in capped]
+    overflow = len(new_names) - len(capped)
+    if overflow:
+        out.append((f"(+{overflow} more handoffs this poll — output capped)", ""))
     return out
 
 
