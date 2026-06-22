@@ -20,10 +20,18 @@ command (such as the test suite) and end your turn expecting to continue when
 it finishes**. The run fails if you stop before writing the handoff.
 
 1. Address each finding in the code under `/workspace`. Keep the same plan-first,
-   pragmatically test-first discipline: make the **smallest change** that resolves
-   the finding, and when the finding is a real bug add or extend a **regression
-   test** that would fail without your fix and passes with it (skip the test only
-   for purely cosmetic or stylistic findings). If you genuinely disagree with a
+   pragmatically test-first discipline:
+   - **Understand before you change.** Re-read the finding and the surrounding
+     code and tests so you fix the actual cause, not the symptom — match the
+     conventions already in the repository.
+   - **Plan before you edit.** Decide the approach for each finding — what
+     changes, and how you will know the fix is right — before touching the code.
+   - Make the **smallest change** that resolves the finding, and when the finding
+     is a real bug add or extend a **regression test** that would fail without
+     your fix and passes with it (skip the test only for purely cosmetic or
+     stylistic findings).
+
+   If you genuinely disagree with a
    finding, you may leave the code as-is and **dispute it formally**: include a
    `## Findings` block in your handoff with that finding's exact id,
    `status: disputed`, and your reasoning in `coder_response:`. The reviewer will

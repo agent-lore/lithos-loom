@@ -51,9 +51,12 @@ def test_coder_init_carries_plan_first_and_pragmatic_test_discipline() -> None:
 
 
 def test_coder_fix_keeps_regression_test_discipline() -> None:
-    # The fix turn carries the same discipline: a real bug fix gets a regression
-    # test, and the change stays minimal.
+    # The fix turn carries the FULL discipline: understand + plan before editing
+    # (not just "smallest change" + a regression test), so round-2+ coders get
+    # the same plan-first guidance the init turn does.
     text = " ".join(load_prompt("coder_fix.md").lower().split())
+    assert "understand before you change" in text
+    assert "plan before you edit" in text
     assert "regression test" in text
     assert "smallest change" in text
 
