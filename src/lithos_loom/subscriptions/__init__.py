@@ -219,7 +219,7 @@ def _compile_where(name: str, expr: str) -> Callable[[Event], bool]:
 
     def predicate(event: Event) -> bool:
         scope = {"event": event, "task": event.payload}
-        return bool(eval(code, globals_, scope))  # noqa: S307 — sandboxed
+        return bool(eval(code, globals_, scope))  # noqa: S307 — sandboxed  # nosec B307
 
     return predicate
 

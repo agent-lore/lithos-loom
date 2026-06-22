@@ -72,6 +72,21 @@ def test_resolve_uv_managed_wraps_env_dependent_python_checks() -> None:
     assert by["lint"].command == "ruff check"
 
 
+def test_resolve_uv_managed_wraps_each_step_of_compound_coverage() -> None:
+    # coverage is a run-then-report compound (#170 follow-up): a single leading
+    # `uv run` would wrap only the `coverage run` step, leaving `coverage report`
+    # to the container's empty environment. Each `&&` step must resolve in the venv.
+    checks = resolve_check_set(
+        [DesiredCheck("coverage", "required")],
+        ("python",),
+        tool_available=_always,
+        uv_managed=True,
+    )
+    assert checks[0].command == (
+        "uv run coverage run -m pytest && uv run coverage report"
+    )
+
+
 def test_resolve_uv_managed_does_not_wrap_dep_audit_external_auditor() -> None:
     # Regression guard (#166 review): pip-audit is an *external auditor* (reads the
     # lock, queries a vuln DB) — NOT a project dependency, so `uv run pip-audit` would
@@ -152,11 +167,32 @@ def test_catalog_includes_coverage_and_semgrep_for_profiles() -> None:
     cov = resolve_check_set(
         [DesiredCheck("coverage", "required")], ("python",), tool_available=_always
     )
-    assert cov[0].name == "coverage" and cov[0].command == "coverage report"
+    assert cov[0].name == "coverage"
+    assert cov[0].command == "coverage run -m pytest && coverage report"
     sg = resolve_check_set(
         [DesiredCheck("semgrep", "informational")], ("python",), tool_available=_always
     )
     assert sg[0].name == "semgrep" and sg[0].command == "semgrep --error"
+
+
+def test_sast_python_excludes_the_project_venv() -> None:
+    # On a uv repo the gate materialises `.venv` in the tree; bandit must not recurse
+    # into it and flag vendored deps as project findings (#170 follow-up). `.venv` is
+    # not a bandit default exclude, so the mapping declares it (with the `./` prefix
+    # bandit's path-match requires).
+    checks = resolve_check_set(
+        [DesiredCheck("sast", "required")], ("python",), tool_available=_always
+    )
+    assert checks[0].command == "bandit -r . -x ./.venv"
+
+
+def test_coverage_python_is_runnable_run_then_report() -> None:
+    # A bare `coverage report` has no data to report and always errors; the catalog
+    # must declare the run-then-report compound so the check is actually runnable.
+    checks = resolve_check_set(
+        [DesiredCheck("coverage", "required")], ("python",), tool_available=_always
+    )
+    assert checks[0].command == "coverage run -m pytest && coverage report"
 
 
 def test_test_check_maps_python_and_at_least_one_other_ecosystem() -> None:

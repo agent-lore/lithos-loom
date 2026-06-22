@@ -973,7 +973,7 @@ def test_make_handler_creates_fresh_sync_state_when_none() -> None:
             agent_id="x",
             lithos_url="http://localhost:8765",
         ),
-        obsidian_sync=ObsidianSyncConfig(vault_path=Path("/tmp/v")),
+        obsidian_sync=ObsidianSyncConfig(vault_path=Path("/tmp/v")),  # nosec B108
     )
     handler = make_handler(cfg)  # no sync_state
     # Should construct without raising.

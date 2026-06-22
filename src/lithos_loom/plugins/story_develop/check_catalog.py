@@ -117,7 +117,12 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
     CheckMapping(
         "sast",
         {
-            "python": "bandit -r .",
+            # Exclude `.venv` so bandit scans the project, not its vendored deps:
+            # on a uv repo the gate materialises the project venv in the tree, and a
+            # bare `bandit -r .` would recurse into `.venv/**` and flag third-party
+            # code as project findings (#170 follow-up). `.venv` is NOT in bandit's
+            # default excludes; the `./` prefix is required for the match to fire.
+            "python": "bandit -r . -x ./.venv",
             "node": "semgrep --error",
         },
     ),
@@ -131,9 +136,12 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
     CheckMapping(
         "coverage",
         {
-            # `thorough`'s coverage is required-present; the exact runner command
-            # (e.g. a `coverage run` preface) is tuned when #140 wires it live.
-            "python": "coverage report",
+            # A bare `coverage report` has no data to report (nothing ran under
+            # coverage), so it always errors out — the run-then-report pair is the
+            # runnable form. Both steps are env-dependent (they execute the project
+            # + its test deps), so on a uv repo each `&&` step is `uv run`-wrapped
+            # (see ENV_DEPENDENT_CHECKS / _uv_run); bare, they run image-global.
+            "python": "coverage run -m pytest && coverage report",
         },
     ),
     CheckMapping(
@@ -165,6 +173,15 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
 ENV_DEPENDENT_CHECKS: frozenset[str] = frozenset({"typecheck", "coverage", "test"})
 
 _BY_NAME: dict[str, CheckMapping] = {m.name: m for m in CANONICAL_CHECKS}
+
+
+def _uv_run(command: str) -> str:
+    """Prefix each ``&&``-joined step of *command* with ``uv run`` so a compound
+    env-dependent command (``coverage run -m pytest && coverage report``) resolves
+    *every* step against the project venv. A single leading ``uv run`` would wrap
+    only the first step, leaving the rest to the container's empty environment. A
+    plain single command (``pyright``) becomes ``uv run pyright`` unchanged."""
+    return " && ".join(f"uv run {step.strip()}" for step in command.split("&&"))
 
 
 def _applicable_commands(
@@ -240,8 +257,9 @@ def resolve_check_set(
             check_name = f"{d.name}.{eco}" if qualify else d.name
             if uv_managed and eco == "python" and d.name in ENV_DEPENDENT_CHECKS:
                 # Run the env-dependent tool inside the project venv; probe the `uv`
-                # entrypoint, like the `test` check's `uv run pytest`.
-                command = f"uv run {command}"
+                # entrypoint, like the `test` check's `uv run pytest`. _uv_run wraps
+                # each `&&` step so coverage's run-then-report both resolve in the venv.
+                command = _uv_run(command)
             if tool_available(command.split()[0]):
                 resolved.append(Check(check_name, command, d.state))
             elif d.state == "required":

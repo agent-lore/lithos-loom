@@ -79,7 +79,7 @@ def _result(status: str = "approved", **overrides) -> DevelopResult:
     base: dict[str, Any] = dict(
         status=status,
         run_id="abcd1234",
-        worktree=Path("/tmp/wt"),
+        worktree=Path("/tmp/wt"),  # nosec B108
         branch="my-branch",
         base_sha="0" * 40,
         commits=["a" * 40],
@@ -105,7 +105,7 @@ def _result(status: str = "approved", **overrides) -> DevelopResult:
                 ],
             ),
         ),
-        conversation_log=Path("/tmp/run/conversation.md"),
+        conversation_log=Path("/tmp/run/conversation.md"),  # nosec B108
     )
     base.update(overrides)
     return DevelopResult(**base)

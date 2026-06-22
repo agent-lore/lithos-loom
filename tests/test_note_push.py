@@ -92,7 +92,7 @@ def _event(
         "body": body,
         "slug": slug,
         "filename": filename,
-        "vault_path": str(vault_path) if vault_path else "/tmp/test.md",
+        "vault_path": str(vault_path) if vault_path else "/tmp/test.md",  # nosec B108
     }
     return Event(
         type="obsidian.note.modified",
@@ -301,7 +301,7 @@ async def test_doc_not_found_pre_fetch_skips_gracefully(
     lithos = AsyncMock()
     lithos.note_read.return_value = None
 
-    await handler(_event(vault_path=Path("/tmp/x.md")), _ctx(lithos))
+    await handler(_event(vault_path=Path("/tmp/x.md")), _ctx(lithos))  # nosec B108
 
     lithos.note_write.assert_not_called()
     assert any("deleted between operator edit" in r.message for r in caplog.records)
