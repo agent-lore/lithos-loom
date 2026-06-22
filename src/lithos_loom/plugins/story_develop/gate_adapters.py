@@ -58,14 +58,16 @@ _MACHINE_FLAGS: dict[str, str] = {
 
 
 def command_tool(command: str) -> str:
-    """The real tool a *command* runs, looking past a ``uv run`` runner prefix.
+    """The real tool a *command* runs, past a ``uv run`` prefix and a pipeline producer.
 
     An env-dependent check resolves to ``uv run <tool>`` on a uv-managed repo (#165),
     so ``command.split()[0]`` is the ``uv`` entrypoint — but adapter selection
     (:data:`SUPPORTED_TOOLS`, :func:`machine_command`) and the floor's severity read
-    need the underlying tool (``pip-audit``, ``pyright``). ``""`` for an empty command
-    (an expected-but-absent placeholder)."""
-    parts = command.split()
+    need the underlying tool (``pip-audit``, ``pyright``). A compound command pipes a
+    producer into the finding-owning tool (``uv export … | pip-audit …`` — #167
+    dep-audit); the **consumer** (last pipe segment) is that tool. ``""`` for an empty
+    command (an expected-but-absent placeholder)."""
+    parts = command.rsplit("|", 1)[-1].split()
     if not parts:
         return ""
     if len(parts) >= 3 and parts[0] == "uv" and parts[1] == "run":
@@ -95,6 +97,16 @@ def _ruff_severity(code: str) -> str:
 def _loads(output: str) -> Any:
     try:
         return json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # The gate concatenates a check's stdout (the tool's JSON) and stderr; a tool that
+    # writes a human status line to stderr (pip-audit: "No known vulnerabilities found"
+    # / "Found N …") leaves the combined output as a leading JSON value followed by
+    # non-JSON (#167). stdout comes first (test_gate.run_gate_container), so decode the
+    # leading value and ignore the trailing text.
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(output.lstrip())
+        return obj
     except (json.JSONDecodeError, ValueError):
         return None
 

@@ -312,6 +312,30 @@ def test_floor_single_required_test_matches_blocking_passed() -> None:
         assert develop_mod.gate_floor_blocks(cs, None) is (not cs.blocking_passed)
 
 
+def test_floor_required_adapter_red_empty_ledger_blocks_failed_run() -> None:
+    # #167 floor-liveness: an adapter exits clean via `--exit-zero` / a clean scan, so
+    # a REQUIRED adapter check that exited RED with NO open findings FAILED TO RUN
+    # (spawn / crash / un-parseable output) and must block — the ledger-severity read
+    # alone can't tell "ran clean" (exit 0, empty) from "failed to run" (red, empty).
+    ruff = CheckSetResult(
+        (_ran("lint", "ruff check --output-format=json", "required", _red()),)
+    )
+    pa = CheckSetResult((_ran("dep-audit", "pip-audit -f json", "required", _red()),))
+    assert develop_mod.gate_floor_blocks(ruff, GateLedger()) is True
+    assert develop_mod.gate_floor_blocks(pa, GateLedger()) is True
+
+
+def test_floor_required_adapter_clean_exit_empty_ledger_passes() -> None:
+    # The liveness rule must NOT over-block a genuinely clean adapter run: exit 0
+    # (`--exit-zero` / nothing found) with an empty ledger is a PASS.
+    ruff = CheckSetResult(
+        (_ran("lint", "ruff check --output-format=json", "required", _green()),)
+    )
+    pa = CheckSetResult((_ran("dep-audit", "pip-audit -f json", "required", _green()),))
+    assert develop_mod.gate_floor_blocks(ruff, GateLedger()) is False
+    assert develop_mod.gate_floor_blocks(pa, GateLedger()) is False
+
+
 # --- build_check_set: profile-selected set, informational-first (#140) --------
 
 
@@ -724,6 +748,41 @@ def test_run_check_set_ledgers_findings_and_drops_full_output(
     assert cs.results[0].gate is not None
     assert cs.results[0].gate.full_output == ""  # consumed + dropped
     assert cs.results[0].gate.output_tail == "t"
+
+
+def test_run_check_set_ledgers_piped_dep_audit_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #167: dep-audit resolves to `uv export … | pip-audit …`, so the run/parse phase
+    # must resolve the adapter via command_tool (the pipe CONSUMER), not split()[0]
+    # (== "uv"), AND tolerate the stderr status line the gate appends after the JSON.
+    pip_audit_json = (
+        '{"dependencies": [{"name": "flask", "version": "0.5", "vulns": ['
+        '{"id": "PYSEC-2019-179", "fix_versions": ["0.12.3"]}]}]}'
+    )
+    full = pip_audit_json + "\nFound 1 known vulnerability in 1 package"
+    monkeypatch.setattr(develop_mod.test_gate, "export_tree", _fake_export)
+    monkeypatch.setattr(
+        develop_mod.test_gate,
+        "run_gate_container",
+        lambda gate_cmd, *, name, command, timeout: GateResult(
+            command=command,
+            exit_code=1,
+            passed=False,
+            output_tail="t",
+            full_output=full,
+        ),
+    )
+    led = GateLedger()
+    dep_audit = Check(
+        "dep-audit",
+        "uv export --no-emit-project --format requirements-txt "
+        "| pip-audit -r /dev/stdin --format=json",
+        "required",
+    )
+    develop_mod._run_check_set(_config(tmp_path), tmp_path, "sha", 1, (dep_audit,), led)
+    assert [f.rule for f in led.open_findings()] == ["PYSEC-2019-179"]
+    assert led.open_findings()[0].finding_id == "gate/dep-audit-001"
 
 
 def test_run_check_set_closes_lint_finding_on_clean_rerun(

@@ -758,14 +758,14 @@ def test_candidate_checks_run_only_on_the_approval_candidate(
     assert candidate_calls == [(2, ("dep-audit",))]  # approval candidate only
 
 
-def test_required_adapter_red_exit_without_findings_does_not_block(
+def test_required_adapter_red_exit_without_findings_blocks_as_failed_run(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    """#140 floor: a *required* adapter check (ruff `lint`) that exits non-zero but
-    produced NO blocking ledger finding must NOT block approval — the floor reads the
-    finding ledger's severity, not the raw exit code, for finding-producing tools
-    (ADR §5/#132 finding-2). Under the old ``blocking_passed`` (exit-driven) the LGTM
-    round would be held back; under ``gate_floor_blocks`` it approves in round one."""
+    """#167 floor-liveness: a *required* adapter check (ruff `lint`) that exits RED
+    with NO ledger finding FAILED TO RUN — adapters use `--exit-zero`, so a red exit
+    is a spawn/crash, not findings, and must BLOCK, not pass on the empty ledger. (A
+    red exit *with* a finding still defers to severity: the tool ran.) With no commit
+    that can fix an unrunnable tool, the run stalls."""
     from lithos_loom.plugins.story_develop.check_set import (
         Check,
         CheckResult,
@@ -776,8 +776,8 @@ def test_required_adapter_red_exit_without_findings_does_not_block(
     monkeypatch.setattr(develop_mod, "build_check_set", lambda config, wt: (lint,))
 
     def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
-        # RED exit, but the ledger is left empty (no parseable major finding) — the
-        # adapter path must consult the ledger and find nothing blocking.
+        # RED exit with an EMPTY ledger: the adapter failed to run, so the floor blocks
+        # via the liveness rule (#167), not the severity read.
         return CheckSetResult(
             tuple(
                 CheckResult(
@@ -792,10 +792,10 @@ def test_required_adapter_red_exit_without_findings_does_not_block(
         )
 
     monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
-    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}], source_rounds={1})
     result = develop_mod.develop(config)
-    assert result.status == "approved"
-    assert result.rounds == 1
+    assert result.status == "stalled"
+    assert result.succeeded is False
 
 
 def test_required_candidate_red_exit_blocks_approval(

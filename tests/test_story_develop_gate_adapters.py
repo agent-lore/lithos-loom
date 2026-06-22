@@ -33,6 +33,26 @@ def test_command_tool_empty_is_empty() -> None:
     assert command_tool("") == ""
 
 
+def test_command_tool_resolves_consumer_past_a_pipe() -> None:
+    # #167 dep-audit pipes `uv export … | pip-audit …`; the adapter tool is the
+    # CONSUMER (pip-audit at the pipe's tail), not the `uv export` producer at its head.
+    cmd = (
+        "uv export --no-emit-project --format requirements-txt "
+        "| pip-audit -r /dev/stdin"
+    )
+    assert command_tool(cmd) == "pip-audit"
+
+
+def test_machine_command_appends_pip_audit_json_flag_after_a_pipe() -> None:
+    # #167: the JSON flag must land on the consumer at the END of the pipe so the
+    # pip-audit segment emits parseable JSON for the ledger adapter.
+    base = (
+        "uv export --no-emit-project --format requirements-txt "
+        "| pip-audit -r /dev/stdin"
+    )
+    assert machine_command("pip-audit", base) == base + " --format=json"
+
+
 def test_command_tool_enables_machine_ifying_a_uv_wrapped_adapter() -> None:
     # The exact #165 regression: without the real-tool resolver, split()[0] == "uv",
     # so machine_command adds NO adapter flags and pip-audit's JSON is never parsed.
@@ -115,6 +135,16 @@ def test_pip_audit_one_finding_per_vuln_skips_clean_deps() -> None:
     assert "flask 0.5" in by_rule["PYSEC-2019-179"].message
     assert "0.12.3" in by_rule["PYSEC-2019-179"].message  # fix version surfaced
     assert "no fix available" in by_rule["GHSA-xxxx"].message
+
+
+def test_pip_audit_parser_tolerates_trailing_stderr_status_line() -> None:
+    # The gate concatenates the run's stdout (JSON) and stderr; pip-audit writes its
+    # findings JSON to stdout but a human status line ("No known vulnerabilities found"
+    # / "Found N ...") to stderr — so the combined gate output is JSON followed by
+    # non-JSON (#167). The parser must still extract findings, not silently yield none.
+    combined = _PIP_AUDIT_JSON + "\nFound 2 known vulnerabilities in 2 packages"
+    findings = parse_findings("dep-audit", "pip-audit", combined)
+    assert {f.rule for f in findings} == {"PYSEC-2019-179", "GHSA-xxxx"}
 
 
 _PIP_AUDIT_SHARED_CVE = """{"dependencies": [
