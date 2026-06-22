@@ -590,7 +590,7 @@ def test_standard_profile_requires_lint_typecheck_surfaces_sast(
     by_name = {c.name: c for c in checks}
     assert by_name["test"].command == "pytest"
     assert by_name["lint"].command == "ruff check --output-format=json --exit-zero"
-    assert by_name["sast"].command == "bandit -r . -f json --exit-zero"
+    assert by_name["sast"].command == "bandit -r . -x ./.venv -f json --exit-zero"
     assert by_name["typecheck"].command == "pyright"  # no adapter -> run as-is
     assert by_name["lint"].state == "required"
     assert by_name["typecheck"].state == "required"
