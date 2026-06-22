@@ -7,7 +7,11 @@ the gate can fall back when the container image lacks a tool.
 
 from __future__ import annotations
 
-from lithos_loom.runner.detection import detect_ecosystems, detect_test_commands
+from lithos_loom.runner.detection import (
+    detect_ecosystems,
+    detect_test_commands,
+    is_uv_managed,
+)
 
 
 def test_makefile(tmp_path) -> None:
@@ -34,6 +38,18 @@ def test_pyproject_pytest_with_uv_lock(tmp_path) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
     (tmp_path / "uv.lock").write_text("")
     assert detect_test_commands(tmp_path) == ["uv run pytest"]
+
+
+def test_is_uv_managed_true_with_uv_lock(tmp_path) -> None:
+    # A repo is uv-managed iff it has a uv.lock — the same signal the test check
+    # already uses (`uv run pytest`), now reusable for every env-dependent check (#165).
+    (tmp_path / "uv.lock").write_text("")
+    assert is_uv_managed(tmp_path) is True
+
+
+def test_is_uv_managed_false_without_uv_lock(tmp_path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    assert is_uv_managed(tmp_path) is False
 
 
 def test_pytest_ini(tmp_path) -> None:

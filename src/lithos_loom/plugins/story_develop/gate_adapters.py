@@ -57,10 +57,29 @@ _MACHINE_FLAGS: dict[str, str] = {
 }
 
 
+def command_tool(command: str) -> str:
+    """The real tool a *command* runs, looking past a ``uv run`` runner prefix.
+
+    An env-dependent check resolves to ``uv run <tool>`` on a uv-managed repo (#165),
+    so ``command.split()[0]`` is the ``uv`` entrypoint — but adapter selection
+    (:data:`SUPPORTED_TOOLS`, :func:`machine_command`) and the floor's severity read
+    need the underlying tool (``pip-audit``, ``pyright``). ``""`` for an empty command
+    (an expected-but-absent placeholder)."""
+    parts = command.split()
+    if not parts:
+        return ""
+    if len(parts) >= 3 and parts[0] == "uv" and parts[1] == "run":
+        return parts[2]
+    return parts[0]
+
+
 def machine_command(tool: str, base: str) -> str:
     """The machine (JSON) invocation of *base* for *tool*, or *base* unchanged
     for a tool with no adapter. E.g. ``ruff check`` ->
-    ``ruff check --output-format=json --exit-zero``."""
+    ``ruff check --output-format=json --exit-zero``.
+
+    *tool* is the real tool (see :func:`command_tool`), so a uv-wrapped adapter like
+    ``uv run pip-audit`` still gets its JSON flags appended to the full command."""
     flags = _MACHINE_FLAGS.get(tool)
     return f"{base} {flags}" if flags else base
 

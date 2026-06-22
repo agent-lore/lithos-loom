@@ -9,9 +9,39 @@ from __future__ import annotations
 
 from lithos_loom.plugins.story_develop.gate_adapters import (
     SUPPORTED_TOOLS,
+    command_tool,
     machine_command,
     parse_findings,
 )
+
+# --- command_tool: the real tool behind a (possibly uv-wrapped) command (#165) -
+
+
+def test_command_tool_strips_uv_run_prefix() -> None:
+    # An env-dependent check resolves to `uv run <tool>` on a uv-managed repo; the
+    # adapter/severity logic still needs the REAL tool, not the `uv` entrypoint.
+    assert command_tool("uv run pyright") == "pyright"
+    assert command_tool("uv run pip-audit") == "pip-audit"
+
+
+def test_command_tool_returns_bare_tool_unchanged() -> None:
+    assert command_tool("ruff check") == "ruff"
+    assert command_tool("bandit -r .") == "bandit"
+
+
+def test_command_tool_empty_is_empty() -> None:
+    assert command_tool("") == ""
+
+
+def test_command_tool_enables_machine_ifying_a_uv_wrapped_adapter() -> None:
+    # The exact #165 regression: without the real-tool resolver, split()[0] == "uv",
+    # so machine_command adds NO adapter flags and pip-audit's JSON is never parsed.
+    base = "uv run pip-audit"
+    assert machine_command(base.split()[0], base) == base  # the bug
+    wrapped = machine_command(command_tool(base), base)  # the fix
+    assert wrapped.startswith("uv run pip-audit ")
+    assert wrapped != base
+
 
 # --- ruff (``ruff check --output-format=json``) -------------------------------
 

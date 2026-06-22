@@ -39,6 +39,7 @@ __all__ = [
     "DesiredCheck",
     "CheckApplicabilityError",
     "CANONICAL_CHECKS",
+    "ENV_DEPENDENT_CHECKS",
     "applies",
     "resolve_check_set",
 ]
@@ -145,6 +146,24 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
     ),
 )
 
+# The checks whose tool must run **inside the project venv** — it imports/executes
+# the project or its deps: ``pyright`` resolves third-party imports, ``pytest`` /
+# ``coverage`` run the code. On a uv-managed repo these run via ``uv run`` so the
+# project venv (dev group included) is materialised in the gate container; bare, they
+# see the container's empty ambient environment and false-positive (#165). ``test`` is
+# included for completeness (it is the precedent — its command is resolved via
+# ``detect_test_commands``, not :func:`resolve_check_set`).
+#
+# Deliberately EXCLUDED — they need no project venv, so they stay bare and image-global:
+#   - static-analysis checks (ruff / bandit / semgrep): AST/source only;
+#   - ``dep-audit`` (pip-audit): an *external auditor* that reads the lock / queries a
+#     vuln DB — it is NOT a project dependency, so ``uv run pip-audit`` would fail to
+#     spawn; bare keeps the probe on ``pip-audit`` itself so a *required* dep-audit
+#     blocks as expected-but-absent rather than silently passing via the floor's
+#     adapter ledger read (#166 review). Auditing a uv project's *resolved* deps
+#     correctly (vs the container's ambient env) is a separate follow-up.
+ENV_DEPENDENT_CHECKS: frozenset[str] = frozenset({"typecheck", "coverage", "test"})
+
 _BY_NAME: dict[str, CheckMapping] = {m.name: m for m in CANONICAL_CHECKS}
 
 
@@ -175,6 +194,7 @@ def resolve_check_set(
     ecosystems: Sequence[Ecosystem],
     *,
     tool_available: Callable[[str], bool],
+    uv_managed: bool = False,
 ) -> tuple[Check, ...]:
     """Resolve a *desired* check-set into concrete checks for *ecosystems*.
 
@@ -186,6 +206,14 @@ def resolve_check_set(
     Raises :class:`CheckApplicabilityError` for a required check unsupported by
     **any** detected ecosystem. See the module docstring for the full
     classification.
+
+    When ``uv_managed`` is true, an :data:`ENV_DEPENDENT_CHECKS` **python** command
+    is prefixed ``uv run`` so it resolves against the project venv in the gate
+    container (#165) — exactly as the ``test`` check already does. The prefix is
+    applied *before* the availability probe, so ``tool_available`` is asked about the
+    ``uv`` entrypoint (like ``uv run pytest``); ``False`` for ``uv`` still yields a
+    required check's expected-but-absent placeholder. Non-python sides and
+    static-analysis checks (ruff/bandit/semgrep) are never wrapped.
     """
     if not ecosystems:
         # Markerless / docs-only repo: every check is declared N/A — never an
@@ -210,6 +238,10 @@ def resolve_check_set(
         qualify = len(applicable) > 1
         for eco, command in applicable:
             check_name = f"{d.name}.{eco}" if qualify else d.name
+            if uv_managed and eco == "python" and d.name in ENV_DEPENDENT_CHECKS:
+                # Run the env-dependent tool inside the project venv; probe the `uv`
+                # entrypoint, like the `test` check's `uv run pytest`.
+                command = f"uv run {command}"
             if tool_available(command.split()[0]):
                 resolved.append(Check(check_name, command, d.state))
             elif d.state == "required":
