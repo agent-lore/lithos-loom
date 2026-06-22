@@ -37,6 +37,36 @@ def test_coder_init_drops_run_the_suite_instruction() -> None:
     assert "run it and note the result" not in load_prompt("coder_init.md")
 
 
+def test_coder_init_carries_plan_first_and_pragmatic_test_discipline() -> None:
+    # The implement turn must steer the coder to understand + plan before
+    # editing, then add tests that actually protect the new behaviour — without
+    # turning into dogmatic ceremony testing.
+    # normalise wrapping so phrase checks don't hinge on line breaks
+    text = " ".join(load_prompt("coder_init.md").lower().split())
+    assert "plan-first" in text
+    assert "smallest change" in text
+    # pragmatic test-first: a test that fails without the change, but not dogma
+    assert "fail without your change" in text
+    assert "pragmatic" in text
+    # ...and the coder must RUN that targeted fast test (red->green), not merely
+    # write it — the core of test-first, scoped to the fast test so the #114
+    # full-suite/background guardrail still holds (#153 review).
+    assert "run that targeted fast test" in text
+
+
+def test_coder_fix_keeps_regression_test_discipline() -> None:
+    # The fix turn carries the FULL discipline: understand + plan before editing
+    # (not just "smallest change" + a regression test), so round-2+ coders get
+    # the same plan-first guidance the init turn does.
+    text = " ".join(load_prompt("coder_fix.md").lower().split())
+    assert "understand before you change" in text
+    assert "plan before you edit" in text
+    assert "regression test" in text
+    assert "smallest change" in text
+    # the regression test must be RUN (red->green), not merely written (#153 review)
+    assert "run that targeted fast test" in text
+
+
 def test_coder_handoff_nudge_asks_only_for_the_handoff() -> None:
     # The #114 salvage re-prompt: when the coder left work but no handoff, the
     # one-shot nudge names that round's handoff file and forbids any further
