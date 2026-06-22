@@ -294,15 +294,21 @@ def _is_finished(run_dir: Path) -> bool:
 
 
 def _reap_empty_task_dir(task_dir: Path) -> None:
-    """Remove a per-task staging dir once it holds no run dirs (best-effort).
+    """Remove a per-task staging dir once it holds no run subdirs (best-effort).
 
     After pruning a task's last retained run the only thing left under
     ``<work_dir>/<task_id>/`` is the shared ``task.json``; dropping the whole
     dir keeps ``work_dir`` as clean as the route-runner leaves it on success.
-    Other run dirs (in-flight / not-yet-finished) keep the task dir alive.
+
+    We gate on *any* remaining child directory, not just one matching
+    :func:`_is_run_dir`: a brand-new dispatch creates ``<work_dir>/<task>/<run>/``
+    before ``develop()`` seeds its ``handoff/`` subdir, so an in-flight startup
+    run is a directory that doesn't yet look like a run dir. Treating any
+    subdirectory as a live run keeps that window safe — only a task dir down to
+    plain files (the stale ``task.json``) is reaped.
     """
     try:
-        if any(_is_run_dir(child) for child in task_dir.iterdir()):
+        if any(child.is_dir() for child in task_dir.iterdir()):
             return
     except OSError:
         return

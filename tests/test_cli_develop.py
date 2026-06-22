@@ -347,6 +347,32 @@ def test_prune_keeps_startup_window_run_with_docker_present(
     assert not finished.exists()  # terminal marker → pruned
 
 
+def test_prune_keeps_unseeded_startup_run_in_shared_task_dir(
+    patched: Path,
+) -> None:
+    # Regression (f-001 r3): a task with an old finished run AND a brand-new
+    # dispatch whose run dir exists but hasn't seeded handoff/ yet. Pruning the
+    # old run must not reap the shared task dir out from under the unseeded
+    # startup run (which `_is_run_dir` doesn't recognise without handoff/).
+    old = _make_run(patched, task_id="t-1", run_id="old", conversation="end")
+    new = patched / "t-1" / "new"  # created by __main__ before develop() seeds it
+    new.mkdir()
+    (new / "task.json").write_text("{}")  # snapshot copied at run start
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert not old.exists()  # finished run pruned
+    assert new.exists()  # unseeded startup run kept
+    assert (patched / "t-1").exists()  # task dir not reaped
+
+
+def test_prune_reaps_task_dir_when_only_files_remain(patched: Path) -> None:
+    # The cleanup still fires when the task's last run is gone and only the
+    # stale per-task task.json remains (no run subdirs left).
+    run = _make_run(patched, task_id="t-1", run_id="only", conversation="end")
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert not run.exists()
+    assert not (patched / "t-1").exists()  # emptied task dir reaped
+
+
 def test_prune_keeps_run_with_marker_but_live_container(
     patched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
