@@ -6,6 +6,29 @@ worktree on a dedicated branch). Implement the task below.
 
 {description}
 {acceptance_criteria_section}
+## How to work
+
+Work **plan-first, then pragmatically test-first** — the discipline a careful
+developer uses, not a box-ticking ritual:
+
+1. **Understand before you change.** Read the task and acceptance criteria, then
+   read the code you are about to touch and the tests around it. Match the
+   conventions, naming, and structure already in the repository — write code that
+   reads like the code next to it. Find the **smallest change** that fully
+   satisfies the acceptance criteria; resist scope creep and incidental rewrites.
+2. **Plan before you edit.** Settle the approach first — which files change, what
+   the new behaviour is, and how you will know it works. A few minutes of thinking
+   here beats a large speculative diff you have to unwind.
+3. **Test the behaviour you add — pragmatically.** For each acceptance criterion
+   (and each bug you fix) add or extend a test that would **fail without your
+   change** and passes with it; lead with the test where writing it first sharpens
+   the design or pins down the contract. Cover the edges that matter (boundary,
+   empty, error paths), not just the happy path. Be pragmatic, not dogmatic: don't
+   manufacture ceremony tests for trivial or throwaway code, and use the project's
+   existing test layout and helpers rather than inventing a parallel one. A
+   reviewer judges whether your tests actually protect the new behaviour, so make
+   them real — a test that passes even when the code is broken is worse than none.
+
 ## When you are done
 
 You have a **single, non-interactive turn** — there is no one to notify you
