@@ -512,8 +512,10 @@ def gate_floor_blocks(
     :meth:`CheckSetResult.blocking_passed` (raw exit code), an adapter-backed
     required check (ruff / bandit / pip-audit) reads its verdict from the finding
     **ledger's mapped severity** at *threshold* — the exit code never decides
-    approval for a finding-producing tool (ADR §5/#132 finding-2). A check with no
-    adapter (pyright / pytest / coverage / semgrep) still reads the raw exit code.
+    approval for a finding-producing tool (ADR §5/#132 finding-2); an adapter that
+    exited red with no open findings is treated as having failed to run and blocks
+    (#167 floor-liveness). A check with no adapter (pyright / pytest / coverage /
+    semgrep) still reads the raw exit code.
 
     Only ``required`` checks count, so an **informational** check never blocks even
     though its findings share *gate_ledger* — this is what keeps `sast` (bandit),
@@ -541,6 +543,17 @@ def gate_floor_blocks(
         tool = gate_adapters.command_tool(r.check.command)
         if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
             if any(f.check == r.check.name for f in gate_ledger.blocking(threshold)):
+                return True
+            # Floor-liveness (#167): an adapter exits clean via `--exit-zero` / a clean
+            # scan, so a required adapter check that exited RED with NO open findings
+            # for it FAILED TO RUN (spawn / crash / un-parseable output) and must block
+            # — the ledger-severity read alone can't tell "ran clean" (exit 0, empty)
+            # from "failed to run" (red, empty). apply_round closes a check's findings
+            # only when it ran, so a failed run leaves zero open findings; a clean
+            # exit-0 run or below-threshold open findings (the tool ran) still pass.
+            ran_ok = r.gate is not None and r.gate.passed
+            has_open = any(f.check == r.check.name for f in gate_ledger.open_findings())
+            if not ran_ok and not has_open:
                 return True
         elif r.gate is None or not r.gate.passed:
             return True

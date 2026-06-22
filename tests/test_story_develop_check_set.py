@@ -312,6 +312,30 @@ def test_floor_single_required_test_matches_blocking_passed() -> None:
         assert develop_mod.gate_floor_blocks(cs, None) is (not cs.blocking_passed)
 
 
+def test_floor_required_adapter_red_empty_ledger_blocks_failed_run() -> None:
+    # #167 floor-liveness: an adapter exits clean via `--exit-zero` / a clean scan, so
+    # a REQUIRED adapter check that exited RED with NO open findings FAILED TO RUN
+    # (spawn / crash / un-parseable output) and must block — the ledger-severity read
+    # alone can't tell "ran clean" (exit 0, empty) from "failed to run" (red, empty).
+    ruff = CheckSetResult(
+        (_ran("lint", "ruff check --output-format=json", "required", _red()),)
+    )
+    pa = CheckSetResult((_ran("dep-audit", "pip-audit -f json", "required", _red()),))
+    assert develop_mod.gate_floor_blocks(ruff, GateLedger()) is True
+    assert develop_mod.gate_floor_blocks(pa, GateLedger()) is True
+
+
+def test_floor_required_adapter_clean_exit_empty_ledger_passes() -> None:
+    # The liveness rule must NOT over-block a genuinely clean adapter run: exit 0
+    # (`--exit-zero` / nothing found) with an empty ledger is a PASS.
+    ruff = CheckSetResult(
+        (_ran("lint", "ruff check --output-format=json", "required", _green()),)
+    )
+    pa = CheckSetResult((_ran("dep-audit", "pip-audit -f json", "required", _green()),))
+    assert develop_mod.gate_floor_blocks(ruff, GateLedger()) is False
+    assert develop_mod.gate_floor_blocks(pa, GateLedger()) is False
+
+
 # --- build_check_set: profile-selected set, informational-first (#140) --------
 
 

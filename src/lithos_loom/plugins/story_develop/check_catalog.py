@@ -129,7 +129,16 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
     CheckMapping(
         "dep-audit",
         {
-            "python": "pip-audit",
+            # Audit the project's RESOLVED deps (the lock), not the container's ambient
+            # env (#167): `uv export` the locked deps (the project package itself
+            # excluded) and pipe to image-global pip-audit. `command_tool` resolves the
+            # consumer (pip-audit) past the pipe as the adapter tool; the pipe runs in
+            # the gate's `sh`. pip-audit stays bare/image-global — an external auditor,
+            # not a project dep (#166 review), so it is NOT uv-run-wrapped.
+            "python": (
+                "uv export --no-emit-project --format requirements-txt "
+                "| pip-audit -r /dev/stdin"
+            ),
             "node": "npm audit",
         },
     ),
@@ -165,11 +174,12 @@ CANONICAL_CHECKS: tuple[CheckMapping, ...] = (
 # Deliberately EXCLUDED — they need no project venv, so they stay bare and image-global:
 #   - static-analysis checks (ruff / bandit / semgrep): AST/source only;
 #   - ``dep-audit`` (pip-audit): an *external auditor* that reads the lock / queries a
-#     vuln DB — it is NOT a project dependency, so ``uv run pip-audit`` would fail to
-#     spawn; bare keeps the probe on ``pip-audit`` itself so a *required* dep-audit
-#     blocks as expected-but-absent rather than silently passing via the floor's
-#     adapter ledger read (#166 review). Auditing a uv project's *resolved* deps
-#     correctly (vs the container's ambient env) is a separate follow-up.
+#     vuln DB — it is NOT a project dependency, so it is never ``uv run``-wrapped. It
+#     audits the project's *resolved* deps by piping ``uv export``'s locked
+#     requirements into image-global pip-audit (#167), not the container's ambient
+#     env; ``command_tool`` resolves pip-audit (the pipe consumer) as the adapter tool
+#     so the floor still reads its severity ledger (and a failed run blocks via the
+#     floor-liveness rule, #167, rather than silently passing on an empty ledger).
 ENV_DEPENDENT_CHECKS: frozenset[str] = frozenset({"typecheck", "coverage", "test"})
 
 _BY_NAME: dict[str, CheckMapping] = {m.name: m for m in CANONICAL_CHECKS}

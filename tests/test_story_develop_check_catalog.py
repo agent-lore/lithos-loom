@@ -89,17 +89,32 @@ def test_resolve_uv_managed_wraps_each_step_of_compound_coverage() -> None:
 
 def test_resolve_uv_managed_does_not_wrap_dep_audit_external_auditor() -> None:
     # Regression guard (#166 review): pip-audit is an *external auditor* (reads the
-    # lock, queries a vuln DB) — NOT a project dependency, so `uv run pip-audit` would
-    # fail to spawn. It must stay bare even on a uv repo, so the probe checks
-    # `pip-audit` directly → absent → expected-but-absent → blocks (never a silent
-    # pass via the floor's adapter ledger read).
+    # lock, queries a vuln DB) — NOT a project dependency, so it is never `uv run`-
+    # wrapped even on a uv repo (dep-audit is excluded from ENV_DEPENDENT_CHECKS); the
+    # `uv export` producer is image-global uv, not a venv-resident tool.
     checks = resolve_check_set(
         [DesiredCheck("dep-audit", "required")],
         ("python",),
         tool_available=_always,
         uv_managed=True,
     )
-    assert checks[0].command == "pip-audit"
+    assert checks[0].command == (
+        "uv export --no-emit-project --format requirements-txt "
+        "| pip-audit -r /dev/stdin"
+    )
+
+
+def test_dep_audit_python_audits_project_lock_not_ambient_env() -> None:
+    # #167: bare `pip-audit` audits the container's AMBIENT env (the image's global
+    # site-packages), not the project. The catalog must export the project's locked
+    # deps and pipe them to pip-audit so the auditor sees the project's RESOLVED set.
+    checks = resolve_check_set(
+        [DesiredCheck("dep-audit", "required")], ("python",), tool_available=_always
+    )
+    assert checks[0].command == (
+        "uv export --no-emit-project --format requirements-txt "
+        "| pip-audit -r /dev/stdin"
+    )
 
 
 def test_resolve_uv_managed_false_leaves_env_checks_bare() -> None:
