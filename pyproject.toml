@@ -44,6 +44,12 @@ dev = [
     "ruff>=0.4",
     "respx>=0.21",
     "types-pyyaml>=6.0",
+    # `coverage` is venv-resident (it executes the test suite against project code),
+    # so the `thorough` profile's coverage check (`uv run coverage run -m pytest &&
+    # uv run coverage report`) needs it in the project env — a bare image-global
+    # `coverage` can't import the project's deps. The `[toml]` extra lets it read the
+    # `[tool.coverage]` config below from pyproject.
+    "coverage[toml]>=7.0",
 ]
 
 [tool.ruff]
@@ -87,3 +93,15 @@ typeCheckingMode = "standard"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+# Measure the package, not the tests; the `thorough` coverage check runs
+# `coverage run -m pytest && coverage report`.
+source = ["src/lithos_loom"]
+
+[tool.coverage.report]
+# Conservative floor below the measured baseline (90% at time of writing) so the
+# gate is a real threshold without spuriously blocking on small dips. Raise
+# deliberately over time.
+fail_under = 85
+show_missing = false

@@ -33,7 +33,7 @@ def _completed_payload(task_id: str = "t-1") -> dict[str, Any]:
         "task_id": task_id,
         "status": "succeeded",
         "exit_code": 0,
-        "worktree": "/tmp/wt",
+        "worktree": "/tmp/wt",  # nosec B108
         "commits": ["a" * 40],
         "error": None,
     }
