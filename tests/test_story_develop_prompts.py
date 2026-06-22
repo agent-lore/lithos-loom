@@ -48,6 +48,10 @@ def test_coder_init_carries_plan_first_and_pragmatic_test_discipline() -> None:
     # pragmatic test-first: a test that fails without the change, but not dogma
     assert "fail without your change" in text
     assert "pragmatic" in text
+    # ...and the coder must RUN that targeted fast test (red->green), not merely
+    # write it — the core of test-first, scoped to the fast test so the #114
+    # full-suite/background guardrail still holds (#153 review).
+    assert "run that targeted fast test" in text
 
 
 def test_coder_fix_keeps_regression_test_discipline() -> None:
@@ -59,6 +63,8 @@ def test_coder_fix_keeps_regression_test_discipline() -> None:
     assert "plan before you edit" in text
     assert "regression test" in text
     assert "smallest change" in text
+    # the regression test must be RUN (red->green), not merely written (#153 review)
+    assert "run that targeted fast test" in text
 
 
 def test_coder_handoff_nudge_asks_only_for_the_handoff() -> None:

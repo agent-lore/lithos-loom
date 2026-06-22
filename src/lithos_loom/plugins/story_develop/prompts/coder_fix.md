@@ -28,8 +28,9 @@ it finishes**. The run fails if you stop before writing the handoff.
      changes, and how you will know the fix is right — before touching the code.
    - Make the **smallest change** that resolves the finding, and when the finding
      is a real bug add or extend a **regression test** that would fail without
-     your fix and passes with it (skip the test only for purely cosmetic or
-     stylistic findings).
+     your fix and passes with it, then **run that targeted fast test** to confirm
+     it: red before your fix, green after (skip the test only for purely cosmetic
+     or stylistic findings).
 
    If you genuinely disagree with a
    finding, you may leave the code as-is and **dispute it formally**: include a
@@ -38,8 +39,9 @@ it finishes**. The run fails if you stop before writing the handoff.
    weigh it next round; a dispute that persists is escalated to the human operator
    rather than ground forever.
 2. You do **not** need to run the full test suite — the orchestrator runs an
-   objective test gate after your turn. A quick sanity check is fine, but never
-   start a long-running or backgrounded test run and wait on it.
+   objective test gate after your turn. Do run the **targeted fast test(s)** for
+   the findings you fixed to confirm red→green, but never run the full suite and
+   never start a long-running or backgrounded test run and wait on it.
 3. Write your response to `/workspace/.handoff/{handoff_file}` using the format
    in `/workspace/.handoff/FORMAT.md`: `## Status: LGTM` plus a `## Summary`
    that addresses each finding **by id** (what you changed, or why you

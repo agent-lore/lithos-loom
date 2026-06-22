@@ -19,11 +19,13 @@ developer uses, not a box-ticking ritual:
 2. **Plan before you edit.** Settle the approach first — which files change, what
    the new behaviour is, and how you will know it works. A few minutes of thinking
    here beats a large speculative diff you have to unwind.
-3. **Test the behaviour you add — pragmatically.** For each acceptance criterion
-   (and each bug you fix) add or extend a test that would **fail without your
-   change** and passes with it; lead with the test where writing it first sharpens
-   the design or pins down the contract. Cover the edges that matter (boundary,
-   empty, error paths), not just the happy path. Be pragmatic, not dogmatic: don't
+3. **Test the behaviour you add — pragmatically, and run it.** For each acceptance
+   criterion (and each bug you fix) add or extend a test that would **fail without
+   your change** and passes with it, then **run that targeted fast test** to
+   confirm it: red before your change, green after. Lead with the test where
+   writing it first sharpens the design or pins down the contract. Cover the edges
+   that matter (boundary, empty, error paths), not just the happy path. Be
+   pragmatic, not dogmatic: don't
    manufacture ceremony tests for trivial or throwaway code, and use the project's
    existing test layout and helpers rather than inventing a parallel one. A
    reviewer judges whether your tests actually protect the new behaviour, so make
@@ -39,8 +41,9 @@ will not get that chance, and the run fails if you stop before the handoff.
 
 1. Make sure your changes are saved in the files under `/workspace`.
 2. You do **not** need to run the full test suite — the orchestrator runs an
-   objective test gate after your turn. A quick, fast sanity check is fine, but
-   never start a long-running or backgrounded test run and wait on it.
+   objective test gate after your turn. Do run the **targeted fast test(s)** for
+   the behaviour you changed (step 3) to confirm red→green, but never run the full
+   suite and never start a long-running or backgrounded test run and wait on it.
 3. Write a short summary of what you did to
    `/workspace/.handoff/{handoff_file}` using the handoff format described in
    `/workspace/.handoff/FORMAT.md`. For this first turn, use
