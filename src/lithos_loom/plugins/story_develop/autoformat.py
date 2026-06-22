@@ -127,24 +127,59 @@ def resolve_formatters(config: DevelopConfig, wt: Path) -> list[str]:
     return [c for c in commands if c.split()[0] in available]
 
 
-def _apply_formatted_tree(formatted: Path, wt: Path) -> bool:
-    """Copy *formatted*'s files back over *wt*'s matching files; report any change.
+def _within(root: Path, target: Path) -> bool:
+    """Whether *target* resolves to a path inside *root* (write-side traversal guard).
 
-    *formatted* is a ``git archive`` export (only the coder commit's **tracked** files),
-    so this never creates or touches untracked worktree paths — in particular not the
-    ``.handoff`` orchestration channel, which lives only in the worktree. Formatters
-    only rewrite content (never add/delete files), so a plain content-compare-and-copy
-    is sufficient; unchanged files are left alone to avoid churn. Returns ``True`` iff
-    at least one file's content changed.
+    Resolves *target*'s deepest **existing** ancestor (following any symlinks) and
+    checks it stays under ``root.resolve()``, so a pre-existing worktree symlink in a
+    parent component cannot redirect a write outside the worktree (CWE-22/CWE-59).
+    """
+    root_r = root.resolve()
+    p = target
+    while not p.exists():
+        if p.parent == p:
+            return False
+        p = p.parent
+    return p.resolve().is_relative_to(root_r)
+
+
+def _apply_formatted_tree(formatted: Path, baseline: Path, wt: Path) -> bool:
+    """Copy back only the files *this* formatter changed vs *baseline*; report change.
+
+    *formatted* is the formatter's mutated ``git archive`` export; *baseline* is a
+    **pristine** export of the same ``HEAD`` (the formatter never touched it). A file is
+    applied to *wt* only when it is **tracked** (present in *baseline*) **and** the
+    formatter actually changed it (``formatted`` bytes ≠ ``baseline`` bytes) — so a
+    later ecosystem's formatter, whose full-tree export re-derives the *original* of
+    files it did not touch, cannot revert an earlier formatter's already-applied edits
+    (correctness/f-002), and a formatter-added untracked path is never copied back.
+
+    The formatter is untrusted, and this runs on the **host**, so symlinks are never
+    followed: a ``formatted`` (or ``baseline``) entry that is a symlink is skipped —
+    both ``is_file()`` and ``read_bytes()`` would otherwise resolve it in the host
+    namespace and could read a host secret into the committed tree (CWE-59/CWE-200) —
+    and the destination is skipped if it is a worktree symlink or resolves outside *wt*.
+    Returns ``True`` iff at least one file's content changed.
     """
     changed = False
     for src in formatted.rglob("*"):
-        if not src.is_file():
+        # CWE-59: never follow a symlink a malicious formatter may have planted in the
+        # export (e.g. `leak.py -> /proc/self/environ` or `-> ~/.config/gh/hosts.yml`).
+        if src.is_symlink() or not src.is_file():
             continue
         rel = src.relative_to(formatted)
-        dst = wt / rel
+        base = baseline / rel
+        # Apply only tracked paths the formatter changed (see docstring). A baseline
+        # symlink is likewise never dereferenced.
+        if base.is_symlink() or not base.is_file():
+            continue
         new = src.read_bytes()
-        if dst.is_file() and dst.read_bytes() == new:
+        if base.read_bytes() == new:
+            continue
+        dst = wt / rel
+        # Defense in depth: don't write through a pre-existing worktree symlink or to a
+        # path that escapes the worktree.
+        if dst.is_symlink() or not _within(wt, dst):
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(new)
@@ -163,20 +198,35 @@ def run_format_pass(
     Each formatter runs against its **own** ``git archive`` export of the worktree's
     ``HEAD`` (the coder's just-made commit) in a hardened, network-less throwaway
     container (:func:`build_format_command`). Only a formatter that **exits clean** has
-    its result applied back to the worktree's tracked files
-    (:func:`_apply_formatted_tree`) — a nonzero / timed-out run may have left a
-    partially-rewritten tree, so its edits are discarded so the gate + panel never see
-    them. After every formatter, one commit captures the cumulative diff (``.handoff``
-    excluded, like the round commit). Returns the new commit SHA when formatting changed
-    something, or ``None`` when nothing was reformatted (or no formatters ran).
-    Best-effort: a per-formatter export / container failure is logged and skipped, never
-    raised — the run proceeds against the unformatted tree.
+    the files **it changed** applied back to the worktree
+    (:func:`_apply_formatted_tree`, diffed against a pristine ``HEAD`` baseline so a
+    polyglot repo's later formatter cannot revert an earlier one's edits) — a nonzero /
+    timed-out run may have left a partially-rewritten tree, so its edits are discarded
+    so the gate + panel never see them. After every formatter, one commit captures the
+    cumulative diff (``.handoff`` excluded, like the round commit). Returns the new
+    commit SHA when formatting changed something, or ``None`` when nothing was
+    reformatted (or no formatters ran). Best-effort: a per-formatter export / container
+    failure is logged and skipped, never raised — the run proceeds unformatted.
     """
     if not formatters:
         return None
     cache = config.gate_dir / "format_cache"
     cache.mkdir(parents=True, exist_ok=True)
     scratch_root = config.gate_dir / f"round_{round_no:02d}" / "format"
+    # A pristine, never-formatted export of HEAD: the per-formatter diff baseline (so an
+    # apply-back touches only files that formatter changed) and the tracked-path list.
+    baseline = scratch_root / "_baseline"
+    try:
+        test_gate.export_tree(wt, "HEAD", baseline)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "story-develop %s: round %d auto-format baseline export errored "
+            "(skipping pass): %s",
+            config.run_id,
+            round_no,
+            exc,
+        )
+        return None
     applied = False
     for command in formatters:
         tool = command.split()[0]
@@ -216,7 +266,7 @@ def run_format_pass(
                 result.exit_code,
             )
             continue
-        if _apply_formatted_tree(export, wt):
+        if _apply_formatted_tree(export, baseline, wt):
             applied = True
         logger.info(
             "story-develop %s: round %d formatter `%s` (exit %d)",

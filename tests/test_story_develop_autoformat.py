@@ -259,3 +259,75 @@ def test_run_format_pass_container_error_is_skipped(
 
     assert sha is None
     assert _git(wt, "rev-parse", "HEAD") == head_before
+
+
+def test_run_format_pass_polyglot_accumulates_each_formatter(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig, tmp_git_repo: Path
+) -> None:
+    # correctness/f-002: in a Python+Node repo each formatter exports a FRESH HEAD, so a
+    # naive whole-export copy-back would let `prettier`'s export (original .py) revert
+    # the applied `ruff` change. The final commit must hold BOTH formatters' edits.
+    wt = tmp_git_repo
+    (wt / "app.py").write_text("py-original\n")
+    (wt / "app.js").write_text("js-original\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-m", "coder round commit")
+
+    def _fake_run(gate_cmd, *, name, command, timeout) -> GateResult:
+        export = _export_dir_from_cmd(gate_cmd)
+        if command.startswith("ruff"):
+            (export / "app.py").write_text("py-formatted\n")  # only the .py side
+        elif command.startswith("prettier"):
+            (export / "app.js").write_text("js-formatted\n")  # only the .js side
+        return GateResult(command=command, exit_code=0, passed=True, output_tail="")
+
+    monkeypatch.setattr(test_gate, "run_gate_container", _fake_run)
+
+    sha = autoformat.run_format_pass(
+        config, wt, round_no=1, formatters=["ruff format", "prettier --write ."]
+    )
+
+    assert sha is not None
+    # Both ecosystems' formatting survives — neither reverted the other.
+    assert (wt / "app.py").read_text() == "py-formatted\n"
+    assert (wt / "app.js").read_text() == "js-formatted\n"
+    committed = _git(wt, "show", f"{sha}:app.py") + _git(wt, "show", f"{sha}:app.js")
+    assert "py-formatted" in committed and "js-formatted" in committed
+
+
+def test_run_format_pass_does_not_follow_symlinks_to_host_files(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+    tmp_git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    # security/f-003: a malicious formatter can plant a symlink in the export pointing
+    # at a host secret (e.g. a gh token file). The host-side apply-back must not
+    # dereference it, or the secret would be read into the committed tree.
+    secret = tmp_path / "host_secret.txt"
+    secret.write_text("TOPSECRET-TOKEN\n")
+    wt = tmp_git_repo
+    head_before = _commit_round(wt, "unformatted\n")
+
+    def _fake_run(gate_cmd, *, name, command, timeout) -> GateResult:
+        export = _export_dir_from_cmd(gate_cmd)
+        # (a) replace a tracked file with a symlink to the secret, and
+        # (b) add a brand-new symlink to the secret — both must be refused.
+        (export / "greeting.txt").unlink()
+        (export / "greeting.txt").symlink_to(secret)
+        (export / "leak.txt").symlink_to(secret)
+        return GateResult(command=command, exit_code=0, passed=True, output_tail="")
+
+    monkeypatch.setattr(test_gate, "run_gate_container", _fake_run)
+
+    sha = autoformat.run_format_pass(config, wt, round_no=1, formatters=["ruff format"])
+
+    # Nothing was applied (only symlinks changed) -> no commit; the worktree is intact.
+    assert sha is None
+    assert _git(wt, "rev-parse", "HEAD") == head_before
+    assert (wt / "greeting.txt").read_text() == "unformatted\n"
+    assert not (wt / "leak.txt").exists()
+    # The secret never reached the worktree in any form.
+    for p in wt.rglob("*"):
+        if p.is_file() and not p.is_symlink() and ".git" not in p.parts:
+            assert "TOPSECRET-TOKEN" not in p.read_text(errors="ignore")
