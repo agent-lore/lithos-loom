@@ -41,15 +41,19 @@ def build_agent_judge(
 
 
 def _judge_prompt(mechanism: str, findings: list[dict]) -> str:
-    lines = [
+    # Paragraphs are named locals (not adjacent literals inside the list) so the
+    # implicit concatenation is unambiguous — no "maybe a missing comma?" footgun.
+    intro = (
         "You are scoring an automated code review for a benchmark. Below are the "
         "findings a reviewer produced. Decide which (if any) describe THIS SPECIFIC "
-        "defect — not merely the same file or topic.",
-        "",
-        f"DEFECT: {mechanism}",
-        "",
-        "FINDINGS:",
-    ]
+        "defect — not merely the same file or topic."
+    )
+    rule = (
+        "A finding matches ONLY if it identifies the same defect mechanism stated "
+        "above. A different bug in the same file or area does NOT match. Reason "
+        "briefly, then conclude with a single final line exactly:"
+    )
+    lines = [intro, "", f"DEFECT: {mechanism}", "", "FINDINGS:"]
     for f in findings:
         files = ", ".join(f.get("files", []))
         lines.append(
@@ -58,9 +62,7 @@ def _judge_prompt(mechanism: str, findings: list[dict]) -> str:
         )
     lines += [
         "",
-        "A finding matches ONLY if it identifies the same defect mechanism stated "
-        "above. A different bug in the same file or area does NOT match. Reason "
-        "briefly, then conclude with a single final line exactly:",
+        rule,
         "`MATCHED: <comma-separated ids>`  or  `MATCHED: none`",
     ]
     return "\n".join(lines)
