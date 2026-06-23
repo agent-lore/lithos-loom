@@ -24,6 +24,7 @@ from .config import (
     CLAUDE_CONFIG_MOUNT,
     CODEX_CONFIG_MOUNT,
     CONTAINER_NOFILE_ULIMIT,
+    HANDOFF_MOUNT_NAME,
     WORKSPACE_MOUNT,
     DevelopConfig,
 )
@@ -97,7 +98,7 @@ def build_run_command(
         "-v",
         workspace_mount,
         "-v",
-        f"{handoff_dir}:{WORKSPACE_MOUNT}/.handoff",
+        f"{handoff_dir}:{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}",
         "-v",
         f"{config_dir}:{config_mount}",
     ]

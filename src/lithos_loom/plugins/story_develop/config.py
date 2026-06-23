@@ -42,6 +42,10 @@ DEFAULT_IMAGE = "ralph-sandbox:latest"
 # docker-daemon hard caps for portability. Passed as ``--ulimit nofile=soft:hard``.
 CONTAINER_NOFILE_ULIMIT = "65536:65536"
 WORKSPACE_MOUNT = "/workspace"
+# The handoff dir is bind-mounted at ``<workspace>/.handoff``; this is also the
+# mountpoint dir name that must exist in a READ-ONLY worktree before its
+# container starts (review-only mode, where there is no RW coder to create it).
+HANDOFF_MOUNT_NAME = ".handoff"
 CLAUDE_CONFIG_MOUNT = "/claude_config"
 # Codex (#94): the per-run config/transcript dir is `CODEX_HOME` (NOT
 # `CODEX_CONFIG_DIR`, which codex ignores — feasibility gate). Mounted under the
