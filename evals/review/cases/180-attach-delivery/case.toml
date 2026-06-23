@@ -1,0 +1,32 @@
+[case]
+id = "180-attach-delivery"
+description = """
+The #180 / #171 defect: `develop attach` treats the `approved` verdict as
+terminal and exits BEFORE daemon PR delivery, recreating the #171 false-done
+window. This case reviews the *removal* of the #180 fix — base is the fix
+(18099f6, which added the `delivering` phase) and head is the pre-fix commit
+(96b471b), so the diff strips the delivering-phase guard. A correct review,
+given the #171 acceptance criteria, must flag that as a critical regression. The
+known-good pair reviews the actual #180 fix (base 96b471b .. head 18099f6), which
+ADDS the guard and should not be flagged.
+"""
+repo = "."
+base = "18099f6b684fc09e0ad725d23819fc691249f131"
+head = "96b471b63df68fcf5e2f9ae340f2327e0380c7b0"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+base = "96b471b63df68fcf5e2f9ae340f2327e0380c7b0"
+head = "18099f6b684fc09e0ad725d23819fc691249f131"
+
+[[expected]]
+file = "src/lithos_loom/cli/develop.py"
+keywords = ["delivery", "approved", "terminal", "before"]
+min_severity = "critical"
+mechanism = """
+develop attach treats the approved state as terminal and exits before daemon PR
+delivery (branch push / Copilot round / result.json write), so an operator sees
+the run as done before the PR exists — the #171 false-done window.
+"""

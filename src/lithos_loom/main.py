@@ -54,6 +54,11 @@ app.add_typer(project_app, name="project")
 app.add_typer(obsidian_sync_app, name="obsidian-sync")
 app.add_typer(develop_app, name="develop")
 
+# On-demand eval harnesses (#183) — not part of `make check`; host-only.
+from lithos_loom.evals.review.cli import eval_app  # noqa: E402
+
+app.add_typer(eval_app, name="eval")
+
 
 @app.command()
 def run(
