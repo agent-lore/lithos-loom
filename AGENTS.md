@@ -32,6 +32,7 @@ Loom replaces [Ralph++](https://github.com/snarktank/ralph) as the user's coding
 | [`docs/cli/project-import.md`](docs/cli/project-import.md) | Full reference for `lithos-loom project import`. |
 | [`docs/cli/project-regenerate-done.md`](docs/cli/project-regenerate-done.md) | Full reference for `lithos-loom project regenerate-done`. |
 | [`docs/cli/project-github-repos.md`](docs/cli/project-github-repos.md) | Full reference for `lithos-loom project add-github-repo` / `remove-github-repo` / `enable-github` / `disable-github` / `migrate-github-tags`. |
+| [`docs/cli/review.md`](docs/cli/review.md) | Full reference for `lithos-loom develop review` — review-only mode (#154): run the panel + gate on an existing PR / range / branch. See [ADR 0004](docs/adr/0004-review-only-mode.md). |
 | [`docs/macros/README.md`](docs/macros/README.md) | Templater macro install + behaviour notes. |
 | [`docs/prd/orchestration.md`](docs/prd/orchestration.md) | Active orchestration plan: assumes the Lithos task-graph extension, reframes the remaining work (decompose front-end, ready-queue adoption, PR gate) + the A-layer roadmap. Supersedes the former `mvp.md` + `full.md`. |
 | [`docs/prd/archive/story-develop.md`](docs/prd/archive/story-develop.md) | Design history for the canonical implement→review→PR plugin (shipped T1–T10; live surface in SPECIFICATION.md §5.5; residual follow-ups tracked as issues). Coder + reviewers are heterogeneous — each agent's `tool` is `claude` or `codex` (#94), so a mixed panel and an engine-switching `fallback_chain` both work. |

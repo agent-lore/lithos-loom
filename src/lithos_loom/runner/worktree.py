@@ -63,6 +63,45 @@ def create(
     return path
 
 
+def create_at(
+    repo: Path,
+    ref: str,
+    name: str,
+    *,
+    parent: Path | None = None,
+) -> Path:
+    """Create a worktree with HEAD **detached at an existing commit** *ref*.
+
+    Unlike :func:`create` (which branches fresh off a base for a coder to commit
+    onto), this materialises a worktree positioned *at* a change that already
+    exists — the head of a PR / branch / ref range — so review-only mode (#154)
+    can run the panel + gate against it. Detached HEAD: no branch is created, so
+    reviewing a ref never leaves a stray branch behind.
+    """
+    base_dir = parent if parent is not None else repo.parent
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    for _attempt in range(5):
+        path = base_dir / f"{_slug(name)}-{secrets.token_hex(4)}"
+        if not path.exists():
+            break
+    else:  # pragma: no cover - astronomically unlikely
+        raise RuntimeError("could not find a free worktree path after 5 attempts")
+
+    result = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(path), ref],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git worktree add --detach {ref} failed (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    return path
+
+
 def git_common_dir(path: Path) -> Path:
     """Absolute path to the shared git dir for the worktree at *path*.
 

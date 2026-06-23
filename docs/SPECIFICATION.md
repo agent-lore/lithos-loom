@@ -549,6 +549,28 @@ Mostly read-only observability over in-flight `story-develop` runs (#88) — `pr
 
 Live `docker exec` transcript streaming (watch the agent think token-by-token) is a deferred follow-up; `attach --stream` emits handoff/state/outcome *events*, not the raw agent token stream. When `docker` is absent the file-based views still work; the active agent shows as `—`.
 
+### 4.15 `lithos-loom develop review` — review-only mode (#154)
+
+```
+lithos-loom develop review <pr|range|branch>
+    [-p|--profile standard] [--reviewer NAME ...]
+    [--ac TEXT | --ac-file PATH] [--base REF]
+    [--repo PATH] [--json PATH] [--keep-worktree] [-c config.toml]
+```
+
+Runs *just* the reviewer panel + deterministic gate against a change that **already exists** — no coder, no fix loop — and emits a consolidated report. Where `develop()` *produces* a change (worktree off a base, coder commits onto it), review-only *consumes* one: it materialises a **detached** worktree at the change's head, resolves the base separately, runs the resolved profile's check-set once on that tree, runs each reviewer once (round 1), and reports. It drives the **same** `run_panel_round` primitive the develop loop uses, so the two review paths can never diverge. See [ADR 0004](adr/0004-review-only-mode.md) and [`docs/cli/review.md`](cli/review.md).
+
+- **Change input** (auto-detected from the argument):
+  - a **GitHub PR** — `#142`, bare `142`, or a PR URL — resolved via `gh pr view` (`base/headRefOid`, title, body); the PR head + base refs are fetched so both commits are local. Works for fork PRs (`pull/N/head`).
+  - an explicit **`base..head` ref range**.
+  - a **local branch / ref** — base is its merge-base with `main` (override with `--base`).
+- **Acceptance criteria** (the reviewer's brief) precedence: `--ac-file` > `--ac` > the **PR body** (for PR input). A bare range / branch with no AC is rejected — a reviewer with no criteria is near-useless.
+- **Panel / profile.** `--profile` selects the persona panel + check-set (default `standard`); `--reviewer NAME` (repeatable) overrides the personas. The deterministic gate runs the profile's full check-set (fast + candidate, since review is a one-shot) on the head tree.
+- **Output.** A human-readable markdown summary (grouped by reviewer, plus a gate line) to stdout; `--json PATH` writes the structured report (the stable contract the review-correctness eval harness, #183, consumes). No GitHub / Lithos side effects in this slice — posting findings to a PR / Lithos task is a deferred follow-up. The worktree is removed on exit unless `--keep-worktree`.
+- **Exit code** is non-zero when the review is **blocking** (any reviewer finding at/above its threshold, an incomplete panel, or a required gate check blocking — the *same* floor `develop()` applies).
+
+Needs `docker` + the agent CLIs (`claude`/`codex`) + `gh` on the host, like a develop run; it is host-only, not part of the hermetic `make check`.
+
 ---
 
 ## 5. Plugin Contract
