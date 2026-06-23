@@ -107,3 +107,32 @@ def test_rejects_expected_with_no_keywords(tmp_path: Path) -> None:
     _write_case(case_dir, toml=toml)
     with pytest.raises(ValueError):
         load_case(case_dir)
+
+
+def test_rejects_unknown_profile(tmp_path: Path) -> None:
+    # a typo'd profile would silently measure the `standard` panel/check-set
+    # while the report claims the typo'd name — fail closed.
+    toml = _SEED_TOML.replace('profile = "standard"', 'profile = "thorogh"')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="profile"):
+        load_case(case_dir)
+
+
+def test_rejects_unknown_persona(tmp_path: Path) -> None:
+    # a typo'd persona would be silently dropped, measuring a different panel
+    toml = _SEED_TOML.replace('personas = ["correctness"]', 'personas = ["corectness"]')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="persona"):
+        load_case(case_dir)
+
+
+def test_rejects_empty_personas(tmp_path: Path) -> None:
+    # a case must declare its panel explicitly (else DevelopConfig would fall
+    # back to the built-in reviewer — not what the case claims to measure)
+    toml = _SEED_TOML.replace('personas = ["correctness"]', "personas = []")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="persona"):
+        load_case(case_dir)

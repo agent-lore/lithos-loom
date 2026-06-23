@@ -13,6 +13,9 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...plugins.story_develop.personas import canonical_personas
+from ...plugins.story_develop.profiles import CANONICAL_PROFILES
+
 _SEVERITIES = ("critical", "major", "minor")
 
 
@@ -75,6 +78,30 @@ def load_case(case_dir: Path) -> Case:
         )
     expected = tuple(_parse_expected(case.get("id"), e) for e in raw_expected)
 
+    # Fail closed on a typo'd profile / persona: a silent fallback would measure a
+    # DIFFERENT panel or check-set than the case declares, so the reported
+    # catch-rate would not describe the panel under test.
+    profile = str(case.get("profile", "standard"))
+    known_profiles = tuple(p.name for p in CANONICAL_PROFILES)
+    if profile not in known_profiles:
+        raise ValueError(
+            f"case {case.get('id')}: unknown profile {profile!r}; "
+            f"known: {', '.join(known_profiles)}"
+        )
+    personas = tuple(case.get("personas", ()))
+    if not personas:
+        raise ValueError(
+            f"case {case.get('id')}: declare at least one persona (the panel under "
+            "test) — an empty panel would silently fall back to the built-in reviewer"
+        )
+    registry = canonical_personas()
+    unknown = [p for p in personas if p not in registry]
+    if unknown:
+        raise ValueError(
+            f"case {case.get('id')}: unknown persona(s) {unknown}; "
+            f"known: {', '.join(sorted(registry))}"
+        )
+
     known_good = data.get("known_good", {})
     known_good_head = known_good.get("head")
     known_good_base = known_good.get("base")
@@ -86,8 +113,8 @@ def load_case(case_dir: Path) -> Case:
         base=str(case["base"]),
         head=str(case["head"]),
         acceptance_criteria=acceptance,
-        personas=tuple(case.get("personas", ())),
-        profile=str(case.get("profile", "standard")),
+        personas=personas,
+        profile=profile,
         expected=expected,
         known_good_head=str(known_good_head) if known_good_head else None,
         known_good_base=str(known_good_base) if known_good_base else None,

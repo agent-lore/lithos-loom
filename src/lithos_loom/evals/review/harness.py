@@ -11,6 +11,7 @@ This is an **on-demand** eval target — never part of ``make check``.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -99,23 +100,30 @@ def live_review(case: Case, head_sha: str) -> dict:
     """Run review-only mode against *head_sha* and return its report JSON.
 
     Host-only — needs docker + the agent CLIs. Resolves the case's personas to
-    their canonical reviewer specs (engine / threshold / focus brief).
+    their canonical reviewer specs (engine / threshold / focus brief). The
+    per-sample work dir (run state, handoffs, reviewer transcripts) is removed
+    after the run so a K×cases×variants sweep does not leave state behind.
     """
     registry = canonical_personas()
-    reviewers = tuple(registry[p] for p in case.personas if p in registry)
+    # load_case() validated every persona, so direct lookup can't KeyError and
+    # an unknown name was never silently dropped.
+    reviewers = tuple(registry[p] for p in case.personas)
     work_dir = Path(tempfile.mkdtemp(prefix="loom-eval-"))
-    config = DevelopConfig(
-        repo=Path(case.repo).resolve(),
-        description=f"eval case {case.id}",
-        work_dir=work_dir,
-        acceptance_criteria=case.acceptance_criteria,
-        review_profile=case.profile,
-        reviewers=reviewers,
-    )
-    change = ResolvedChange(
-        base_sha=_base_for(case, head_sha),
-        head_sha=head_sha,
-        head_ref=f"{case.id}@{head_sha[:12]}",
-        body=case.acceptance_criteria,
-    )
-    return review_change(config, change).to_json()
+    try:
+        config = DevelopConfig(
+            repo=Path(case.repo).resolve(),
+            description=f"eval case {case.id}",
+            work_dir=work_dir,
+            acceptance_criteria=case.acceptance_criteria,
+            review_profile=case.profile,
+            reviewers=reviewers,
+        )
+        change = ResolvedChange(
+            base_sha=_base_for(case, head_sha),
+            head_sha=head_sha,
+            head_ref=f"{case.id}@{head_sha[:12]}",
+            body=case.acceptance_criteria,
+        )
+        return review_change(config, change).to_json()
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)

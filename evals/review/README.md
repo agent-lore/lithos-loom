@@ -43,8 +43,9 @@ description = "..."
 repo = "."                      # the repo to review in
 base = "<base sha>"             # the defect diff is base..head
 head = "<buggy head sha>"
-personas = ["correctness"]      # canonical persona names (or set `profile`)
-profile = "standard"
+personas = ["correctness"]      # the panel under test — canonical persona names,
+                                # validated at load (a typo fails closed)
+profile = "standard"            # selects the check-set; validated at load
 acceptance_criteria_file = "ac.md"
 
 # Optional clean pair for the false-positive measurement. May use its own base
