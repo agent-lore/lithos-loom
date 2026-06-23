@@ -71,17 +71,20 @@ head = "<clean head sha>"
 file = "path/to/file.py"        # the finding must touch this file
 keywords = ["delivery", "approved"]  # ...and mention >= 1 keyword
 min_severity = "critical"       # ...at or above this band
-mechanism = "prose describing the defect (for the LLM-judge fallback)"
+mechanism = "prose describing the defect (the LLM-judge keys on this)"
 ```
 
 ## Scoring (how a finding matches)
 
-- **Structured (default):** a produced finding matches an expected defect when it
-  touches the expected `file` AND mentions ≥1 `keyword`. Severity-correct when the
-  matched finding is at/above `min_severity`.
-- **LLM-judge (fallback):** the matcher supports an injected judge for
-  correctly-worded-but-different findings; wiring an agent judge into the CLI is a
-  follow-up.
+- **Mechanism LLM-judge (default, `--judge`):** authoritative. Given the reviewer's
+  findings and the expected `mechanism`, it returns which findings describe *that
+  specific* defect — so it both **vetoes** a same-topic false hit and **rescues** a
+  correctly-worded finding that shares no `keyword`. Severity-correct when a matched
+  finding is at/above `min_severity`.
+- **Structured (`--no-judge`):** a produced finding matches when it touches the
+  expected `file` AND mentions ≥1 `keyword`. Cheap and agent-free, but over-counts
+  when the known-good shares the defect's topic (the first live run measured 100% FP
+  this way) — useful for a quick pass, not a trusted number.
 
 A case is **caught** in a run iff *every* expected defect matches. Reported over K
 runs: catch-rate, severity-correctness (among caught), and false-positive rate (on
