@@ -36,6 +36,11 @@ changed — and any points it disputes.
    dispute) / still `open` / `superseded` / `merged`. Do not drop, renumber,
    or invent ids — genuinely NEW findings get a blank `finding_id:` and the
    orchestrator assigns one.
+   - Do **not** limit yourself to the open list. Re-scan the current change for
+     issues earlier rounds missed: re-trace each acceptance criterion — and the
+     original failure mode it must fix — against the code as it stands now. A real
+     bug that no prior finding named still gets a new finding; an earlier LGTM is
+     not a reason to stop looking.
 3. Write your updated verdict to `/workspace/.handoff/{review_file}` using the
    format in `/workspace/.handoff/FORMAT.md`:
    - **No remaining issues** → `## Status: LGTM` with a one-paragraph `## Summary`.
