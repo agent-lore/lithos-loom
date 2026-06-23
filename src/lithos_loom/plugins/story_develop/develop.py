@@ -162,6 +162,26 @@ class DevelopResult:
         return self.coder_cost_usd + self.review_cost_usd
 
 
+@dataclass(frozen=True)
+class PanelRoundResult:
+    """One round of the reviewer panel — the shared review primitive's result.
+
+    Returned by :func:`run_panel_round`, which ``develop()`` calls every round
+    of its implement→review→fix loop and review-only mode (#154) calls once
+    against an existing change. ``round_reviews`` is in panel order; ``cost`` is
+    the round's total reviewer spend. ``interrupted`` / ``invalid_reviewer``
+    short-circuit the panel (the loop stops at the offending reviewer);
+    ``resume_after`` is set only when ``interrupted`` is True (the T10 daemon
+    re-dispatch surface).
+    """
+
+    round_reviews: list[ReviewOutcome]
+    cost: float
+    interrupted: bool
+    resume_after: datetime | None
+    invalid_reviewer: str | None
+
+
 # --- prompt / rendering helpers --------------------------------------------
 
 
@@ -1259,6 +1279,120 @@ def _record_coder_disputes(
 # --- orchestration ----------------------------------------------------------
 
 
+def run_panel_round(
+    config: DevelopConfig,
+    reviewers: list[_ReviewerState],
+    *,
+    wt: Path,
+    base: str,
+    round_no: int,
+    check_set: CheckSetResult | None,
+    gate_ledger: GateLedger,
+    budget: _PauseBudget,
+    reviewer_timeout: int,
+    coder_summary: str,
+) -> PanelRoundResult:
+    """Drive the reviewer panel for a single round — the one shared primitive.
+
+    ``develop()`` calls this once per round; review-only mode (#154) calls it
+    once against an existing change. There is intentionally **one** panel
+    implementation — both callers share this so a prompt / severity / lifecycle
+    fix can never land in one review path and silently miss the other.
+
+    Each reviewer takes one turn (wrapped in the usage-limit reaction), its
+    review is committed to its :class:`~.findings.FindingLedger`, and the
+    round's outcomes are returned in panel order. Round 1 renders
+    ``reviewer_round.md`` (with the coder's ``coder_summary``); later rounds
+    render ``reviewer_rereview.md`` (with the reviewer's open findings + the
+    coder's handoff) and resume the reviewer's session. The panel stops early at
+    the first interrupted or invalid reviewer.
+    """
+    round_reviews: list[ReviewOutcome] = []
+    cost = 0.0
+    interrupted = False
+    resume_after: datetime | None = None
+    invalid_reviewer: str | None = None
+    for rstate in reviewers:
+        name = rstate.spec.name
+        if round_no == 1:
+            review_prompt = _render(
+                handoff.load_prompt("reviewer_round.md"),
+                reviewer=name,
+                reviewer_brief=_reviewer_brief(rstate.spec),
+                acceptance_criteria=config.effective_acceptance_criteria,
+                coder_summary=coder_summary,
+                base_sha=base[:12],
+                diff_stat=git.diff_stat(wt, base),
+                gate_summary=render_check_summary(
+                    check_set, for_coder=False, gate_ledger=gate_ledger
+                ),
+                severity_calibration=SEVERITY_CALIBRATION,
+                review_file=handoff.reviewer_handoff_name(1, name),
+            )
+            review_resume = False
+        else:
+            review_prompt = _render(
+                handoff.load_prompt("reviewer_rereview.md"),
+                reviewer=name,
+                reviewer_brief=_reviewer_brief(rstate.spec),
+                round_no=str(round_no),
+                acceptance_criteria=config.effective_acceptance_criteria,
+                base_sha=base[:12],
+                coder_handoff_file=handoff.coder_handoff_name(round_no),
+                open_findings=rstate.ledger.render_open(),
+                diff_stat=git.diff_stat(wt, base),
+                gate_summary=render_check_summary(
+                    check_set, for_coder=False, gate_ledger=gate_ledger
+                ),
+                severity_calibration=SEVERITY_CALIBRATION,
+                review_file=handoff.reviewer_handoff_name(round_no, name),
+            )
+            review_resume = True
+
+        review, rev_cost, rev_interrupted, rev_resume_after = (
+            _run_reviewer_with_reaction(
+                config,
+                budget,
+                rstate,
+                round_no=round_no,
+                resume=review_resume,
+                prompt=review_prompt,
+                timeout=reviewer_timeout,
+                base=base,
+            )
+        )
+        cost += rev_cost
+        if review.status != "invalid":
+            # T7: commit the (already check()-validated) review into the ledger;
+            # downstream sees ledger-canonical ids.
+            applied = rstate.ledger.apply_review(
+                ReviewHandoff(
+                    status=review.status,
+                    summary="",
+                    findings=review.findings,
+                ),
+                round_no,
+            )
+            review = replace(review, findings=applied)
+        round_reviews.append(review)
+        rstate.outcome = review
+        if rev_interrupted:
+            interrupted = True
+            resume_after = rev_resume_after
+            break
+        if review.status == "invalid":
+            invalid_reviewer = name
+            break
+
+    return PanelRoundResult(
+        round_reviews=round_reviews,
+        cost=cost,
+        interrupted=interrupted,
+        resume_after=resume_after,
+        invalid_reviewer=invalid_reviewer,
+    )
+
+
 def develop(
     config: DevelopConfig,
     *,
@@ -1562,92 +1696,36 @@ def develop(
                 _persist_gate_ledger(config, gate_ledger)
 
             # --- reviewer turns (panel order, sequential) -------------------
-            round_reviews: list[ReviewOutcome] = []
-            reviewer_interrupted = False
-            invalid_reviewer: str | None = None
-            for rstate in reviewers:
-                name = rstate.spec.name
-                if round_no == 1:
-                    review_prompt = _render(
-                        handoff.load_prompt("reviewer_round.md"),
-                        reviewer=name,
-                        reviewer_brief=_reviewer_brief(rstate.spec),
-                        acceptance_criteria=config.effective_acceptance_criteria,
-                        coder_summary=_coder_summary(config, 1),
-                        base_sha=base[:12],
-                        diff_stat=git.diff_stat(wt, base),
-                        gate_summary=render_check_summary(
-                            check_set, for_coder=False, gate_ledger=gate_ledger
-                        ),
-                        severity_calibration=SEVERITY_CALIBRATION,
-                        review_file=handoff.reviewer_handoff_name(1, name),
-                    )
-                    review_resume = False
-                else:
-                    review_prompt = _render(
-                        handoff.load_prompt("reviewer_rereview.md"),
-                        reviewer=name,
-                        reviewer_brief=_reviewer_brief(rstate.spec),
-                        round_no=str(round_no),
-                        acceptance_criteria=config.effective_acceptance_criteria,
-                        base_sha=base[:12],
-                        coder_handoff_file=handoff.coder_handoff_name(round_no),
-                        open_findings=rstate.ledger.render_open(),
-                        diff_stat=git.diff_stat(wt, base),
-                        gate_summary=render_check_summary(
-                            check_set, for_coder=False, gate_ledger=gate_ledger
-                        ),
-                        severity_calibration=SEVERITY_CALIBRATION,
-                        review_file=handoff.reviewer_handoff_name(round_no, name),
-                    )
-                    review_resume = True
-
-                review, cost, interrupted, rev_resume_after = (
-                    _run_reviewer_with_reaction(
-                        config,
-                        budget,
-                        rstate,
-                        round_no=round_no,
-                        resume=review_resume,
-                        prompt=review_prompt,
-                        timeout=reviewer_timeout,
-                        base=base,
-                    )
-                )
-                review_cost += cost
-                if review.status != "invalid":
-                    # T7: commit the (already check()-validated) review into
-                    # the ledger; downstream sees ledger-canonical ids.
-                    applied = rstate.ledger.apply_review(
-                        ReviewHandoff(
-                            status=review.status,
-                            summary="",
-                            findings=review.findings,
-                        ),
-                        round_no,
-                    )
-                    review = replace(review, findings=applied)
-                round_reviews.append(review)
-                rstate.outcome = review
-                if interrupted:
-                    reviewer_interrupted = True
-                    resume_after = rev_resume_after
-                    break
-                if review.status == "invalid":
-                    invalid_reviewer = name
-                    break
-
+            # The single shared panel primitive (#154): review-only mode drives
+            # the SAME call. Round 1 hands the coder's summary to the panel;
+            # later rounds resume each reviewer with its open findings.
+            panel = run_panel_round(
+                config,
+                reviewers,
+                wt=wt,
+                base=base,
+                round_no=round_no,
+                check_set=check_set,
+                gate_ledger=gate_ledger,
+                budget=budget,
+                reviewer_timeout=reviewer_timeout,
+                coder_summary=_coder_summary(config, 1) if round_no == 1 else "",
+            )
+            round_reviews = panel.round_reviews
+            review_cost += panel.cost
             final_reviews = round_reviews
 
-            if reviewer_interrupted:
+            if panel.interrupted:
                 failure_reason = (
                     f"round {round_no}: reviewer usage-limited; pause budget exhausted"
                 )
                 status = "interrupted"
+                resume_after = panel.resume_after
                 break
-            if invalid_reviewer is not None:
+            if panel.invalid_reviewer is not None:
                 failure_reason = (
-                    f"round {round_no}: reviewer [{invalid_reviewer}] handoff invalid"
+                    f"round {round_no}: reviewer "
+                    f"[{panel.invalid_reviewer}] handoff invalid"
                 )
                 status = "failed"
                 break
