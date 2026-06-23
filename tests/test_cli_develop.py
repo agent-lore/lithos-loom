@@ -33,6 +33,7 @@ def _make_run(
     conversation: str | None = None,
     status: str | None = None,
     branch: str | None = None,
+    delivered: bool | None = None,
 ) -> Path:
     run_dir = work_dir / task_id / run_id
     (run_dir / "handoff").mkdir(parents=True)
@@ -68,6 +69,16 @@ def _make_run(
                     "branch": branch or f"feat/{task_id}",
                 }
             )
+        )
+    # The plugin's final contract output: the daemon writes result.json into the
+    # SHARED per-task dir AFTER post-approval PR delivery (deliver() runs once
+    # develop() returns). It — not the bare state.json verdict — is the "fully
+    # done" signal for an approved run. Default: an approved run is delivered.
+    if delivered is None:
+        delivered = status == "approved"
+    if delivered:
+        (work_dir / task_id / "result.json").write_text(
+            json.dumps({"status": "succeeded", "task_id": task_id})
         )
     return run_dir
 
@@ -233,12 +244,13 @@ def test_agent_state_distinguishes_no_docker_from_done(
 
 
 def test_run_phase_classification(tmp_path: Path) -> None:
-    rd = tmp_path / "run"
-    rd.mkdir()
+    rd = tmp_path / "t-1" / "run"
+    rd.mkdir(parents=True)
     running = [develop.ContainerStatus("n", "coder", "Up", True)]
     exited = [develop.ContainerStatus("n", "coder", "Exited", False)]
     none: dict | None = None  # no recorded outcome yet
     approved = {"status": "approved"}
+    failed = {"status": "failed"}
     # docker present: live while a container runs
     assert develop._run_phase(rd, running, none, seen_container=True) == "running"
     # startup window: zero containers and none seen yet → keep following (the
@@ -249,14 +261,38 @@ def test_run_phase_classification(tmp_path: Path) -> None:
     assert develop._run_phase(rd, exited, none, seen_container=True) == "vanished"
     # docker absent (None): live until the outcome lands (or the dir is reaped)
     assert develop._run_phase(rd, None, none, seen_container=False) == "running"
-    # the recorded OUTCOME (state.json with a status) is the graceful terminal —
-    # regardless of container state, and NOT conversation.md / liveness.
-    assert develop._run_phase(rd, exited, approved, seen_container=True) == "terminal"
-    assert develop._run_phase(rd, running, approved, seen_container=True) == "terminal"
+    # a NON-approved terminal status has no post-dialogue work (deliver() runs
+    # only for approved) → terminal the moment its state.json lands.
+    assert develop._run_phase(rd, exited, failed, seen_container=True) == "terminal"
+    # an APPROVED verdict is NOT terminal while PR delivery is still pending — in
+    # daemon mode deliver() (push + Copilot + result.json) runs AFTER develop()
+    # writes state.json, so keying terminal on the bare verdict re-opens the #171
+    # false-done window. Until the run's result.json lands it is "delivering".
+    for containers, seen in ((exited, True), (running, True), (None, False)):
+        phase = develop._run_phase(rd, containers, approved, seen_container=seen)
+        assert phase == "delivering"
+    # this run's result.json (succeeded) lands in the shared per-task dir → done
+    (rd.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
     assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
     # docker absent + the run dir reaped on success → terminal (nothing to read)
-    rd.rmdir()
+    shutil.rmtree(rd)
     assert develop._run_phase(rd, None, none, seen_container=False) == "terminal"
+
+
+def test_run_phase_approved_ignores_stale_failed_result_json(tmp_path: Path) -> None:
+    # The shared per-task result.json can be a stale leftover from a PRIOR
+    # retained run (a succeeded run's whole work dir is reaped, so a surviving
+    # result.json is necessarily a non-success). It must NOT be mistaken for THIS
+    # approved run's delivery — else the false-done window reopens on a retry.
+    rd = tmp_path / "t-1" / "r2"
+    rd.mkdir(parents=True)
+    (rd / "state.json").write_text(json.dumps({"status": "approved"}))
+    (rd.parent / "result.json").write_text(json.dumps({"status": "failed"}))  # stale
+    approved = {"status": "approved"}
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "delivering"
+    # this run's own delivery writes a succeeded result.json → terminal
+    (rd.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
 
 
 def test_recover_reaped_outcome_delegates_to_completion_store(
@@ -677,11 +713,12 @@ def test_attach_waits_through_teardown_window_for_recorded_outcome(
             ]
         if polls["n"] in (2, 3):  # teardown window: containers gone, no outcome yet
             return []
-        # the plugin finishes writing the terminal outcome
+        # the plugin finishes writing the terminal outcome + delivers (result.json)
         (run_dir / "conversation.md").write_text("log")
         (run_dir / "state.json").write_text(
             json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
         )
+        (run_dir.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
         return []
 
     monkeypatch.setattr(develop, "_run_containers", fake_containers)
@@ -707,6 +744,9 @@ def test_attach_wait_waits_for_recorded_outcome_not_just_the_log(
         if sleeps["n"] == 2:  # the outcome lands a couple polls later
             (run_dir / "state.json").write_text(
                 json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
+            )
+            (run_dir.parent / "result.json").write_text(
+                json.dumps({"status": "succeeded"})
             )
 
     monkeypatch.setattr(develop.time, "sleep", fake_sleep)
@@ -738,11 +778,12 @@ def test_attach_follows_through_startup_window_to_terminal_state(
             return [
                 develop.ContainerStatus("loom-develop-r1-coder", "coder", "Up", True)
             ]
-        # run reaches terminal state: marker + state written, containers reaped
+        # run reaches terminal state: marker + state + result.json, containers reaped
         (run_dir / "conversation.md").write_text("log")
         (run_dir / "state.json").write_text(
             json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
         )
+        (run_dir.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
         return []
 
     monkeypatch.setattr(develop, "_run_containers", fake_containers)
@@ -753,6 +794,91 @@ def test_attach_follows_through_startup_window_to_terminal_state(
     assert "coder working" in out
     assert "round_01_coder_done.md" in out
     assert "approved" in out and "after 1 round" in out  # outcome summary
+
+
+def test_attach_follows_through_delivery_window_then_terminates(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The HIGH-finding regression: in daemon mode develop() writes state.json the
+    # instant the dialogue approves, but PR delivery + result.json happen AFTER
+    # (deliver() runs once develop() returns). attach must NOT treat the bare
+    # approved verdict as terminal — it follows through a distinct "delivering
+    # PR…" phase until result.json lands, or it re-creates the #171 false-done bug.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,  # approved verdict recorded; PR delivery still pending
+    )
+    sleeps = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 2:  # delivery finishes a couple polls later
+            (run_dir.parent / "result.json").write_text(
+                json.dumps({"status": "succeeded"})
+            )
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "delivering PR" in out  # the AC#3 delivery phase is actually observable
+    assert "approved" in out  # and it DID follow through to the real outcome
+
+
+def test_attach_wait_does_not_exit_before_delivery_completes(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --wait must block through PR delivery, not exit 0 the instant the dialogue
+    # approves — deliver() can still be running (or fail) afterward, so an early
+    # exit would make `attach --wait && gh pr view` race a not-yet-created PR.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,
+    )
+    polls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        polls["n"] += 1
+        if polls["n"] == 3:
+            (run_dir.parent / "result.json").write_text(
+                json.dumps({"status": "succeeded"})
+            )
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert polls["n"] >= 3  # blocked through the delivery window, did not exit early
+    assert "approved" in out
+
+
+def test_attach_wait_blocks_until_run_appears(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AC: --wait used right after dispatch (before the run dir is seeded) blocks
+    # until the run appears, instead of failing immediately with "no run found".
+    _make_run(
+        patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]}, status="approved"
+    )
+    real_resolve = develop._resolve
+    calls = {"n": 0}
+
+    def slow_resolve(work_dir: Path, key: str) -> Path | None:
+        calls["n"] += 1
+        return None if calls["n"] < 3 else real_resolve(work_dir, key)
+
+    monkeypatch.setattr(develop, "_resolve", slow_resolve)
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert calls["n"] >= 3  # polled for the run to appear rather than failing
+    assert "approved" in out  # then followed it to the terminal outcome
 
 
 def test_attach_wait_is_quiet_and_summarises_outcome(

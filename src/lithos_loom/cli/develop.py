@@ -337,19 +337,28 @@ def _run_phase(
     *,
     seen_container: bool,
 ) -> str:
-    """Classify the run for ``attach``: ``"running"`` / ``"terminal"`` / ``"vanished"``.
+    """Classify the run for ``attach``: ``"running"`` / ``"delivering"`` /
+    ``"terminal"`` / ``"vanished"``.
 
     Terminal *state*, not agent *liveness*. The graceful terminal signal is the
-    run's recorded **outcome** — a parseable ``state.json`` with a status — not
-    container liveness and not ``conversation.md``: the plugin writes
-    ``conversation.md`` *before* ``state.json``, so stopping on the log would
-    leave ``--wait`` / the outcome summary unable to read the status (it'd
-    misreport an approved run). We therefore follow until the outcome lands.
+    run's recorded **outcome** — not container liveness and not ``conversation.md``
+    (the plugin writes the log *before* ``state.json``, so stopping on the log
+    would misreport an approved run). But the verdict in ``state.json`` is not the
+    whole story: ``develop()`` writes it the instant the dialogue ends, while in
+    daemon mode the **PR delivery** (branch push, Copilot round, ``result.json``)
+    all happen *after* it returns. So an **approved** verdict alone is NOT
+    terminal — exiting there is the #171 false-done window (attach quits while the
+    PR is still being pushed). We stay in ``"delivering"`` until this run's
+    ``result.json`` lands (or the work dir is reaped on success).
 
-    - ``"terminal"`` — outcome recorded (graceful), or the run dir was **reaped**
-      (the route-runner removes it after applying the result, so its absence is
-      itself an end signal; the outcome is then recovered from the completion
-      store — see :func:`_recover_reaped_outcome`).
+    - ``"terminal"`` — a non-approved outcome is recorded, or an approved run's
+      delivery has completed (:func:`_delivery_complete`), or the run dir was
+      **reaped** (the route-runner removes it after applying the result, so its
+      absence is itself an end signal; the outcome is then recovered from the
+      completion store — see :func:`_recover_reaped_outcome`).
+    - ``"delivering"`` — the dialogue **approved** but post-approval PR delivery
+      is still in flight (``result.json`` not yet written, dir not yet reaped).
+      Keep following; the caller renders a distinct "delivering PR…" phase.
     - ``"running"`` — an agent container is up, or we're still in the **startup
       window** (no container seen yet), or docker is absent and the run dir is
       still present (can't observe containers — keep following for the outcome).
@@ -363,6 +372,11 @@ def _run_phase(
     that could race the work-dir reap).
     """
     if state is not None and state.get("status"):
+        # An approved verdict still has PR delivery to do in daemon mode — not
+        # terminal until this run's result.json lands (or it's reaped on success,
+        # handled below). Every other terminal status has no post-dialogue work.
+        if state.get("status") == "approved" and not _delivery_complete(run_dir):
+            return "delivering"
         return "terminal"
     if not run_dir.is_dir():
         return "terminal"  # reaped by the route-runner after applying the result
@@ -371,6 +385,40 @@ def _run_phase(
     if any(c.running for c in containers):
         return "running"
     return "vanished" if seen_container else "running"
+
+
+def _delivery_complete(run_dir: Path) -> bool:
+    """Whether an approved run's post-dialogue PR delivery has finished.
+
+    ``develop()`` writes ``state.json`` the moment the dialogue approves, but in
+    daemon mode the branch push, the Copilot round, and the ``result.json`` write
+    all happen AFTER it returns (``story_develop/__main__`` calls ``deliver()``
+    then ``write_result_atomically``). ``result.json`` — the plugin's final
+    contract output — is therefore the "fully delivered" signal. It lives in the
+    SHARED per-task dir (``run_dir.parent``); a ``"succeeded"`` status binds it to
+    THIS run, since a succeeded run's whole work dir is reaped — so any
+    ``result.json`` that survives there from a prior *retained* run is necessarily
+    a non-success and must not be mistaken for this run's delivery.
+    """
+    try:
+        data = json.loads((run_dir.parent / "result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("status") == "succeeded"
+
+
+def _wait_for_run(work_dir: Path, key: str) -> Path:
+    """Block (polling) until a run for *key* appears under *work_dir*.
+
+    For ``attach --wait`` invoked right after dispatching a task, before the
+    route-runner has created the run dir. ``Ctrl-C`` exits cleanly, like the
+    follow loop.
+    """
+    while True:
+        run_dir = _resolve(work_dir, key)
+        if run_dir is not None:
+            return run_dir
+        time.sleep(_ATTACH_POLL_SECONDS)
 
 
 def _is_finished(run_dir: Path) -> bool:
@@ -752,18 +800,22 @@ def develop_attach(
 ) -> None:
     """Follow a live run until it reaches a **terminal state**, printing handoffs
     as they land plus the current round + active agent, then a one-line outcome
-    summary. Following keys on terminal state (the recorded outcome —
-    ``state.json`` with a status), not agent liveness, so it spans both the
-    startup window before the first container and the commit / test-gate /
-    teardown after the last agent turn, grace-polling through the window where
-    the plugin has stopped its containers but not yet written the outcome. If
-    the work dir is reaped on success before a poll observes ``state.json``, the
-    outcome is recovered from the plugin's completion store. Read-only; ``Ctrl-C``
-    exits cleanly. When docker is unavailable it still follows the handoff files
-    (active agent shows as ``—``).
+    summary. Following keys on terminal state, not agent liveness, so it spans
+    both the startup window before the first container and the commit / test-gate
+    / teardown after the last agent turn, grace-polling through the window where
+    the plugin has stopped its containers but not yet written the outcome. An
+    **approved** verdict is not yet the end in daemon mode — PR delivery (push +
+    Copilot round + ``result.json``) runs after the dialogue approves, shown as a
+    distinct "delivering PR…" phase — so attach follows through it instead of
+    exiting early. If the work dir is reaped on success before a poll observes the
+    result, the outcome is recovered from the plugin's completion store.
+    Read-only; ``Ctrl-C`` exits cleanly. When docker is unavailable it still
+    follows the handoff files (active agent shows as ``—``).
 
-    ``--once`` prints a single snapshot and exits. ``--wait`` blocks quietly and
-    prints only the outcome. ``--stream`` emits JSONL events. The three are
+    ``--once`` prints a single snapshot and exits. ``--wait`` blocks quietly —
+    first until the run appears (so it can be used immediately after dispatch),
+    then through to the terminal outcome — and prints only that outcome (exit
+    non-zero unless approved). ``--stream`` emits JSONL events. The three are
     mutually exclusive.
     """
     chosen = [
@@ -779,7 +831,12 @@ def develop_attach(
         _fail(str(exc))
     run_dir = _resolve(cfg.orchestrator.work_dir, key)
     if run_dir is None:
-        _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")
+        if wait:
+            # --wait may be used right after dispatch, before the route-runner
+            # has seeded the run dir — block until it appears rather than failing.
+            run_dir = _wait_for_run(cfg.orchestrator.work_dir, key)
+        else:
+            _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")
     info = _run_info(run_dir)
 
     if once:
@@ -874,6 +931,18 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
                     "label": label,
                     "round": round_no,
                     "agent": agent,
+                }
+                last_label = label
+        elif phase == "delivering":
+            # approved, but post-approval PR delivery is still in flight — surface
+            # it as a distinct phase rather than letting the window read as done.
+            label = "── approved — delivering PR…"
+            if label != last_label:
+                yield {
+                    "event": "state",
+                    "label": label,
+                    "round": _round_and_reviewers(run_dir / "handoff")[0],
+                    "agent": None,
                 }
                 last_label = label
         for name, body in _iter_new_handoffs(run_dir / "handoff", seen):
