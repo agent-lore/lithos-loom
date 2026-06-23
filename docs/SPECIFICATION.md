@@ -571,6 +571,14 @@ Runs *just* the reviewer panel + deterministic gate against a change that **alre
 
 Needs `docker` + the agent CLIs (`claude`/`codex`) + `gh` on the host, like a develop run; it is host-only, not part of the hermetic `make check`.
 
+### 4.16 `lithos-loom eval review` — review-correctness eval harness (#183)
+
+```
+lithos-loom eval review [--case ID] [-k N] [--bar FLOAT] [--cases-dir PATH]
+```
+
+A **seeded-defect benchmark** that measures how reliably the reviewer panel catches real defects — review correctness as a *number*, not a vibe. Each **case** (a directory under `evals/review/cases/<id>/` with a `case.toml` + `ac.md`) pairs a known-buggy `base..head`, the acceptance criteria the reviewer receives, and the expected finding(s) a correct review must surface. The harness runs review-only mode (§4.15) against the case's head **K times** (default 5) and reports, over the K runs: **catch-rate** (every expected defect surfaced), **severity-correctness** (caught at/above the expected band), and **false-positive rate** (on the paired known-good head). A case **passes** at `catch-rate ≥ --bar` (default 0.8) — agents are stochastic, so it's a rate, not a single pass/fail. Matching is structured (file + ≥1 keyword) with an LLM-judge fallback the matcher supports (CLI wiring deferred). Seeded with the **#180/#171** case; every future escape becomes a regression case. **On-demand only — never part of `make check`** (it spends real tokens and needs the host sandbox + agent CLIs); the harness *logic* is unit-tested hermetically with the review function stubbed. See [ADR 0005](adr/0005-review-correctness-eval-harness.md) and [`evals/review/README.md`](../evals/review/README.md).
+
 ---
 
 ## 5. Plugin Contract

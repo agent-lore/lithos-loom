@@ -74,6 +74,7 @@ ignore = ["S101", "S603", "S607"]
 # known false positive for Typer code.
 "src/lithos_loom/main.py" = ["B008"]
 "src/lithos_loom/cli/**.py" = ["B008"]
+"src/lithos_loom/evals/**/cli.py" = ["B008"]
 "src/lithos_loom/plugins/**/__main__.py" = ["B008"]
 # Tests legitimately use fixture credentials (S105/S106) and temp paths (S108);
 # (S101 ``assert`` is exempt project-wide above — and is the test idiom anyway).
