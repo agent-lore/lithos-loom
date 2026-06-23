@@ -6,6 +6,7 @@ case selection, the results table, and the exit code.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -118,3 +119,64 @@ def test_unknown_case_errors(monkeypatch: pytest.MonkeyPatch, cases_dir: Path) -
         eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "nope"]
     )
     assert result.exit_code != 0
+
+
+def test_judge_on_by_default(monkeypatch: pytest.MonkeyPatch, cases_dir: Path) -> None:
+    seen = _stub_run_case(monkeypatch)
+    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert seen[0]["kwargs"]["judge"] == "JUDGE"
+
+
+def test_no_judge_flag_disables_it(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "other-case", "--no-judge"],
+    )
+    assert seen[0]["kwargs"]["judge"] is None
+
+
+def test_report_dir_passes_a_sink(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    assert seen[0]["kwargs"]["report_sink"] is not None
+
+
+def test_no_report_dir_means_no_sink(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert seen[0]["kwargs"]["report_sink"] is None
+
+
+def test_report_sink_writes_per_run_files(tmp_path: Path) -> None:
+    sink = eval_cli._make_report_sink(tmp_path)
+    sink("case-x", "buggy", 0, {"blocking": True})
+    f = tmp_path / "case-x" / "buggy-0.json"
+    assert f.is_file()
+    assert json.loads(f.read_text())["blocking"] is True

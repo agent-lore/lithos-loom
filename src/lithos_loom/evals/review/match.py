@@ -15,9 +15,10 @@ from dataclasses import dataclass, field
 from ...plugins.story_develop.handoff import severity_at_or_above
 from .case import Case, Expected
 
-# A judge takes (mechanism, produced_findings) and returns whether any finding
-# describes the mechanism. Injected so scoring stays unit-testable.
-Judge = Callable[[str, list[dict]], bool]
+# A judge takes (mechanism, produced_findings) and returns the finding_ids that
+# describe the SPECIFIC mechanism (empty = none). Injected so scoring stays
+# unit-testable. Returning ids (not a bool) keeps severity-correctness accurate.
+Judge = Callable[[str, list[dict]], list[str]]
 
 
 @dataclass(frozen=True)
@@ -56,9 +57,29 @@ def match_expected(
 ) -> MatchResult:
     """Match one *expected* defect against the *produced* findings.
 
-    Structured match first (file + ≥1 keyword); on a miss, fall back to the
-    *judge* (if provided) on the expected mechanism.
+    When a *judge* is given it is **authoritative**: it sees every produced
+    finding and returns the ids that describe the *specific* mechanism — so it
+    both **vetoes** a finding that only matches the topic (a structural keyword
+    hit on a different defect) and **rescues** a correct finding worded without
+    the keywords. Without a judge, the cheap structured match (file + ≥1 keyword)
+    is used — deterministic, but topic-loose.
     """
+    if judge is not None:
+        matched_ids = set(judge(expected.mechanism, produced))
+        matched = [f for f in produced if f.get("finding_id") in matched_ids]
+        if matched:
+            sev_ok = any(
+                severity_at_or_above(f.get("severity", "minor"), expected.min_severity)
+                for f in matched
+            )
+            return MatchResult(
+                caught=True,
+                severity_correct=sev_ok,
+                method="judge",
+                finding_id=str(matched[0].get("finding_id", "")),
+            )
+        return MatchResult(caught=False, severity_correct=False, method="judge")
+
     for finding in produced:
         if _structured_match(expected, finding):
             return MatchResult(
@@ -69,19 +90,6 @@ def match_expected(
                 method="structured",
                 finding_id=finding.get("finding_id", ""),
             )
-
-    if judge is not None and produced and judge(expected.mechanism, produced):
-        # The judge affirms the mechanism is described; it does not adjudicate
-        # severity, so severity-correctness is credited when any produced finding
-        # reaches the band (best-effort — the structured path is authoritative).
-        sev_ok = any(
-            severity_at_or_above(f.get("severity", "minor"), expected.min_severity)
-            for f in produced
-        )
-        return MatchResult(
-            caught=True, severity_correct=sev_ok, method="judge", finding_id=""
-        )
-
     return MatchResult(caught=False, severity_correct=False, method="none")
 
 

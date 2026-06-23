@@ -5,18 +5,22 @@ reviewer panel K times against a known-defect change via review-only mode (#154)
 scores each run, and prints catch-rate / severity-correctness / false-positive.
 Needs the host sandbox + agent CLIs — it spends real tokens.
 
-The structured matcher (file + keyword) runs by default; the LLM-judge fallback
-the matcher supports is a documented follow-up (see ADR 0005).
+Matching defaults to the **mechanism LLM-judge** (ADR 0005): it confirms each
+finding describes the case's specific defect, not just the same topic — without
+it the structured matcher over-counts on same-topic changes. ``--no-judge`` falls
+back to the cheap structured matcher. ``--report-dir`` retains each run's report.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
 
 from .case import load_case
-from .harness import DEFAULT_BAR, DEFAULT_K, run_case
+from .harness import DEFAULT_BAR, DEFAULT_K, ReportSink, run_case
+from .judge import build_agent_judge
 
 eval_app = typer.Typer(
     name="eval",
@@ -55,6 +59,15 @@ def review(
     bar: float = typer.Option(
         DEFAULT_BAR, "--bar", help="Catch-rate a case must reach to pass."
     ),
+    judge: bool = typer.Option(
+        True, "--judge/--no-judge", help="Use the mechanism LLM-judge (default on)."
+    ),
+    judge_tool: str = typer.Option(
+        "claude", "--judge-tool", help="Agent for the judge (claude | codex)."
+    ),
+    report_dir: Path | None = typer.Option(
+        None, "--report-dir", help="Retain each run's report JSON under this dir."
+    ),
     cases_dir: Path = typer.Option(
         _DEFAULT_CASES_DIR, "--cases-dir", help="Directory of case folders."
     ),
@@ -62,15 +75,31 @@ def review(
     """Measure the panel's catch-rate on the seeded-defect benchmark."""
     case_dirs = _discover(cases_dir, case)
 
+    judge_fn = build_agent_judge(tool=judge_tool) if judge else None
+    sink = _make_report_sink(report_dir) if report_dir is not None else None
+
     results = []
     for case_dir in case_dirs:
         loaded = load_case(case_dir)
         typer.echo(f"running {loaded.id} × {k} …", err=True)
-        results.append(run_case(loaded, k=k, bar=bar))
+        results.append(run_case(loaded, k=k, bar=bar, judge=judge_fn, report_sink=sink))
 
     _print_table(results)
     if any(not r.passed for r in results):
         raise typer.Exit(1)
+
+
+def _make_report_sink(report_dir: Path) -> ReportSink:
+    """A sink that writes each run's report to ``<dir>/<case>/<variant>-<i>.json``."""
+
+    def sink(case_id: str, variant: str, i: int, report: dict) -> None:
+        out = report_dir / case_id
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{variant}-{i}.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
+
+    return sink
 
 
 def _print_table(results: list) -> None:
