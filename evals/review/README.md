@@ -12,15 +12,27 @@ harness *logic* is unit-tested hermetically; only the live run below calls agent
 ## Run it
 
 ```bash
-# All cases, 5 runs each (host, from the loom checkout)
+# All cases, 5 runs each (host, from the loom checkout) — judge ON by default
 uv run lithos-loom eval review
 
-# One case, 8 runs, a stricter bar
-uv run lithos-loom eval review --case 180-attach-delivery -k 8 --bar 0.9
+# One case, 8 runs, a stricter bar, retain each run's report for inspection
+uv run lithos-loom eval review --case 180-attach-delivery -k 8 --bar 0.9 \
+  --report-dir /tmp/eval-reports
+
+# Quick, cheap, agent-free pass (topic-loose — not a trusted number)
+uv run lithos-loom eval review --no-judge
 ```
 
 The command prints a per-case table (catch-rate / severity-correctness / FP) and
 exits non-zero if any case falls below its bar.
+
+- `--judge` / `--no-judge` (**default on**): the mechanism LLM-judge confirms each
+  finding describes the case's *specific* defect, not just the same file/topic.
+  Without it the structured matcher over-counts on same-topic changes (the first
+  live run measured 100% FP on the seed). `--judge-tool` picks the agent
+  (`claude` | `codex`).
+- `--report-dir DIR`: write every run's report to `DIR/<case>/<variant>-<i>.json`
+  (`variant` = `buggy` / `known-good`) so you can read the findings behind a number.
 
 ## Add a case
 

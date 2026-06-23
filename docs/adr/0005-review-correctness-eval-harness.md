@@ -46,17 +46,32 @@ as the known-good.
 
 ### Matching method (expected → produced)
 
-The cheapest method that does not reward vague findings:
+> **Revised after the first live run.** The seed case returned `catch 100% / fp
+> 100%`: the **structured matcher keys on the change's *topic*** (file + topic
+> words), and the seed's known-good is the #180 fix — the *same topic* — so any
+> finding on it matched. Worse, the original judge was a *miss-only fallback*, so
+> it never ran on these false structural *hits*. The fix below makes the judge a
+> **confirmer/veto keyed to the specific mechanism**, default on.
 
-1. **Structured (default, deterministic, hermetic):** a produced finding matches
-   an expected defect when it touches the expected **file** AND mentions at least
-   one expected **keyword** (over the rationale + files). Severity-correct when
-   the matched finding is at or above `min_severity`.
-2. **LLM-judge fallback (optional):** on a structural miss, a judge is asked
-   whether any produced finding describes the expected **mechanism** prose. The
-   matcher layer supports an injected judge; wiring an agent judge into the
-   `eval review` CLI is a follow-up. The judge never *lowers* a structured match;
-   it only rescues a correctly-worded-but-differently finding.
+1. **Mechanism LLM-judge (default).** The judge is **authoritative**: it sees
+   *every* produced finding and returns the finding ids that describe the
+   **specific mechanism** (not the topic). So it both **vetoes** a finding that
+   only matches the file/topic (a different defect) and **rescues** a correct
+   finding worded without the keywords. Severity-correct = a matched finding at or
+   above `min_severity`. The agent call is host-direct (a pure text Q&A — no repo,
+   no container). `--no-judge` opts out.
+2. **Structured (fallback, deterministic, hermetic):** a produced finding matches
+   when it touches the expected **file** AND mentions ≥1 expected **keyword**.
+   Cheap and agent-free, but *topic-loose* — it over-counts on a same-topic
+   change, as the first live run showed. Use it for a quick pass, not a trusted
+   number.
+
+**The mechanism-judge also rescues a *contaminated* known-good.** The seed's
+known-good (the #180 fix) is not actually defect-free — reviewing it surfaced two
+real residual gaps ([#188](https://github.com/agent-lore/lithos-loom/issues/188),
+[#189](https://github.com/agent-lore/lithos-loom/issues/189)). Those are *different*
+mechanisms, so the judge rejects them → the false-positive measurement stays
+meaningful without needing a perfectly clean known-good.
 
 ### Metrics, K, and the pass bar
 
@@ -100,8 +115,9 @@ with the review function stubbed; only `lithos-loom eval review` does live runs.
 
 ## Deferred
 
-- Wiring an **agent LLM-judge** into the `eval review` CLI (the matcher already
-  supports it).
+- A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
+  its fix differing by *only* the defect) so the false-positive measurement is
+  meaningful even under `--no-judge`.
 - A few **mutation-style synthetic** defects (off-by-one, swapped ordering,
   dropped error path) for breadth alongside the real-escape cases.
 - Per-case **cost reporting** and a cheaper-than-full panel sampling mode.

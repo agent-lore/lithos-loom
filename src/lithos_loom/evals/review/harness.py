@@ -43,6 +43,9 @@ class CaseResult:
     passed: bool
 
 
+ReportSink = Callable[[str, str, int, dict], None]
+
+
 def run_case(
     case: Case,
     *,
@@ -51,17 +54,27 @@ def run_case(
     judge: Judge | None = None,
     review_fn: ReviewFn | None = None,
     known_good_runs: int | None = None,
+    report_sink: ReportSink | None = None,
 ) -> CaseResult:
     """Run *case* *k* times and aggregate the catch / severity / FP rates.
 
     *review_fn* defaults to the live review-only run; tests inject a stub.
+    *report_sink*, when given, receives every run's report JSON as
+    ``(case_id, variant, index, report)`` so per-run findings can be retained
+    for inspection (``variant`` is ``"buggy"`` / ``"known-good"``).
     """
     review = review_fn or live_review
 
+    def _review(head: str, variant: str, i: int) -> dict:
+        report = review(case, head)
+        if report_sink is not None:
+            report_sink(case.id, variant, i, report)
+        return report
+
     caught = 0
     severity_ok = 0
-    for _ in range(k):
-        score = score_run(case, review(case, case.head), judge=judge)
+    for i in range(k):
+        score = score_run(case, _review(case.head, "buggy", i), judge=judge)
         caught += int(score.caught)
         severity_ok += int(score.severity_correct)
 
@@ -72,8 +85,12 @@ def run_case(
     if case.known_good_head:
         j = known_good_runs if known_good_runs is not None else k
         flagged = sum(
-            int(score_run(case, review(case, case.known_good_head), judge=judge).caught)
-            for _ in range(j)
+            int(
+                score_run(
+                    case, _review(case.known_good_head, "known-good", i), judge=judge
+                ).caught
+            )
+            for i in range(j)
         )
         false_positive_rate = flagged / j if j else 0.0
 

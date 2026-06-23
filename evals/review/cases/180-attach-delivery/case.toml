@@ -8,7 +8,11 @@ window. This case reviews the *removal* of the #180 fix — base is the fix
 (96b471b), so the diff strips the delivering-phase guard. A correct review,
 given the #171 acceptance criteria, must flag that as a critical regression. The
 known-good pair reviews the actual #180 fix (base 96b471b .. head 18099f6), which
-ADDS the guard and should not be flagged.
+ADDS the guard. NOTE: the #180 fix is not fully defect-free — reviewing it
+surfaces two real residual gaps (#188 summary omits PR url, #189 crash-during-
+delivery hang), so the structured matcher over-counts here. The mechanism-judge
+(default) discriminates: those are DIFFERENT mechanisms and are rejected, so this
+case needs `--judge` for a trustworthy false-positive number.
 """
 repo = "."
 base = "18099f6b684fc09e0ad725d23819fc691249f131"

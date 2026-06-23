@@ -115,6 +115,22 @@ def test_no_known_good_means_zero_fp() -> None:
     assert result.false_positive_rate == 0.0
 
 
+def test_report_sink_receives_every_run() -> None:
+    fn = _review_fn([True, True])
+    calls: list = []
+
+    def sink(case_id: str, variant: str, i: int, report: dict) -> None:
+        calls.append((case_id, variant, i))
+
+    run_case(_case(), k=2, review_fn=fn, known_good_runs=2, report_sink=sink)
+    assert sorted(calls) == [
+        ("180-attach-delivery", "buggy", 0),
+        ("180-attach-delivery", "buggy", 1),
+        ("180-attach-delivery", "known-good", 0),
+        ("180-attach-delivery", "known-good", 1),
+    ]
+
+
 def test_base_for_selects_defect_vs_known_good_base() -> None:
     case = Case(
         id="c",

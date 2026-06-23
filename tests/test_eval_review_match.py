@@ -7,7 +7,11 @@ LLM-judge fallback is injected as a callable so these tests never call an agent.
 from __future__ import annotations
 
 from lithos_loom.evals.review.case import Case, Expected
-from lithos_loom.evals.review.match import match_expected, score_run
+from lithos_loom.evals.review.match import (
+    _structured_match,
+    match_expected,
+    score_run,
+)
 
 
 def _finding(
@@ -75,19 +79,57 @@ def test_keyword_match_in_rationale_without_file_in_files_list() -> None:
     assert m.caught is True
 
 
-def test_judge_fallback_catches_a_structural_miss() -> None:
-    produced = [_finding("critical", ["cli/develop.py"], "totally different wording")]
-    # structured miss (no keyword), but the judge affirms the mechanism
-    calls = []
+def test_judge_confirms_and_returns_the_matched_finding() -> None:
+    produced = [
+        _finding("critical", ["cli/develop.py"], "exits before delivery", fid="f-007")
+    ]
+    seen = {}
 
-    def judge(mechanism: str, findings: list[dict]) -> bool:
-        calls.append(mechanism)
-        return True
+    def judge(mechanism: str, findings: list[dict]) -> list[str]:
+        seen["mechanism"] = mechanism
+        seen["ids"] = [f["finding_id"] for f in findings]
+        return ["f-007"]
 
     m = match_expected(_EXPECTED, produced, judge=judge)
     assert m.caught is True
     assert m.method == "judge"
-    assert calls  # the judge was actually consulted
+    assert m.finding_id == "f-007"
+    assert m.severity_correct is True
+    # the judge saw the mechanism + every produced finding
+    assert seen["mechanism"] == _EXPECTED.mechanism
+    assert seen["ids"] == ["f-007"]
+
+
+def test_judge_vetoes_a_false_structural_hit() -> None:
+    # this finding structurally matches (file + keyword) but is a DIFFERENT
+    # defect — the judge keyed on the mechanism rejects it. This is the FP fix.
+    produced = [
+        _finding("critical", ["cli/develop.py"], "the approved-state delivery summary")
+    ]
+    assert _structured_match(_EXPECTED, produced[0]) is True  # would falsely match
+
+    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: [])
+    assert m.caught is False
+    assert m.method == "judge"
+
+
+def test_judge_rescues_a_keyword_less_finding() -> None:
+    # no keyword overlap (structural miss), but the judge affirms the mechanism
+    produced = [_finding("critical", ["cli/develop.py"], "premature exit", fid="f-009")]
+    assert _structured_match(_EXPECTED, produced[0]) is False
+
+    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: ["f-009"])
+    assert m.caught is True
+    assert m.finding_id == "f-009"
+
+
+def test_judge_match_below_min_severity_is_not_severity_correct() -> None:
+    produced = [
+        _finding("minor", ["cli/develop.py"], "exits before delivery", fid="f-1")
+    ]
+    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: ["f-1"])
+    assert m.caught is True
+    assert m.severity_correct is False
 
 
 def test_no_judge_means_structural_only() -> None:
