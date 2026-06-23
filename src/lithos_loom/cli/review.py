@@ -20,8 +20,12 @@ import typer
 from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
+from lithos_loom.plugins.story_develop.personas import canonical_personas
+from lithos_loom.plugins.story_develop.profiles import CANONICAL_PROFILES
 from lithos_loom.plugins.story_develop.review_only import review_change
 from lithos_loom.plugins.story_develop.review_resolve import resolve_change
+
+_KNOWN_PROFILES = tuple(p.name for p in CANONICAL_PROFILES)
 
 
 def review_command(
@@ -60,6 +64,13 @@ def review_command(
     config: Path | None = typer.Option(None, "--config", help="Host config path."),
 ) -> None:
     """Run the reviewer panel + deterministic gate against an existing change."""
+    # Fail closed on an unknown profile rather than silently running `standard`
+    # while mislabeling the report (the resolved-profile contract — get_profile
+    # falls back defensively, so we must validate the explicit name here).
+    if profile not in _KNOWN_PROFILES:
+        raise typer.BadParameter(
+            f"unknown profile {profile!r}; known: {', '.join(_KNOWN_PROFILES)}"
+        )
     repo = repo or Path.cwd()
     host = load_config(config)
 
@@ -111,10 +122,24 @@ def _acceptance_criteria(
 def _reviewers(profile: str, reviewer: list[str] | None) -> tuple[ReviewerSpec, ...]:
     """Explicit ``--reviewer`` names win; otherwise the profile's persona panel.
 
-    Falls back to an empty tuple (``DevelopConfig`` then uses its built-in single
-    reviewer) for a gate-only profile.
+    A ``--reviewer NAME`` resolves to its **canonical persona** (#137 — engine,
+    block threshold, effort, focus prompt baked in), matching the daemon's
+    resolver; an unknown name fails closed. With no override, the profile's
+    persona panel drives the run (empty tuple for a gate-only profile, so
+    ``DevelopConfig`` uses its built-in reviewer).
     """
     if reviewer:
-        return tuple(ReviewerSpec(name=name) for name in reviewer)
+        registry = canonical_personas()
+        specs: list[ReviewerSpec] = []
+        for name in reviewer:
+            spec = registry.get(name)
+            if spec is None:
+                raise typer.BadParameter(
+                    f"unknown reviewer persona {name!r}; "
+                    f"known: {', '.join(sorted(registry))}"
+                )
+            if spec not in specs:
+                specs.append(spec)
+        return tuple(specs)
     panel = profile_panel(profile, [])
     return panel if panel is not None else ()

@@ -112,7 +112,31 @@ def test_reviewer_override_and_profile(stubs: dict) -> None:
     )
     assert result.exit_code == 0, result.output
     assert stubs["config"].review_profile == "thorough"
-    assert [r.name for r in stubs["config"].reviewers] == ["correctness"]
+    # --reviewer resolves to the CANONICAL persona (codex + focus prompt),
+    # not a bare generic reviewer.
+    specs = stubs["config"].reviewers
+    assert [r.name for r in specs] == ["correctness"]
+    assert specs[0].tool == "codex"
+    assert specs[0].system_prompt  # the correctness focus brief is baked in
+
+
+def test_unknown_profile_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--profile", "thorogh"]
+    )
+    assert result.exit_code != 0
+    assert "unknown profile" in result.output.lower()
+    # the live review must NOT run under a silently-substituted profile
+    assert "config" not in stubs
+
+
+def test_unknown_reviewer_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--reviewer", "corectness"]
+    )
+    assert result.exit_code != 0
+    assert "unknown reviewer" in result.output.lower()
+    assert "config" not in stubs
 
 
 def test_json_output_written(stubs: dict, tmp_path: Path) -> None:
