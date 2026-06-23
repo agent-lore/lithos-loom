@@ -64,11 +64,15 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         "remove",
         lambda p, force=False: state["removed"].append(p),
     )
-    monkeypatch.setattr(
-        review_only.containers,
-        "start_container",
-        lambda cmd: state["started"].append(cmd),
-    )
+
+    def _start(cmd):
+        # capture whether the RO worktree's handoff mountpoint exists yet — the
+        # reviewer container mounts handoff_dir at /workspace/.handoff and docker
+        # cannot create that mountpoint inside a read-only /workspace.
+        state["handoff_at_start"] = (wt_path / ".handoff").is_dir()
+        state["started"].append(cmd)
+
+    monkeypatch.setattr(review_only.containers, "start_container", _start)
     monkeypatch.setattr(
         review_only.containers,
         "stop_container",
@@ -179,3 +183,14 @@ def test_keep_worktree_retains_it(harness: dict, tmp_path: Path) -> None:
     config = _config(tmp_path)
     review_only.review_change(config, _CHANGE, keep_worktree=True)
     assert harness["removed"] == []
+
+
+def test_handoff_mountpoint_created_before_containers_start(
+    harness: dict, tmp_path: Path
+) -> None:
+    """The reviewer worktree mounts RO, so /workspace/.handoff must already exist
+    as a mountpoint before the container starts (the develop loop gets this free
+    from the RW coder container; review-only has no coder)."""
+    config = _config(tmp_path)
+    review_only.review_change(config, _CHANGE)
+    assert harness["handoff_at_start"] is True

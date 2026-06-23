@@ -23,7 +23,7 @@ import logging
 from ...runner import worktree
 from . import containers
 from .check_set import CheckSetResult
-from .config import DevelopConfig, is_valid_reviewer_name
+from .config import HANDOFF_MOUNT_NAME, DevelopConfig, is_valid_reviewer_name
 from .develop import (
     _build_run_cmd,
     _PauseBudget,
@@ -97,6 +97,13 @@ def review_change(
         wt,
         change.head_sha[:12],
     )
+
+    # Reviewer containers mount the worktree READ-ONLY and bind the handoff dir
+    # at /workspace/.handoff — docker cannot create that mountpoint inside a RO
+    # /workspace, so it must already exist in the worktree. In the develop loop
+    # the RW coder container (started first) creates it; review-only has no
+    # coder, so create it here before the RO reviewers start.
+    (wt / HANDOFF_MOUNT_NAME).mkdir(parents=True, exist_ok=True)
 
     reviewers: list[_ReviewerState] = []
     for spec in specs:
