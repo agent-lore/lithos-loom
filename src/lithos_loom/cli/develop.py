@@ -57,6 +57,13 @@ develop_app = typer.Typer(
     no_args_is_help=True,
 )
 
+# `develop review` (#154): run the panel + gate on an existing change. Registered
+# here (not a read-only observability command) so it shares the `develop`
+# namespace; the implementation lives in `cli/review.py`.
+from lithos_loom.cli.review import review_command  # noqa: E402
+
+develop_app.command("review")(review_command)
+
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
 # Active-agent label when docker is unavailable: we can't tell which (if any)

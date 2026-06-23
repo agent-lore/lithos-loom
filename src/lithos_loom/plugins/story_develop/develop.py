@@ -543,6 +543,56 @@ def _merge_check_sets(
     return CheckSetResult(results=base.results + extra.results)
 
 
+def check_result_blocks(
+    r: CheckResult,
+    gate_ledger: GateLedger | None,
+    threshold: str = DEFAULT_BLOCK_THRESHOLD,
+) -> bool:
+    """Whether a single **required** check holds approval (#140, ADR §4/§5).
+
+    The per-result core of :func:`gate_floor_blocks`, factored out so review-only
+    mode (#154) can report each check's block decision with the *same* logic the
+    floor uses — one decision, no drift between the develop loop and review-only.
+
+    Unlike :meth:`CheckResult.passed` (raw exit code), an adapter-backed required
+    check (ruff / bandit / pip-audit) reads its verdict from the finding
+    **ledger's mapped severity** at *threshold* — the exit code never decides
+    approval for a finding-producing tool (ADR §5/#132 finding-2); an adapter that
+    exited red with no open findings is treated as having failed to run and blocks
+    (#167 floor-liveness). A check with no adapter (pyright / pytest / coverage /
+    semgrep) still reads the raw exit code. An **informational** check never blocks
+    (returns ``False``) even though its findings share *gate_ledger*. An
+    expected-but-absent or timed-out required check blocks structurally; an infra
+    ``errored`` skip and a declared ``n_a`` never block.
+    """
+    if r.check.state != "required":
+        return False
+    outcome = r.execution_outcome
+    if outcome in ("errored", "n_a"):
+        return False
+    if outcome in ("absent", "timed_out"):
+        return True
+    # Ran: the tool decides how to read the verdict. Resolve the real tool past
+    # any `uv run` prefix (#165) so a uv-wrapped adapter (`uv run pip-audit`) is
+    # detected — `command_tool` is "" for an empty command, so a reorder can never
+    # hit ``"".split()[0]``.
+    tool = gate_adapters.command_tool(r.check.command)
+    if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
+        if any(f.check == r.check.name for f in gate_ledger.blocking(threshold)):
+            return True
+        # Floor-liveness (#167): an adapter exits clean via `--exit-zero` / a clean
+        # scan, so a required adapter check that exited RED with NO open findings
+        # for it FAILED TO RUN (spawn / crash / un-parseable output) and must block
+        # — the ledger-severity read alone can't tell "ran clean" (exit 0, empty)
+        # from "failed to run" (red, empty). apply_round closes a check's findings
+        # only when it ran, so a failed run leaves zero open findings; a clean
+        # exit-0 run or below-threshold open findings (the tool ran) still pass.
+        ran_ok = r.gate is not None and r.gate.passed
+        has_open = any(f.check == r.check.name for f in gate_ledger.open_findings())
+        return not ran_ok and not has_open
+    return r.gate is None or not r.gate.passed
+
+
 def gate_floor_blocks(
     check_set: CheckSetResult | None,
     gate_ledger: GateLedger | None,
@@ -550,56 +600,18 @@ def gate_floor_blocks(
 ) -> bool:
     """Whether the deterministic floor blocks approval (#140, ADR §4/§5).
 
-    Returns ``True`` iff a **required** check blocks. Unlike
-    :meth:`CheckSetResult.blocking_passed` (raw exit code), an adapter-backed
-    required check (ruff / bandit / pip-audit) reads its verdict from the finding
-    **ledger's mapped severity** at *threshold* — the exit code never decides
-    approval for a finding-producing tool (ADR §5/#132 finding-2); an adapter that
-    exited red with no open findings is treated as having failed to run and blocks
-    (#167 floor-liveness). A check with no adapter (pyright / pytest / coverage /
-    semgrep) still reads the raw exit code.
-
-    Only ``required`` checks count, so an **informational** check never blocks even
-    though its findings share *gate_ledger* — this is what keeps `sast` (bandit),
-    informational on the default `standard` profile, from blocking the default. An
-    expected-but-absent or timed-out required check blocks structurally (the
-    timed-out branch is essential: an adapter check that timed out produced no
-    findings, so the ledger rule alone would wrongly pass it). An infra ``errored``
-    skip and a declared ``n_a`` never block. A ``None`` check-set (markerless repo)
-    never blocks.
+    Returns ``True`` iff any **required** check blocks — see
+    :func:`check_result_blocks` for the per-check rule. A ``None`` check-set
+    (markerless repo) never blocks. Only ``required`` checks count, so an
+    **informational** check never blocks even though its findings share
+    *gate_ledger* — this is what keeps `sast` (bandit), informational on the
+    default `standard` profile, from blocking the default.
     """
     if check_set is None:
         return False
-    for r in check_set.results:
-        if r.check.state != "required":
-            continue
-        outcome = r.execution_outcome
-        if outcome in ("errored", "n_a"):
-            continue
-        if outcome in ("absent", "timed_out"):
-            return True
-        # Ran: the tool decides how to read the verdict. Resolve the real tool past
-        # any `uv run` prefix (#165) so a uv-wrapped adapter (`uv run pip-audit`) is
-        # detected — `command_tool` is "" for an empty command, so a reorder can never
-        # hit ``"".split()[0]``.
-        tool = gate_adapters.command_tool(r.check.command)
-        if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
-            if any(f.check == r.check.name for f in gate_ledger.blocking(threshold)):
-                return True
-            # Floor-liveness (#167): an adapter exits clean via `--exit-zero` / a clean
-            # scan, so a required adapter check that exited RED with NO open findings
-            # for it FAILED TO RUN (spawn / crash / un-parseable output) and must block
-            # — the ledger-severity read alone can't tell "ran clean" (exit 0, empty)
-            # from "failed to run" (red, empty). apply_round closes a check's findings
-            # only when it ran, so a failed run leaves zero open findings; a clean
-            # exit-0 run or below-threshold open findings (the tool ran) still pass.
-            ran_ok = r.gate is not None and r.gate.passed
-            has_open = any(f.check == r.check.name for f in gate_ledger.open_findings())
-            if not ran_ok and not has_open:
-                return True
-        elif r.gate is None or not r.gate.passed:
-            return True
-    return False
+    return any(
+        check_result_blocks(r, gate_ledger, threshold) for r in check_set.results
+    )
 
 
 def _write_check_output(round_dir: Path, check: Check, gate: GateResult | None) -> None:

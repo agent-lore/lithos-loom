@@ -76,3 +76,57 @@ def test_git_common_dir_is_main_repo_git(tmp_git_repo: Path, tmp_path: Path) -> 
 def test_git_common_dir_rejects_non_worktree(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         worktree.git_common_dir(tmp_path / "nope")
+
+
+# --- create_at: materialise a worktree AT an existing commit (#154) ----------
+
+
+def _sha(path: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=path, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _add_commit(repo: Path, filename: str, content: str) -> str:
+    (repo / filename).write_text(content)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", f"add {filename}"], cwd=repo, check=True)
+    return _sha(repo, "HEAD")
+
+
+def test_create_at_checks_out_detached_at_ref(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """Review-only materialises a worktree AT the change head (detached), unlike
+    ``create`` which branches fresh off a base."""
+    first = _sha(tmp_git_repo, "HEAD")
+    _add_commit(tmp_git_repo, "feature.txt", "the change\n")
+
+    wt = worktree.create_at(tmp_git_repo, first, "review pr 1", parent=tmp_path / "w")
+
+    assert wt.is_dir()
+    assert wt.parent == tmp_path / "w"
+    # HEAD is exactly the requested commit, and it is DETACHED (no branch)
+    assert _sha(wt, "HEAD") == first
+    assert _branch_of(wt) == "HEAD"
+    # the tree reflects that commit — the later file is absent
+    assert not (wt / "feature.txt").exists()
+
+
+def test_create_at_reflects_head_ref(tmp_git_repo: Path, tmp_path: Path) -> None:
+    head = _add_commit(tmp_git_repo, "feature.txt", "the change\n")
+    wt = worktree.create_at(tmp_git_repo, head, "review", parent=tmp_path / "w")
+    assert _sha(wt, "HEAD") == head
+    assert (wt / "feature.txt").read_text() == "the change\n"
+
+
+def test_create_at_is_unique(tmp_git_repo: Path, tmp_path: Path) -> None:
+    head = _sha(tmp_git_repo, "HEAD")
+    a = worktree.create_at(tmp_git_repo, head, "task", parent=tmp_path / "w")
+    b = worktree.create_at(tmp_git_repo, head, "task", parent=tmp_path / "w")
+    assert a != b
+
+
+def test_create_at_rejects_unknown_ref(tmp_git_repo: Path, tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError):
+        worktree.create_at(tmp_git_repo, "deadbeef" * 5, "task", parent=tmp_path / "w")
