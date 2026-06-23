@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import fields
 from pathlib import Path
@@ -30,6 +31,9 @@ def _make_run(
     run_title: str | None = None,
     rounds: dict[int, list[str]] | None = None,
     conversation: str | None = None,
+    status: str | None = None,
+    branch: str | None = None,
+    delivered: bool | None = None,
 ) -> Path:
     run_dir = work_dir / task_id / run_id
     (run_dir / "handoff").mkdir(parents=True)
@@ -53,6 +57,29 @@ def _make_run(
             )
     if conversation is not None:
         (run_dir / "conversation.md").write_text(conversation)
+    if status is not None:
+        # the terminal state.json the plugin writes alongside conversation.md
+        max_round = max(rounds or {0: []}, default=0)
+        (run_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "status": status,
+                    "run_id": run_id,
+                    "rounds": max_round,
+                    "branch": branch or f"feat/{task_id}",
+                }
+            )
+        )
+    # The plugin's final contract output: the daemon writes result.json into the
+    # SHARED per-task dir AFTER post-approval PR delivery (deliver() runs once
+    # develop() returns). It — not the bare state.json verdict — is the "fully
+    # done" signal for an approved run. Default: an approved run is delivered.
+    if delivered is None:
+        delivered = status == "approved"
+    if delivered:
+        (work_dir / task_id / "result.json").write_text(
+            json.dumps({"status": "succeeded", "task_id": task_id})
+        )
     return run_dir
 
 
@@ -216,17 +243,118 @@ def test_agent_state_distinguishes_no_docker_from_done(
     assert develop._agent_state(info) == "done"  # docker present, no containers
 
 
-def test_still_running_predicate(tmp_path: Path) -> None:
-    rd = tmp_path / "run"
-    rd.mkdir()
+def test_run_phase_classification(tmp_path: Path) -> None:
+    rd = tmp_path / "t-1" / "run"
+    rd.mkdir(parents=True)
     running = [develop.ContainerStatus("n", "coder", "Up", True)]
     exited = [develop.ContainerStatus("n", "coder", "Exited", False)]
-    assert develop._still_running(rd, running) is True
-    assert develop._still_running(rd, exited) is False
-    # docker absent (None): live until conversation.md appears (or dir reaped)
-    assert develop._still_running(rd, None) is True
-    (rd / "conversation.md").write_text("done")
-    assert develop._still_running(rd, None) is False
+    none: dict | None = None  # no recorded outcome yet
+    approved = {"status": "approved"}
+    failed = {"status": "failed"}
+    # docker present: live while a container runs
+    assert develop._run_phase(rd, running, none, seen_container=True) == "running"
+    # startup window: zero containers and none seen yet → keep following (the
+    # old container-liveness check exited here, the bug this fixes)
+    assert develop._run_phase(rd, [], none, seen_container=False) == "running"
+    # a seen container gone with no recorded outcome yet → ambiguous (teardown
+    # window vs crash); the caller grace-polls before deciding
+    assert develop._run_phase(rd, exited, none, seen_container=True) == "vanished"
+    # docker absent (None): live until the outcome lands (or the dir is reaped)
+    assert develop._run_phase(rd, None, none, seen_container=False) == "running"
+    # a NON-approved terminal status has no post-dialogue work (deliver() runs
+    # only for approved) → terminal the moment its state.json lands.
+    assert develop._run_phase(rd, exited, failed, seen_container=True) == "terminal"
+    # an APPROVED verdict is NOT terminal while PR delivery is still pending — in
+    # daemon mode deliver() (push + Copilot + result.json) runs AFTER develop()
+    # writes state.json, so keying terminal on the bare verdict re-opens the #171
+    # false-done window. Until the run's result.json lands it is "delivering".
+    for containers, seen in ((exited, True), (running, True), (None, False)):
+        phase = develop._run_phase(rd, containers, approved, seen_container=seen)
+        assert phase == "delivering"
+    # this run's result.json (succeeded) lands in the shared per-task dir → done
+    (rd.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
+    # docker absent + the run dir reaped on success → terminal (nothing to read)
+    shutil.rmtree(rd)
+    assert develop._run_phase(rd, None, none, seen_container=False) == "terminal"
+
+
+def test_run_phase_approved_ignores_stale_failed_result_json(tmp_path: Path) -> None:
+    # The shared per-task result.json can be a stale leftover from a PRIOR
+    # retained run (a succeeded run's whole work dir is reaped, so a surviving
+    # result.json is necessarily a non-success). It must NOT be mistaken for THIS
+    # approved run's delivery — else the false-done window reopens on a retry.
+    rd = tmp_path / "t-1" / "r2"
+    rd.mkdir(parents=True)
+    (rd / "state.json").write_text(json.dumps({"status": "approved"}))
+    (rd.parent / "result.json").write_text(json.dumps({"status": "failed"}))  # stale
+    approved = {"status": "approved"}
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "delivering"
+    # this run's own delivery writes a succeeded result.json → terminal
+    (rd.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
+
+
+def test_recover_reaped_outcome_delegates_to_completion_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # correctness/f-003: a reaped (success-cleaned) run's outcome is recovered
+    # from the completion store, keyed by this run id (so an explicit
+    # --idempotency-key is found too — the run-id binding lives in
+    # idempotency.lookup_completed_for_run).
+    run_dir = tmp_path / "t-1" / "r1"
+    run_dir.mkdir(parents=True)
+    seen: dict[str, tuple[str, str]] = {}
+
+    def fake_lookup(task_id: str, run_id: str) -> dict | None:
+        seen["args"] = (task_id, run_id)
+        return {"task_id": task_id, "status": "succeeded"}
+
+    monkeypatch.setattr(develop, "lookup_completed_for_run", fake_lookup)
+    assert develop._recover_reaped_outcome(run_dir) == {"status": "approved"}
+    assert seen["args"] == ("t-1", "r1")  # looked up by task id + run id
+    # no matching record → nothing to recover
+    monkeypatch.setattr(develop, "lookup_completed_for_run", lambda t, r: None)
+    assert develop._recover_reaped_outcome(run_dir) is None
+
+
+def test_iter_new_handoffs_caps_count_per_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # security/f-003: a flood of agent-written handoff files must not all be read
+    # in one poll; the batch is capped and the remainder surfaces on later polls.
+    monkeypatch.setattr(develop, "_MAX_HANDOFFS_PER_POLL", 3)
+    hd = tmp_path / "handoff"
+    hd.mkdir()
+    for i in range(5):
+        (hd / f"round_01_review_r{i}.md").write_text("body")
+    pairs = develop._iter_new_handoffs(hd, set())
+    real = [(n, b) for n, b in pairs if n.startswith("round_")]
+    assert len(real) == 3  # capped, not all 5 slurped at once
+    assert any("more handoffs" in n for n, _ in pairs)  # overflow notice present
+    # the remainder surfaces once the first batch is marked seen (no loss)
+    seen = {n for n, _ in real}
+    more = [
+        n for n, _ in develop._iter_new_handoffs(hd, seen) if n.startswith("round_")
+    ]
+    assert len(more) == 2
+
+
+def test_read_handoff_bounds_size_and_decodes_leniently(tmp_path: Path) -> None:
+    # f-002: an oversized agent-written handoff must be read bounded, not slurped.
+    p = tmp_path / "h.md"
+    p.write_bytes(b"A" * (develop._MAX_HANDOFF_BYTES + 5000))
+    body = develop._read_handoff(p)
+    assert "truncated" in body
+    assert body.count("A") == develop._MAX_HANDOFF_BYTES  # capped, not the full file
+    # invalid utf-8 (an agent can write arbitrary bytes) must not raise
+    p.write_bytes(b"\xff\xfe ok")
+    assert "ok" in develop._read_handoff(p)
+
+
+def test_sanitize_strips_control_keeps_tab_and_newline() -> None:
+    # f-001: ESC (0x1b) and BEL (0x07) stripped; TAB/LF preserved.
+    assert develop._sanitize("a\x1b[31mb\x07\n\tc") == "a[31mb\n\tc"
 
 
 # ── commands ───────────────────────────────────────────────────────────
@@ -390,7 +518,7 @@ def test_attach_once_snapshot(
     patched: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["code-quality"]})
-    develop.develop_attach(key="t-1", config=None, once=True)
+    develop.develop_attach(key="t-1", config=None, once=True, wait=False, stream=False)
     out = capsys.readouterr().out
     assert "attached to run r1" in out
     assert "round_01_coder_done.md" in out  # handoff printed in the snapshot
@@ -401,18 +529,19 @@ def test_attach_follows_handoffs_when_docker_absent(
 ) -> None:
     # Regression: docker absent must NOT make attach exit instantly as "done".
     # A finished run (conversation.md present) still prints its handoffs and
-    # terminates via the file-based end signal.
+    # terminates via the file-based end signal, then its outcome summary.
     _make_run(
         patched,
         task_id="t-1",
         run_id="r1",
         rounds={1: ["code-quality"]},
         conversation="done",
+        status="approved",
     )
-    develop.develop_attach(key="r1", config=None, once=False)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
     out = capsys.readouterr().out
     assert "round_01_coder_done.md" in out  # handoffs followed despite no docker
-    assert "not running" in out
+    assert "approved" in out  # terminal-state outcome summary
 
 
 def test_prune_removes_finished_keeps_inflight_when_docker_absent(
@@ -534,16 +663,21 @@ def test_prune_json_shape_and_empty(
     assert rows[0]["run_id"] == "rr" and rows[0]["pruned"] is False
 
 
-def test_attach_follows_until_containers_stop(
+def test_attach_stops_when_seen_containers_vanish_without_marker(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A run whose seen agent containers disappear and never record an outcome (a
+    # hard crash) must not hang the follow forever: after the teardown grace
+    # window elapses with no state.json, it stops and reports the missing
+    # outcome rather than looping.
     monkeypatch.setattr(develop.time, "sleep", lambda s: None)  # no real wait
+    monkeypatch.setattr(develop, "_TEARDOWN_GRACE_POLLS", 2)  # short grace for the test
     _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["code-quality"]})
     polls = {"n": 0}
 
     def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
         polls["n"] += 1
-        running = polls["n"] == 1  # live on poll 1, stopped on poll 2
+        running = polls["n"] == 1  # live on poll 1, gone (and never returns) after
         return [
             develop.ContainerStatus(
                 "loom-develop-r1-coder", "coder", "Up" if running else "Exited", running
@@ -552,8 +686,388 @@ def test_attach_follows_until_containers_stop(
 
     monkeypatch.setattr(develop, "_run_containers", fake_containers)
     monkeypatch.setattr(develop, "_active_agent", lambda cs: "coder")
-    develop.develop_attach(key="r1", config=None, once=False)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
     out = capsys.readouterr().out
     assert "coder working" in out
     assert "round_01_coder_done.md" in out
-    assert "not running" in out
+    assert "without recording an outcome" in out  # crash outcome, not a hang
+
+
+def test_attach_waits_through_teardown_window_for_recorded_outcome(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-001): the plugin force-removes its agent
+    # containers BEFORE it computes commits and writes the terminal state.json,
+    # so a normally-completing run spends a window with no containers and no
+    # outcome. attach must grace-poll through that window and report the real
+    # recorded outcome — not declare a crash on container disappearance.
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    polls = {"n": 0}
+
+    def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
+        polls["n"] += 1
+        if polls["n"] == 1:  # agent working
+            return [
+                develop.ContainerStatus("loom-develop-r1-coder", "coder", "Up", True)
+            ]
+        if polls["n"] in (2, 3):  # teardown window: containers gone, no outcome yet
+            return []
+        # the plugin finishes writing the terminal outcome + delivers (result.json)
+        (run_dir / "conversation.md").write_text("log")
+        (run_dir / "state.json").write_text(
+            json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
+        )
+        (run_dir.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+        return []
+
+    monkeypatch.setattr(develop, "_run_containers", fake_containers)
+    monkeypatch.setattr(develop, "_active_agent", lambda cs: "coder" if cs else None)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out and "after 1 round" in out  # real outcome
+    assert "without recording an outcome" not in out  # NOT misreported as a crash
+
+
+def test_attach_wait_waits_for_recorded_outcome_not_just_the_log(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-002): conversation.md is written BEFORE
+    # state.json. --wait must wait for the recorded outcome (state.json), not
+    # stop at the log and exit non-zero for an approved run.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    (run_dir / "conversation.md").write_text("log")  # log present, NO state.json yet
+    sleeps = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 2:  # the outcome lands a couple polls later
+            (run_dir / "state.json").write_text(
+                json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
+            )
+            (run_dir.parent / "result.json").write_text(
+                json.dumps({"status": "succeeded"})
+            )
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    # docker absent (patched) → terminal keys on the recorded outcome, not the log.
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out  # exited 0 (no SystemExit) and reported the outcome
+
+
+def test_attach_follows_through_startup_window_to_terminal_state(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The headline behaviour: attach follows to TERMINAL STATE, not agent
+    # liveness. During the startup window docker reports zero containers — the
+    # old check exited instantly as "done". Now it keeps polling through startup
+    # → working → teardown, then prints the recorded outcome summary.
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1")  # no handoffs yet
+    polls = {"n": 0}
+
+    def fake_containers(run_id: str) -> list[develop.ContainerStatus]:
+        polls["n"] += 1
+        if polls["n"] == 1:
+            return []  # startup window: handoff dir seeded, containers not up
+        if polls["n"] == 2:
+            (run_dir / "handoff" / "round_01_coder_done.md").write_text(
+                "## Status: LGTM\nwork"
+            )
+            return [
+                develop.ContainerStatus("loom-develop-r1-coder", "coder", "Up", True)
+            ]
+        # run reaches terminal state: marker + state + result.json, containers reaped
+        (run_dir / "conversation.md").write_text("log")
+        (run_dir / "state.json").write_text(
+            json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
+        )
+        (run_dir.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+        return []
+
+    monkeypatch.setattr(develop, "_run_containers", fake_containers)
+    monkeypatch.setattr(develop, "_active_agent", lambda cs: "coder" if cs else None)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "starting up" in out  # did NOT exit during the startup window
+    assert "coder working" in out
+    assert "round_01_coder_done.md" in out
+    assert "approved" in out and "after 1 round" in out  # outcome summary
+
+
+def test_attach_follows_through_delivery_window_then_terminates(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The HIGH-finding regression: in daemon mode develop() writes state.json the
+    # instant the dialogue approves, but PR delivery + result.json happen AFTER
+    # (deliver() runs once develop() returns). attach must NOT treat the bare
+    # approved verdict as terminal — it follows through a distinct "delivering
+    # PR…" phase until result.json lands, or it re-creates the #171 false-done bug.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,  # approved verdict recorded; PR delivery still pending
+    )
+    sleeps = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 2:  # delivery finishes a couple polls later
+            (run_dir.parent / "result.json").write_text(
+                json.dumps({"status": "succeeded"})
+            )
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "delivering PR" in out  # the AC#3 delivery phase is actually observable
+    assert "approved" in out  # and it DID follow through to the real outcome
+
+
+def test_attach_wait_does_not_exit_before_delivery_completes(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --wait must block through PR delivery, not exit 0 the instant the dialogue
+    # approves — deliver() can still be running (or fail) afterward, so an early
+    # exit would make `attach --wait && gh pr view` race a not-yet-created PR.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,
+    )
+    polls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        polls["n"] += 1
+        if polls["n"] == 3:
+            (run_dir.parent / "result.json").write_text(
+                json.dumps({"status": "succeeded"})
+            )
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert polls["n"] >= 3  # blocked through the delivery window, did not exit early
+    assert "approved" in out
+
+
+def test_attach_wait_blocks_until_run_appears(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AC: --wait used right after dispatch (before the run dir is seeded) blocks
+    # until the run appears, instead of failing immediately with "no run found".
+    _make_run(
+        patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]}, status="approved"
+    )
+    real_resolve = develop._resolve
+    calls = {"n": 0}
+
+    def slow_resolve(work_dir: Path, key: str) -> Path | None:
+        calls["n"] += 1
+        return None if calls["n"] < 3 else real_resolve(work_dir, key)
+
+    monkeypatch.setattr(develop, "_resolve", slow_resolve)
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert calls["n"] >= 3  # polled for the run to appear rather than failing
+    assert "approved" in out  # then followed it to the terminal outcome
+
+
+def test_attach_wait_is_quiet_and_summarises_outcome(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --wait suppresses the play-by-play and prints only the outcome line.
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        conversation="log",
+        status="approved",
+        branch="feat/win",
+    )
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "round_01_coder_done.md" not in out  # no streamed handoffs
+    assert "approved" in out and "feat/win" in out
+
+
+def test_attach_wait_exits_nonzero_when_not_approved(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_run(patched, task_id="t-1", run_id="r1", conversation="log", status="failed")
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(
+            key="r1", config=None, once=False, wait=True, stream=False
+        )
+    assert exc.value.code == 1
+    assert "failed" in capsys.readouterr().out
+
+
+def test_attach_wait_captures_outcome_before_workdir_is_reaped(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-003): the route-runner reaps an approved run's
+    # work dir immediately after the plugin exits. attach must capture the
+    # outcome at terminal-detection time, not re-read a since-deleted run_dir —
+    # which would misreport approved as a crash and make --wait exit 1.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        conversation="log",
+        status="approved",
+    )
+    real_read = develop._read_state
+    calls = {"n": 0}
+
+    def reaping_read(rd: Path) -> dict | None:
+        calls["n"] += 1
+        state = real_read(rd)
+        if calls["n"] == 1 and state and state.get("status"):
+            shutil.rmtree(rd, ignore_errors=True)  # the success reap, mid-follow
+        return state
+
+    monkeypatch.setattr(develop, "_read_state", reaping_read)
+    # approved → must NOT raise SystemExit (exit 0); reported from the snapshot
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out
+    assert "without recording an outcome" not in out
+    assert not run_dir.exists()  # the dir really was reaped during the follow
+
+
+def test_attach_wait_recovers_reaped_success_when_state_never_seen(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression (correctness/f-003 r4): attach can miss state.json entirely — a
+    # fast approved run writes it and the route-runner reaps the whole work dir
+    # between two polls. The outcome is then recovered from the host-persistent
+    # completion store (a source the route-runner never removes), so --wait
+    # reports approved and exits 0 instead of misreporting a crash + exit 1.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+
+    # state.json is NEVER written into the run dir (attach never observes it).
+    def reaping_sleep(_seconds: float) -> None:
+        shutil.rmtree(run_dir.parent, ignore_errors=True)  # route-runner success reap
+
+    monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
+    monkeypatch.setattr(
+        develop,
+        "lookup_completed_for_run",
+        lambda task_id, run_id: {
+            "task_id": task_id,
+            "status": "succeeded",
+            "artifacts": {"conversation_log": str(run_dir / "conversation.md")},
+        },
+    )
+    # approved (recovered) → must NOT raise SystemExit and must report approved
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out
+    assert "without recording an outcome" not in out
+    assert not run_dir.exists()  # the work dir really was reaped mid-follow
+
+
+def test_attach_wait_reaped_without_recoverable_record_is_not_a_false_crash(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A reaped run with no recoverable success record (e.g. a non-default
+    # idempotency key, or a failure reaped under retain_failed_workdirs=False)
+    # reports "work dir reaped" rather than the misleading "crashed?" line.
+    run_dir = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+
+    def reaping_sleep(_seconds: float) -> None:
+        shutil.rmtree(run_dir.parent, ignore_errors=True)
+
+    monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
+    monkeypatch.setattr(
+        develop, "lookup_completed_for_run", lambda task_id, run_id: None
+    )
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(
+            key="r1", config=None, once=False, wait=True, stream=False
+        )
+    assert exc.value.code == 1  # success unconfirmed → non-zero
+    out = capsys.readouterr().out
+    assert "work dir reaped" in out
+    assert "crashed" not in out
+
+
+def test_attach_stream_emits_jsonl_events(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        conversation="log",
+        status="approved",
+    )
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=True)
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    kinds = [e["event"] for e in events]
+    assert "handoff" in kinds
+    assert kinds[-1] == "outcome"  # terminal event last
+    outcome = events[-1]
+    assert outcome["status"] == "approved" and outcome["rounds"] == 1
+
+
+def test_attach_rejects_conflicting_modes(patched: Path) -> None:
+    # --once / --wait / --stream are mutually exclusive.
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(key="r1", config=None, once=True, wait=True)
+    assert exc.value.code == 2
+
+
+def test_attach_text_output_strips_handoff_escape_sequences(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression (security/f-001): handoff name + body are agent-writable, so the
+    # text view must strip terminal control/escape bytes (no forged/hidden
+    # output on the operator's terminal) while preserving the visible content.
+    run_dir = _make_run(
+        patched, task_id="t-1", run_id="r1", conversation="log", status="approved"
+    )
+    hd = run_dir / "handoff"
+    (hd / "round_01_coder_done.md").write_text("clean\x1b[2Jspoofed")
+    # ESC also smuggled into the reviewer-name segment of the filename
+    (hd / "round_01_review_cq\x1b[31m.md").write_text("review\x1b]0;title\x07body")
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=False)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out  # no escapes reach the terminal
+    assert "clean" in out and "spoofed" in out  # content preserved, just de-fanged
+
+
+def test_attach_stream_handoff_body_is_escape_safe_via_json(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --stream stays raw-fidelity but escape-safe: json.dumps encodes control
+    # bytes as \uXXXX, so no literal ESC reaches the consumer's terminal either.
+    run_dir = _make_run(
+        patched, task_id="t-1", run_id="r1", conversation="log", status="approved"
+    )
+    (run_dir / "handoff" / "round_01_coder_done.md").write_text("x\x1by")
+    develop.develop_attach(key="r1", config=None, once=False, wait=False, stream=True)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    handoff_events = [
+        json.loads(line)
+        for line in out.splitlines()
+        if line.strip() and json.loads(line).get("event") == "handoff"
+    ]
+    assert any(e["body"] == "x\x1by" for e in handoff_events)  # decoded value intact

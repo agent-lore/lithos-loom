@@ -146,6 +146,38 @@ def test_lookup_binds_record_to_expected_task_id(tmp_path: Path, monkeypatch) ->
     assert lookup_completed("shared-key") is not None
 
 
+def test_lookup_completed_for_run_finds_record_under_explicit_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """correctness/f-003: a success recorded under an explicit --idempotency-key
+    (not the task id) is still locatable by the run id embedded in the recorded
+    conversation-log path, so a reaped run's outcome can be recovered."""
+    monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(tmp_path / "store"))
+    run_dir = tmp_path / "work" / "t-1" / "r1"
+    payload = _completed_payload("t-1")
+    payload["artifacts"] = {"conversation_log": str(run_dir / "conversation.md")}
+    record_completion("explicit-key", payload)  # recorded NOT under the task id
+    # not findable via the task-id key path (the f-003 bug) ...
+    assert lookup_completed("t-1", expected_task_id="t-1") is None
+    # ... but the run-id scan finds it regardless of the recording key
+    assert idempotency.lookup_completed_for_run("t-1", "r1") == payload
+    # a different run id or task id does not match
+    assert idempotency.lookup_completed_for_run("t-1", "other-run") is None
+    assert idempotency.lookup_completed_for_run("t-2", "r1") is None
+
+
+def test_lookup_completed_for_run_ignores_unbound_and_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(tmp_path / "store"))
+    # a completed record without an artifacts.conversation_log can't be bound
+    record_completion("k", _completed_payload("t-1"))
+    assert idempotency.lookup_completed_for_run("t-1", "r1") is None
+    # a missing store dir yields None rather than raising
+    monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(tmp_path / "absent"))
+    assert idempotency.lookup_completed_for_run("t-1", "r1") is None
+
+
 def test_record_completion_prunes_store_to_bound(tmp_path: Path, monkeypatch) -> None:
     """security/f-002 (CWE-770): the store is bounded — each write prunes back to
     LITHOS_LOOM_IDEMPOTENCY_MAX_RECORDS so it cannot grow without limit."""

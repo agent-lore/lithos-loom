@@ -7,7 +7,11 @@ commands:
 * ``develop list`` — enumerate inspectable runs (run id, task, current round,
   which agent is active, container status, run dir).
 * ``develop attach <run-id|task-id>`` — follow a live run: round + active agent,
-  printing each handoff as it lands, until the run's containers stop.
+  printing each handoff as it lands, until the run reaches a terminal state (its
+  recorded outcome — ``state.json`` with a status, or, when the work dir was
+  reaped on success before a poll saw it, the outcome recovered from the
+  completion store), then a one-line outcome summary. ``--wait`` blocks quietly
+  for the outcome (exit non-zero unless approved); ``--stream`` emits JSONL events.
 * ``develop dump <run-id|task-id>`` — print the assembled conversation log so
   far.
 * ``develop prune`` — delete the on-disk run-state dirs of finished runs (the
@@ -35,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -44,6 +49,7 @@ import typer
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import handoff
+from lithos_loom.plugins.story_develop.idempotency import lookup_completed_for_run
 
 develop_app = typer.Typer(
     name="develop",
@@ -70,6 +76,30 @@ _CODER_DONE_RE = re.compile(r"^round_(\d+)_coder_done\.md$")
 _REVIEW_RE = re.compile(r"^round_(\d+)_review_(.+)\.md$")
 
 _ATTACH_POLL_SECONDS = 2.0
+# Grace after a run's agent containers vanish before we call it a crash. The
+# plugin force-removes its containers (containers.stop_container) *before* it
+# computes commits and writes the terminal state.json/conversation.md, so a
+# normally-completing run spends a short window with no containers and no
+# outcome yet. We keep polling for the outcome across that window; only if it
+# never lands do we report a crash — following terminal *state*, not liveness.
+_TEARDOWN_GRACE_SECONDS = 30.0
+_TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECONDS))
+
+# Handoff files are bind-mounted RW into agent containers (containers.py), so an
+# agent can write arbitrary bytes — both the body and (via the reviewer-name
+# segment) the filename. Treat them as adversarial: cap the read so one poisoned
+# multi-GB file can't OOM this observability process, and strip terminal control
+# bytes before echoing so a crafted handoff can't forge/hide output on the
+# operator's terminal. The JSON `--stream` path is escape-safe via json.dumps.
+_MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
+# Cap how many *new* handoffs we materialise in a single poll. A genuine round
+# adds a handful (1 coder + a few reviewers); an agent could otherwise drop
+# thousands of matching filenames into the RW mount, and reading them all at
+# once (count × ≤1 MiB) would balloon this process even with the per-file cap.
+# Overflow surfaces over subsequent polls (unprocessed files aren't marked seen).
+_MAX_HANDOFFS_PER_POLL = 64
+# C0 controls except TAB/LF, plus DEL and the C1 range (covers ESC 0x1b).
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 # ── run-dir model (pure; unit-tested) ──────────────────────────────────
@@ -300,17 +330,95 @@ def _agent_state(info: RunInfo) -> str:
     return "idle" if any(c.running for c in containers) else "done"
 
 
-def _still_running(run_dir: Path, containers: list[ContainerStatus] | None) -> bool:
-    """Whether ``attach`` should keep following.
+def _run_phase(
+    run_dir: Path,
+    containers: list[ContainerStatus] | None,
+    state: dict | None,
+    *,
+    seen_container: bool,
+) -> str:
+    """Classify the run for ``attach``: ``"running"`` / ``"delivering"`` /
+    ``"terminal"`` / ``"vanished"``.
 
-    With docker, the run is live while any agent container runs. Without docker
-    (``containers is None``), fall back to a file-based end signal so the
-    handoff view still follows: the run dir is reaped on success, and
-    ``conversation.md`` is written on a non-success end — either means done.
+    Terminal *state*, not agent *liveness*. The graceful terminal signal is the
+    run's recorded **outcome** — not container liveness and not ``conversation.md``
+    (the plugin writes the log *before* ``state.json``, so stopping on the log
+    would misreport an approved run). But the verdict in ``state.json`` is not the
+    whole story: ``develop()`` writes it the instant the dialogue ends, while in
+    daemon mode the **PR delivery** (branch push, Copilot round, ``result.json``)
+    all happen *after* it returns. So an **approved** verdict alone is NOT
+    terminal — exiting there is the #171 false-done window (attach quits while the
+    PR is still being pushed). We stay in ``"delivering"`` until this run's
+    ``result.json`` lands (or the work dir is reaped on success).
+
+    - ``"terminal"`` — a non-approved outcome is recorded, or an approved run's
+      delivery has completed (:func:`_delivery_complete`), or the run dir was
+      **reaped** (the route-runner removes it after applying the result, so its
+      absence is itself an end signal; the outcome is then recovered from the
+      completion store — see :func:`_recover_reaped_outcome`).
+    - ``"delivering"`` — the dialogue **approved** but post-approval PR delivery
+      is still in flight (``result.json`` not yet written, dir not yet reaped).
+      Keep following; the caller renders a distinct "delivering PR…" phase.
+    - ``"running"`` — an agent container is up, or we're still in the **startup
+      window** (no container seen yet), or docker is absent and the run dir is
+      still present (can't observe containers — keep following for the outcome).
+    - ``"vanished"`` — docker shows the agent containers, having been **seen**,
+      are now all gone but no outcome is recorded yet. Ambiguous: either the
+      normal teardown window before ``state.json`` is written, or a hard crash.
+      The caller grace-polls before deciding (see ``_TEARDOWN_GRACE_POLLS``).
+
+    *state* is the already-read ``state.json`` for this poll (passed in so the
+    caller can capture the exact dict it classified on, without a second read
+    that could race the work-dir reap).
     """
+    if state is not None and state.get("status"):
+        # An approved verdict still has PR delivery to do in daemon mode — not
+        # terminal until this run's result.json lands (or it's reaped on success,
+        # handled below). Every other terminal status has no post-dialogue work.
+        if state.get("status") == "approved" and not _delivery_complete(run_dir):
+            return "delivering"
+        return "terminal"
+    if not run_dir.is_dir():
+        return "terminal"  # reaped by the route-runner after applying the result
     if containers is None:
-        return run_dir.is_dir() and not (run_dir / "conversation.md").is_file()
-    return any(c.running for c in containers)
+        return "running"
+    if any(c.running for c in containers):
+        return "running"
+    return "vanished" if seen_container else "running"
+
+
+def _delivery_complete(run_dir: Path) -> bool:
+    """Whether an approved run's post-dialogue PR delivery has finished.
+
+    ``develop()`` writes ``state.json`` the moment the dialogue approves, but in
+    daemon mode the branch push, the Copilot round, and the ``result.json`` write
+    all happen AFTER it returns (``story_develop/__main__`` calls ``deliver()``
+    then ``write_result_atomically``). ``result.json`` — the plugin's final
+    contract output — is therefore the "fully delivered" signal. It lives in the
+    SHARED per-task dir (``run_dir.parent``); a ``"succeeded"`` status binds it to
+    THIS run, since a succeeded run's whole work dir is reaped — so any
+    ``result.json`` that survives there from a prior *retained* run is necessarily
+    a non-success and must not be mistaken for this run's delivery.
+    """
+    try:
+        data = json.loads((run_dir.parent / "result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("status") == "succeeded"
+
+
+def _wait_for_run(work_dir: Path, key: str) -> Path:
+    """Block (polling) until a run for *key* appears under *work_dir*.
+
+    For ``attach --wait`` invoked right after dispatching a task, before the
+    route-runner has created the run dir. ``Ctrl-C`` exits cleanly, like the
+    follow loop.
+    """
+    while True:
+        run_dir = _resolve(work_dir, key)
+        if run_dir is not None:
+            return run_dir
+        time.sleep(_ATTACH_POLL_SECONDS)
 
 
 def _is_finished(run_dir: Path) -> bool:
@@ -355,6 +463,126 @@ def _reap_empty_task_dir(task_dir: Path) -> None:
         return
     with contextlib.suppress(OSError):
         shutil.rmtree(task_dir)
+
+
+# Human phrasing for a finished run's terminal status (story_develop writes
+# these into state.json — see develop.py). Kept terse + greppable; an unknown
+# status falls through to its raw value.
+_OUTCOME_PHRASES = {
+    "approved": "approved",
+    "max_rounds": "NOT approved (max rounds reached)",
+    "failed": "failed",
+    "interrupted": "interrupted (re-run to retry)",
+    "stalled": "stopped (stalled)",
+    "disputed": "stopped (dispute needs human arbitration)",
+    "cost_exceeded": "stopped (cost ceiling reached)",
+}
+
+
+def _read_state(run_dir: Path) -> dict | None:
+    """The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
+
+    Written by the plugin only at run end, alongside ``conversation.md``.
+    """
+    try:
+        data = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+@dataclass
+class _Outcome:
+    """A run's terminal outcome, captured the moment ``attach`` detects it.
+
+    The follow loop snapshots this **before returning**, so the rendered summary
+    survives the route-runner reaping the work dir on success — re-reading the
+    (now-deleted) ``run_dir`` afterwards would misreport an approved run as a
+    crash (correctness/f-003).
+    """
+
+    state: dict | None = None  # parsed state.json (or recovered) at capture time
+    has_log: bool = False  # conversation.md present at capture time
+    reaped: bool = False  # run dir removed by the route-runner's success cleanup
+
+
+def _recover_reaped_outcome(run_dir: Path) -> dict | None:
+    """Recover a **reaped** run's outcome from the host-persistent completion store.
+
+    The route-runner removes the whole work dir on a succeeded result, taking
+    ``state.json`` with it — and a follow can miss the brief window where the
+    file exists (a poll lands before it is written, then the dir is gone by the
+    next poll). The plugin records that success in the idempotency store *before*
+    the dir is reaped, a source the route-runner never touches. The record is
+    keyed by the (possibly explicit ``--idempotency-key``) key, so it is located
+    by this run's id — bound to **this** run, not a prior success of the same
+    task. A match means the run was approved (the only success).
+    """
+    if lookup_completed_for_run(run_dir.parent.name, run_dir.name):
+        return {"status": "approved"}
+    return None
+
+
+def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> None:
+    """Snapshot the terminal outcome into *outcome* from the already-read *state*.
+
+    Done before the follow loop returns, while the result is still recoverable.
+    When the run dir has been reaped (success cleanup) with no ``state.json``
+    captured, the outcome is recovered from the completion store
+    (:func:`_recover_reaped_outcome`).
+    """
+    outcome.reaped = not run_dir.is_dir()
+    if state is None and outcome.reaped:
+        state = _recover_reaped_outcome(run_dir)
+    outcome.state = state
+    outcome.has_log = (run_dir / "conversation.md").is_file()
+
+
+def _approved(outcome: _Outcome) -> bool:
+    """Whether the run reached the only success status (``approved``)."""
+    return bool(outcome.state and outcome.state.get("status") == "approved")
+
+
+def _outcome_line(run_id: str, outcome: _Outcome) -> str:
+    """One-line outcome summary for a run that has reached a terminal state.
+
+    Prefers the recorded (or recovered) ``state.json`` status; then the bare
+    terminal marker (``conversation.md`` present but no status); then a reaped
+    run whose success could not be recovered; failing all, a crash.
+    """
+    state = outcome.state
+    if state and state.get("status"):
+        status = str(state["status"])
+        phrase = _OUTCOME_PHRASES.get(status, status)
+        parts = [f"── run {run_id} {phrase}"]
+        rounds = state.get("rounds")
+        if isinstance(rounds, int):
+            parts.append(f"after {rounds} round{'s' if rounds != 1 else ''}")
+        if state.get("branch"):
+            parts.append(f"on {state['branch']}")
+        return " ".join(parts)
+    if outcome.has_log:
+        return f"── run {run_id} finished (status not recorded)"
+    if outcome.reaped:
+        return f"── run {run_id} finished (work dir reaped; outcome not recovered)"
+    return f"── run {run_id} ended without recording an outcome (crashed?)"
+
+
+def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
+    """The ``--stream`` terminal event mirroring :func:`_outcome_line`."""
+    state = outcome.state
+    event: dict = {"event": "outcome", "run_id": run_id, "status": None}
+    if state and state.get("status"):
+        event["status"] = str(state["status"])
+        if isinstance(state.get("rounds"), int):
+            event["rounds"] = state["rounds"]
+        if state.get("branch"):
+            event["branch"] = str(state["branch"])
+    elif outcome.reaped:
+        event["reaped"] = True
+    elif not outcome.has_log:
+        event["crashed"] = True
+    return event
 
 
 def _fail(msg: str, code: int = 1) -> NoReturn:
@@ -557,54 +785,178 @@ def develop_attach(
     once: bool = typer.Option(  # noqa: B008
         False, "--once", help="Print one snapshot and exit (no follow)."
     ),
+    wait: bool = typer.Option(  # noqa: B008
+        False,
+        "--wait",
+        help="Block silently until the run reaches a terminal state, then print "
+        "only the outcome (exit non-zero unless approved).",
+    ),
+    stream: bool = typer.Option(  # noqa: B008
+        False,
+        "--stream",
+        help="Emit newline-delimited JSON events (state / handoff / outcome) for "
+        "machine consumption.",
+    ),
 ) -> None:
-    """Follow a live run: current round + active agent, printing handoffs as
-    they land, until the run ends. Read-only. When docker is unavailable it
-    still follows the handoff files (active agent shows as ``—``)."""
+    """Follow a live run until it reaches a **terminal state**, printing handoffs
+    as they land plus the current round + active agent, then a one-line outcome
+    summary. Following keys on terminal state, not agent liveness, so it spans
+    both the startup window before the first container and the commit / test-gate
+    / teardown after the last agent turn, grace-polling through the window where
+    the plugin has stopped its containers but not yet written the outcome. An
+    **approved** verdict is not yet the end in daemon mode — PR delivery (push +
+    Copilot round + ``result.json``) runs after the dialogue approves, shown as a
+    distinct "delivering PR…" phase — so attach follows through it instead of
+    exiting early. If the work dir is reaped on success before a poll observes the
+    result, the outcome is recovered from the plugin's completion store.
+    Read-only; ``Ctrl-C`` exits cleanly. When docker is unavailable it still
+    follows the handoff files (active agent shows as ``—``).
+
+    ``--once`` prints a single snapshot and exits. ``--wait`` blocks quietly —
+    first until the run appears (so it can be used immediately after dispatch),
+    then through to the terminal outcome — and prints only that outcome (exit
+    non-zero unless approved). ``--stream`` emits JSONL events. The three are
+    mutually exclusive.
+    """
+    chosen = [
+        flag
+        for flag, on in (("--once", once), ("--wait", wait), ("--stream", stream))
+        if on
+    ]
+    if len(chosen) > 1:
+        _fail(f"pass at most one of {' / '.join(chosen)}", code=2)
     try:
         cfg = load_config(config)
     except LithosLoomError as exc:
         _fail(str(exc))
     run_dir = _resolve(cfg.orchestrator.work_dir, key)
     if run_dir is None:
-        _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")
+        if wait:
+            # --wait may be used right after dispatch, before the route-runner
+            # has seeded the run dir — block until it appears rather than failing.
+            run_dir = _wait_for_run(cfg.orchestrator.work_dir, key)
+        else:
+            _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")
     info = _run_info(run_dir)
-    typer.echo(
+
+    if once:
+        typer.echo(_attach_header(info))
+        _print_snapshot(run_dir)
+        return
+
+    outcome = _Outcome()
+
+    if stream:
+        for event in _follow_events(run_dir, info, outcome):
+            typer.echo(json.dumps(event))
+        typer.echo(json.dumps(_outcome_event(info.run_id, outcome)))
+        return
+
+    if wait:
+        for _event in _follow_events(run_dir, info, outcome):
+            pass  # quiet — drain the follow, surface only the outcome
+        typer.echo(_outcome_line(info.run_id, outcome))
+        if not _approved(outcome):
+            sys.exit(1)
+        return
+
+    typer.echo(_attach_header(info))
+    for event in _follow_events(run_dir, info, outcome):
+        if event["event"] == "state":
+            typer.echo(event["label"])
+        else:  # handoff — sanitize agent-written name/body before the terminal
+            typer.echo(f"\n── {_sanitize(event['name'])}\n{_sanitize(event['body'])}")
+    typer.echo(_outcome_line(info.run_id, outcome))
+    typer.echo(f"── `lithos-loom develop dump {key}` for the full log")
+
+
+def _attach_header(info: RunInfo) -> str:
+    return (
         f"── attached to run {info.run_id} (task {info.task_id}"
         f"{f': {info.title}' if info.title else ''})"
     )
 
-    if once:
-        _print_snapshot(run_dir)
-        return
 
+def _follow_state(
+    run_dir: Path, containers: list[ContainerStatus] | None
+) -> tuple[str, int, str | None]:
+    """Human label, round, and active agent for the current poll while running."""
+    round_no = _round_and_reviewers(run_dir / "handoff")[0]
+    if containers is None:
+        return "── (docker unavailable — following handoffs only)", round_no, None
+    active = _active_agent(containers)
+    if active is not None:
+        return f"── round {round_no}: {active} working…", round_no, active
+    if any(c.running for c in containers):
+        return "── (between turns: commit / test gate / next prompt…)", round_no, None
+    return "── (starting up — waiting for agent containers…)", round_no, None
+
+
+def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[dict]:
+    """Yield follow events until the run reaches a terminal state.
+
+    Each event is a dict tagged by ``event``: ``state`` (label / round / agent,
+    re-emitted only when the label changes) or ``handoff`` (name / body, once
+    per file). The loop exits on terminal *state* — see :func:`_run_phase` — not
+    agent liveness, so it survives the startup window and the post-agent
+    teardown. When the agent containers vanish before the outcome is recorded
+    (the normal window where the plugin has stopped its containers but not yet
+    written ``state.json``) it grace-polls rather than declaring a crash. The
+    final handoffs are surfaced on the last poll before exit.
+
+    On exit it populates *outcome* from the ``state.json`` it classified on, so
+    the caller renders the summary from that snapshot — re-reading ``run_dir``
+    after the loop would race the route-runner reaping it on success
+    (correctness/f-003). ``state.json`` is read once per poll and reused for both
+    the classification and the capture, so the captured dict is exactly the one
+    that triggered the terminal decision.
+    """
     seen: set[str] = set()
-    last_line: str | None = None
+    seen_container = False
+    last_label: str | None = None
+    grace = _TEARDOWN_GRACE_POLLS
     while True:
         containers = _run_containers(info.run_id)
-        running = _still_running(run_dir, containers)
-        if running:
-            if containers is None:
-                line = "── (docker unavailable — following handoffs only)"
-            elif (active := _active_agent(containers)) is not None:
-                round_no = _round_and_reviewers(run_dir / "handoff")[0]
-                line = f"── round {round_no}: {active} working…"
-            else:
-                line = "── (between turns: commit / test gate / next prompt…)"
-            if line != last_line:  # re-announce only on a state change
-                typer.echo(line)
-                last_line = line
-        # Print new handoffs every poll — including the final one before we
-        # stop — so a docker-absent follow still surfaces them as they land.
-        seen = _print_new_handoffs(run_dir / "handoff", seen)
-        if not running:
-            break
+        if containers:
+            seen_container = True
+        state = _read_state(run_dir)
+        phase = _run_phase(run_dir, containers, state, seen_container=seen_container)
+        if phase != "vanished":
+            grace = _TEARDOWN_GRACE_POLLS  # only count down once truly ending
+        if phase == "running":
+            label, round_no, agent = _follow_state(run_dir, containers)
+            if label != last_label:  # re-announce only on a state change
+                yield {
+                    "event": "state",
+                    "label": label,
+                    "round": round_no,
+                    "agent": agent,
+                }
+                last_label = label
+        elif phase == "delivering":
+            # approved, but post-approval PR delivery is still in flight — surface
+            # it as a distinct phase rather than letting the window read as done.
+            label = "── approved — delivering PR…"
+            if label != last_label:
+                yield {
+                    "event": "state",
+                    "label": label,
+                    "round": _round_and_reviewers(run_dir / "handoff")[0],
+                    "agent": None,
+                }
+                last_label = label
+        for name, body in _iter_new_handoffs(run_dir / "handoff", seen):
+            seen.add(name)
+            yield {"event": "handoff", "name": name, "body": body}
+        if phase == "terminal":
+            _capture_outcome(outcome, run_dir, state)
+            return
+        if phase == "vanished":
+            grace -= 1
+            if grace <= 0:  # outcome never landed across the grace window → crash
+                _capture_outcome(outcome, run_dir, state)
+                return
         time.sleep(_ATTACH_POLL_SECONDS)
-
-    typer.echo(
-        f"── run {info.run_id} not running — "
-        f"`lithos-loom develop dump {key}` for the full log"
-    )
 
 
 def _print_snapshot(run_dir: Path) -> None:
@@ -616,8 +968,41 @@ def _print_snapshot(run_dir: Path) -> None:
     _print_new_handoffs(run_dir / "handoff", set())
 
 
-def _print_new_handoffs(handoff_dir: Path, seen: set[str]) -> set[str]:
-    """Echo handoff files not yet shown; return the updated seen-set."""
+def _sanitize(text: str) -> str:
+    """Strip terminal control/escape bytes (keeping TAB/LF) from agent-written
+    text before echoing it to the operator's terminal.
+
+    Handoff bodies and filenames are agent-writable (RW bind mount), so a crafted
+    handoff could otherwise inject ANSI escapes to forge a fake outcome line,
+    clear the screen, or set the window title. Plain text is unaffected.
+    """
+    return _CONTROL_CHARS_RE.sub("", text)
+
+
+def _read_handoff(path: Path) -> str:
+    """Read a handoff body, bounded to :data:`_MAX_HANDOFF_BYTES`.
+
+    The file is agent-writable, so a slurp (``read_text``) of a poisoned multi-GB
+    file would OOM this read-only process. We read at most the cap (+1 to detect
+    overflow) and decode leniently — adversarial bytes must not raise either.
+    """
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(_MAX_HANDOFF_BYTES + 1)
+    except OSError:
+        return ""
+    truncated = len(raw) > _MAX_HANDOFF_BYTES
+    text = raw[:_MAX_HANDOFF_BYTES].decode("utf-8", errors="replace").strip()
+    return f"{text}\n…(handoff truncated)" if truncated else text
+
+
+def _iter_new_handoffs(handoff_dir: Path, seen: set[str]) -> list[tuple[str, str]]:
+    """New ``(name, body)`` handoff pairs not in *seen*, sorted by filename.
+
+    Bounded to :data:`_MAX_HANDOFFS_PER_POLL` per call so a flood of
+    agent-written handoff files can't be slurped all at once (security/f-003);
+    a final notice pair reports any overflow, which surfaces on later polls.
+    """
     try:
         names = sorted(
             p.name
@@ -625,12 +1010,20 @@ def _print_new_handoffs(handoff_dir: Path, seen: set[str]) -> set[str]:
             if _CODER_DONE_RE.match(p.name) or _REVIEW_RE.match(p.name)
         )
     except OSError:
-        return seen
+        return []
+    new_names = [name for name in names if name not in seen]
+    capped = new_names[:_MAX_HANDOFFS_PER_POLL]
+    out = [(name, _read_handoff(handoff_dir / name)) for name in capped]
+    overflow = len(new_names) - len(capped)
+    if overflow:
+        out.append((f"(+{overflow} more handoffs this poll — output capped)", ""))
+    return out
+
+
+def _print_new_handoffs(handoff_dir: Path, seen: set[str]) -> set[str]:
+    """Echo handoff files not yet shown; return the updated seen-set."""
     updated = set(seen)
-    for name in names:
-        if name in updated:
-            continue
+    for name, body in _iter_new_handoffs(handoff_dir, seen):
         updated.add(name)
-        body = (handoff_dir / name).read_text(encoding="utf-8").strip()
-        typer.echo(f"\n── {name}\n{body}")
+        typer.echo(f"\n── {_sanitize(name)}\n{_sanitize(body)}")
     return updated

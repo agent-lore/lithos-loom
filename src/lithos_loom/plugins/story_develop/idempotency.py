@@ -154,6 +154,37 @@ def lookup_completed(
     return payload
 
 
+def lookup_completed_for_run(task_id: str, run_id: str) -> dict[str, Any] | None:
+    """Find a replayable completed record for one specific run, by its run id.
+
+    Records are keyed by the (possibly explicit ``--idempotency-key``) key, so a
+    run's record cannot be located from the task id alone. This scans the store
+    for a completed/succeeded record bound to *task_id* whose recorded
+    ``artifacts.conversation_log`` lives under *run_id* (the path is
+    ``<work_dir>/<task_id>/<run_id>/conversation.md``). Returns that payload, or
+    ``None`` if none matches — letting a follower recover a reaped run's outcome
+    regardless of which key recorded it (the work dir, and its ``state.json``,
+    are gone by then). Best-effort: a missing store / unreadable record yields
+    ``None``.
+    """
+    try:
+        paths = list(store_dir().glob("*.json"))
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not _is_completed_record(payload) or payload.get("task_id") != task_id:
+            continue
+        artifacts = payload.get("artifacts")
+        log = artifacts.get("conversation_log") if isinstance(artifacts, dict) else None
+        if isinstance(log, str) and Path(log).parent.name == run_id:
+            return payload
+    return None
+
+
 def _prune(keep: int) -> None:
     """Bound the store: keep the *keep* newest records (by mtime), drop the rest.
 
