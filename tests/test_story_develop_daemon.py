@@ -1297,6 +1297,57 @@ def test_daemon_mode_happy_path_writes_result(
     assert snapshot["task"]["title"] == "Add a flag"
 
 
+def test_daemon_records_delivery_deadline_before_delivering(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#189: the daemon writes run_dir/delivery.json BEFORE deliver() runs, with a
+    future deadline derived from the copilot/coder budget — so `develop attach` can
+    bound a crashed delivery without timing out a healthy slow one."""
+    from datetime import UTC, datetime
+
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
+
+    monkeypatch.setattr(
+        main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **k: True)
+    monkeypatch.setattr(
+        main_mod, "develop", lambda config, **kw: _result("approved", tmp_path)
+    )
+
+    seen: dict[str, Any] = {}
+
+    def fake_deliver(config, result, **kw):
+        # the marker must already exist when delivery starts (ordering matters)
+        marker = config.run_dir / "delivery.json"
+        seen["marker_at_delivery"] = marker.is_file()
+        seen["deadline"] = json.loads(marker.read_text())["deadline"]
+        return DeliveryOutcome(pr_url="https://github.com/o/r/pull/1", pr_number=1)
+
+    monkeypatch.setattr(main_mod, "deliver", fake_deliver)
+
+    argv, _ = _daemon_args(
+        tmp_git_repo,
+        tmp_path,
+        "--open-pr",
+        "--copilot-timeout",
+        "600",
+        "--coder-timeout",
+        "3600",
+    )
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert seen["marker_at_delivery"] is True  # written BEFORE deliver()
+    deadline = datetime.fromisoformat(seen["deadline"])
+    # comfortably in the future: at least the copilot + coder budget away.
+    assert (deadline - datetime.now(UTC)).total_seconds() > 600 + 3600
+
+
 def test_daemon_mode_cli_model_effort_fallback_used(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

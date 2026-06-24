@@ -36,12 +36,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
 import shutil
 import sys
 import tempfile
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ...plugin_runner import write_result_atomically
@@ -323,6 +324,31 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Overhead beyond the agent budgets — branch push, PR open, gate, bookkeeping —
+# added to the recorded delivery deadline so a healthy run is never timed out.
+_DELIVERY_MARGIN_SECONDS = 600
+
+
+def _record_delivery_deadline(
+    run_dir: Path, *, copilot_timeout: int, coder_timeout: int
+) -> None:
+    """Record when this run's PR delivery budget expires, for `develop attach` (#189).
+
+    deliver() runs host-side after the agent containers stop, so attach can't use
+    container liveness to tell a slow delivery from a dead one — and the budget is
+    the daemon's *configurable* copilot/coder timeouts, which attach can't see.
+    Writing an absolute deadline (now + that budget + overhead) lets attach bound a
+    crashed/orphaned delivery without ever timing out one still inside its budget.
+    Best-effort: a write failure just means attach falls back to its flat grace.
+    """
+    budget = copilot_timeout + coder_timeout + _DELIVERY_MARGIN_SECONDS
+    deadline = datetime.now(UTC) + timedelta(seconds=budget)
+    with contextlib.suppress(OSError):
+        (run_dir / "delivery.json").write_text(
+            json.dumps({"deadline": deadline.isoformat()}) + "\n", encoding="utf-8"
+        )
+
+
 def _daemon_main(args: argparse.Namespace) -> int:
     """Daemon-mode entry (T10): task.json in, atomic result.json out.
 
@@ -525,6 +551,15 @@ def _daemon_main(args: argparse.Namespace) -> int:
 
     delivery = None
     if args.open_pr and result.approved:
+        # Record when this run's delivery budget expires BEFORE delivery starts,
+        # so `develop attach` can bound a crashed/orphaned delivery without ever
+        # timing out a healthy slow one (#189). deliver() can legitimately spend
+        # up to copilot_timeout (the Copilot round) + coder_timeout (the fix turn).
+        _record_delivery_deadline(
+            config.run_dir,
+            copilot_timeout=args.copilot_timeout,
+            coder_timeout=args.coder_timeout,
+        )
         raw_issue = ctx.metadata.get("github_issue_url")
         try:
             delivery = deliver(
