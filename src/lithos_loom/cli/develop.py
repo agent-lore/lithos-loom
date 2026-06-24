@@ -430,44 +430,67 @@ def _run_phase(
     return "vanished" if seen_container else "running"
 
 
+def _result_for_run(run_dir: Path) -> dict | None:
+    """THIS run's ``result.json`` (the plugin's final contract output), or ``None``.
+
+    ``result.json`` lives in the SHARED per-task dir (``run_dir.parent``), so a
+    prior run of the same task can leave one behind. #198 binds it to the run by
+    ``run_id``: the file is THIS run's iff its ``run_id`` equals ``run_dir.name``.
+    The earlier "a succeeded survivor must be the current run because a success is
+    reaped" reasoning relied on a BEST-EFFORT reap (``_cleanup_work_dir`` suppresses
+    ``rmtree`` ``OSError``) and didn't cover a failed result at all; the explicit
+    run_id binding removes that dependency. A result without ``run_id`` (an old
+    daemon's) does not bind — safe direction (treated as not-this-run).
+    """
+    try:
+        data = json.loads((run_dir.parent / "result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data if data.get("run_id") == run_dir.name else None
+
+
 def _delivery_complete(run_dir: Path) -> bool:
-    """Whether an approved run's post-dialogue PR delivery has finished.
+    """Whether THIS approved run's post-dialogue PR delivery succeeded.
 
     ``develop()`` writes ``state.json`` the moment the dialogue approves, but in
     daemon mode the branch push, the Copilot round, and the ``result.json`` write
     all happen AFTER it returns (``story_develop/__main__`` calls ``deliver()``
     then ``write_result_atomically``). ``result.json`` — the plugin's final
-    contract output — is therefore the "fully delivered" signal. It lives in the
-    SHARED per-task dir (``run_dir.parent``); a ``"succeeded"`` status binds it to
-    THIS run, since a succeeded run's whole work dir is reaped — so any
-    ``result.json`` that survives there from a prior *retained* run is necessarily
-    a non-success and must not be mistaken for this run's delivery.
+    contract output — is the "fully delivered" signal, bound to this run by
+    ``run_id`` (:func:`_result_for_run`) so a prior run's leftover can't false-done
+    a retry.
     """
-    try:
-        data = json.loads((run_dir.parent / "result.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return isinstance(data, dict) and data.get("status") == "succeeded"
+    data = _result_for_run(run_dir)
+    return data is not None and data.get("status") == "succeeded"
 
 
 def _delivery_failed(run_dir: Path) -> str | None:
-    """The reason this run's PR delivery FAILED (#194), or ``None``.
+    """The reason THIS run's PR delivery FAILED (#194), or ``None``.
 
     When ``deliver()`` raises before a PR exists (e.g. ``push_branch()`` /
     ``gh pr create`` fails), the daemon records the failure in this run's PRIVATE
-    ``run_dir/delivery.json`` marker. Reading it lets attach treat the run as
-    terminally **approved-but-not-delivered** at once — rather than sitting in the
-    ``"delivering"`` phase until the #189 deadline. The marker is per-run (unlike
-    the SHARED ``result.json``), so a prior run's leftover can never be mistaken
-    for this one.
+    ``run_dir/delivery.json`` marker so attach reports it at once rather than
+    sitting in ``"delivering"`` until the #189 deadline. The marker write is
+    BEST-EFFORT, though, so when it's missing fall back to this run's terminal
+    ``result.json`` (run_id-bound, ``status: failed`` with a ``delivery`` error) —
+    the durable contract output, written atomically (#198, Hole 2). An approved
+    dialogue's failed result is always a delivery failure (``build_result_payload``
+    maps approved→succeeded otherwise), so the category check is just defensive.
     """
     try:
         data = json.loads((run_dir / _DELIVERY_MARKER).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        data = None
     if isinstance(data, dict) and data.get("failed"):
         reason = data.get("reason")
         return str(reason) if reason else "PR delivery failed"
+    result = _result_for_run(run_dir)
+    if result is not None and result.get("status") == "failed":
+        error = result.get("error")
+        if isinstance(error, dict) and error.get("category") == "delivery":
+            return str(error.get("message") or "PR delivery failed")
     return None
 
 
@@ -664,22 +687,14 @@ def _delivered_pr_url(run_dir: Path, state: dict | None) -> str | None:
     """The delivered PR url for an approved run, or ``None`` (#188).
 
     A reaped run's recovered *state* already carries it (from the completion-store
-    payload); otherwise read this run's ``result.json``. A ``succeeded`` status
-    binds that file to THIS run (a prior succeeded run's whole work dir is reaped,
-    so a surviving ``succeeded`` result.json is necessarily this run's — the same
-    reasoning as :func:`_delivery_complete`).
+    payload); otherwise read this run's ``result.json``, bound to the run by
+    ``run_id`` (:func:`_result_for_run`, #198) so a prior run's leftover PR url is
+    never surfaced for this one.
     """
     if state and state.get("pr_url"):
         return str(state["pr_url"])
-    try:
-        data = json.loads((run_dir.parent / "result.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if (
-        isinstance(data, dict)
-        and data.get("status") == "succeeded"
-        and data.get("pr_url")
-    ):
+    data = _result_for_run(run_dir)
+    if data is not None and data.get("status") == "succeeded" and data.get("pr_url"):
         return str(data["pr_url"])
     return None
 

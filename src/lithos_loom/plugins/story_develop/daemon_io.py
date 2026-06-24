@@ -816,6 +816,10 @@ def build_result_payload(
         # On-contract (#196) so a reaped/replayed run — whose state.json is gone —
         # can still report its round count from the completion store via attach.
         "rounds": result.rounds,
+        # On-contract (#198) so `develop attach` can bind this shared result.json to
+        # THIS run for terminal detection — not a prior run's leftover succeeded
+        # (best-effort reap) or failed (best-effort marker) result.
+        "run_id": result.run_id,
     }
     if result.conversation_log is not None:
         payload["artifacts"] = {"conversation_log": str(result.conversation_log)}

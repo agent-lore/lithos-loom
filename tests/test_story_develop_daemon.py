@@ -1148,6 +1148,21 @@ def test_build_result_payload_carries_rounds(tmp_path: Path) -> None:
     validate_result_schema(payload)
 
 
+def test_build_result_payload_carries_run_id(tmp_path: Path) -> None:
+    # #198: the run id is on the result.json contract so `develop attach` can bind
+    # the shared result.json to THIS run for terminal detection (not a prior run's
+    # leftover succeeded/failed result), closing the best-effort reap/marker holes.
+    payload, _ = build_result_payload(
+        _result("approved", tmp_path, run_id="r-xyz"),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert payload["run_id"] == "r-xyz"
+    validate_result_schema(payload)
+
+
 def test_build_result_payload_delivery_failure_is_failed(tmp_path: Path) -> None:
     # #194: an approved dialogue whose PR delivery FAILED (deliver() raised before
     # a PR exists) is NOT a clean success — no PR opened, so it is a `failed` run

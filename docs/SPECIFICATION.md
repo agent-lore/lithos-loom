@@ -647,7 +647,8 @@ An `interrupted` result may additionally carry a `resume` object marking the int
 | `resume.resume_after` | Schedules the in-process re-dispatch on `status == "interrupted"` (see §2.2). |
 | `pr_url` | Optional. The PR an approved run delivered (story-develop, #188). The **runner** ignores it; `develop attach` reads it (offline) to name the PR in the terminal summary, and it is recorded under the idempotency key so a reaped success still surfaces it. |
 | `rounds` | Optional. The implement/review round count the run reached (story-develop, #196). The **runner** ignores it; `develop attach` reads it (offline / from the completion store) so a reaped or idempotency-replayed run — whose `state.json` is gone — still names the round count in its terminal summary. |
-| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `rounds`, `spawned_tasks`, `metadata_updates`, `error.category`, `error.retriable`, `resume.run_id`, `resume.coder_session`, `resume.reviewer_sessions` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
+| `run_id` | Optional. The run id that produced this result (story-develop, #198). The **runner** ignores it; `develop attach` uses it to bind the SHARED per-task `result.json` to **this** run for terminal detection — so a prior run's leftover `succeeded` (a best-effort reap left it behind) or `failed` (a best-effort delivery-marker write that failed) result can't be mistaken for the current run's delivery. |
+| `exit_code`, `started_at`, `finished_at`, `worktree`, `artifacts`, `commits`, `rounds`, `run_id`, `spawned_tasks`, `metadata_updates`, `error.category`, `error.retriable`, `resume.run_id`, `resume.coder_session`, `resume.reviewer_sessions` | Schema-validated but **currently ignored** by the runner. Plugins may populate them; they have no effect on Lithos today. |
 
 ### 5.3 Runner Lifecycle
 

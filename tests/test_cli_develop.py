@@ -78,8 +78,10 @@ def _make_run(
     if delivered is None:
         delivered = status == "approved"
     if delivered:
+        # run_id-bound (#198) — the real daemon stamps result.json with its run id
+        # so attach binds it to THIS run, not a prior leftover.
         (work_dir / task_id / "result.json").write_text(
-            json.dumps({"status": "succeeded", "task_id": task_id})
+            json.dumps({"status": "succeeded", "task_id": task_id, "run_id": run_id})
         )
     return run_dir
 
@@ -273,27 +275,65 @@ def test_run_phase_classification(tmp_path: Path) -> None:
         phase = develop._run_phase(rd, containers, approved, seen_container=seen)
         assert phase == "delivering"
     # this run's result.json (succeeded) lands in the shared per-task dir → done
-    (rd.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+    (rd.parent / "result.json").write_text(
+        json.dumps({"status": "succeeded", "run_id": "run"})
+    )
     assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
     # docker absent + the run dir reaped on success → terminal (nothing to read)
     shutil.rmtree(rd)
     assert develop._run_phase(rd, None, none, seen_container=False) == "terminal"
 
 
-def test_run_phase_approved_ignores_stale_failed_result_json(tmp_path: Path) -> None:
-    # The shared per-task result.json can be a stale leftover from a PRIOR
-    # retained run (a succeeded run's whole work dir is reaped, so a surviving
-    # result.json is necessarily a non-success). It must NOT be mistaken for THIS
-    # approved run's delivery — else the false-done window reopens on a retry.
+def test_run_phase_approved_ignores_stale_result_from_a_prior_run(
+    tmp_path: Path,
+) -> None:
+    # The shared per-task result.json can be a stale leftover from a PRIOR run.
+    # The old reasoning — "a succeeded run is reaped, so a survivor is non-success"
+    # — relied on a BEST-EFFORT reap (route_runner suppresses rmtree OSError), so a
+    # stale *succeeded* result could survive and false-done a retry. #198 binds on
+    # run_id: a prior run's result (succeeded OR failed) is not THIS run's delivery.
     rd = tmp_path / "t-1" / "r2"
     rd.mkdir(parents=True)
     (rd / "state.json").write_text(json.dumps({"status": "approved"}))
-    (rd.parent / "result.json").write_text(json.dumps({"status": "failed"}))  # stale
     approved = {"status": "approved"}
+    # a PRIOR run's succeeded result.json (run_id r1) must not read as r2's delivery
+    (rd.parent / "result.json").write_text(
+        json.dumps({"status": "succeeded", "run_id": "r1"})
+    )
     assert develop._run_phase(rd, None, approved, seen_container=False) == "delivering"
-    # this run's own delivery writes a succeeded result.json → terminal
-    (rd.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+    # this run's own succeeded result.json (run_id r2) → terminal
+    (rd.parent / "result.json").write_text(
+        json.dumps({"status": "succeeded", "run_id": "r2"})
+    )
     assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
+
+
+def test_run_phase_approved_failed_result_is_terminal_without_marker(
+    tmp_path: Path,
+) -> None:
+    # #198 (Hole 2): when deliver() raises, the daemon writes a failed result.json
+    # but the private delivery.json marker write is best-effort. If the marker is
+    # missing, THIS run's failed result.json (run_id-bound, category delivery) is
+    # still the terminal signal — attach must report the failure, not sit in
+    # "delivering" until the #189 deadline.
+    rd = tmp_path / "t-1" / "r2"
+    rd.mkdir(parents=True)
+    (rd / "state.json").write_text(json.dumps({"status": "approved"}))
+    (rd.parent / "result.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "run_id": "r2",
+                "error": {
+                    "category": "delivery",
+                    "message": "PR delivery failed: boom",
+                },
+            }
+        )
+    )
+    approved = {"status": "approved"}
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
+    assert develop._delivery_failed(rd) == "PR delivery failed: boom"
 
 
 def test_recover_reaped_outcome_delegates_to_completion_store(
@@ -719,7 +759,9 @@ def test_attach_waits_through_teardown_window_for_recorded_outcome(
         (run_dir / "state.json").write_text(
             json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
         )
-        (run_dir.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+        (run_dir.parent / "result.json").write_text(
+            json.dumps({"status": "succeeded", "run_id": "r1"})
+        )
         return []
 
     monkeypatch.setattr(develop, "_run_containers", fake_containers)
@@ -747,7 +789,7 @@ def test_attach_wait_waits_for_recorded_outcome_not_just_the_log(
                 json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
             )
             (run_dir.parent / "result.json").write_text(
-                json.dumps({"status": "succeeded"})
+                json.dumps({"status": "succeeded", "run_id": "r1"})
             )
 
     monkeypatch.setattr(develop.time, "sleep", fake_sleep)
@@ -784,7 +826,9 @@ def test_attach_follows_through_startup_window_to_terminal_state(
         (run_dir / "state.json").write_text(
             json.dumps({"status": "approved", "rounds": 1, "branch": "feat/x"})
         )
-        (run_dir.parent / "result.json").write_text(json.dumps({"status": "succeeded"}))
+        (run_dir.parent / "result.json").write_text(
+            json.dumps({"status": "succeeded", "run_id": "r1"})
+        )
         return []
 
     monkeypatch.setattr(develop, "_run_containers", fake_containers)
@@ -819,7 +863,7 @@ def test_attach_follows_through_delivery_window_then_terminates(
         sleeps["n"] += 1
         if sleeps["n"] == 2:  # delivery finishes a couple polls later
             (run_dir.parent / "result.json").write_text(
-                json.dumps({"status": "succeeded"})
+                json.dumps({"status": "succeeded", "run_id": "r1"})
             )
 
     monkeypatch.setattr(develop.time, "sleep", fake_sleep)
@@ -849,7 +893,7 @@ def test_attach_wait_does_not_exit_before_delivery_completes(
         polls["n"] += 1
         if polls["n"] == 3:
             (run_dir.parent / "result.json").write_text(
-                json.dumps({"status": "succeeded"})
+                json.dumps({"status": "succeeded", "run_id": "r1"})
             )
 
     monkeypatch.setattr(develop.time, "sleep", fake_sleep)
@@ -1022,7 +1066,7 @@ def test_attach_does_not_time_out_delivery_within_its_budget(
         polls["n"] += 1
         if polls["n"] == 200:  # delivery completes long after the old bound (150)
             (run_dir.parent / "result.json").write_text(
-                json.dumps({"status": "succeeded"})
+                json.dumps({"status": "succeeded", "run_id": "r1"})
             )
 
     monkeypatch.setattr(develop.time, "sleep", fake_sleep)
@@ -1105,7 +1149,13 @@ def test_capture_outcome_stashes_pr_url_and_failure_reason(tmp_path: Path) -> No
     run_dir = tmp_path / "t-1" / "r1"
     (run_dir / "handoff").mkdir(parents=True)
     (run_dir.parent / "result.json").write_text(
-        json.dumps({"status": "succeeded", "pr_url": "https://github.com/o/r/pull/170"})
+        json.dumps(
+            {
+                "status": "succeeded",
+                "run_id": "r1",
+                "pr_url": "https://github.com/o/r/pull/170",
+            }
+        )
     )
     outcome = develop._Outcome()
     develop._capture_outcome(outcome, run_dir, {"status": "approved", "rounds": 1})
