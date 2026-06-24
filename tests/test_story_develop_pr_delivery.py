@@ -819,3 +819,21 @@ def test_generated_count_parsing() -> None:
     assert token("generated 1 comment") == "1"
     assert token("generated no comments") == "no"
     assert pr_delivery._GENERATED_RE.search("reviewed all files") is None
+
+
+def test_delivery_budget_covers_copilot_coder_and_gate() -> None:
+    # #189: the recorded delivery budget must cover EVERY bounded phase deliver()
+    # can run — the Copilot round, the fix coder turn, AND the regression gate on
+    # the fix commit — so `develop attach` never times out a healthy slow delivery.
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(test_timeout=900)
+    budget = pr_delivery.delivery_budget_seconds(
+        cfg, copilot_timeout=600, coder_timeout=3600
+    )
+    assert budget >= 600 + 3600 + 900  # all three phase timeouts are summed in
+    # the gate timeout is summed, not ignored: a wider gate widens the budget.
+    wider = pr_delivery.delivery_budget_seconds(
+        SimpleNamespace(test_timeout=1800), copilot_timeout=600, coder_timeout=3600
+    )
+    assert wider == budget + 900

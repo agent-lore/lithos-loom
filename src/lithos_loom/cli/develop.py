@@ -112,7 +112,10 @@ _TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECOND
 # grace that comfortably exceeds the DEFAULT budget so the fallback can't
 # false-fire on a default-configured run.
 _DELIVERY_MARKER = "delivery.json"
-_DELIVERY_FALLBACK_SECONDS = 5400.0  # 90 min > default copilot(600) + coder(3600)
+# > the full DEFAULT delivery budget (copilot 600 + coder 3600 + gate 900 +
+# overhead 1800 = 6900s; see pr_delivery.delivery_budget_seconds) so the
+# no-marker fallback can't false-fire on a default-config run.
+_DELIVERY_FALLBACK_SECONDS = 9000.0  # 2.5 h
 _DELIVERY_FALLBACK_POLLS = max(
     1, int(_DELIVERY_FALLBACK_SECONDS / _ATTACH_POLL_SECONDS)
 )

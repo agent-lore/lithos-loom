@@ -88,7 +88,7 @@ from .lithos_io import (
     fetch_task_context,
     post_results,
 )
-from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver
+from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver, delivery_budget_seconds
 from .profiles import resolve_profile
 
 
@@ -324,25 +324,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-# Overhead beyond the agent budgets — branch push, PR open, gate, bookkeeping —
-# added to the recorded delivery deadline so a healthy run is never timed out.
-_DELIVERY_MARGIN_SECONDS = 600
-
-
-def _record_delivery_deadline(
-    run_dir: Path, *, copilot_timeout: int, coder_timeout: int
-) -> None:
+def _record_delivery_deadline(run_dir: Path, *, budget_seconds: int) -> None:
     """Record when this run's PR delivery budget expires, for `develop attach` (#189).
 
     deliver() runs host-side after the agent containers stop, so attach can't use
     container liveness to tell a slow delivery from a dead one — and the budget is
-    the daemon's *configurable* copilot/coder timeouts, which attach can't see.
-    Writing an absolute deadline (now + that budget + overhead) lets attach bound a
-    crashed/orphaned delivery without ever timing out one still inside its budget.
-    Best-effort: a write failure just means attach falls back to its flat grace.
+    the daemon's *configurable* timeouts, which attach can't see. Writing an
+    absolute deadline (now + the full delivery budget; see
+    :func:`pr_delivery.delivery_budget_seconds`) lets attach bound a crashed/orphaned
+    delivery without ever timing out one still inside its budget. Best-effort: a
+    write failure just means attach falls back to its flat grace.
     """
-    budget = copilot_timeout + coder_timeout + _DELIVERY_MARGIN_SECONDS
-    deadline = datetime.now(UTC) + timedelta(seconds=budget)
+    deadline = datetime.now(UTC) + timedelta(seconds=budget_seconds)
     with contextlib.suppress(OSError):
         (run_dir / "delivery.json").write_text(
             json.dumps({"deadline": deadline.isoformat()}) + "\n", encoding="utf-8"
@@ -553,12 +546,16 @@ def _daemon_main(args: argparse.Namespace) -> int:
     if args.open_pr and result.approved:
         # Record when this run's delivery budget expires BEFORE delivery starts,
         # so `develop attach` can bound a crashed/orphaned delivery without ever
-        # timing out a healthy slow one (#189). deliver() can legitimately spend
-        # up to copilot_timeout (the Copilot round) + coder_timeout (the fix turn).
+        # timing out a healthy slow one (#189). The budget covers every bounded
+        # phase deliver() can run — Copilot round + fix turn + regression gate —
+        # computed alongside those phases in delivery_budget_seconds().
         _record_delivery_deadline(
             config.run_dir,
-            copilot_timeout=args.copilot_timeout,
-            coder_timeout=args.coder_timeout,
+            budget_seconds=delivery_budget_seconds(
+                config,
+                copilot_timeout=args.copilot_timeout,
+                coder_timeout=args.coder_timeout,
+            ),
         )
         raw_issue = ctx.metadata.get("github_issue_url")
         try:

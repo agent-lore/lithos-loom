@@ -1344,8 +1344,9 @@ def test_daemon_records_delivery_deadline_before_delivering(
     assert main_mod.main(argv) == EXIT_SUCCEEDED
     assert seen["marker_at_delivery"] is True  # written BEFORE deliver()
     deadline = datetime.fromisoformat(seen["deadline"])
-    # comfortably in the future: at least the copilot + coder budget away.
-    assert (deadline - datetime.now(UTC)).total_seconds() > 600 + 3600
+    # the full delivery budget: Copilot round (600) + fix turn (3600) + the
+    # regression gate (test_timeout 900) — not just copilot + coder.
+    assert (deadline - datetime.now(UTC)).total_seconds() > 600 + 3600 + 900
 
 
 def test_daemon_mode_cli_model_effort_fallback_used(
