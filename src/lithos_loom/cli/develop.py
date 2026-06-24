@@ -41,6 +41,7 @@ import sys
 import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -91,6 +92,33 @@ _ATTACH_POLL_SECONDS = 2.0
 # never lands do we report a crash — following terminal *state*, not liveness.
 _TEARDOWN_GRACE_SECONDS = 30.0
 _TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECONDS))
+
+# Bound the post-approval delivery window (#189). deliver() — branch push, PR
+# open, an optional Copilot review round + fix turn, then the result.json write —
+# runs host-side in the plugin subprocess AFTER the agent containers stop, so
+# "containers gone" is the NORMAL state during delivery, not a crash signal. If
+# the plugin crashes (or the host reboots) after writing the approved state.json
+# but before result.json lands, attach would otherwise stay in "delivering"
+# forever.
+#
+# We cannot bound it on a fixed wall-clock guess: legitimate delivery can spend
+# up to copilot_timeout (default 600s) on the Copilot round PLUS coder_timeout
+# (default 3600s) on the fix turn — the daemon's *configurable* flags, which
+# attach can't see. So the daemon records an absolute delivery DEADLINE
+# (run_dir/delivery.json, = now + its own budget) before delivery starts, and
+# attach stops waiting only once that deadline passes — never timing out a
+# delivery still inside its own budget. When no deadline was recorded (a run
+# predating this, or one whose marker write failed), attach falls back to a flat
+# grace that comfortably exceeds the DEFAULT budget so the fallback can't
+# false-fire on a default-configured run.
+_DELIVERY_MARKER = "delivery.json"
+# > the full DEFAULT delivery budget (copilot 600 + coder 3600 + gate 900 +
+# overhead 1800 = 6900s; see pr_delivery.delivery_budget_seconds) so the
+# no-marker fallback can't false-fire on a default-config run.
+_DELIVERY_FALLBACK_SECONDS = 9000.0  # 2.5 h
+_DELIVERY_FALLBACK_POLLS = max(
+    1, int(_DELIVERY_FALLBACK_SECONDS / _ATTACH_POLL_SECONDS)
+)
 
 # Handoff files are bind-mounted RW into agent containers (containers.py), so an
 # agent can write arbitrary bytes — both the body and (via the reviewer-name
@@ -414,6 +442,42 @@ def _delivery_complete(run_dir: Path) -> bool:
     return isinstance(data, dict) and data.get("status") == "succeeded"
 
 
+def _delivery_deadline(run_dir: Path) -> datetime | None:
+    """The instant this run's delivery budget expires (#189), or ``None``.
+
+    The daemon writes ``run_dir/delivery.json`` with an absolute ``deadline``
+    (its own ``copilot_timeout + coder_timeout`` budget) before delivery starts.
+    Reading it lets attach bound a crashed/orphaned delivery WITHOUT timing out a
+    delivery still inside its budget — which attach can't otherwise size, since the
+    budget is the daemon's configurable flags.
+    """
+    try:
+        data = json.loads((run_dir / _DELIVERY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw = data.get("deadline") if isinstance(data, dict) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        deadline = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
+
+
+def _delivery_timed_out(run_dir: Path, delivering_polls: int) -> bool:
+    """Whether an in-flight delivery has exceeded its bound (#189).
+
+    Prefers the daemon's recorded deadline (so a delivery inside its own budget is
+    never falsely timed out); falls back to a generous flat poll grace only when no
+    deadline was recorded — generous enough not to false-fire on a default budget.
+    """
+    deadline = _delivery_deadline(run_dir)
+    if deadline is not None:
+        return datetime.now(UTC) >= deadline
+    return delivering_polls >= _DELIVERY_FALLBACK_POLLS
+
+
 def _wait_for_run(work_dir: Path, key: str) -> Path:
     """Block (polling) until a run for *key* appears under *work_dir*.
 
@@ -511,6 +575,7 @@ class _Outcome:
     state: dict | None = None  # parsed state.json (or recovered) at capture time
     has_log: bool = False  # conversation.md present at capture time
     reaped: bool = False  # run dir removed by the route-runner's success cleanup
+    delivery_timed_out: bool = False  # approved, but result.json never landed (#189)
 
 
 def _recover_reaped_outcome(run_dir: Path) -> dict | None:
@@ -546,7 +611,15 @@ def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> No
 
 
 def _approved(outcome: _Outcome) -> bool:
-    """Whether the run reached the only success status (``approved``)."""
+    """Whether the run reached the only success status (``approved``) **and**
+    fully delivered.
+
+    A delivery that never completed (:attr:`_Outcome.delivery_timed_out`, #189) is
+    not a clean success — the PR may not exist — so ``attach --wait`` must exit
+    nonzero, or ``attach --wait && gh pr view`` would race a PR that never opened.
+    """
+    if outcome.delivery_timed_out:
+        return False
     return bool(outcome.state and outcome.state.get("status") == "approved")
 
 
@@ -558,6 +631,17 @@ def _outcome_line(run_id: str, outcome: _Outcome) -> str:
     run whose success could not be recovered; failing all, a crash.
     """
     state = outcome.state
+    if outcome.delivery_timed_out:
+        # approved, but result.json never landed within the grace window — the
+        # run likely crashed mid-delivery (#189). Distinct from a clean approval.
+        parts = [f"── run {run_id} approved but PR delivery did not complete"]
+        rounds = state.get("rounds") if state else None
+        if isinstance(rounds, int):
+            parts.append(f"after {rounds} round{'s' if rounds != 1 else ''}")
+        if state and state.get("branch"):
+            parts.append(f"on {state['branch']}")
+        parts.append("(timed out waiting for result.json — check `develop dump`)")
+        return " ".join(parts)
     if state and state.get("status"):
         status = str(state["status"])
         phrase = _OUTCOME_PHRASES.get(status, status)
@@ -579,6 +663,16 @@ def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
     """The ``--stream`` terminal event mirroring :func:`_outcome_line`."""
     state = outcome.state
     event: dict = {"event": "outcome", "run_id": run_id, "status": None}
+    if outcome.delivery_timed_out:
+        # approved verdict, but delivery never completed (#189) — flag it so a
+        # consumer doesn't read the bare "approved" status as a delivered PR.
+        event["status"] = "approved"
+        event["delivery_timed_out"] = True
+        if state and isinstance(state.get("rounds"), int):
+            event["rounds"] = state["rounds"]
+        if state and state.get("branch"):
+            event["branch"] = str(state["branch"])
+        return event
     if state and state.get("status"):
         event["status"] = str(state["status"])
         if isinstance(state.get("rounds"), int):
@@ -922,6 +1016,7 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
     seen_container = False
     last_label: str | None = None
     grace = _TEARDOWN_GRACE_POLLS
+    delivering_polls = 0  # polls in the current delivering episode (fallback bound)
     while True:
         containers = _run_containers(info.run_id)
         if containers:
@@ -930,6 +1025,8 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
         phase = _run_phase(run_dir, containers, state, seen_container=seen_container)
         if phase != "vanished":
             grace = _TEARDOWN_GRACE_POLLS  # only count down once truly ending
+        if phase != "delivering":
+            delivering_polls = 0  # reset the fallback counter unless still delivering
         if phase == "running":
             label, round_no, agent = _follow_state(run_dir, containers)
             if label != last_label:  # re-announce only on a state change
@@ -962,6 +1059,14 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
             grace -= 1
             if grace <= 0:  # outcome never landed across the grace window → crash
                 _capture_outcome(outcome, run_dir, state)
+                return
+        if phase == "delivering":
+            delivering_polls += 1
+            # bound the hang on the daemon's recorded delivery deadline (or a
+            # generous flat fallback) — never on a delivery still inside its budget.
+            if _delivery_timed_out(run_dir, delivering_polls):
+                _capture_outcome(outcome, run_dir, state)
+                outcome.delivery_timed_out = True
                 return
         time.sleep(_ATTACH_POLL_SECONDS)
 

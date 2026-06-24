@@ -14,6 +14,7 @@ import re
 import shutil
 import time
 from dataclasses import fields
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -856,6 +857,147 @@ def test_attach_wait_does_not_exit_before_delivery_completes(
     out = capsys.readouterr().out
     assert polls["n"] >= 3  # blocked through the delivery window, did not exit early
     assert "approved" in out
+
+
+def test_outcome_renders_delivery_timeout_and_is_not_a_clean_success() -> None:
+    # #189: a delivery that never completed is approved-but-not-delivered. The
+    # summary must say so, and it must NOT count as a clean success — `attach
+    # --wait` exits nonzero so `attach --wait && gh pr view` can't race a PR that
+    # never opened.
+    outcome = develop._Outcome(
+        state={"status": "approved", "rounds": 1, "branch": "feat/x"}
+    )
+    outcome.delivery_timed_out = True
+    line = develop._outcome_line("r1", outcome)
+    assert "delivery did not complete" in line
+    assert develop._approved(outcome) is False
+    event = develop._outcome_event("r1", outcome)
+    assert event["status"] == "approved"
+    assert event["delivery_timed_out"] is True
+
+
+def _write_delivery_deadline(run_dir: Path, deadline: datetime) -> None:
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"deadline": deadline.isoformat()})
+    )
+
+
+def test_delivery_deadline_and_timeout_helpers(tmp_path: Path) -> None:
+    # #189: attach bounds delivery on the daemon's recorded deadline, never a
+    # fixed guess. Past deadline → timed out; future deadline → not (even after
+    # many polls); no marker → a generous flat fallback.
+    rd = tmp_path / "t-1" / "r1"
+    rd.mkdir(parents=True)
+    assert develop._delivery_deadline(rd) is None  # no marker yet
+    assert develop._delivery_timed_out(rd, 1) is False  # fallback not yet reached
+
+    _write_delivery_deadline(rd, datetime.now(UTC) - timedelta(seconds=1))
+    assert develop._delivery_timed_out(rd, 1) is True  # past deadline
+
+    _write_delivery_deadline(rd, datetime.now(UTC) + timedelta(hours=1))
+    assert develop._delivery_timed_out(rd, 10_000) is False  # within budget, any polls
+
+    (rd / "delivery.json").unlink()  # no marker → flat fallback kicks in
+    assert develop._delivery_timed_out(rd, develop._DELIVERY_FALLBACK_POLLS) is True
+
+
+def test_attach_bounds_delivery_at_recorded_deadline(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #189: a crashed/orphaned delivery (approved state.json, result.json never
+    # lands, agent containers already gone — delivery runs host-side after they
+    # stop) must not hang. Once the recorded deadline passes attach terminates
+    # with a "delivery did not complete" outcome and a nonzero --wait exit.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,
+    )
+    _write_delivery_deadline(run_dir, datetime.now(UTC) - timedelta(seconds=1))
+    polls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        polls["n"] += 1
+        if polls["n"] > 50:  # fail fast instead of hanging if the bound is missing
+            raise AssertionError("delivering phase did not terminate (unbounded)")
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(
+            key="r1", config=None, once=False, wait=True, stream=False
+        )
+    assert exc.value.code == 1  # delivery never finished → not a clean success
+    out = capsys.readouterr().out
+    assert "delivery did not complete" in out
+    assert polls["n"] <= 3  # bounded at the deadline, did not hang
+
+
+def test_attach_does_not_time_out_delivery_within_its_budget(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #189 review: a SLOW BUT HEALTHY delivery — open PR, request Copilot, wait
+    # well past five minutes for the Copilot round + fix turn — must NOT be falsely
+    # timed out. With the daemon's (future) deadline recorded, attach follows
+    # through far beyond the old fixed 300s/150-poll bound and reports the real
+    # approved outcome once result.json lands.
+    run_dir = _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,
+    )
+    _write_delivery_deadline(run_dir, datetime.now(UTC) + timedelta(hours=1))
+    polls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        polls["n"] += 1
+        if polls["n"] == 200:  # delivery completes long after the old bound (150)
+            (run_dir.parent / "result.json").write_text(
+                json.dumps({"status": "succeeded"})
+            )
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "delivery did not complete" not in out  # no false timeout
+    assert "approved" in out  # followed through to the real outcome
+    assert polls["n"] >= 200  # waited past the old fixed bound
+
+
+def test_attach_delivery_fallback_grace_when_no_deadline(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #189: a stuck delivering run with NO recorded deadline (predates the marker,
+    # or its write failed) still gets bounded — by a generous flat fallback.
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,  # no delivery.json, result never lands
+    )
+    monkeypatch.setattr(develop, "_DELIVERY_FALLBACK_POLLS", 3)
+    polls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        polls["n"] += 1
+        if polls["n"] > 50:
+            raise AssertionError("fallback grace did not bound the delivering phase")
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(
+            key="r1", config=None, once=False, wait=True, stream=False
+        )
+    assert exc.value.code == 1
+    assert "delivery did not complete" in capsys.readouterr().out
+    assert polls["n"] <= 10
 
 
 def test_attach_wait_blocks_until_run_appears(

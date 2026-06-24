@@ -515,6 +515,34 @@ def post_pr_comment(wt: Path, pr_number: int, body: str) -> bool:
 
 # --- orchestration --------------------------------------------------------------
 
+# Overhead beyond the bounded agent phases — the worktree pushes (push_branch
+# runs twice, start + fix, each with a 300s timeout) plus the gh API calls (PR
+# open, reviewer/Copilot requests, per-comment replies — _run's 120s timeout
+# each). A crashed delivery only takes longer to declare dead if this is too
+# large, whereas too small re-opens the false-timeout; so it is deliberately
+# generous (a healthy run is never timed out).
+_DELIVERY_OVERHEAD_SECONDS = 1800
+
+
+def delivery_budget_seconds(config, *, copilot_timeout: int, coder_timeout: int) -> int:
+    """Upper bound on the wall-clock :func:`deliver` can legitimately spend (#189).
+
+    `develop attach` records a delivery deadline from this so it can bound a
+    *crashed* delivery without ever timing out a *healthy* slow one. It sums every
+    bounded phase below — **keep in sync with deliver() if a phase is added**:
+
+    - the Copilot review round (``copilot_timeout``),
+    - the Copilot fix coder turn (``coder_timeout``),
+    - the regression gate on the fix commit (``config.test_timeout``),
+    - plus push / PR / gh overhead (a flat margin).
+    """
+    return (
+        copilot_timeout
+        + coder_timeout
+        + config.test_timeout
+        + _DELIVERY_OVERHEAD_SECONDS
+    )
+
 
 def deliver(
     config,
