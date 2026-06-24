@@ -136,3 +136,45 @@ def test_rejects_empty_personas(tmp_path: Path) -> None:
     _write_case(case_dir, toml=toml)
     with pytest.raises(ValueError, match="persona"):
         load_case(case_dir)
+
+
+# ── shipped cases: the real cases under evals/review/cases/ must stay valid ──
+# load_case is pure (TOML + ac.md, no git), so this guard is hermetic — it runs
+# in `make check`/CI without fetching the cases' (possibly off-branch) commits.
+
+_SHIPPED_CASES_DIR = Path(__file__).resolve().parents[1] / "evals" / "review" / "cases"
+
+
+def _shipped_case_dirs() -> list[Path]:
+    return sorted(
+        d for d in _SHIPPED_CASES_DIR.iterdir() if (d / "case.toml").is_file()
+    )
+
+
+def test_every_shipped_case_loads() -> None:
+    # a malformed case.toml (bad sha string aside — not git-checked here — a typo'd
+    # profile/persona, a missing [[expected]], an empty AC) must fail the gate, not
+    # the live eval hours later.
+    dirs = _shipped_case_dirs()
+    assert dirs, f"no shipped cases under {_SHIPPED_CASES_DIR}"
+    for case_dir in dirs:
+        case = load_case(case_dir)  # raises ValueError on any structural problem
+        assert case.id == case_dir.name
+        assert case.expected, f"{case.id}: at least one [[expected]] is required"
+
+
+def test_seed_180_is_a_clean_mirror() -> None:
+    # The 180 seed is a synthetic clean mirror (ADR 0005, Update 2026-06-24): the
+    # known-good is the EXACT reverse of the buggy pair — same two commits, no
+    # third (contaminating) commit — so reviewing it adds the guard back on
+    # otherwise-clean code and FP is meaningful without the judge. Guard against a
+    # regression to a non-mirror known-good that re-introduces a contaminated base.
+    case = load_case(_SHIPPED_CASES_DIR / "180-attach-delivery")
+
+    assert case.base and case.head and case.base != case.head
+    assert case.known_good_base == case.head, "known-good base must be the buggy head"
+    assert case.known_good_head == case.base, "known-good head must be the buggy base"
+
+    expected = case.expected[0]
+    assert expected.file == "src/lithos_loom/cli/develop.py"
+    assert expected.min_severity == "critical"

@@ -41,8 +41,9 @@ packaged) so adding one is a small, documented, code-free step:
 - `ac.md` — the acceptance criteria the reviewer receives (the issue body).
 
 A case may pair an **independent** defect diff and clean diff (different bases) —
-the seed reviews the *removal* of the #180 fix as the defect and the fix itself
-as the known-good.
+the seed reviews the *removal* of the `approved -> delivering` guard as the defect
+and its *addition* (on otherwise-clean code) as the known-good. See *Update
+(2026-06-24)* for the synthetic clean-mirror construction.
 
 ### Matching method (expected → produced)
 
@@ -66,12 +67,16 @@ as the known-good.
    change, as the first live run showed. Use it for a quick pass, not a trusted
    number.
 
-**The mechanism-judge also rescues a *contaminated* known-good.** The seed's
-known-good (the #180 fix) is not actually defect-free — reviewing it surfaced two
-real residual gaps ([#188](https://github.com/agent-lore/lithos-loom/issues/188),
+**The mechanism-judge also rescues a *contaminated* known-good.** A known-good that
+is itself a real change can carry unrelated defects: the original seed's known-good
+(the #180 fix) surfaced two real residual gaps
+([#188](https://github.com/agent-lore/lithos-loom/issues/188),
 [#189](https://github.com/agent-lore/lithos-loom/issues/189)). Those are *different*
 mechanisms, so the judge rejects them → the false-positive measurement stays
-meaningful without needing a perfectly clean known-good.
+meaningful without a perfectly clean known-good. (The seed itself was later rebuilt
+as a synthetic clean mirror so it no longer relies on this — see *Update
+(2026-06-24)* — but the rescue remains a real property for cases whose known-good is
+a genuine change.)
 
 ### Metrics, K, and the pass bar
 
@@ -113,11 +118,57 @@ with the review function stubbed; only `lithos-loom eval review` does live runs.
 - The first slice ships the #180/#171 seed + the `correctness` persona; the live
   run reports its catch-rate under the post-#181 prompts (the first real number).
 
+## Update (2026-06-24): the seed is now a synthetic clean mirror
+
+The first live re-run under the mechanism-judge gave `catch 100% / sev-ok 100% /
+**fp 20%**`. The retained reports confirmed the residual FP was the **contaminated
+known-good**: reviewing the real #180-fix commit still surfaced #188/#189 (the
+judge vetoed them 4/5; the 1/5 leak conflated #188's pre-delivery-snapshot wording
+with the seed's mechanism). The post-#181 reviewer prompts *demand* tracing the
+lifecycle and AC#3 *requires* the PR url in the terminal summary, so a known-good
+that is the real #180 fix can never be defect-free — its own bugs are reachable.
+
+Building the clean mirror then **drove out a series of real escapes** the known-good
+review kept finding in "clean" `main` — each a residual defect in the young
+attach/delivery lifecycle: #194 (a failed PR delivery recorded as `succeeded`), #196
+(`attach --wait` forever-hang on idempotency-replay/fast-reap + an incomplete reaped
+summary), and #198 (best-effort reap/marker holes in `result.json` terminal
+detection). Each was verified against the code and fixed — the eval working as
+designed (every escape becomes a fix, then a regression case). With
+#188/#189/#194/#196/#198 all landed, the seed was rebuilt as a **synthetic clean
+mirror** off the hardened `main` (commit `a127361`, tag `eval/180-clean`):
+
+- a one-commit off-branch fixture (`f14e220`, tag `eval/180-noguard`) removes
+  **only** the `approved -> delivering` guard in `_run_phase`;
+- **buggy** = `eval/180-clean .. eval/180-noguard` (guard removed → catch);
+- **known-good** = `eval/180-noguard .. eval/180-clean` (guard added back on
+  otherwise-clean code).
+
+The rebuilt mirror measured **`catch 100% / fp 60%` under `--no-judge`** (down from
+100%). Reading the residual known-good findings settled the matter: they are all
+*different-mechanism* edge cases — the thorough post-#181 reviewers trace every
+best-effort failure path in this intricate lifecycle, so a same-file mirror's
+known-good carries a long tail of real-but-narrow findings (#194/#196/#198 closed
+the run-bindable ones; the rest, e.g. the #189 timeout-as-terminal critique, are
+design tradeoffs). **Driving `--no-judge` to 0 is an unbounded chase; the judge is
+the trusted matcher** (it vetoes every different-mechanism finding → judge FP ≈ 0).
+So the seed ships **judge-scored**: the rebuild removed the *gross* #188/#189-era
+contamination and made the buggy catch unambiguous, while `--judge` provides the
+trustworthy FP. The judge's *contaminated-known-good rescue* (below) is thus not a
+crutch the seed outgrew but the standing mechanism. The richer **patch-in-case-dir**
+authoring form is filed as a follow-up (#193).
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
   its fix differing by *only* the defect) so the false-positive measurement is
-  meaningful even under `--no-judge`.
+  meaningful even under `--no-judge`. **Partly done, conclusion revised** (see
+  *Update (2026-06-24)*): the seed *is* now a synthetic minimal mutation, but
+  `--no-judge` FP is **not** 0 — thorough reviewers surface a long tail of
+  different-mechanism edge cases on intricate lifecycle code, so the seed ships
+  **judge-scored** rather than chasing `--no-judge` to 0. The drive nonetheless
+  closed real defects (#194/#196/#198). The general patch-based authoring form is
+  #193.
 - A few **mutation-style synthetic** defects (off-by-one, swapped ordering,
   dropped error path) for breadth alongside the real-escape cases.
 - Per-case **cost reporting** and a cheaper-than-full panel sampling mode.
