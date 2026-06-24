@@ -95,6 +95,35 @@ def test_diff_stat_empty_without_changes(tmp_git_repo: Path) -> None:
     assert git.diff_stat(tmp_git_repo, base) == ""  # base == HEAD
 
 
+def test_apply_patch_applies_a_clean_diff(tmp_git_repo: Path, tmp_path: Path) -> None:
+    # #193: produce a real `git diff` patch, then apply it onto a clean tree.
+    _commit(tmp_git_repo, "f.txt", "one\n")
+    (tmp_git_repo / "f.txt").write_text("two\n")
+    patch = subprocess.run(
+        ["git", "diff"], cwd=tmp_git_repo, capture_output=True, text=True
+    ).stdout
+    subprocess.run(
+        ["git", "checkout", "--", "."],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    patch_file = tmp_path / "change.patch"
+    patch_file.write_text(patch)
+
+    git.apply_patch(tmp_git_repo, patch_file)
+    assert (tmp_git_repo / "f.txt").read_text() == "two\n"
+
+
+def test_apply_patch_raises_on_conflict(tmp_git_repo: Path, tmp_path: Path) -> None:
+    # a patch that doesn't apply (targets a file/contents that aren't there) must
+    # fail loudly so a drifted base can't silently produce a bogus head.
+    patch_file = tmp_path / "bad.patch"
+    patch_file.write_text("--- a/nope.txt\n+++ b/nope.txt\n@@ -1 +1 @@\n-x\n+y\n")
+    with pytest.raises(RuntimeError):
+        git.apply_patch(tmp_git_repo, patch_file)
+
+
 def test_raises_on_bad_repo(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         git.base_sha(tmp_path)  # not a git repo

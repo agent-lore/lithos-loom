@@ -1,0 +1,22 @@
+diff --git a/src/lithos_loom/plugins/story_develop/daemon_io.py b/src/lithos_loom/plugins/story_develop/daemon_io.py
+index ca0cdc1..1d4f02c 100644
+--- a/src/lithos_loom/plugins/story_develop/daemon_io.py
++++ b/src/lithos_loom/plugins/story_develop/daemon_io.py
+@@ -783,15 +783,9 @@ def build_result_payload(
+     task open/retriable. Keying status off ``result.approved`` alone wrote
+     ``succeeded`` here — the #171 false-done window in the delivery path.
+     """
+-    if delivery_error is not None:
+-        status, exit_code = "failed", EXIT_FAILED
+-        error: dict[str, Any] | None = {
+-            "category": "delivery",
+-            "message": f"PR delivery failed: {delivery_error}",
+-        }
+-    elif result.approved:
++    if result.approved:
+         status, exit_code = "succeeded", EXIT_SUCCEEDED
+-        error = None
++        error: dict[str, Any] | None = None
+     elif result.status == "interrupted":
+         status, exit_code = "interrupted", EXIT_INTERRUPTED
+         error = {

@@ -42,37 +42,69 @@ backstop, in prod) should become a regression case. Create a directory under
 
 ```
 cases/<id>/
-  case.toml   # the defect: base..head, personas/profile, expected findings
-  ac.md       # the acceptance criteria the reviewer receives (the issue body)
+  case.toml             # the defect: base + head (sha OR patch), expected findings
+  ac.md                 # the acceptance criteria the reviewer receives (issue body)
+  head.patch            # (patch form, #193) the seeded change applied to base
 ```
 
-`case.toml`:
+### Patch form (#193, preferred)
+
+A case's head can be a **`.patch` applied to `base` at runtime** instead of a
+pinned sha — so a case needs **no off-branch commit + tag**: only `base` is a real
+reachable commit (a `main` ancestor), and the seeded defect is a reviewable diff in
+the case dir. Author it by introducing the defect on top of `base` and capturing a
+plain `git diff`:
+
+```bash
+git worktree add --detach /tmp/seed <base-sha>
+cd /tmp/seed && <edit files to introduce the defect>
+git diff > <case-dir>/reintroduce-defect.patch
+cd - && git worktree remove --force /tmp/seed
+```
 
 ```toml
 [case]
 id = "<id>"
 description = "..."
-repo = "."                      # the repo to review in
-base = "<base sha>"             # the defect diff is base..head
-head = "<buggy head sha>"
-personas = ["correctness"]      # the panel under test — canonical persona names,
-                                # validated at load (a typo fails closed)
-profile = "standard"            # selects the check-set; validated at load
+repo = "."
+base = "<base sha>"                       # a real reachable commit (the only sha)
+head_patch = "reintroduce-defect.patch"   # applied to base -> the buggy head
+personas = ["correctness"]                # validated at load (a typo fails closed)
+profile = "standard"                      # selects the check-set; validated at load
 acceptance_criteria_file = "ac.md"
 
-# Optional clean pair for the false-positive measurement. May use its own base
-# so the known-good is an independent clean diff, not the empty diff.
+# Optional clean pair for the false-positive measurement — its own patch (an
+# independent clean change), or a sha (`head` / `base`), or omit for catch-only.
+[known_good]
+head_patch = "clean-change.patch"
+
+[[expected]]
+file = "path/to/file.py"               # the finding must touch this file
+keywords = ["delivery", "approved"]    # ...and mention >= 1 keyword
+min_severity = "critical"              # ...at or above this band
+mechanism = "prose describing the defect (the LLM-judge keys on this)"
+```
+
+`load_case` enforces **exactly one** of `head` / `head_patch` (and likewise for the
+known-good); a patch file must exist in the case dir (fail-closed at load). See
+`cases/194-delivery-failure-status/` for a worked example.
+
+### Sha form (when history already isolates the defect)
+
+```toml
+[case]
+base = "<base sha>"             # the defect diff is base..head
+head = "<buggy head sha>"
+# Optional clean pair; may use its own base so the known-good is an independent
+# clean diff, not the empty diff.
 [known_good]
 base = "<clean base sha>"
 head = "<clean head sha>"
-
-# One or more expected defects a correct review MUST surface.
-[[expected]]
-file = "path/to/file.py"        # the finding must touch this file
-keywords = ["delivery", "approved"]  # ...and mention >= 1 keyword
-min_severity = "critical"       # ...at or above this band
-mechanism = "prose describing the defect (the LLM-judge keys on this)"
 ```
+
+The sha form needs each head to be a reachable commit — a synthetic clean head
+that isn't on any branch must be kept alive by a pushed tag (see the `180`
+seed). The patch form (above) avoids that.
 
 ## Scoring (how a finding matches)
 

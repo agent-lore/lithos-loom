@@ -71,6 +71,16 @@ def commit_all(
     return base_sha(worktree)
 
 
+def apply_patch(worktree: Path, patch_path: Path) -> None:
+    """Apply the unified diff at *patch_path* to *worktree*'s working tree (#193).
+
+    Used by the eval harness to materialise a case's head from a ``.patch`` instead
+    of a pinned sha. A patch that doesn't apply cleanly (a drifted base) exits
+    non-zero → :func:`_git` raises, so a bogus head can never be silently built.
+    """
+    _git(worktree, "apply", str(patch_path))
+
+
 def diff_stat(worktree: Path, base_sha: str) -> str:
     """Return ``git diff --stat base_sha..HEAD`` — the cumulative change so far.
 
