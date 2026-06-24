@@ -41,6 +41,20 @@ def test_result_schema_accepts_pr_url() -> None:
         )
 
 
+def test_result_schema_accepts_delivery_error_category() -> None:
+    # #194: a PR-delivery failure on an approved run is a first-class error
+    # category, so the failed result.json self-describes why the run stopped.
+    validate_result_schema(
+        {
+            "schema_version": 1,
+            "task_id": "t1",
+            "status": "failed",
+            "exit_code": 1,
+            "error": {"category": "delivery", "message": "PR delivery failed: boom"},
+        }
+    )
+
+
 # ── write_result_atomically ────────────────────────────────────────────
 
 

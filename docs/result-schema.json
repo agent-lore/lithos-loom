@@ -70,7 +70,7 @@
           "properties": {
             "category": {
               "type": "string",
-              "enum": ["config", "environment", "input", "agent", "git", "github", "lithos", "usage_limited", "internal"]
+              "enum": ["config", "environment", "input", "agent", "git", "github", "lithos", "delivery", "usage_limited", "internal"]
             },
             "message": {"type": "string"},
             "retriable": {"type": "boolean"}

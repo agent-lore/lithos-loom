@@ -342,6 +342,31 @@ def _record_delivery_deadline(run_dir: Path, *, budget_seconds: int) -> None:
         )
 
 
+def _record_delivery_failure(run_dir: Path, *, reason: str) -> None:
+    """Mark this run's PR delivery as FAILED in its private delivery.json (#194).
+
+    When ``deliver()`` raises (e.g. ``push_branch()`` / ``gh pr create`` fails
+    before a PR exists), the run is still an approved dialogue but produced no PR.
+    `develop attach` reads this PRIVATE per-run marker (not the SHARED result.json,
+    which a prior run could have left behind) to report the failure at once rather
+    than waiting out the #189 delivery deadline. Merges into the existing marker so
+    the recorded deadline is preserved. Best-effort: a write failure just means
+    attach falls back to the deadline/grace bound.
+    """
+    marker = run_dir / "delivery.json"
+    data: dict[str, object] = {}
+    try:
+        existing = json.loads(marker.read_text(encoding="utf-8"))
+        if isinstance(existing, dict):
+            data = existing
+    except (OSError, json.JSONDecodeError):
+        pass
+    data["failed"] = True
+    data["reason"] = reason
+    with contextlib.suppress(OSError):
+        marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+
 def _daemon_main(args: argparse.Namespace) -> int:
     """Daemon-mode entry (T10): task.json in, atomic result.json out.
 
@@ -543,6 +568,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         return _fail_payload("internal", f"unexpected error: {exc}", 1)
 
     delivery = None
+    delivery_error: str | None = None
     if args.open_pr and result.approved:
         # Record when this run's delivery budget expires BEFORE delivery starts,
         # so `develop attach` can bound a crashed/orphaned delivery without ever
@@ -569,6 +595,12 @@ def _daemon_main(args: argparse.Namespace) -> int:
                 task_id=ctx.task_id,
             )
         except Exception as exc:  # delivery failure must not sink the run
+            # An approved run whose delivery FAILED is not a clean success (#194):
+            # record the reason so result.json is `failed` (task stays retriable)
+            # and drop a private marker so `develop attach` reports the failure
+            # instead of waiting out the #189 deadline.
+            delivery_error = str(exc)
+            _record_delivery_failure(config.run_dir, reason=delivery_error)
             print(f"pr delivery failed: {exc}", file=sys.stderr)
 
     post_results(args.lithos_url, ctx.task_id, result, delivery=delivery)
@@ -579,6 +611,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         finished_at=datetime.now(UTC),
         run_dir=config.run_dir,
         delivery=delivery,
+        delivery_error=delivery_error,
     )
     write_result_atomically(result_file, payload)
     # Record the completion under the run's idempotency key so a later dispatch

@@ -409,8 +409,13 @@ def _run_phase(
     if state is not None and state.get("status"):
         # An approved verdict still has PR delivery to do in daemon mode — not
         # terminal until this run's result.json lands (or it's reaped on success,
-        # handled below). Every other terminal status has no post-dialogue work.
-        if state.get("status") == "approved" and not _delivery_complete(run_dir):
+        # handled below), UNLESS delivery already FAILED (#194), which is terminal
+        # at once. Every other terminal status has no post-dialogue work.
+        if (
+            state.get("status") == "approved"
+            and not _delivery_failed(run_dir)
+            and not _delivery_complete(run_dir)
+        ):
             return "delivering"
         return "terminal"
     if not run_dir.is_dir():
@@ -440,6 +445,27 @@ def _delivery_complete(run_dir: Path) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     return isinstance(data, dict) and data.get("status") == "succeeded"
+
+
+def _delivery_failed(run_dir: Path) -> str | None:
+    """The reason this run's PR delivery FAILED (#194), or ``None``.
+
+    When ``deliver()`` raises before a PR exists (e.g. ``push_branch()`` /
+    ``gh pr create`` fails), the daemon records the failure in this run's PRIVATE
+    ``run_dir/delivery.json`` marker. Reading it lets attach treat the run as
+    terminally **approved-but-not-delivered** at once — rather than sitting in the
+    ``"delivering"`` phase until the #189 deadline. The marker is per-run (unlike
+    the SHARED ``result.json``), so a prior run's leftover can never be mistaken
+    for this one.
+    """
+    try:
+        data = json.loads((run_dir / _DELIVERY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict) and data.get("failed"):
+        reason = data.get("reason")
+        return str(reason) if reason else "PR delivery failed"
+    return None
 
 
 def _delivery_deadline(run_dir: Path) -> datetime | None:
@@ -576,8 +602,10 @@ class _Outcome:
     has_log: bool = False  # conversation.md present at capture time
     reaped: bool = False  # run dir removed by the route-runner's success cleanup
     delivery_timed_out: bool = False  # approved, but result.json never landed (#189)
+    delivery_failed: bool = False  # approved, but PR delivery raised (no PR) (#194)
     pr_url: str | None = None  # the delivered PR url, when approved+delivered (#188)
-    failure_reason: str | None = None  # why a non-approved run stopped (#188)
+    # why a run stopped (#188), or why its PR delivery failed (#194)
+    failure_reason: str | None = None
 
 
 def _recover_reaped_outcome(run_dir: Path) -> dict | None:
@@ -647,18 +675,26 @@ def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> No
     if state:
         outcome.failure_reason = state.get("failure_reason")
         if state.get("status") == "approved":
-            outcome.pr_url = _delivered_pr_url(run_dir, state)
+            # #194: an approved run whose delivery FAILED (raised before a PR
+            # opened) is not a clean delivery — surface the reason, not a PR url.
+            reason = _delivery_failed(run_dir)
+            if reason:
+                outcome.delivery_failed = True
+                outcome.failure_reason = reason
+            else:
+                outcome.pr_url = _delivered_pr_url(run_dir, state)
 
 
 def _approved(outcome: _Outcome) -> bool:
     """Whether the run reached the only success status (``approved``) **and**
     fully delivered.
 
-    A delivery that never completed (:attr:`_Outcome.delivery_timed_out`, #189) is
-    not a clean success — the PR may not exist — so ``attach --wait`` must exit
-    nonzero, or ``attach --wait && gh pr view`` would race a PR that never opened.
+    A delivery that never completed (:attr:`_Outcome.delivery_timed_out`, #189) or
+    that FAILED (:attr:`_Outcome.delivery_failed`, #194) is not a clean success —
+    no PR exists — so ``attach --wait`` must exit nonzero, or ``attach --wait &&
+    gh pr view`` would race a PR that never opened.
     """
-    if outcome.delivery_timed_out:
+    if outcome.delivery_timed_out or outcome.delivery_failed:
         return False
     return bool(outcome.state and outcome.state.get("status") == "approved")
 
@@ -681,6 +717,18 @@ def _outcome_line(run_id: str, outcome: _Outcome) -> str:
         if state and state.get("branch"):
             parts.append(f"on {state['branch']}")
         parts.append("(timed out waiting for result.json — check `develop dump`)")
+        return " ".join(parts)
+    if outcome.delivery_failed:
+        # approved, but PR delivery raised before a PR opened (#194). Not a clean
+        # success — name the failure + reason (AC#3 of #171).
+        parts = [f"── run {run_id} approved but PR delivery failed"]
+        rounds = state.get("rounds") if state else None
+        if isinstance(rounds, int):
+            parts.append(f"after {rounds} round{'s' if rounds != 1 else ''}")
+        if state and state.get("branch"):
+            parts.append(f"on {state['branch']}")
+        if outcome.failure_reason:
+            parts.append(f"— {outcome.failure_reason}")
         return " ".join(parts)
     if state and state.get("status"):
         status = str(state["status"])
@@ -718,6 +766,18 @@ def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
             event["rounds"] = state["rounds"]
         if state and state.get("branch"):
             event["branch"] = str(state["branch"])
+        return event
+    if outcome.delivery_failed:
+        # approved verdict, but PR delivery raised before a PR opened (#194) — flag
+        # it so a consumer doesn't read the bare "approved" status as a delivered PR.
+        event["status"] = "approved"
+        event["delivery_failed"] = True
+        if state and isinstance(state.get("rounds"), int):
+            event["rounds"] = state["rounds"]
+        if state and state.get("branch"):
+            event["branch"] = str(state["branch"])
+        if outcome.failure_reason:
+            event["failure_reason"] = outcome.failure_reason
         return event
     if state and state.get("status"):
         event["status"] = str(state["status"])
