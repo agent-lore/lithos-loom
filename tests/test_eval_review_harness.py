@@ -199,3 +199,99 @@ def test_live_review_cleans_up_on_error(monkeypatch: pytest.MonkeyPatch) -> None
     with pytest.raises(RuntimeError):
         live_review(_live_case(), "h")
     assert not captured["work_dir"].exists()
+
+
+# ── patch-based cases (#193): run_case materialises an ephemeral head ──────────
+
+
+def _patch_case(tmp_git_repo, tmp_path):
+    """A real patch-`Case` whose head is `mod.py: ok=False  # BUG` on a fresh base."""
+    import subprocess
+
+    from lithos_loom.runner import git as _git
+
+    (tmp_git_repo / "mod.py").write_text("ok = True\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=tmp_git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "seed"],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    base = _git.base_sha(tmp_git_repo)
+    (tmp_git_repo / "mod.py").write_text("ok = False  # BUG\n")
+    diff = subprocess.run(
+        ["git", "diff"], cwd=tmp_git_repo, capture_output=True, text=True
+    ).stdout
+    subprocess.run(
+        ["git", "checkout", "--", "."],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "head.patch").write_text(diff)
+    case = Case(
+        id="194-x",
+        description="",
+        repo=str(tmp_git_repo),
+        base=base,
+        head="",
+        acceptance_criteria="ac",
+        personas=("correctness",),
+        profile="standard",
+        expected=(_EXPECTED,),
+        head_patch="head.patch",
+        case_dir=case_dir,
+    )
+    return case, base
+
+
+def _worktree_list(repo):
+    import subprocess
+
+    return subprocess.run(
+        ["git", "worktree", "list"], cwd=repo, capture_output=True, text=True
+    ).stdout
+
+
+def test_run_case_materialises_a_patch_head_end_to_end(tmp_git_repo, tmp_path) -> None:
+    import subprocess
+
+    case, base = _patch_case(tmp_git_repo, tmp_path)
+    seen: dict = {}
+
+    def capturing(c: Case, head: str) -> dict:
+        seen["head"] = head
+        seen["diff"] = subprocess.run(
+            ["git", "diff", f"{base}..{head}"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+        ).stdout
+        return _caught()
+
+    result = run_case(case, k=1, review_fn=capturing)
+
+    assert seen["head"] and seen["head"] != base  # the reviewer got an ephemeral sha
+    assert "BUG" in seen["diff"]  # which resolves to base + the patch
+    assert result.catch_rate == 1.0
+    assert "eval-patch" not in _worktree_list(tmp_git_repo)  # build worktree cleaned up
+
+
+def test_run_case_cleans_up_patch_head_even_on_review_error(
+    tmp_git_repo, tmp_path
+) -> None:
+    case, _base = _patch_case(tmp_git_repo, tmp_path)
+
+    def boom(c: Case, head: str) -> dict:
+        raise RuntimeError("review blew up")
+
+    with pytest.raises(RuntimeError):
+        run_case(case, k=1, review_fn=boom)
+    assert "eval-patch" not in _worktree_list(
+        tmp_git_repo
+    )  # cleaned up despite the error

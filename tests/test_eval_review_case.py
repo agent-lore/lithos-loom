@@ -138,6 +138,92 @@ def test_rejects_empty_personas(tmp_path: Path) -> None:
         load_case(case_dir)
 
 
+# ── patch-based heads (#193): a case can apply a .patch instead of pinning a sha ──
+
+_PATCH_TOML = """
+[case]
+id = "194-delivery-failure-status"
+description = "a failed delivery recorded as succeeded"
+repo = "."
+base = "aaaaaaaa"
+head_patch = "head.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_loom/plugins/story_develop/daemon_io.py"
+keywords = ["delivery", "succeeded"]
+min_severity = "critical"
+mechanism = "a failed PR delivery is recorded as succeeded"
+"""
+
+
+def _write_patch(case_dir: Path, name: str = "head.patch") -> None:
+    # contents are irrelevant at load time — load_case only checks the file exists
+    (case_dir / name).write_text("--- a/x\n+++ b/x\n")
+
+
+def test_loads_a_patch_case(tmp_path: Path) -> None:
+    # #193: a case may define its head as a .patch applied at runtime, not a sha.
+    case_dir = tmp_path / "194-delivery-failure-status"
+    _write_case(case_dir, toml=_PATCH_TOML)
+    _write_patch(case_dir)
+    case = load_case(case_dir)
+    assert case.head_patch == "head.patch"
+    assert case.head == ""  # no sha — resolved to an ephemeral commit at run time
+    assert case.base == "aaaaaaaa"
+
+
+def test_rejects_both_head_and_head_patch(tmp_path: Path) -> None:
+    toml = _PATCH_TOML.replace(
+        'head_patch = "head.patch"', 'head = "bbbbbbbb"\nhead_patch = "head.patch"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_patch(case_dir)
+    with pytest.raises(ValueError, match="head"):
+        load_case(case_dir)
+
+
+def test_rejects_neither_head_nor_head_patch(tmp_path: Path) -> None:
+    toml = _PATCH_TOML.replace('head_patch = "head.patch"\n', "")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="head"):
+        load_case(case_dir)
+
+
+def test_rejects_missing_head_patch_file(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PATCH_TOML)  # the .patch file is NOT written
+    with pytest.raises(ValueError, match="head.patch"):
+        load_case(case_dir)
+
+
+def test_loads_known_good_patch(tmp_path: Path) -> None:
+    toml = _PATCH_TOML + '\n[known_good]\nhead_patch = "clean.patch"\n'
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_patch(case_dir)
+    _write_patch(case_dir, "clean.patch")
+    case = load_case(case_dir)
+    assert case.known_good_head_patch == "clean.patch"
+    assert case.known_good_head is None
+
+
+def test_rejects_known_good_with_both_head_and_patch(tmp_path: Path) -> None:
+    toml = (
+        _PATCH_TOML + '\n[known_good]\nhead = "cccccccc"\nhead_patch = "clean.patch"\n'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_patch(case_dir)
+    _write_patch(case_dir, "clean.patch")
+    with pytest.raises(ValueError, match="known_good"):
+        load_case(case_dir)
+
+
 # ── shipped cases: the real cases under evals/review/cases/ must stay valid ──
 # load_case is pure (TOML + ac.md, no git), so this guard is hermetic — it runs
 # in `make check`/CI without fetching the cases' (possibly off-branch) commits.

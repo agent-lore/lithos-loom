@@ -23,6 +23,7 @@ from ...plugins.story_develop.review_only import review_change
 from ...plugins.story_develop.review_resolve import ResolvedChange
 from .case import Case
 from .match import Judge, score_run
+from .patch import materialise_patch_heads
 
 # A review function takes (case, head_sha) and returns the ReviewReport JSON.
 ReviewFn = Callable[[Case, str], dict]
@@ -65,43 +66,53 @@ def run_case(
     """
     review = review_fn or live_review
 
-    def _review(head: str, variant: str, i: int) -> dict:
-        report = review(case, head)
-        if report_sink is not None:
-            report_sink(case.id, variant, i, report)
-        return report
+    # #193: resolve any patch-defined head(s) to ephemeral commits ONCE, up front,
+    # so the rest of the flow sees only shas (and they're reused across all K
+    # samples). A sha-based case is identity + a no-op cleanup.
+    case, cleanup = materialise_patch_heads(case)
+    try:
 
-    caught = 0
-    severity_ok = 0
-    for i in range(k):
-        score = score_run(case, _review(case.head, "buggy", i), judge=judge)
-        caught += int(score.caught)
-        severity_ok += int(score.severity_correct)
+        def _review(head: str, variant: str, i: int) -> dict:
+            report = review(case, head)
+            if report_sink is not None:
+                report_sink(case.id, variant, i, report)
+            return report
 
-    catch_rate = caught / k if k else 0.0
-    severity_correctness = severity_ok / caught if caught else 0.0
+        caught = 0
+        severity_ok = 0
+        for i in range(k):
+            score = score_run(case, _review(case.head, "buggy", i), judge=judge)
+            caught += int(score.caught)
+            severity_ok += int(score.severity_correct)
 
-    false_positive_rate = 0.0
-    if case.known_good_head:
-        j = known_good_runs if known_good_runs is not None else k
-        flagged = sum(
-            int(
-                score_run(
-                    case, _review(case.known_good_head, "known-good", i), judge=judge
-                ).caught
+        catch_rate = caught / k if k else 0.0
+        severity_correctness = severity_ok / caught if caught else 0.0
+
+        false_positive_rate = 0.0
+        if case.known_good_head:
+            j = known_good_runs if known_good_runs is not None else k
+            flagged = sum(
+                int(
+                    score_run(
+                        case,
+                        _review(case.known_good_head, "known-good", i),
+                        judge=judge,
+                    ).caught
+                )
+                for i in range(j)
             )
-            for i in range(j)
-        )
-        false_positive_rate = flagged / j if j else 0.0
+            false_positive_rate = flagged / j if j else 0.0
 
-    return CaseResult(
-        case_id=case.id,
-        n=k,
-        catch_rate=catch_rate,
-        severity_correctness=severity_correctness,
-        false_positive_rate=false_positive_rate,
-        passed=catch_rate >= bar,
-    )
+        return CaseResult(
+            case_id=case.id,
+            n=k,
+            catch_rate=catch_rate,
+            severity_correctness=severity_correctness,
+            false_positive_rate=false_positive_rate,
+            passed=catch_rate >= bar,
+        )
+    finally:
+        cleanup()
 
 
 def _base_for(case: Case, head_sha: str) -> str:

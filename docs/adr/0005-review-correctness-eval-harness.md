@@ -156,7 +156,23 @@ So the seed ships **judge-scored**: the rebuild removed the *gross* #188/#189-er
 contamination and made the buggy catch unambiguous, while `--judge` provides the
 trustworthy FP. The judge's *contaminated-known-good rescue* (below) is thus not a
 crutch the seed outgrew but the standing mechanism. The richer **patch-in-case-dir**
-authoring form is filed as a follow-up (#193).
+authoring form shipped in **#193** (below).
+
+## Update (#193): patch-based case authoring
+
+The `180` rebuild proved that authoring a case by *pinning historical commit shas*
+is painful — a genuinely-clean head usually needs a **synthetic off-branch commit
+kept alive by a pushed tag** (done twice by hand for the `180` mirror). #193 adds a
+cheaper, scalable form: a case declares `head_patch` (and optionally
+`known_good_head_patch`) — a `.patch` file beside `case.toml` that the harness
+applies to `base` in a throwaway worktree, commits as an **ephemeral** commit, and
+reviews `base..<ephemeral>` (cleaned up after the run). Now **only `base`** must be
+a real reachable commit (a `main` ancestor — no tags), and the seeded defect is a
+**reviewable diff in the PR**. `load_case` enforces exactly one of `head` /
+`head_patch`; the sha form still works. The first real escape (#194) ships as the
+worked example (`cases/194-delivery-failure-status/`). This is the keystone for
+*growing* the benchmark toward the independent-case count this ADR requires before
+tuning the panel (#175 / #182).
 
 ## Deferred
 
@@ -167,8 +183,8 @@ authoring form is filed as a follow-up (#193).
   `--no-judge` FP is **not** 0 — thorough reviewers surface a long tail of
   different-mechanism edge cases on intricate lifecycle code, so the seed ships
   **judge-scored** rather than chasing `--no-judge` to 0. The drive nonetheless
-  closed real defects (#194/#196/#198). The general patch-based authoring form is
-  #193.
+  closed real defects (#194/#196/#198). The general patch-based authoring form
+  shipped in #193 (see *Update (#193)*).
 - A few **mutation-style synthetic** defects (off-by-one, swapped ordering,
   dropped error path) for breadth alongside the real-escape cases.
 - Per-case **cost reporting** and a cheaper-than-full panel sampling mode.

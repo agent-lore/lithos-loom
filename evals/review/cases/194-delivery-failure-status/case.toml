@@ -1,0 +1,37 @@
+[case]
+id = "194-delivery-failure-status"
+description = """
+#194: an approved story-develop run whose PR delivery FAILS before a PR opens
+(deliver() raises) must NOT be recorded as `succeeded` — keying result.json status
+off `result.approved` alone is the #171 false-done window (the operator sees the
+run as done with no PR and no failure reason; the task is wrongly completed). Fixed
+by #195 (build_result_payload maps an approved-but-failed-delivery to `failed` with
+a `delivery` error).
+
+This is a PATCH-BASED case (#193) — the first real escape converted via the new
+authoring path. `base` is the hardened `main`; `head_patch` re-introduces the
+defect by removing the `if delivery_error is not None:` branch in
+`build_result_payload`, so an approved run with a failed delivery is recorded
+`succeeded` again -> catch. The known-good (`known_good_head_patch`) is a
+comment-only clarification to the same function — no behaviour change, so a correct
+review finds nothing. JUDGE-SCORED (the default).
+"""
+repo = "."
+base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
+head_patch = "reintroduce-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "clean-change.patch"
+
+[[expected]]
+file = "src/lithos_loom/plugins/story_develop/daemon_io.py"
+keywords = ["delivery", "succeeded", "failed", "false"]
+min_severity = "critical"
+mechanism = """
+build_result_payload maps an approved run whose PR delivery FAILED (delivery_error
+is set) to status `succeeded` instead of `failed`, so the operator sees the run as
+a clean success with no PR and no failure reason — the #171/#194 false-done window.
+"""

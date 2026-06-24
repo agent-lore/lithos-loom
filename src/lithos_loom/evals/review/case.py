@@ -53,6 +53,13 @@ class Case:
     # a defect diff with an independent clean diff — e.g. review the *removal* of
     # a fix as the defect, and the fix itself as the known-good.
     known_good_base: str | None = None
+    # #193: a head defined as a ``.patch`` applied to ``base`` at runtime, instead
+    # of a pinned sha (so a case needs no off-branch commit + tag). The filename
+    # is relative to ``case_dir``; the harness materialises an ephemeral commit and
+    # fills ``head`` / ``known_good_head`` with its sha. ``load_case`` enforces
+    # exactly one of head / head_patch (and likewise for the known-good).
+    head_patch: str | None = None
+    known_good_head_patch: str | None = None
     case_dir: Path | None = None
 
 
@@ -61,10 +68,17 @@ def load_case(case_dir: Path) -> Case:
     data = tomllib.loads((case_dir / "case.toml").read_text(encoding="utf-8"))
     case = data.get("case", {})
 
-    required = ("id", "base", "head")
+    required = ("id", "base")
     missing = [k for k in required if not case.get(k)]
     if missing:
         raise ValueError(f"case {case_dir.name}: missing required field(s) {missing}")
+
+    # The buggy head is exactly one of a sha (`head`) or a runtime patch
+    # (`head_patch`, #193). The sha form fills `head`; the patch form leaves it
+    # "" (the harness fills it with the ephemeral commit's sha at run time).
+    head, head_patch = _head_spec(
+        case_dir, case.get("id"), "head", case.get("head"), case.get("head_patch")
+    )
 
     ac_file = case.get("acceptance_criteria_file", "ac.md")
     acceptance = (case_dir / ac_file).read_text(encoding="utf-8").strip()
@@ -102,8 +116,19 @@ def load_case(case_dir: Path) -> Case:
             f"known: {', '.join(sorted(registry))}"
         )
 
+    # The optional known-good pair: if the [known_good] table is present it, too,
+    # is exactly one of head / head_patch; an absent table means no known-good.
     known_good = data.get("known_good", {})
-    known_good_head = known_good.get("head")
+    if known_good:
+        kg_head, kg_head_patch = _head_spec(
+            case_dir,
+            case.get("id"),
+            "known_good.head",
+            known_good.get("head"),
+            known_good.get("head_patch"),
+        )
+    else:
+        kg_head, kg_head_patch = "", None
     known_good_base = known_good.get("base")
 
     return Case(
@@ -111,15 +136,47 @@ def load_case(case_dir: Path) -> Case:
         description=str(case.get("description", "")),
         repo=str(case.get("repo", ".")),
         base=str(case["base"]),
-        head=str(case["head"]),
+        head=head,
         acceptance_criteria=acceptance,
         personas=personas,
         profile=profile,
         expected=expected,
-        known_good_head=str(known_good_head) if known_good_head else None,
+        known_good_head=kg_head or None,
         known_good_base=str(known_good_base) if known_good_base else None,
+        head_patch=head_patch,
+        known_good_head_patch=kg_head_patch,
         case_dir=case_dir,
     )
+
+
+def _head_spec(
+    case_dir: Path, case_id: object, label: str, sha: object, patch: object
+) -> tuple[str, str | None]:
+    """Resolve a head spec to ``(sha, patch_filename)`` — exactly one of the two.
+
+    A case's head is either a pinned commit sha or a ``.patch`` applied to ``base``
+    at runtime (#193). The patch form returns ``("", filename)`` (the sha is filled
+    in later from the ephemeral commit); the sha form returns ``(sha, None)``. The
+    patch file must exist in the case dir (fail closed at load, not hours into the
+    live run).
+    """
+    if sha and patch:
+        raise ValueError(
+            f"case {case_id}: {label} and {label}_patch are mutually exclusive — "
+            "declare exactly one"
+        )
+    if not sha and not patch:
+        raise ValueError(
+            f"case {case_id}: declare exactly one of {label} / {label}_patch"
+        )
+    if patch:
+        if not (case_dir / str(patch)).is_file():
+            raise ValueError(
+                f"case {case_id}: {label}_patch file {str(patch)!r} not found in "
+                f"{case_dir.name}"
+            )
+        return "", str(patch)
+    return str(sha), None
 
 
 def _parse_expected(case_id: str | None, e: dict) -> Expected:
