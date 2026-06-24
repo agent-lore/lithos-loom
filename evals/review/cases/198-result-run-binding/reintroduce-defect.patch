@@ -1,0 +1,13 @@
+diff --git a/src/lithos_loom/cli/develop.py b/src/lithos_loom/cli/develop.py
+index 790a376..558babc 100644
+--- a/src/lithos_loom/cli/develop.py
++++ b/src/lithos_loom/cli/develop.py
+@@ -448,7 +448,7 @@ def _result_for_run(run_dir: Path) -> dict | None:
+         return None
+     if not isinstance(data, dict):
+         return None
+-    return data if data.get("run_id") == run_dir.name else None
++    return data
+ 
+ 
+ def _delivery_complete(run_dir: Path) -> bool:

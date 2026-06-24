@@ -1,0 +1,31 @@
+[case]
+id = "196-attach-wait-hang"
+description = """
+#196: `develop attach --wait <task>` invoked right after dispatch must NOT hang
+forever. A run can complete WITHOUT an observable run dir — an idempotency replay
+writes result.json and exits *before* creating the dir, or a fast success is reaped
+between two 2s polls — so `_wait_for_run`, which loops until the dir appears, never
+returns. Fixed by #197 (a completion-store escape: each poll also checks
+`lookup_completed` and returns the recovered outcome instead of looping).
+
+PATCH-BASED case (#193): `base` is the hardened `main`; `head_patch` removes the
+completion-store escape from `_wait_for_run`, re-introducing the forever-hang ->
+catch. Catch-only (no FP pair). JUDGE-SCORED (the default).
+"""
+repo = "."
+base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
+head_patch = "reintroduce-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_loom/cli/develop.py"
+keywords = ["wait", "hang", "loop", "forever", "completion", "reaped"]
+min_severity = "critical"
+mechanism = """
+_wait_for_run loops until the run dir appears with no completion-store escape, so
+`attach --wait <task>` hangs forever when the run completed without an observable
+run dir — an idempotency replay (result.json written before the dir is created) or
+a fast success reaped between two polls.
+"""

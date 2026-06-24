@@ -1,0 +1,14 @@
+diff --git a/src/lithos_loom/cli/develop.py b/src/lithos_loom/cli/develop.py
+index 790a376..918731a 100644
+--- a/src/lithos_loom/cli/develop.py
++++ b/src/lithos_loom/cli/develop.py
+@@ -548,9 +548,6 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
+         run_dir = _resolve(work_dir, key)
+         if run_dir is not None:
+             return run_dir, None
+-        record = lookup_completed(key, expected_task_id=key)
+-        if record:
+-            return None, _state_from_completion_record(record)
+         time.sleep(_ATTACH_POLL_SECONDS)
+ 
+ 
