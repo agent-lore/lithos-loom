@@ -1,0 +1,29 @@
+diff --git a/src/lithos_loom/cli/develop.py b/src/lithos_loom/cli/develop.py
+index 790a376..d3970da 100644
+--- a/src/lithos_loom/cli/develop.py
++++ b/src/lithos_loom/cli/develop.py
+@@ -557,20 +557,11 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
+ def _is_finished(run_dir: Path) -> bool:
+     """Whether a run is terminal — i.e. safe for ``prune`` to remove.
+ 
+-    The signal is the on-disk terminal marker: the plugin writes
+-    ``conversation.md`` only after the agent containers stop, so its presence
+-    means the run reached teardown. Container state alone is *not* sufficient —
+-    agent containers run with ``--rm`` (``containers.py``), so a finished run and
+-    a run still in its **startup window** (handoff dir seeded, containers not yet
+-    started) both report zero containers. Pruning on "no running container" would
+-    delete a live run out from under the daemon during that window. Requiring the
+-    durable marker leaves every in-flight run (and any hard-crashed run that
+-    never wrote the marker) untouched, erring conservative. A still-live agent
+-    container is treated as a definitive override in case a future change writes
+-    the marker earlier.
++    A run is finished once no agent container for it is still running. Agent
++    containers run with ``--rm`` (``containers.py``), so a torn-down run leaves
++    no container behind; an absent / non-running container therefore means the
++    run reached teardown and its dir is safe to reap.
+     """
+-    if not (run_dir / "conversation.md").is_file():
+-        return False
+     containers = _run_containers(run_dir.name)
+     return not (containers and any(c.running for c in containers))
+ 
