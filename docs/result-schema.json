@@ -24,6 +24,10 @@
       "type": "integer",
       "description": "Process exit code. 0=succeeded, 1=generic failure, 20=bad input/config (do not retry), 30=interrupted by signal."
     },
+    "rounds": {
+      "type": "integer",
+      "description": "Optional. The implement/review round count the run reached (story-develop). The runner ignores it; develop attach reads it (offline / from the completion store) so a reaped or replayed run's terminal summary still names the round count."
+    },
     "started_at": {
       "type": "string",
       "format": "date-time"

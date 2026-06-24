@@ -1134,6 +1134,20 @@ def test_build_result_payload_other_stops_are_failed(
     validate_result_schema(payload)
 
 
+def test_build_result_payload_carries_rounds(tmp_path: Path) -> None:
+    # #196: the round count is on the result.json contract so a reaped success
+    # (its state.json gone) can still report rounds from the completion store.
+    payload, _ = build_result_payload(
+        _result("approved", tmp_path, rounds=4),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert payload["rounds"] == 4
+    validate_result_schema(payload)
+
+
 def test_build_result_payload_delivery_failure_is_failed(tmp_path: Path) -> None:
     # #194: an approved dialogue whose PR delivery FAILED (deliver() raised before
     # a PR exists) is NOT a clean success — no PR opened, so it is a `failed` run
