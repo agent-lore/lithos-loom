@@ -410,16 +410,7 @@ def _run_phase(
     that could race the work-dir reap).
     """
     if state is not None and state.get("status"):
-        # An approved verdict still has PR delivery to do in daemon mode — not
-        # terminal until this run's result.json lands (or it's reaped on success,
-        # handled below), UNLESS delivery already FAILED (#194), which is terminal
-        # at once. Every other terminal status has no post-dialogue work.
-        if (
-            state.get("status") == "approved"
-            and not _delivery_failed(run_dir)
-            and not _delivery_complete(run_dir)
-        ):
-            return "delivering"
+        # A recorded outcome is terminal.
         return "terminal"
     if not run_dir.is_dir():
         return "terminal"  # reaped by the route-runner after applying the result
