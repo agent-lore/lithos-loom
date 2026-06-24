@@ -1905,6 +1905,9 @@ def develop(
                 "worktree": str(wt),
                 "base_sha": base,
                 "rounds": rounds_completed,
+                # Why a non-approved run stopped, for the offline `attach` summary
+                # (#188). None on approval — there is no failure to explain.
+                "failure_reason": failure_reason if status != "approved" else None,
                 # Review-metadata record (ADR 0003 §11) — the same profile +
                 # panel + findings-by-severity written to Lithos metadata, kept
                 # in the durable run-state for local outcome correlation.

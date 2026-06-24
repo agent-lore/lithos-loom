@@ -1456,6 +1456,21 @@ def test_state_json_written_on_success(
     assert data["findings_by_severity"] == develop_mod.findings_by_severity(
         result.reviews
     )
+    # #188: an approved run carries no failure reason (the field is for the
+    # terminal summary on a non-approved exit).
+    assert data["failure_reason"] is None
+
+
+def test_state_json_records_failure_reason_on_failure(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # #188: the failure reason `develop()` builds must reach `state.json` so the
+    # offline `attach` summary can show *why* a run failed, not just "failed".
+    _install_fakes(monkeypatch, config, write_source=False)  # coder makes no commit
+    result = develop_mod.develop(config)
+    assert result.status == "failed"
+    data = json.loads((config.run_dir / "state.json").read_text())
+    assert data["failure_reason"] == "round 1: coder produced no commit"
 
 
 # --- validation -------------------------------------------------------------

@@ -578,6 +578,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         started_at=started_at,
         finished_at=datetime.now(UTC),
         run_dir=config.run_dir,
+        delivery=delivery,
     )
     write_result_atomically(result_file, payload)
     # Record the completion under the run's idempotency key so a later dispatch

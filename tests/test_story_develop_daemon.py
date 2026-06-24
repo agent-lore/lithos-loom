@@ -1083,6 +1083,38 @@ def test_build_result_payload_interrupted_carries_resume(tmp_path: Path) -> None
     validate_result_schema(payload)
 
 
+def test_build_result_payload_carries_pr_url_from_delivery(tmp_path: Path) -> None:
+    # #188: the delivered PR url is part of the run's contract output so an
+    # offline reader (`attach`) can show which PR opened. Threaded from the
+    # DeliveryOutcome the daemon already has in hand post-delivery.
+    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
+
+    delivery = DeliveryOutcome(pr_url="https://github.com/o/r/pull/170", pr_number=170)
+    payload, _ = build_result_payload(
+        _result("approved", tmp_path),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+        delivery=delivery,
+    )
+    assert payload["pr_url"] == "https://github.com/o/r/pull/170"
+    validate_result_schema(payload)  # the new field is on-contract
+
+
+def test_build_result_payload_omits_pr_url_without_delivery(tmp_path: Path) -> None:
+    # a run that opened no PR (no delivery, or a failed run) carries no pr_url.
+    payload, _ = build_result_payload(
+        _result("approved", tmp_path),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert "pr_url" not in payload
+    validate_result_schema(payload)
+
+
 @pytest.mark.parametrize(
     "status", ["max_rounds", "stalled", "disputed", "cost_exceeded", "failed"]
 )
