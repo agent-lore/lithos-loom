@@ -360,6 +360,8 @@ def _record_delivery_failure(run_dir: Path, *, reason: str) -> None:
         if isinstance(existing, dict):
             data = existing
     except (OSError, json.JSONDecodeError):
+        # Best-effort merge: if the prior marker is missing/unreadable/invalid,
+        # continue with a fresh payload and still record this failure.
         pass
     data["failed"] = True
     data["reason"] = reason
