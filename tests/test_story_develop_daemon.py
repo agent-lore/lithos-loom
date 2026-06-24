@@ -1134,6 +1134,71 @@ def test_build_result_payload_other_stops_are_failed(
     validate_result_schema(payload)
 
 
+def test_build_result_payload_delivery_failure_is_failed(tmp_path: Path) -> None:
+    # #194: an approved dialogue whose PR delivery FAILED (deliver() raised before
+    # a PR exists) is NOT a clean success — no PR opened, so it is a `failed` run
+    # carrying the delivery reason and the task stays open/retriable. Keying status
+    # off result.approved alone wrote `succeeded` here — the false-done window.
+    payload, exit_code = build_result_payload(
+        _result("approved", tmp_path),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+        delivery_error="gh pr create failed: HTTP 422",
+    )
+    assert exit_code == EXIT_FAILED
+    assert payload["status"] == "failed"
+    assert payload["error"]["category"] == "delivery"
+    assert "gh pr create failed: HTTP 422" in payload["error"]["message"]
+    assert "pr_url" not in payload
+    validate_result_schema(payload)
+
+
+def test_daemon_records_delivery_failure_when_deliver_raises(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#194: when deliver() raises before opening a PR, the approved run is recorded
+    as FAILED (not succeeded) with a `delivery` error, and a PRIVATE
+    run_dir/delivery.json failure marker is written so `develop attach` can report
+    the failure (rather than hanging in `delivering` until the #189 deadline)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **k: True)
+    monkeypatch.setattr(
+        main_mod, "develop", lambda config, **kw: _result("approved", tmp_path)
+    )
+
+    seen: dict[str, Any] = {}
+
+    def boom_deliver(config, result, **kw):
+        seen["run_dir"] = config.run_dir
+        raise RuntimeError("gh pr create failed: HTTP 422")
+
+    monkeypatch.setattr(main_mod, "deliver", boom_deliver)
+
+    argv, result_file = _daemon_args(tmp_git_repo, tmp_path, "--open-pr")
+    assert main_mod.main(argv) == EXIT_FAILED
+
+    payload = json.loads(result_file.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["error"]["category"] == "delivery"
+    assert "gh pr create failed" in payload["error"]["message"]
+    assert "pr_url" not in payload
+
+    marker = json.loads((seen["run_dir"] / "delivery.json").read_text(encoding="utf-8"))
+    assert marker["failed"] is True
+    assert "gh pr create failed" in marker["reason"]
+
+
 # ── __main__ daemon-mode wiring ────────────────────────────────────────
 
 

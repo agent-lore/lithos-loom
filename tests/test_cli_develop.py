@@ -876,6 +876,70 @@ def test_outcome_renders_delivery_timeout_and_is_not_a_clean_success() -> None:
     assert event["delivery_timed_out"] is True
 
 
+def test_delivery_failed_helper(tmp_path: Path) -> None:
+    # #194: the daemon records a delivery failure in the run's PRIVATE
+    # delivery.json (not the shared result.json — so a prior run's leftover can't
+    # be mistaken for this one). _delivery_failed surfaces the reason.
+    rd = tmp_path / "t-1" / "r1"
+    rd.mkdir(parents=True)
+    assert develop._delivery_failed(rd) is None  # no marker
+    (rd / "delivery.json").write_text(
+        json.dumps({"deadline": "2026-01-01T00:00:00+00:00"})
+    )
+    assert develop._delivery_failed(rd) is None  # deadline only, not a failure
+    (rd / "delivery.json").write_text(
+        json.dumps({"failed": True, "reason": "push rejected"})
+    )
+    assert develop._delivery_failed(rd) == "push rejected"
+
+
+def test_run_phase_approved_delivery_failed_is_terminal(tmp_path: Path) -> None:
+    # #194: an approved run whose delivery FAILED (its private delivery.json marks
+    # failed) is terminal at once — not stuck in "delivering" until the #189
+    # deadline. The shared result.json is untouched, so the stale-result.json
+    # staleness reasoning is unaffected.
+    rd = tmp_path / "t-1" / "r1"
+    rd.mkdir(parents=True)
+    approved = {"status": "approved"}
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "delivering"
+    (rd / "delivery.json").write_text(json.dumps({"failed": True, "reason": "boom"}))
+    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
+
+
+def test_capture_outcome_records_delivery_failure(tmp_path: Path) -> None:
+    # #194: capture reads the run's private marker and sets delivery_failed + the
+    # reason (and no pr_url) so the summary reports the failure honestly.
+    rd = tmp_path / "t-1" / "r1"
+    rd.mkdir(parents=True)
+    (rd / "delivery.json").write_text(
+        json.dumps({"failed": True, "reason": "push rejected"})
+    )
+    outcome = develop._Outcome()
+    develop._capture_outcome(outcome, rd, {"status": "approved", "rounds": 2})
+    assert outcome.delivery_failed is True
+    assert outcome.failure_reason == "push rejected"
+    assert outcome.pr_url is None
+
+
+def test_outcome_line_shows_delivery_failure() -> None:
+    # #194: the terminal summary names the delivery failure + reason (#171 AC#3),
+    # and it is NOT a clean success — `attach --wait` exits nonzero, so
+    # `attach --wait && gh pr view` can't race a PR that never opened.
+    outcome = develop._Outcome(
+        state={"status": "approved", "rounds": 2, "branch": "feat/x"}
+    )
+    outcome.delivery_failed = True
+    outcome.failure_reason = "gh pr create failed: HTTP 422"
+    line = develop._outcome_line("r1", outcome)
+    assert "PR delivery failed" in line
+    assert "gh pr create failed: HTTP 422" in line
+    assert develop._approved(outcome) is False
+    event = develop._outcome_event("r1", outcome)
+    assert event["status"] == "approved"
+    assert event["delivery_failed"] is True
+    assert event["failure_reason"] == "gh pr create failed: HTTP 422"
+
+
 def _write_delivery_deadline(run_dir: Path, deadline: datetime) -> None:
     (run_dir / "delivery.json").write_text(
         json.dumps({"deadline": deadline.isoformat()})

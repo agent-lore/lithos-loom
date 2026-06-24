@@ -766,6 +766,7 @@ def build_result_payload(
     finished_at: datetime,
     run_dir: Path,
     delivery: DeliveryOutcome | None = None,
+    delivery_error: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Map a :class:`DevelopResult` onto the result.json contract.
 
@@ -775,10 +776,22 @@ def build_result_payload(
     ``resume_after``); every other stop (``max_rounds`` / ``stalled`` /
     ``disputed`` / ``cost_exceeded`` / ``failed``) maps to ``failed`` —
     they all need a human to look before another run is worth its spend.
+
+    *delivery_error* (#194): an approved dialogue whose PR delivery FAILED
+    (``deliver()`` raised before a PR opened) is NOT a clean success — no PR
+    exists, so it maps to ``failed`` carrying the delivery reason, keeping the
+    task open/retriable. Keying status off ``result.approved`` alone wrote
+    ``succeeded`` here — the #171 false-done window in the delivery path.
     """
-    if result.approved:
+    if delivery_error is not None:
+        status, exit_code = "failed", EXIT_FAILED
+        error: dict[str, Any] | None = {
+            "category": "delivery",
+            "message": f"PR delivery failed: {delivery_error}",
+        }
+    elif result.approved:
         status, exit_code = "succeeded", EXIT_SUCCEEDED
-        error: dict[str, Any] | None = None
+        error = None
     elif result.status == "interrupted":
         status, exit_code = "interrupted", EXIT_INTERRUPTED
         error = {
