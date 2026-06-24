@@ -1284,6 +1284,103 @@ def test_attach_wait_reaped_without_recoverable_record_is_not_a_false_crash(
     assert "crashed" not in out
 
 
+def test_recover_reaped_outcome_carries_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #196 (Gap A2): the recovered outcome includes the round count (from the
+    # completion record's result.json), so a reaped success's summary shows rounds
+    # — not just the verdict + PR.
+    run_dir = tmp_path / "t-1" / "r1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        develop,
+        "lookup_completed_for_run",
+        lambda t, r: {
+            "status": "succeeded",
+            "rounds": 4,
+            "pr_url": "https://github.com/o/r/pull/9",
+        },
+    )
+    recovered = develop._recover_reaped_outcome(run_dir)
+    assert recovered == {
+        "status": "approved",
+        "rounds": 4,
+        "pr_url": "https://github.com/o/r/pull/9",
+    }
+
+
+def test_wait_for_run_recovers_completed_run_without_a_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #196 (Gap B): a run can complete (idempotency replay / fast reap) WITHOUT any
+    # run dir ever being observable. _wait_for_run must NOT loop forever: when the
+    # completion store has a record for the key, it returns (None, recovered).
+    monkeypatch.setattr(develop, "_resolve", lambda wd, key: None)  # dir never appears
+    monkeypatch.setattr(
+        develop,
+        "lookup_completed",
+        lambda key, expected_task_id=None: {
+            "status": "succeeded",
+            "rounds": 3,
+            "pr_url": "https://github.com/o/r/pull/7",
+        },
+    )
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    run_dir, recovered = develop._wait_for_run(tmp_path, "t-1")
+    assert run_dir is None
+    assert recovered == {
+        "status": "approved",
+        "rounds": 3,
+        "pr_url": "https://github.com/o/r/pull/7",
+    }
+
+
+def test_attach_wait_recovers_replayed_run_with_no_run_dir(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #196 (Gap B): `attach --wait <task>` invoked when the run was
+    # idempotency-replayed (no run dir is ever created) reports the recovered
+    # outcome and exits 0, instead of hanging forever in _wait_for_run.
+    monkeypatch.setattr(develop, "_resolve", lambda wd, key: None)  # no dir, ever
+    monkeypatch.setattr(
+        develop,
+        "lookup_completed",
+        lambda key, expected_task_id=None: {
+            "status": "succeeded",
+            "rounds": 2,
+            "pr_url": "https://github.com/o/r/pull/5",
+        },
+    )
+    monkeypatch.setattr(develop.time, "sleep", lambda s: None)
+    develop.develop_attach(key="t-1", config=None, once=False, wait=True, stream=False)
+    out = capsys.readouterr().out
+    assert "approved" in out
+    assert "pull/5" in out  # the recovered summary names the PR
+    assert "after 2 rounds" in out  # and the round count
+
+
+def test_capture_outcome_recovers_pr_url_when_reaped_mid_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #196 (Gap A1): the route-runner can rmtree the task dir between the poll's
+    # state.json read and _delivered_pr_url's result.json read within one
+    # _capture_outcome. The pr_url must be recovered from the durable completion
+    # store, not silently dropped from the summary.
+    run_dir = tmp_path / "t-1" / "r1"  # never created → result.json unreadable (reaped)
+    monkeypatch.setattr(
+        develop,
+        "lookup_completed_for_run",
+        lambda t, r: {
+            "status": "succeeded",
+            "rounds": 3,
+            "pr_url": "https://github.com/o/r/pull/8",
+        },
+    )
+    outcome = develop._Outcome()
+    develop._capture_outcome(outcome, run_dir, {"status": "approved", "rounds": 3})
+    assert outcome.pr_url == "https://github.com/o/r/pull/8"
+
+
 def test_attach_stream_emits_jsonl_events(
     patched: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

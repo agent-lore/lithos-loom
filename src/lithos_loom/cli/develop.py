@@ -50,7 +50,10 @@ import typer
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import handoff
-from lithos_loom.plugins.story_develop.idempotency import lookup_completed_for_run
+from lithos_loom.plugins.story_develop.idempotency import (
+    lookup_completed,
+    lookup_completed_for_run,
+)
 
 develop_app = typer.Typer(
     name="develop",
@@ -504,17 +507,27 @@ def _delivery_timed_out(run_dir: Path, delivering_polls: int) -> bool:
     return delivering_polls >= _DELIVERY_FALLBACK_POLLS
 
 
-def _wait_for_run(work_dir: Path, key: str) -> Path:
-    """Block (polling) until a run for *key* appears under *work_dir*.
+def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
+    """Block (polling) until a run for *key* appears, or it already completed.
 
-    For ``attach --wait`` invoked right after dispatching a task, before the
-    route-runner has created the run dir. ``Ctrl-C`` exits cleanly, like the
-    follow loop.
+    Returns ``(run_dir, None)`` once the run dir appears (the common case: ``attach
+    --wait`` used right after dispatch, before the route-runner seeds the dir), or
+    ``(None, recovered_state)`` when the run **completed without an observable run
+    dir** — an idempotency replay (``__main__`` writes result.json and exits
+    *before* creating the run dir) or a fast success the route-runner reaped
+    between two polls. Without the second exit this loops forever (#196): the dir
+    never appears. The completion store is the durable signal the route-runner
+    never removes; it is keyed by the idempotency key (the task id by default), so
+    ``attach --wait <task-id>`` finds it. ``Ctrl-C`` exits cleanly, like the follow
+    loop.
     """
     while True:
         run_dir = _resolve(work_dir, key)
         if run_dir is not None:
-            return run_dir
+            return run_dir, None
+        record = lookup_completed(key, expected_task_id=key)
+        if record:
+            return None, _state_from_completion_record(record)
         time.sleep(_ATTACH_POLL_SECONDS)
 
 
@@ -627,8 +640,22 @@ def _recover_reaped_outcome(run_dir: Path) -> dict | None:
     record = lookup_completed_for_run(run_dir.parent.name, run_dir.name)
     if not record:
         return None
+    return _state_from_completion_record(record)
+
+
+def _state_from_completion_record(record: dict) -> dict:
+    """Translate a completion-store record (a ``result.json`` payload) into the
+    ``state.json``-shaped dict ``attach`` renders from.
+
+    A recorded run is always **approved** (the only success). The record carries
+    the round count (#196) and the delivered ``pr_url`` (#188), so a reaped or
+    idempotency-replayed run — whose ``state.json`` was never seen — still reports
+    a complete terminal summary (verdict + rounds + PR).
+    """
     recovered: dict = {"status": "approved"}
-    if isinstance(record, dict) and record.get("pr_url"):
+    if isinstance(record.get("rounds"), int):
+        recovered["rounds"] = record["rounds"]
+    if record.get("pr_url"):
         recovered["pr_url"] = str(record["pr_url"])
     return recovered
 
@@ -683,6 +710,14 @@ def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> No
                 outcome.failure_reason = reason
             else:
                 outcome.pr_url = _delivered_pr_url(run_dir, state)
+                # #196 (Gap A1): the route-runner can rmtree the task dir between
+                # the poll's state.json read and _delivered_pr_url's result.json
+                # read. When that race drops the url, recover it from the durable
+                # completion store rather than losing it from the summary.
+                if outcome.pr_url is None and not run_dir.is_dir():
+                    recovered = _recover_reaped_outcome(run_dir)
+                    if recovered and recovered.get("pr_url"):
+                        outcome.pr_url = str(recovered["pr_url"])
 
 
 def _approved(outcome: _Outcome) -> bool:
@@ -1042,12 +1077,22 @@ def develop_attach(
         _fail(str(exc))
     run_dir = _resolve(cfg.orchestrator.work_dir, key)
     if run_dir is None:
-        if wait:
-            # --wait may be used right after dispatch, before the route-runner
-            # has seeded the run dir — block until it appears rather than failing.
-            run_dir = _wait_for_run(cfg.orchestrator.work_dir, key)
-        else:
+        if not wait:
             _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")
+        # --wait may be used right after dispatch, before the route-runner has
+        # seeded the run dir — block until it appears rather than failing.
+        run_dir, recovered = _wait_for_run(cfg.orchestrator.work_dir, key)
+        if run_dir is None:
+            # The run completed with no observable run dir (idempotency replay /
+            # fast reap) — report the recovered terminal outcome instead of
+            # hanging forever (#196). --wait is the only mode that waits.
+            outcome = _Outcome(state=recovered, reaped=True)
+            if recovered and recovered.get("pr_url"):
+                outcome.pr_url = str(recovered["pr_url"])
+            typer.echo(_outcome_line(key, outcome))
+            if not _approved(outcome):
+                sys.exit(1)
+            return
     info = _run_info(run_dir)
 
     if once:

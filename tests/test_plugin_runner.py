@@ -55,6 +55,20 @@ def test_result_schema_accepts_delivery_error_category() -> None:
     )
 
 
+def test_result_schema_accepts_rounds() -> None:
+    # #196: rounds is an optional contract field so a reaped/replayed run's
+    # recovered summary (state.json is gone) can still show the round count.
+    validate_result_schema(
+        {
+            "schema_version": 1,
+            "task_id": "t1",
+            "status": "succeeded",
+            "exit_code": 0,
+            "rounds": 3,
+        }
+    )
+
+
 # ── write_result_atomically ────────────────────────────────────────────
 
 

@@ -813,6 +813,9 @@ def build_result_payload(
         "worktree": str(result.worktree),
         "commits": list(result.commits),
         "error": error,
+        # On-contract (#196) so a reaped/replayed run — whose state.json is gone —
+        # can still report its round count from the completion store via attach.
+        "rounds": result.rounds,
     }
     if result.conversation_log is not None:
         payload["artifacts"] = {"conversation_log": str(result.conversation_log)}
