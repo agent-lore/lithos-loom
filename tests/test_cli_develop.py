@@ -858,6 +858,59 @@ def test_attach_wait_does_not_exit_before_delivery_completes(
     assert "approved" in out
 
 
+def test_outcome_renders_delivery_timeout_and_is_not_a_clean_success() -> None:
+    # #189: a delivery that never completed is approved-but-not-delivered. The
+    # summary must say so, and it must NOT count as a clean success — `attach
+    # --wait` exits nonzero so `attach --wait && gh pr view` can't race a PR that
+    # never opened.
+    outcome = develop._Outcome(
+        state={"status": "approved", "rounds": 1, "branch": "feat/x"}
+    )
+    outcome.delivery_timed_out = True
+    line = develop._outcome_line("r1", outcome)
+    assert "delivery did not complete" in line
+    assert develop._approved(outcome) is False
+    event = develop._outcome_event("r1", outcome)
+    assert event["status"] == "approved"
+    assert event["delivery_timed_out"] is True
+
+
+def test_attach_wait_bounds_delivery_when_result_never_lands(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #189: if the plugin crashes after writing the approved state.json but before
+    # result.json lands (the agent containers are already gone — delivery runs
+    # host-side after they stop, so "containers gone" is NORMAL here, not a crash
+    # signal), attach must not stay in "delivering" forever. After a bounded grace
+    # window it terminates with a "delivery did not complete" outcome and a nonzero
+    # exit for --wait.
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        rounds={1: ["cq"]},
+        status="approved",
+        delivered=False,  # approved verdict recorded; result.json NEVER lands
+    )
+    monkeypatch.setattr(develop, "_DELIVERY_GRACE_POLLS", 3)
+    polls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        polls["n"] += 1
+        if polls["n"] > 50:  # fail fast instead of hanging if the bound is missing
+            raise AssertionError("delivering phase did not terminate (unbounded)")
+
+    monkeypatch.setattr(develop.time, "sleep", fake_sleep)
+    with pytest.raises(SystemExit) as exc:
+        develop.develop_attach(
+            key="r1", config=None, once=False, wait=True, stream=False
+        )
+    assert exc.value.code == 1  # delivery never finished → not a clean success
+    out = capsys.readouterr().out
+    assert "delivery did not complete" in out
+    assert polls["n"] <= 10  # bounded within the grace window, did not hang
+
+
 def test_attach_wait_blocks_until_run_appears(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -92,6 +92,17 @@ _ATTACH_POLL_SECONDS = 2.0
 _TEARDOWN_GRACE_SECONDS = 30.0
 _TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECONDS))
 
+# Bound the post-approval delivery window (#189). deliver() — branch push, PR
+# open, result.json write — runs host-side in the plugin subprocess AFTER the
+# agent containers stop, so "containers gone" is the NORMAL state during
+# delivery, not a crash signal. If the plugin crashes after writing the approved
+# state.json but before result.json lands, attach would otherwise stay in
+# "delivering" forever. We bound it on wall-clock instead: generous enough for a
+# slow push / Copilot round, but finite, so a crash-during-delivery terminates
+# with a clear outcome rather than hanging --wait forever.
+_DELIVERY_GRACE_SECONDS = 300.0
+_DELIVERY_GRACE_POLLS = max(1, int(_DELIVERY_GRACE_SECONDS / _ATTACH_POLL_SECONDS))
+
 # Handoff files are bind-mounted RW into agent containers (containers.py), so an
 # agent can write arbitrary bytes — both the body and (via the reviewer-name
 # segment) the filename. Treat them as adversarial: cap the read so one poisoned
@@ -511,6 +522,7 @@ class _Outcome:
     state: dict | None = None  # parsed state.json (or recovered) at capture time
     has_log: bool = False  # conversation.md present at capture time
     reaped: bool = False  # run dir removed by the route-runner's success cleanup
+    delivery_timed_out: bool = False  # approved, but result.json never landed (#189)
 
 
 def _recover_reaped_outcome(run_dir: Path) -> dict | None:
@@ -546,7 +558,15 @@ def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> No
 
 
 def _approved(outcome: _Outcome) -> bool:
-    """Whether the run reached the only success status (``approved``)."""
+    """Whether the run reached the only success status (``approved``) **and**
+    fully delivered.
+
+    A delivery that never completed (:attr:`_Outcome.delivery_timed_out`, #189) is
+    not a clean success — the PR may not exist — so ``attach --wait`` must exit
+    nonzero, or ``attach --wait && gh pr view`` would race a PR that never opened.
+    """
+    if outcome.delivery_timed_out:
+        return False
     return bool(outcome.state and outcome.state.get("status") == "approved")
 
 
@@ -558,6 +578,17 @@ def _outcome_line(run_id: str, outcome: _Outcome) -> str:
     run whose success could not be recovered; failing all, a crash.
     """
     state = outcome.state
+    if outcome.delivery_timed_out:
+        # approved, but result.json never landed within the grace window — the
+        # run likely crashed mid-delivery (#189). Distinct from a clean approval.
+        parts = [f"── run {run_id} approved but PR delivery did not complete"]
+        rounds = state.get("rounds") if state else None
+        if isinstance(rounds, int):
+            parts.append(f"after {rounds} round{'s' if rounds != 1 else ''}")
+        if state and state.get("branch"):
+            parts.append(f"on {state['branch']}")
+        parts.append("(timed out waiting for result.json — check `develop dump`)")
+        return " ".join(parts)
     if state and state.get("status"):
         status = str(state["status"])
         phrase = _OUTCOME_PHRASES.get(status, status)
@@ -579,6 +610,16 @@ def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
     """The ``--stream`` terminal event mirroring :func:`_outcome_line`."""
     state = outcome.state
     event: dict = {"event": "outcome", "run_id": run_id, "status": None}
+    if outcome.delivery_timed_out:
+        # approved verdict, but delivery never completed (#189) — flag it so a
+        # consumer doesn't read the bare "approved" status as a delivered PR.
+        event["status"] = "approved"
+        event["delivery_timed_out"] = True
+        if state and isinstance(state.get("rounds"), int):
+            event["rounds"] = state["rounds"]
+        if state and state.get("branch"):
+            event["branch"] = str(state["branch"])
+        return event
     if state and state.get("status"):
         event["status"] = str(state["status"])
         if isinstance(state.get("rounds"), int):
@@ -922,6 +963,7 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
     seen_container = False
     last_label: str | None = None
     grace = _TEARDOWN_GRACE_POLLS
+    delivery_grace = _DELIVERY_GRACE_POLLS
     while True:
         containers = _run_containers(info.run_id)
         if containers:
@@ -930,6 +972,8 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
         phase = _run_phase(run_dir, containers, state, seen_container=seen_container)
         if phase != "vanished":
             grace = _TEARDOWN_GRACE_POLLS  # only count down once truly ending
+        if phase != "delivering":
+            delivery_grace = _DELIVERY_GRACE_POLLS  # reset unless still delivering
         if phase == "running":
             label, round_no, agent = _follow_state(run_dir, containers)
             if label != last_label:  # re-announce only on a state change
@@ -962,6 +1006,12 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
             grace -= 1
             if grace <= 0:  # outcome never landed across the grace window → crash
                 _capture_outcome(outcome, run_dir, state)
+                return
+        if phase == "delivering":
+            delivery_grace -= 1
+            if delivery_grace <= 0:  # result.json never landed → bound the hang
+                _capture_outcome(outcome, run_dir, state)
+                outcome.delivery_timed_out = True
                 return
         time.sleep(_ATTACH_POLL_SECONDS)
 
