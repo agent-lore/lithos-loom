@@ -69,6 +69,21 @@ def test_result_schema_accepts_rounds() -> None:
     )
 
 
+def test_result_schema_accepts_run_id() -> None:
+    # #198: run_id is an optional contract field so `develop attach` can bind the
+    # shared result.json to THIS run (not a prior run's leftover) for terminal
+    # detection — closing the best-effort reap/marker holes.
+    validate_result_schema(
+        {
+            "schema_version": 1,
+            "task_id": "t1",
+            "status": "succeeded",
+            "exit_code": 0,
+            "run_id": "r1",
+        }
+    )
+
+
 # ── write_result_atomically ────────────────────────────────────────────
 
 

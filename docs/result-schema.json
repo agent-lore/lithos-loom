@@ -28,6 +28,10 @@
       "type": "integer",
       "description": "Optional. The implement/review round count the run reached (story-develop). The runner ignores it; develop attach reads it (offline / from the completion store) so a reaped or replayed run's terminal summary still names the round count."
     },
+    "run_id": {
+      "type": "string",
+      "description": "Optional. The run id that produced this result (story-develop). The runner ignores it; develop attach uses it to bind the shared per-task result.json to THIS run for terminal detection, so a prior run's leftover succeeded/failed result can't be mistaken for the current run's delivery."
+    },
     "started_at": {
       "type": "string",
       "format": "date-time"
