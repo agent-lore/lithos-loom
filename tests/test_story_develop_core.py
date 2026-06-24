@@ -408,6 +408,31 @@ def test_max_rounds_stops_unapproved(
     assert "max_rounds" in result.message
 
 
+def test_state_json_failure_reason_none_for_max_rounds(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # #188/#192 review: a max_rounds run DID run rounds, so the offline `attach`
+    # summary must NOT show the "no rounds ran" sentinel. max_rounds describes
+    # itself, so state.json records no failure_reason for it (only the genuine
+    # failure statuses carry one).
+    cfg = DevelopConfig(
+        repo=config.repo,
+        description=config.description,
+        work_dir=config.work_dir,
+        claude_config_dir=config.claude_config_dir,
+        max_rounds=2,
+    )
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+    )
+    result = develop_mod.develop(cfg)
+    assert result.status == "max_rounds" and result.rounds == 2  # rounds ran
+    data = json.loads((cfg.run_dir / "state.json").read_text())
+    assert data["failure_reason"] is None  # not the stale "no rounds ran"
+
+
 # --- malformed / failed review handling -------------------------------------
 
 
