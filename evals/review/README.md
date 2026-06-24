@@ -93,5 +93,26 @@ the known-good head). A case **passes** at `catch-rate ≥ bar` (default 0.8).
 ## Seed case
 
 `180-attach-delivery` — the #180 / #171 defect: `develop attach` exits on the
-`approved` verdict before PR delivery (the false-done window). It reviews the
-*removal* of the #180 fix as the defect, and the fix itself as the known-good.
+`approved` verdict before PR delivery (the false-done window). It is a **synthetic
+clean mirror** built off the hardened `main`: the buggy head (`eval/180-noguard`)
+removes only the `approved -> delivering` guard from clean code, and the known-good
+reviews the reverse (adding the guard back). **Judge-scored** (the default): the
+rebuild removed the gross #188/#189-era contamination (the original seed paired the
+real #180-fix commit with its pre-fix parent and measured 100% `--no-judge` FP), and
+building it drove out a series of real escapes that had to be fixed first
+(#194/#196/#198). `--no-judge` FP is still **not** 0 — the thorough post-#181
+reviewers surface a long tail of *different-mechanism* edge cases on this intricate
+lifecycle that the mechanism-**judge** vetoes — so the trustworthy FP comes from
+`--judge`. See [ADR 0005](../../docs/adr/0005-review-correctness-eval-harness.md).
+
+### Keeping synthetic-case commits alive
+
+A case may diff against a commit that is **not on any branch** — e.g. the
+`180-attach-delivery` buggy head is a one-line fixture committed on top of `main`,
+not part of any merge. Git would garbage-collect such a commit once nothing points
+at it. **Pin each off-branch fixture commit with a pushed annotated tag** (the seed
+uses `eval/180-noguard` for the fixture and `eval/180-clean` for its clean base);
+`case.toml` references the resolved **commit sha**, and the tag is the reachability
+anchor that survives `gc` and lets a fresh clone fetch it (`git fetch --tags`). The
+live eval is host-only, so only the host running it needs the tags — they are not
+required by `make check`.

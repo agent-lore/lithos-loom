@@ -3,27 +3,44 @@ id = "180-attach-delivery"
 description = """
 The #180 / #171 defect: `develop attach` treats the `approved` verdict as
 terminal and exits BEFORE daemon PR delivery, recreating the #171 false-done
-window. This case reviews the *removal* of the #180 fix — base is the fix
-(18099f6, which added the `delivering` phase) and head is the pre-fix commit
-(96b471b), so the diff strips the delivering-phase guard. A correct review,
-given the #171 acceptance criteria, must flag that as a critical regression. The
-known-good pair reviews the actual #180 fix (base 96b471b .. head 18099f6), which
-ADDS the guard. NOTE: the #180 fix is not fully defect-free — reviewing it
-surfaces two real residual gaps (#188 summary omits PR url, #189 crash-during-
-delivery hang), so the structured matcher over-counts here. The mechanism-judge
-(default) discriminates: those are DIFFERENT mechanisms and are rejected, so this
-case needs `--judge` for a trustworthy false-positive number.
+window. A correct review, given the #171 acceptance criteria, must flag that as a
+critical regression.
+
+This is a SYNTHETIC CLEAN MIRROR built off the fully-hardened `main`. `base`
+(eval/180-clean, a127361) is clean main with the whole attach/delivery lifecycle
+hardened (#188, #189, #194, #196, #198); `head` (eval/180-noguard, f14e220) is a
+one-commit fixture that removes ONLY the `approved -> delivering` guard in
+`_run_phase`, so the diff strips the guard -> catch. The known-good pair reviews
+the reverse (eval/180-noguard .. eval/180-clean), which ADDS the guard back on
+otherwise-clean code.
+
+**This case is JUDGE-SCORED** (the default). The earlier seed paired the real
+#180-fix commit (18099f6) with its pre-fix parent (96b471b); reviewing that fix
+surfaced gross residual gaps (#188/#189) so the structured (`--no-judge`) matcher
+measured 100% FP. Rebuilding the mirror off clean main then drove out a *series*
+of real escapes the known-good review kept finding — #194 (a failed delivery
+recorded as succeeded), #196 (attach --wait forever-hang + incomplete reaped
+summary), #198 (best-effort reap/marker holes in result.json terminal detection) —
+each verified and fixed (the eval working as designed). The remaining `--no-judge`
+findings are *different-mechanism* edge cases (the thorough post-#181 reviewers
+trace every best-effort path) that the mechanism-**judge** correctly vetoes — so
+the trustworthy FP comes from `--judge`, not the topic-loose structured matcher.
+See ADR 0005.
+
+The head commit (eval/180-noguard) is off-branch; it is kept alive by the pushed
+`eval/180-noguard` annotated tag (and `eval/180-clean` anchors the clean base).
+See evals/review/README.md ("Keeping synthetic-case commits alive").
 """
 repo = "."
-base = "18099f6b684fc09e0ad725d23819fc691249f131"
-head = "96b471b63df68fcf5e2f9ae340f2327e0380c7b0"
+base = "a127361ad25c592645764bbaa33251dee235e406"
+head = "f14e2203476f94d15b40556300e3cf5c46f486e3"
 personas = ["correctness"]
 profile = "standard"
 acceptance_criteria_file = "ac.md"
 
 [known_good]
-base = "96b471b63df68fcf5e2f9ae340f2327e0380c7b0"
-head = "18099f6b684fc09e0ad725d23819fc691249f131"
+base = "f14e2203476f94d15b40556300e3cf5c46f486e3"
+head = "a127361ad25c592645764bbaa33251dee235e406"
 
 [[expected]]
 file = "src/lithos_loom/cli/develop.py"
