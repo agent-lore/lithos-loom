@@ -10,7 +10,36 @@ from textwrap import dedent
 import pytest
 
 from lithos_loom.errors import PluginContractError
-from lithos_loom.plugin_runner import run_plugin, write_result_atomically
+from lithos_loom.plugin_runner import (
+    run_plugin,
+    validate_result_schema,
+    write_result_atomically,
+)
+
+
+def test_result_schema_accepts_pr_url() -> None:
+    # #188: pr_url is an optional contract field (an offline reader names the PR).
+    validate_result_schema(
+        {
+            "schema_version": 1,
+            "task_id": "t1",
+            "status": "succeeded",
+            "exit_code": 0,
+            "pr_url": "https://github.com/o/r/pull/170",
+        }
+    )
+    # additionalProperties:false still rejects an unknown field.
+    with pytest.raises(PluginContractError):
+        validate_result_schema(
+            {
+                "schema_version": 1,
+                "task_id": "t1",
+                "status": "succeeded",
+                "exit_code": 0,
+                "not_a_field": 1,
+            }
+        )
+
 
 # ── write_result_atomically ────────────────────────────────────────────
 

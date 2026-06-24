@@ -576,6 +576,8 @@ class _Outcome:
     has_log: bool = False  # conversation.md present at capture time
     reaped: bool = False  # run dir removed by the route-runner's success cleanup
     delivery_timed_out: bool = False  # approved, but result.json never landed (#189)
+    pr_url: str | None = None  # the delivered PR url, when approved+delivered (#188)
+    failure_reason: str | None = None  # why a non-approved run stopped (#188)
 
 
 def _recover_reaped_outcome(run_dir: Path) -> dict | None:
@@ -589,9 +591,41 @@ def _recover_reaped_outcome(run_dir: Path) -> dict | None:
     keyed by the (possibly explicit ``--idempotency-key``) key, so it is located
     by this run's id — bound to **this** run, not a prior success of the same
     task. A match means the run was approved (the only success).
+
+    The record is this run's ``result.json`` payload, so it carries the delivered
+    ``pr_url`` (#188) — surfaced here so a write-then-reap between two polls still
+    names the PR.
     """
-    if lookup_completed_for_run(run_dir.parent.name, run_dir.name):
-        return {"status": "approved"}
+    record = lookup_completed_for_run(run_dir.parent.name, run_dir.name)
+    if not record:
+        return None
+    recovered: dict = {"status": "approved"}
+    if isinstance(record, dict) and record.get("pr_url"):
+        recovered["pr_url"] = str(record["pr_url"])
+    return recovered
+
+
+def _delivered_pr_url(run_dir: Path, state: dict | None) -> str | None:
+    """The delivered PR url for an approved run, or ``None`` (#188).
+
+    A reaped run's recovered *state* already carries it (from the completion-store
+    payload); otherwise read this run's ``result.json``. A ``succeeded`` status
+    binds that file to THIS run (a prior succeeded run's whole work dir is reaped,
+    so a surviving ``succeeded`` result.json is necessarily this run's — the same
+    reasoning as :func:`_delivery_complete`).
+    """
+    if state and state.get("pr_url"):
+        return str(state["pr_url"])
+    try:
+        data = json.loads((run_dir.parent / "result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        isinstance(data, dict)
+        and data.get("status") == "succeeded"
+        and data.get("pr_url")
+    ):
+        return str(data["pr_url"])
     return None
 
 
@@ -608,6 +642,12 @@ def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> No
         state = _recover_reaped_outcome(run_dir)
     outcome.state = state
     outcome.has_log = (run_dir / "conversation.md").is_file()
+    # #188: enrich the summary — why a non-approved run stopped, and the PR url
+    # of an approved+delivered one (only an approved run has a delivered PR).
+    if state:
+        outcome.failure_reason = state.get("failure_reason")
+        if state.get("status") == "approved":
+            outcome.pr_url = _delivered_pr_url(run_dir, state)
 
 
 def _approved(outcome: _Outcome) -> bool:
@@ -651,6 +691,12 @@ def _outcome_line(run_id: str, outcome: _Outcome) -> str:
             parts.append(f"after {rounds} round{'s' if rounds != 1 else ''}")
         if state.get("branch"):
             parts.append(f"on {state['branch']}")
+        # #188: name the PR an approved run delivered, or why a stopped run stopped
+        # — so the terminal summary answers "did it finish, and how?" (AC#3 of #171).
+        if status == "approved" and outcome.pr_url:
+            parts.append(f"· {outcome.pr_url}")
+        elif status != "approved" and outcome.failure_reason:
+            parts.append(f"— {outcome.failure_reason}")
         return " ".join(parts)
     if outcome.has_log:
         return f"── run {run_id} finished (status not recorded)"
@@ -679,6 +725,10 @@ def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
             event["rounds"] = state["rounds"]
         if state.get("branch"):
             event["branch"] = str(state["branch"])
+        if outcome.pr_url:  # #188: the delivered PR url (approved+delivered)
+            event["pr_url"] = outcome.pr_url
+        if outcome.failure_reason:  # #188: why a non-approved run stopped
+            event["failure_reason"] = outcome.failure_reason
     elif outcome.reaped:
         event["reaped"] = True
     elif not outcome.has_log:

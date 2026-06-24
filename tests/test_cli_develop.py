@@ -1000,6 +1000,81 @@ def test_attach_delivery_fallback_grace_when_no_deadline(
     assert polls["n"] <= 10
 
 
+def test_outcome_line_shows_pr_url_for_delivered_run() -> None:
+    # #188: an approved+delivered run's summary names the PR url so the operator
+    # can tell which PR opened (AC#3 of #171).
+    outcome = develop._Outcome(
+        state={"status": "approved", "rounds": 1, "branch": "feat/x"},
+        pr_url="https://github.com/o/r/pull/170",
+    )
+    line = develop._outcome_line("r1", outcome)
+    assert "approved" in line
+    assert "https://github.com/o/r/pull/170" in line
+
+
+def test_outcome_line_shows_failure_reason() -> None:
+    # #188: a failed run's summary names *why* it failed, not just "failed".
+    outcome = develop._Outcome(
+        state={"status": "failed", "rounds": 2, "branch": "feat/x"},
+        failure_reason="round 2: gate RED",
+    )
+    line = develop._outcome_line("r1", outcome)
+    assert "failed" in line
+    assert "round 2: gate RED" in line
+
+
+def test_outcome_event_carries_pr_url_and_failure_reason() -> None:
+    delivered = develop._Outcome(
+        state={"status": "approved"}, pr_url="https://github.com/o/r/pull/170"
+    )
+    assert (
+        develop._outcome_event("r1", delivered)["pr_url"]
+        == "https://github.com/o/r/pull/170"
+    )
+    failed = develop._Outcome(state={"status": "failed"}, failure_reason="boom")
+    assert develop._outcome_event("r1", failed)["failure_reason"] == "boom"
+
+
+def test_capture_outcome_stashes_pr_url_and_failure_reason(tmp_path: Path) -> None:
+    # the offline reader pulls the failure reason from this run's state.json and
+    # the delivered PR url from its (succeeded) result.json.
+    run_dir = tmp_path / "t-1" / "r1"
+    (run_dir / "handoff").mkdir(parents=True)
+    (run_dir.parent / "result.json").write_text(
+        json.dumps({"status": "succeeded", "pr_url": "https://github.com/o/r/pull/170"})
+    )
+    outcome = develop._Outcome()
+    develop._capture_outcome(outcome, run_dir, {"status": "approved", "rounds": 1})
+    assert outcome.pr_url == "https://github.com/o/r/pull/170"
+
+    failed = develop._Outcome()
+    develop._capture_outcome(
+        failed, run_dir, {"status": "failed", "failure_reason": "boom"}
+    )
+    assert failed.failure_reason == "boom"
+    assert failed.pr_url is None  # a non-approved run shows no PR url
+
+
+def test_recover_reaped_outcome_carries_pr_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #188: a reaped success recovers its PR url from the completion-store payload
+    # (which is this run's result.json), so even a write-then-reap between polls
+    # still surfaces the PR.
+    run_dir = tmp_path / "t-1" / "r1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        develop,
+        "lookup_completed_for_run",
+        lambda t, r: {"status": "succeeded", "pr_url": "https://github.com/o/r/pull/9"},
+    )
+    recovered = develop._recover_reaped_outcome(run_dir)
+    assert recovered == {
+        "status": "approved",
+        "pr_url": "https://github.com/o/r/pull/9",
+    }
+
+
 def test_attach_wait_blocks_until_run_appears(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

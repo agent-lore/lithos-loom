@@ -554,23 +554,14 @@ def deliver(
     github_issue_url: str | None = None,
     task_id: str | None = None,
 ) -> DeliveryOutcome:
-    """Push the approved branch, open the PR, run the Copilot round.
+    """Push the approved branch and open the PR, then run the Copilot round.
 
-    Imports the develop-module helpers lazily to keep the import graph
-    one-directional (develop never imports this module).
+    Once :func:`create_pr` returns, the PR exists — so any later failure must NOT
+    lose its url. The post-open work is delegated to :func:`_deliver_after_open`,
+    and a raise there degrades to a delivered-with-notes outcome **carrying the
+    url** (#192) rather than propagating — which would otherwise strand the
+    operator with an approved run and no PR in the `attach` summary.
     """
-    from ...runner import git
-    from . import containers, handoff
-    from .develop import (
-        _build_run_cmd,
-        _render,
-        _render_findings,
-        _run_check_set,
-        build_check_set,
-    )
-    from .findings import FindingLedger
-    from .turns import run_turn
-
     wt: Path = result.worktree
     notes: list[str] = []
 
@@ -592,6 +583,66 @@ def deliver(
     )
     pr_number = pr_number_from_url(pr_url)
     logger.info("story-develop %s: opened PR %s", config.run_id, pr_url)
+
+    try:
+        return _deliver_after_open(
+            config,
+            result,
+            wt=wt,
+            repo=repo,
+            title=title,
+            pr_url=pr_url,
+            pr_number=pr_number,
+            notes=notes,
+            no_copilot=no_copilot,
+            copilot_timeout=copilot_timeout,
+            coder_timeout=coder_timeout,
+        )
+    except Exception as exc:
+        # The PR is already open; never strand its url on a later failure (#192).
+        logger.warning(
+            "story-develop %s: delivery did not finish after opening %s: %s",
+            config.run_id,
+            pr_url,
+            exc,
+        )
+        return DeliveryOutcome(
+            pr_url=pr_url,
+            pr_number=pr_number,
+            notes=(*notes, f"delivery did not finish after opening the PR: {exc}"),
+        )
+
+
+def _deliver_after_open(
+    config,
+    result,
+    *,
+    wt: Path,
+    repo: str,
+    title: str,
+    pr_url: str,
+    pr_number: int,
+    notes: list[str],
+    no_copilot: bool,
+    copilot_timeout: int,
+    coder_timeout: int,
+) -> DeliveryOutcome:
+    """The post-PR-open delivery work: notify, the Copilot round, the fix turn +
+    regression gate, and the per-thread replies. Separated so :func:`deliver` can
+    guarantee the PR url survives any failure here (#192). Imports the
+    develop-module helpers lazily (develop never imports this module).
+    """
+    from ...runner import git
+    from . import containers, handoff
+    from .develop import (
+        _build_run_cmd,
+        _render,
+        _render_findings,
+        _run_check_set,
+        build_check_set,
+    )
+    from .findings import FindingLedger
+    from .turns import run_turn
 
     # #113: notify the operator their PR awaits review (native GitHub
     # notification). Best-effort; the note threads into every return below.

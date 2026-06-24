@@ -1405,6 +1405,16 @@ def run_panel_round(
     )
 
 
+# Statuses whose human message embeds ``failure_reason`` (the message-building
+# elif chain in ``develop()``). ``approved`` and ``max_rounds`` describe
+# themselves and never consume it — so it stays at its "no rounds ran" sentinel
+# for a max_rounds run. ``state.json`` records the reason only for these, so the
+# offline ``attach`` summary (#188) never shows a stale reason for max_rounds.
+_REASON_BEARING_STATUSES = frozenset(
+    {"failed", "interrupted", "stalled", "disputed", "cost_exceeded"}
+)
+
+
 def develop(
     config: DevelopConfig,
     *,
@@ -1905,6 +1915,13 @@ def develop(
                 "worktree": str(wt),
                 "base_sha": base,
                 "rounds": rounds_completed,
+                # Why a non-approved run stopped, for the offline `attach` summary
+                # (#188). Only the reason-bearing statuses set a real reason;
+                # approved + max_rounds describe themselves (and would otherwise
+                # leak the "no rounds ran" sentinel for an exhausted run).
+                "failure_reason": (
+                    failure_reason if status in _REASON_BEARING_STATUSES else None
+                ),
                 # Review-metadata record (ADR 0003 §11) — the same profile +
                 # panel + findings-by-severity written to Lithos metadata, kept
                 # in the durable run-state for local outcome correlation.

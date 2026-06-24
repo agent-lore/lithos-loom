@@ -46,6 +46,10 @@
       "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
       "description": "Full SHAs of commits this run produced, in chronological order."
     },
+    "pr_url": {
+      "type": "string",
+      "description": "URL of the pull request opened by post-approval delivery, when the run delivered one. Absent on runs that opened no PR. Lets an offline reader (develop attach) name the PR without querying GitHub/Lithos."
+    },
     "spawned_tasks": {
       "type": "array",
       "items": {"type": "string"},

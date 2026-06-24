@@ -422,6 +422,28 @@ def test_deliver_notifies_operator_when_configured(
     assert any("requested review from @dave" in n for n in out.notes)
 
 
+def test_deliver_preserves_pr_url_when_post_open_step_raises(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # #192 review: once create_pr() returns, the PR exists. A later failure (the
+    # fix push, a reply, the Copilot wait — here the Copilot request) must NOT
+    # lose the url: deliver() degrades to a delivered-with-notes outcome carrying
+    # it, so build_result_payload still records pr_url and `attach` can render it
+    # instead of stranding the operator with an approved run and no PR.
+    state = _install(monkeypatch, config)
+    wt = _make_wt(config)
+    state["wt"] = wt
+
+    def boom(*a: Any, **kw: Any) -> bool:
+        raise RuntimeError("github flaked right after the PR was opened")
+
+    monkeypatch.setattr(pr_delivery, "request_copilot", boom)
+
+    out = deliver(config, _result(config, wt), no_copilot=False)
+    assert out.pr_url.endswith("/pull/82") and out.pr_number == 82  # url preserved
+    assert any("did not finish after opening the PR" in n for n in out.notes)
+
+
 def test_deliver_skips_operator_notify_when_unset(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

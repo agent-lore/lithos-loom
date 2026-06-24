@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from .develop import DevelopResult
+    from .pr_delivery import DeliveryOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -764,6 +765,7 @@ def build_result_payload(
     started_at: datetime,
     finished_at: datetime,
     run_dir: Path,
+    delivery: DeliveryOutcome | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Map a :class:`DevelopResult` onto the result.json contract.
 
@@ -801,6 +803,12 @@ def build_result_payload(
     }
     if result.conversation_log is not None:
         payload["artifacts"] = {"conversation_log": str(result.conversation_log)}
+    # The delivered PR url is part of the run's contract output (#188) so an
+    # offline reader (`develop attach`) — which never queries Lithos — can show
+    # which PR opened. Recorded under the idempotency key too, so a reaped
+    # success still surfaces it.
+    if delivery is not None:
+        payload["pr_url"] = delivery.pr_url
     if status == "interrupted" and result.resume_after is not None:
         resume: dict[str, Any] = {
             "resume_after": result.resume_after.isoformat(timespec="seconds"),
