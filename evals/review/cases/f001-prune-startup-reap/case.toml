@@ -1,0 +1,36 @@
+[case]
+id = "f001-prune-startup-reap"
+description = """
+f-001 (a #170 `develop prune` dogfood finding — finding-ledger id, no GH issue):
+`prune` decided a run was finished from container liveness ALONE. Agent containers
+run with `--rm`, so a run still in its STARTUP WINDOW (run dir + handoff/ seeded,
+first container not yet started) reports zero containers — identical to a torn-down
+run — and `prune` reaps its dir, deleting a concurrent same-task live run out from
+under the daemon. The fix requires the durable terminal marker (`conversation.md`,
+written only after the containers stop) before pruning.
+
+PATCH-BASED case (#193): `base` is hardened `main`; `head_patch` rewrites
+`_is_finished` back to the container-liveness-only check (dropping the
+`conversation.md` marker guard), re-introducing the startup-window reap -> catch.
+Catch-only. JUDGE-SCORED (the default). First benchmark case OUTSIDE the
+attach/delivery lifecycle (the `prune` subsystem) — diversifies the seeded-defect
+coverage off `cli/develop.py`'s attach path.
+"""
+repo = "."
+base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
+head_patch = "reintroduce-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_loom/cli/develop.py"
+keywords = ["prune", "startup", "reap", "container", "concurrent", "in-flight", "marker"]
+min_severity = "critical"
+mechanism = """
+_is_finished no longer requires the durable terminal marker (conversation.md), so it
+judges a run finished from container liveness alone. A run in its startup window (run
+dir + handoff/ seeded, first agent container not yet started) reports zero containers
+under `--rm`, so `prune` reaps its dir — deleting a concurrent same-task live run out
+from under the daemon.
+"""
