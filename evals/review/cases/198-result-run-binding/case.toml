@@ -1,0 +1,32 @@
+[case]
+id = "198-result-run-binding"
+description = """
+#198: `develop attach` reads the SHARED per-task `result.json` for terminal
+detection, so a prior run's leftover must not be mistaken for THIS run's. #199 binds
+it to the run by `run_id` (the file is this run's iff its `run_id == run_dir.name`);
+the earlier "a succeeded survivor must be this run because a success is reaped"
+reasoning relied on a BEST-EFFORT reap (`_cleanup_work_dir` suppresses `rmtree`
+`OSError`), so a stale succeeded `result.json` could false-done a retry of the same
+task.
+
+PATCH-BASED case (#193): `base` is the hardened `main`; `head_patch` removes the
+`run_id` binding from `_result_for_run` (it trusts any succeeded result.json again),
+so a stale prior-run result.json false-dones the next run -> catch. Catch-only.
+JUDGE-SCORED (the default).
+"""
+repo = "."
+base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
+head_patch = "reintroduce-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_loom/cli/develop.py"
+keywords = ["stale", "run_id", "prior", "result", "false", "reap"]
+min_severity = "critical"
+mechanism = """
+_result_for_run no longer binds result.json to the run by run_id, so a stale prior
+run's succeeded result.json (which a best-effort reap left behind) is mistaken for
+THIS approved run's delivery — a false-done on a retry of the same task.
+"""
