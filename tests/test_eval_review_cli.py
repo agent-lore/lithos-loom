@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 from lithos_loom.evals.review import cli as eval_cli
 from lithos_loom.evals.review.cli import eval_app
 from lithos_loom.evals.review.harness import CaseResult
+from lithos_loom.evals.review.stats import wilson_interval
 
 runner = CliRunner()
 
@@ -55,14 +56,20 @@ def _stub_run_case(monkeypatch: pytest.MonkeyPatch, *, catch_rate=1.0, passed=Tr
     seen = []
 
     def fake(case, **kwargs):
+        n = kwargs.get("k", 5)
+        caught = round(catch_rate * n)
+        per = tuple([True] * caught + [False] * (n - caught))
         seen.append({"case": case.id, "kwargs": kwargs})
         return CaseResult(
             case_id=case.id,
-            n=kwargs.get("k", 5),
+            n=n,
             catch_rate=catch_rate,
             severity_correctness=1.0,
             false_positive_rate=0.0,
             passed=passed,
+            caught_per_sample=per,
+            severity_per_sample=per,
+            catch_rate_ci=wilson_interval(caught, n),
         )
 
     monkeypatch.setattr(eval_cli, "run_case", fake)
@@ -180,3 +187,54 @@ def test_report_sink_writes_per_run_files(tmp_path: Path) -> None:
     f = tmp_path / "case-x" / "buggy-0.json"
     assert f.is_file()
     assert json.loads(f.read_text())["blocking"] is True
+
+
+def test_table_shows_catch_count_and_ci(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_run_case(monkeypatch, catch_rate=0.8)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "180-attach-delivery"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "4/5" in result.output  # caught count out of K, not a bare percentage
+    assert "%" in result.output  # the CI range is rendered as a percentage band
+
+
+def test_summary_json_written_when_report_dir(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_run_case(monkeypatch, catch_rate=0.8)
+    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "180-attach-delivery",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    summary = out / "180-attach-delivery" / "summary.json"
+    assert summary.is_file()
+    data = json.loads(summary.read_text())
+    assert data["case"] == "180-attach-delivery"
+    assert data["catch_rate"] == 0.8
+    assert len(data["caught_per_sample"]) == 5
+    assert len(data["catch_rate_ci"]) == 2
+
+
+def test_no_summary_json_without_report_dir(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_run_case(monkeypatch)
+    runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "180-attach-delivery"],
+    )
+    assert not (tmp_path / "180-attach-delivery" / "summary.json").exists()

@@ -23,8 +23,18 @@ uv run lithos-loom eval review --case 180-attach-delivery -k 8 --bar 0.9 \
 uv run lithos-loom eval review --no-judge
 ```
 
-The command prints a per-case table (catch-rate / severity-correctness / FP) and
-exits non-zero if any case falls below its bar.
+The command prints a per-case table and exits non-zero if any case falls below
+its bar. Catch and FP are shown as a count over K plus a **Wilson 95% CI** (#182)
+— so a rate is read with its sampling error, not as a bare point estimate:
+
+```
+case                           n   catch (95% CI)   sev     fp (95% CI)  result
+-------------------------------------------------------------------------------
+180-attach-delivery           20     18/20 70-97%  100%      0/20 0-16%  PASS
+```
+
+The CI is why a low-K run can't prove a clean panel: `5/5` still spans `57-100%`
+(a miss-rate up to ~43%), and `0/20` known-good only bounds FP below ~16%.
 
 - `--judge` / `--no-judge` (**default on**): the mechanism LLM-judge confirms each
   finding describes the case's *specific* defect, not just the same file/topic.
@@ -32,7 +42,9 @@ exits non-zero if any case falls below its bar.
   live run measured 100% FP on the seed). `--judge-tool` picks the agent
   (`claude` | `codex`).
 - `--report-dir DIR`: write every run's report to `DIR/<case>/<variant>-<i>.json`
-  (`variant` = `buggy` / `known-good`) so you can read the findings behind a number.
+  (`variant` = `buggy` / `known-good`) so you can read the findings behind a number,
+  plus a per-case `DIR/<case>/summary.json` (rates, per-sample booleans, CIs) so a
+  costly K-sample run is re-analysable for variance without re-scoring.
 
 ## Add a case
 

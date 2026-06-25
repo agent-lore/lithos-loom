@@ -92,6 +92,36 @@ def test_below_bar_does_not_pass() -> None:
     assert result.passed is False
 
 
+def test_per_sample_booleans_and_catch_ci() -> None:
+    # 3 of 5 buggy runs surface the defect -> the per-sample pattern is retained
+    # and the Wilson CI brackets the 0.6 point estimate (not a bare percentage).
+    fn = _review_fn([True, True, True, False, False])
+    result = run_case(_case(known_good=False), k=5, review_fn=fn)
+    assert result.caught_per_sample == (True, True, True, False, False)
+    assert result.severity_per_sample == (True, True, True, False, False)
+    assert result.catch_rate == 0.6
+    lo, hi = result.catch_rate_ci
+    assert 0.0 < lo < 0.6 < hi < 1.0
+
+
+def test_fp_per_sample_and_ci() -> None:
+    # the known-good head trips the matcher every time -> fp 100% with a CI whose
+    # lower bound is < 1.0 even at 3/3 (small-n uncertainty is surfaced).
+    fn = _review_fn([True, True, True], good_caught=True)
+    result = run_case(_case(), k=3, review_fn=fn, known_good_runs=3)
+    assert result.false_positive_per_sample == (True, True, True)
+    assert result.false_positive_rate == 1.0
+    flo, fhi = result.false_positive_rate_ci
+    assert flo < 1.0 and fhi == 1.0
+
+
+def test_no_known_good_means_empty_fp_samples() -> None:
+    fn = _review_fn([True, True])
+    result = run_case(_case(known_good=False), k=2, review_fn=fn)
+    assert result.false_positive_per_sample == ()
+    assert result.false_positive_rate_ci == (0.0, 0.0)
+
+
 def test_severity_correctness_among_caught() -> None:
     # both runs catch, but report only `major` -> below the critical bar
     def fn(case, head):
