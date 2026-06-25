@@ -28,13 +28,20 @@ its bar. Catch and FP are shown as a count over K plus a **Wilson 95% CI** (#182
 — so a rate is read with its sampling error, not as a bare point estimate:
 
 ```
-case                           n   catch (95% CI)   sev     fp (95% CI)  result
--------------------------------------------------------------------------------
-180-attach-delivery           20     18/20 70-97%  100%      0/20 0-16%  PASS
+case                           n       catch (95% CI)   sev          fp (95% CI)  result
+----------------------------------------------------------------------------------------
+180-attach-delivery           20        20/20 84-100%  100%     0/4 0-49% +16err  PASS
 ```
 
 The CI is why a low-K run can't prove a clean panel: `5/5` still spans `57-100%`
-(a miss-rate up to ~43%), and `0/20` known-good only bounds FP below ~16%.
+(a miss-rate up to ~43%), and `0/4` known-good only bounds FP below ~49%.
+
+A reviewer turn that **crashes** (a failed/short-circuited turn — `status`
+`invalid` / `not-run`, e.g. a provider usage limit) produces no verdict. Such a
+sample is **errored**: excluded from the catch / FP denominators and reported as
+`+Nerr`, so agent flakiness never masquerades as a review miss (the `fp` above is
+`0/4` valid + `16err`, not a misleading `0/20`). A genuine catch is still counted
+even if a panel peer crashed.
 
 - `--judge` / `--no-judge` (**default on**): the mechanism LLM-judge confirms each
   finding describes the case's *specific* defect, not just the same file/topic.

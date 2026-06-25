@@ -238,3 +238,59 @@ def test_no_summary_json_without_report_dir(
         ["review", "--cases-dir", str(cases_dir), "--case", "180-attach-delivery"],
     )
     assert not (tmp_path / "180-attach-delivery" / "summary.json").exists()
+
+
+def _stub_errored(monkeypatch: pytest.MonkeyPatch):
+    """run_case returns 18 valid catches + 2 errored samples (k=20)."""
+
+    def fake(case, **kwargs):
+        return CaseResult(
+            case_id=case.id,
+            n=20,
+            catch_rate=1.0,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=True,
+            caught_per_sample=tuple([True] * 18 + [False] * 2),
+            severity_per_sample=tuple([True] * 18 + [False] * 2),
+            catch_rate_ci=wilson_interval(18, 18),
+            errored_per_sample=tuple([False] * 18 + [True] * 2),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+
+
+def test_table_shows_errored_count(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_errored(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "180-attach-delivery"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "18/18" in result.output  # denominator is the valid-sample count
+    assert "err" in result.output  # errored count surfaced
+
+
+def test_summary_json_carries_errored(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_errored(monkeypatch)
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "180-attach-delivery",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert data["errored"] == 2
+    assert data["n_valid"] == 18
+    assert sum(data["errored_per_sample"]) == 2

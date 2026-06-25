@@ -31,6 +31,13 @@ class MatchResult:
     finding_id: str = ""
 
 
+# Reviewer statuses that mean the turn did NOT produce a verdict (always
+# findings=[]): a crashed/malformed turn ("invalid") or a panel short-circuit
+# ("not-run"). A report carrying either is incomplete — a "no findings" result
+# from it is an absence of review, not a clean pass / genuine miss (#182 A3).
+_INCOMPLETE_STATUSES = frozenset({"invalid", "not-run"})
+
+
 @dataclass(frozen=True)
 class RunScore:
     """Score for one review run against a case (all expecteds must match)."""
@@ -38,6 +45,7 @@ class RunScore:
     caught: bool
     severity_correct: bool
     matches: list[MatchResult] = field(default_factory=list)
+    incomplete: bool = False
 
 
 def _haystack(finding: dict) -> str:
@@ -101,10 +109,28 @@ def _all_produced(report_json: dict) -> list[dict]:
     return findings
 
 
+def review_incomplete(report_json: dict) -> bool:
+    """Whether any reviewer's turn did not produce a verdict (#182 A3).
+
+    Keys on the *presence* of an error status (``invalid`` / ``not-run``), not
+    the absence of a good one — so a reviewer dict without a ``status`` key (only
+    test stubs; real reports always set it) is treated as complete.
+    """
+    return any(
+        r.get("status") in _INCOMPLETE_STATUSES
+        for r in report_json.get("reviewers", [])
+    )
+
+
 def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> RunScore:
     """Score one review run: the case is caught iff EVERY expected matches."""
     produced = _all_produced(report_json)
     matches = [match_expected(e, produced, judge=judge) for e in case.expected]
     caught = all(m.caught for m in matches)
     severity_correct = caught and all(m.severity_correct for m in matches)
-    return RunScore(caught=caught, severity_correct=severity_correct, matches=matches)
+    return RunScore(
+        caught=caught,
+        severity_correct=severity_correct,
+        matches=matches,
+        incomplete=review_incomplete(report_json),
+    )

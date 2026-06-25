@@ -41,6 +41,12 @@ class CaseResult:
     read with its sampling error, not as a bare point estimate — the basis for
     measuring review-panel variance. ``false_positive_per_sample`` is empty when
     the case has no known-good head.
+
+    A sample whose reviewer turn crashed (incomplete report) and did not catch is
+    **errored** (#182 A3): excluded from the rate denominators and flagged in
+    ``errored_per_sample`` — ``catch_rate`` / ``false_positive_rate`` and their
+    CIs are over the *valid* (non-errored) samples only, so agent flakiness never
+    masquerades as a review miss.
     """
 
     case_id: str
@@ -54,6 +60,8 @@ class CaseResult:
     catch_rate_ci: tuple[float, float] = (0.0, 0.0)
     false_positive_per_sample: tuple[bool, ...] = ()
     false_positive_rate_ci: tuple[float, float] = (0.0, 0.0)
+    errored_per_sample: tuple[bool, ...] = ()
+    false_positive_errored_per_sample: tuple[bool, ...] = ()
 
 
 ReportSink = Callable[[str, str, int, dict], None]
@@ -92,32 +100,44 @@ def run_case(
 
         caught_samples: list[bool] = []
         severity_samples: list[bool] = []
+        errored_samples: list[bool] = []
         for i in range(k):
             score = score_run(case, _review(case.head, "buggy", i), judge=judge)
             caught_samples.append(score.caught)
             severity_samples.append(score.severity_correct)
+            # A crashed reviewer (incomplete report) that didn't catch is errored:
+            # we can't tell a real miss from a crash-induced one, so exclude it. A
+            # genuine catch is always trusted, even if a panel peer crashed.
+            errored_samples.append((not score.caught) and score.incomplete)
 
-        caught = sum(caught_samples)
-        severity_ok = sum(severity_samples)
-        catch_rate = caught / k if k else 0.0
+        n_valid = k - sum(errored_samples)
+        caught = sum(
+            c for c, e in zip(caught_samples, errored_samples, strict=True) if not e
+        )
+        severity_ok = sum(
+            s for s, e in zip(severity_samples, errored_samples, strict=True) if not e
+        )
+        catch_rate = caught / n_valid if n_valid else 0.0
         severity_correctness = severity_ok / caught if caught else 0.0
 
         fp_samples: list[bool] = []
+        fp_errored_samples: list[bool] = []
         false_positive_rate = 0.0
         fp_ci = (0.0, 0.0)
         if case.known_good_head:
             j = known_good_runs if known_good_runs is not None else k
-            fp_samples = [
-                score_run(
-                    case,
-                    _review(case.known_good_head, "known-good", i),
-                    judge=judge,
-                ).caught
-                for i in range(j)
-            ]
-            flagged = sum(fp_samples)
-            false_positive_rate = flagged / j if j else 0.0
-            fp_ci = wilson_interval(flagged, j)
+            for i in range(j):
+                score = score_run(
+                    case, _review(case.known_good_head, "known-good", i), judge=judge
+                )
+                fp_samples.append(score.caught)
+                fp_errored_samples.append((not score.caught) and score.incomplete)
+            fp_valid = j - sum(fp_errored_samples)
+            flagged = sum(
+                f for f, e in zip(fp_samples, fp_errored_samples, strict=True) if not e
+            )
+            false_positive_rate = flagged / fp_valid if fp_valid else 0.0
+            fp_ci = wilson_interval(flagged, fp_valid)
 
         return CaseResult(
             case_id=case.id,
@@ -125,12 +145,14 @@ def run_case(
             catch_rate=catch_rate,
             severity_correctness=severity_correctness,
             false_positive_rate=false_positive_rate,
-            passed=catch_rate >= bar,
+            passed=n_valid > 0 and catch_rate >= bar,
             caught_per_sample=tuple(caught_samples),
             severity_per_sample=tuple(severity_samples),
-            catch_rate_ci=wilson_interval(caught, k),
+            catch_rate_ci=wilson_interval(caught, n_valid),
             false_positive_per_sample=tuple(fp_samples),
             false_positive_rate_ci=fp_ci,
+            errored_per_sample=tuple(errored_samples),
+            false_positive_errored_per_sample=tuple(fp_errored_samples),
         )
     finally:
         cleanup()
