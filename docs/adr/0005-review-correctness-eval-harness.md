@@ -202,6 +202,12 @@ crashed peer is counted). The motivating `180` run reads honestly as **catch 20/
 "valid vs failed", not *why* the turn failed); retry/fallback of a limited reviewer is left
 to #103.
 
+The probe's outcome — catch **20/20**, no measurable single-pass variance — drove the #182
+decision to **measure before reducing**: the eval can't yet *exhibit* the live #180 variance
+(the synthetic mirror is ~100× smaller than the real change, the prompts are already
+#181-hardened, and review-only strips the coder/multi-round context), so the first slice is
+to build *harder* cases / live-loop measurement, not a panel change. See [ADR 0006](0006-review-variance-measure-before-reducing.md).
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
