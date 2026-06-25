@@ -19,7 +19,7 @@ from pathlib import Path
 import typer
 
 from .case import load_case
-from .harness import DEFAULT_BAR, DEFAULT_K, ReportSink, run_case
+from .harness import DEFAULT_BAR, DEFAULT_K, CaseResult, ReportSink, run_case
 from .judge import build_agent_judge
 
 eval_app = typer.Typer(
@@ -82,7 +82,10 @@ def review(
     for case_dir in case_dirs:
         loaded = load_case(case_dir)
         typer.echo(f"running {loaded.id} × {k} …", err=True)
-        results.append(run_case(loaded, k=k, bar=bar, judge=judge_fn, report_sink=sink))
+        result = run_case(loaded, k=k, bar=bar, judge=judge_fn, report_sink=sink)
+        results.append(result)
+        if report_dir is not None:
+            _write_summary(report_dir, result)
 
     _print_table(results)
     if any(not r.passed for r in results):
@@ -102,14 +105,60 @@ def _make_report_sink(report_dir: Path) -> ReportSink:
     return sink
 
 
-def _print_table(results: list) -> None:
-    header = f"{'case':<28} {'n':>3} {'catch':>7} {'sev-ok':>7} {'fp':>6}  result"
+def _write_summary(report_dir: Path, r: CaseResult) -> None:
+    """Write a per-case ``summary.json`` (rates + per-sample booleans + CIs).
+
+    Beside the per-run ``buggy-N.json`` files, so a costly K-sample run is
+    re-analysable for variance **without** re-scoring (which would re-invoke the
+    paid judge).
+    """
+    out = report_dir / r.case_id
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.json").write_text(
+        json.dumps(
+            {
+                "case": r.case_id,
+                "k": r.n,
+                "catch_rate": r.catch_rate,
+                "catch_rate_ci": list(r.catch_rate_ci),
+                "caught_per_sample": list(r.caught_per_sample),
+                "severity_correctness": r.severity_correctness,
+                "severity_per_sample": list(r.severity_per_sample),
+                "false_positive_rate": r.false_positive_rate,
+                "false_positive_rate_ci": list(r.false_positive_rate_ci),
+                "false_positive_per_sample": list(r.false_positive_per_sample),
+                "passed": r.passed,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _ci_band(lo: float, hi: float) -> str:
+    return f"{lo * 100:.0f}-{hi * 100:.0f}%"
+
+
+def _print_table(results: list[CaseResult]) -> None:
+    header = (
+        f"{'case':<28} {'n':>3} {'catch (95% CI)':>16} "
+        f"{'sev':>5} {'fp (95% CI)':>15}  result"
+    )
     typer.echo(header)
     typer.echo("-" * len(header))
     for r in results:
+        caught = sum(r.caught_per_sample)
+        catch_cell = f"{caught}/{r.n} {_ci_band(*r.catch_rate_ci)}"
+        if r.false_positive_per_sample:
+            fp_n = len(r.false_positive_per_sample)
+            fp_cell = (
+                f"{sum(r.false_positive_per_sample)}/{fp_n} "
+                f"{_ci_band(*r.false_positive_rate_ci)}"
+            )
+        else:
+            fp_cell = f"{r.false_positive_rate * 100:.0f}%"
         mark = "PASS" if r.passed else "FAIL"
         typer.echo(
-            f"{r.case_id:<28} {r.n:>3} "
-            f"{r.catch_rate * 100:>6.0f}% {r.severity_correctness * 100:>6.0f}% "
-            f"{r.false_positive_rate * 100:>5.0f}%  {mark}"
+            f"{r.case_id:<28} {r.n:>3} {catch_cell:>16} "
+            f"{r.severity_correctness * 100:>4.0f}% {fp_cell:>15}  {mark}"
         )

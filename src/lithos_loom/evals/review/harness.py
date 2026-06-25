@@ -24,6 +24,7 @@ from ...plugins.story_develop.review_resolve import ResolvedChange
 from .case import Case
 from .match import Judge, score_run
 from .patch import materialise_patch_heads
+from .stats import wilson_interval
 
 # A review function takes (case, head_sha) and returns the ReviewReport JSON.
 ReviewFn = Callable[[Case, str], dict]
@@ -34,7 +35,13 @@ DEFAULT_BAR = 0.8
 
 @dataclass(frozen=True)
 class CaseResult:
-    """Aggregated metrics for one case over K runs."""
+    """Aggregated metrics for one case over K runs.
+
+    The per-sample boolean tuples + Wilson 95% CIs (#182) let a catch-rate be
+    read with its sampling error, not as a bare point estimate — the basis for
+    measuring review-panel variance. ``false_positive_per_sample`` is empty when
+    the case has no known-good head.
+    """
 
     case_id: str
     n: int
@@ -42,6 +49,11 @@ class CaseResult:
     severity_correctness: float
     false_positive_rate: float
     passed: bool
+    caught_per_sample: tuple[bool, ...] = ()
+    severity_per_sample: tuple[bool, ...] = ()
+    catch_rate_ci: tuple[float, float] = (0.0, 0.0)
+    false_positive_per_sample: tuple[bool, ...] = ()
+    false_positive_rate_ci: tuple[float, float] = (0.0, 0.0)
 
 
 ReportSink = Callable[[str, str, int, dict], None]
@@ -78,30 +90,34 @@ def run_case(
                 report_sink(case.id, variant, i, report)
             return report
 
-        caught = 0
-        severity_ok = 0
+        caught_samples: list[bool] = []
+        severity_samples: list[bool] = []
         for i in range(k):
             score = score_run(case, _review(case.head, "buggy", i), judge=judge)
-            caught += int(score.caught)
-            severity_ok += int(score.severity_correct)
+            caught_samples.append(score.caught)
+            severity_samples.append(score.severity_correct)
 
+        caught = sum(caught_samples)
+        severity_ok = sum(severity_samples)
         catch_rate = caught / k if k else 0.0
         severity_correctness = severity_ok / caught if caught else 0.0
 
+        fp_samples: list[bool] = []
         false_positive_rate = 0.0
+        fp_ci = (0.0, 0.0)
         if case.known_good_head:
             j = known_good_runs if known_good_runs is not None else k
-            flagged = sum(
-                int(
-                    score_run(
-                        case,
-                        _review(case.known_good_head, "known-good", i),
-                        judge=judge,
-                    ).caught
-                )
+            fp_samples = [
+                score_run(
+                    case,
+                    _review(case.known_good_head, "known-good", i),
+                    judge=judge,
+                ).caught
                 for i in range(j)
-            )
+            ]
+            flagged = sum(fp_samples)
             false_positive_rate = flagged / j if j else 0.0
+            fp_ci = wilson_interval(flagged, j)
 
         return CaseResult(
             case_id=case.id,
@@ -110,6 +126,11 @@ def run_case(
             severity_correctness=severity_correctness,
             false_positive_rate=false_positive_rate,
             passed=catch_rate >= bar,
+            caught_per_sample=tuple(caught_samples),
+            severity_per_sample=tuple(severity_samples),
+            catch_rate_ci=wilson_interval(caught, k),
+            false_positive_per_sample=tuple(fp_samples),
+            false_positive_rate_ci=fp_ci,
         )
     finally:
         cleanup()

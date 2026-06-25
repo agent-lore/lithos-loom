@@ -174,6 +174,20 @@ worked example (`cases/194-delivery-failure-status/`). This is the keystone for
 *growing* the benchmark toward the independent-case count this ADR requires before
 tuning the panel (#175 / #182).
 
+## Update (#182): per-sample confidence intervals + `summary.json`
+
+The original metrics report a **point** catch-rate (caught / K). Over K stochastic
+runs that estimate has real sampling error, and the benchmark's grown cases all read
+`100%` at `-k 5` — which a point number presents as certainty. It is not: `5/5` only
+bounds the miss-rate below ~43%. So the harness now reports each rate (catch + FP) as
+a count over K **plus a Wilson 95% confidence interval** (`stats.wilson_interval`),
+and `CaseResult` carries the per-sample boolean tuples. With `--report-dir`, a per-case
+`summary.json` (rates, per-sample booleans, CIs) is written beside the run reports so a
+costly K-sample run is re-analysable **without** re-scoring (which would re-invoke the
+paid judge). This is the measurement instrument #182's design depends on: it makes
+single-pass review variance a *number with error bars* before any variance-reduction
+mechanism is chosen.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
