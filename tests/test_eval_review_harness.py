@@ -42,6 +42,8 @@ def _caught(severity: str = "critical") -> dict:
         "reviewers": [
             {
                 "name": "correctness",
+                "status": "FINDINGS",
+                "passed": False,
                 "findings": [
                     {
                         "reviewer": "correctness",
@@ -57,7 +59,24 @@ def _caught(severity: str = "critical") -> dict:
 
 
 def _clean() -> dict:
-    return {"reviewers": [{"name": "correctness", "findings": []}]}
+    return {
+        "reviewers": [
+            {"name": "correctness", "status": "LGTM", "passed": True, "findings": []}
+        ]
+    }
+
+
+def _errored(status: str = "invalid") -> dict:
+    # a crashed/short-circuited reviewer turn — always findings=[] (#182 A3)
+    return {
+        "reviewers": [
+            {"name": "correctness", "status": status, "passed": False, "findings": []}
+        ]
+    }
+
+
+def _report_for(marker: str) -> dict:
+    return {"catch": _caught, "clean": _clean, "error": _errored}[marker]()
 
 
 def _review_fn(buggy_pattern: list[bool], *, good_caught: bool = False):
@@ -72,6 +91,23 @@ def _review_fn(buggy_pattern: list[bool], *, good_caught: bool = False):
             )
         counters["good"] += 1
         return _caught() if good_caught else _clean()
+
+    return review_fn
+
+
+def _seq_review_fn(buggy: list[str], good: list[str] | None = None):
+    """Map an explicit marker sequence ('catch'/'clean'/'error') to reports."""
+    good = good or []
+    counters = {"buggy": 0, "good": 0}
+
+    def review_fn(case: Case, head: str) -> dict:
+        if head == case.head:
+            m = buggy[counters["buggy"]]
+            counters["buggy"] += 1
+            return _report_for(m)
+        m = good[counters["good"]]
+        counters["good"] += 1
+        return _report_for(m)
 
     return review_fn
 
@@ -120,6 +156,77 @@ def test_no_known_good_means_empty_fp_samples() -> None:
     result = run_case(_case(known_good=False), k=2, review_fn=fn)
     assert result.false_positive_per_sample == ()
     assert result.false_positive_rate_ci == (0.0, 0.0)
+
+
+# ── errored-sample tracking (#182 A3): a crashed reviewer turn is not data ─────
+
+
+def test_errored_samples_excluded_from_catch_denominator() -> None:
+    # 3 catches + 2 crashed reviewer turns: the crashes are EXCLUDED, not counted
+    # as misses, so catch-rate is 3/3 over valid samples (not a deflated 3/5).
+    fn = _seq_review_fn(["catch", "catch", "catch", "error", "error"])
+    result = run_case(_case(known_good=False), k=5, review_fn=fn)
+    assert result.errored_per_sample == (False, False, False, True, True)
+    assert result.caught_per_sample == (True, True, True, False, False)
+    assert result.n - sum(result.errored_per_sample) == 3  # valid samples
+    assert result.catch_rate == 1.0  # 3/3 valid, not 3/5
+    _lo, hi = result.catch_rate_ci
+    assert hi == 1.0  # CI computed over the 3 valid samples
+    assert result.passed is True
+
+
+def test_known_good_crashes_are_errored_not_clean_passes() -> None:
+    # the 180 incident: 4 real LGTMs + 16 crashed reviewer turns on known-good ->
+    # FP is 0/4 over valid (with 16 errored), NOT a fake "0/20".
+    fn = _seq_review_fn(buggy=["catch"] * 20, good=["clean"] * 4 + ["error"] * 16)
+    result = run_case(_case(), k=20, review_fn=fn, known_good_runs=20)
+    assert result.catch_rate == 1.0
+    assert sum(result.errored_per_sample) == 0  # buggy side healthy
+    assert sum(result.false_positive_errored_per_sample) == 16
+    assert 20 - sum(result.false_positive_errored_per_sample) == 4  # valid good
+    assert result.false_positive_rate == 0.0  # 0 flagged / 4 valid
+
+
+def test_all_errored_means_no_valid_samples_and_not_passed() -> None:
+    fn = _seq_review_fn(["error"] * 5)
+    result = run_case(_case(known_good=False), k=5, review_fn=fn)
+    assert result.errored_per_sample == (True,) * 5
+    assert result.catch_rate == 0.0  # no valid samples -> 0.0, not a divide-by-zero
+    assert result.passed is False  # cannot pass with zero valid reviews
+
+
+def test_caught_sample_with_a_crashed_second_reviewer_still_counts() -> None:
+    # a real catch by one reviewer is trusted even if a panel peer crashed.
+    def fn(case: Case, head: str) -> dict:
+        return {
+            "reviewers": [
+                {
+                    "name": "correctness",
+                    "status": "FINDINGS",
+                    "passed": False,
+                    "findings": [
+                        {
+                            "reviewer": "correctness",
+                            "severity": "critical",
+                            "files": ["cli/develop.py"],
+                            "rationale": "exits on approved before delivery",
+                            "finding_id": "f-001",
+                        }
+                    ],
+                },
+                {
+                    "name": "security",
+                    "status": "invalid",
+                    "passed": False,
+                    "findings": [],
+                },
+            ]
+        }
+
+    result = run_case(_case(known_good=False), k=1, review_fn=fn)
+    assert result.caught_per_sample == (True,)
+    assert result.errored_per_sample == (False,)  # caught -> trusted, not errored
+    assert result.catch_rate == 1.0
 
 
 def test_severity_correctness_among_caught() -> None:

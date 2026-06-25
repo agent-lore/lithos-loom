@@ -10,6 +10,7 @@ from lithos_loom.evals.review.case import Case, Expected
 from lithos_loom.evals.review.match import (
     _structured_match,
     match_expected,
+    review_incomplete,
     score_run,
 )
 
@@ -170,3 +171,60 @@ def test_score_run_miss_when_an_expected_is_unmatched() -> None:
     report = _report([_finding("minor", ["other.py"], "nit")])
     score = score_run(_case(), report)
     assert score.caught is False
+
+
+# ── incomplete-report detection (#182 A3) ─────────────────────────────────────
+
+
+def _report_status(status: str, findings: list[dict] | None = None) -> dict:
+    return {
+        "reviewers": [
+            {"name": "correctness", "status": status, "findings": findings or []}
+        ]
+    }
+
+
+def test_review_incomplete_flags_a_crashed_reviewer() -> None:
+    assert review_incomplete(_report_status("invalid")) is True
+
+
+def test_review_incomplete_flags_a_not_run_reviewer() -> None:
+    assert review_incomplete(_report_status("not-run")) is True
+
+
+def test_review_incomplete_false_for_completed_verdicts() -> None:
+    assert review_incomplete(_report_status("LGTM")) is False
+    assert review_incomplete(_report_status("FINDINGS")) is False
+
+
+def test_review_incomplete_false_for_statusless_reviewer() -> None:
+    # robustness: a reviewer dict without a status (only test stubs) is treated
+    # as complete — we key on the presence of an error status, not its absence.
+    assert (
+        review_incomplete({"reviewers": [{"name": "correctness", "findings": []}]})
+        is False
+    )
+
+
+def test_review_incomplete_true_if_any_reviewer_invalid() -> None:
+    report = {
+        "reviewers": [
+            {"name": "correctness", "status": "FINDINGS", "findings": []},
+            {"name": "security", "status": "invalid", "findings": []},
+        ]
+    }
+    assert review_incomplete(report) is True
+
+
+def test_score_run_sets_incomplete() -> None:
+    assert score_run(_case(), _report_status("invalid")).incomplete is True
+    assert (
+        score_run(
+            _case(),
+            _report_status(
+                "FINDINGS",
+                [_finding("critical", ["cli/develop.py"], "approved before delivery")],
+            ),
+        ).incomplete
+        is False
+    )

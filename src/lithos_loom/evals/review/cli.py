@@ -114,19 +114,28 @@ def _write_summary(report_dir: Path, r: CaseResult) -> None:
     """
     out = report_dir / r.case_id
     out.mkdir(parents=True, exist_ok=True)
+    errored = sum(r.errored_per_sample)
+    fp_errored = sum(r.false_positive_errored_per_sample)
     (out / "summary.json").write_text(
         json.dumps(
             {
                 "case": r.case_id,
                 "k": r.n,
+                "n_valid": r.n - errored,
+                "errored": errored,
                 "catch_rate": r.catch_rate,
                 "catch_rate_ci": list(r.catch_rate_ci),
                 "caught_per_sample": list(r.caught_per_sample),
+                "errored_per_sample": list(r.errored_per_sample),
                 "severity_correctness": r.severity_correctness,
                 "severity_per_sample": list(r.severity_per_sample),
                 "false_positive_rate": r.false_positive_rate,
                 "false_positive_rate_ci": list(r.false_positive_rate_ci),
                 "false_positive_per_sample": list(r.false_positive_per_sample),
+                "false_positive_errored": fp_errored,
+                "false_positive_errored_per_sample": list(
+                    r.false_positive_errored_per_sample
+                ),
                 "passed": r.passed,
             },
             indent=2,
@@ -139,26 +148,47 @@ def _ci_band(lo: float, hi: float) -> str:
     return f"{lo * 100:.0f}-{hi * 100:.0f}%"
 
 
+def _err_suffix(n: int) -> str:
+    return f" +{n}err" if n else ""
+
+
 def _print_table(results: list[CaseResult]) -> None:
     header = (
-        f"{'case':<28} {'n':>3} {'catch (95% CI)':>16} "
-        f"{'sev':>5} {'fp (95% CI)':>15}  result"
+        f"{'case':<28} {'n':>3} {'catch (95% CI)':>20} "
+        f"{'sev':>5} {'fp (95% CI)':>20}  result"
     )
     typer.echo(header)
     typer.echo("-" * len(header))
     for r in results:
+        # Denominators are the VALID (non-errored) samples; errored counts are
+        # shown separately so a crashed reviewer never deflates a rate (#182 A3).
+        n_err = sum(r.errored_per_sample)
+        n_valid = r.n - n_err
         caught = sum(r.caught_per_sample)
-        catch_cell = f"{caught}/{r.n} {_ci_band(*r.catch_rate_ci)}"
+        catch_cell = (
+            f"{caught}/{n_valid} {_ci_band(*r.catch_rate_ci)}{_err_suffix(n_err)}"
+        )
         if r.false_positive_per_sample:
-            fp_n = len(r.false_positive_per_sample)
+            fp_err_samples = r.false_positive_errored_per_sample or (
+                (False,) * len(r.false_positive_per_sample)
+            )
+            fp_err = sum(fp_err_samples)
+            fp_valid = len(r.false_positive_per_sample) - fp_err
+            flagged = sum(
+                f
+                for f, e in zip(
+                    r.false_positive_per_sample, fp_err_samples, strict=True
+                )
+                if not e
+            )
             fp_cell = (
-                f"{sum(r.false_positive_per_sample)}/{fp_n} "
-                f"{_ci_band(*r.false_positive_rate_ci)}"
+                f"{flagged}/{fp_valid} "
+                f"{_ci_band(*r.false_positive_rate_ci)}{_err_suffix(fp_err)}"
             )
         else:
             fp_cell = f"{r.false_positive_rate * 100:.0f}%"
         mark = "PASS" if r.passed else "FAIL"
         typer.echo(
-            f"{r.case_id:<28} {r.n:>3} {catch_cell:>16} "
-            f"{r.severity_correctness * 100:>4.0f}% {fp_cell:>15}  {mark}"
+            f"{r.case_id:<28} {r.n:>3} {catch_cell:>20} "
+            f"{r.severity_correctness * 100:>4.0f}% {fp_cell:>20}  {mark}"
         )

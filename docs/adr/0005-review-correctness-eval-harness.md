@@ -188,6 +188,20 @@ paid judge). This is the measurement instrument #182's design depends on: it mak
 single-pass review variance a *number with error bars* before any variance-reduction
 mechanism is chosen.
 
+**Errored samples (A3).** The first `-k 20` probe on `180` exposed a scoring hole: a
+reviewer turn that **crashes** (status `invalid` / `not-run` — here a codex usage limit,
+see #103) produces `findings=[]`, and the matcher (which ignored `status`) scored that as
+a legitimate "0 findings" review — a *clean pass* on known-good and, dangerously, a *review
+miss* on the buggy head, i.e. agent flakiness masquerading as the very variance being
+measured. The harness now classifies a sample as **errored** when its caught/flagged
+verdict is False *and* the report is incomplete (`match.review_incomplete`), excludes it
+from the catch / severity / FP denominators, and reports an `errored` count; rates + CIs are
+over the *valid* samples. A genuine catch is always trusted (a real flag/catch even with a
+crashed peer is counted). The motivating `180` run reads honestly as **catch 20/20, FP 0/4
+(+16 errored)** instead of a misleading "FP 0/20". Independent of #103 (needs only
+"valid vs failed", not *why* the turn failed); retry/fallback of a limited reviewer is left
+to #103.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
