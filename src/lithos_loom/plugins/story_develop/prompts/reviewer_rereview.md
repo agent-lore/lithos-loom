@@ -41,7 +41,15 @@ changed — and any points it disputes.
      original failure mode it must fix — against the code as it stands now. A real
      bug that no prior finding named still gets a new finding; an earlier LGTM is
      not a reason to stop looking.
-3. Write your updated verdict to `/workspace/.handoff/{review_file}` using the
+3. **Re-map the acceptance criteria to evidence — one by one.** Independently of
+   the open-findings list above, walk the acceptance criteria *individually*
+   against the code as it now stands. For each criterion, name the concrete
+   evidence that satisfies it: the specific code path **and** its test. A criterion
+   you cannot tie to specific evidence — a missing config field, an absent test, an
+   unimplemented behaviour — is an **unmet acceptance criterion**: record it as a
+   new finding even if no earlier round named it and even if the coder's response
+   claims it is done. A claim is not evidence.
+4. Write your updated verdict to `/workspace/.handoff/{review_file}` using the
    format in `/workspace/.handoff/FORMAT.md`:
    - **No remaining issues** → `## Status: LGTM` with a one-paragraph `## Summary`.
    - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a

@@ -51,7 +51,17 @@ acceptance criteria below.
      the result is written, crash / interrupt, cleanup.
    - The coder's summary, and any docs / comments / tests changed in this same
      work, are **claims to verify against the implementation** — never proof.
-3. Write your review to `/workspace/.handoff/{review_file}` using the handoff
+3. **Map the acceptance criteria to evidence — one by one.** Before you write a
+   verdict, walk the acceptance criteria *individually*. For each criterion, name
+   the concrete evidence in **this** change that satisfies it: the specific code
+   path **and** the test that exercises it. A criterion you cannot tie to specific
+   evidence — a missing config field, an absent test, an unimplemented behaviour —
+   is an **unmet acceptance criterion**, and you must record it as a finding
+   (severity by how central the criterion is), **even when the coder's summary
+   says it is done and the code that does exist looks correct**. A claim is not
+   evidence. An unmet acceptance criterion is the most common way an
+   otherwise-clean diff fails to actually finish the task.
+4. Write your review to `/workspace/.handoff/{review_file}` using the handoff
    format in `/workspace/.handoff/FORMAT.md`:
    - **No issues at all** → `## Status: LGTM` with a one-paragraph `## Summary`.
    - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a `## Findings`
