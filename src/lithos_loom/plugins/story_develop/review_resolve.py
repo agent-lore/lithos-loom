@@ -21,7 +21,10 @@ from pathlib import Path
 _PR_URL_RE = re.compile(r"/pull/(\d+)\b")
 _PR_HASH_RE = re.compile(r"^#?(\d+)$")
 
-_PR_JSON_FIELDS = "baseRefOid,headRefOid,baseRefName,headRefName,title,body"
+# ``gh pr view --json`` exposes ``headRefOid`` but NOT ``baseRefOid`` — requesting
+# the latter fails the whole call with "Unknown JSON field" (#207). The base sha is
+# derived locally via merge-base instead (see :func:`_resolve_pr`).
+_PR_JSON_FIELDS = "headRefOid,baseRefName,headRefName,title,body"
 
 
 @dataclass(frozen=True)
@@ -127,13 +130,23 @@ def _resolve_pr(
     repo: Path, number: str, *, base_override: str | None
 ) -> ResolvedChange:
     info = _gh_pr_view(repo, number)
+    head_sha = info["headRefOid"]
+    base_ref_name = info["baseRefName"]
     # Fetch the PR head (works for forks too) and the base branch so both
     # commits are local before we materialise a worktree / diff against them.
-    _git_fetch(repo, f"pull/{number}/head", info["baseRefName"])
-    base_sha = _rev_parse(repo, base_override) if base_override else info["baseRefOid"]
+    _git_fetch(repo, f"pull/{number}/head", base_ref_name)
+    if base_override:
+        base_sha = _rev_parse(repo, base_override)
+    else:
+        # gh pr view doesn't expose the base-ref OID, so derive the PR's true diff
+        # base as the merge-base of the base branch and the head (what GitHub
+        # diffs). Using the merge-base — not the base branch tip — also avoids
+        # spurious deletions when the base branch advanced after the PR was cut.
+        # The base branch was just fetched, so its tip is local at origin/<base>.
+        base_sha = _merge_base(repo, f"origin/{base_ref_name}", head_sha)
     return ResolvedChange(
         base_sha=base_sha,
-        head_sha=info["headRefOid"],
+        head_sha=head_sha,
         head_ref=f"#{number} ({info.get('headRefName', '')})".strip(),
         title=info.get("title", ""),
         body=info.get("body", ""),

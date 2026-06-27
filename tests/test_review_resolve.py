@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -82,10 +83,13 @@ def test_unknown_ref_raises(tmp_git_repo: Path) -> None:
 
 
 @pytest.fixture
-def stub_gh(monkeypatch: pytest.MonkeyPatch) -> list:
-    fetches: list = []
+def stub_gh(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    # Mirror real ``gh pr view --json`` output: it exposes headRefOid but NOT
+    # baseRefOid (#207). The base sha is derived locally via merge-base, so the
+    # stub records the merge-base call and returns a known sentinel rather than
+    # handing back a base oid gh never provides.
+    calls = SimpleNamespace(fetches=[], merge_base=[])
     pr = {
-        "baseRefOid": "b" * 40,
         "headRefOid": "h" * 40,
         "baseRefName": "main",
         "headRefName": "contributor:feature",
@@ -96,29 +100,46 @@ def stub_gh(monkeypatch: pytest.MonkeyPatch) -> list:
         review_resolve, "_gh_pr_view", lambda repo, n: dict(pr, number=n)
     )
     monkeypatch.setattr(
-        review_resolve, "_git_fetch", lambda repo, *refs: fetches.append(refs)
+        review_resolve, "_git_fetch", lambda repo, *refs: calls.fetches.append(refs)
     )
-    return fetches
+
+    def _fake_merge_base(repo: Path, a: str, b: str) -> str:
+        calls.merge_base.append((a, b))
+        return "m" * 40
+
+    monkeypatch.setattr(review_resolve, "_merge_base", _fake_merge_base)
+    return calls
 
 
-def test_resolves_pr_number(stub_gh: list, tmp_path: Path) -> None:
+def test_pr_json_fields_exclude_baserefoid() -> None:
+    # #207: ``gh pr view`` does not expose baseRefOid; requesting it fails the
+    # whole PR-resolution path with "Unknown JSON field". Guard the field set so
+    # a reintroduced baseRefOid is caught here, not in production.
+    assert "baseRefOid" not in review_resolve._PR_JSON_FIELDS
+    assert "headRefOid" in review_resolve._PR_JSON_FIELDS
+
+
+def test_resolves_pr_number(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     change = review_resolve.resolve_change(tmp_path, "#142")
-    assert change.base_sha == "b" * 40
+    # base is the merge-base of the base branch and the PR head — the real diff
+    # base GitHub shows — derived locally, not a baseRefOid gh never returned.
+    assert change.base_sha == "m" * 40
+    assert stub_gh.merge_base == [("origin/main", "h" * 40)]
     assert change.head_sha == "h" * 40
     # the PR body is the default acceptance-criteria source
     assert "adds a thing" in change.body
     assert change.title == "Add a thing"
     assert "142" in change.head_ref
     # the PR head was fetched so the commit is local
-    assert fetches_for(stub_gh, "142")
+    assert fetches_for(stub_gh.fetches, "142")
 
 
-def test_resolves_bare_digits_as_pr(stub_gh: list, tmp_path: Path) -> None:
+def test_resolves_bare_digits_as_pr(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     change = review_resolve.resolve_change(tmp_path, "142")
     assert change.head_sha == "h" * 40
 
 
-def test_resolves_pr_url(stub_gh: list, tmp_path: Path) -> None:
+def test_resolves_pr_url(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     change = review_resolve.resolve_change(
         tmp_path, "https://github.com/agent-lore/lithos-loom/pull/142"
     )
