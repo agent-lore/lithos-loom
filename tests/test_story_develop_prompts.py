@@ -87,6 +87,23 @@ def test_reviewer_templates_carry_the_severity_calibration_slot(name: str) -> No
     assert "{severity_calibration}" in load_prompt(name)
 
 
+@pytest.mark.parametrize("name", ["reviewer_round.md", "reviewer_rereview.md"])
+def test_reviewer_templates_require_mechanical_ac_to_evidence_mapping(
+    name: str,
+) -> None:
+    # #208: holistic "judge whether it meets the AC" lets unmet criteria slip
+    # through under single-pass variance / coder-summary anchoring (influx #239 →
+    # PR #242 escape). Both reviewer prompts must force a *mechanical* per-criterion
+    # AC -> evidence checklist, where a criterion with no implementing evidence is
+    # itself a finding (not satisfied by the coder's claim that it is done).
+    text = " ".join(load_prompt(name).lower().split())
+    assert "acceptance criteri" in text
+    assert "one by one" in text
+    assert "evidence" in text
+    # An unmet criterion is a finding in its own right.
+    assert "unmet" in text
+
+
 def test_round1_template_offers_the_full_base_head_diff() -> None:
     # The architecture persona needs the cumulative change in round 1, not just
     # the latest commit, so round 1 now injects base_sha and offers base..HEAD.
