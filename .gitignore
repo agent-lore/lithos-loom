@@ -197,7 +197,9 @@ cython_debug/
 .ruff_cache/
 
 # Claude Code / VS Code local config (per-developer, not shared)
-.claude/
+# ...except shared, checked-in skills under .claude/skills/ (e.g. /regen-manual).
+.claude/*
+!.claude/skills/
 .vscode/
 
 # PyPI configuration file
