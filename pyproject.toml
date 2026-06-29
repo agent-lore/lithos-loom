@@ -50,6 +50,8 @@ dev = [
     # `coverage` can't import the project's deps. The `[toml]` extra lets it read the
     # `[tool.coverage]` config below from pyproject.
     "coverage[toml]>=7.0",
+    "grimp>=3.14",
+    "import-linter>=2.12",
 ]
 
 [tool.ruff]
@@ -90,6 +92,62 @@ pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "standard"
+
+[tool.importlinter]
+# Directional architecture contract: dependencies must only point downward,
+# Entrypoints -> Core -> Foundation. Expressed as `forbidden` contracts (not
+# `layers`) because some core modules legitimately import siblings (e.g.
+# render <-> subscriptions), which a strict layers contract would reject.
+root_package = "lithos_loom"
+
+[[tool.importlinter.contracts]]
+name = "Foundation must not import Core or Entrypoints"
+type = "forbidden"
+source_modules = [
+    "lithos_loom.bus",
+    "lithos_loom.config",
+    "lithos_loom.errors",
+    "lithos_loom.lithos_client",
+    "lithos_loom.github_client",
+    "lithos_loom.task_graph",
+    "lithos_loom.task_line_parser",
+    "lithos_loom.cursor_store",
+    "lithos_loom.sync_state",
+    "lithos_loom.runner",
+    "lithos_loom.plugin_runner",
+    "lithos_loom.supervisor",
+    "lithos_loom.render_project_context",
+]
+forbidden_modules = [
+    "lithos_loom.cli",
+    "lithos_loom.plugins",
+    "lithos_loom.subscriptions",
+    "lithos_loom.sources",
+    "lithos_loom.render",
+    "lithos_loom.doctor",
+    "lithos_loom.evals",
+    "lithos_loom.main",
+    "lithos_loom.__main__",
+    "lithos_loom.children",
+]
+
+[[tool.importlinter.contracts]]
+name = "Core must not import Entrypoints"
+type = "forbidden"
+source_modules = [
+    "lithos_loom.cli",
+    "lithos_loom.plugins",
+    "lithos_loom.subscriptions",
+    "lithos_loom.sources",
+    "lithos_loom.render",
+    "lithos_loom.doctor",
+    "lithos_loom.evals",
+]
+forbidden_modules = [
+    "lithos_loom.main",
+    "lithos_loom.__main__",
+    "lithos_loom.children",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

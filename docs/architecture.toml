@@ -1,0 +1,49 @@
+# Architecture model for the "diagrams as tests" guardrail.
+#
+# Single source of truth for:
+#   - the generated component diagram (tests/guardrail/test_architecture_diagram.py)
+#   - which modules are scanned for the domain class diagram
+#
+# The directional layering contract lives in pyproject.toml
+# ([tool.importlinter]); the tiers below document that intent (dependencies must
+# only point downward, Entrypoints -> Core -> Foundation) and group the diagram.
+#
+# `component_of()` matches a module to a component by LONGEST module-prefix, so
+# "lithos_loom.plugins" also captures "lithos_loom.plugins.story_develop" etc.
+
+[components]
+Entrypoint     = ["lithos_loom.main", "lithos_loom.__main__"]
+Children       = ["lithos_loom.children"]
+Cli            = ["lithos_loom.cli"]
+Plugins        = ["lithos_loom.plugins"]
+Subscriptions  = ["lithos_loom.subscriptions"]
+Sources        = ["lithos_loom.sources"]
+Render         = ["lithos_loom.render"]
+Doctor         = ["lithos_loom.doctor"]
+Evals          = ["lithos_loom.evals"]
+Bus            = ["lithos_loom.bus"]
+Config         = ["lithos_loom.config"]
+Errors         = ["lithos_loom.errors"]
+LithosClient   = ["lithos_loom.lithos_client"]
+GitHub         = ["lithos_loom.github_client"]
+Tasks          = ["lithos_loom.task_graph", "lithos_loom.task_line_parser"]
+State          = ["lithos_loom.cursor_store", "lithos_loom.sync_state"]
+Runners        = ["lithos_loom.runner", "lithos_loom.plugin_runner"]
+Supervisor     = ["lithos_loom.supervisor"]
+ProjectContext = ["lithos_loom.render_project_context"]
+
+[tiers]
+Entrypoints = ["Entrypoint", "Children"]
+Core        = ["Cli", "Plugins", "Subscriptions", "Sources", "Render", "Doctor", "Evals"]
+Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "State", "Runners", "Supervisor", "ProjectContext"]
+
+# Domain class diagram: the GitHub/task data types. Config/settings dataclasses
+# are configuration, not domain entities, so config is excluded.
+[domain]
+include_modules = [
+    "lithos_loom.github_client",
+    "lithos_loom.task_graph",
+    "lithos_loom.task_line_parser",
+    "lithos_loom.supervisor",
+]
+exclude_modules = ["lithos_loom.config"]
