@@ -1,4 +1,4 @@
-.PHONY: install fmt lint typecheck test check
+.PHONY: install fmt lint typecheck test check diagrams
 
 install:
 	uv sync
@@ -17,3 +17,9 @@ test:
 	uv run pytest
 
 check: lint typecheck test
+
+# Regenerate the architecture & domain diagrams under docs/generated/.
+# Run after changing code/models and commit the result; CI fails if the
+# committed diagrams drift from the code (see .github/workflows/ci.yml).
+diagrams:
+	uv run pytest tests/guardrail/ -q
