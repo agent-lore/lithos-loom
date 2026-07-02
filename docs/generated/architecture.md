@@ -5,7 +5,7 @@
 
 ```mermaid
 graph TD
-  subgraph Core
+  subgraph tier_Core["Core"]
     Cli
     Doctor
     Evals
@@ -14,11 +14,11 @@ graph TD
     Sources
     Subscriptions
   end
-  subgraph Entrypoints
+  subgraph tier_Entrypoints["Entrypoints"]
     Children
     Entrypoint
   end
-  subgraph Foundation
+  subgraph tier_Foundation["Foundation"]
     Bus
     Config
     Errors
