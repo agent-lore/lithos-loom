@@ -1,15 +1,17 @@
-"""The develop-run on-disk contract: classify a run's fate from its markers.
+"""The develop-run on-disk contract: read/classify a run's fate, and write its markers.
 
 A story-develop run communicates its fate between three processes — the plugin
 subprocess that runs it, the daemon that delivers its PR, and the ``lithos-loom
 develop`` CLI that observes it — entirely through files in the run dir
 (``<work_dir>/<task_id>/<run_id>/``) and the shared per-task dir
-(``run_dir.parent``). This module owns the **read/classify half** of that
-contract so the invariants live in one place instead of being duplicated as prose
-across the reader (``cli/develop.py``) and the writer (``story_develop/__main__``,
-``pr_delivery``). The write half (the delivery markers) lands in a later slice.
+(``run_dir.parent``). This module owns **both halves** of that contract — the
+read/classify functions AND the delivery-marker writers
+(:func:`record_delivery_deadline` / :func:`record_delivery_failure`) — so the
+invariants live in one place instead of being duplicated as prose across the
+reader (``cli/develop.py``) and the writer (``story_develop/__main__`` today;
+``pr_delivery.deliver_guarded`` calls the writers after ARCH-1.S3).
 
-Marker inventory (read side):
+Marker inventory (who writes / who reads each):
 
 - ``state.json`` (run dir) — the dialogue verdict, written by ``develop()`` at run
   end. Read by :func:`read_state`. An ``approved`` verdict is NOT terminal on its
@@ -19,8 +21,9 @@ Marker inventory (read side):
   so a prior run's leftover can't false-done a retry. Read by
   :func:`result_for_run` / :func:`delivery_complete`.
 - ``delivery.json`` (run dir, private) — the delivery deadline (#189) and/or a
-  best-effort delivery-failure marker (#194). Read by :func:`delivery_deadline` /
-  :func:`delivery_failed` / :func:`delivery_timed_out`.
+  best-effort delivery-failure marker (#194). Written by
+  :func:`record_delivery_deadline` / :func:`record_delivery_failure`; read by
+  :func:`delivery_deadline` / :func:`delivery_failed` / :func:`delivery_timed_out`.
 - ``conversation.md`` (run dir) — the teardown marker (the plugin writes it just
   before ``state.json``); its presence means the run reached teardown. Read by
   :func:`capture_outcome`.
@@ -37,15 +40,17 @@ contract without dragging in the plugin's runtime dependencies.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 from .idempotency import lookup_completed_for_run
 
-# Marker filenames, single-sourced (the writer half adopts these in a later slice).
+# Marker filenames, single-sourced across the read + write functions here and
+# develop()'s epilogue writers (STATE_FILE / CONVERSATION_LOG).
 STATE_FILE = "state.json"
 RESULT_FILE = "result.json"
 DELIVERY_MARKER = "delivery.json"
@@ -178,6 +183,51 @@ def delivery_timed_out(run_dir: Path, *, delivering_seconds: float) -> bool:
     if deadline is not None:
         return datetime.now(UTC) >= deadline
     return delivering_seconds >= DELIVERY_FALLBACK_SECONDS
+
+
+def record_delivery_deadline(run_dir: Path, *, budget_seconds: int) -> None:
+    """Record when this run's PR delivery budget expires, for `develop attach` (#189).
+
+    deliver() runs host-side after the agent containers stop, so attach can't use
+    container liveness to tell a slow delivery from a dead one — and the budget is
+    the daemon's *configurable* timeouts, which attach can't see. Writing an
+    absolute deadline (now + the full delivery budget; see
+    :func:`pr_delivery.delivery_budget_seconds`) lets attach bound a crashed/orphaned
+    delivery without ever timing out one still inside its budget. Best-effort: a
+    write failure just means attach falls back to its flat grace.
+    """
+    deadline = datetime.now(UTC) + timedelta(seconds=budget_seconds)
+    with contextlib.suppress(OSError):
+        (run_dir / DELIVERY_MARKER).write_text(
+            json.dumps({"deadline": deadline.isoformat()}) + "\n", encoding="utf-8"
+        )
+
+
+def record_delivery_failure(run_dir: Path, *, reason: str) -> None:
+    """Mark this run's PR delivery as FAILED in its private delivery.json (#194).
+
+    When ``deliver()`` raises (e.g. ``push_branch()`` / ``gh pr create`` fails
+    before a PR exists), the run is still an approved dialogue but produced no PR.
+    `develop attach` reads this PRIVATE per-run marker (not the SHARED result.json,
+    which a prior run could have left behind) to report the failure at once rather
+    than waiting out the #189 delivery deadline. Merges into the existing marker so
+    the recorded deadline is preserved. Best-effort: a write failure just means
+    attach falls back to the deadline/grace bound.
+    """
+    marker = run_dir / DELIVERY_MARKER
+    data: dict[str, object] = {}
+    try:
+        existing = json.loads(marker.read_text(encoding="utf-8"))
+        if isinstance(existing, dict):
+            data = existing
+    except (OSError, json.JSONDecodeError):
+        # Best-effort merge: if the prior marker is missing/unreadable/invalid,
+        # continue with a fresh payload and still record this failure.
+        pass
+    data["failed"] = True
+    data["reason"] = reason
+    with contextlib.suppress(OSError):
+        marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
 
 
 def run_phase(

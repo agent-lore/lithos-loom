@@ -527,14 +527,21 @@ _DELIVERY_OVERHEAD_SECONDS = 1800
 def delivery_budget_seconds(config, *, copilot_timeout: int, coder_timeout: int) -> int:
     """Upper bound on the wall-clock :func:`deliver` can legitimately spend (#189).
 
-    `develop attach` records a delivery deadline from this so it can bound a
-    *crashed* delivery without ever timing out a *healthy* slow one. It sums every
-    bounded phase below — **keep in sync with deliver() if a phase is added**:
+    `develop attach` records a delivery deadline from this (via
+    :func:`run_outcome.record_delivery_deadline` — the develop-run marker contract
+    lives in :mod:`run_outcome`) so it can bound a *crashed* delivery without ever
+    timing out a *healthy* slow one. It sums every bounded phase below — **keep in
+    sync with deliver() if a phase is added**:
 
     - the Copilot review round (``copilot_timeout``),
     - the Copilot fix coder turn (``coder_timeout``),
     - the regression gate on the fix commit (``config.test_timeout``),
     - plus push / PR / gh overhead (a flat margin).
+
+    That attach's no-deadline fallback (``run_outcome.DELIVERY_FALLBACK_SECONDS``)
+    stays above this budget — so it can't false-fire on a healthy default-config
+    run — is enforced by the executed invariant
+    ``test_delivery_fallback_exceeds_the_full_default_delivery_budget``, not prose.
     """
     return (
         copilot_timeout

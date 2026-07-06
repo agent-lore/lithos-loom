@@ -859,3 +859,30 @@ def test_delivery_budget_covers_copilot_coder_and_gate() -> None:
         SimpleNamespace(test_timeout=1800), copilot_timeout=600, coder_timeout=3600
     )
     assert wider == budget + 900
+
+
+def test_delivery_fallback_exceeds_the_full_default_delivery_budget() -> None:
+    # #189 cross-module invariant: run_outcome's flat fallback — used by `develop
+    # attach` when a run recorded no delivery deadline (predates the marker, or its
+    # write failed) — must comfortably exceed the LARGEST default delivery budget,
+    # or it could false-fire on a healthy default-config run. This executes the
+    # derivation that was previously only prose in cli/develop.py's
+    # DELIVERY_FALLBACK_SECONDS comment (9000 > 6900): if a future phase widens the
+    # budget past the fallback, this fails instead of silently under-bounding attach.
+    from types import SimpleNamespace
+
+    from lithos_loom.plugins.story_develop import run_outcome
+    from lithos_loom.plugins.story_develop.config import (
+        DEFAULT_CODER_TIMEOUT,
+        DEFAULT_TEST_TIMEOUT,
+    )
+
+    # Every input is the daemon's real default, single-sourced from the same
+    # constants the parser uses — so the invariant tracks a default that changes,
+    # rather than a hard-coded copy that could silently pass against a stale value.
+    default_budget = pr_delivery.delivery_budget_seconds(
+        SimpleNamespace(test_timeout=DEFAULT_TEST_TIMEOUT),
+        copilot_timeout=pr_delivery.DEFAULT_COPILOT_TIMEOUT,
+        coder_timeout=DEFAULT_CODER_TIMEOUT,
+    )
+    assert default_budget < run_outcome.DELIVERY_FALLBACK_SECONDS

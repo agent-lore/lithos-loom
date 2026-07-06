@@ -36,18 +36,19 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import logging
 import shutil
 import sys
 import tempfile
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ...plugin_runner import write_result_atomically
+from . import run_outcome
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
+    DEFAULT_CODER_TIMEOUT,
     DEFAULT_CODER_TOOL,
     DEFAULT_IMAGE,
     DEFAULT_MAX_PAUSE_MINUTES,
@@ -313,7 +314,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-run state dir (default: a fresh temp dir)",
     )
     p.add_argument(
-        "--coder-timeout", type=int, default=3600, help="Max seconds for the coder turn"
+        "--coder-timeout",
+        type=int,
+        default=DEFAULT_CODER_TIMEOUT,
+        help="Max seconds for the coder turn",
     )
     p.add_argument(
         "--reviewer-timeout",
@@ -322,51 +326,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Max seconds for a reviewer turn",
     )
     return p
-
-
-def _record_delivery_deadline(run_dir: Path, *, budget_seconds: int) -> None:
-    """Record when this run's PR delivery budget expires, for `develop attach` (#189).
-
-    deliver() runs host-side after the agent containers stop, so attach can't use
-    container liveness to tell a slow delivery from a dead one — and the budget is
-    the daemon's *configurable* timeouts, which attach can't see. Writing an
-    absolute deadline (now + the full delivery budget; see
-    :func:`pr_delivery.delivery_budget_seconds`) lets attach bound a crashed/orphaned
-    delivery without ever timing out one still inside its budget. Best-effort: a
-    write failure just means attach falls back to its flat grace.
-    """
-    deadline = datetime.now(UTC) + timedelta(seconds=budget_seconds)
-    with contextlib.suppress(OSError):
-        (run_dir / "delivery.json").write_text(
-            json.dumps({"deadline": deadline.isoformat()}) + "\n", encoding="utf-8"
-        )
-
-
-def _record_delivery_failure(run_dir: Path, *, reason: str) -> None:
-    """Mark this run's PR delivery as FAILED in its private delivery.json (#194).
-
-    When ``deliver()`` raises (e.g. ``push_branch()`` / ``gh pr create`` fails
-    before a PR exists), the run is still an approved dialogue but produced no PR.
-    `develop attach` reads this PRIVATE per-run marker (not the SHARED result.json,
-    which a prior run could have left behind) to report the failure at once rather
-    than waiting out the #189 delivery deadline. Merges into the existing marker so
-    the recorded deadline is preserved. Best-effort: a write failure just means
-    attach falls back to the deadline/grace bound.
-    """
-    marker = run_dir / "delivery.json"
-    data: dict[str, object] = {}
-    try:
-        existing = json.loads(marker.read_text(encoding="utf-8"))
-        if isinstance(existing, dict):
-            data = existing
-    except (OSError, json.JSONDecodeError):
-        # Best-effort merge: if the prior marker is missing/unreadable/invalid,
-        # continue with a fresh payload and still record this failure.
-        pass
-    data["failed"] = True
-    data["reason"] = reason
-    with contextlib.suppress(OSError):
-        marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
 
 
 def _daemon_main(args: argparse.Namespace) -> int:
@@ -577,7 +536,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         # timing out a healthy slow one (#189). The budget covers every bounded
         # phase deliver() can run — Copilot round + fix turn + regression gate —
         # computed alongside those phases in delivery_budget_seconds().
-        _record_delivery_deadline(
+        run_outcome.record_delivery_deadline(
             config.run_dir,
             budget_seconds=delivery_budget_seconds(
                 config,
@@ -602,7 +561,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
             # and drop a private marker so `develop attach` reports the failure
             # instead of waiting out the #189 deadline.
             delivery_error = str(exc)
-            _record_delivery_failure(config.run_dir, reason=delivery_error)
+            run_outcome.record_delivery_failure(config.run_dir, reason=delivery_error)
             print(f"pr delivery failed: {exc}", file=sys.stderr)
 
     post_results(args.lithos_url, ctx.task_id, result, delivery=delivery)

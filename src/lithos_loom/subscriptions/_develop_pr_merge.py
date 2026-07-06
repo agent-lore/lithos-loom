@@ -15,6 +15,13 @@ any plugin that records ``develop_pr_url`` gets merge→complete for free.
 De-dup lives in a single ``metadata.develop_pr_merge_state`` marker (mirrors
 ``github_state_snapshot``): once it reaches a terminal value the sweep skips the
 task, so neither completion nor a finding fires twice.
+
+This reconcile reads the delivered PR's merge state from GitHub, independent of
+the run-dir markers — a develop run's on-disk fate (``state.json`` /
+``result.json`` / ``delivery.json``) is classified by
+:mod:`plugins.story_develop.run_outcome`. Now that the classifier is a standalone
+module, this reconcile *could* consume it to correlate a PR's merge state with the
+run's recorded outcome; today it doesn't, and behaviour is unchanged.
 """
 
 from __future__ import annotations
