@@ -156,6 +156,13 @@ forbidden_modules = [
 # import of the plugin runtime (develop/pr_delivery/containers/…) or the config /
 # client stack, cli/develop.py would drag that whole graph in just to classify a
 # run — the coupling the extraction removed.
+#
+# This contract is the DENYLIST half of the guard: it forbids the known heavy
+# runtime/config/client modules, and (import-linter checks chains) catches an
+# INDIRECT path too — e.g. if `.idempotency` itself grew a develop import. The
+# literal "stdlib + .idempotency only" property on run_outcome's OWN imports is
+# enforced directly by tests/guardrail/test_run_outcome_leaf.py — a denylist
+# alone can't, since it can't name every module a future edit might reach for.
 name = "run_outcome stays a lightweight on-disk contract module"
 type = "forbidden"
 source_modules = [
