@@ -956,6 +956,9 @@ def test_stall_guard_stops_on_unchanged_blocking_findings(
     assert result.rounds == 3  # strikes at r2 and r3
     assert "stalled" in result.message
     assert result.succeeded is False
+    # stalled is reason-bearing: the reason reaches state.json.
+    reason = json.loads((config.run_dir / "state.json").read_text())["failure_reason"]
+    assert reason and "stalled" in reason
 
 
 def test_stall_guard_stops_on_empty_round_commits(
@@ -1018,6 +1021,9 @@ def test_dispute_deadlock_stops_with_breadcrumb(
     assert result.rounds == 3
     assert "dispute deadlock" in result.message and "f-001" in result.message
     assert any("[ReviewDispute]" in r.message for r in caplog.records)
+    # disputed is reason-bearing: the breadcrumb reaches state.json.
+    reason = json.loads((config.run_dir / "state.json").read_text())["failure_reason"]
+    assert reason and "dispute deadlock" in reason
 
 
 def test_cost_ceiling_stops_run(
@@ -1032,6 +1038,13 @@ def test_cost_ceiling_stops_run(
     assert result.status == "cost_exceeded"
     assert result.rounds == 1
     assert "cost ceiling" in result.message
+    # cost_exceeded is reason-bearing: the exact POST-review (J) reason reaches
+    # state.json. Same template as the PRE-review (D) site — see
+    # test_cost_ceiling_stops_before_reviews_when_coder_exceeds.
+    reason = json.loads((cfg.run_dir / "state.json").read_text())["failure_reason"]
+    assert re.fullmatch(
+        r"round \d+: cost ceiling reached \(\$\d+\.\d\d >= \$\d+\.\d\d\)", reason
+    )
 
 
 def test_approval_beats_cost_ceiling_in_the_same_round(
@@ -1062,6 +1075,13 @@ def test_cost_ceiling_stops_before_reviews_when_coder_exceeds(
     result = develop_mod.develop(cfg)
     assert result.status == "cost_exceeded"
     assert state["review_calls"] == []
+    # Pin the PRE-review (D) reason text; it shares the exact template with the
+    # POST-review (J) site (test_cost_ceiling_stops_run), so the round-pipeline
+    # refactor cannot diverge the two cost-ceiling messages.
+    reason = json.loads((cfg.run_dir / "state.json").read_text())["failure_reason"]
+    assert re.fullmatch(
+        r"round \d+: cost ceiling reached \(\$\d+\.\d\d >= \$\d+\.\d\d\)", reason
+    )
 
 
 def test_lifecycle_unknown_id_is_reprompted_and_recovers(
@@ -1353,6 +1373,11 @@ def test_coder_limit_budget_exhausted_interrupts(
     state_file = json.loads((cfg.run_dir / "state.json").read_text())
     assert state_file["status"] == "interrupted"
     assert state_file["coder_session"]  # resume handle preserved
+    # interrupted is reason-bearing: the "why" reaches state.json (the offline
+    # `attach` summary), not just the status.
+    assert (
+        state_file["failure_reason"] and "usage-limited" in state_file["failure_reason"]
+    )
 
 
 def test_reviewer_limit_pauses_when_no_fallback(
@@ -1576,6 +1601,12 @@ def test_interrupted_reviewer_run_carries_resume_after(
     result = develop_mod.develop(cfg)
     assert result.status == "interrupted"
     assert result.resume_after is not None
+    # The panel-path resume_after (1745) reaches state.json too, not only the
+    # coder-path one — the daemon re-dispatch surface needs both.
+    state_file = json.loads((cfg.run_dir / "state.json").read_text())
+    assert state_file["resume_after"] == result.resume_after.isoformat(
+        timespec="seconds"
+    )
 
 
 def test_non_interrupted_run_has_no_resume_after(
@@ -1608,3 +1639,120 @@ def test_resume_after_uses_provider_reset_hint_when_future() -> None:
     )
     resumed = _resume_after_from(turn)
     assert int(resumed.timestamp()) == future_epoch
+
+
+# --- ARCH-1.S1: exit-path characterisation net -------------------------------
+# Pins the develop() exits the existing suite left uncovered, so the round/phase
+# seam refactor (ARCH-1.S6) cannot silently drop one. The cost-ceiling message
+# text, the state.json reason-bearing filter, and the reviewer resume_after
+# round-trip are pinned inline on their existing terminal tests above.
+
+
+def test_develop_rejects_unsupported_reviewer_tool(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # The reviewer-tool validation branch (distinct from the coder-tool one): a
+    # reviewer whose engine is neither claude nor codex is rejected up front,
+    # before any container starts.
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    cfg = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        reviewers=(ReviewerSpec(name="sec", tool="opencode"),),
+        claude_config_dir=tmp_path / "fake-claude",
+    )
+    with pytest.raises(ValueError, match=r"unsupported tool .* for reviewer"):
+        develop_mod.develop(cfg)
+
+
+def test_uncaught_exception_propagates_and_tears_down_containers(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """A phase raising mid-loop propagates out of develop() while the ``finally``
+    still stops every started container, and the epilogue (conversation log /
+    state.json / DevelopResult) is skipped. Pins the try/finally teardown
+    contract the round-pipeline refactor must preserve — the only exit the
+    existing suite never exercised."""
+    state = _install_fakes(monkeypatch, config)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom in panel")
+
+    # run_panel_round is called directly in the loop body with no local handler,
+    # so it reaches only the outer try/finally — a clean injection point that is
+    # past both container-start calls.
+    monkeypatch.setattr(develop_mod, "run_panel_round", boom)
+
+    with pytest.raises(RuntimeError, match="boom in panel"):
+        develop_mod.develop(config)
+
+    # finally tore down every container that was started (coder + reviewer(s)).
+    assert state["starts"] >= 2
+    assert len(state["stopped"]) == state["starts"]
+    # epilogue skipped: no durable run state is written on an uncaught exception.
+    assert not (config.run_dir / "state.json").exists()
+
+
+def test_candidate_stage_dedups_per_committed_sha(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#140 dedup: the expensive candidate stage runs at most once per committed
+    tree. When the approval branch is re-entered across rounds on the SAME
+    ``gated_sha`` (reviews keep passing but a required candidate blocks and no new
+    commit lands), the candidate checks are NOT re-run — pins
+    ``candidate_ran_for_sha != gated_sha``. Without the guard the candidate would
+    fire every round."""
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
+
+    fast = Check("lint", "ruff check --x", "required", "fast")
+    candidate = Check("coverage", "coverage report", "required", "candidate")
+    monkeypatch.setattr(
+        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+    )
+    calls: list[tuple[int, tuple[str, ...]]] = []
+
+    def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
+        calls.append((round_no, tuple(c.name for c in checks)))
+        return CheckSetResult(
+            tuple(
+                CheckResult(
+                    c,
+                    "ran",
+                    GateResult(
+                        command=c.command,
+                        # coverage (candidate) is RED and required -> blocks
+                        # approval; lint (fast) is green so only the candidate
+                        # holds the run.
+                        exit_code=0 if c.name != "coverage" else 1,
+                        passed=c.name != "coverage",
+                        output_tail="x",
+                    ),
+                )
+                for c in checks
+            )
+        )
+
+    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    # LGTM every round (approval branch entered each round), but the coder commits
+    # ONLY in round 1 (source_rounds={1}), so gated_sha never changes: rounds 2/3
+    # re-enter approval on the same sha. The blocking candidate can never be
+    # fixed -> the run stalls.
+    cfg = replace(config, max_rounds=3)
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}], source_rounds={1})
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "stalled"
+    candidate_calls = [(r, n) for r, n in calls if n == ("coverage",)]
+    fast_calls = [(r, n) for r, n in calls if n == ("lint",)]
+    # candidate ran exactly once (round 1), not on the same-sha re-entries.
+    assert candidate_calls == [(1, ("coverage",))]
+    # the fast gate likewise runs only on the round that produced a new commit.
+    assert fast_calls == [(1, ("lint",))]
