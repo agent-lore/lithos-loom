@@ -7,6 +7,7 @@ no Docker.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -886,3 +887,95 @@ def test_delivery_fallback_exceeds_the_full_default_delivery_budget() -> None:
         coder_timeout=DEFAULT_CODER_TIMEOUT,
     )
     assert default_budget < run_outcome.DELIVERY_FALLBACK_SECONDS
+
+
+# --- deliver_guarded (ARCH-1.S3): the shared develop→deliver seam -----------------
+
+
+def test_deliver_guarded_skips_when_nothing_to_deliver(
+    config: DevelopConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # (None, None) — and deliver() is never called — when open_pr is off OR the
+    # run wasn't approved. No deadline marker is recorded in the skip case.
+    approved = _result(config, tmp_path)
+    not_approved = replace(approved, status="max_rounds")
+    called = {"n": 0}
+    monkeypatch.setattr(
+        pr_delivery,
+        "deliver",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1),
+    )
+    assert pr_delivery.deliver_guarded(
+        config,
+        not_approved,
+        open_pr=True,  # approved gate fails → skip
+        no_copilot=True,
+        copilot_timeout=1,
+        coder_timeout=1,
+        github_issue_url=None,
+        task_id=None,
+    ) == (None, None)
+    assert pr_delivery.deliver_guarded(
+        config,
+        approved,
+        open_pr=False,  # open_pr off → skip
+        no_copilot=True,
+        copilot_timeout=1,
+        coder_timeout=1,
+        github_issue_url=None,
+        task_id=None,
+    ) == (None, None)
+    assert called["n"] == 0  # deliver() untouched in either skip case
+    assert not (config.run_dir / "delivery.json").exists()  # no deadline recorded
+
+
+def test_deliver_guarded_returns_outcome_and_records_deadline_on_success(
+    config: DevelopConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
+
+    config.run_dir.mkdir(parents=True, exist_ok=True)  # develop() creates this first
+    approved = _result(config, tmp_path)
+    outcome = DeliveryOutcome(pr_url="https://github.com/o/r/pull/1", pr_number=1)
+    monkeypatch.setattr(pr_delivery, "deliver", lambda *a, **k: outcome)
+    delivery, error = pr_delivery.deliver_guarded(
+        config,
+        approved,
+        open_pr=True,
+        no_copilot=True,
+        copilot_timeout=600,
+        coder_timeout=3600,
+        github_issue_url=None,
+        task_id=None,
+    )
+    assert delivery is outcome and error is None
+    # the #189 deadline was recorded BEFORE delivery ran
+    assert (config.run_dir / "delivery.json").is_file()
+
+
+def test_deliver_guarded_records_failure_and_returns_reason(
+    config: DevelopConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #194: deliver() raising before a PR opens → (None, reason), and the private
+    # delivery.json failure marker is written so attach can report it terminally.
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    approved = _result(config, tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("gh pr create failed: HTTP 422")
+
+    monkeypatch.setattr(pr_delivery, "deliver", boom)
+    delivery, error = pr_delivery.deliver_guarded(
+        config,
+        approved,
+        open_pr=True,
+        no_copilot=True,
+        copilot_timeout=600,
+        coder_timeout=3600,
+        github_issue_url=None,
+        task_id=None,
+    )
+    assert delivery is None
+    assert error is not None and "gh pr create failed" in error
+    marker = json.loads((config.run_dir / "delivery.json").read_text(encoding="utf-8"))
+    assert marker["failed"] is True
