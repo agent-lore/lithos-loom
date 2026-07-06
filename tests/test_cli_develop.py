@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from lithos_loom.cli import develop
+from lithos_loom.plugins.story_develop import run_outcome
 
 
 def _make_run(
@@ -244,119 +245,6 @@ def test_agent_state_distinguishes_no_docker_from_done(
     assert develop._agent_state(info) == "—"  # docker absent → can't tell
     monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
     assert develop._agent_state(info) == "done"  # docker present, no containers
-
-
-def test_run_phase_classification(tmp_path: Path) -> None:
-    rd = tmp_path / "t-1" / "run"
-    rd.mkdir(parents=True)
-    running = [develop.ContainerStatus("n", "coder", "Up", True)]
-    exited = [develop.ContainerStatus("n", "coder", "Exited", False)]
-    none: dict | None = None  # no recorded outcome yet
-    approved = {"status": "approved"}
-    failed = {"status": "failed"}
-    # docker present: live while a container runs
-    assert develop._run_phase(rd, running, none, seen_container=True) == "running"
-    # startup window: zero containers and none seen yet → keep following (the
-    # old container-liveness check exited here, the bug this fixes)
-    assert develop._run_phase(rd, [], none, seen_container=False) == "running"
-    # a seen container gone with no recorded outcome yet → ambiguous (teardown
-    # window vs crash); the caller grace-polls before deciding
-    assert develop._run_phase(rd, exited, none, seen_container=True) == "vanished"
-    # docker absent (None): live until the outcome lands (or the dir is reaped)
-    assert develop._run_phase(rd, None, none, seen_container=False) == "running"
-    # a NON-approved terminal status has no post-dialogue work (deliver() runs
-    # only for approved) → terminal the moment its state.json lands.
-    assert develop._run_phase(rd, exited, failed, seen_container=True) == "terminal"
-    # an APPROVED verdict is NOT terminal while PR delivery is still pending — in
-    # daemon mode deliver() (push + Copilot + result.json) runs AFTER develop()
-    # writes state.json, so keying terminal on the bare verdict re-opens the #171
-    # false-done window. Until the run's result.json lands it is "delivering".
-    for containers, seen in ((exited, True), (running, True), (None, False)):
-        phase = develop._run_phase(rd, containers, approved, seen_container=seen)
-        assert phase == "delivering"
-    # this run's result.json (succeeded) lands in the shared per-task dir → done
-    (rd.parent / "result.json").write_text(
-        json.dumps({"status": "succeeded", "run_id": "run"})
-    )
-    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
-    # docker absent + the run dir reaped on success → terminal (nothing to read)
-    shutil.rmtree(rd)
-    assert develop._run_phase(rd, None, none, seen_container=False) == "terminal"
-
-
-def test_run_phase_approved_ignores_stale_result_from_a_prior_run(
-    tmp_path: Path,
-) -> None:
-    # The shared per-task result.json can be a stale leftover from a PRIOR run.
-    # The old reasoning — "a succeeded run is reaped, so a survivor is non-success"
-    # — relied on a BEST-EFFORT reap (route_runner suppresses rmtree OSError), so a
-    # stale *succeeded* result could survive and false-done a retry. #198 binds on
-    # run_id: a prior run's result (succeeded OR failed) is not THIS run's delivery.
-    rd = tmp_path / "t-1" / "r2"
-    rd.mkdir(parents=True)
-    (rd / "state.json").write_text(json.dumps({"status": "approved"}))
-    approved = {"status": "approved"}
-    # a PRIOR run's succeeded result.json (run_id r1) must not read as r2's delivery
-    (rd.parent / "result.json").write_text(
-        json.dumps({"status": "succeeded", "run_id": "r1"})
-    )
-    assert develop._run_phase(rd, None, approved, seen_container=False) == "delivering"
-    # this run's own succeeded result.json (run_id r2) → terminal
-    (rd.parent / "result.json").write_text(
-        json.dumps({"status": "succeeded", "run_id": "r2"})
-    )
-    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
-
-
-def test_run_phase_approved_failed_result_is_terminal_without_marker(
-    tmp_path: Path,
-) -> None:
-    # #198 (Hole 2): when deliver() raises, the daemon writes a failed result.json
-    # but the private delivery.json marker write is best-effort. If the marker is
-    # missing, THIS run's failed result.json (run_id-bound, category delivery) is
-    # still the terminal signal — attach must report the failure, not sit in
-    # "delivering" until the #189 deadline.
-    rd = tmp_path / "t-1" / "r2"
-    rd.mkdir(parents=True)
-    (rd / "state.json").write_text(json.dumps({"status": "approved"}))
-    (rd.parent / "result.json").write_text(
-        json.dumps(
-            {
-                "status": "failed",
-                "run_id": "r2",
-                "error": {
-                    "category": "delivery",
-                    "message": "PR delivery failed: boom",
-                },
-            }
-        )
-    )
-    approved = {"status": "approved"}
-    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
-    assert develop._delivery_failed(rd) == "PR delivery failed: boom"
-
-
-def test_recover_reaped_outcome_delegates_to_completion_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # correctness/f-003: a reaped (success-cleaned) run's outcome is recovered
-    # from the completion store, keyed by this run id (so an explicit
-    # --idempotency-key is found too — the run-id binding lives in
-    # idempotency.lookup_completed_for_run).
-    run_dir = tmp_path / "t-1" / "r1"
-    run_dir.mkdir(parents=True)
-    seen: dict[str, tuple[str, str]] = {}
-
-    def fake_lookup(task_id: str, run_id: str) -> dict | None:
-        seen["args"] = (task_id, run_id)
-        return {"task_id": task_id, "status": "succeeded"}
-
-    monkeypatch.setattr(develop, "lookup_completed_for_run", fake_lookup)
-    assert develop._recover_reaped_outcome(run_dir) == {"status": "approved"}
-    assert seen["args"] == ("t-1", "r1")  # looked up by task id + run id
-    # no matching record → nothing to recover
-    monkeypatch.setattr(develop, "lookup_completed_for_run", lambda t, r: None)
-    assert develop._recover_reaped_outcome(run_dir) is None
 
 
 def test_iter_new_handoffs_caps_count_per_poll(
@@ -908,68 +796,23 @@ def test_outcome_renders_delivery_timeout_and_is_not_a_clean_success() -> None:
     # summary must say so, and it must NOT count as a clean success — `attach
     # --wait` exits nonzero so `attach --wait && gh pr view` can't race a PR that
     # never opened.
-    outcome = develop._Outcome(
+    outcome = run_outcome.RunOutcome(
         state={"status": "approved", "rounds": 1, "branch": "feat/x"}
     )
     outcome.delivery_timed_out = True
     line = develop._outcome_line("r1", outcome)
     assert "delivery did not complete" in line
-    assert develop._approved(outcome) is False
+    assert run_outcome.is_clean_success(outcome) is False
     event = develop._outcome_event("r1", outcome)
     assert event["status"] == "approved"
     assert event["delivery_timed_out"] is True
-
-
-def test_delivery_failed_helper(tmp_path: Path) -> None:
-    # #194: the daemon records a delivery failure in the run's PRIVATE
-    # delivery.json (not the shared result.json — so a prior run's leftover can't
-    # be mistaken for this one). _delivery_failed surfaces the reason.
-    rd = tmp_path / "t-1" / "r1"
-    rd.mkdir(parents=True)
-    assert develop._delivery_failed(rd) is None  # no marker
-    (rd / "delivery.json").write_text(
-        json.dumps({"deadline": "2026-01-01T00:00:00+00:00"})
-    )
-    assert develop._delivery_failed(rd) is None  # deadline only, not a failure
-    (rd / "delivery.json").write_text(
-        json.dumps({"failed": True, "reason": "push rejected"})
-    )
-    assert develop._delivery_failed(rd) == "push rejected"
-
-
-def test_run_phase_approved_delivery_failed_is_terminal(tmp_path: Path) -> None:
-    # #194: an approved run whose delivery FAILED (its private delivery.json marks
-    # failed) is terminal at once — not stuck in "delivering" until the #189
-    # deadline. The shared result.json is untouched, so the stale-result.json
-    # staleness reasoning is unaffected.
-    rd = tmp_path / "t-1" / "r1"
-    rd.mkdir(parents=True)
-    approved = {"status": "approved"}
-    assert develop._run_phase(rd, None, approved, seen_container=False) == "delivering"
-    (rd / "delivery.json").write_text(json.dumps({"failed": True, "reason": "boom"}))
-    assert develop._run_phase(rd, None, approved, seen_container=False) == "terminal"
-
-
-def test_capture_outcome_records_delivery_failure(tmp_path: Path) -> None:
-    # #194: capture reads the run's private marker and sets delivery_failed + the
-    # reason (and no pr_url) so the summary reports the failure honestly.
-    rd = tmp_path / "t-1" / "r1"
-    rd.mkdir(parents=True)
-    (rd / "delivery.json").write_text(
-        json.dumps({"failed": True, "reason": "push rejected"})
-    )
-    outcome = develop._Outcome()
-    develop._capture_outcome(outcome, rd, {"status": "approved", "rounds": 2})
-    assert outcome.delivery_failed is True
-    assert outcome.failure_reason == "push rejected"
-    assert outcome.pr_url is None
 
 
 def test_outcome_line_shows_delivery_failure() -> None:
     # #194: the terminal summary names the delivery failure + reason (#171 AC#3),
     # and it is NOT a clean success — `attach --wait` exits nonzero, so
     # `attach --wait && gh pr view` can't race a PR that never opened.
-    outcome = develop._Outcome(
+    outcome = run_outcome.RunOutcome(
         state={"status": "approved", "rounds": 2, "branch": "feat/x"}
     )
     outcome.delivery_failed = True
@@ -977,7 +820,7 @@ def test_outcome_line_shows_delivery_failure() -> None:
     line = develop._outcome_line("r1", outcome)
     assert "PR delivery failed" in line
     assert "gh pr create failed: HTTP 422" in line
-    assert develop._approved(outcome) is False
+    assert run_outcome.is_clean_success(outcome) is False
     event = develop._outcome_event("r1", outcome)
     assert event["status"] == "approved"
     assert event["delivery_failed"] is True
@@ -988,25 +831,6 @@ def _write_delivery_deadline(run_dir: Path, deadline: datetime) -> None:
     (run_dir / "delivery.json").write_text(
         json.dumps({"deadline": deadline.isoformat()})
     )
-
-
-def test_delivery_deadline_and_timeout_helpers(tmp_path: Path) -> None:
-    # #189: attach bounds delivery on the daemon's recorded deadline, never a
-    # fixed guess. Past deadline → timed out; future deadline → not (even after
-    # many polls); no marker → a generous flat fallback.
-    rd = tmp_path / "t-1" / "r1"
-    rd.mkdir(parents=True)
-    assert develop._delivery_deadline(rd) is None  # no marker yet
-    assert develop._delivery_timed_out(rd, 1) is False  # fallback not yet reached
-
-    _write_delivery_deadline(rd, datetime.now(UTC) - timedelta(seconds=1))
-    assert develop._delivery_timed_out(rd, 1) is True  # past deadline
-
-    _write_delivery_deadline(rd, datetime.now(UTC) + timedelta(hours=1))
-    assert develop._delivery_timed_out(rd, 10_000) is False  # within budget, any polls
-
-    (rd / "delivery.json").unlink()  # no marker → flat fallback kicks in
-    assert develop._delivery_timed_out(rd, develop._DELIVERY_FALLBACK_POLLS) is True
 
 
 def test_attach_bounds_delivery_at_recorded_deadline(
@@ -1090,7 +914,10 @@ def test_attach_delivery_fallback_grace_when_no_deadline(
         status="approved",
         delivered=False,  # no delivery.json, result never lands
     )
-    monkeypatch.setattr(develop, "_DELIVERY_FALLBACK_POLLS", 3)
+    # shorten the flat fallback so the delivering loop bounds quickly: attach
+    # feeds delivering_polls × _ATTACH_POLL_SECONDS (2.0s) as delivering_seconds,
+    # so 6.0s fires on the 3rd delivering poll.
+    monkeypatch.setattr(run_outcome, "DELIVERY_FALLBACK_SECONDS", 6.0)
     polls = {"n": 0}
 
     def fake_sleep(_seconds: float) -> None:
@@ -1111,7 +938,7 @@ def test_attach_delivery_fallback_grace_when_no_deadline(
 def test_outcome_line_shows_pr_url_for_delivered_run() -> None:
     # #188: an approved+delivered run's summary names the PR url so the operator
     # can tell which PR opened (AC#3 of #171).
-    outcome = develop._Outcome(
+    outcome = run_outcome.RunOutcome(
         state={"status": "approved", "rounds": 1, "branch": "feat/x"},
         pr_url="https://github.com/o/r/pull/170",
     )
@@ -1122,7 +949,7 @@ def test_outcome_line_shows_pr_url_for_delivered_run() -> None:
 
 def test_outcome_line_shows_failure_reason() -> None:
     # #188: a failed run's summary names *why* it failed, not just "failed".
-    outcome = develop._Outcome(
+    outcome = run_outcome.RunOutcome(
         state={"status": "failed", "rounds": 2, "branch": "feat/x"},
         failure_reason="round 2: gate RED",
     )
@@ -1132,61 +959,15 @@ def test_outcome_line_shows_failure_reason() -> None:
 
 
 def test_outcome_event_carries_pr_url_and_failure_reason() -> None:
-    delivered = develop._Outcome(
+    delivered = run_outcome.RunOutcome(
         state={"status": "approved"}, pr_url="https://github.com/o/r/pull/170"
     )
     assert (
         develop._outcome_event("r1", delivered)["pr_url"]
         == "https://github.com/o/r/pull/170"
     )
-    failed = develop._Outcome(state={"status": "failed"}, failure_reason="boom")
+    failed = run_outcome.RunOutcome(state={"status": "failed"}, failure_reason="boom")
     assert develop._outcome_event("r1", failed)["failure_reason"] == "boom"
-
-
-def test_capture_outcome_stashes_pr_url_and_failure_reason(tmp_path: Path) -> None:
-    # the offline reader pulls the failure reason from this run's state.json and
-    # the delivered PR url from its (succeeded) result.json.
-    run_dir = tmp_path / "t-1" / "r1"
-    (run_dir / "handoff").mkdir(parents=True)
-    (run_dir.parent / "result.json").write_text(
-        json.dumps(
-            {
-                "status": "succeeded",
-                "run_id": "r1",
-                "pr_url": "https://github.com/o/r/pull/170",
-            }
-        )
-    )
-    outcome = develop._Outcome()
-    develop._capture_outcome(outcome, run_dir, {"status": "approved", "rounds": 1})
-    assert outcome.pr_url == "https://github.com/o/r/pull/170"
-
-    failed = develop._Outcome()
-    develop._capture_outcome(
-        failed, run_dir, {"status": "failed", "failure_reason": "boom"}
-    )
-    assert failed.failure_reason == "boom"
-    assert failed.pr_url is None  # a non-approved run shows no PR url
-
-
-def test_recover_reaped_outcome_carries_pr_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # #188: a reaped success recovers its PR url from the completion-store payload
-    # (which is this run's result.json), so even a write-then-reap between polls
-    # still surfaces the PR.
-    run_dir = tmp_path / "t-1" / "r1"
-    run_dir.mkdir(parents=True)
-    monkeypatch.setattr(
-        develop,
-        "lookup_completed_for_run",
-        lambda t, r: {"status": "succeeded", "pr_url": "https://github.com/o/r/pull/9"},
-    )
-    recovered = develop._recover_reaped_outcome(run_dir)
-    assert recovered == {
-        "status": "approved",
-        "pr_url": "https://github.com/o/r/pull/9",
-    }
 
 
 def test_attach_wait_blocks_until_run_appears(
@@ -1258,7 +1039,7 @@ def test_attach_wait_captures_outcome_before_workdir_is_reaped(
         conversation="log",
         status="approved",
     )
-    real_read = develop._read_state
+    real_read = run_outcome.read_state
     calls = {"n": 0}
 
     def reaping_read(rd: Path) -> dict | None:
@@ -1268,7 +1049,7 @@ def test_attach_wait_captures_outcome_before_workdir_is_reaped(
             shutil.rmtree(rd, ignore_errors=True)  # the success reap, mid-follow
         return state
 
-    monkeypatch.setattr(develop, "_read_state", reaping_read)
+    monkeypatch.setattr(run_outcome, "read_state", reaping_read)
     # approved → must NOT raise SystemExit (exit 0); reported from the snapshot
     develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
     out = capsys.readouterr().out
@@ -1293,7 +1074,7 @@ def test_attach_wait_recovers_reaped_success_when_state_never_seen(
 
     monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
     monkeypatch.setattr(
-        develop,
+        run_outcome,
         "lookup_completed_for_run",
         lambda task_id, run_id: {
             "task_id": task_id,
@@ -1322,7 +1103,7 @@ def test_attach_wait_reaped_without_recoverable_record_is_not_a_false_crash(
 
     monkeypatch.setattr(develop.time, "sleep", reaping_sleep)
     monkeypatch.setattr(
-        develop, "lookup_completed_for_run", lambda task_id, run_id: None
+        run_outcome, "lookup_completed_for_run", lambda task_id, run_id: None
     )
     with pytest.raises(SystemExit) as exc:
         develop.develop_attach(
@@ -1332,31 +1113,6 @@ def test_attach_wait_reaped_without_recoverable_record_is_not_a_false_crash(
     out = capsys.readouterr().out
     assert "work dir reaped" in out
     assert "crashed" not in out
-
-
-def test_recover_reaped_outcome_carries_rounds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # #196 (Gap A2): the recovered outcome includes the round count (from the
-    # completion record's result.json), so a reaped success's summary shows rounds
-    # — not just the verdict + PR.
-    run_dir = tmp_path / "t-1" / "r1"
-    run_dir.mkdir(parents=True)
-    monkeypatch.setattr(
-        develop,
-        "lookup_completed_for_run",
-        lambda t, r: {
-            "status": "succeeded",
-            "rounds": 4,
-            "pr_url": "https://github.com/o/r/pull/9",
-        },
-    )
-    recovered = develop._recover_reaped_outcome(run_dir)
-    assert recovered == {
-        "status": "approved",
-        "rounds": 4,
-        "pr_url": "https://github.com/o/r/pull/9",
-    }
 
 
 def test_wait_for_run_recovers_completed_run_without_a_dir(
@@ -1418,7 +1174,7 @@ def test_capture_outcome_recovers_pr_url_when_reaped_mid_capture(
     # store, not silently dropped from the summary.
     run_dir = tmp_path / "t-1" / "r1"  # never created → result.json unreadable (reaped)
     monkeypatch.setattr(
-        develop,
+        run_outcome,
         "lookup_completed_for_run",
         lambda t, r: {
             "status": "succeeded",
@@ -1426,8 +1182,8 @@ def test_capture_outcome_recovers_pr_url_when_reaped_mid_capture(
             "pr_url": "https://github.com/o/r/pull/8",
         },
     )
-    outcome = develop._Outcome()
-    develop._capture_outcome(outcome, run_dir, {"status": "approved", "rounds": 3})
+    outcome = run_outcome.RunOutcome()
+    run_outcome.capture_outcome(outcome, run_dir, {"status": "approved", "rounds": 3})
     assert outcome.pr_url == "https://github.com/o/r/pull/8"
 
 

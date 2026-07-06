@@ -41,7 +41,6 @@ import sys
 import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -49,11 +48,8 @@ import typer
 
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
-from lithos_loom.plugins.story_develop import handoff
-from lithos_loom.plugins.story_develop.idempotency import (
-    lookup_completed,
-    lookup_completed_for_run,
-)
+from lithos_loom.plugins.story_develop import handoff, run_outcome
+from lithos_loom.plugins.story_develop.idempotency import lookup_completed
 
 develop_app = typer.Typer(
     name="develop",
@@ -96,32 +92,6 @@ _ATTACH_POLL_SECONDS = 2.0
 _TEARDOWN_GRACE_SECONDS = 30.0
 _TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECONDS))
 
-# Bound the post-approval delivery window (#189). deliver() — branch push, PR
-# open, an optional Copilot review round + fix turn, then the result.json write —
-# runs host-side in the plugin subprocess AFTER the agent containers stop, so
-# "containers gone" is the NORMAL state during delivery, not a crash signal. If
-# the plugin crashes (or the host reboots) after writing the approved state.json
-# but before result.json lands, attach would otherwise stay in "delivering"
-# forever.
-#
-# We cannot bound it on a fixed wall-clock guess: legitimate delivery can spend
-# up to copilot_timeout (default 600s) on the Copilot round PLUS coder_timeout
-# (default 3600s) on the fix turn — the daemon's *configurable* flags, which
-# attach can't see. So the daemon records an absolute delivery DEADLINE
-# (run_dir/delivery.json, = now + its own budget) before delivery starts, and
-# attach stops waiting only once that deadline passes — never timing out a
-# delivery still inside its own budget. When no deadline was recorded (a run
-# predating this, or one whose marker write failed), attach falls back to a flat
-# grace that comfortably exceeds the DEFAULT budget so the fallback can't
-# false-fire on a default-configured run.
-_DELIVERY_MARKER = "delivery.json"
-# > the full DEFAULT delivery budget (copilot 600 + coder 3600 + gate 900 +
-# overhead 1800 = 6900s; see pr_delivery.delivery_budget_seconds) so the
-# no-marker fallback can't false-fire on a default-config run.
-_DELIVERY_FALLBACK_SECONDS = 9000.0  # 2.5 h
-_DELIVERY_FALLBACK_POLLS = max(
-    1, int(_DELIVERY_FALLBACK_SECONDS / _ATTACH_POLL_SECONDS)
-)
 
 # Handoff files are bind-mounted RW into agent containers (containers.py), so an
 # agent can write arbitrary bytes — both the body and (via the reviewer-name
@@ -368,168 +338,6 @@ def _agent_state(info: RunInfo) -> str:
     return "idle" if any(c.running for c in containers) else "done"
 
 
-def _run_phase(
-    run_dir: Path,
-    containers: list[ContainerStatus] | None,
-    state: dict | None,
-    *,
-    seen_container: bool,
-) -> str:
-    """Classify the run for ``attach``: ``"running"`` / ``"delivering"`` /
-    ``"terminal"`` / ``"vanished"``.
-
-    Terminal *state*, not agent *liveness*. The graceful terminal signal is the
-    run's recorded **outcome** — not container liveness and not ``conversation.md``
-    (the plugin writes the log *before* ``state.json``, so stopping on the log
-    would misreport an approved run). But the verdict in ``state.json`` is not the
-    whole story: ``develop()`` writes it the instant the dialogue ends, while in
-    daemon mode the **PR delivery** (branch push, Copilot round, ``result.json``)
-    all happen *after* it returns. So an **approved** verdict alone is NOT
-    terminal — exiting there is the #171 false-done window (attach quits while the
-    PR is still being pushed). We stay in ``"delivering"`` until this run's
-    ``result.json`` lands (or the work dir is reaped on success).
-
-    - ``"terminal"`` — a non-approved outcome is recorded, or an approved run's
-      delivery has completed (:func:`_delivery_complete`), or the run dir was
-      **reaped** (the route-runner removes it after applying the result, so its
-      absence is itself an end signal; the outcome is then recovered from the
-      completion store — see :func:`_recover_reaped_outcome`).
-    - ``"delivering"`` — the dialogue **approved** but post-approval PR delivery
-      is still in flight (``result.json`` not yet written, dir not yet reaped).
-      Keep following; the caller renders a distinct "delivering PR…" phase.
-    - ``"running"`` — an agent container is up, or we're still in the **startup
-      window** (no container seen yet), or docker is absent and the run dir is
-      still present (can't observe containers — keep following for the outcome).
-    - ``"vanished"`` — docker shows the agent containers, having been **seen**,
-      are now all gone but no outcome is recorded yet. Ambiguous: either the
-      normal teardown window before ``state.json`` is written, or a hard crash.
-      The caller grace-polls before deciding (see ``_TEARDOWN_GRACE_POLLS``).
-
-    *state* is the already-read ``state.json`` for this poll (passed in so the
-    caller can capture the exact dict it classified on, without a second read
-    that could race the work-dir reap).
-    """
-    if state is not None and state.get("status"):
-        # An approved verdict still has PR delivery to do in daemon mode — not
-        # terminal until this run's result.json lands (or it's reaped on success,
-        # handled below), UNLESS delivery already FAILED (#194), which is terminal
-        # at once. Every other terminal status has no post-dialogue work.
-        if (
-            state.get("status") == "approved"
-            and not _delivery_failed(run_dir)
-            and not _delivery_complete(run_dir)
-        ):
-            return "delivering"
-        return "terminal"
-    if not run_dir.is_dir():
-        return "terminal"  # reaped by the route-runner after applying the result
-    if containers is None:
-        return "running"
-    if any(c.running for c in containers):
-        return "running"
-    return "vanished" if seen_container else "running"
-
-
-def _result_for_run(run_dir: Path) -> dict | None:
-    """THIS run's ``result.json`` (the plugin's final contract output), or ``None``.
-
-    ``result.json`` lives in the SHARED per-task dir (``run_dir.parent``), so a
-    prior run of the same task can leave one behind. #198 binds it to the run by
-    ``run_id``: the file is THIS run's iff its ``run_id`` equals ``run_dir.name``.
-    The earlier "a succeeded survivor must be the current run because a success is
-    reaped" reasoning relied on a BEST-EFFORT reap (``_cleanup_work_dir`` suppresses
-    ``rmtree`` ``OSError``) and didn't cover a failed result at all; the explicit
-    run_id binding removes that dependency. A result without ``run_id`` (an old
-    daemon's) does not bind — safe direction (treated as not-this-run).
-    """
-    try:
-        data = json.loads((run_dir.parent / "result.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data if data.get("run_id") == run_dir.name else None
-
-
-def _delivery_complete(run_dir: Path) -> bool:
-    """Whether THIS approved run's post-dialogue PR delivery succeeded.
-
-    ``develop()`` writes ``state.json`` the moment the dialogue approves, but in
-    daemon mode the branch push, the Copilot round, and the ``result.json`` write
-    all happen AFTER it returns (``story_develop/__main__`` calls ``deliver()``
-    then ``write_result_atomically``). ``result.json`` — the plugin's final
-    contract output — is the "fully delivered" signal, bound to this run by
-    ``run_id`` (:func:`_result_for_run`) so a prior run's leftover can't false-done
-    a retry.
-    """
-    data = _result_for_run(run_dir)
-    return data is not None and data.get("status") == "succeeded"
-
-
-def _delivery_failed(run_dir: Path) -> str | None:
-    """The reason THIS run's PR delivery FAILED (#194), or ``None``.
-
-    When ``deliver()`` raises before a PR exists (e.g. ``push_branch()`` /
-    ``gh pr create`` fails), the daemon records the failure in this run's PRIVATE
-    ``run_dir/delivery.json`` marker so attach reports it at once rather than
-    sitting in ``"delivering"`` until the #189 deadline. The marker write is
-    BEST-EFFORT, though, so when it's missing fall back to this run's terminal
-    ``result.json`` (run_id-bound, ``status: failed`` with a ``delivery`` error) —
-    the durable contract output, written atomically (#198, Hole 2). An approved
-    dialogue's failed result is always a delivery failure (``build_result_payload``
-    maps approved→succeeded otherwise), so the category check is just defensive.
-    """
-    try:
-        data = json.loads((run_dir / _DELIVERY_MARKER).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = None
-    if isinstance(data, dict) and data.get("failed"):
-        reason = data.get("reason")
-        return str(reason) if reason else "PR delivery failed"
-    result = _result_for_run(run_dir)
-    if result is not None and result.get("status") == "failed":
-        error = result.get("error")
-        if isinstance(error, dict) and error.get("category") == "delivery":
-            return str(error.get("message") or "PR delivery failed")
-    return None
-
-
-def _delivery_deadline(run_dir: Path) -> datetime | None:
-    """The instant this run's delivery budget expires (#189), or ``None``.
-
-    The daemon writes ``run_dir/delivery.json`` with an absolute ``deadline``
-    (its own ``copilot_timeout + coder_timeout`` budget) before delivery starts.
-    Reading it lets attach bound a crashed/orphaned delivery WITHOUT timing out a
-    delivery still inside its budget — which attach can't otherwise size, since the
-    budget is the daemon's configurable flags.
-    """
-    try:
-        data = json.loads((run_dir / _DELIVERY_MARKER).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    raw = data.get("deadline") if isinstance(data, dict) else None
-    if not isinstance(raw, str):
-        return None
-    try:
-        deadline = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
-
-
-def _delivery_timed_out(run_dir: Path, delivering_polls: int) -> bool:
-    """Whether an in-flight delivery has exceeded its bound (#189).
-
-    Prefers the daemon's recorded deadline (so a delivery inside its own budget is
-    never falsely timed out); falls back to a generous flat poll grace only when no
-    deadline was recorded — generous enough not to false-fire on a default budget.
-    """
-    deadline = _delivery_deadline(run_dir)
-    if deadline is not None:
-        return datetime.now(UTC) >= deadline
-    return delivering_polls >= _DELIVERY_FALLBACK_POLLS
-
-
 def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
     """Block (polling) until a run for *key* appears, or it already completed.
 
@@ -550,7 +358,7 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
             return run_dir, None
         record = lookup_completed(key, expected_task_id=key)
         if record:
-            return None, _state_from_completion_record(record)
+            return None, run_outcome.state_from_completion_record(record)
         time.sleep(_ATTACH_POLL_SECONDS)
 
 
@@ -612,144 +420,7 @@ _OUTCOME_PHRASES = {
 }
 
 
-def _read_state(run_dir: Path) -> dict | None:
-    """The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
-
-    Written by the plugin only at run end, alongside ``conversation.md``.
-    """
-    try:
-        data = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-@dataclass
-class _Outcome:
-    """A run's terminal outcome, captured the moment ``attach`` detects it.
-
-    The follow loop snapshots this **before returning**, so the rendered summary
-    survives the route-runner reaping the work dir on success — re-reading the
-    (now-deleted) ``run_dir`` afterwards would misreport an approved run as a
-    crash (correctness/f-003).
-    """
-
-    state: dict | None = None  # parsed state.json (or recovered) at capture time
-    has_log: bool = False  # conversation.md present at capture time
-    reaped: bool = False  # run dir removed by the route-runner's success cleanup
-    delivery_timed_out: bool = False  # approved, but result.json never landed (#189)
-    delivery_failed: bool = False  # approved, but PR delivery raised (no PR) (#194)
-    pr_url: str | None = None  # the delivered PR url, when approved+delivered (#188)
-    # why a run stopped (#188), or why its PR delivery failed (#194)
-    failure_reason: str | None = None
-
-
-def _recover_reaped_outcome(run_dir: Path) -> dict | None:
-    """Recover a **reaped** run's outcome from the host-persistent completion store.
-
-    The route-runner removes the whole work dir on a succeeded result, taking
-    ``state.json`` with it — and a follow can miss the brief window where the
-    file exists (a poll lands before it is written, then the dir is gone by the
-    next poll). The plugin records that success in the idempotency store *before*
-    the dir is reaped, a source the route-runner never touches. The record is
-    keyed by the (possibly explicit ``--idempotency-key``) key, so it is located
-    by this run's id — bound to **this** run, not a prior success of the same
-    task. A match means the run was approved (the only success).
-
-    The record is this run's ``result.json`` payload, so it carries the delivered
-    ``pr_url`` (#188) — surfaced here so a write-then-reap between two polls still
-    names the PR.
-    """
-    record = lookup_completed_for_run(run_dir.parent.name, run_dir.name)
-    if not record:
-        return None
-    return _state_from_completion_record(record)
-
-
-def _state_from_completion_record(record: dict) -> dict:
-    """Translate a completion-store record (a ``result.json`` payload) into the
-    ``state.json``-shaped dict ``attach`` renders from.
-
-    A recorded run is always **approved** (the only success). The record carries
-    the round count (#196) and the delivered ``pr_url`` (#188), so a reaped or
-    idempotency-replayed run — whose ``state.json`` was never seen — still reports
-    a complete terminal summary (verdict + rounds + PR).
-    """
-    recovered: dict = {"status": "approved"}
-    if isinstance(record.get("rounds"), int):
-        recovered["rounds"] = record["rounds"]
-    if record.get("pr_url"):
-        recovered["pr_url"] = str(record["pr_url"])
-    return recovered
-
-
-def _delivered_pr_url(run_dir: Path, state: dict | None) -> str | None:
-    """The delivered PR url for an approved run, or ``None`` (#188).
-
-    A reaped run's recovered *state* already carries it (from the completion-store
-    payload); otherwise read this run's ``result.json``, bound to the run by
-    ``run_id`` (:func:`_result_for_run`, #198) so a prior run's leftover PR url is
-    never surfaced for this one.
-    """
-    if state and state.get("pr_url"):
-        return str(state["pr_url"])
-    data = _result_for_run(run_dir)
-    if data is not None and data.get("status") == "succeeded" and data.get("pr_url"):
-        return str(data["pr_url"])
-    return None
-
-
-def _capture_outcome(outcome: _Outcome, run_dir: Path, state: dict | None) -> None:
-    """Snapshot the terminal outcome into *outcome* from the already-read *state*.
-
-    Done before the follow loop returns, while the result is still recoverable.
-    When the run dir has been reaped (success cleanup) with no ``state.json``
-    captured, the outcome is recovered from the completion store
-    (:func:`_recover_reaped_outcome`).
-    """
-    outcome.reaped = not run_dir.is_dir()
-    if state is None and outcome.reaped:
-        state = _recover_reaped_outcome(run_dir)
-    outcome.state = state
-    outcome.has_log = (run_dir / "conversation.md").is_file()
-    # #188: enrich the summary — why a non-approved run stopped, and the PR url
-    # of an approved+delivered one (only an approved run has a delivered PR).
-    if state:
-        outcome.failure_reason = state.get("failure_reason")
-        if state.get("status") == "approved":
-            # #194: an approved run whose delivery FAILED (raised before a PR
-            # opened) is not a clean delivery — surface the reason, not a PR url.
-            reason = _delivery_failed(run_dir)
-            if reason:
-                outcome.delivery_failed = True
-                outcome.failure_reason = reason
-            else:
-                outcome.pr_url = _delivered_pr_url(run_dir, state)
-                # #196 (Gap A1): the route-runner can rmtree the task dir between
-                # the poll's state.json read and _delivered_pr_url's result.json
-                # read. When that race drops the url, recover it from the durable
-                # completion store rather than losing it from the summary.
-                if outcome.pr_url is None and not run_dir.is_dir():
-                    recovered = _recover_reaped_outcome(run_dir)
-                    if recovered and recovered.get("pr_url"):
-                        outcome.pr_url = str(recovered["pr_url"])
-
-
-def _approved(outcome: _Outcome) -> bool:
-    """Whether the run reached the only success status (``approved``) **and**
-    fully delivered.
-
-    A delivery that never completed (:attr:`_Outcome.delivery_timed_out`, #189) or
-    that FAILED (:attr:`_Outcome.delivery_failed`, #194) is not a clean success —
-    no PR exists — so ``attach --wait`` must exit nonzero, or ``attach --wait &&
-    gh pr view`` would race a PR that never opened.
-    """
-    if outcome.delivery_timed_out or outcome.delivery_failed:
-        return False
-    return bool(outcome.state and outcome.state.get("status") == "approved")
-
-
-def _outcome_line(run_id: str, outcome: _Outcome) -> str:
+def _outcome_line(run_id: str, outcome: run_outcome.RunOutcome) -> str:
     """One-line outcome summary for a run that has reached a terminal state.
 
     Prefers the recorded (or recovered) ``state.json`` status; then the bare
@@ -803,7 +474,7 @@ def _outcome_line(run_id: str, outcome: _Outcome) -> str:
     return f"── run {run_id} ended without recording an outcome (crashed?)"
 
 
-def _outcome_event(run_id: str, outcome: _Outcome) -> dict:
+def _outcome_event(run_id: str, outcome: run_outcome.RunOutcome) -> dict:
     """The ``--stream`` terminal event mirroring :func:`_outcome_line`."""
     state = outcome.state
     event: dict = {"event": "outcome", "run_id": run_id, "status": None}
@@ -1101,11 +772,11 @@ def develop_attach(
             # The run completed with no observable run dir (idempotency replay /
             # fast reap) — report the recovered terminal outcome instead of
             # hanging forever (#196). --wait is the only mode that waits.
-            outcome = _Outcome(state=recovered, reaped=True)
+            outcome = run_outcome.RunOutcome(state=recovered, reaped=True)
             if recovered and recovered.get("pr_url"):
                 outcome.pr_url = str(recovered["pr_url"])
             typer.echo(_outcome_line(key, outcome))
-            if not _approved(outcome):
+            if not run_outcome.is_clean_success(outcome):
                 sys.exit(1)
             return
     info = _run_info(run_dir)
@@ -1115,7 +786,7 @@ def develop_attach(
         _print_snapshot(run_dir)
         return
 
-    outcome = _Outcome()
+    outcome = run_outcome.RunOutcome()
 
     if stream:
         for event in _follow_events(run_dir, info, outcome):
@@ -1127,7 +798,7 @@ def develop_attach(
         for _event in _follow_events(run_dir, info, outcome):
             pass  # quiet — drain the follow, surface only the outcome
         typer.echo(_outcome_line(info.run_id, outcome))
-        if not _approved(outcome):
+        if not run_outcome.is_clean_success(outcome):
             sys.exit(1)
         return
 
@@ -1163,7 +834,9 @@ def _follow_state(
     return "── (starting up — waiting for agent containers…)", round_no, None
 
 
-def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[dict]:
+def _follow_events(
+    run_dir: Path, info: RunInfo, outcome: run_outcome.RunOutcome
+) -> Iterator[dict]:
     """Yield follow events until the run reaches a terminal state.
 
     Each event is a dict tagged by ``event``: ``state`` (label / round / agent,
@@ -1191,8 +864,15 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
         containers = _run_containers(info.run_id)
         if containers:
             seen_container = True
-        state = _read_state(run_dir)
-        phase = _run_phase(run_dir, containers, state, seen_container=seen_container)
+        state = run_outcome.read_state(run_dir)
+        phase = run_outcome.run_phase(
+            run_dir,
+            state,
+            containers_running=(
+                None if containers is None else any(c.running for c in containers)
+            ),
+            seen_container=seen_container,
+        )
         if phase != "vanished":
             grace = _TEARDOWN_GRACE_POLLS  # only count down once truly ending
         if phase != "delivering":
@@ -1223,19 +903,21 @@ def _follow_events(run_dir: Path, info: RunInfo, outcome: _Outcome) -> Iterator[
             seen.add(name)
             yield {"event": "handoff", "name": name, "body": body}
         if phase == "terminal":
-            _capture_outcome(outcome, run_dir, state)
+            run_outcome.capture_outcome(outcome, run_dir, state)
             return
         if phase == "vanished":
             grace -= 1
             if grace <= 0:  # outcome never landed across the grace window → crash
-                _capture_outcome(outcome, run_dir, state)
+                run_outcome.capture_outcome(outcome, run_dir, state)
                 return
         if phase == "delivering":
             delivering_polls += 1
             # bound the hang on the daemon's recorded delivery deadline (or a
             # generous flat fallback) — never on a delivery still inside its budget.
-            if _delivery_timed_out(run_dir, delivering_polls):
-                _capture_outcome(outcome, run_dir, state)
+            if run_outcome.delivery_timed_out(
+                run_dir, delivering_seconds=delivering_polls * _ATTACH_POLL_SECONDS
+            ):
+                run_outcome.capture_outcome(outcome, run_dir, state)
                 outcome.delivery_timed_out = True
                 return
         time.sleep(_ATTACH_POLL_SECONDS)
