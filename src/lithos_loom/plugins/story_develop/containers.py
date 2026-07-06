@@ -153,13 +153,17 @@ def build_exec_command(
 def resolve_auth_files(
     config: DevelopConfig, candidates: Sequence[str], *, tool: str = "claude"
 ) -> list[str]:
-    """Return the auth files present in *tool*'s operator config dir.
+    """Return the subset of *candidates* present in *tool*'s operator config dir.
 
-    Delegate to :meth:`Engine.auth_files`, which owns the per-tool candidate set
-    (*candidates* is now vestigial — the engine knows its own). Kept until
-    container provisioning migrates to the engine (ARCH-2.E3).
+    Behaviour-preserving shim: only the source-dir lookup moves to the engine
+    (:meth:`Engine.auth_source_dir`); the *supplied* candidates are still what get
+    filtered — so a caller passing a narrower/temporary list keeps its contract.
+    The engine's own :meth:`Engine.auth_files` (which filters the engine's built-in
+    candidate set) is the going-forward API; this shim is deleted when container
+    provisioning migrates to the engine (ARCH-2.E3).
     """
-    return engines.get_engine(tool).auth_files(config)
+    source = engines.get_engine(tool).auth_source_dir(config)
+    return [f for f in candidates if (source / f).is_file()]
 
 
 # --- thin side-effecting wrappers (monkeypatched in unit tests) -------------

@@ -156,6 +156,18 @@ def test_codex_cli_argv_session_id_none_is_plain_exec() -> None:
     assert "resume" not in argv
 
 
+def test_cli_argv_resume_without_handle_degrades_to_fresh_both_engines() -> None:
+    # session_id=None means "no handle" — you cannot resume nothing, so resume is
+    # moot and both engines emit a FRESH invocation (no None leaks into the argv).
+    # This is the intended, symmetric behaviour, not a caller error to reject.
+    codex = CodexEngine().cli_argv(prompt="p", session_id=None, resume=True)
+    assert (
+        codex[:2] == ["codex", "exec"] and "resume" not in codex and None not in codex
+    )
+    claude = ClaudeEngine().cli_argv(prompt="p", session_id=None, resume=True)
+    assert "--resume" not in claude and "--session-id" not in claude
+
+
 @pytest.mark.parametrize("tool", ["claude", "codex"])
 def test_build_exec_argv_wraps_cli_argv_in_docker_exec(tool: str) -> None:
     engine = get_engine(tool)
@@ -352,9 +364,30 @@ def test_codex_transcript_absent_for_wrong_id_or_extension(tmp_path: Path) -> No
 
 
 def test_engines_satisfy_the_engine_protocol() -> None:
-    # structural conformance is compile-time (pyright); assert at runtime too so a
-    # dropped method is caught even if a caller stops annotating against Engine.
+    # Structural conformance is compile-time (pyright, via ENGINES: dict[str, Engine]);
+    # assert EVERY protocol member at runtime too, so a dropped attribute/method is
+    # caught even when a future engine is added without an Engine annotation.
+    required = (
+        # identity / capabilities
+        "name",
+        "meters_cost_usd",
+        "mints_session_handle",
+        "supports_effort",
+        # container provisioning
+        "config_mount",
+        "config_env_var",
+        "auth_file_candidates",
+        "auth_source_dir",
+        "auth_files",
+        "skills_dir",
+        # turn execution
+        "cli_argv",
+        "build_exec_argv",
+        "parse_turn",
+        # session durability
+        "session_transcript_exists",
+    )
     engines_under_test: list[Engine] = [ClaudeEngine(), CodexEngine()]
     for e in engines_under_test:
-        assert hasattr(e, "cli_argv") and hasattr(e, "parse_turn")
-        assert hasattr(e, "session_transcript_exists")
+        for member in required:
+            assert hasattr(e, member), f"{type(e).__name__} missing {member!r}"
