@@ -180,6 +180,22 @@ forbidden_modules = [
     "lithos_loom.lithos_client",
 ]
 
+[[tool.importlinter.contracts]]
+# The Engine adapter (engines.py) concentrates the per-tool claude/codex
+# differences and imports config for DevelopConfig + the mount/auth constants.
+# The dependency is one-directional: engines -> config, never the reverse. If
+# config imported engines the import graph would cycle (engines needs config at
+# import time) and config would stop being the leaf every module depends on
+# freely. containers / turns / develop import engines — that direction is fine.
+name = "config stays engine-blind (no engines import)"
+type = "forbidden"
+source_modules = [
+    "lithos_loom.plugins.story_develop.config",
+]
+forbidden_modules = [
+    "lithos_loom.plugins.story_develop.engines",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

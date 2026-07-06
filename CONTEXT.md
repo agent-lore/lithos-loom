@@ -39,6 +39,17 @@ dialogue-based** cycle.
   `docker exec … --resume <session-id> -p …` — context restored from the on-disk transcript,
   not a live tmux REPL. The core thesis and core technical risk; net-new (Ralph++ did not
   have it). Open spike: confirm Codex headless `--resume` + skills.
+- **engine** — the per-tool adapter concentrating everything story-develop must know to run
+  a coder/reviewer with a specific CLI tool (`claude` or `codex`): its identity + capabilities
+  (`meters_cost_usd` — codex reports tokens not USD, #102; `mints_session_handle` — codex mints
+  a `thread_id` on turn 1 while claude echoes the caller's uuid; `supports_effort` — codex depth
+  is model-driven), how to provision its **container** (config mount + env var, auth files,
+  skills), how to build one turn's CLI argv (bare, or wrapped in `docker exec`), how to parse
+  that turn's structured output into a turn result, and where it writes its **session** transcript.
+  One adapter per tool behind a registry (`get_engine`); a new tool is added in one place instead
+  of branching on a `tool` string across the container / turn / transcript / config code. The
+  capabilities *express* decisions ADR 0002 + #94 already made — the adapter does not re-decide
+  them. Owned by the `engines` module.
 - **run outcome / develop-run contract** — the on-disk contract by which a develop run's
   *fate* is communicated between the three processes that touch it: the plugin subprocess
   that runs it, the daemon that delivers its PR, and the `develop attach` CLI that observes
