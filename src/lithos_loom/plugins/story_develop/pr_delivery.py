@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import run_outcome
+
 logger = logging.getLogger(__name__)
 
 COPILOT_LOGIN = "copilot-pull-request-reviewer[bot]"
@@ -549,6 +551,66 @@ def delivery_budget_seconds(config, *, copilot_timeout: int, coder_timeout: int)
         + config.test_timeout
         + _DELIVERY_OVERHEAD_SECONDS
     )
+
+
+def deliver_guarded(
+    config,
+    result,
+    *,
+    open_pr: bool,
+    no_copilot: bool,
+    copilot_timeout: int,
+    coder_timeout: int,
+    github_issue_url: str | None,
+    task_id: str | None,
+) -> tuple[DeliveryOutcome | None, str | None]:
+    """Guarded PR delivery for an approved run — shared daemon/standalone seam.
+
+    The single develop→deliver seam both ``__main__`` entry points call, so the
+    #189 / #194 delivery contract is enforced identically on both surfaces instead
+    of living in two hand-kept copies (the asymmetry ARCH-1.S3 fixes: standalone
+    used to complete the task + exit 0 on a failed delivery). Returns
+    ``(delivery, error)``:
+
+    - ``(None, None)`` — nothing to deliver (``open_pr`` off, or the run wasn't
+      approved). The caller renders "skipped" / nothing.
+    - ``(DeliveryOutcome, None)`` — delivered.
+    - ``(None, reason)`` — ``deliver()`` raised before a PR opened (#194). An
+      approved dialogue with no PR is NOT a clean success, so the reason is
+      returned for the caller to map to a non-success (daemon: ``result.json``
+      failed + ``EXIT_FAILED``; standalone: skip ``--complete-on-approval`` + exit
+      non-zero). The failure is recorded in the run's private ``delivery.json``
+      (:func:`run_outcome.record_delivery_failure`) so ``develop attach`` reports
+      it terminally rather than waiting out the #189 deadline.
+
+    Records the #189 delivery deadline before delivery starts, so attach can bound
+    a crashed/orphaned delivery without timing out a healthy slow one. The marker
+    writers live in :mod:`run_outcome` (ARCH-3.R2); this only calls them.
+    """
+    if not (open_pr and result.approved):
+        return None, None
+    run_outcome.record_delivery_deadline(
+        config.run_dir,
+        budget_seconds=delivery_budget_seconds(
+            config, copilot_timeout=copilot_timeout, coder_timeout=coder_timeout
+        ),
+    )
+    try:
+        delivery = deliver(
+            config,
+            result,
+            no_copilot=no_copilot,
+            copilot_timeout=copilot_timeout,
+            coder_timeout=coder_timeout,
+            github_issue_url=github_issue_url,
+            task_id=task_id,
+        )
+    except Exception as exc:  # delivery failure must not sink the run (#194)
+        logger.exception("story-develop PR delivery failed")
+        reason = str(exc)
+        run_outcome.record_delivery_failure(config.run_dir, reason=reason)
+        return None, reason
+    return delivery, None
 
 
 def deliver(
