@@ -31,6 +31,7 @@ DEFAULT_REVIEWER_NAME = "code-quality"
 DEFAULT_BLOCK_THRESHOLD = "major"  # findings below this don't block (see handoff.py)
 DEFAULT_MAX_ROUNDS = 5  # T3 loop bound; stall/dispute/cost guards arrive with T7
 DEFAULT_TEST_TIMEOUT = 900  # seconds for one test-gate container run (T4)
+DEFAULT_CODER_TIMEOUT = 3600  # daemon --coder-timeout default (one coder turn)
 DEFAULT_MAX_PAUSE_MINUTES = 120  # T5: total usage-limit pause budget per run
 DEFAULT_PAUSE_POLL_MINUTES = 5  # T5: retry cadence when the reset time is unknown
 DEFAULT_IMAGE = "ralph-sandbox:latest"

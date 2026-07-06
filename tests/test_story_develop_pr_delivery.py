@@ -872,11 +872,17 @@ def test_delivery_fallback_exceeds_the_full_default_delivery_budget() -> None:
     from types import SimpleNamespace
 
     from lithos_loom.plugins.story_develop import run_outcome
-    from lithos_loom.plugins.story_develop.config import DEFAULT_TEST_TIMEOUT
+    from lithos_loom.plugins.story_develop.config import (
+        DEFAULT_CODER_TIMEOUT,
+        DEFAULT_TEST_TIMEOUT,
+    )
 
+    # Every input is the daemon's real default, single-sourced from the same
+    # constants the parser uses — so the invariant tracks a default that changes,
+    # rather than a hard-coded copy that could silently pass against a stale value.
     default_budget = pr_delivery.delivery_budget_seconds(
         SimpleNamespace(test_timeout=DEFAULT_TEST_TIMEOUT),
         copilot_timeout=pr_delivery.DEFAULT_COPILOT_TIMEOUT,
-        coder_timeout=3600,  # the daemon's default --coder-timeout
+        coder_timeout=DEFAULT_CODER_TIMEOUT,
     )
     assert default_budget < run_outcome.DELIVERY_FALLBACK_SECONDS

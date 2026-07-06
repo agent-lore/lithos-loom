@@ -48,6 +48,7 @@ from ...plugin_runner import write_result_atomically
 from . import run_outcome
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
+    DEFAULT_CODER_TIMEOUT,
     DEFAULT_CODER_TOOL,
     DEFAULT_IMAGE,
     DEFAULT_MAX_PAUSE_MINUTES,
@@ -313,7 +314,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-run state dir (default: a fresh temp dir)",
     )
     p.add_argument(
-        "--coder-timeout", type=int, default=3600, help="Max seconds for the coder turn"
+        "--coder-timeout",
+        type=int,
+        default=DEFAULT_CODER_TIMEOUT,
+        help="Max seconds for the coder turn",
     )
     p.add_argument(
         "--reviewer-timeout",

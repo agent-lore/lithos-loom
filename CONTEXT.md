@@ -42,8 +42,9 @@ dialogue-based** cycle.
 - **run outcome / develop-run contract** — the on-disk contract by which a develop run's
   *fate* is communicated between the three processes that touch it: the plugin subprocess
   that runs it, the daemon that delivers its PR, and the `develop attach` CLI that observes
-  it. The run leaves markers in its run dir — `state.json` (the dialogue verdict), `result.json`
-  (the final delivered outcome), `delivery.json` (the PR-delivery deadline / failure marker) —
+  it. The run leaves markers on disk — `state.json` (the dialogue verdict) and `delivery.json`
+  (the PR-delivery deadline / failure marker) in its **run dir**, plus `result.json` (the final
+  delivered outcome) in the **shared per-task dir**, bound to its run by `run_id` (#198) —
   and the *rules* for reading them are the run-outcome invariants: an approved verdict is not
   "done" until the PR is delivered (#171); a reaped run's outcome is recovered from the
   completion store (#196); each marker is bound to *its* run, not a prior one (#198); a failed
