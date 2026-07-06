@@ -305,7 +305,7 @@ class CodexEngine(_BaseEngine):
         model: str | None = None,
         effort: str | None = None,
     ) -> list[str]:
-        # Verified against codex-cli 0.139.0:
+        # Verified against codex-cli 0.139.0, reconfirmed against 0.142.5 (E2):
         #   first:  codex exec [OPTIONS] [PROMPT]
         #   resume: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
         # The thread_id is minted on turn 1 (thread.started) and passed
@@ -414,7 +414,11 @@ class CodexEngine(_BaseEngine):
         )
 
     def session_transcript_exists(self, config_dir: Path, session_id: str) -> bool:
-        # codex writes sessions/YYYY/MM/DD/rollout-…-<thread_id>.jsonl under CODEX_HOME
+        # codex writes sessions/YYYY/MM/DD/rollout-…-<thread_id>.jsonl under
+        # CODEX_HOME. Reality-checked against codex-cli 0.142.5 (E2): a real
+        # `codex exec --json` with CODEX_HOME redirected landed the transcript at
+        # sessions/2026/07/06/rollout-2026-07-06T…-<thread_id>.jsonl, so this glob
+        # (keyed by the minted thread_id) finds a survived session on retry.
         sessions = config_dir / "sessions"
         if not sessions.is_dir():
             return False
@@ -433,8 +437,9 @@ def get_engine(tool: str) -> Engine:
     try:
         return ENGINES[tool]
     except KeyError:
-        expected = " or ".join(repr(t) for t in ENGINES)
-        raise ValueError(f"unsupported tool: {tool!r} (expected {expected})") from None
+        raise ValueError(
+            f"unsupported tool: {tool!r} (expected {supported_tools_phrase()})"
+        ) from None
 
 
 def is_supported(tool: str) -> bool:
@@ -445,3 +450,12 @@ def is_supported(tool: str) -> bool:
 def supported_tools() -> tuple[str, ...]:
     """The registered tool names, in registry order."""
     return tuple(ENGINES)
+
+
+def supported_tools_phrase() -> str:
+    """Registry-derived ``'a' or 'b'`` list of tools, for operator error messages.
+
+    Single-sources the "expected …" clause so adding an engine updates every
+    validation message (no more hand-maintained ``'claude' or 'codex'`` literals).
+    """
+    return " or ".join(repr(t) for t in ENGINES)

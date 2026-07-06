@@ -810,26 +810,6 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _tool_supported(tool: str) -> bool:
-    """Whether the container/exec layer can run *tool* (delegate to the registry)."""
-    return engines.is_supported(tool)
-
-
-def _session_transcript_exists(
-    config_dir: Path, session_id: str, *, tool: str = "claude"
-) -> bool:
-    """True when the agent's on-disk transcript for *session_id* exists.
-
-    Decides whether a limit-interrupted turn is retried as a resume
-    continuation (partial progress is in the transcript) or re-issued fresh
-    (the process died before the session was created). The per-tool layout
-    (claude ``projects/<hash>/<uuid>.jsonl`` vs codex
-    ``sessions/YYYY/MM/DD/rollout-…-<thread_id>.jsonl``) lives on the engine.
-    Delegate kept until the turn path migrates to the engine (ARCH-2.E2).
-    """
-    return engines.get_engine(tool).session_transcript_exists(config_dir, session_id)
-
-
 # When a usage-limited run checkpoints WITHOUT a parseable reset hint, suggest
 # retrying after this long. Provider windows are typically 1-5h; an hourly
 # re-dispatch is bounded and cheap, where re-trying at the pause-poll cadence
@@ -860,7 +840,7 @@ def _turn_with_limit_pauses(
     resume: bool,
     round_no: int,
     timeout: int,
-    tool: str = "claude",
+    engine: engines.Engine,
 ) -> tuple[TurnResult, bool, float]:
     """Run a turn, pausing-and-retrying through provider usage limits.
 
@@ -880,7 +860,7 @@ def _turn_with_limit_pauses(
             session_id=session_id,
             resume=attempt_resume,
             timeout=timeout,
-            tool=tool,
+            engine=engine,
             model=config.coder_model,
             effort=config.coder_effort,
         )
@@ -927,7 +907,7 @@ def _turn_with_limit_pauses(
         # Resume the SAME session when its transcript survived the interruption
         # (the in-session context is the thing we are protecting); otherwise
         # re-issue the original prompt fresh.
-        if _session_transcript_exists(config_dir, session_id, tool=tool):
+        if engine.session_transcript_exists(config_dir, session_id):
             attempt_prompt, attempt_resume = _CONTINUATION_PROMPT, True
         else:
             attempt_prompt, attempt_resume = prompt, resume
@@ -947,7 +927,7 @@ def _review_turn(
     resume: bool,
     prompt: str,
     timeout: int,
-    tool: str = "claude",
+    engine: engines.Engine,
     model: str | None = None,
     effort: str | None = None,
     validate: Callable[[ReviewHandoff], str | None] | None = None,
@@ -989,7 +969,7 @@ def _review_turn(
         session_id=session_id,
         resume=resume,
         timeout=timeout,
-        tool=tool,
+        engine=engine,
         model=model,
         effort=effort,
     )
@@ -1020,7 +1000,7 @@ def _review_turn(
                 session_id=cur_session,
                 resume=True,
                 timeout=timeout,
-                tool=tool,
+                engine=engine,
                 model=model,
                 effort=effort,
             )
@@ -1081,7 +1061,10 @@ class _ReviewerState:
         # run command for the NEW tool's env/auth/mount (#94).
         self.wt = wt
         self.session = str(uuid.uuid4())
-        self.tool_now: str = spec.tool
+        # spec.tool is validated (engines.is_supported) before any _ReviewerState
+        # is built, so get_engine is safe here. state.json still serialises
+        # engine_now.name — the reviewers.<name>.tool string contract is unchanged.
+        self.engine_now: engines.Engine = engines.get_engine(spec.tool)
         self.outcome: ReviewOutcome | None = None  # latest completed round
         self.ledger = FindingLedger(spec.name)  # T7: plugin-owned finding ids
         # order-preserving dedupe (see T5 review): never self-switch
@@ -1119,7 +1102,7 @@ def _run_reviewer_with_reaction(
         resume=resume,
         prompt=prompt,
         timeout=timeout,
-        tool=rstate.tool_now,
+        engine=rstate.engine_now,
         model=rstate.spec.model,
         effort=rstate.spec.effort,
         validate=rstate.ledger.check,
@@ -1130,8 +1113,8 @@ def _run_reviewer_with_reaction(
         rev_failed is not None
         and limits.classify_failure(rev_failed) == limits.USAGE_LIMITED
     ):
-        nxt = limits.next_fallback_tool(rstate.chain, rstate.tool_now)
-        while nxt is not None and not _tool_supported(nxt):
+        nxt = limits.next_fallback_tool(rstate.chain, rstate.engine_now.name)
+        while nxt is not None and not engines.is_supported(nxt):
             logger.warning(
                 "story-develop %s: fallback tool %r not supported yet; skipping",
                 config.run_id,
@@ -1146,11 +1129,11 @@ def _run_reviewer_with_reaction(
                 "tool %s -> %s",
                 config.run_id,
                 name,
-                rstate.tool_now,
+                rstate.engine_now.name,
                 nxt,
             )
             containers.stop_container(rstate.container)
-            rstate.tool_now = nxt
+            rstate.engine_now = engines.get_engine(nxt)
             rstate.session = str(uuid.uuid4())
             # Rebuild the run command for the NEW tool — its env var
             # (CODEX_HOME vs CLAUDE_CONFIG_DIR), auth file, and mount differ, so
@@ -1189,7 +1172,7 @@ def _run_reviewer_with_reaction(
                 resume=False,
                 prompt=reseed_prompt,
                 timeout=timeout,
-                tool=rstate.tool_now,
+                engine=rstate.engine_now,
                 model=rstate.spec.model,
                 effort=rstate.spec.effort,
                 validate=rstate.ledger.check,
@@ -1215,8 +1198,8 @@ def _run_reviewer_with_reaction(
         )
         _sleep(plan.wait_seconds)
         budget.remaining -= plan.wait_seconds
-        if _session_transcript_exists(
-            config.reviewer_config_dir(name), rstate.session, tool=rstate.tool_now
+        if rstate.engine_now.session_transcript_exists(
+            config.reviewer_config_dir(name), rstate.session
         ):
             retry_prompt, retry_resume = _CONTINUATION_PROMPT, True
         else:
@@ -1231,7 +1214,7 @@ def _run_reviewer_with_reaction(
             resume=retry_resume,
             prompt=retry_prompt,
             timeout=timeout,
-            tool=rstate.tool_now,
+            engine=rstate.engine_now,
             model=rstate.spec.model,
             effort=rstate.spec.effort,
             validate=rstate.ledger.check,
@@ -1420,15 +1403,17 @@ def develop(
     containers are torn down.
     """
     specs = config.effective_reviewers
-    if not _tool_supported(config.coder):
+    if not engines.is_supported(config.coder):
         raise ValueError(
-            f"unsupported coder tool {config.coder!r}: expected 'claude' or 'codex'"
+            f"unsupported coder tool {config.coder!r}: "
+            f"expected {engines.supported_tools_phrase()}"
         )
+    coder_engine = engines.get_engine(config.coder)
     for spec in specs:
-        if not _tool_supported(spec.tool):
+        if not engines.is_supported(spec.tool):
             raise ValueError(
                 f"unsupported tool {spec.tool!r} for reviewer {spec.name!r}: "
-                "expected 'claude' or 'codex'"
+                f"expected {engines.supported_tools_phrase()}"
             )
         if not is_valid_reviewer_name(spec.name):
             raise ValueError(
@@ -1580,7 +1565,7 @@ def develop(
                 resume=coder_resume,
                 round_no=round_no,
                 timeout=coder_timeout,
-                tool=config.coder,
+                engine=coder_engine,
             )
             coder_cost += attempt_cost
             # Codex mints its session handle (thread_id) on turn 1; reuse the
@@ -1631,7 +1616,7 @@ def develop(
                     session_id=coder_session,
                     resume=True,
                     timeout=coder_timeout,
-                    tool=config.coder,
+                    engine=coder_engine,
                     model=config.coder_model,
                     effort=config.coder_effort,
                 )
@@ -1922,7 +1907,7 @@ def develop(
                 "findings_by_severity": findings_by_severity(final_reviews),
                 "coder_session": coder_session,
                 "reviewers": {
-                    r.spec.name: {"session": r.session, "tool": r.tool_now}
+                    r.spec.name: {"session": r.session, "tool": r.engine_now.name}
                     for r in reviewers
                 },
                 "pause_budget_remaining_s": round(budget.remaining, 1),

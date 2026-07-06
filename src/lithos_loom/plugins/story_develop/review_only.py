@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 
 from ...runner import worktree
-from . import containers
+from . import containers, engines
 from .check_set import CheckSetResult
 from .config import HANDOFF_MOUNT_NAME, DevelopConfig, is_valid_reviewer_name
 from .develop import (
@@ -29,7 +29,6 @@ from .develop import (
     _PauseBudget,
     _ReviewerState,
     _run_check_set,
-    _tool_supported,
     build_check_set,
     check_result_blocks,
     gate_floor_blocks,
@@ -72,10 +71,10 @@ def review_change(
     """
     specs = config.effective_reviewers
     for spec in specs:
-        if not _tool_supported(spec.tool):
+        if not engines.is_supported(spec.tool):
             raise ValueError(
                 f"unsupported tool {spec.tool!r} for reviewer {spec.name!r}: "
-                "expected 'claude' or 'codex'"
+                f"expected {engines.supported_tools_phrase()}"
             )
         if not is_valid_reviewer_name(spec.name):
             raise ValueError(f"invalid reviewer name {spec.name!r}")

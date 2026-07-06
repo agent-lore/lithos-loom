@@ -702,7 +702,7 @@ def _deliver_after_open(
     develop-module helpers lazily (develop never imports this module).
     """
     from ...runner import git
-    from . import containers, handoff
+    from . import containers, engines, handoff
     from .develop import (
         _build_run_cmd,
         _render,
@@ -834,7 +834,7 @@ def _deliver_after_open(
             session_id=result.coder_session,
             resume=True,
             timeout=coder_timeout,
-            tool=config.coder,
+            engine=engines.get_engine(config.coder),
             model=config.coder_model,
             effort=config.coder_effort,
         )

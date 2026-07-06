@@ -331,10 +331,10 @@ def _install(
         *,
         container,
         prompt,
+        engine,
         session_id,
         resume=False,
         timeout,
-        tool="claude",
         model=None,
         effort=None,
     ):

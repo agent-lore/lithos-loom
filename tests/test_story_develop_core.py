@@ -57,6 +57,28 @@ def _round_from(prompt: str, kind: str) -> int:
     return int(m.group(1))
 
 
+# codex mints a fresh thread_id on turn 1 (even a turn that then usage-limits);
+# the orchestrator must rebind to it and resume the SAME session by THAT handle,
+# not the stale pre-mint uuid.
+_MINTED_CODEX_THREAD = "0199a213-81c0-7800-8aa1-minted0thread"
+
+
+def _write_survived_transcript(engine, coder_config_dir: Path, key: str) -> None:
+    """Simulate a session transcript surviving an interruption, in *engine*'s layout.
+
+    Keyed by *key* — the handle the orchestrator will actually resume by (the
+    minted thread_id for codex, the echoed uuid for claude).
+    """
+    if engine.mints_session_handle:  # codex: sessions/YYYY/MM/DD/rollout-…-<id>.jsonl
+        day = coder_config_dir / "sessions" / "2026" / "07" / "06"
+        day.mkdir(parents=True, exist_ok=True)
+        (day / f"rollout-2026-07-06T00-00-00-{key}.jsonl").write_text("{}\n")
+    else:  # claude: projects/<cwd-hash>/<uuid>.jsonl
+        pdir = coder_config_dir / "projects" / "-workspace"
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / f"{key}.jsonl").write_text("{}\n")
+
+
 def _install_fakes(
     monkeypatch: pytest.MonkeyPatch,
     config: DevelopConfig,
@@ -114,11 +136,13 @@ def _install_fakes(
         state["starts"] += 1
         return "cid"
 
-    def _limit_turn(session_id: str) -> TurnResult:
+    def _limit_turn(session_id: str = "") -> TurnResult:
+        # *session_id* is the handle the turn hands back — "" for claude (a limited
+        # turn yields no usable handle), the minted thread_id for codex.
         return TurnResult(
             exit_code=1,
             succeeded=False,
-            session_id="",
+            session_id=session_id,
             result_text="Claude AI usage limit reached|1750000000",
             cost_usd=0.001,
             raw={"is_error": True},
@@ -135,15 +159,15 @@ def _install_fakes(
         *,
         container,
         prompt,
+        engine,
         session_id,
         resume=False,
         timeout,
-        tool="claude",
         model=None,
         effort=None,
     ):
         wt = state["worktree"]
-        state["tools"].append(tool)
+        state["tools"].append(engine.name)
         state["models"].append((container, model))
         state["efforts"].append((container, effort))
         if "-coder" in container:
@@ -159,11 +183,17 @@ def _install_fakes(
                 idx = len(state["coder_calls"]) - 1
                 action = coder_results[min(idx, len(coder_results) - 1)]
                 if action == "limit":
+                    # codex mints a fresh thread_id on the limited turn; claude
+                    # echoes the supplied uuid. The retry resumes by THAT handle,
+                    # so the surviving transcript is written keyed by it.
+                    resume_key = (
+                        _MINTED_CODEX_THREAD if engine.mints_session_handle else ""
+                    )
                     if coder_transcript_on_limit:
-                        pdir = config.coder_config_dir / "projects" / "-workspace"
-                        pdir.mkdir(parents=True, exist_ok=True)
-                        (pdir / f"{session_id}.jsonl").write_text("{}\n")
-                    return _limit_turn(session_id)
+                        _write_survived_transcript(
+                            engine, config.coder_config_dir, resume_key or session_id
+                        )
+                    return _limit_turn(resume_key)
             if write_source and (source_rounds is None or rnd in source_rounds):
                 (wt / "greeting.txt").write_text(f"hello round {rnd}\n")
             # #114 salvage: when scripted, the initial coder turn leaves work but
@@ -203,7 +233,7 @@ def _install_fakes(
         attempts = state["review_attempts"].get((rnd, rev_name), 0)
         state["review_attempts"][(rnd, rev_name)] = attempts + 1
         if attempts < entry.get("limit_first", 0):
-            return _limit_turn(session_id)
+            return _limit_turn()
         review_path = config.handoff_dir / handoff.reviewer_handoff_name(rnd, rev_name)
         if is_correction:
             text, ok = entry.get("retry_text"), entry.get("retry_ok", True)
@@ -1358,6 +1388,30 @@ def test_coder_limit_resumes_when_transcript_survived(
     assert "interrupted by a provider usage limit" in state["coder_prompts"][1]
 
 
+def test_codex_coder_limit_resumes_when_transcript_survived(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # #94 (ARCH-2.E2): a codex coder MINTS its session handle (thread_id) on the
+    # limited turn — the retry must rebind to that minted handle and glob the
+    # survived transcript by IT (codex sessions/ layout), not the stale pre-mint
+    # uuid. If the resume globbed the old uuid it would miss the minted-id
+    # transcript and re-issue fresh, silently losing the in-session context.
+    from dataclasses import replace
+
+    cfg = replace(config, coder="codex")
+    state = _install_fakes(
+        monkeypatch,
+        cfg,
+        coder_results=["limit", "ok"],
+        coder_transcript_on_limit=True,
+    )
+    result = develop_mod.develop(cfg)
+    assert result.status == "approved"
+    assert state["tools"][0] == "codex"  # the coder actually ran on codex
+    assert state["coder_calls"][1][1] is True  # resumed the SAME (minted) session
+    assert "interrupted by a provider usage limit" in state["coder_prompts"][1]
+
+
 def test_coder_limit_budget_exhausted_interrupts(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
@@ -1461,7 +1515,9 @@ def test_duplicate_primary_in_fallback_chain_does_not_self_switch(
     # primary must not trap the reviewer in a claude->claude self-switch loop
     # that never reaches codex.
     cfg = replace(config, reviewer_fallback_chain=("claude", "codex"))
-    monkeypatch.setattr(develop_mod, "_tool_supported", lambda t: True)
+    # both claude + codex are natively supported (#94), so no is_supported patch
+    # is needed — the dedup (chain becomes claude->codex) is what prevents the
+    # claude->claude self-switch loop.
     state = _install_fakes(
         monkeypatch, cfg, reviews=[{"text": _LGTM, "limit_first": 1}]
     )

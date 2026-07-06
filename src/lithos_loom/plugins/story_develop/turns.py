@@ -16,7 +16,7 @@ from __future__ import annotations
 import subprocess
 
 from . import containers, engines
-from .engines import _TIMEOUT_EXIT, TurnResult
+from .engines import _TIMEOUT_EXIT, Engine, TurnResult
 
 __all__ = ["TurnResult", "parse_claude_result", "parse_codex_result", "run_turn"]
 
@@ -46,24 +46,23 @@ def run_turn(
     *,
     container: str,
     prompt: str,
+    engine: Engine,
     session_id: str,
     resume: bool = False,
     timeout: int = 3600,
-    tool: str = "claude",
     model: str | None = None,
     effort: str | None = None,
 ) -> TurnResult:
-    """Execute one agent turn in *container* and return its parsed result.
+    """Execute one agent turn in *container* via *engine* and return its result.
 
-    *tool* is threaded through to the exec builder, which raises for tools it
-    cannot run — so an orchestration-level tool switch that the exec layer
-    doesn't support yet fails loudly instead of silently running claude.
+    *engine* builds the ``docker exec`` argv and parses the turn's structured
+    output — the tool-specific mechanics (claude JSON vs codex JSONL, session
+    handling) live behind that one interface, so this driver is tool-agnostic.
     *model* / *effort* (#93), when set, pin the agent model + reasoning effort
     for the turn; ``None`` leaves the agent default.
     """
-    exec_cmd = containers.build_exec_command(
+    exec_cmd = engine.build_exec_argv(
         name=container,
-        tool=tool,
         prompt=prompt,
         session_id=session_id,
         resume=resume,
@@ -82,14 +81,10 @@ def run_turn(
             raw=None,
             stderr=f"agent turn timed out after {timeout}s",
         )
-    if tool == "codex":
-        return parse_codex_result(
-            proc.stdout,
-            exit_code=proc.returncode,
-            stderr=proc.stderr,
-            session_id=session_id,
-            resume=resume,
-        )
-    return parse_claude_result(
-        proc.stdout, exit_code=proc.returncode, stderr=proc.stderr
+    return engine.parse_turn(
+        proc.stdout,
+        exit_code=proc.returncode,
+        stderr=proc.stderr,
+        session_id=session_id,
+        resume=resume,
     )
