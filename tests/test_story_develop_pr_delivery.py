@@ -937,7 +937,14 @@ def test_deliver_guarded_returns_outcome_and_records_deadline_on_success(
     config.run_dir.mkdir(parents=True, exist_ok=True)  # develop() creates this first
     approved = _result(config, tmp_path)
     outcome = DeliveryOutcome(pr_url="https://github.com/o/r/pull/1", pr_number=1)
-    monkeypatch.setattr(pr_delivery, "deliver", lambda *a, **k: outcome)
+    seen: dict[str, bool] = {}
+
+    def fake_deliver(cfg, result, **kw):
+        # the #189 deadline must already be on disk when delivery starts (ordering)
+        seen["marker_at_delivery"] = (cfg.run_dir / "delivery.json").is_file()
+        return outcome
+
+    monkeypatch.setattr(pr_delivery, "deliver", fake_deliver)
     delivery, error = pr_delivery.deliver_guarded(
         config,
         approved,
@@ -949,8 +956,7 @@ def test_deliver_guarded_returns_outcome_and_records_deadline_on_success(
         task_id=None,
     )
     assert delivery is outcome and error is None
-    # the #189 deadline was recorded BEFORE delivery ran
-    assert (config.run_dir / "delivery.json").is_file()
+    assert seen["marker_at_delivery"] is True  # deadline recorded BEFORE delivery ran
 
 
 def test_deliver_guarded_records_failure_and_returns_reason(

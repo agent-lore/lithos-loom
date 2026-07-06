@@ -811,7 +811,8 @@ def test_main_open_pr_delivery_failure_skips_completion_and_exits_nonzero(
     produced no PR — so main() must NOT mark the task done and must exit non-zero,
     matching daemon mode. Before this fix it printed DELIVERY FAILED but still ran
     --complete-on-approval and returned 0. It must also write the private
-    delivery.json failure marker so `develop attach` reports it offline."""
+    delivery.json failure marker (same on-disk format the daemon writes — contract
+    parity, not turnkey attach discovery; see SPECIFICATION §5.5 + #219)."""
     from lithos_loom.plugins.story_develop import __main__ as main_mod
     from lithos_loom.plugins.story_develop import pr_delivery
     from lithos_loom.plugins.story_develop.develop import DevelopResult

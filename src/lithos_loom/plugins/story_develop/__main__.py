@@ -857,9 +857,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  cost:     ${result.total_cost_usd:.4f}")
 
     # Same guarded delivery seam as the daemon path (deliver_guarded): records the
-    # #189 deadline + the #194 failure marker, so `develop attach` gets identical
-    # offline visibility. delivery_error is set (delivery None) only when an
-    # approved run's deliver() raised — used below to skip completion + exit 1.
+    # #189 deadline + the #194 failure marker, so the on-disk delivery contract is
+    # symmetric with the daemon (same marker format — attach's run-dir discovery
+    # still targets the daemon layout, see SPECIFICATION §5.5 + #219). delivery_error
+    # is set (delivery None) only when an approved run's deliver() raised — used
+    # below to skip completion + exit 1.
     delivery, delivery_error = deliver_guarded(
         config,
         result,
