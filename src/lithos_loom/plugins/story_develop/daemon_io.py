@@ -770,6 +770,12 @@ def build_result_payload(
 ) -> tuple[dict[str, Any], int]:
     """Map a :class:`DevelopResult` onto the result.json contract.
 
+    ``result.json`` is one marker in the develop-run on-disk contract whose
+    read/classify + delivery-marker invariants live in :mod:`run_outcome`; this is
+    its writer. It stays here (not in ``run_outcome``) because it depends on
+    ``DevelopResult`` / ``DeliveryOutcome``, which ``run_outcome`` deliberately
+    doesn't import — ``run_outcome`` reads ``result.json`` back as plain dicts.
+
     Returns ``(payload, exit_code)``. ``approved`` is the only success —
     the runner completes the task on ``succeeded``. ``interrupted`` carries
     the ``resume`` block (the runner schedules a re-dispatch at

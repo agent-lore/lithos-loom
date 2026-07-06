@@ -51,6 +51,7 @@ from . import (
     handoff,
     limits,
     profiles,
+    run_outcome,
     test_gate,
 )
 from .check_set import (
@@ -1859,7 +1860,7 @@ def develop(
     commits = git.commits_since(wt, base)
     handoff_present = (config.handoff_dir / handoff.coder_handoff_name(1)).is_file()
 
-    log_path = config.run_dir / "conversation.md"
+    log_path = config.run_dir / run_outcome.CONVERSATION_LOG
     log_path.write_text(
         handoff.conversation_log(config.handoff_dir, rounds_completed, names),
         encoding="utf-8",
@@ -1906,7 +1907,7 @@ def develop(
     # Durable run state (PRD decision #5: resume state is ~free — session ids
     # + handoffs are on disk). Written on every exit, primarily for
     # `interrupted` runs and the future daemon re-dispatch (T10).
-    (config.run_dir / "state.json").write_text(
+    (config.run_dir / run_outcome.STATE_FILE).write_text(
         json.dumps(
             {
                 "status": status,
