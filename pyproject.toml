@@ -149,6 +149,30 @@ forbidden_modules = [
     "lithos_loom.children",
 ]
 
+[[tool.importlinter.contracts]]
+# run_outcome owns the develop-run on-disk contract (state.json / result.json /
+# delivery.json) and is imported by BOTH the reader (cli/develop.py) and, later,
+# the writer side. Keep it a leaf: stdlib + `.idempotency` only. If it grew an
+# import of the plugin runtime (develop/pr_delivery/containers/…) or the config /
+# client stack, cli/develop.py would drag that whole graph in just to classify a
+# run — the coupling the extraction removed.
+name = "run_outcome stays a lightweight on-disk contract module"
+type = "forbidden"
+source_modules = [
+    "lithos_loom.plugins.story_develop.run_outcome",
+]
+forbidden_modules = [
+    "lithos_loom.cli",
+    "lithos_loom.plugins.story_develop.develop",
+    "lithos_loom.plugins.story_develop.daemon_io",
+    "lithos_loom.plugins.story_develop.pr_delivery",
+    "lithos_loom.plugins.story_develop.containers",
+    "lithos_loom.plugins.story_develop.turns",
+    "lithos_loom.plugins.story_develop.lithos_io",
+    "lithos_loom.config",
+    "lithos_loom.lithos_client",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
