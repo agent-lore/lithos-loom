@@ -276,7 +276,10 @@ def _stub_daemon(monkeypatch, tmp_path: Path) -> dict[str, Any]:
         return None
 
     monkeypatch.setattr(main_mod, "develop", fake_develop)
-    monkeypatch.setattr(main_mod, "deliver", fake_deliver)
+    # deliver() runs inside pr_delivery.deliver_guarded now — patch it there.
+    monkeypatch.setattr(
+        "lithos_loom.plugins.story_develop.pr_delivery.deliver", fake_deliver
+    )
     return captured
 
 

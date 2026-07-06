@@ -6,6 +6,7 @@ agent work happens.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from lithos_loom.plugins.story_develop.__main__ import main
@@ -787,7 +788,10 @@ def test_main_open_pr_passes_issue_link_to_delivery(
         captured["posted_pr_url"] = delivery.pr_url if delivery else pr_url
         return True
 
-    monkeypatch.setattr(main_mod, "deliver", fake_deliver)
+    # deliver() is called from pr_delivery.deliver_guarded now — patch it there.
+    monkeypatch.setattr(
+        "lithos_loom.plugins.story_develop.pr_delivery.deliver", fake_deliver
+    )
     monkeypatch.setattr(main_mod, "post_results", fake_post)
 
     rc = main_mod.main(["--repo", str(tmp_git_repo), "--task-id", "t-1", "--open-pr"])
@@ -798,3 +802,83 @@ def test_main_open_pr_passes_issue_link_to_delivery(
     )
     assert captured["posted_pr_url"] == "https://github.com/o/r/pull/12"
     assert "pull/12" in capsys.readouterr().out
+
+
+def test_main_open_pr_delivery_failure_skips_completion_and_exits_nonzero(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """#194 parity (ARCH-1.S3): an approved STANDALONE run whose PR delivery RAISES
+    produced no PR — so main() must NOT mark the task done and must exit non-zero,
+    matching daemon mode. Before this fix it printed DELIVERY FAILED but still ran
+    --complete-on-approval and returned 0. It must also write the private
+    delivery.json failure marker (same on-disk format the daemon writes — contract
+    parity, not turnkey attach discovery; see SPECIFICATION §5.5 + #219)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop import pr_delivery
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        main_mod,
+        "fetch_task_context",
+        lambda url, tid: TaskContext(
+            task_id=tid,
+            title="T",
+            description="",
+            acceptance_criteria=None,
+            metadata={},
+        ),
+    )
+
+    def fake_develop(config, **kw):
+        # the real develop() creates the run dir before delivery; mirror that so
+        # the best-effort marker write has somewhere to land.
+        config.run_dir.mkdir(parents=True, exist_ok=True)
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.1,
+            review_cost_usd=0.1,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        main_mod, "complete_task", lambda *a: captured.setdefault("completed", True)
+    )
+
+    seen: dict = {}
+
+    def boom_deliver(config, result, **kw):
+        seen["run_dir"] = config.run_dir
+        raise RuntimeError("gh pr create failed: HTTP 422")
+
+    # delivery orchestration lives in pr_delivery.deliver_guarded, so patch the
+    # deliver() it calls there (not the name imported into __main__).
+    monkeypatch.setattr(pr_delivery, "deliver", boom_deliver)
+
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--task-id",
+            "t-1",
+            "--open-pr",
+            "--complete-on-approval",
+        ]
+    )
+    assert rc == 1  # NOT 0 — an approved run with no PR is not a clean success
+    assert "completed" not in captured  # the task must NOT be marked done
+    assert "DELIVERY FAILED" in capsys.readouterr().err
+    # the private failure marker is written for offline `develop attach` visibility
+    marker = json.loads((seen["run_dir"] / "delivery.json").read_text(encoding="utf-8"))
+    assert marker["failed"] is True
+    assert "gh pr create failed" in marker["reason"]

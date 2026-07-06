@@ -45,7 +45,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ...plugin_runner import write_result_atomically
-from . import run_outcome
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     DEFAULT_CODER_TIMEOUT,
@@ -89,7 +88,7 @@ from .lithos_io import (
     fetch_task_context,
     post_results,
 )
-from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver, delivery_budget_seconds
+from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver_guarded
 from .profiles import resolve_profile
 
 
@@ -528,41 +527,24 @@ def _daemon_main(args: argparse.Namespace) -> int:
         logging.getLogger(__name__).exception("story-develop daemon run crashed")
         return _fail_payload("internal", f"unexpected error: {exc}", 1)
 
-    delivery = None
-    delivery_error: str | None = None
-    if args.open_pr and result.approved:
-        # Record when this run's delivery budget expires BEFORE delivery starts,
-        # so `develop attach` can bound a crashed/orphaned delivery without ever
-        # timing out a healthy slow one (#189). The budget covers every bounded
-        # phase deliver() can run — Copilot round + fix turn + regression gate —
-        # computed alongside those phases in delivery_budget_seconds().
-        run_outcome.record_delivery_deadline(
-            config.run_dir,
-            budget_seconds=delivery_budget_seconds(
-                config,
-                copilot_timeout=args.copilot_timeout,
-                coder_timeout=args.coder_timeout,
-            ),
-        )
-        raw_issue = ctx.metadata.get("github_issue_url")
-        try:
-            delivery = deliver(
-                config,
-                result,
-                no_copilot=args.no_copilot,
-                copilot_timeout=args.copilot_timeout,
-                coder_timeout=args.coder_timeout,
-                github_issue_url=raw_issue if isinstance(raw_issue, str) else None,
-                task_id=ctx.task_id,
-            )
-        except Exception as exc:  # delivery failure must not sink the run
-            # An approved run whose delivery FAILED is not a clean success (#194):
-            # record the reason so result.json is `failed` (task stays retriable)
-            # and drop a private marker so `develop attach` reports the failure
-            # instead of waiting out the #189 deadline.
-            delivery_error = str(exc)
-            run_outcome.record_delivery_failure(config.run_dir, reason=delivery_error)
-            print(f"pr delivery failed: {exc}", file=sys.stderr)
+    # PR delivery is guarded + shared with the standalone path (deliver_guarded):
+    # it records the #189 deadline, runs deliver(), and on a #194 failure records
+    # the private marker + returns the reason (delivery is None). Downstream,
+    # build_result_payload(delivery_error=…) maps that to a `failed` result.json so
+    # the task stays retriable — no PR means no clean success.
+    raw_issue = ctx.metadata.get("github_issue_url")
+    delivery, delivery_error = deliver_guarded(
+        config,
+        result,
+        open_pr=args.open_pr,
+        no_copilot=args.no_copilot,
+        copilot_timeout=args.copilot_timeout,
+        coder_timeout=args.coder_timeout,
+        github_issue_url=raw_issue if isinstance(raw_issue, str) else None,
+        task_id=ctx.task_id,
+    )
+    if delivery_error is not None:
+        print(f"pr delivery failed: {delivery_error}", file=sys.stderr)
 
     post_results(args.lithos_url, ctx.task_id, result, delivery=delivery)
     payload, exit_code = build_result_payload(
@@ -874,21 +856,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  log:      {result.conversation_log}")
     print(f"  cost:     ${result.total_cost_usd:.4f}")
 
-    delivery = None
+    # Same guarded delivery seam as the daemon path (deliver_guarded): records the
+    # #189 deadline + the #194 failure marker, so the on-disk delivery contract is
+    # symmetric with the daemon (same marker format — attach's run-dir discovery
+    # still targets the daemon layout, see SPECIFICATION §5.5 + #219). delivery_error
+    # is set (delivery None) only when an approved run's deliver() raised — used
+    # below to skip completion + exit 1.
+    delivery, delivery_error = deliver_guarded(
+        config,
+        result,
+        open_pr=args.open_pr,
+        no_copilot=args.no_copilot,
+        copilot_timeout=args.copilot_timeout,
+        coder_timeout=args.coder_timeout,
+        github_issue_url=github_issue_url,
+        task_id=args.task_id,
+    )
     if args.open_pr and result.approved:
-        try:
-            delivery = deliver(
-                config,
-                result,
-                no_copilot=args.no_copilot,
-                copilot_timeout=args.copilot_timeout,
-                coder_timeout=args.coder_timeout,
-                github_issue_url=github_issue_url,
-                task_id=args.task_id,
-            )
-        except Exception as exc:  # delivery failure must not sink the run
-            print(f"  pr:       DELIVERY FAILED — {exc}", file=sys.stderr)
-        else:
+        if delivery is not None:
             print(f"  pr:       {delivery.pr_url}")
             if delivery.copilot_reviewed:
                 fix = (
@@ -905,6 +890,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             for note in delivery.notes:
                 print(f"  note:     {note}")
+        else:  # #194: deliver() raised before a PR opened — no PR exists
+            print(f"  pr:       DELIVERY FAILED — {delivery_error}", file=sys.stderr)
     elif args.open_pr:
         print("  pr:       skipped (run not approved)")
 
@@ -919,7 +906,11 @@ def main(argv: list[str] | None = None) -> int:
             f"  lithos:   {'results posted to' if posted else 'POSTING FAILED for'} "
             f"task {args.task_id}"
         )
-        if args.complete_on_approval and result.approved:
+        # #194 parity with the daemon path: an approved run whose PR delivery
+        # FAILED produced no PR, so it is NOT a clean success — do not mark the
+        # task done. Sibling of the exit-code guard below (both key on
+        # delivery_error; they must change together — the #194 single-exit trap).
+        if args.complete_on_approval and result.approved and delivery_error is None:
             done = complete_task(args.lithos_url, args.task_id, result)
             print(
                 f"  lithos:   task {args.task_id} "
@@ -946,6 +937,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif result.status == "cost_exceeded":
         print("\n  Stopped at the --max-cost-usd ceiling.")
+    # #194 parity: an approved dialogue whose PR delivery FAILED is not a clean
+    # success (no PR) — exit non-zero, matching daemon mode's delivery_error →
+    # failed/EXIT_FAILED mapping. Sibling of the skipped completion above.
+    if delivery_error is not None:
+        return 1
     return 0 if result.succeeded else 1
 
 

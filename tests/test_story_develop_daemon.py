@@ -1212,7 +1212,10 @@ def test_daemon_records_delivery_failure_when_deliver_raises(
         seen["run_dir"] = config.run_dir
         raise RuntimeError("gh pr create failed: HTTP 422")
 
-    monkeypatch.setattr(main_mod, "deliver", boom_deliver)
+    # deliver() runs inside pr_delivery.deliver_guarded now — patch it there.
+    monkeypatch.setattr(
+        "lithos_loom.plugins.story_develop.pr_delivery.deliver", boom_deliver
+    )
 
     argv, result_file = _daemon_args(tmp_git_repo, tmp_path, "--open-pr")
     assert main_mod.main(argv) == EXIT_FAILED
@@ -1456,7 +1459,10 @@ def test_daemon_records_delivery_deadline_before_delivering(
         seen["deadline"] = json.loads(marker.read_text())["deadline"]
         return DeliveryOutcome(pr_url="https://github.com/o/r/pull/1", pr_number=1)
 
-    monkeypatch.setattr(main_mod, "deliver", fake_deliver)
+    # deliver() runs inside pr_delivery.deliver_guarded now — patch it there.
+    monkeypatch.setattr(
+        "lithos_loom.plugins.story_develop.pr_delivery.deliver", fake_deliver
+    )
 
     argv, _ = _daemon_args(
         tmp_git_repo,
