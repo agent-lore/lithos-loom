@@ -1688,9 +1688,15 @@ def test_uncaught_exception_propagates_and_tears_down_containers(
     with pytest.raises(RuntimeError, match="boom in panel"):
         develop_mod.develop(config)
 
-    # finally tore down every container that was started (coder + reviewer(s)).
-    assert state["starts"] >= 2
-    assert len(state["stopped"]) == state["starts"]
+    # finally tore down every started container exactly once — identity, not just
+    # count: a teardown that stopped the coder twice and skipped a reviewer would
+    # satisfy a bare count check.
+    stopped = state["stopped"]
+    assert state["starts"] >= 2  # coder + >=1 reviewer
+    assert len(stopped) == state["starts"]
+    assert len(stopped) == len(set(stopped))  # each container stopped exactly once
+    assert sum(1 for n in stopped if n.endswith("-coder")) == 1  # the coder
+    assert any("-review-" in n for n in stopped)  # at least one reviewer
     # epilogue skipped: no durable run state is written on an uncaught exception.
     assert not (config.run_dir / "state.json").exists()
 
@@ -1756,3 +1762,65 @@ def test_candidate_stage_dedups_per_committed_sha(
     assert candidate_calls == [(1, ("coverage",))]
     # the fast gate likewise runs only on the round that produced a new commit.
     assert fast_calls == [(1, ("lint",))]
+
+
+def test_candidate_stage_reruns_on_a_new_committed_sha(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """#140 dedup is keyed by the committed sha, NOT a one-shot boolean: when a
+    LATER approval candidate lands on a DIFFERENT gated_sha, the candidate stage
+    re-runs and approval is gated on the FRESH result. Companion to
+    test_candidate_stage_dedups_per_committed_sha — together they pin
+    ``candidate_ran_for_sha != gated_sha``. A bare ``candidate_ran`` boolean would
+    pass the same-sha dedup half but fail this one (it would approve round 2's new
+    tree on round 1's stale RED candidate, or never re-run to clear it)."""
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
+
+    fast = Check("lint", "ruff check --x", "required", "fast")
+    candidate = Check("coverage", "coverage report", "required", "candidate")
+    monkeypatch.setattr(
+        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+    )
+    calls: list[tuple[int, str, tuple[str, ...]]] = []
+
+    def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
+        calls.append((round_no, sha, tuple(c.name for c in checks)))
+        return CheckSetResult(
+            tuple(
+                CheckResult(
+                    c,
+                    "ran",
+                    GateResult(
+                        command=c.command,
+                        # coverage (candidate) blocks in round 1 and clears from
+                        # round 2, so approval must wait for the SECOND candidate
+                        # run on the new sha — not the stale round-1 result.
+                        exit_code=0 if (c.name != "coverage" or round_no >= 2) else 1,
+                        passed=c.name != "coverage" or round_no >= 2,
+                        output_tail="x",
+                    ),
+                )
+                for c in checks
+            )
+        )
+
+    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    # LGTM every round; the coder commits a DIFFERENT tree each round (default
+    # write_source writes "hello round N"), so round 2's approval candidate has a
+    # new gated_sha and the guard must let it re-run.
+    cfg = replace(config, max_rounds=3)
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved"
+    assert result.rounds == 2  # approved on the round the fresh candidate cleared
+    candidate_calls = [(r, sha) for r, sha, n in calls if n == ("coverage",)]
+    # candidate re-ran on BOTH committed trees (a boolean guard would skip round 2).
+    assert [r for r, _ in candidate_calls] == [1, 2]
+    assert candidate_calls[0][1] != candidate_calls[1][1]  # distinct gated_sha
