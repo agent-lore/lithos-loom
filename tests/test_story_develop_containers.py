@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import containers
-from lithos_loom.plugins.story_develop.config import CONTAINER_NOFILE_ULIMIT
+from lithos_loom.plugins.story_develop.config import (
+    CONTAINER_NOFILE_ULIMIT,
+    DevelopConfig,
+)
 
 
 def _run_cmd(**over) -> list[str]:
@@ -201,3 +204,33 @@ def test_container_name() -> None:
     assert (
         containers.container_name("ab12cd34", "coder") == "loom-develop-ab12cd34-coder"
     )
+
+
+# ── resolve_auth_files shim contract (ARCH-2.E1) ──────────────────────────
+
+
+def test_resolve_auth_files_honours_supplied_candidates(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """The shim filters the CALLER's candidate list, not the engine's built-ins.
+
+    Regression for the E1 delegation: routing the dir lookup through the engine
+    must not swap the supplied candidates for the engine's own set.
+    """
+    cfg_dir = tmp_path / "claude"
+    cfg_dir.mkdir()
+    (cfg_dir / "custom.json").write_text("{}")
+    config = DevelopConfig(
+        repo=tmp_git_repo,
+        description="x",
+        work_dir=tmp_path / "work",
+        claude_config_dir=cfg_dir,
+    )
+    # a narrower/temporary candidate present on disk is returned …
+    assert containers.resolve_auth_files(config, ["custom.json"], tool="claude") == [
+        "custom.json"
+    ]
+    # … an absent one is filtered out …
+    assert containers.resolve_auth_files(config, ["absent.json"], tool="claude") == []
+    # … and the engine's default candidate is NOT injected when unasked-for.
+    assert containers.resolve_auth_files(config, [], tool="claude") == []

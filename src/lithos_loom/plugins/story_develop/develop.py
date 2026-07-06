@@ -47,6 +47,7 @@ from . import (
     autoformat,
     check_catalog,
     containers,
+    engines,
     gate_adapters,
     handoff,
     limits,
@@ -810,8 +811,8 @@ def _sleep(seconds: float) -> None:
 
 
 def _tool_supported(tool: str) -> bool:
-    """Whether the container/exec layer can run *tool* (claude + codex, #94)."""
-    return tool in ("claude", "codex")
+    """Whether the container/exec layer can run *tool* (delegate to the registry)."""
+    return engines.is_supported(tool)
 
 
 def _session_transcript_exists(
@@ -821,22 +822,12 @@ def _session_transcript_exists(
 
     Decides whether a limit-interrupted turn is retried as a resume
     continuation (partial progress is in the transcript) or re-issued fresh
-    (the process died before the session was created). The layout is
-    tool-specific: claude writes ``projects/<cwd-hash>/<uuid>.jsonl`` under
-    ``CLAUDE_CONFIG_DIR``; codex writes
-    ``sessions/YYYY/MM/DD/rollout-…-<thread_id>.jsonl`` under ``CODEX_HOME``
-    (#94). Dormant for codex until codex usage-limits are classified (G4), but
-    kept correct.
+    (the process died before the session was created). The per-tool layout
+    (claude ``projects/<hash>/<uuid>.jsonl`` vs codex
+    ``sessions/YYYY/MM/DD/rollout-…-<thread_id>.jsonl``) lives on the engine.
+    Delegate kept until the turn path migrates to the engine (ARCH-2.E2).
     """
-    if tool == "codex":
-        sessions = config_dir / "sessions"
-        if not sessions.is_dir():
-            return False
-        return any(sessions.glob(f"**/*{session_id}*.jsonl"))
-    projects = config_dir / "projects"
-    if not projects.is_dir():
-        return False
-    return any(projects.glob(f"*/{session_id}.jsonl"))
+    return engines.get_engine(tool).session_transcript_exists(config_dir, session_id)
 
 
 # When a usage-limited run checkpoints WITHOUT a parseable reset hint, suggest

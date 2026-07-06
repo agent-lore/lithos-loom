@@ -20,6 +20,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+from . import engines
 from .config import (
     CLAUDE_CONFIG_MOUNT,
     CODEX_CONFIG_MOUNT,
@@ -132,84 +133,36 @@ def build_exec_command(
 ) -> list[str]:
     """Build the ``docker exec`` argv for one agent turn (coder or reviewer).
 
-    ``--session-id`` controls the session on the first turn; ``--resume`` reloads
-    it on later turns (T3). Output is ``--output-format json`` so completion /
-    cost / errors come from structured output, not pane scraping.
-
-    *model* / *effort*, when set, add ``--model <model>`` / ``--effort <level>``
-    (#93) — passed on every turn, including resumes. *effort* is a Claude
-    reasoning level (``low``…``max``), not a token budget; ``None`` leaves the
-    agent default.
-
-    Codex (#94) is the per-tool translation point: it takes ``model`` via
-    ``-m`` but has no shared effort knob (codex depth is model-driven), so
-    *effort* is ignored for codex. The session handle is **minted by the tool**
-    on the first turn (``thread_id`` from the ``thread.started`` ``--json``
-    event), not supplied — so on the first turn *session_id* is unused, and on
-    resume it is passed positionally to ``codex exec resume``. ``--json`` emits
-    JSONL; ``--dangerously-bypass-approvals-and-sandbox`` is the codex analogue
-    of claude's ``--dangerously-skip-permissions`` (the container is the
-    sandbox).
+    Delegate to :meth:`Engine.build_exec_argv` — the per-tool argv (claude's
+    ``--session-id`` / ``--output-format json`` vs codex's ``exec [resume …]
+    --json``) lives on the engine now. Raises ``ValueError`` for an unknown
+    *tool* (via :func:`engines.get_engine`). Kept until the turn path migrates
+    to the engine directly (ARCH-2.E2).
     """
-    if tool == "claude":
-        session_flag = (
-            ["--resume", session_id] if resume else ["--session-id", session_id]
-        )
-        model_flag = ["--model", model] if model else []
-        effort_flag = ["--effort", effort] if effort else []
-        return [
-            "docker",
-            "exec",
-            "-w",
-            workdir,
-            name,
-            "claude",
-            *session_flag,
-            *model_flag,
-            *effort_flag,
-            "-p",
-            "--dangerously-skip-permissions",
-            "--output-format",
-            "json",
-            prompt,
-        ]
-
-    if tool == "codex":
-        # Verified against codex-cli 0.139.0:
-        #   first:  codex exec [OPTIONS] [PROMPT]
-        #   resume: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
-        # so the thread_id is the first positional after `resume` and the
-        # prompt is the trailing positional (handle captured from turn 1's
-        # `thread.started` event). The working dir is set by `docker exec -w`,
-        # so the `-C/--cd` flag that `resume` lacks is not needed.
-        subcommand = ["exec", "resume", session_id] if resume else ["exec"]
-        model_flag = ["-m", model] if model else []  # effort is model-driven
-        return [
-            "docker",
-            "exec",
-            "-w",
-            workdir,
-            name,
-            "codex",
-            *subcommand,
-            "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
-            *model_flag,
-            prompt,
-        ]
-
-    raise ValueError(f"unsupported tool: {tool!r} (expected 'claude' or 'codex')")
+    return engines.get_engine(tool).build_exec_argv(
+        name=name,
+        prompt=prompt,
+        session_id=session_id,
+        resume=resume,
+        workdir=workdir,
+        model=model,
+        effort=effort,
+    )
 
 
 def resolve_auth_files(
     config: DevelopConfig, candidates: Sequence[str], *, tool: str = "claude"
 ) -> list[str]:
-    """Return the subset of *candidates* that exist in *tool*'s operator config dir.
+    """Return the subset of *candidates* present in *tool*'s operator config dir.
 
-    Reads ``~/.codex`` for codex, ``~/.claude`` for claude (#94) — see
-    :meth:`DevelopConfig.auth_source_dir`.
+    Behaviour-preserving shim: only the source-dir lookup moves to the engine
+    (:meth:`Engine.auth_source_dir`); the *supplied* candidates are still what get
+    filtered — so a caller passing a narrower/temporary list keeps its contract.
+    The engine's own :meth:`Engine.auth_files` (which filters the engine's built-in
+    candidate set) is the going-forward API; this shim is deleted when container
+    provisioning migrates to the engine (ARCH-2.E3).
     """
-    source = config.auth_source_dir(tool)
+    source = engines.get_engine(tool).auth_source_dir(config)
     return [f for f in candidates if (source / f).is_file()]
 
 
