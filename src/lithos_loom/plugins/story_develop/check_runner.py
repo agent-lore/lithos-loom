@@ -13,8 +13,8 @@ decides the approval floor — all lives here, behind a small public surface:
 * :func:`load_gate_ledger` / :func:`persist_gate_ledger` — the run's
   deterministic-finding ledger (#132), reloaded on resume;
 * :func:`run_delivery_test_gate` — the *delivery* regression gate (test-only,
-  ledger-less) — the intentional delivery-vs-develop divergence ADR 0004 named,
-  now a named policy function instead of an inline filter in :mod:`pr_delivery`.
+  ledger-less) — the intentional delivery-vs-develop divergence (#140), now a
+  named policy function instead of an inline filter in :mod:`pr_delivery`.
 
 This module is engine-blind and imports no ``develop`` symbols (``develop``
 imports *this*): the round pipeline drives these functions, review-only reuses
@@ -486,10 +486,13 @@ def run_delivery_test_gate(
     ``test``; running the advisory / candidate checks here would burn containers
     without affecting the push decision (or wrongly hold it).
 
-    This is the intentional delivery-vs-develop gate divergence ADR 0004 warned
-    about — now a named policy function instead of an inline filter in
+    This is the intentional delivery-vs-develop gate divergence — #140 put
+    informational + candidate checks into the profile set, so delivery must key
+    only on ``test`` or it would push a RED fix an informational ``test`` allowed.
+    It is now a named policy function instead of an inline filter in
     :mod:`pr_delivery`, so a change to the develop-side gate can no longer silently
-    skip (or accidentally rewire) the delivery gate.
+    skip (or accidentally rewire) the delivery gate. No dedicated ADR records this
+    policy; the required/informational check-state model it rests on is ADR 0003 §4.
 
     Returns the ``test`` check's :class:`GateResult`, or ``None`` when no ``test``
     check is runnable (``develop_test_gate=false`` / no command / absent) or the
