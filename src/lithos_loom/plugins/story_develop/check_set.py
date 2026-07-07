@@ -9,7 +9,9 @@ This module is the pure-data layer: the :class:`Check` spec, the per-check
 :class:`CheckResult`, the aggregate :class:`CheckSetResult`, and the
 ``(exit_code, output) -> execution_outcome`` adapter :func:`classify_execution`.
 The container mechanics live in :mod:`test_gate`; the orchestration (building the
-default set, running it per round) lives in :mod:`develop`.
+profile check-set, running it per round, the required-check floor) lives in
+:mod:`check_runner` (ARCH-1.S2), which :mod:`develop` drives as one step of its
+higher-level implement→review→fix workflow.
 
 #131 ships exactly one check — ``test`` — so the default set is degenerate and
 behaviour is identical to the old single-command gate. The structure is what the

@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from lithos_loom.plugins.story_develop import develop as develop_mod
+from lithos_loom.plugins.story_develop import check_runner
+from lithos_loom.plugins.story_develop.check_runner import build_check_set
 from lithos_loom.plugins.story_develop.check_set import (
     Check,
     CheckResult,
@@ -21,7 +22,6 @@ from lithos_loom.plugins.story_develop.check_set import (
     render_check_summary,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
-from lithos_loom.plugins.story_develop.develop import build_check_set
 from lithos_loom.plugins.story_develop.gate_findings import GateFinding, GateLedger
 from lithos_loom.plugins.story_develop.test_gate import GateResult
 
@@ -178,7 +178,7 @@ def test_floor_required_adapter_check_blocks_on_major_ledger_finding() -> None:
         (_ran("lint", "ruff check --output-format=json", "required", _green()),)
     )
     assert (
-        develop_mod.gate_floor_blocks(cs, _ledger_with("lint", severity="major"))
+        check_runner.gate_floor_blocks(cs, _ledger_with("lint", severity="major"))
         is True
     )
 
@@ -207,15 +207,15 @@ def test_floor_informational_sast_major_finding_does_not_block() -> None:
         ],
         1,
     )
-    assert develop_mod.gate_floor_blocks(cs, led) is False
+    assert check_runner.gate_floor_blocks(cs, led) is False
 
 
 def test_floor_required_no_adapter_check_reads_raw_exit() -> None:
     # pyright has no adapter -> blocking reads the raw exit code.
     red = CheckSetResult((_ran("typecheck", "pyright", "required", _red()),))
     green = CheckSetResult((_ran("typecheck", "pyright", "required", _green()),))
-    assert develop_mod.gate_floor_blocks(red, None) is True
-    assert develop_mod.gate_floor_blocks(green, None) is False
+    assert check_runner.gate_floor_blocks(red, None) is True
+    assert check_runner.gate_floor_blocks(green, None) is False
 
 
 def test_floor_uv_wrapped_adapter_reads_ledger_via_command_tool() -> None:
@@ -227,7 +227,7 @@ def test_floor_uv_wrapped_adapter_reads_ledger_via_command_tool() -> None:
         (_ran("dep-audit", "uv run pip-audit -f json", "required", _green()),)
     )
     assert (
-        develop_mod.gate_floor_blocks(cs, _ledger_with("dep-audit", severity="major"))
+        check_runner.gate_floor_blocks(cs, _ledger_with("dep-audit", severity="major"))
         is True
     )
 
@@ -238,7 +238,7 @@ def test_floor_required_absent_check_blocks_without_indexerror() -> None:
     cs = CheckSetResult(
         (CheckResult(Check("typecheck", "", "required"), "absent", None),)
     )
-    assert develop_mod.gate_floor_blocks(cs, GateLedger()) is True
+    assert check_runner.gate_floor_blocks(cs, GateLedger()) is True
 
 
 def test_floor_required_adapter_timeout_blocks_with_empty_ledger() -> None:
@@ -254,14 +254,14 @@ def test_floor_required_adapter_timeout_blocks_with_empty_ledger() -> None:
             ),
         )
     )
-    assert develop_mod.gate_floor_blocks(cs, GateLedger()) is True
+    assert check_runner.gate_floor_blocks(cs, GateLedger()) is True
 
 
 def test_floor_required_no_adapter_timeout_blocks() -> None:
     cs = CheckSetResult(
         (CheckResult(Check("test", "pytest", "required"), "timed_out", _timeout()),)
     )
-    assert develop_mod.gate_floor_blocks(cs, None) is True
+    assert check_runner.gate_floor_blocks(cs, None) is True
 
 
 def test_floor_errored_and_na_never_block() -> None:
@@ -271,8 +271,8 @@ def test_floor_errored_and_na_never_block() -> None:
     na = CheckSetResult(
         (CheckResult(Check("dep-audit", "", "not_applicable"), "n_a", None),)
     )
-    assert develop_mod.gate_floor_blocks(errored, None) is False
-    assert develop_mod.gate_floor_blocks(na, None) is False
+    assert check_runner.gate_floor_blocks(errored, None) is False
+    assert check_runner.gate_floor_blocks(na, None) is False
 
 
 def test_floor_informational_red_never_blocks() -> None:
@@ -280,13 +280,13 @@ def test_floor_informational_red_never_blocks() -> None:
         (_ran("lint", "ruff check --output-format=json", "informational", _red()),)
     )
     no_adapter = CheckSetResult((_ran("semgrep", "semgrep", "informational", _red()),))
-    assert develop_mod.gate_floor_blocks(adapter, GateLedger()) is False
-    assert develop_mod.gate_floor_blocks(no_adapter, None) is False
+    assert check_runner.gate_floor_blocks(adapter, GateLedger()) is False
+    assert check_runner.gate_floor_blocks(no_adapter, None) is False
 
 
 def test_floor_none_check_set_never_blocks() -> None:
-    assert develop_mod.gate_floor_blocks(None, GateLedger()) is False
-    assert develop_mod.gate_floor_blocks(None, None) is False
+    assert check_runner.gate_floor_blocks(None, GateLedger()) is False
+    assert check_runner.gate_floor_blocks(None, None) is False
 
 
 def test_floor_minor_finding_below_threshold_does_not_block() -> None:
@@ -296,7 +296,7 @@ def test_floor_minor_finding_below_threshold_does_not_block() -> None:
         (_ran("lint", "ruff check --output-format=json", "required", _red()),)
     )
     assert (
-        develop_mod.gate_floor_blocks(cs, _ledger_with("lint", severity="minor"))
+        check_runner.gate_floor_blocks(cs, _ledger_with("lint", severity="minor"))
         is False
     )
 
@@ -309,7 +309,7 @@ def test_floor_single_required_test_matches_blocking_passed() -> None:
         cs = CheckSetResult(
             (CheckResult(Check("test", "pytest", "required"), outcome, gate),)
         )
-        assert develop_mod.gate_floor_blocks(cs, None) is (not cs.blocking_passed)
+        assert check_runner.gate_floor_blocks(cs, None) is (not cs.blocking_passed)
 
 
 def test_floor_required_adapter_red_empty_ledger_blocks_failed_run() -> None:
@@ -321,8 +321,8 @@ def test_floor_required_adapter_red_empty_ledger_blocks_failed_run() -> None:
         (_ran("lint", "ruff check --output-format=json", "required", _red()),)
     )
     pa = CheckSetResult((_ran("dep-audit", "pip-audit -f json", "required", _red()),))
-    assert develop_mod.gate_floor_blocks(ruff, GateLedger()) is True
-    assert develop_mod.gate_floor_blocks(pa, GateLedger()) is True
+    assert check_runner.gate_floor_blocks(ruff, GateLedger()) is True
+    assert check_runner.gate_floor_blocks(pa, GateLedger()) is True
 
 
 def test_floor_required_adapter_clean_exit_empty_ledger_passes() -> None:
@@ -332,8 +332,8 @@ def test_floor_required_adapter_clean_exit_empty_ledger_passes() -> None:
         (_ran("lint", "ruff check --output-format=json", "required", _green()),)
     )
     pa = CheckSetResult((_ran("dep-audit", "pip-audit -f json", "required", _green()),))
-    assert develop_mod.gate_floor_blocks(ruff, GateLedger()) is False
-    assert develop_mod.gate_floor_blocks(pa, GateLedger()) is False
+    assert check_runner.gate_floor_blocks(ruff, GateLedger()) is False
+    assert check_runner.gate_floor_blocks(pa, GateLedger()) is False
 
 
 # --- build_check_set: profile-selected set, informational-first (#140) --------
@@ -354,10 +354,10 @@ def _python(
     """Stub a python ecosystem with the named tools present (all tools, if None) —
     so ``build_check_set`` resolves the profile's checks without touching Docker."""
     monkeypatch.setattr(
-        develop_mod.detection, "detect_ecosystems", lambda wt: ("python",)
+        check_runner.detection, "detect_ecosystems", lambda wt: ("python",)
     )
     monkeypatch.setattr(
-        develop_mod.test_gate,
+        check_runner.test_gate,
         "probe_tools",
         lambda image, tools: (
             list(tools) if present is None else [t for t in tools if t in present]
@@ -372,7 +372,7 @@ def test_default_set_is_one_required_test_check(
     # leaving just the `test` check — required under the default `standard` profile
     # (#140: its state is the profile's, blocking on RED with no extra config).
     monkeypatch.setattr(
-        develop_mod, "_resolve_test_command", lambda config, wt: "pytest"
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
     )
     checks = build_check_set(_config(tmp_path), tmp_path)
     assert checks == (Check(name="test", command="pytest", state="required"),)
@@ -392,9 +392,9 @@ def test_test_gate_false_drops_test_check_but_keeps_the_informational_set(
         command="ruff check --output-format=json --exit-zero",
         state="informational",
     )
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", _boom)
+    monkeypatch.setattr(check_runner, "_resolve_test_command", _boom)
     monkeypatch.setattr(
-        develop_mod, "_build_profile_checks", lambda config, profile, eco, wt: [lint]
+        check_runner, "_build_profile_checks", lambda config, profile, eco, wt: [lint]
     )
     checks = build_check_set(_config(tmp_path, test_gate=False), tmp_path)
     assert checks == (lint,)
@@ -409,7 +409,7 @@ def test_build_check_set_resolves_uv_aware_typecheck_on_a_uv_repo(
     # while the static-analysis `lint` check stays bare `ruff`.
     _python(monkeypatch, present=("uv", "ruff", "bandit"))
     monkeypatch.setattr(
-        develop_mod, "_resolve_test_command", lambda config, wt: "uv run pytest"
+        check_runner, "_resolve_test_command", lambda config, wt: "uv run pytest"
     )
     (tmp_path / "uv.lock").write_text("")
     checks = build_check_set(_config(tmp_path, review_profile="standard"), tmp_path)
@@ -421,7 +421,7 @@ def test_build_check_set_resolves_uv_aware_typecheck_on_a_uv_repo(
 def test_no_detected_command_yields_empty_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda config, wt: None)
     assert build_check_set(_config(tmp_path, test_gate=True), tmp_path) == ()
 
 
@@ -532,10 +532,10 @@ def test_required_test_absent_blocks_when_ecosystem_detected(
     # A code repo (pyproject => python) with a *required* test check but no
     # runnable test command -> expected-but-absent placeholder that blocks.
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda config, wt: None)
     # isolate the test check; the profile check-set is exercised separately below.
     monkeypatch.setattr(
-        develop_mod, "_build_profile_checks", lambda config, profile, eco, wt: []
+        check_runner, "_build_profile_checks", lambda config, profile, eco, wt: []
     )
     # `standard` declares test required, so an absent test command is a blocking
     # expected-but-absent placeholder (no block_on_red knob needed — #140).
@@ -548,7 +548,7 @@ def test_markerless_repo_yields_no_gate_even_when_required(
 ) -> None:
     # No ecosystem marker: `test` is declared N/A (docs-only), so even a required
     # gate with no command is simply empty rather than a blocking absent check.
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda config, wt: None)
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda config, wt: None)
     assert build_check_set(_config(tmp_path), tmp_path) == ()
 
 
@@ -608,7 +608,7 @@ def test_standard_profile_requires_lint_typecheck_surfaces_sast(
     # `make check` already enforces), while sast (bandit) stays INFORMATIONAL
     # (surfaced, not blocking the default). Finding-producing tools (ruff/bandit) are
     # machine-ified for the ledger; a no-adapter tool (pyright) runs as-is.
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda c, w: "pytest")
     _python(monkeypatch)
     checks = build_check_set(_config(tmp_path), tmp_path)
     by_name = {c.name: c for c in checks}
@@ -631,7 +631,7 @@ def test_default_profile_makes_the_test_check_required(
     # profile's `ProfileCheck("test", ...)` — the single source of truth — NOT a
     # separate `block_on_red` knob (removed). `standard` declares test required, so
     # the default test check blocks on RED with no extra config.
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda c, w: "pytest")
     checks = build_check_set(_config(tmp_path), tmp_path)
     test = next(c for c in checks if c.name == "test")
     assert test.state == "required"
@@ -640,7 +640,7 @@ def test_default_profile_makes_the_test_check_required(
 def test_minimal_profile_runs_only_lint_and_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda c, w: "pytest")
     _python(monkeypatch)
     checks = build_check_set(_config(tmp_path, review_profile="minimal"), tmp_path)
     assert {c.name for c in checks} == {"lint", "test"}
@@ -649,7 +649,7 @@ def test_minimal_profile_runs_only_lint_and_test(
 def test_thorough_profile_stages_the_expensive_checks_as_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda c, w: "pytest")
     _python(monkeypatch)
     checks = build_check_set(_config(tmp_path, review_profile="thorough"), tmp_path)
     stage = {c.name: c.stage for c in checks}
@@ -669,7 +669,7 @@ def test_required_absent_tool_blocks_informational_absent_drops(
     # command, state required), while the INFORMATIONAL `sast` (bandit) absent stays
     # a silent drop. The required floor is no longer silently weakened by a missing
     # tool — it becomes an actionable block.
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda c, w: "pytest")
     _python(monkeypatch, present=("ruff",))
     checks = build_check_set(_config(tmp_path), tmp_path)
     by_name = {c.name: c for c in checks}
@@ -687,12 +687,14 @@ def test_required_check_inapplicable_to_ecosystem_is_na_not_an_error(
     # they must resolve N/A (dropped), NOT raise CheckApplicabilityError before any
     # agent work (which would turn the default profile into a config failure for a
     # supported ecosystem). `lint` (cargo clippy) + `test` still apply.
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "cargo test")
     monkeypatch.setattr(
-        develop_mod.detection, "detect_ecosystems", lambda wt: ("rust",)
+        check_runner, "_resolve_test_command", lambda c, w: "cargo test"
     )
     monkeypatch.setattr(
-        develop_mod.test_gate, "probe_tools", lambda image, tools: list(tools)
+        check_runner.detection, "detect_ecosystems", lambda wt: ("rust",)
+    )
+    monkeypatch.setattr(
+        check_runner.test_gate, "probe_tools", lambda image, tools: list(tools)
     )
     checks = build_check_set(_config(tmp_path), tmp_path)  # must not raise
     by_name = {c.name: c for c in checks}
@@ -705,8 +707,8 @@ def test_required_check_inapplicable_to_ecosystem_is_na_not_an_error(
 def test_no_informational_checks_without_an_ecosystem(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(develop_mod, "_resolve_test_command", lambda c, w: "pytest")
-    monkeypatch.setattr(develop_mod.detection, "detect_ecosystems", lambda wt: ())
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda c, w: "pytest")
+    monkeypatch.setattr(check_runner.detection, "detect_ecosystems", lambda wt: ())
     checks = build_check_set(_config(tmp_path), tmp_path)
     assert [c.name for c in checks] == ["test"]
 
@@ -727,9 +729,9 @@ def _fake_export(wt: object, sha: object, dest: Path) -> None:
 def test_run_check_set_ledgers_findings_and_drops_full_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(develop_mod.test_gate, "export_tree", _fake_export)
+    monkeypatch.setattr(check_runner.test_gate, "export_tree", _fake_export)
     monkeypatch.setattr(
-        develop_mod.test_gate,
+        check_runner.test_gate,
         "run_gate_container",
         lambda gate_cmd, *, name, command, timeout: GateResult(
             command=command,
@@ -741,7 +743,7 @@ def test_run_check_set_ledgers_findings_and_drops_full_output(
     )
     led = GateLedger()
     lint = Check("lint", "ruff check --output-format=json --exit-zero", "informational")
-    cs = develop_mod._run_check_set(_config(tmp_path), tmp_path, "sha", 1, (lint,), led)
+    cs = check_runner.run_check_set(_config(tmp_path), tmp_path, "sha", 1, (lint,), led)
     assert [f.rule for f in led.open_findings()] == ["E501"]
     assert led.open_findings()[0].finding_id == "gate/lint-001"
     assert cs is not None
@@ -761,9 +763,9 @@ def test_run_check_set_ledgers_piped_dep_audit_findings(
         '{"id": "PYSEC-2019-179", "fix_versions": ["0.12.3"]}]}]}'
     )
     full = pip_audit_json + "\nFound 1 known vulnerability in 1 package"
-    monkeypatch.setattr(develop_mod.test_gate, "export_tree", _fake_export)
+    monkeypatch.setattr(check_runner.test_gate, "export_tree", _fake_export)
     monkeypatch.setattr(
-        develop_mod.test_gate,
+        check_runner.test_gate,
         "run_gate_container",
         lambda gate_cmd, *, name, command, timeout: GateResult(
             command=command,
@@ -780,7 +782,7 @@ def test_run_check_set_ledgers_piped_dep_audit_findings(
         "| pip-audit -r /dev/stdin --format=json",
         "required",
     )
-    develop_mod._run_check_set(_config(tmp_path), tmp_path, "sha", 1, (dep_audit,), led)
+    check_runner.run_check_set(_config(tmp_path), tmp_path, "sha", 1, (dep_audit,), led)
     assert [f.rule for f in led.open_findings()] == ["PYSEC-2019-179"]
     assert led.open_findings()[0].finding_id == "gate/dep-audit-001"
 
@@ -788,10 +790,10 @@ def test_run_check_set_ledgers_piped_dep_audit_findings(
 def test_run_check_set_closes_lint_finding_on_clean_rerun(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(develop_mod.test_gate, "export_tree", _fake_export)
+    monkeypatch.setattr(check_runner.test_gate, "export_tree", _fake_export)
     outputs = iter([_RUFF_ONE, "[]"])
     monkeypatch.setattr(
-        develop_mod.test_gate,
+        check_runner.test_gate,
         "run_gate_container",
         lambda gate_cmd, *, name, command, timeout: GateResult(
             command=command,
@@ -803,8 +805,8 @@ def test_run_check_set_closes_lint_finding_on_clean_rerun(
     )
     led = GateLedger()
     lint = Check("lint", "ruff check --output-format=json --exit-zero", "informational")
-    develop_mod._run_check_set(_config(tmp_path), tmp_path, "s1", 1, (lint,), led)
-    develop_mod._run_check_set(_config(tmp_path), tmp_path, "s2", 2, (lint,), led)
+    check_runner.run_check_set(_config(tmp_path), tmp_path, "s1", 1, (lint,), led)
+    check_runner.run_check_set(_config(tmp_path), tmp_path, "s2", 2, (lint,), led)
     assert led.open_findings() == []  # gone on the clean re-run -> closed
     assert led.all_findings()[0].status == "fixed"
 
@@ -821,7 +823,7 @@ def test_gate_ledger_persists_and_reloads(tmp_path: Path) -> None:
         ],
         1,
     )
-    develop_mod._persist_gate_ledger(cfg, led)
-    assert develop_mod._gate_ledger_path(cfg).is_file()
-    reloaded = develop_mod._load_gate_ledger(cfg)
+    check_runner.persist_gate_ledger(cfg, led)
+    assert check_runner._gate_ledger_path(cfg).is_file()
+    reloaded = check_runner.load_gate_ledger(cfg)
     assert [f.finding_id for f in reloaded.all_findings()] == ["gate/lint-001"]
