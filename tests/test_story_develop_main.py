@@ -443,6 +443,31 @@ def test_main_accepts_codex_coder(
     assert captured["config"].coder == "codex"
 
 
+def test_coder_choices_are_registry_derived() -> None:
+    """ARCH-2.E4: --coder choices come from the Engine registry, so a new engine
+    is CLI-usable on registration alone (no hand-edit of a choices list)."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.engines import supported_tools
+
+    parser = main_mod._build_parser()
+    coder = next(a for a in parser._actions if a.dest == "coder")
+    assert coder.choices is not None
+    assert tuple(coder.choices) == supported_tools()
+
+
+def test_main_rejects_unregistered_coder(tmp_git_repo: Path, capsys) -> None:
+    """An unknown --coder is rejected at parse time (argparse choices → exit 2),
+    and the error names the registry-derived supported set."""
+    import pytest
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--repo", str(tmp_git_repo), "--description", "x", "--coder", "opencode"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "opencode" in err
+    assert "claude" in err and "codex" in err  # the choices, from the registry
+
+
 def test_main_rejects_bad_max_rounds(tmp_git_repo: Path, capsys) -> None:
     rc = main(["--repo", str(tmp_git_repo), "--description", "x", "--max-rounds", "0"])
     assert rc == 2

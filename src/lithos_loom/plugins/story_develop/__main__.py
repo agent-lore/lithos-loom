@@ -45,6 +45,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ...plugin_runner import write_result_atomically
+from . import engines
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     DEFAULT_CODER_TIMEOUT,
@@ -182,7 +183,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--coder",
         default=DEFAULT_CODER_TOOL,
-        choices=["claude", "codex"],  # #94: codex adapter parallel to claude
+        choices=engines.supported_tools(),  # registry-derived (#94, ARCH-2.E4)
         help="Coding agent tool",
     )
     p.add_argument(

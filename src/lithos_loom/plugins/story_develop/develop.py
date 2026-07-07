@@ -67,6 +67,7 @@ from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     HANDOFF_DIRNAME,
     DevelopConfig,
+    ReviewerSpec,
     is_valid_reviewer_name,
 )
 from .findings import FindingLedger
@@ -1388,6 +1389,43 @@ _REASON_BEARING_STATUSES = frozenset(
 )
 
 
+def _warn_if_ceiling_unmetered(
+    config: DevelopConfig, specs: Sequence[ReviewerSpec]
+) -> None:
+    """Warn once when ``max_cost_usd`` is set but a participant can't meter USD.
+
+    #102: an engine with ``meters_cost_usd=False`` (today only codex, which
+    reports token usage, not USD) contributes ``$0.00`` to the ceiling — the
+    knob then bounds only the USD-reporting participants. The message is
+    capability-driven: it names whatever non-metering tools are actually in the
+    run, so a future non-metering engine reads correctly without a code edit.
+    Visibility only; the ceiling checks (approved-precedence + two-site ordering)
+    are untouched. Measuring token→USD cost is #102's own problem, not this.
+    Unsupported fallback-chain entries are skipped (they never run).
+    """
+    if config.max_cost_usd is None:
+        return
+    tools = {config.coder}
+    for spec in specs:
+        tools.add(spec.tool)
+        tools.update(spec.fallback_chain)
+    unmetered = sorted(
+        t
+        for t in tools
+        if engines.is_supported(t) and not engines.get_engine(t).meters_cost_usd
+    )
+    if unmetered:
+        logger.warning(
+            "story-develop %s: max_cost_usd=$%.2f does not meter %s "
+            "(reports token usage, not USD; meters_cost_usd=False), so those "
+            "turns add $0.00 to the ceiling — it bounds USD-reporting tools "
+            "only. See #102.",
+            config.run_id,
+            config.max_cost_usd,
+            ", ".join(unmetered),
+        )
+
+
 def develop(
     config: DevelopConfig,
     *,
@@ -1435,6 +1473,7 @@ def develop(
         )
     if config.max_cost_usd is not None and config.max_cost_usd <= 0:
         raise ValueError(f"max_cost_usd must be > 0 (got {config.max_cost_usd})")
+    _warn_if_ceiling_unmetered(config, specs)
 
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     for spec in specs:
