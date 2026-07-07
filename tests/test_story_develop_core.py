@@ -1396,6 +1396,13 @@ def test_codex_coder_limit_resumes_when_transcript_survived(
     # survived transcript by IT (codex sessions/ layout), not the stale pre-mint
     # uuid. If the resume globbed the old uuid it would miss the minted-id
     # transcript and re-issue fresh, silently losing the in-session context.
+    #
+    # This exercises the ORCHESTRATION resume mechanics with a SYNTHETIC already-
+    # classified usage-limit (the fake returns a classified limit turn). It does
+    # NOT prove live codex limit *classification* — a real codex limit arrives as
+    # a raw JSONL turn.failed event that classify_failure does not yet read; that
+    # G4 boundary is pinned by
+    # test_story_develop_limits.test_codex_raw_limit_events_are_not_yet_classified.
     from dataclasses import replace
 
     cfg = replace(config, coder="codex")

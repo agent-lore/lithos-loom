@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from lithos_loom.plugins.story_develop.engines import CodexEngine
 from lithos_loom.plugins.story_develop.limits import (
     AGENT_ERROR,
     USAGE_LIMITED,
@@ -78,6 +79,43 @@ def test_unrecognised_failures_are_agent_errors(text: str) -> None:
 
 def test_timeout_is_agent_error_even_with_limit_text() -> None:
     turn = _failed(result_text="usage limit reached", exit_code=124)
+    assert classify_failure(turn) == AGENT_ERROR
+
+
+def test_codex_raw_limit_events_are_not_yet_classified() -> None:
+    """The G4 boundary (#103): a real codex usage-limit is captured but not classified.
+
+    A real codex limit arrives as a JSONL ``turn.failed`` event, NOT an
+    ``agent_message`` — so :meth:`CodexEngine.parse_turn` stores it verbatim in
+    ``raw["failure_events"]`` and leaves ``result_text`` empty. Because
+    :func:`classify_failure` searches only ``result_text`` + ``stderr`` (never
+    ``raw``), the limit is NOT yet recognised as ``USAGE_LIMITED`` — it stays
+    ``AGENT_ERROR``, so a *real* codex limit does not yet reach the pause/resume
+    path. ARCH-2.E2 makes the resume mechanics correct (pinned by the coder test
+    with a *synthetic already-classified* failure); promoting the captured raw
+    wording into classification is the dormant G4 work. When G4 lands, flip this
+    assertion to ``USAGE_LIMITED``.
+    """
+    stream = "\n".join(
+        json.dumps(e)
+        for e in (
+            {"type": "thread.started", "thread_id": "t1"},
+            {
+                "type": "turn.failed",
+                "error": {
+                    "message": "You've hit your usage limit.",
+                    "type": "usage_limit",
+                },
+            },
+        )
+    )
+    turn = CodexEngine().parse_turn(stream, exit_code=1, stderr="")
+    assert turn.succeeded is False
+    # the limit wording is captured verbatim in raw, NOT in result_text / stderr …
+    assert turn.result_text == "" and turn.stderr == ""
+    assert turn.raw is not None and "failure_events" in turn.raw
+    assert "usage limit" in json.dumps(turn.raw["failure_events"])
+    # … so the current classifier (result_text + stderr only) does not see it.
     assert classify_failure(turn) == AGENT_ERROR
 
 
