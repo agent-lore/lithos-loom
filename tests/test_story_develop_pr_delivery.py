@@ -339,6 +339,7 @@ def _install(
         effort=None,
     ):
         state["turn_prompts"].append(prompt)
+        state["turn_engine"] = engine.name
         state["resume"] = resume
         state["session"] = session_id
         state["model"] = model
@@ -571,6 +572,43 @@ def test_deliver_full_copilot_round(
     assert body.startswith("Fixed in ")
     assert "tightened the annotation" in body
     assert AUTOMATED_MARKER in body
+
+
+def test_deliver_copilot_fix_turn_builds_codex_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """ARCH-2.E3: a codex-coder run's Copilot fix turn rebuilds its container with
+    CODEX provisioning (CODEX_HOME + auth.json), not claude's.
+
+    The fix turn resumes ``result.coder_session`` — the codex thread_id — so the
+    container must be the codex tool/env, else the handle would resume in the
+    wrong place. Regression guard for the E3 ``engine=engines.get_engine(config.coder)``
+    wiring at the delivery call site.
+    """
+    codex_dir = tmp_path / "fake-codex"
+    codex_dir.mkdir()
+    (codex_dir / "auth.json").write_text("{}")  # so the codex auth mount appears
+    config = DevelopConfig(
+        repo=tmp_git_repo,
+        description="Add a flag",
+        work_dir=tmp_path / "work",
+        coder="codex",
+        codex_config_dir=codex_dir,
+        test_gate=False,
+    )
+    comments = [CopilotComment(comment_id=11, path="a.py", line=5, body="tighten this")]
+    state = _install(monkeypatch, config, comments=comments)
+    wt = _make_wt(config)
+    state["wt"] = wt
+    out = deliver(config, _result(config, wt))
+
+    assert out.fix_pushed  # a coder fix round actually ran
+    assert state["turn_engine"] == "codex"  # run_turn received the codex engine
+    fix_cmd = state["start_cmds"][-1]  # the fix-turn container's docker-run argv
+    assert "CODEX_HOME=/codex_home" in fix_cmd
+    assert "CLAUDE_CONFIG_DIR=/claude_config" not in fix_cmd
+    # the codex auth file is mounted from the operator's codex config dir
+    assert any(a.endswith(":/codex_home/auth.json") for a in fix_cmd)
 
 
 def test_deliver_copilot_round_uses_configured_model_and_effort(
