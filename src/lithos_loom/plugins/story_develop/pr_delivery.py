@@ -703,12 +703,11 @@ def _deliver_after_open(
     """
     from ...runner import git
     from . import containers, engines, handoff
+    from .check_runner import run_delivery_test_gate
     from .develop import (
         _build_run_cmd,
         _render,
         _render_findings,
-        _run_check_set,
-        build_check_set,
     )
     from .findings import FindingLedger
     from .turns import run_turn
@@ -884,17 +883,10 @@ def _deliver_after_open(
     fix_pushed = False
     gate_verdict: str | None = None
     if fix_committed:
-        # Run the `test` check on the fix commit; its GateResult drives push/hold.
-        # Delivery holds the push on ANY red `test` fix regardless of the profile's
-        # blocking config, so read the test_gate view here (not blocking_passed /
-        # gate_floor_blocks, which would honour an informational `test` and push a RED
-        # fix). #140: the profile set now also carries informational checks, but
-        # delivery keys only on `test` and passes no ledger, so gate just the `test`
-        # check (the advisory + candidate checks would burn containers without
-        # affecting the decision — or wrongly hold).
-        checks = tuple(c for c in build_check_set(config, wt) if c.name == "test")
-        cs = _run_check_set(config, wt, new_sha, fix_round, checks) if checks else None
-        gate = cs.test_gate if cs is not None else None
+        # The delivery-side regression gate on the fix commit: test-only,
+        # ledger-less — the intentional delivery-vs-develop divergence lives in
+        # check_runner.run_delivery_test_gate (its docstring carries the rationale).
+        gate = run_delivery_test_gate(config, wt, new_sha, fix_round)
         gate_verdict = gate.verdict if gate else None
         if gate is None or gate.passed:
             push_branch(wt, result.branch)
