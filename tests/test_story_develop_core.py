@@ -1114,6 +1114,58 @@ def test_cost_ceiling_stops_before_reviews_when_coder_exceeds(
     )
 
 
+# --- cost-metering visibility (ARCH-2.E4, #102) -----------------------------
+
+
+def test_max_cost_warns_once_when_a_participant_cannot_meter_usd(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # #102: max_cost_usd bounds USD, but codex reports tokens not USD
+    # (meters_cost_usd=False) so its turns add $0.00 to the ceiling — the knob
+    # silently meters claude spend only. Warn once at run start.
+    from dataclasses import replace
+
+    cfg = replace(config, coder="codex", max_cost_usd=5.0)
+    _install_fakes(monkeypatch, cfg)
+    with caplog.at_level("WARNING"):
+        develop_mod.develop(cfg)
+    warnings = [
+        r.getMessage() for r in caplog.records if "max_cost_usd" in r.getMessage()
+    ]
+    assert len(warnings) == 1  # exactly one, not per-round
+    assert "codex" in warnings[0] and "#102" in warnings[0]
+
+
+def test_no_cost_warning_when_all_participants_meter_usd(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, max_cost_usd=5.0)  # all-claude default → all meter USD
+    _install_fakes(monkeypatch, cfg)
+    with caplog.at_level("WARNING"):
+        develop_mod.develop(cfg)
+    assert not any("max_cost_usd" in r.getMessage() for r in caplog.records)
+
+
+def test_no_cost_warning_when_ceiling_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, coder="codex")  # codex participant but no ceiling
+    _install_fakes(monkeypatch, cfg)
+    with caplog.at_level("WARNING"):
+        develop_mod.develop(cfg)
+    assert not any("max_cost_usd" in r.getMessage() for r in caplog.records)
+
+
 def test_lifecycle_unknown_id_is_reprompted_and_recovers(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

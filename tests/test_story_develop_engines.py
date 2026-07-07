@@ -52,6 +52,23 @@ def test_supported_tools_and_membership() -> None:
     assert not is_supported("opencode")
 
 
+def test_all_default_and_persona_tools_are_registered() -> None:
+    # A canonical persona or a default naming a tool with no Engine would fail
+    # only at run start (get_engine ValueError). This guard catches it in CI.
+    from lithos_loom.plugins.story_develop.config import (
+        DEFAULT_CODER_TOOL,
+        DEFAULT_REVIEWER_TOOL,
+    )
+    from lithos_loom.plugins.story_develop.personas import canonical_personas
+
+    required = {DEFAULT_CODER_TOOL, DEFAULT_REVIEWER_TOOL}
+    required.update(spec.tool for spec in canonical_personas().values())
+    for tool in sorted(required):
+        assert is_supported(tool), (
+            f"{tool!r} is used by a persona/default but not in ENGINES"
+        )
+
+
 def test_get_engine_returns_the_matching_engine() -> None:
     assert isinstance(get_engine("claude"), ClaudeEngine)
     assert isinstance(get_engine("codex"), CodexEngine)
