@@ -7,19 +7,20 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import containers
-from lithos_loom.plugins.story_develop.config import (
-    CONTAINER_NOFILE_ULIMIT,
-    DevelopConfig,
-)
+from lithos_loom.plugins.story_develop.config import CONTAINER_NOFILE_ULIMIT
 
 
 def _run_cmd(**over) -> list[str]:
+    # config_mount / config_env_var are engine-supplied now (ARCH-2.E3); the
+    # claude defaults keep these argv assertions byte-identical.
     kwargs: dict = dict(
         name="loom-develop-ab12cd34-coder",
         image="ralph-sandbox:latest",
         worktree=Path("/work/run/worktree/branch"),
         config_dir=Path("/work/run/agents/coder/claude_config"),
         handoff_dir=Path("/work/run/handoff"),
+        config_mount="/claude_config",
+        config_env_var="CLAUDE_CONFIG_DIR",
         auth_source_dir=Path("/home/u/.claude"),
         auth_files=[".credentials.json"],
     )
@@ -187,10 +188,11 @@ def test_exec_command_codex_model_flag_and_effort_ignored() -> None:
 def test_run_command_codex_env_mount_and_auth() -> None:
     cmd = _run_cmd(
         config_dir=Path("/work/run/agents/coder/claude_config"),
+        config_mount="/codex_home",
+        config_env_var="CODEX_HOME",
         auth_source_dir=Path("/home/u/.codex"),
         auth_files=["auth.json"],
         skills_dir=None,
-        tool="codex",
     )
     assert "/work/run/agents/coder/claude_config:/codex_home" in cmd
     assert "/home/u/.codex/auth.json:/codex_home/auth.json" in cmd
@@ -206,31 +208,5 @@ def test_container_name() -> None:
     )
 
 
-# ── resolve_auth_files shim contract (ARCH-2.E1) ──────────────────────────
-
-
-def test_resolve_auth_files_honours_supplied_candidates(
-    tmp_git_repo: Path, tmp_path: Path
-) -> None:
-    """The shim filters the CALLER's candidate list, not the engine's built-ins.
-
-    Regression for the E1 delegation: routing the dir lookup through the engine
-    must not swap the supplied candidates for the engine's own set.
-    """
-    cfg_dir = tmp_path / "claude"
-    cfg_dir.mkdir()
-    (cfg_dir / "custom.json").write_text("{}")
-    config = DevelopConfig(
-        repo=tmp_git_repo,
-        description="x",
-        work_dir=tmp_path / "work",
-        claude_config_dir=cfg_dir,
-    )
-    # a narrower/temporary candidate present on disk is returned …
-    assert containers.resolve_auth_files(config, ["custom.json"], tool="claude") == [
-        "custom.json"
-    ]
-    # … an absent one is filtered out …
-    assert containers.resolve_auth_files(config, ["absent.json"], tool="claude") == []
-    # … and the engine's default candidate is NOT injected when unasked-for.
-    assert containers.resolve_auth_files(config, [], tool="claude") == []
+# resolve_auth_files was deleted in ARCH-2.E3 — its candidate-filtering contract
+# now lives on Engine.auth_files, covered by tests/test_story_develop_engines.py.

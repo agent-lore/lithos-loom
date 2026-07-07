@@ -29,14 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .config import (
-    CLAUDE_AUTH_FILES,
-    CLAUDE_CONFIG_MOUNT,
-    CODEX_AUTH_FILES,
-    CODEX_CONFIG_MOUNT,
-    WORKSPACE_MOUNT,
-    DevelopConfig,
-)
+from .config import WORKSPACE_MOUNT, DevelopConfig
 
 _TIMEOUT_EXIT = 124  # conventional timeout exit; we set it ourselves on timeout
 
@@ -193,9 +186,12 @@ class ClaudeEngine(_BaseEngine):
     mints_session_handle = False  # echoes the caller-supplied uuid (ADR 0002)
     supports_effort = True  # canonical --effort levels (low…max)
 
-    config_mount = CLAUDE_CONFIG_MOUNT
+    config_mount = "/claude_config"
     config_env_var = "CLAUDE_CONFIG_DIR"
-    auth_file_candidates: tuple[str, ...] = CLAUDE_AUTH_FILES
+    # `.credentials.json` only — never the whole ~/.claude, and NOT `.claude.json`
+    # (mutable user state; mounting it RW would let the container pollute the
+    # operator's live config). Bind-mounted RW so the OAuth token refresh propagates.
+    auth_file_candidates: tuple[str, ...] = (".credentials.json",)
 
     def auth_source_dir(self, config: DevelopConfig) -> Path:
         return config.claude_config_dir
@@ -286,9 +282,13 @@ class CodexEngine(_BaseEngine):
     mints_session_handle = True  # thread_id from turn-1 thread.started
     supports_effort = False  # depth is model-driven — no effort knob
 
-    config_mount = CODEX_CONFIG_MOUNT
+    # CODEX_HOME (NOT CODEX_CONFIG_DIR, which codex ignores — feasibility gate);
+    # mounted under the work-dir, never /tmp.
+    config_mount = "/codex_home"
     config_env_var = "CODEX_HOME"
-    auth_file_candidates: tuple[str, ...] = CODEX_AUTH_FILES
+    auth_file_candidates: tuple[str, ...] = (
+        "auth.json",
+    )  # codex .credentials analogue
 
     def auth_source_dir(self, config: DevelopConfig) -> Path:
         return config.codex_config_dir

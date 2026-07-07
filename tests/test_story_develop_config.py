@@ -177,22 +177,9 @@ def test_codex_config_dir_defaults_to_home_dotcodex(tmp_path: Path) -> None:
     assert cfg.codex_config_dir == Path.home() / ".codex"
 
 
-def test_auth_source_dir_selects_by_tool(tmp_path: Path) -> None:
-    cfg = DevelopConfig(
-        repo=tmp_path,
-        description="x",
-        work_dir=tmp_path / "w",
-        claude_config_dir=tmp_path / "c",
-        codex_config_dir=tmp_path / "x",
-    )
-    assert cfg.auth_source_dir("codex") == tmp_path / "x"
-    assert cfg.auth_source_dir("claude") == tmp_path / "c"
-
-
-def test_codex_auth_files_constant() -> None:
-    from lithos_loom.plugins.story_develop.config import CODEX_AUTH_FILES
-
-    assert CODEX_AUTH_FILES == ("auth.json",)
+# auth_source_dir + the CLAUDE_/CODEX_ auth/mount constants moved to the Engine
+# adapter in ARCH-2.E3 — now covered by tests/test_story_develop_engines.py
+# (test_auth_source_dir_picks_the_tools_config_dir, test_auth_file_candidates).
 
 
 def test_loader_rejects_invalid_toml(tmp_path: Path) -> None:

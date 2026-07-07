@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from lithos_loom.plugins.story_develop import containers, handoff
+from lithos_loom.plugins.story_develop import containers, engines, handoff
 from lithos_loom.plugins.story_develop import develop as develop_mod
 from lithos_loom.plugins.story_develop import test_gate as test_gate_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
@@ -312,7 +312,7 @@ def test_build_run_cmd_mounts_git_common_dir(config: DevelopConfig) -> None:
     _name, cmd = develop_mod._build_run_cmd(
         config,
         agent="coder",
-        tool="claude",
+        engine=engines.get_engine("claude"),
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,

@@ -22,12 +22,9 @@ from pathlib import Path
 
 from . import engines
 from .config import (
-    CLAUDE_CONFIG_MOUNT,
-    CODEX_CONFIG_MOUNT,
     CONTAINER_NOFILE_ULIMIT,
     HANDOFF_MOUNT_NAME,
     WORKSPACE_MOUNT,
-    DevelopConfig,
 )
 
 
@@ -43,26 +40,30 @@ def build_run_command(
     worktree: Path,
     config_dir: Path,
     handoff_dir: Path,
+    config_mount: str,
+    config_env_var: str,
     auth_source_dir: Path,
     auth_files: Sequence[str],
     skills_dir: Path | None = None,
     read_only_worktree: bool = False,
-    tool: str = "claude",
     git_common_dir: Path | None = None,
 ) -> list[str]:
     """Build the ``docker run`` argv for a long-lived idle agent container.
 
     The container does nothing but ``sleep`` — turns are injected later via
-    :func:`build_exec_command`.
+    :func:`build_exec_command`. This builder is **engine-blind**: the caller reads
+    *config_mount* / *config_env_var* / *auth_source_dir* / *auth_files* /
+    *skills_dir* off the :class:`Engine` (ARCH-2.E3), so a new tool needs no edit
+    here.
 
     Mounts:
 
     * the worktree at ``/workspace`` (RW, or RO for reviewers);
     * *handoff_dir* at ``/workspace/.handoff`` (RW) — a separate dir outside the
       worktree, so the worktree stays git-clean;
-    * *config_dir* (per-run) at the tool's config mount (RW, holds the
-      transcript) — ``/claude_config`` exported as ``CLAUDE_CONFIG_DIR`` for
-      claude, ``/codex_home`` exported as ``CODEX_HOME`` for codex (#94);
+    * *config_dir* (per-run) at *config_mount* (RW, holds the transcript) —
+      ``/claude_config`` exported as ``CLAUDE_CONFIG_DIR`` for claude,
+      ``/codex_home`` exported as ``CODEX_HOME`` for codex (#94);
     * each of *auth_files* individually from *auth_source_dir* (RW, token
       refresh) — never the whole config dir;
     * *skills_dir* at ``<config-mount>/skills`` (RO) when provided, so
@@ -72,12 +73,6 @@ def build_run_command(
       a linked worktree's ``gitdir:`` backlink resolves in-container and
       reviewers can ``git diff``/``log``/``show`` the change.
     """
-    config_mount, config_env = (
-        (CODEX_CONFIG_MOUNT, "CODEX_HOME")
-        if tool == "codex"
-        else (CLAUDE_CONFIG_MOUNT, "CLAUDE_CONFIG_DIR")
-    )
-
     workspace_mount = f"{worktree}:{WORKSPACE_MOUNT}"
     if read_only_worktree:
         workspace_mount += ":ro"
@@ -115,7 +110,7 @@ def build_run_command(
         # `show`. RO: loom commits host-side, so no agent needs write access to
         # the real repo's object store (and a --cap-drop ALL agent shouldn't).
         cmd += ["-v", f"{git_common_dir}:{git_common_dir}:ro"]
-    cmd += ["-e", f"{config_env}={config_mount}"]
+    cmd += ["-e", f"{config_env_var}={config_mount}"]
     cmd += ["--entrypoint", "sleep", image, "infinity"]
     return cmd
 
@@ -148,22 +143,6 @@ def build_exec_command(
         model=model,
         effort=effort,
     )
-
-
-def resolve_auth_files(
-    config: DevelopConfig, candidates: Sequence[str], *, tool: str = "claude"
-) -> list[str]:
-    """Return the subset of *candidates* present in *tool*'s operator config dir.
-
-    Behaviour-preserving shim: only the source-dir lookup moves to the engine
-    (:meth:`Engine.auth_source_dir`); the *supplied* candidates are still what get
-    filtered — so a caller passing a narrower/temporary list keeps its contract.
-    The engine's own :meth:`Engine.auth_files` (which filters the engine's built-in
-    candidate set) is the going-forward API; this shim is deleted when container
-    provisioning migrates to the engine (ARCH-2.E3).
-    """
-    source = engines.get_engine(tool).auth_source_dir(config)
-    return [f for f in candidates if (source / f).is_file()]
 
 
 # --- thin side-effecting wrappers (monkeypatched in unit tests) -------------

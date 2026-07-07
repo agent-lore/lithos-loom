@@ -109,7 +109,7 @@ def review_change(
         rname, rcmd = _build_run_cmd(
             config,
             agent=f"review-{spec.name}",
-            tool=spec.tool,
+            engine=engines.get_engine(spec.tool),
             config_dir=config.reviewer_config_dir(spec.name),
             wt=wt,
             read_only=True,
