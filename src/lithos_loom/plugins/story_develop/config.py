@@ -47,19 +47,9 @@ WORKSPACE_MOUNT = "/workspace"
 # mountpoint dir name that must exist in a READ-ONLY worktree before its
 # container starts (review-only mode, where there is no RW coder to create it).
 HANDOFF_MOUNT_NAME = ".handoff"
-CLAUDE_CONFIG_MOUNT = "/claude_config"
-# Codex (#94): the per-run config/transcript dir is `CODEX_HOME` (NOT
-# `CODEX_CONFIG_DIR`, which codex ignores — feasibility gate). Mounted under the
-# work-dir, never `/tmp`. Auth is a single `auth.json` (the codex analogue of
-# claude's `.credentials.json`), bind-mounted RW for token refresh.
-CODEX_CONFIG_MOUNT = "/codex_home"
-# The single auth file bind-mounted from the operator's real config (RW, so the
-# OAuth token refresh propagates) — never the whole ~/.claude, and NOT
-# ``.claude.json`` (that is mutable user state, not auth; mounting the real one
-# RW would let the container pollute the operator's live config). See the PRD
-# "Run-state & session durability" section.
-CLAUDE_AUTH_FILES = (".credentials.json",)
-CODEX_AUTH_FILES = ("auth.json",)
+# The per-tool config mount / env var / auth-file set now live on the Engine
+# adapter (ARCH-2.E3): ClaudeEngine `/claude_config` + `CLAUDE_CONFIG_DIR` +
+# `.credentials.json`; CodexEngine `/codex_home` + `CODEX_HOME` + `auth.json`.
 HANDOFF_DIRNAME = ".handoff"
 
 
@@ -432,11 +422,3 @@ class DevelopConfig:
         """
         skills = self.claude_config_dir / "skills"
         return skills if skills.is_dir() else None
-
-    def auth_source_dir(self, tool: str) -> Path:
-        """Operator config dir that holds *tool*'s auth file (#94).
-
-        ``codex`` reads ``auth.json`` from :attr:`codex_config_dir`; every other
-        tool (claude) reads from :attr:`claude_config_dir`.
-        """
-        return self.codex_config_dir if tool == "codex" else self.claude_config_dir

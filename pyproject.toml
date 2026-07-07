@@ -182,7 +182,8 @@ forbidden_modules = [
 
 [[tool.importlinter.contracts]]
 # The Engine adapter (engines.py) concentrates the per-tool claude/codex
-# differences and imports config for DevelopConfig + the mount/auth constants.
+# differences and imports config for DevelopConfig + WORKSPACE_MOUNT (the
+# mount/auth constants now live ON the engine classes, ARCH-2.E3).
 # The dependency is one-directional: engines -> config, never the reverse. If
 # config imported engines the import graph would cycle (engines needs config at
 # import time) and config would stop being the leaf every module depends on

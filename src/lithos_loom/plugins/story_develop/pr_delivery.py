@@ -816,7 +816,7 @@ def _deliver_after_open(
     name, run_cmd = _build_run_cmd(
         config,
         agent="coder",
-        tool=config.coder,
+        engine=engines.get_engine(config.coder),
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,

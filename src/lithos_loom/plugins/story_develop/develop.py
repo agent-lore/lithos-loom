@@ -64,8 +64,6 @@ from .check_set import (
     render_check_summary,
 )
 from .config import (
-    CLAUDE_AUTH_FILES,
-    CODEX_AUTH_FILES,
     DEFAULT_BLOCK_THRESHOLD,
     HANDOFF_DIRNAME,
     DevelopConfig,
@@ -273,7 +271,7 @@ def _build_run_cmd(
     config: DevelopConfig,
     *,
     agent: str,
-    tool: str,
+    engine: engines.Engine,
     config_dir: Path,
     wt: Path,
     read_only: bool,
@@ -281,26 +279,26 @@ def _build_run_cmd(
     """Build (container_name, docker-run-argv) for an agent container.
 
     Model + reasoning effort (#93) are per-TURN flags applied in
-    :func:`run_turn` (the per-tool exec builder), not container env, so the
-    idle container itself carries no agent tuning. *tool* (#94) selects the
-    config env var + mount + auth file: claude (``CLAUDE_CONFIG_DIR`` +
-    ``.credentials.json`` + operator skills) vs codex (``CODEX_HOME`` +
-    ``auth.json``, no skills — codex honours the worktree ``AGENTS.md``).
+    :func:`run_turn`, not container env, so the idle container itself carries no
+    agent tuning. All per-tool provisioning — config mount + env var + auth
+    source/files + skills — comes off *engine* (#94, ARCH-2.E3): claude
+    (``CLAUDE_CONFIG_DIR`` + ``.credentials.json`` + operator skills) vs codex
+    (``CODEX_HOME`` + ``auth.json``, no skills — codex honours the worktree
+    ``AGENTS.md``). ``build_run_command`` stays engine-blind.
     """
     name = containers.container_name(config.run_id, agent)
-    is_codex = tool == "codex"
-    auth_candidates = CODEX_AUTH_FILES if is_codex else CLAUDE_AUTH_FILES
     cmd = containers.build_run_command(
         name=name,
         image=config.image,
         worktree=wt,
         config_dir=config_dir,
         handoff_dir=config.handoff_dir,
-        auth_source_dir=config.auth_source_dir(tool),
-        auth_files=containers.resolve_auth_files(config, auth_candidates, tool=tool),
-        skills_dir=None if is_codex else config.operator_skills_dir,
+        config_mount=engine.config_mount,
+        config_env_var=engine.config_env_var,
+        auth_source_dir=engine.auth_source_dir(config),
+        auth_files=engine.auth_files(config),
+        skills_dir=engine.skills_dir(config),
         read_only_worktree=read_only,
-        tool=tool,
         # #109: mount the linked worktree's shared .git (RO) so in-container
         # `git diff`/`log`/`show` resolve — reviewers inspect the actual change.
         git_common_dir=worktree.git_common_dir(wt),
@@ -1142,7 +1140,7 @@ def _run_reviewer_with_reaction(
             rstate.container, rstate.run_cmd = _build_run_cmd(
                 config,
                 agent=f"review-{name}",
-                tool=nxt,
+                engine=rstate.engine_now,
                 config_dir=config.reviewer_config_dir(name),
                 wt=rstate.wt,
                 read_only=True,
@@ -1457,7 +1455,7 @@ def develop(
     coder_name, coder_cmd = _build_run_cmd(
         config,
         agent="coder",
-        tool=config.coder,
+        engine=coder_engine,
         config_dir=config.coder_config_dir,
         wt=wt,
         read_only=False,
@@ -1467,7 +1465,7 @@ def develop(
         rname, rcmd = _build_run_cmd(
             config,
             agent=f"review-{spec.name}",
-            tool=spec.tool,
+            engine=engines.get_engine(spec.tool),
             config_dir=config.reviewer_config_dir(spec.name),
             wt=wt,
             read_only=True,
