@@ -1166,6 +1166,33 @@ def test_no_cost_warning_when_ceiling_unset(
     assert not any("max_cost_usd" in r.getMessage() for r in caplog.records)
 
 
+def test_max_cost_warning_scans_fallback_chains_and_skips_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The scan covers every participant's fallback_chain, not just active tools:
+    # a supported non-metering fallback (codex) trips the warning even with an
+    # all-claude active panel, while an unsupported entry (opencode) is skipped —
+    # it can never run, so it can't affect spend.
+    from dataclasses import replace
+
+    cfg = replace(
+        config,
+        max_cost_usd=5.0,  # coder + reviewer both default to claude (metering)
+        reviewer_fallback_chain=("codex", "opencode"),
+    )
+    _install_fakes(monkeypatch, cfg)
+    with caplog.at_level("WARNING"):
+        develop_mod.develop(cfg)
+    warnings = [
+        r.getMessage() for r in caplog.records if "max_cost_usd" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "codex" in warnings[0]  # supported non-metering fallback → named
+    assert "opencode" not in warnings[0]  # unsupported → skipped, never runs
+
+
 def test_lifecycle_unknown_id_is_reprompted_and_recovers(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

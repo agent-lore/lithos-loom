@@ -1394,10 +1394,13 @@ def _warn_if_ceiling_unmetered(
 ) -> None:
     """Warn once when ``max_cost_usd`` is set but a participant can't meter USD.
 
-    #102: codex reports tokens, not USD (``meters_cost_usd=False``), so its turns
-    contribute ``$0.00`` to the ceiling — the knob then bounds *claude* spend only.
+    #102: an engine with ``meters_cost_usd=False`` (today only codex, which
+    reports token usage, not USD) contributes ``$0.00`` to the ceiling — the
+    knob then bounds only the USD-reporting participants. The message is
+    capability-driven: it names whatever non-metering tools are actually in the
+    run, so a future non-metering engine reads correctly without a code edit.
     Visibility only; the ceiling checks (approved-precedence + two-site ordering)
-    are untouched. Measuring codex cost in USD is #102's own problem, not this.
+    are untouched. Measuring token→USD cost is #102's own problem, not this.
     Unsupported fallback-chain entries are skipped (they never run).
     """
     if config.max_cost_usd is None:
@@ -1413,9 +1416,10 @@ def _warn_if_ceiling_unmetered(
     )
     if unmetered:
         logger.warning(
-            "story-develop %s: max_cost_usd=$%.2f cannot meter %s spend — codex "
-            "reports tokens, not USD, so those turns add $0.00 to the ceiling "
-            "(it bounds claude spend only; see #102)",
+            "story-develop %s: max_cost_usd=$%.2f does not meter %s "
+            "(reports token usage, not USD; meters_cost_usd=False), so those "
+            "turns add $0.00 to the ceiling — it bounds USD-reporting tools "
+            "only. See #102.",
             config.run_id,
             config.max_cost_usd,
             ", ".join(unmetered),
