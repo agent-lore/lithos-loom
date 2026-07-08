@@ -488,12 +488,12 @@ def develop(
         coder_handoff_nudge=_coder_handoff_nudge,
     )
 
-    # Dead sentinel: max_rounds >= 1 is validated, so the loop always runs and
-    # overwrites this; an exception inside the try bypasses the epilogue entirely
-    # (exit L), so "no rounds ran" is never actually surfaced.
-    exit_state = CycleExit(
-        status="failed", failure_reason="no rounds ran", resume_after=None
-    )
+    # The default outcome is "max_rounds" — the exit the loop lands on when it
+    # completes without any round returning an early CycleExit (exit K). A round
+    # that DOES terminate early overrides this and breaks. (An exception inside the
+    # try bypasses the epilogue entirely — exit L — so this value is never read on
+    # that path.)
+    exit_state = CycleExit(status="max_rounds", failure_reason="", resume_after=None)
     try:
         containers.start_container(coder_cmd)
         for rstate in reviewers:
@@ -510,11 +510,6 @@ def develop(
             if round_exit is not None:
                 exit_state = round_exit
                 break
-        else:
-            # loop exhausted without an approval / failure exit (K max_rounds)
-            exit_state = CycleExit(
-                status="max_rounds", failure_reason="", resume_after=None
-            )
     finally:
         containers.stop_container(coder_name)
         for rstate in reviewers:
