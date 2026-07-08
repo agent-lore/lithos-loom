@@ -49,7 +49,6 @@ from . import (
     handoff,
     run_outcome,
 )
-from .agent_session import _CONTINUATION_PROMPT as _CONTINUATION_PROMPT
 from .agent_session import (
     PauseBudget,
     build_run_cmd,
@@ -84,19 +83,10 @@ from .handoff import (
     render_prompt,
 )
 from .panel import (
-    SEVERITY_CALIBRATION as SEVERITY_CALIBRATION,
-)
-from .panel import (
-    PanelRoundResult as PanelRoundResult,
-)
-from .panel import (
     ReviewerState,
     ReviewOutcome,
     findings_by_severity,
     run_panel_round,
-)
-from .panel import (
-    _reviewer_brief as _reviewer_brief,
 )
 from .rounds import Services
 from .test_gate import GateResult
@@ -224,10 +214,13 @@ _resume_after_from = resume_after_from
 # run_panel_round / findings_by_severity / _reviewer_brief / SEVERITY_CALIBRATION)
 # moved to panel.py, and the generic prompt renderers to handoff.py
 # (render_prompt / render_findings). These back-compat aliases keep develop()'s
-# own coder-side call sites and external importers (review_only imports
-# _ReviewerState + run_panel_round; pr_delivery imports _render + _render_findings;
-# lithos_io imports findings_by_severity; test_prompts imports _reviewer_brief +
-# SEVERITY_CALIBRATION) resolving through this module until S8's public-name flip.
+# own coder-side call sites and the module importers that still reach these names
+# through develop resolving until S8's public-name flip: review_only imports
+# _ReviewerState + run_panel_round; pr_delivery imports _render + _render_findings.
+# (ReviewOutcome / findings_by_severity are imported straight above because
+# develop's own body uses them. Names only *tests* need — PanelRoundResult,
+# SEVERITY_CALIBRATION, _reviewer_brief — are NOT re-exported: those tests import
+# them from panel directly, since the panel is their new owner.)
 _ReviewerState = ReviewerState
 _render = render_prompt
 _render_findings = render_findings

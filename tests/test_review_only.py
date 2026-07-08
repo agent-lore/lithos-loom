@@ -19,8 +19,8 @@ from lithos_loom.plugins.story_develop.check_set import (
     CheckSetResult,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
-from lithos_loom.plugins.story_develop.develop import PanelRoundResult, ReviewOutcome
 from lithos_loom.plugins.story_develop.handoff import Finding
+from lithos_loom.plugins.story_develop.panel import PanelRoundResult, ReviewOutcome
 from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
 from lithos_loom.plugins.story_develop.test_gate import GateResult
 
