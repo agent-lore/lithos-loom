@@ -8,8 +8,9 @@ zero-config default stays the single generalist ``code-quality`` reviewer (see
 ``daemon_io.BUILTIN_REVIEWERS``). The selectable *bundle/dial* is #139.
 
 Engines are heterogeneous on purpose — different tools have different blind spots
-(#94). ``effort`` is honoured by claude only (codex depth is model-driven, see
-``containers.build_exec_command``), so it is set only on the claude personas.
+(#94). ``effort`` is honoured by claude only (codex depth is model-driven, see the
+codex :class:`~lithos_loom.plugins.story_develop.engines.Engine`), so it is set only
+on the claude personas.
 ``model`` is left ``None`` (inherits the route / project default) rather than
 hard-pinning a possibly-stale model id; operators may pin a cheaper model per
 persona (e.g. ``dependency-hygiene``) via project config.

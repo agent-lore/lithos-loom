@@ -1,13 +1,15 @@
-"""Unit tests for coder-turn result parsing."""
+"""Unit tests for turn-result parsing — the Engine.parse_turn detail suite.
+
+The per-tool parsing lives on the Engine adapter (ARCH-2.E1); these cases
+exercise ClaudeEngine/CodexEngine.parse_turn directly (the turns.py
+parse_* delegates were removed at E5).
+"""
 
 from __future__ import annotations
 
 import json
 
-from lithos_loom.plugins.story_develop.turns import (
-    parse_claude_result,
-    parse_codex_result,
-)
+from lithos_loom.plugins.story_develop.engines import ClaudeEngine, CodexEngine
 
 _SUCCESS = json.dumps(
     {
@@ -22,7 +24,7 @@ _SUCCESS = json.dumps(
 
 
 def test_parse_success() -> None:
-    r = parse_claude_result(_SUCCESS, exit_code=0, stderr="")
+    r = ClaudeEngine().parse_turn(_SUCCESS, exit_code=0, stderr="")
     assert r.succeeded is True
     assert r.session_id == "11111111-2222-3333-4444-555555555555"
     assert r.result_text == "OK"
@@ -31,32 +33,32 @@ def test_parse_success() -> None:
 
 def test_parse_is_error_fails_even_with_zero_exit() -> None:
     payload = json.dumps({"type": "result", "is_error": True, "result": "limit"})
-    r = parse_claude_result(payload, exit_code=0, stderr="")
+    r = ClaudeEngine().parse_turn(payload, exit_code=0, stderr="")
     assert r.succeeded is False
 
 
 def test_parse_nonzero_exit_fails() -> None:
-    r = parse_claude_result(_SUCCESS, exit_code=1, stderr="boom")
+    r = ClaudeEngine().parse_turn(_SUCCESS, exit_code=1, stderr="boom")
     assert r.succeeded is False
     assert r.stderr == "boom"
 
 
 def test_parse_garbage_output_fails_safely() -> None:
-    r = parse_claude_result("not json", exit_code=0, stderr="")
+    r = ClaudeEngine().parse_turn("not json", exit_code=0, stderr="")
     assert r.succeeded is False
     assert r.raw is None
     assert r.cost_usd == 0.0
 
 
 def test_parse_empty_output_fails_safely() -> None:
-    r = parse_claude_result("", exit_code=0, stderr="")
+    r = ClaudeEngine().parse_turn("", exit_code=0, stderr="")
     assert r.succeeded is False
     assert r.raw is None
 
 
 def test_parse_requires_session_id_for_success() -> None:
     payload = json.dumps({"type": "result", "is_error": False, "result": "OK"})
-    r = parse_claude_result(payload, exit_code=0, stderr="")
+    r = ClaudeEngine().parse_turn(payload, exit_code=0, stderr="")
     assert r.succeeded is False  # no session_id -> not a usable success
     assert r.session_id == ""
 
@@ -65,7 +67,7 @@ def test_parse_normalises_null_fields_not_to_literal_none() -> None:
     payload = json.dumps(
         {"type": "result", "is_error": False, "result": None, "session_id": "s1"}
     )
-    r = parse_claude_result(payload, exit_code=0, stderr="")
+    r = ClaudeEngine().parse_turn(payload, exit_code=0, stderr="")
     assert r.result_text == ""  # not "None"
     assert r.succeeded is True
 
@@ -92,7 +94,7 @@ _CODEX_SUCCESS = _codex_jsonl(
 
 
 def test_parse_codex_first_turn_captures_thread_id_and_succeeds() -> None:
-    r = parse_codex_result(_CODEX_SUCCESS, exit_code=0, stderr="")
+    r = CodexEngine().parse_turn(_CODEX_SUCCESS, exit_code=0, stderr="")
     assert r.succeeded is True
     assert r.session_id == "0199a213-81c0-7800-8aa1-bbab2a035a53"
     assert r.result_text == "Done the work."
@@ -107,7 +109,9 @@ def test_parse_codex_last_agent_message_wins() -> None:
         {"type": "item.completed", "item": {"type": "agent_message", "text": "final"}},
         {"type": "turn.completed", "usage": {}},
     )
-    assert parse_codex_result(stream, exit_code=0, stderr="").result_text == "final"
+    assert (
+        CodexEngine().parse_turn(stream, exit_code=0, stderr="").result_text == "final"
+    )
 
 
 def test_parse_codex_resume_keeps_handle_without_thread_started() -> None:
@@ -118,7 +122,9 @@ def test_parse_codex_resume_keeps_handle_without_thread_started() -> None:
         {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
         {"type": "turn.completed", "usage": {}},
     )
-    r = parse_codex_result(stream, exit_code=0, stderr="", session_id="t9", resume=True)
+    r = CodexEngine().parse_turn(
+        stream, exit_code=0, stderr="", session_id="t9", resume=True
+    )
     assert r.succeeded is True
     assert r.session_id == "t9"
 
@@ -129,7 +135,7 @@ def test_parse_codex_first_turn_without_thread_id_fails() -> None:
         {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
         {"type": "turn.completed", "usage": {}},
     )
-    r = parse_codex_result(stream, exit_code=0, stderr="", resume=False)
+    r = CodexEngine().parse_turn(stream, exit_code=0, stderr="", resume=False)
     assert r.succeeded is False
     assert r.session_id == ""
 
@@ -139,7 +145,7 @@ def test_parse_codex_turn_failed_event_is_failure() -> None:
         {"type": "thread.started", "thread_id": "t1"},
         {"type": "turn.failed", "error": {"message": "boom"}},
     )
-    assert parse_codex_result(stream, exit_code=1, stderr="").succeeded is False
+    assert CodexEngine().parse_turn(stream, exit_code=1, stderr="").succeeded is False
 
 
 def test_parse_codex_error_event_is_failure_even_on_zero_exit() -> None:
@@ -148,11 +154,11 @@ def test_parse_codex_error_event_is_failure_even_on_zero_exit() -> None:
         {"type": "error", "message": "usage limit"},
         {"type": "turn.completed", "usage": {}},
     )
-    assert parse_codex_result(stream, exit_code=0, stderr="").succeeded is False
+    assert CodexEngine().parse_turn(stream, exit_code=0, stderr="").succeeded is False
 
 
 def test_parse_codex_nonzero_exit_fails() -> None:
-    r = parse_codex_result(_CODEX_SUCCESS, exit_code=1, stderr="x")
+    r = CodexEngine().parse_turn(_CODEX_SUCCESS, exit_code=1, stderr="x")
     assert r.succeeded is False
 
 
@@ -161,18 +167,18 @@ def test_parse_codex_no_turn_completed_fails() -> None:
         {"type": "thread.started", "thread_id": "t1"},
         {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
     )
-    assert parse_codex_result(stream, exit_code=0, stderr="").succeeded is False
+    assert CodexEngine().parse_turn(stream, exit_code=0, stderr="").succeeded is False
 
 
 def test_parse_codex_skips_unparseable_lines() -> None:
     stream = "not json\n" + _CODEX_SUCCESS + "\nalso not json"
-    r = parse_codex_result(stream, exit_code=0, stderr="")
+    r = CodexEngine().parse_turn(stream, exit_code=0, stderr="")
     assert r.succeeded is True
     assert r.session_id == "0199a213-81c0-7800-8aa1-bbab2a035a53"
 
 
 def test_parse_codex_empty_output_fails_safely() -> None:
-    r = parse_codex_result("", exit_code=0, stderr="")
+    r = CodexEngine().parse_turn("", exit_code=0, stderr="")
     assert r.succeeded is False
     assert r.raw is None
     assert r.cost_usd == 0.0
@@ -187,7 +193,7 @@ def test_parse_codex_turn_failed_event_retained_in_raw() -> None:
         "error": {"message": "you have hit your usage limit", "type": "rate_limit"},
     }
     stream = _codex_jsonl({"type": "thread.started", "thread_id": "t1"}, failure)
-    r = parse_codex_result(stream, exit_code=1, stderr="")
+    r = CodexEngine().parse_turn(stream, exit_code=1, stderr="")
     assert r.succeeded is False
     # verbatim — no interpretation; record_failure_fixture serialises raw, so the
     # real limit wording lands in the failures dir (Part B then classifies it).
@@ -197,14 +203,14 @@ def test_parse_codex_turn_failed_event_retained_in_raw() -> None:
 def test_parse_codex_error_event_retained_in_raw() -> None:
     failure = {"type": "error", "message": "quota exceeded"}
     stream = _codex_jsonl({"type": "thread.started", "thread_id": "t1"}, failure)
-    r = parse_codex_result(stream, exit_code=1, stderr="")
+    r = CodexEngine().parse_turn(stream, exit_code=1, stderr="")
     assert r.raw is not None
     assert r.raw["failure_events"] == [failure]
 
 
 def test_parse_codex_success_raw_has_no_failure_events() -> None:
     # backward-compat: a clean success still carries only usage in raw.
-    r = parse_codex_result(_CODEX_SUCCESS, exit_code=0, stderr="")
+    r = CodexEngine().parse_turn(_CODEX_SUCCESS, exit_code=0, stderr="")
     assert r.succeeded is True
     assert r.raw is not None
     assert "failure_events" not in r.raw

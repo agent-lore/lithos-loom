@@ -121,3 +121,24 @@ loss of clean exit-code detection.
   warm in-container state — rejected per the keep-container-alive requirement. `--resume`
   still does the context restoration, so this remains the de-facto behaviour *across* a
   daemon checkpoint/resume boundary.
+
+## Addendum (ARCH-2) — the Engine adapter expresses this mechanism, it does not change it
+
+The per-tool `Engine` adapter (`story_develop.engines`, ARCH-2) concentrates everything
+story-develop must know to run a specific coder/reviewer tool — capabilities
+(`meters_cost_usd` / `mints_session_handle` / `supports_effort`), container provisioning
+(config mount + env var, auth files, skills dir), the per-turn CLI argv (`cli_argv`, and its
+`docker exec` wrapper `build_exec_argv`), the unified turn parse (`parse_turn`), and the
+session-transcript layout probe (`session_transcript_exists`). **None of this re-opens the
+decision recorded above.** The adapter *expresses* the live-container + resumable-`exec`
+mechanism this ADR chose (and the #94 codex facts): a `thread_id`/uuid session handle carried
+across resumable `docker exec` turns, completion/error/cost read from structured output +
+exit code (no ANSI scraping). Adding a tool is one adapter, not new branches across the
+container / turn / transcript / config code — but the *mechanism* each adapter must honour is
+still this one.
+
+One consequence worth naming: `cli_argv(session_id=None)` yields the **bare, session-less**
+host-side argv, and the review-correctness eval judge (`evals/review/judge.py`) runs exactly
+that off-container to call an agent directly (ARCH-2.E5). So the same adapter serves both the
+in-container turn path and the host-direct one-shot call — one implementation of "how you
+invoke tool X and read its result," not a second parallel copy in the eval harness.

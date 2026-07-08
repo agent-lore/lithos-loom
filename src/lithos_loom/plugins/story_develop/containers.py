@@ -2,8 +2,9 @@
 
 Two layers, deliberately split:
 
-* **pure builders** (:func:`build_run_command`, :func:`build_exec_command`) that
-  return ``docker`` argv lists — unit-tested without Docker;
+* the **pure builder** :func:`build_run_command` that returns the ``docker run``
+  argv — unit-tested without Docker (the per-turn ``docker exec`` argv lives on
+  :meth:`Engine.build_exec_argv`);
 * **thin wrappers** (:func:`start_container`, :func:`exec_turn`,
   :func:`stop_container`) that actually shell out — monkeypatched in
   orchestration tests, exercised for real only in the integration test.
@@ -20,7 +21,6 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import engines
 from .config import (
     CONTAINER_NOFILE_ULIMIT,
     HANDOFF_MOUNT_NAME,
@@ -51,7 +51,8 @@ def build_run_command(
     """Build the ``docker run`` argv for a long-lived idle agent container.
 
     The container does nothing but ``sleep`` — turns are injected later via
-    :func:`build_exec_command`. This builder is **engine-blind**: the caller reads
+    ``docker exec`` (:meth:`Engine.build_exec_argv`). This builder is
+    **engine-blind**: the caller reads
     *config_mount* / *config_env_var* / *auth_source_dir* / *auth_files* /
     *skills_dir* off the :class:`Engine` (ARCH-2.E3), so a new tool needs no edit
     here.
@@ -113,36 +114,6 @@ def build_run_command(
     cmd += ["-e", f"{config_env_var}={config_mount}"]
     cmd += ["--entrypoint", "sleep", image, "infinity"]
     return cmd
-
-
-def build_exec_command(
-    *,
-    name: str,
-    tool: str,
-    prompt: str,
-    session_id: str,
-    resume: bool = False,
-    workdir: str = WORKSPACE_MOUNT,
-    model: str | None = None,
-    effort: str | None = None,
-) -> list[str]:
-    """Build the ``docker exec`` argv for one agent turn (coder or reviewer).
-
-    Delegate to :meth:`Engine.build_exec_argv` — the per-tool argv (claude's
-    ``--session-id`` / ``--output-format json`` vs codex's ``exec [resume …]
-    --json``) lives on the engine now. Raises ``ValueError`` for an unknown
-    *tool* (via :func:`engines.get_engine`). Kept until the turn path migrates
-    to the engine directly (ARCH-2.E2).
-    """
-    return engines.get_engine(tool).build_exec_argv(
-        name=name,
-        prompt=prompt,
-        session_id=session_id,
-        resume=resume,
-        workdir=workdir,
-        model=model,
-        effort=effort,
-    )
 
 
 # --- thin side-effecting wrappers (monkeypatched in unit tests) -------------

@@ -48,7 +48,7 @@ import typer
 
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
-from lithos_loom.plugins.story_develop import handoff, run_outcome
+from lithos_loom.plugins.story_develop import engines, handoff, run_outcome
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
 
 develop_app = typer.Typer(
@@ -75,8 +75,11 @@ _UNKNOWN = "—"
 _CONTAINER_PREFIX = "loom-develop-"
 # An agent turn is one `docker exec` of the tool CLI into the long-lived
 # container; the *active* agent is the one with a live agent process (#94:
-# codex as well as claude).
-_AGENT_PROCESS_RE = re.compile(r"\b(?:claude|codex)\b")
+# codex as well as claude). The alternation is registry-derived (ARCH-2.E5) so a
+# new Engine is picked up by live-process detection without editing this regex.
+_AGENT_PROCESS_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in engines.supported_tools()) + r")\b"
+)
 # Handoff filenames (story_develop.handoff): round_NN_coder_done.md /
 # round_NN_review_<name>.md.
 _CODER_DONE_RE = re.compile(r"^round_(\d+)_coder_done\.md$")

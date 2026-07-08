@@ -14,7 +14,7 @@ import re
 import subprocess
 from collections.abc import Iterable
 
-from ...plugins.story_develop.turns import parse_claude_result, parse_codex_result
+from ...plugins.story_develop import engines
 from .match import Judge
 
 logger = logging.getLogger(__name__)
@@ -69,36 +69,29 @@ def _judge_prompt(mechanism: str, findings: list[dict]) -> str:
 
 
 def _run_host_agent(tool: str, prompt: str, model: str | None, timeout: int) -> str:
-    """Run one host-direct agent turn and return its message text ("" on failure)."""
-    if tool == "claude":
-        cmd = [
-            "claude",
-            *(["--model", model] if model else []),
-            "-p",
-            "--dangerously-skip-permissions",
-            "--output-format",
-            "json",
-            prompt,
-        ]
-    elif tool == "codex":
-        cmd = [
-            "codex",
-            "exec",
-            "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
-            *(["-m", model] if model else []),
-            prompt,
-        ]
-    else:
-        raise ValueError(f"unsupported judge tool {tool!r} (expected claude or codex)")
+    """Run one host-direct agent turn and return its message text ("" on failure).
 
+    Drives the same :class:`~...plugins.story_develop.engines.Engine` adapter the
+    container turn path uses (ARCH-2.E5) instead of a second per-tool argv +
+    parser pick: the bare host-side argv (no docker, no session) is
+    ``engine.cli_argv(session_id=None)`` and the result parse is
+    ``engine.parse_turn`` — one implementation.
+    """
+    if not engines.is_supported(tool):
+        raise ValueError(
+            f"unsupported judge tool {tool!r} "
+            f"(expected {engines.supported_tools_phrase()})"
+        )
+    engine = engines.get_engine(tool)
+    cmd = engine.cli_argv(prompt=prompt, model=model)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         logger.warning("judge agent call failed (%s); treating as no match", exc)
         return ""
-    parse = parse_codex_result if tool == "codex" else parse_claude_result
-    return parse(proc.stdout, exit_code=proc.returncode, stderr=proc.stderr).result_text
+    return engine.parse_turn(
+        proc.stdout, exit_code=proc.returncode, stderr=proc.stderr
+    ).result_text
 
 
 def _parse_matched_ids(text: str, valid_ids: Iterable[str]) -> list[str]:

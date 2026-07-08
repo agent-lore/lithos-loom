@@ -171,8 +171,8 @@ def parse_bool_setting(value: object, *, where: str) -> bool | None:
 # Claude's `--effort` is low/medium/high/xhigh/max; Codex has NO effort flag
 # (depth is implicit in model choice — o3 vs gpt-4o); OpenCode's `--variant` is
 # high/max/minimal. So Loom adopts CLAUDE'S levels as canonical (Claude is the
-# only wired agent today). When other tools land (#94), each tool's
-# `build_exec_command` maps this canonical level onto that tool's mechanism
+# only wired agent today). When other tools land (#94), each tool's `Engine`
+# (`cli_argv`) maps this canonical level onto that tool's mechanism
 # (Codex: pick the model; OpenCode: map to a `--variant`), coercing as needed.
 VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
@@ -299,7 +299,7 @@ class DevelopConfig:
     # the resolved choice with the run. Per-reviewer model/effort live on
     # ``ReviewerSpec``; this pair is the coder's. ``effort`` is a level string
     # (:data:`VALID_EFFORTS`, Claude's canonical levels), not a token budget;
-    # each tool's ``build_exec_command`` translates it to that tool's mechanism
+    # each tool's ``Engine`` translates it to that tool's mechanism
     # when other tools land (#94) — see VALID_EFFORTS for why it's not universal.
     coder_model: str | None = None
     coder_effort: str | None = None
