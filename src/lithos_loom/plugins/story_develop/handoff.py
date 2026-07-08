@@ -159,6 +159,30 @@ def _blockquote(text: str) -> str:
     return "\n".join(f"> {line}".rstrip() for line in text.splitlines())
 
 
+def render_log_section(
+    handoff_dir: Path, header: str, entries: Sequence[tuple[str, str]]
+) -> list[str]:
+    """Render one conversation-log section as a list of lines (the caller joins).
+
+    *header* is the section heading (e.g. ``"## Round 2"``); each ``(label,
+    filename)`` entry becomes a ``### {label} — `{filename}` `` sub-heading
+    followed by that handoff file's blockquoted body (or a placeholder when the
+    file was never written, so gaps stay visible). The section shape — heading +
+    read-or-missing + blockquote — lives here so :func:`conversation_log` (per
+    develop round) and ``pr_delivery``'s Copilot-round append share one renderer
+    instead of each reaching the private helpers (ARCH-1.S7).
+    """
+    parts = [header, ""]
+    for label, filename in entries:
+        parts += [
+            f"### {label} — `{filename}`",
+            "",
+            _blockquote(_read_or_missing(handoff_dir / filename)),
+            "",
+        ]
+    return parts
+
+
 def conversation_log(handoff_dir: Path, rounds: int, reviewers: Sequence[str]) -> str:
     """Assemble an ordered, human-readable log of every round's handoffs.
 
@@ -171,23 +195,12 @@ def conversation_log(handoff_dir: Path, rounds: int, reviewers: Sequence[str]) -
     """
     parts = ["# story-develop conversation log", ""]
     for r in range(1, rounds + 1):
-        coder_name = coder_handoff_name(r)
-        parts += [
-            f"## Round {r}",
-            "",
-            f"### Coder — `{coder_name}`",
-            "",
-            _blockquote(_read_or_missing(handoff_dir / coder_name)),
-            "",
+        entries = [("Coder", coder_handoff_name(r))]
+        entries += [
+            (f"Reviewer [{reviewer}]", reviewer_handoff_name(r, reviewer))
+            for reviewer in reviewers
         ]
-        for reviewer in reviewers:
-            review_name = reviewer_handoff_name(r, reviewer)
-            parts += [
-                f"### Reviewer [{reviewer}] — `{review_name}`",
-                "",
-                _blockquote(_read_or_missing(handoff_dir / review_name)),
-                "",
-            ]
+        parts += render_log_section(handoff_dir, f"## Round {r}", entries)
     return "\n".join(parts) + "\n"
 
 
