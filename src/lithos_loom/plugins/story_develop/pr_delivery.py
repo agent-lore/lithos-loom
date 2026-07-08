@@ -31,7 +31,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import run_outcome
+from . import containers, engines, handoff, run_outcome, turns
+from .agent_session import build_run_cmd
+from .check_runner import run_delivery_test_gate
+from .findings import FindingLedger
+from .rounds import commit_round
 
 logger = logging.getLogger(__name__)
 
@@ -533,11 +537,15 @@ def delivery_budget_seconds(config, *, copilot_timeout: int, coder_timeout: int)
     :func:`run_outcome.record_delivery_deadline` — the develop-run marker contract
     lives in :mod:`run_outcome`) so it can bound a *crashed* delivery without ever
     timing out a *healthy* slow one. It sums every bounded phase below — **keep in
-    sync with deliver() if a phase is added**:
+    sync with deliver() if a phase is added** — each bound maps to the named
+    primitive that phase drives (ARCH-1.S7):
 
-    - the Copilot review round (``copilot_timeout``),
-    - the Copilot fix coder turn (``coder_timeout``),
-    - the regression gate on the fix commit (``config.test_timeout``),
+    - the Copilot review round — ``copilot_timeout`` (:func:`wait_for_copilot`
+      + :func:`fetch_copilot_comments_settled`),
+    - the Copilot fix coder turn — ``coder_timeout`` (the one-shot
+      ``turns.run_turn`` in :func:`_deliver_after_open`),
+    - the regression gate on the fix commit — ``config.test_timeout``
+      (:func:`check_runner.run_delivery_test_gate`),
     - plus push / PR / gh overhead (a flat margin).
 
     That attach's no-deadline fallback (``run_outcome.DELIVERY_FALLBACK_SECONDS``)
@@ -698,20 +706,14 @@ def _deliver_after_open(
 ) -> DeliveryOutcome:
     """The post-PR-open delivery work: notify, the Copilot round, the fix turn +
     regression gate, and the per-thread replies. Separated so :func:`deliver` can
-    guarantee the PR url survives any failure here (#192). Imports the
-    develop-module helpers lazily (develop never imports this module).
-    """
-    from ...runner import git
-    from . import containers, engines, handoff
-    from .check_runner import run_delivery_test_gate
-    from .develop import (
-        _build_run_cmd,
-        _render,
-        _render_findings,
-    )
-    from .findings import FindingLedger
-    from .turns import run_turn
+    guarantee the PR url survives any failure here (#192).
 
+    Drives the shared story-develop primitives directly (ARCH-1.S7) —
+    :func:`agent_session.build_run_cmd`, :func:`handoff.render_prompt` /
+    :func:`handoff.render_findings`, :func:`rounds.commit_round`, and
+    :func:`check_runner.run_delivery_test_gate` — rather than re-implementing the
+    coder round inline or reaching develop's private aliases through a lazy import.
+    """
     # #113: notify the operator their PR awaits review (native GitHub
     # notification). Best-effort; the note threads into every return below.
     if config.notify_github_login:
@@ -805,14 +807,14 @@ def _deliver_after_open(
     synthetic_path.write_text(synthetic, encoding="utf-8")
 
     coder_handoff = handoff.coder_handoff_name(fix_round)
-    prompt = _render(
+    prompt = handoff.render_prompt(
         handoff.load_prompt("copilot_fix.md"),
         pr_url=pr_url,
         acceptance_criteria=config.effective_acceptance_criteria,
-        findings=_render_findings(canonical),
+        findings=handoff.render_findings(canonical),
         handoff_file=coder_handoff,
     )
-    name, run_cmd = _build_run_cmd(
+    name, run_cmd = build_run_cmd(
         config,
         agent="coder",
         engine=engines.get_engine(config.coder),
@@ -827,7 +829,13 @@ def _deliver_after_open(
         # revert to the agent default while finalizing the branch.
         # ``result.coder_session`` is the live handle (the codex thread_id, or
         # the claude uuid).
-        turn = run_turn(
+        #
+        # Deliberately a bare ``turns.run_turn`` — no usage-limit pause / tool-switch
+        # reaction and no #114 salvage nudge, unlike develop()'s
+        # ``agent_session.turn_with_limit_pauses``. This one-shot fix turn just
+        # fails cleanly (below) if the coder is usage-limited; whether it should
+        # gain the limit reaction is tracked as a follow-up, not decided here.
+        turn = turns.run_turn(
             container=name,
             prompt=prompt,
             session_id=result.coder_session,
@@ -874,9 +882,7 @@ def _deliver_after_open(
     except Exception:  # tolerant: replies degrade gracefully
         notes.append("coder handoff unreadable; replies use generic text")
 
-    new_sha = git.commit_all(
-        wt, f"story-develop copilot round: {title}", exclude=[".handoff"]
-    )
+    new_sha = commit_round(wt, f"story-develop copilot round: {title}")
     fix_committed = new_sha is not None
 
     # regression gate on the fix commit; RED => do NOT push the fix
@@ -955,22 +961,13 @@ def _append_copilot_round_to_log(
     ``develop()`` wrote the log before delivery started; without this append
     the shipped log would omit the whole Copilot exchange.
     """
-    from .handoff import _blockquote, _read_or_missing, reviewer_handoff_name
-
-    log_path = config.run_dir / "conversation.md"
-    review_name = reviewer_handoff_name(fix_round, "copilot")
-    parts = [
-        "",
+    log_path = config.run_dir / run_outcome.CONVERSATION_LOG
+    review_name = handoff.reviewer_handoff_name(fix_round, "copilot")
+    section = handoff.render_log_section(
+        config.handoff_dir,
         f"## Copilot round ({pr_url})",
-        "",
-        f"### Reviewer [copilot] — `{review_name}`",
-        "",
-        _blockquote(_read_or_missing(config.handoff_dir / review_name)),
-        "",
-        f"### Coder — `{coder_handoff}`",
-        "",
-        _blockquote(_read_or_missing(config.handoff_dir / coder_handoff)),
-        "",
-    ]
+        [("Reviewer [copilot]", review_name), ("Coder", coder_handoff)],
+    )
     with open(log_path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(parts))
+        # leading newline separates the appended section from develop()'s log body
+        fh.write("\n" + "\n".join(section))

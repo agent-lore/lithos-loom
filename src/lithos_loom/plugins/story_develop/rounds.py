@@ -295,16 +295,26 @@ def dispute_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
+def commit_round(wt: Path, message: str) -> str | None:
+    """Commit a round's work as one commit, excluding the handoff dir.
+
+    The single shared commit primitive (ARCH-1.S7): both ``develop()``'s
+    :func:`commit_phase` and ``pr_delivery``'s Copilot fix round call it, so the
+    handoff-dir exclusion is single-sourced on :data:`HANDOFF_DIRNAME` rather than
+    drifting as a bare ``".handoff"`` literal on the delivery side. Returns the new
+    commit SHA, or ``None`` when nothing (outside the handoff dir) was staged.
+    """
+    return git.commit_all(wt, message, exclude=[HANDOFF_DIRNAME])
+
+
 def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Commit the round's work (excluding the handoff dir) and auto-format it in
     place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
 
     Exit: C ``failed`` (round 1 produced no commit).
     """
-    new_commit = git.commit_all(
-        ctx.wt,
-        f"story-develop r{round_no}: {ctx.config.description}",
-        exclude=[HANDOFF_DIRNAME],
+    new_commit = commit_round(
+        ctx.wt, f"story-develop r{round_no}: {ctx.config.description}"
     )
     if round_no == 1 and new_commit is None:
         return CycleExit(
