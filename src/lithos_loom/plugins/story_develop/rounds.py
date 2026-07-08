@@ -4,13 +4,15 @@
 machinery calls through instead of reaching module globals directly, so the loop
 is unit-testable by constructing a ``Services`` with fakes.
 
-:meth:`Services.live` wires the real modules with **call-time** attribute
-lookups, so a ``monkeypatch`` of ``turns.run_turn`` / ``containers.start_container``
-/ … is honoured even after the ``Services`` instance is built. ``develop()`` does
-*not* use ``live()`` yet — it constructs a ``Services`` from its own module
-globals so the existing ``monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/…)``
-patches keep taking effect until S8 re-points the tests (see the compat note in
-:mod:`develop`).
+:meth:`Services.live` wires the real module callables — captured when it is
+built. Both it and ``develop()``'s own ``_develop_services()`` are constructed at
+``develop()`` start, *after* any test applies its ``monkeypatch.setattr`` of
+``turns.run_turn`` / ``containers.start_container`` / ``develop_mod.run_turn`` / … ,
+so each field binds the patched callable (a patch applied *after* construction is
+not observed — nothing does that). ``develop()`` does *not* use ``live()`` yet —
+it builds a ``Services`` from its own module globals so the existing
+``monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/…)`` patches keep taking
+effect until S8 re-points the tests (see the compat note in :mod:`develop`).
 
 S4 introduces the seam and threads it through
 :func:`agent_session.turn_with_limit_pauses` (which reads ``run_turn`` +

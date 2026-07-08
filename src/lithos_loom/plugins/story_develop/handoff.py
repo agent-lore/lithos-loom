@@ -103,6 +103,33 @@ def load_prompt(name: str) -> str:
     return resources.files(_PROMPTS).joinpath(name).read_text(encoding="utf-8")
 
 
+def render_prompt(template: str, **values: str) -> str:
+    """Placeholder substitution that is safe against braces in the values.
+
+    Lives here (ARCH-1.S5) with :func:`load_prompt` so a caller that only needs
+    to render a prompt (e.g. ``pr_delivery``) never has to import the reviewer
+    panel machinery. ``develop`` re-exports it as ``_render`` until S7.
+    """
+    out = template
+    for key, value in values.items():
+        out = out.replace("{" + key + "}", value)
+    return out
+
+
+def render_findings(findings: list[Finding]) -> str:
+    """Render a reviewer's findings as a compact block for the coder's prompt."""
+    if not findings:
+        return "(no structured findings were listed)"
+    lines: list[str] = []
+    for f in findings:
+        files = ", ".join(f.files) if f.files else "(unspecified)"
+        lines.append(f"- [{f.finding_id}] severity={f.severity} status={f.status}")
+        lines.append(f"  files: {files}")
+        if f.rationale:
+            lines.append(f"  rationale: {f.rationale}")
+    return "\n".join(lines)
+
+
 def coder_handoff_name(round_no: int) -> str:
     """Filename for the coder's handoff in a given round (1-based)."""
     return f"round_{round_no:02d}_coder_done.md"

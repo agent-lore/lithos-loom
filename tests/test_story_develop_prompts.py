@@ -13,12 +13,12 @@ from __future__ import annotations
 import pytest
 
 from lithos_loom.plugins.story_develop.config import ReviewerSpec
-from lithos_loom.plugins.story_develop.develop import (
+from lithos_loom.plugins.story_develop.develop import _coder_handoff_nudge
+from lithos_loom.plugins.story_develop.handoff import load_prompt
+from lithos_loom.plugins.story_develop.panel import (
     SEVERITY_CALIBRATION,
-    _coder_handoff_nudge,
     _reviewer_brief,
 )
-from lithos_loom.plugins.story_develop.handoff import load_prompt
 
 
 @pytest.mark.parametrize("name", ["coder_init.md", "coder_fix.md"])
