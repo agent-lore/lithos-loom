@@ -38,7 +38,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from ...runner import git, worktree
@@ -49,6 +49,13 @@ from . import (
     handoff,
     limits,
     run_outcome,
+)
+from .agent_session import _CONTINUATION_PROMPT as _CONTINUATION_PROMPT
+from .agent_session import (
+    PauseBudget,
+    build_run_cmd,
+    resume_after_from,
+    turn_with_limit_pauses,
 )
 from .check_runner import (
     build_check_set,
@@ -74,6 +81,7 @@ from .config import (
 from .findings import FindingLedger
 from .gate_findings import GateFinding, GateLedger
 from .handoff import Finding, HandoffError, ReviewHandoff
+from .rounds import Services
 from .test_gate import GateResult
 from .turns import TurnResult, run_turn
 
@@ -269,45 +277,6 @@ def _reviewer_brief(spec) -> str:
     )
 
 
-def _build_run_cmd(
-    config: DevelopConfig,
-    *,
-    agent: str,
-    engine: engines.Engine,
-    config_dir: Path,
-    wt: Path,
-    read_only: bool,
-) -> tuple[str, list[str]]:
-    """Build (container_name, docker-run-argv) for an agent container.
-
-    Model + reasoning effort (#93) are per-TURN flags applied in
-    :func:`run_turn`, not container env, so the idle container itself carries no
-    agent tuning. All per-tool provisioning — config mount + env var + auth
-    source/files + skills — comes off *engine* (#94, ARCH-2.E3): claude
-    (``CLAUDE_CONFIG_DIR`` + ``.credentials.json`` + operator skills) vs codex
-    (``CODEX_HOME`` + ``auth.json``, no skills — codex honours the worktree
-    ``AGENTS.md``). ``build_run_command`` stays engine-blind.
-    """
-    name = containers.container_name(config.run_id, agent)
-    cmd = containers.build_run_command(
-        name=name,
-        image=config.image,
-        worktree=wt,
-        config_dir=config_dir,
-        handoff_dir=config.handoff_dir,
-        config_mount=engine.config_mount,
-        config_env_var=engine.config_env_var,
-        auth_source_dir=engine.auth_source_dir(config),
-        auth_files=engine.auth_files(config),
-        skills_dir=engine.skills_dir(config),
-        read_only_worktree=read_only,
-        # #109: mount the linked worktree's shared .git (RO) so in-container
-        # `git diff`/`log`/`show` resolve — reviewers inspect the actual change.
-        git_common_dir=worktree.git_common_dir(wt),
-    )
-    return name, cmd
-
-
 def _read_review(path: Path) -> tuple[ReviewHandoff | None, str | None]:
     """Read + parse a reviewer handoff. Returns (handoff, error_message)."""
     if not path.is_file():
@@ -353,14 +322,37 @@ _merge_check_sets = merge_check_sets
 _load_gate_ledger = load_gate_ledger
 _persist_gate_ledger = persist_gate_ledger
 
+# ARCH-1.S4: build_run_cmd + the usage-limit pause loop (turn_with_limit_pauses,
+# PauseBudget, resume_after_from, _CONTINUATION_PROMPT) moved to agent_session.py;
+# the Services injection seam lives in rounds.py. develop() keeps these aliases
+# (deleted in S8) for its own calls + review_only / pr_delivery importers, and
+# wires Services from its OWN module globals (below) so the existing
+# monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/"_run_check_set") patches
+# — and containers.* patches — keep taking effect. _sleep stays defined here as
+# the seam Services.sleep binds when develop() builds its Services.
+_build_run_cmd = build_run_cmd
+_PauseBudget = PauseBudget
+_turn_with_limit_pauses = turn_with_limit_pauses
+_resume_after_from = resume_after_from
+
+
+def _develop_services() -> Services:
+    """The round pipeline's :class:`Services`, bound from develop's OWN module
+    globals. develop() builds it at run start — *after* the tests apply their
+    ``monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/"_run_check_set")`` (and
+    ``containers.*``) patches — so each field captures the patched callable and
+    every one of those patches keeps taking effect until S8 re-points the tests to
+    :meth:`Services.live`."""
+    return Services(
+        run_turn=run_turn,
+        sleep=_sleep,
+        start_container=containers.start_container,
+        stop_container=containers.stop_container,
+        run_check_set=_run_check_set,
+    )
+
 
 # --- usage-limit reaction (T5) ----------------------------------------------
-
-_CONTINUATION_PROMPT = (
-    "You were interrupted by a provider usage limit, which has now lifted. "
-    "Continue the task from where you left off. If you had already finished, "
-    "just write the handoff file as previously instructed."
-)
 
 
 def _coder_handoff_nudge(round_no: int) -> str:
@@ -381,119 +373,9 @@ def _coder_handoff_nudge(round_no: int) -> str:
     )
 
 
-class _PauseBudget:
-    """The run's shared usage-limit pause budget, in seconds."""
-
-    def __init__(self, seconds: float) -> None:
-        self.remaining = seconds
-
-
 def _sleep(seconds: float) -> None:
     """Monkeypatch seam — tests must never actually sleep."""
     time.sleep(seconds)
-
-
-# When a usage-limited run checkpoints WITHOUT a parseable reset hint, suggest
-# retrying after this long. Provider windows are typically 1-5h; an hourly
-# re-dispatch is bounded and cheap, where re-trying at the pause-poll cadence
-# (minutes) would burn a full container spin-up per attempt.
-_RESUME_FALLBACK_MINUTES = 60
-
-
-def _resume_after_from(turn: TurnResult | None) -> datetime:
-    """When an interrupted run should be retried (PRD decision #5, T10).
-
-    The provider's parsed reset time when available, else now + a fixed
-    fallback delay. Always returns a value — an ``interrupted`` status is by
-    definition retryable, so the daemon contract gets a concrete timestamp.
-    """
-    hint = limits.reset_hint(turn) if turn is not None else None
-    return hint or (datetime.now(UTC) + timedelta(minutes=_RESUME_FALLBACK_MINUTES))
-
-
-def _turn_with_limit_pauses(
-    config: DevelopConfig,
-    budget: _PauseBudget,
-    *,
-    agent: str,
-    container: str,
-    config_dir: Path,
-    prompt: str,
-    session_id: str,
-    resume: bool,
-    round_no: int,
-    timeout: int,
-    engine: engines.Engine,
-) -> tuple[TurnResult, bool, float]:
-    """Run a turn, pausing-and-retrying through provider usage limits.
-
-    Returns ``(turn, interrupted, total_cost)``: *interrupted* is True when
-    the turn was usage-limited and the pause budget ran out — the caller
-    checkpoints rather than treating it as an agent failure. Non-limit
-    failures return immediately (the existing failure paths own those).
-    *total_cost* sums every attempt, not just the last. Every failed turn is
-    recorded as a classification fixture (G4 capture harness).
-    """
-    attempt_prompt, attempt_resume = prompt, resume
-    total_cost = 0.0
-    while True:
-        turn = run_turn(
-            container=container,
-            prompt=attempt_prompt,
-            session_id=session_id,
-            resume=attempt_resume,
-            timeout=timeout,
-            engine=engine,
-            model=config.coder_model,
-            effort=config.coder_effort,
-        )
-        total_cost += turn.cost_usd
-        # Codex mints its handle (thread_id) on turn 1; rebind so a retry after
-        # a usage-limit pause resumes the SAME session (and the transcript
-        # check below globs the right id) rather than the stale pre-mint uuid.
-        # No-op for claude (echoes the supplied uuid); dormant for codex until
-        # codex usage-limits are classified (G4), but kept correct — mirrors
-        # the reviewer path's `cur_session` rebind in `_review_turn`.
-        if turn.session_id:
-            session_id = turn.session_id
-        if turn.succeeded:
-            return turn, False, total_cost
-        limits.record_failure_fixture(
-            config.failures_dir, agent=agent, round_no=round_no, turn=turn
-        )
-        if limits.classify_failure(turn) != limits.USAGE_LIMITED:
-            return turn, False, total_cost
-        plan = limits.pause_plan(
-            turn,
-            poll_seconds=config.pause_poll_minutes * 60,
-            remaining_seconds=budget.remaining,
-        )
-        if plan is None:
-            logger.warning(
-                "story-develop %s: %s usage-limited and the pause budget is "
-                "exhausted — checkpointing",
-                config.run_id,
-                agent,
-            )
-            return turn, True, total_cost
-        logger.info(
-            "story-develop %s: %s usage-limited; pausing %.0fs (%s; %.0f min "
-            "of pause budget left)",
-            config.run_id,
-            agent,
-            plan.wait_seconds,
-            plan.reason,
-            budget.remaining / 60,
-        )
-        _sleep(plan.wait_seconds)
-        budget.remaining -= plan.wait_seconds
-        # Resume the SAME session when its transcript survived the interruption
-        # (the in-session context is the thing we are protecting); otherwise
-        # re-issue the original prompt fresh.
-        if engine.session_transcript_exists(config_dir, session_id):
-            attempt_prompt, attempt_resume = _CONTINUATION_PROMPT, True
-        else:
-            attempt_prompt, attempt_resume = prompt, resume
 
 
 # --- per-turn drivers -------------------------------------------------------
@@ -1120,6 +1002,7 @@ def develop(
     coder_cost = 0.0
     review_cost = 0.0
     budget = _PauseBudget(config.max_pause_minutes * 60)
+    services = _develop_services()  # ARCH-1.S4: injected into the coder turn loop
     stall_strikes = 0  # T7: consecutive no-progress rounds
     prev_signature: frozenset | None = None
     resume_after: datetime | None = None  # set only on interrupted (T10)
@@ -1178,6 +1061,7 @@ def develop(
             coder_turn, coder_interrupted, attempt_cost = _turn_with_limit_pauses(
                 config,
                 budget,
+                services=services,
                 agent="coder",
                 container=coder_name,
                 config_dir=config.coder_config_dir,
