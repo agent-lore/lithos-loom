@@ -12,13 +12,16 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from lithos_loom.plugins.story_develop import check_runner as check_runner_mod
 from lithos_loom.plugins.story_develop import containers, engines, handoff
 from lithos_loom.plugins.story_develop import develop as develop_mod
 from lithos_loom.plugins.story_develop import test_gate as test_gate_mod
+from lithos_loom.plugins.story_develop import turns as turns_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
 from lithos_loom.plugins.story_develop.test_gate import GateResult
 from lithos_loom.plugins.story_develop.turns import TurnResult
@@ -269,9 +272,9 @@ def _install_fakes(
     monkeypatch.setattr(
         containers, "stop_container", lambda name: state["stopped"].append(name)
     )
-    monkeypatch.setattr(develop_mod, "run_turn", fake_run_turn)
+    monkeypatch.setattr(turns_mod, "run_turn", fake_run_turn)
     monkeypatch.setattr(test_gate_mod, "run_gate_container", fake_gate_container)
-    monkeypatch.setattr(develop_mod, "_sleep", lambda s: state["sleeps"].append(s))
+    monkeypatch.setattr(time, "sleep", lambda s: state["sleeps"].append(s))
     return state
 
 
@@ -309,7 +312,7 @@ def test_build_run_cmd_mounts_git_common_dir(config: DevelopConfig) -> None:
     wt = worktree.create(
         config.repo, config.base_branch, "t", parent=config.worktree_parent
     )
-    _name, cmd = develop_mod._build_run_cmd(
+    _name, cmd = develop_mod.build_run_cmd(
         config,
         agent="coder",
         engine=engines.get_engine("claude"),
@@ -839,7 +842,7 @@ def test_candidate_checks_run_only_on_the_approval_candidate(
     fast = Check("lint", "ruff check --x", "informational", "fast")
     candidate = Check("dep-audit", "pip-audit --x", "informational", "candidate")
     monkeypatch.setattr(
-        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+        check_runner_mod, "build_check_set", lambda config, wt: (fast, candidate)
     )
     calls: list[tuple[int, tuple[str, ...]]] = []
 
@@ -858,7 +861,7 @@ def test_candidate_checks_run_only_on_the_approval_candidate(
             )
         )
 
-    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    monkeypatch.setattr(check_runner_mod, "run_check_set", fake_run_check_set)
     # Round 1 FINDINGS (not approved) then round 2 LGTM (approved): proves the
     # fast gate runs both rounds while the candidate gate fires only at approval.
     _install_fakes(
@@ -888,7 +891,7 @@ def test_required_adapter_red_exit_without_findings_blocks_as_failed_run(
     )
 
     lint = Check("lint", "ruff check --x", "required", "fast")
-    monkeypatch.setattr(develop_mod, "build_check_set", lambda config, wt: (lint,))
+    monkeypatch.setattr(check_runner_mod, "build_check_set", lambda config, wt: (lint,))
 
     def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
         # RED exit with an EMPTY ledger: the adapter failed to run, so the floor blocks
@@ -906,7 +909,7 @@ def test_required_adapter_red_exit_without_findings_blocks_as_failed_run(
             )
         )
 
-    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    monkeypatch.setattr(check_runner_mod, "run_check_set", fake_run_check_set)
     _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}], source_rounds={1})
     result = develop_mod.develop(config)
     assert result.status == "stalled"
@@ -929,7 +932,7 @@ def test_required_candidate_red_exit_blocks_approval(
     fast = Check("lint", "ruff check --x", "required", "fast")
     candidate = Check("coverage", "coverage report", "required", "candidate")
     monkeypatch.setattr(
-        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+        check_runner_mod, "build_check_set", lambda config, wt: (fast, candidate)
     )
 
     def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
@@ -949,7 +952,7 @@ def test_required_candidate_red_exit_blocks_approval(
             )
         )
 
-    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    monkeypatch.setattr(check_runner_mod, "run_check_set", fake_run_check_set)
     # LGTM from round 1, but the coder commits only in round 1 -> the blocking required
     # candidate can never be fixed -> the stall guard terminates the run.
     _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}], source_rounds={1})
@@ -1766,7 +1769,7 @@ def test_resume_after_uses_provider_reset_hint_when_future() -> None:
     """A parseable FUTURE epoch sentinel becomes the resume time verbatim."""
     from datetime import UTC, datetime
 
-    from lithos_loom.plugins.story_develop.develop import _resume_after_from
+    from lithos_loom.plugins.story_develop.agent_session import resume_after_from
     from lithos_loom.plugins.story_develop.turns import TurnResult
 
     future_epoch = int(datetime.now(UTC).timestamp()) + 7200  # +2h
@@ -1779,7 +1782,7 @@ def test_resume_after_uses_provider_reset_hint_when_future() -> None:
         raw={"is_error": True},
         stderr="",
     )
-    resumed = _resume_after_from(turn)
+    resumed = resume_after_from(turn)
     assert int(resumed.timestamp()) == future_epoch
 
 
@@ -1863,7 +1866,7 @@ def test_candidate_stage_dedups_per_committed_sha(
     fast = Check("lint", "ruff check --x", "required", "fast")
     candidate = Check("coverage", "coverage report", "required", "candidate")
     monkeypatch.setattr(
-        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+        check_runner_mod, "build_check_set", lambda config, wt: (fast, candidate)
     )
     calls: list[tuple[int, tuple[str, ...]]] = []
 
@@ -1888,7 +1891,7 @@ def test_candidate_stage_dedups_per_committed_sha(
             )
         )
 
-    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    monkeypatch.setattr(check_runner_mod, "run_check_set", fake_run_check_set)
     # LGTM every round (approval branch entered each round), but the coder commits
     # ONLY in round 1 (source_rounds={1}), so gated_sha never changes: rounds 2/3
     # re-enter approval on the same sha. The blocking candidate can never be
@@ -1927,7 +1930,7 @@ def test_candidate_stage_reruns_on_a_new_committed_sha(
     fast = Check("lint", "ruff check --x", "required", "fast")
     candidate = Check("coverage", "coverage report", "required", "candidate")
     monkeypatch.setattr(
-        develop_mod, "build_check_set", lambda config, wt: (fast, candidate)
+        check_runner_mod, "build_check_set", lambda config, wt: (fast, candidate)
     )
     calls: list[tuple[int, str, tuple[str, ...]]] = []
 
@@ -1952,7 +1955,7 @@ def test_candidate_stage_reruns_on_a_new_committed_sha(
             )
         )
 
-    monkeypatch.setattr(develop_mod, "_run_check_set", fake_run_check_set)
+    monkeypatch.setattr(check_runner_mod, "run_check_set", fake_run_check_set)
     # LGTM every round; the coder commits a DIFFERENT tree each round (default
     # write_source writes "hello round N"), so round 2's approval candidate has a
     # new gated_sha and the guard must let it re-run.
