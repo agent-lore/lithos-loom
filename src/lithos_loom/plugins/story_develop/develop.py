@@ -42,18 +42,14 @@ from pathlib import Path
 
 from ...runner import git, worktree
 from . import (
+    agent_session,
     autoformat,
     check_runner,
     containers,
     engines,
     handoff,
+    panel,
     run_outcome,
-)
-from .agent_session import (
-    PauseBudget,
-    build_run_cmd,
-    resume_after_from,
-    turn_with_limit_pauses,
 )
 from .config import (
     DevelopConfig,
@@ -61,12 +57,8 @@ from .config import (
     is_valid_reviewer_name,
 )
 from .gate_findings import GateFinding
-from .handoff import (
-    HandoffError,
-    render_findings,
-)
+from .handoff import HandoffError
 from .panel import (
-    ReviewerState,
     ReviewOutcome,
     findings_by_severity,
     run_panel_round,
@@ -141,12 +133,12 @@ def _render_panel_findings(outcomes: list[ReviewOutcome]) -> str:
     more than one reviewer, keeping ids unambiguous across the panel.
     """
     if len(outcomes) == 1:
-        return render_findings(outcomes[0].findings)
+        return handoff.render_findings(outcomes[0].findings)
     parts: list[str] = []
     for outcome in outcomes:
         parts.append(f"### From the {outcome.reviewer} reviewer")
         if outcome.findings:
-            rendered = render_findings(outcome.findings)
+            rendered = handoff.render_findings(outcome.findings)
             # qualify ids: [f-001] -> [code-quality/f-001]
             rendered = rendered.replace("- [", f"- [{outcome.reviewer}/")
             parts.append(rendered)
@@ -202,7 +194,7 @@ def _coder_handoff_nudge(round_no: int) -> str:
 
 
 def _record_coder_disputes(
-    config: DevelopConfig, reviewers: list[ReviewerState], round_no: int
+    config: DevelopConfig, reviewers: list[panel.ReviewerState], round_no: int
 ) -> None:
     """Parse the coder's round handoff and record dispute marks (T7).
 
@@ -355,7 +347,7 @@ def develop(
     base = git.base_sha(wt)
     logger.info("story-develop %s: worktree %s (branch %s)", config.run_id, wt, branch)
 
-    coder_name, coder_cmd = build_run_cmd(
+    coder_name, coder_cmd = agent_session.build_run_cmd(
         config,
         agent="coder",
         engine=coder_engine,
@@ -363,9 +355,9 @@ def develop(
         wt=wt,
         read_only=False,
     )
-    reviewers: list[ReviewerState] = []
+    reviewers: list[panel.ReviewerState] = []
     for spec in specs:
-        rname, rcmd = build_run_cmd(
+        rname, rcmd = agent_session.build_run_cmd(
             config,
             agent=f"review-{spec.name}",
             engine=engines.get_engine(spec.tool),
@@ -373,7 +365,7 @@ def develop(
             wt=wt,
             read_only=True,
         )
-        reviewers.append(ReviewerState(spec, rname, rcmd, wt))
+        reviewers.append(panel.ReviewerState(spec, rname, rcmd, wt))
     coder_session = str(uuid.uuid4())
 
     # The per-round gate is an ordered check-set (#131). ``fast`` checks run every
@@ -388,7 +380,7 @@ def develop(
     formatters = autoformat.resolve_formatters(config, wt)
     # #132: one gate ledger per run; survives resume.
     gate_ledger = check_runner.load_gate_ledger(config)
-    budget = PauseBudget(config.max_pause_minutes * 60)
+    budget = agent_session.PauseBudget(config.max_pause_minutes * 60)
 
     # RoundContext is the explicit successor of this function's locals bag (S6).
     # The boundary collaborators are injected from THIS module's globals — so the
@@ -415,9 +407,9 @@ def develop(
         gate_ledger=gate_ledger,
         budget=budget,
         coder_session=coder_session,
-        turn_with_limit_pauses=turn_with_limit_pauses,
+        turn_with_limit_pauses=agent_session.turn_with_limit_pauses,
         run_panel_round=run_panel_round,
-        resume_after_from=resume_after_from,
+        resume_after_from=agent_session.resume_after_from,
         render_panel_findings=_render_panel_findings,
         coder_summary=_coder_summary,
         record_coder_disputes=_record_coder_disputes,

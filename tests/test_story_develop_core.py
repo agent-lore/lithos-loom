@@ -304,15 +304,16 @@ def test_build_run_cmd_mounts_git_common_dir(config: DevelopConfig) -> None:
     """#109: every agent container gets the linked worktree's shared .git (RO).
 
     End-to-end lock-in over the real-worktree wiring: guards against the
-    ``git_common_dir=`` kwarg silently dropping out of ``_build_run_cmd``.
+    ``git_common_dir=`` kwarg silently dropping out of ``build_run_cmd``.
     """
+    from lithos_loom.plugins.story_develop.agent_session import build_run_cmd
     from lithos_loom.runner import worktree
 
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     wt = worktree.create(
         config.repo, config.base_branch, "t", parent=config.worktree_parent
     )
-    _name, cmd = develop_mod.build_run_cmd(
+    _name, cmd = build_run_cmd(
         config,
         agent="coder",
         engine=engines.get_engine("claude"),
