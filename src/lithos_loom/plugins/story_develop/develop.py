@@ -57,21 +57,16 @@ from .agent_session import (
 )
 from .check_runner import (
     build_check_set,
-    gate_floor_blocks,
     load_gate_ledger,
-    merge_check_sets,
-    persist_gate_ledger,
     run_check_set,
 )
 from .check_runner import (
     check_result_blocks as check_result_blocks,
 )
-from .check_set import (
-    CheckSetResult,
-    render_check_summary,
+from .check_runner import (
+    gate_floor_blocks as gate_floor_blocks,
 )
 from .config import (
-    HANDOFF_DIRNAME,
     DevelopConfig,
     ReviewerSpec,
     is_valid_reviewer_name,
@@ -88,7 +83,7 @@ from .panel import (
     findings_by_severity,
     run_panel_round,
 )
-from .rounds import Services
+from .rounds import CycleExit, RoundContext, Services, run_round
 from .test_gate import GateResult
 from .turns import run_turn
 
@@ -188,14 +183,18 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
 # --- deterministic gate (T4; #131: ordered multi-check check-set) -----------
 
 
-# ARCH-1.S2: the check-set builders + gate runners moved to check_runner.py.
-# These back-compat aliases keep develop()'s internal call sites and external
-# importers (review_only, pr_delivery, tests' monkeypatch targets) resolving
-# through this module until S8's public-surface flip deletes them.
+# ARCH-1.S2/S6: the check-set builders + gate runners live in check_runner.py.
+# After S6 the round phases call check_runner.* directly, so develop keeps only
+# the two aliases it still needs (both deleted at S8's flip):
+#   * _run_check_set — the internal monkeypatch seam: bound into Services by
+#     _develop_services (so develop_mod._run_check_set patches take effect through
+#     the phases' ctx.services.run_check_set), and imported by review_only;
+#   * _load_gate_ledger — used in setup below.
+# _merge_check_sets / _persist_gate_ledger were dropped here: S6 moved their last
+# callers into the phases (check_runner.merge_check_sets / .persist_gate_ledger),
+# leaving the aliases dead (no importer, no develop-body use).
 _run_check_set = run_check_set
-_merge_check_sets = merge_check_sets
 _load_gate_ledger = load_gate_ledger
-_persist_gate_ledger = persist_gate_ledger
 
 # ARCH-1.S4: build_run_cmd + the usage-limit pause loop (turn_with_limit_pauses,
 # PauseBudget, resume_after_from, _CONTINUATION_PROMPT) moved to agent_session.py;
@@ -446,37 +445,55 @@ def develop(
         reviewers.append(_ReviewerState(spec, rname, rcmd, wt))
     coder_session = str(uuid.uuid4())
 
-    status = "failed"
-    failure_reason = "no rounds ran"
-    final_reviews: list[ReviewOutcome] = []
-    # The per-round gate is an ordered check-set (#131); ``gate`` stays the
-    # ``test`` check's back-compat view so the prompt/summary/result sites below
-    # are unchanged. ``checks`` is the Review-Profile-selected set, resolved once
-    # (detection probes the image). #140/ADR §4: ``fast`` checks run every round
-    # for tight coder feedback; ``candidate`` checks (expensive — dep-audit /
-    # coverage / semgrep) run only on the approval candidate, the round that would
-    # otherwise pass.
-    gate: GateResult | None = None
-    check_set: CheckSetResult | None = None
+    # The per-round gate is an ordered check-set (#131). ``fast`` checks run every
+    # round for tight coder feedback; ``candidate`` checks (expensive — dep-audit /
+    # coverage / semgrep) run only on the approval candidate (#140/ADR §4). #134:
+    # resolve the runnable formatters once, like the check-set (empty = no-op).
     checks = build_check_set(config, wt)
     fast_checks = tuple(c for c in checks if c.stage == "fast")
     candidate_checks = tuple(c for c in checks if c.stage == "candidate")
-    # #134/ADR §4: the auto-format pass rewrites the round commit in place before the
-    # gate + panel. Resolve the runnable formatters once (detection + one image probe),
-    # like the check-set; empty for a markerless repo, when the pass is a no-op.
     formatters = autoformat.resolve_formatters(config, wt)
     gate_ledger = _load_gate_ledger(config)  # #132: one per run; survives resume
-    rounds_completed = 0
-    coder_cost = 0.0
-    review_cost = 0.0
     budget = _PauseBudget(config.max_pause_minutes * 60)
-    services = _develop_services()  # ARCH-1.S4: injected into the coder turn loop
-    stall_strikes = 0  # T7: consecutive no-progress rounds
-    prev_signature: frozenset | None = None
-    resume_after: datetime | None = None  # set only on interrupted (T10)
-    gated_sha: str | None = None  # latest committed tree (the approval candidate)
-    candidate_ran_for_sha: str | None = None  # dedup the candidate run per commit
 
+    # RoundContext is the explicit successor of this function's locals bag (S6).
+    # The boundary collaborators are injected from THIS module's globals so the
+    # ``develop_mod`` monkeypatch targets stay live and rounds.py imports neither
+    # panel nor agent_session nor develop (see rounds.py). Run-state (costs,
+    # check_set, gate, final_reviews, coder_session, rounds_completed, …) is mutated
+    # on ctx and read back into locals below for the unchanged epilogue.
+    ctx = RoundContext(
+        config=config,
+        wt=wt,
+        base=base,
+        names=names,
+        services=_develop_services(),
+        reviewers=reviewers,
+        coder_container=coder_name,
+        coder_engine=coder_engine,
+        coder_timeout=coder_timeout,
+        reviewer_timeout=reviewer_timeout,
+        fast_checks=fast_checks,
+        candidate_checks=candidate_checks,
+        formatters=formatters,
+        gate_ledger=gate_ledger,
+        budget=budget,
+        coder_session=coder_session,
+        turn_with_limit_pauses=_turn_with_limit_pauses,
+        run_panel_round=run_panel_round,
+        resume_after_from=_resume_after_from,
+        render_panel_findings=_render_panel_findings,
+        coder_summary=_coder_summary,
+        record_coder_disputes=_record_coder_disputes,
+        coder_handoff_nudge=_coder_handoff_nudge,
+    )
+
+    # The default outcome is "max_rounds" — the exit the loop lands on when it
+    # completes without any round returning an early CycleExit (exit K). A round
+    # that DOES terminate early overrides this and breaks. (An exception inside the
+    # try bypasses the epilogue entirely — exit L — so this value is never read on
+    # that path.)
+    exit_state = CycleExit(status="max_rounds", failure_reason="", resume_after=None)
     try:
         containers.start_container(coder_cmd)
         for rstate in reviewers:
@@ -488,325 +505,27 @@ def develop(
             len(reviewers),
             ", ".join(names),
         )
-
         for round_no in range(1, config.max_rounds + 1):
-            rounds_completed = round_no
-            # --- coder turn ------------------------------------------------
-            if round_no == 1:
-                # T8: an EXPLICIT acceptance criteria (flag / task metadata)
-                # gets its own section; when it merely falls back to the
-                # description, repeating it would be noise.
-                ac_section = (
-                    f"\n## Acceptance criteria\n\n{config.acceptance_criteria}\n"
-                    if config.acceptance_criteria
-                    else ""
-                )
-                coder_prompt = _render(
-                    handoff.load_prompt("coder_init.md"),
-                    description=config.description,
-                    acceptance_criteria_section=ac_section,
-                    handoff_file=handoff.coder_handoff_name(1),
-                )
-                coder_resume = False
-            else:
-                assert final_reviews  # set by the prior round's reviews
-                review_files = ", ".join(
-                    f"`{handoff.reviewer_handoff_name(round_no - 1, n)}`" for n in names
-                )
-                coder_prompt = _render(
-                    handoff.load_prompt("coder_fix.md"),
-                    round_no=str(round_no),
-                    acceptance_criteria=config.effective_acceptance_criteria,
-                    findings=_render_panel_findings(final_reviews),
-                    gate_summary=render_check_summary(
-                        check_set, for_coder=True, gate_ledger=gate_ledger
-                    ),
-                    review_files=review_files,
-                    handoff_file=handoff.coder_handoff_name(round_no),
-                )
-                coder_resume = True
-
-            coder_turn, coder_interrupted, attempt_cost = _turn_with_limit_pauses(
-                config,
-                budget,
-                services=services,
-                agent="coder",
-                container=coder_name,
-                config_dir=config.coder_config_dir,
-                prompt=coder_prompt,
-                session_id=coder_session,
-                resume=coder_resume,
-                round_no=round_no,
-                timeout=coder_timeout,
-                engine=coder_engine,
-            )
-            coder_cost += attempt_cost
-            # Codex mints its session handle (thread_id) on turn 1; reuse the
-            # returned handle for resumes + persist it (no-op for claude, which
-            # echoes the supplied uuid). Drives daemon-resume + PR delivery.
-            if coder_turn.session_id:
-                coder_session = coder_turn.session_id
-            if coder_interrupted:
-                failure_reason = (
-                    f"round {round_no}: coder usage-limited; pause budget exhausted"
-                )
-                status = "interrupted"
-                resume_after = _resume_after_from(coder_turn)
+            round_exit = run_round(ctx, round_no)
+            if round_exit is not None:
+                exit_state = round_exit
                 break
-            done_present = (
-                config.handoff_dir / handoff.coder_handoff_name(round_no)
-            ).is_file()
-            # The turn whose success gates the handoff for this round. The
-            # salvage nudge (below) replaces it, so a re-prompt is judged on the
-            # NUDGE's own outcome — a nudge that writes the file but then exits
-            # failed/non-zero is not a clean recovery.
-            handoff_turn = coder_turn
-            # Salvage (lithos-loom#114): the coder ended its turn cleanly and
-            # left work in the worktree but never wrote its handoff (classic
-            # case: it backgrounded a slow suite and stopped before the handoff
-            # step). The implementation is done; only the required breadcrumb is
-            # missing. Re-prompt once to write it before failing — the prompt
-            # already forbids this (#115); this recovers the slips-through. Only
-            # for a clean turn (a crashed/errored turn can't be resumed) and
-            # only when there is uncommitted work to save (else a nudge is
-            # wasted); between rounds the worktree is clean, so the flag
-            # reflects this round's coder work.
-            if (
-                coder_turn.succeeded
-                and not done_present
-                and git.has_uncommitted_changes(wt)
-            ):
-                logger.warning(
-                    "story-develop %s: round %d coder ended its turn with "
-                    "uncommitted changes but no handoff — re-prompting once to "
-                    "write it",
-                    config.run_id,
-                    round_no,
-                )
-                handoff_turn = run_turn(
-                    container=coder_name,
-                    prompt=_coder_handoff_nudge(round_no),
-                    session_id=coder_session,
-                    resume=True,
-                    timeout=coder_timeout,
-                    engine=coder_engine,
-                    model=config.coder_model,
-                    effort=config.coder_effort,
-                )
-                coder_cost += handoff_turn.cost_usd
-                if handoff_turn.session_id:
-                    coder_session = handoff_turn.session_id
-                done_present = (
-                    config.handoff_dir / handoff.coder_handoff_name(round_no)
-                ).is_file()
-            if not (handoff_turn.succeeded and done_present):
-                reasons = []
-                if not handoff_turn.succeeded:
-                    reasons.append(f"coder turn failed (exit {handoff_turn.exit_code})")
-                if not done_present:
-                    reasons.append("no coder handoff file")
-                failure_reason = f"round {round_no}: " + "; ".join(reasons)
-                status = "failed"
-                break
-
-            # T7: record the coder's dispute marks (its handoff may carry a
-            # Findings block updating ids with status: disputed). Tolerant —
-            # an unparseable coder handoff just records nothing.
-            if round_no >= 2:
-                _record_coder_disputes(config, reviewers, round_no)
-
-            new_commit = git.commit_all(
-                wt,
-                f"story-develop r{round_no}: {config.description}",
-                exclude=[HANDOFF_DIRNAME],
-            )
-            if round_no == 1 and new_commit is None:
-                failure_reason = "round 1: coder produced no commit"
-                status = "failed"
-                break
-            if new_commit is not None:
-                # #134/ADR §4: auto-format the round's commit BEFORE the gate + panel.
-                # The formatter rewrites source in place; any change is a SEPARATE
-                # commit whose SHA supersedes new_commit, so the gate runs on — and the
-                # reviewers review — that exact formatted tree. Best-effort: a no-op
-                # (already clean, or no formatter) leaves new_commit untouched.
-                format_sha = autoformat.run_format_pass(
-                    config, wt, round_no, formatters
-                )
-                if format_sha is not None:
-                    new_commit = format_sha
-                # Track the latest committed tree so the approval-candidate gate
-                # (#140) can run candidate-staged checks against it even on a later
-                # round that produced no fresh commit.
-                gated_sha = new_commit
-
-            # T7: cost ceiling — check before spending more on reviews.
-            if (
-                config.max_cost_usd is not None
-                and coder_cost + review_cost >= config.max_cost_usd
-            ):
-                failure_reason = (
-                    f"round {round_no}: cost ceiling reached "
-                    f"(${coder_cost + review_cost:.2f} >= ${config.max_cost_usd:.2f})"
-                )
-                status = "cost_exceeded"
-                break
-
-            # --- deterministic gate (only when there is a new commit to gate) -
-            # #140/ADR §4: the per-round gate runs the FAST checks only; the
-            # candidate-staged checks are deferred to the approval candidate below.
-            if fast_checks and new_commit is not None:
-                # Overwrite unconditionally: on a gate infra error this clears
-                # to None rather than letting a PRIOR commit's result (e.g. a
-                # stale RED) stand in for this commit. A
-                # round with no new commit keeps the prior result — the tree is
-                # unchanged, so it still describes HEAD.
-                check_set = _run_check_set(
-                    config, wt, new_commit, round_no, fast_checks, gate_ledger
-                )
-                gate = check_set.test_gate if check_set is not None else None
-                _persist_gate_ledger(config, gate_ledger)
-
-            # --- reviewer turns (panel order, sequential) -------------------
-            # The single shared panel primitive (#154): review-only mode drives
-            # the SAME call. Round 1 hands the coder's summary to the panel;
-            # later rounds resume each reviewer with its open findings.
-            panel = run_panel_round(
-                config,
-                reviewers,
-                wt=wt,
-                base=base,
-                round_no=round_no,
-                check_set=check_set,
-                gate_ledger=gate_ledger,
-                budget=budget,
-                reviewer_timeout=reviewer_timeout,
-                coder_summary=_coder_summary(config, 1) if round_no == 1 else "",
-                # ARCH-1.S5: reviewer turns run through develop's own seam
-                services=services,
-            )
-            round_reviews = panel.round_reviews
-            review_cost += panel.cost
-            final_reviews = round_reviews
-
-            if panel.interrupted:
-                failure_reason = (
-                    f"round {round_no}: reviewer usage-limited; pause budget exhausted"
-                )
-                status = "interrupted"
-                resume_after = panel.resume_after
-                break
-            if panel.invalid_reviewer is not None:
-                failure_reason = (
-                    f"round {round_no}: reviewer "
-                    f"[{panel.invalid_reviewer}] handoff invalid"
-                )
-                status = "failed"
-                break
-
-            # Approval requires ALL reviewers to pass their OWN threshold in
-            # the SAME round (PRD decision #7). Approval deliberately takes
-            # precedence over the cost ceiling when both land in the same
-            # round: the ceiling exists to stop FURTHER spend on unfinished
-            # work, and the spend has already happened — relabelling a
-            # finished, approved run as cost_exceeded would discard a good
-            # branch for no protective benefit.
-            if all(r.passed for r in round_reviews):
-                # #140/ADR §4: the approval candidate — run the expensive
-                # candidate-staged checks once on this tree before sealing approval.
-                # A *required* candidate (e.g. thorough's dep-audit) now blocks via
-                # :func:`gate_floor_blocks` below, so its findings merge into
-                # ``check_set`` + the ledger + the ``[DevelopResult]`` and, when it
-                # blocks, hold approval so a later round surfaces them to the
-                # coder/panel. Run once per committed tree (dedup on the sha).
-                if (
-                    candidate_checks
-                    and gated_sha is not None
-                    and candidate_ran_for_sha != gated_sha
-                ):
-                    candidate_ran_for_sha = gated_sha
-                    candidate_set = _run_check_set(
-                        config, wt, gated_sha, round_no, candidate_checks, gate_ledger
-                    )
-                    check_set = _merge_check_sets(check_set, candidate_set)
-                    gate = check_set.test_gate if check_set is not None else None
-                    _persist_gate_ledger(config, gate_ledger)
-                # #140 floor: a *required* check blocks approval — its verdict read
-                # from the ledger severity for adapter tools, the raw exit otherwise
-                # (informational checks never block, even if RED).
-                if gate_floor_blocks(check_set, gate_ledger):
-                    logger.info(
-                        "story-develop %s: round %d reviews passed but a required "
-                        "check blocks approval; continuing",
-                        config.run_id,
-                        round_no,
-                    )
-                else:
-                    status = "approved"
-                    break
-
-            # --- T7 termination guards (not approved this round) ------------
-            # Dispute escalation: a coder-disputed finding the reviewer kept
-            # blocking for 2 consecutive rounds -> stop with a human
-            # breadcrumb rather than grinding to max_rounds.
-            deadlocked = [
-                f"{r.spec.name}/{fid}"
-                for r in reviewers
-                for fid in r.ledger.disputed_deadlocks(r.spec.block_threshold)
-            ]
-            if deadlocked:
-                logger.warning(
-                    "[ReviewDispute] story-develop %s: round %d dispute deadlock "
-                    "on %s — stopping for human review",
-                    config.run_id,
-                    round_no,
-                    ", ".join(deadlocked),
-                )
-                failure_reason = (
-                    f"round {round_no}: dispute deadlock on "
-                    f"{', '.join(deadlocked)} (coder disputes, reviewer keeps "
-                    "blocking)"
-                )
-                status = "disputed"
-                break
-            # Stall guard, keyed off finding IDENTITY: an empty round commit
-            # or an unchanged blocking set, two rounds running -> stop.
-            signature = frozenset(
-                (r.spec.name, fid, fstatus)
-                for r in reviewers
-                for fid, fstatus in r.ledger.blocking_signature(r.spec.block_threshold)
-            )
-            if round_no >= 2 and (new_commit is None or signature == prev_signature):
-                stall_strikes += 1
-            else:
-                stall_strikes = 0
-            prev_signature = signature
-            if stall_strikes >= 2:
-                failure_reason = f"round {round_no}: stalled — " + (
-                    "no new commit and/or blocking findings unchanged "
-                    "across 2 consecutive rounds"
-                )
-                status = "stalled"
-                break
-            # Cost ceiling after the round's reviews.
-            if (
-                config.max_cost_usd is not None
-                and coder_cost + review_cost >= config.max_cost_usd
-            ):
-                failure_reason = (
-                    f"round {round_no}: cost ceiling reached "
-                    f"(${coder_cost + review_cost:.2f} >= ${config.max_cost_usd:.2f})"
-                )
-                status = "cost_exceeded"
-                break
-            # otherwise: loop to the next round (if any remain)
-        else:
-            # loop exhausted without an approval / failure break
-            status = "max_rounds"
     finally:
         containers.stop_container(coder_name)
         for rstate in reviewers:
             containers.stop_container(rstate.container)
+
+    # Unpack ctx's run-state + the exit into the exact local names the epilogue
+    # below already uses, so that block stays byte-for-byte unchanged.
+    status = exit_state.status
+    failure_reason = exit_state.failure_reason
+    resume_after = exit_state.resume_after
+    coder_cost = ctx.coder_cost
+    review_cost = ctx.review_cost
+    gate = ctx.gate
+    final_reviews = ctx.final_reviews
+    coder_session = ctx.coder_session
+    rounds_completed = ctx.rounds_completed
 
     commits = git.commits_since(wt, base)
     handoff_present = (config.handoff_dir / handoff.coder_handoff_name(1)).is_file()
