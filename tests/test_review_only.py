@@ -79,7 +79,7 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         lambda name: state["stopped"].append(name),
     )
     monkeypatch.setattr(
-        review_only, "_build_run_cmd", lambda *a, **k: (k.get("agent", "c"), ["run"])
+        review_only, "build_run_cmd", lambda *a, **k: (k.get("agent", "c"), ["run"])
     )
     monkeypatch.setattr(review_only, "seed_handoff_dir", lambda d: None)
 
@@ -97,7 +97,7 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         )
 
     monkeypatch.setattr(review_only, "build_check_set", fake_build_check_set)
-    monkeypatch.setattr(review_only, "_run_check_set", fake_run_check_set)
+    monkeypatch.setattr(review_only, "run_check_set", fake_run_check_set)
 
     def fake_panel(config, reviewers, **kwargs):
         state["panel_calls"].append(kwargs)

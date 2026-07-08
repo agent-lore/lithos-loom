@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -43,28 +42,14 @@ from pathlib import Path
 
 from ...runner import git, worktree
 from . import (
+    agent_session,
     autoformat,
+    check_runner,
     containers,
     engines,
     handoff,
+    panel,
     run_outcome,
-)
-from .agent_session import (
-    PauseBudget,
-    build_run_cmd,
-    resume_after_from,
-    turn_with_limit_pauses,
-)
-from .check_runner import (
-    build_check_set,
-    load_gate_ledger,
-    run_check_set,
-)
-from .check_runner import (
-    check_result_blocks as check_result_blocks,
-)
-from .check_runner import (
-    gate_floor_blocks as gate_floor_blocks,
 )
 from .config import (
     DevelopConfig,
@@ -72,20 +57,14 @@ from .config import (
     is_valid_reviewer_name,
 )
 from .gate_findings import GateFinding
-from .handoff import (
-    HandoffError,
-    render_findings,
-    render_prompt,
-)
+from .handoff import HandoffError
 from .panel import (
-    ReviewerState,
     ReviewOutcome,
     findings_by_severity,
     run_panel_round,
 )
 from .rounds import CycleExit, RoundContext, Services, run_round
 from .test_gate import GateResult
-from .turns import run_turn
 
 logger = logging.getLogger(__name__)
 
@@ -154,12 +133,12 @@ def _render_panel_findings(outcomes: list[ReviewOutcome]) -> str:
     more than one reviewer, keeping ids unambiguous across the panel.
     """
     if len(outcomes) == 1:
-        return _render_findings(outcomes[0].findings)
+        return handoff.render_findings(outcomes[0].findings)
     parts: list[str] = []
     for outcome in outcomes:
         parts.append(f"### From the {outcome.reviewer} reviewer")
         if outcome.findings:
-            rendered = _render_findings(outcome.findings)
+            rendered = handoff.render_findings(outcome.findings)
             # qualify ids: [f-001] -> [code-quality/f-001]
             rendered = rendered.replace("- [", f"- [{outcome.reviewer}/")
             parts.append(rendered)
@@ -180,65 +159,14 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
         return "(coder summary unavailable)"
 
 
-# --- deterministic gate (T4; #131: ordered multi-check check-set) -----------
-
-
-# ARCH-1.S2/S6: the check-set builders + gate runners live in check_runner.py.
-# After S6 the round phases call check_runner.* directly, so develop keeps only
-# the two aliases it still needs (both deleted at S8's flip):
-#   * _run_check_set — the internal monkeypatch seam: bound into Services by
-#     _develop_services (so develop_mod._run_check_set patches take effect through
-#     the phases' ctx.services.run_check_set), and imported by review_only;
-#   * _load_gate_ledger — used in setup below.
-# _merge_check_sets / _persist_gate_ledger were dropped here: S6 moved their last
-# callers into the phases (check_runner.merge_check_sets / .persist_gate_ledger),
-# leaving the aliases dead (no importer, no develop-body use).
-_run_check_set = run_check_set
-_load_gate_ledger = load_gate_ledger
-
-# ARCH-1.S4: build_run_cmd + the usage-limit pause loop (turn_with_limit_pauses,
-# PauseBudget, resume_after_from, _CONTINUATION_PROMPT) moved to agent_session.py;
-# the Services injection seam lives in rounds.py. develop() keeps these aliases
-# (deleted in S8) for its own calls + review_only / pr_delivery importers, and
-# wires Services from its OWN module globals (below) so the existing
-# monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/"_run_check_set") patches
-# — and containers.* patches — keep taking effect. _sleep stays defined here as
-# the seam Services.sleep binds when develop() builds its Services.
-_build_run_cmd = build_run_cmd
-_PauseBudget = PauseBudget
-_turn_with_limit_pauses = turn_with_limit_pauses
-_resume_after_from = resume_after_from
-
-# ARCH-1.S5: the reviewer panel (ReviewOutcome / PanelRoundResult / ReviewerState /
-# run_panel_round / findings_by_severity / _reviewer_brief / SEVERITY_CALIBRATION)
-# moved to panel.py, and the generic prompt renderers to handoff.py
-# (render_prompt / render_findings). These back-compat aliases keep develop()'s
-# own coder-side call sites and the module importers that still reach these names
-# through develop resolving until S8's public-name flip: review_only imports
-# _ReviewerState + run_panel_round; pr_delivery imports _render + _render_findings.
-# (ReviewOutcome / findings_by_severity are imported straight above because
-# develop's own body uses them. Names only *tests* need — PanelRoundResult,
-# SEVERITY_CALIBRATION, _reviewer_brief — are NOT re-exported: those tests import
-# them from panel directly, since the panel is their new owner.)
-_ReviewerState = ReviewerState
-_render = render_prompt
-_render_findings = render_findings
-
-
-def _develop_services() -> Services:
-    """The round pipeline's :class:`Services`, bound from develop's OWN module
-    globals. develop() builds it at run start — *after* the tests apply their
-    ``monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/"_run_check_set")`` (and
-    ``containers.*``) patches — so each field captures the patched callable and
-    every one of those patches keeps taking effect until S8 re-points the tests to
-    :meth:`Services.live`."""
-    return Services(
-        run_turn=run_turn,
-        sleep=_sleep,
-        start_container=containers.start_container,
-        stop_container=containers.stop_container,
-        run_check_set=_run_check_set,
-    )
+# ARCH-1.S8 (public-surface flip): the S2/S4/S5 back-compat aliases and the
+# develop-local Services seam (_develop_services / _sleep) are gone. develop()
+# now builds :meth:`Services.live` directly and calls the public names —
+# check_runner.build_check_set / .load_gate_ledger, agent_session's build_run_cmd
+# / PauseBudget / turn_with_limit_pauses / resume_after_from, panel's ReviewerState
+# / run_panel_round — so tests patch the real module homes (turns.run_turn,
+# time.sleep, check_runner.run_check_set / .build_check_set) rather than develop's
+# aliases. review_only + pr_delivery likewise import from those homes.
 
 
 # --- usage-limit reaction (T5) ----------------------------------------------
@@ -262,16 +190,11 @@ def _coder_handoff_nudge(round_no: int) -> str:
     )
 
 
-def _sleep(seconds: float) -> None:
-    """Monkeypatch seam — tests must never actually sleep."""
-    time.sleep(seconds)
-
-
 # --- per-turn drivers -------------------------------------------------------
 
 
 def _record_coder_disputes(
-    config: DevelopConfig, reviewers: list[_ReviewerState], round_no: int
+    config: DevelopConfig, reviewers: list[panel.ReviewerState], round_no: int
 ) -> None:
     """Parse the coder's round handoff and record dispute marks (T7).
 
@@ -424,7 +347,7 @@ def develop(
     base = git.base_sha(wt)
     logger.info("story-develop %s: worktree %s (branch %s)", config.run_id, wt, branch)
 
-    coder_name, coder_cmd = _build_run_cmd(
+    coder_name, coder_cmd = agent_session.build_run_cmd(
         config,
         agent="coder",
         engine=coder_engine,
@@ -432,9 +355,9 @@ def develop(
         wt=wt,
         read_only=False,
     )
-    reviewers: list[_ReviewerState] = []
+    reviewers: list[panel.ReviewerState] = []
     for spec in specs:
-        rname, rcmd = _build_run_cmd(
+        rname, rcmd = agent_session.build_run_cmd(
             config,
             agent=f"review-{spec.name}",
             engine=engines.get_engine(spec.tool),
@@ -442,32 +365,37 @@ def develop(
             wt=wt,
             read_only=True,
         )
-        reviewers.append(_ReviewerState(spec, rname, rcmd, wt))
+        reviewers.append(panel.ReviewerState(spec, rname, rcmd, wt))
     coder_session = str(uuid.uuid4())
 
     # The per-round gate is an ordered check-set (#131). ``fast`` checks run every
     # round for tight coder feedback; ``candidate`` checks (expensive — dep-audit /
     # coverage / semgrep) run only on the approval candidate (#140/ADR §4). #134:
     # resolve the runnable formatters once, like the check-set (empty = no-op).
-    checks = build_check_set(config, wt)
+    # build_check_set is reached via the module so tests can patch
+    # check_runner.build_check_set (S8).
+    checks = check_runner.build_check_set(config, wt)
     fast_checks = tuple(c for c in checks if c.stage == "fast")
     candidate_checks = tuple(c for c in checks if c.stage == "candidate")
     formatters = autoformat.resolve_formatters(config, wt)
-    gate_ledger = _load_gate_ledger(config)  # #132: one per run; survives resume
-    budget = _PauseBudget(config.max_pause_minutes * 60)
+    # #132: one gate ledger per run; survives resume.
+    gate_ledger = check_runner.load_gate_ledger(config)
+    budget = agent_session.PauseBudget(config.max_pause_minutes * 60)
 
     # RoundContext is the explicit successor of this function's locals bag (S6).
-    # The boundary collaborators are injected from THIS module's globals so the
-    # ``develop_mod`` monkeypatch targets stay live and rounds.py imports neither
-    # panel nor agent_session nor develop (see rounds.py). Run-state (costs,
-    # check_set, gate, final_reviews, coder_session, rounds_completed, …) is mutated
-    # on ctx and read back into locals below for the unchanged epilogue.
+    # The boundary collaborators are injected from THIS module's globals — so the
+    # develop_mod.run_panel_round patch (the exit-L test) stays live — and rounds.py
+    # imports neither panel nor agent_session nor develop (see rounds.py). The
+    # side-effecting seams come from Services.live() (S8): tests patch the real
+    # module homes (turns.run_turn / time.sleep / check_runner.run_check_set). Run
+    # state (costs, check_set, gate, final_reviews, coder_session, rounds_completed,
+    # …) is mutated on ctx and read back into locals below for the unchanged epilogue.
     ctx = RoundContext(
         config=config,
         wt=wt,
         base=base,
         names=names,
-        services=_develop_services(),
+        services=Services.live(),
         reviewers=reviewers,
         coder_container=coder_name,
         coder_engine=coder_engine,
@@ -479,9 +407,9 @@ def develop(
         gate_ledger=gate_ledger,
         budget=budget,
         coder_session=coder_session,
-        turn_with_limit_pauses=_turn_with_limit_pauses,
+        turn_with_limit_pauses=agent_session.turn_with_limit_pauses,
         run_panel_round=run_panel_round,
-        resume_after_from=_resume_after_from,
+        resume_after_from=agent_session.resume_after_from,
         render_panel_findings=_render_panel_findings,
         coder_summary=_coder_summary,
         record_coder_disputes=_record_coder_disputes,

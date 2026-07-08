@@ -16,7 +16,6 @@ from typing import Any
 import pytest
 
 from lithos_loom.plugins.story_develop import containers, pr_delivery
-from lithos_loom.plugins.story_develop import develop as develop_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
 from lithos_loom.plugins.story_develop.pr_delivery import (
@@ -375,11 +374,8 @@ def _install(
     monkeypatch.setattr(containers, "stop_container", lambda n: None)
     import lithos_loom.plugins.story_develop.turns as turns_mod
 
-    monkeypatch.setattr(
-        develop_mod, "run_turn", fake_run_turn
-    )  # not used by deliver, but harmless
+    # deliver drives the coder fix turn through turns.run_turn (module attribute).
     monkeypatch.setattr(turns_mod, "run_turn", fake_run_turn)
-    # deliver imports run_turn from .turns inside the function body
     return state
 
 

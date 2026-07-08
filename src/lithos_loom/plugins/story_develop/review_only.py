@@ -6,11 +6,11 @@ deterministic gate once on that tree, run the reviewer panel once (no coder, no
 fix loop), and consolidate the result into a :class:`ReviewReport`.
 
 There is intentionally **one** panel implementation: this calls the same
-:func:`~.develop.run_panel_round` primitive ``develop()`` uses, so a
+:func:`~.panel.run_panel_round` primitive ``develop()`` uses, so a
 prompt / severity / lifecycle fix can never land in one review path and silently
-miss the other. The deterministic gate (:func:`~.develop.build_check_set` /
-:func:`~.develop._run_check_set`) and the per-check block decision
-(:func:`~.develop.check_result_blocks`) are likewise reused verbatim.
+miss the other. The deterministic gate (:func:`~.check_runner.build_check_set` /
+:func:`~.check_runner.run_check_set`) and the per-check block decision
+(:func:`~.check_runner.check_result_blocks`) are likewise reused verbatim.
 
 This function is also the execution primitive the review-correctness eval
 harness (#183) drives: it returns structured findings for an arbitrary change.
@@ -22,20 +22,18 @@ import logging
 
 from ...runner import worktree
 from . import containers, engines
-from .check_set import CheckSetResult
-from .config import HANDOFF_MOUNT_NAME, DevelopConfig, is_valid_reviewer_name
-from .develop import (
-    _build_run_cmd,
-    _PauseBudget,
-    _ReviewerState,
-    _run_check_set,
+from .agent_session import PauseBudget, build_run_cmd
+from .check_runner import (
     build_check_set,
     check_result_blocks,
     gate_floor_blocks,
-    run_panel_round,
+    run_check_set,
 )
+from .check_set import CheckSetResult
+from .config import HANDOFF_MOUNT_NAME, DevelopConfig, is_valid_reviewer_name
 from .gate_findings import GateLedger
 from .handoff import seed_handoff_dir
+from .panel import ReviewerState, run_panel_round
 from .review_report import (
     GateCheckReport,
     ReviewerReport,
@@ -104,9 +102,9 @@ def review_change(
     # coder, so create it here before the RO reviewers start.
     (wt / HANDOFF_MOUNT_NAME).mkdir(parents=True, exist_ok=True)
 
-    reviewers: list[_ReviewerState] = []
+    reviewers: list[ReviewerState] = []
     for spec in specs:
-        rname, rcmd = _build_run_cmd(
+        rname, rcmd = build_run_cmd(
             config,
             agent=f"review-{spec.name}",
             engine=engines.get_engine(spec.tool),
@@ -114,7 +112,7 @@ def review_change(
             wt=wt,
             read_only=True,
         )
-        reviewers.append(_ReviewerState(spec, rname, rcmd, wt))
+        reviewers.append(ReviewerState(spec, rname, rcmd, wt))
 
     gate_ledger = GateLedger()
     check_set: CheckSetResult | None = None
@@ -126,7 +124,7 @@ def review_change(
         # Gate first so the panel prompt carries the deterministic summary, then
         # one reviewer round — the SAME primitive develop() drives.
         if checks:
-            check_set = _run_check_set(
+            check_set = run_check_set(
                 config, wt, change.head_sha, 1, checks, gate_ledger
             )
         panel = run_panel_round(
@@ -137,7 +135,7 @@ def review_change(
             round_no=1,
             check_set=check_set,
             gate_ledger=gate_ledger,
-            budget=_PauseBudget(config.max_pause_minutes * 60),
+            budget=PauseBudget(config.max_pause_minutes * 60),
             reviewer_timeout=reviewer_timeout,
             coder_summary=_REVIEW_ONLY_CODER_SUMMARY,
         )
@@ -156,7 +154,7 @@ def review_change(
 def _build_report(
     config: DevelopConfig,
     change: ResolvedChange,
-    reviewers: list[_ReviewerState],
+    reviewers: list[ReviewerState],
     panel,
     check_set: CheckSetResult | None,
     gate_ledger: GateLedger,
