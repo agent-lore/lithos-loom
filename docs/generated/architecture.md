@@ -30,6 +30,25 @@ graph TD
     Supervisor
     Tasks
   end
+  click Bus "components/Bus.md"
+  click Children "components/Children.md"
+  click Cli "components/Cli.md"
+  click Config "components/Config.md"
+  click Doctor "components/Doctor.md"
+  click Entrypoint "components/Entrypoint.md"
+  click Errors "components/Errors.md"
+  click Evals "components/Evals.md"
+  click GitHub "components/GitHub.md"
+  click LithosClient "components/LithosClient.md"
+  click Plugins "components/Plugins.md"
+  click ProjectContext "components/ProjectContext.md"
+  click Render "components/Render.md"
+  click Runners "components/Runners.md"
+  click Sources "components/Sources.md"
+  click State "components/State.md"
+  click Subscriptions "components/Subscriptions.md"
+  click Supervisor "components/Supervisor.md"
+  click Tasks "components/Tasks.md"
   Children --> Bus
   Children --> Config
   Children --> GitHub
@@ -92,4 +111,49 @@ graph TD
   Subscriptions --> State
   Subscriptions --> Tasks
   Supervisor --> Config
+  linkStyle 0 stroke:#999,stroke-dasharray:4
+  linkStyle 1 stroke:#999,stroke-dasharray:4
+  linkStyle 2 stroke:#999,stroke-dasharray:4
+  linkStyle 3 stroke:#999,stroke-dasharray:4
+  linkStyle 5 stroke:#999,stroke-dasharray:4
+  linkStyle 7 stroke:#bbb
+  linkStyle 8 stroke:#bbb
+  linkStyle 9 stroke:#bbb
+  linkStyle 11 stroke:#bbb
+  linkStyle 14 stroke:#bbb
+  linkStyle 15 stroke:#bbb
+  linkStyle 16 stroke:#bbb
+  linkStyle 17 stroke:#bbb
+  linkStyle 18 stroke:#bbb
+  linkStyle 19 stroke:#999,stroke-dasharray:4
+  linkStyle 21 stroke:#999,stroke-dasharray:4
+  linkStyle 23 stroke:#999,stroke-dasharray:4
+  linkStyle 25 stroke:#999,stroke-dasharray:4
+  linkStyle 27 stroke:#999,stroke-dasharray:4
+  linkStyle 29 stroke:#bbb
+  linkStyle 30 stroke:#bbb
+  linkStyle 31 stroke:#bbb
+  linkStyle 32 stroke:#bbb
+  linkStyle 33 stroke:#bbb
+  linkStyle 34 stroke:#bbb
+  linkStyle 35 stroke:#bbb
+  linkStyle 36 stroke:#bbb
+  linkStyle 37 stroke:#bbb
+  linkStyle 38 stroke:#bbb
+  linkStyle 40 stroke:#bbb
+  linkStyle 41 stroke:#bbb
+  linkStyle 43 stroke:#bbb
+  linkStyle 44 stroke:#bbb
+  linkStyle 45 stroke:#bbb
+  linkStyle 46 stroke:#bbb
+  linkStyle 47 stroke:#bbb
+  linkStyle 48 stroke:#bbb
+  linkStyle 49 stroke:#bbb
+  linkStyle 50 stroke:#bbb
+  linkStyle 51 stroke:#bbb
+  linkStyle 52 stroke:#bbb
+  linkStyle 53 stroke:#bbb
+  linkStyle 55 stroke:#bbb
+  linkStyle 56 stroke:#bbb
+  linkStyle 57 stroke:#bbb
 ```

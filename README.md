@@ -155,6 +155,18 @@ make check       # ruff + ruff format + pyright + pytest
 
 `make check` is the mandatory pre-merge gate; all four stages must be green. See [`AGENTS.md`](AGENTS.md) for the non-obvious project facts and rules of engagement.
 
+After changing code or models, regenerate the architecture docs (component
+diagram, domain model, metrics, and per-component pages under
+[`docs/generated/`](docs/generated/README.md)):
+
+```bash
+make diagrams   # = pytest tests/guardrail/ -q; commit the result
+```
+
+`make test` runs the guardrail tests too, so a normal test run also rewrites
+`docs/generated/`. CI's `diagrams` job fails if the committed views drift from the
+code.
+
 ## Configuration model
 
 | Layer | What it sets | When you change it |
