@@ -48,13 +48,14 @@ class Services:
 
     @classmethod
     def live(cls) -> Services:
-        """Wire the real modules. Each field defers its module-attr lookup to
-        call time, so monkeypatching ``turns.run_turn`` / ``containers.*`` is
-        still honoured after this ``Services`` is constructed."""
+        """The concrete production seams — the real module callables. Built at
+        ``develop()`` start (once S8 switches to it), *after* any test patch of
+        ``turns.run_turn`` / ``containers.*`` is applied, so each field captures
+        the patched callable."""
         return cls(
-            run_turn=lambda **kw: turns.run_turn(**kw),
-            sleep=lambda seconds: time.sleep(seconds),
-            start_container=lambda cmd: containers.start_container(cmd),
-            stop_container=lambda name: containers.stop_container(name),
-            run_check_set=lambda *a, **k: check_runner.run_check_set(*a, **k),
+            run_turn=turns.run_turn,
+            sleep=time.sleep,
+            start_container=containers.start_container,
+            stop_container=containers.stop_container,
+            run_check_set=check_runner.run_check_set,
         )

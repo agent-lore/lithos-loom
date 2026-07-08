@@ -329,7 +329,7 @@ _persist_gate_ledger = persist_gate_ledger
 # wires Services from its OWN module globals (below) so the existing
 # monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/"_run_check_set") patches
 # — and containers.* patches — keep taking effect. _sleep stays defined here as
-# the seam Services.sleep resolves at call time.
+# the seam Services.sleep binds when develop() builds its Services.
 _build_run_cmd = build_run_cmd
 _PauseBudget = PauseBudget
 _turn_with_limit_pauses = turn_with_limit_pauses
@@ -337,16 +337,18 @@ _resume_after_from = resume_after_from
 
 
 def _develop_services() -> Services:
-    """The round pipeline's :class:`Services`, wired from develop's OWN module
-    globals so existing monkeypatch targets (``develop_mod.run_turn`` / ``_sleep``
-    / ``_run_check_set``, ``containers.start_container`` / ``stop_container``) all
-    keep taking effect until S8 re-points the tests to :meth:`Services.live`."""
+    """The round pipeline's :class:`Services`, bound from develop's OWN module
+    globals. develop() builds it at run start — *after* the tests apply their
+    ``monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/"_run_check_set")`` (and
+    ``containers.*``) patches — so each field captures the patched callable and
+    every one of those patches keeps taking effect until S8 re-points the tests to
+    :meth:`Services.live`."""
     return Services(
-        run_turn=lambda **kw: run_turn(**kw),
-        sleep=lambda seconds: _sleep(seconds),
-        start_container=lambda cmd: containers.start_container(cmd),
-        stop_container=lambda name: containers.stop_container(name),
-        run_check_set=lambda *a, **k: _run_check_set(*a, **k),
+        run_turn=run_turn,
+        sleep=_sleep,
+        start_container=containers.start_container,
+        stop_container=containers.stop_container,
+        run_check_set=_run_check_set,
     )
 
 

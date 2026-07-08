@@ -114,7 +114,7 @@ def _run(
         resume=False,
         round_no=1,
         timeout=100,
-        engine=cast("engines.Engine", engine),
+        engine=cast(engines.Engine, engine),
     )
 
 
