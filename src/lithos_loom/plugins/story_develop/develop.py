@@ -58,8 +58,6 @@ from .agent_session import (
 from .check_runner import (
     build_check_set,
     load_gate_ledger,
-    merge_check_sets,
-    persist_gate_ledger,
     run_check_set,
 )
 from .check_runner import (
@@ -185,14 +183,18 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
 # --- deterministic gate (T4; #131: ordered multi-check check-set) -----------
 
 
-# ARCH-1.S2: the check-set builders + gate runners moved to check_runner.py.
-# These back-compat aliases keep develop()'s internal call sites and external
-# importers (review_only, pr_delivery, tests' monkeypatch targets) resolving
-# through this module until S8's public-surface flip deletes them.
+# ARCH-1.S2/S6: the check-set builders + gate runners live in check_runner.py.
+# After S6 the round phases call check_runner.* directly, so develop keeps only
+# the two aliases it still needs (both deleted at S8's flip):
+#   * _run_check_set — the internal monkeypatch seam: bound into Services by
+#     _develop_services (so develop_mod._run_check_set patches take effect through
+#     the phases' ctx.services.run_check_set), and imported by review_only;
+#   * _load_gate_ledger — used in setup below.
+# _merge_check_sets / _persist_gate_ledger were dropped here: S6 moved their last
+# callers into the phases (check_runner.merge_check_sets / .persist_gate_ledger),
+# leaving the aliases dead (no importer, no develop-body use).
 _run_check_set = run_check_set
-_merge_check_sets = merge_check_sets
 _load_gate_ledger = load_gate_ledger
-_persist_gate_ledger = persist_gate_ledger
 
 # ARCH-1.S4: build_run_cmd + the usage-limit pause loop (turn_with_limit_pauses,
 # PauseBudget, resume_after_from, _CONTINUATION_PROMPT) moved to agent_session.py;
