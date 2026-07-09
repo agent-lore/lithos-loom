@@ -33,7 +33,7 @@ from typing import Any
 
 from lithos_loom.config import LoomConfig
 from lithos_loom.errors import LithosClientError
-from lithos_loom.lithos_client import LithosClient, Note
+from lithos_loom.lithos_client import LithosClient, Note, NoteClient
 
 __all__ = [
     "GITHUB_EXCLUDE_AUTHORS_KEY",
@@ -227,7 +227,7 @@ async def mutate_project_context_metadata(
 
 async def _mutate_with_cas(
     *,
-    client: LithosClient,
+    client: NoteClient,
     doc_path: str,
     slug: str,
     mutator: Callable[[dict[str, Any]], dict[str, Any]],
@@ -283,7 +283,7 @@ async def _mutate_with_cas(
     )
 
 
-async def _read_canonical_doc(client: LithosClient, doc_path: str, slug: str) -> Note:
+async def _read_canonical_doc(client: NoteClient, doc_path: str, slug: str) -> Note:
     note = await client.note_read(path=doc_path)
     if note is None:
         raise GithubMetadataError(

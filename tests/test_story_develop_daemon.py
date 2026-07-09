@@ -10,6 +10,7 @@ plugin and the runner cannot drift apart silently.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from lithos_loom.lithos_client import Note
 from lithos_loom.plugin_runner import validate_result_schema
 from lithos_loom.plugins.story_develop.config import ReviewerSpec
 from lithos_loom.plugins.story_develop.daemon_io import (
@@ -36,6 +38,7 @@ from lithos_loom.plugins.story_develop.daemon_io import (
     resolve_project_settings,
 )
 from lithos_loom.plugins.story_develop.develop import DevelopResult
+from tests.support import FakeLithosClient, make_note
 
 # ── read_task_payload ──────────────────────────────────────────────────
 
@@ -105,48 +108,45 @@ def test_read_task_payload_rejects_invalid_json(tmp_path: Path) -> None:
 # ── resolve_project_settings ───────────────────────────────────────────
 
 
-class _FakeNote:
-    def __init__(self, path: str, metadata: dict[str, Any]) -> None:
-        self.path = path
-        self.metadata = metadata
+def _ctx_note(path: str, metadata: dict[str, Any]) -> Note:
+    """A project-context doc seed for :class:`FakeLithosClient`.
+
+    ``note_read`` matches by ``path`` and ``note_list`` filters on the
+    ``project-context`` tag, so the seed carries both. The note id is the path
+    (paths are unique) so ``note_list`` fallback candidates never collide.
+    """
+    return make_note(path, path=path, metadata=metadata, tags=("project-context",))
 
 
-class _FakeClient:
-    """Stands in for LithosClient: canned note_read / note_list responses."""
+@dataclass
+class _ContextSeed:
+    """Mutable seed for the ``fake_client`` fixture: the canonical-path context
+    doc (``note``), the fallback ``note_list`` candidates (``listing``), and an
+    optional failure injected on ``async with`` entry (``fail_connect``)."""
 
-    note: _FakeNote | None = None
-    listing: list[_FakeNote] = []
-    fail_connect: bool = False
-
-    def __init__(self, url: str, *, agent_id: str) -> None:
-        pass
-
-    async def __aenter__(self) -> _FakeClient:
-        if type(self).fail_connect:
-            raise ConnectionError("lithos down")
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        return None
-
-    async def note_read(self, *, path: str) -> _FakeNote | None:
-        return type(self).note
-
-    async def note_list(self, **kw: Any) -> list[_FakeNote]:
-        return type(self).listing
+    note: Note | None = None
+    listing: list[Note] = field(default_factory=list)
+    fail_connect: BaseException | None = None
 
 
 @pytest.fixture
-def fake_client(monkeypatch) -> type[_FakeClient]:
-    class Client(_FakeClient):
-        note = None
-        listing = []
-        fail_connect = False
+def fake_client(monkeypatch: pytest.MonkeyPatch) -> _ContextSeed:
+    """Patch ``daemon_io.LithosClient`` to yield a seeded ``FakeLithosClient``.
+
+    Tests set ``.note`` / ``.listing`` / ``.fail_connect`` on the returned seed;
+    each ``resolve_project_settings`` run then builds a fresh fake from the
+    seed's current state.
+    """
+    seed = _ContextSeed()
+
+    def _build(*_a: Any, **_k: Any) -> FakeLithosClient:
+        notes = tuple(n for n in (seed.note, *seed.listing) if n is not None)
+        return FakeLithosClient(notes=notes, fail_connect=seed.fail_connect)
 
     monkeypatch.setattr(
-        "lithos_loom.plugins.story_develop.daemon_io.LithosClient", Client
+        "lithos_loom.plugins.story_develop.daemon_io.LithosClient", _build
     )
-    return Client
+    return seed
 
 
 def test_resolve_no_project_slug_uses_builtin_with_friction() -> None:
@@ -159,7 +159,7 @@ def test_resolve_no_project_slug_uses_builtin_with_friction() -> None:
 
 
 def test_resolve_review_profile_from_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_review_profile": "  thorough  "},
     )
@@ -168,7 +168,7 @@ def test_resolve_review_profile_from_project(fake_client) -> None:
 
 
 def test_resolve_invalid_review_profile_frictioned(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_review_profile": 123},
     )
@@ -360,7 +360,7 @@ def test_apply_review_profile_panel_skips_invalid_explicit_selection() -> None:
 
 
 def test_resolve_lithos_unreachable_degrades(fake_client) -> None:
-    fake_client.fail_connect = True
+    fake_client.fail_connect = ConnectionError("lithos down")
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.reviewers == BUILTIN_REVIEWERS
     assert any("cannot read project-context" in f for f in settings.frictions)
@@ -374,11 +374,11 @@ def test_resolve_no_context_doc_degrades(fake_client) -> None:
 
 def test_resolve_falls_back_to_smallest_tagged_doc(fake_client) -> None:
     fake_client.listing = [
-        _FakeNote(
+        _ctx_note(
             "projects/loom/b-context.md",
             {"develop_default_reviewers": ["never-this"]},
         ),
-        _FakeNote(
+        _ctx_note(
             "projects/loom/a-context.md",
             {
                 "develop_reviewers": [{"name": "security"}],
@@ -392,7 +392,7 @@ def test_resolve_falls_back_to_smallest_tagged_doc(fake_client) -> None:
 
 def test_resolve_stale_doc_without_keys_is_builtin_no_friction(fake_client) -> None:
     """Enabling story-develop on a project is purely additive (contract #5)."""
-    fake_client.note = _FakeNote("projects/loom/loom-project-context.md", {})
+    fake_client.note = _ctx_note("projects/loom/loom-project-context.md", {})
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.reviewers == BUILTIN_REVIEWERS
     assert settings.frictions == ()
@@ -400,7 +400,7 @@ def test_resolve_stale_doc_without_keys_is_builtin_no_friction(fake_client) -> N
 
 def test_resolve_pool_without_defaults_is_builtin(fake_client) -> None:
     """Opting a reviewer into the pool does not auto-run it (contract #3/#5)."""
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_reviewers": [{"name": "security", "block_threshold": "minor"}]},
     )
@@ -411,7 +411,7 @@ def test_resolve_pool_without_defaults_is_builtin(fake_client) -> None:
 def test_resolve_selects_canonical_persona_by_name(fake_client) -> None:
     # A name in develop_default_reviewers that is NOT in the project's explicit
     # pool resolves from the canonical registry (#137) — no prompt redefinition.
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_default_reviewers": ["correctness", "security"]},
     )
@@ -428,7 +428,7 @@ def test_resolve_selects_canonical_persona_by_name(fake_client) -> None:
 
 def test_resolve_explicit_pool_entry_overrides_canonical(fake_client) -> None:
     # A project pool entry with a canonical name wins over the canonical persona.
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {
             "develop_reviewers": [{"name": "security", "block_threshold": "major"}],
@@ -442,7 +442,7 @@ def test_resolve_explicit_pool_entry_overrides_canonical(fake_client) -> None:
 
 
 def test_resolve_unknown_non_canonical_name_falls_back(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_default_reviewers": ["no-such-persona"]},
     )
@@ -455,7 +455,7 @@ def test_resolve_unknown_non_canonical_name_falls_back(fake_client) -> None:
 
 
 def test_resolve_no_reviewer_config_is_not_explicit(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_coder": {"tool": "claude"}},  # no reviewer keys at all
     )
@@ -465,7 +465,7 @@ def test_resolve_no_reviewer_config_is_not_explicit(fake_client) -> None:
 
 
 def test_resolve_explicit_selection_is_marked_explicit(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_default_reviewers": ["security"]},
     )
@@ -475,7 +475,7 @@ def test_resolve_explicit_selection_is_marked_explicit(fake_client) -> None:
 
 
 def test_resolve_full_config_with_task_override(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {
             "develop_reviewers": [
@@ -502,7 +502,7 @@ def test_resolve_full_config_with_task_override(fake_client) -> None:
 
 
 def test_resolve_coder_model_and_effort_from_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_coder": {"tool": "claude", "model": "opus", "effort": "high"}},
     )
@@ -514,7 +514,7 @@ def test_resolve_coder_model_and_effort_from_project(fake_client) -> None:
 
 def test_resolve_coder_model_without_tool_keeps_default_tool(fake_client) -> None:
     """develop_coder = {model = ...} is valid — tool stays the default, no friction."""
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_coder": {"model": "sonnet"}},
     )
@@ -525,7 +525,7 @@ def test_resolve_coder_model_without_tool_keeps_default_tool(fake_client) -> Non
 
 
 def test_resolve_task_override_beats_project_coder_model(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_coder": {"model": "opus", "effort": "high"}},
     )
@@ -539,7 +539,7 @@ def test_resolve_task_override_beats_project_coder_model(fake_client) -> None:
 
 
 def test_resolve_reviewer_model_and_effort_flow_through_pool(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {
             "develop_reviewers": [
@@ -554,7 +554,7 @@ def test_resolve_reviewer_model_and_effort_flow_through_pool(fake_client) -> Non
 
 
 def test_resolve_invalid_coder_model_effort_frictioned(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_coder": {"model": "", "effort": "ultra"}},
     )
@@ -567,7 +567,7 @@ def test_resolve_invalid_coder_model_effort_frictioned(fake_client) -> None:
 
 
 def test_resolve_invalid_task_override_keeps_project_default(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_coder": {"model": "opus"}},
     )
@@ -579,7 +579,7 @@ def test_resolve_invalid_task_override_keeps_project_default(fake_client) -> Non
 
 
 def test_resolve_image_from_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_image": "ghcr.io/acme/dev:2026-06"},
     )
@@ -589,13 +589,13 @@ def test_resolve_image_from_project(fake_client) -> None:
 
 
 def test_resolve_image_defaults_none_without_key(fake_client) -> None:
-    fake_client.note = _FakeNote("projects/loom/loom-project-context.md", {})
+    fake_client.note = _ctx_note("projects/loom/loom-project-context.md", {})
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.image is None
 
 
 def test_resolve_task_image_override_beats_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_image": "ghcr.io/acme/dev:2026-06"},
     )
@@ -608,7 +608,7 @@ def test_resolve_task_image_override_beats_project(fake_client) -> None:
 
 
 def test_resolve_invalid_project_image_frictioned(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_image": ""},
     )
@@ -618,7 +618,7 @@ def test_resolve_invalid_project_image_frictioned(fake_client) -> None:
 
 
 def test_resolve_invalid_task_image_keeps_project_default(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_image": "ghcr.io/acme/dev:2026-06"},
     )
@@ -633,14 +633,14 @@ def test_resolve_invalid_task_image_keeps_project_default(fake_client) -> None:
 
 
 def test_resolve_test_gate_keys_default_none(fake_client) -> None:
-    fake_client.note = _FakeNote("projects/loom/loom-project-context.md", {})
+    fake_client.note = _ctx_note("projects/loom/loom-project-context.md", {})
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.test_command is None
     assert settings.test_gate is None
 
 
 def test_resolve_test_command_from_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_test_command": "make check"},
     )
@@ -650,7 +650,7 @@ def test_resolve_test_command_from_project(fake_client) -> None:
 
 
 def test_resolve_task_test_command_override_beats_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_test_command": "make check"},
     )
@@ -662,7 +662,7 @@ def test_resolve_task_test_command_override_beats_project(fake_client) -> None:
 
 
 def test_resolve_invalid_test_command_frictioned(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_test_command": ""},
     )
@@ -672,7 +672,7 @@ def test_resolve_invalid_test_command_frictioned(fake_client) -> None:
 
 
 def test_resolve_test_gate_from_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_test_gate": False},
     )
@@ -682,7 +682,7 @@ def test_resolve_test_gate_from_project(fake_client) -> None:
 
 
 def test_resolve_task_test_gate_override_beats_project(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_test_gate": True},
     )
@@ -696,7 +696,7 @@ def test_resolve_task_test_gate_override_beats_project(fake_client) -> None:
 def test_resolve_invalid_test_gate_frictioned(fake_client) -> None:
     # TOML ``1`` / ``"yes"`` are not booleans — a mistyped flag frictions
     # rather than silently coercing.
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_test_gate": "yes"},
     )
@@ -709,7 +709,7 @@ def test_resolve_deprecated_block_on_red_frictioned(fake_client) -> None:
     # #140: `develop_block_on_red` is removed (the `test` check's blocking is the
     # review profile's). A lingering key is inert but surfaces a deprecation friction
     # so the behaviour change is not silent.
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {"develop_block_on_red": True},
     )
@@ -720,7 +720,7 @@ def test_resolve_deprecated_block_on_red_frictioned(fake_client) -> None:
 
 
 def test_resolve_unknown_override_name_skipped_with_friction(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {
             "develop_reviewers": [{"name": "code-quality"}],
@@ -735,7 +735,7 @@ def test_resolve_unknown_override_name_skipped_with_friction(fake_client) -> Non
 
 
 def test_resolve_all_unknown_selection_falls_back_to_builtin(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {
             "develop_reviewers": [{"name": "code-quality"}],
@@ -748,7 +748,7 @@ def test_resolve_all_unknown_selection_falls_back_to_builtin(fake_client) -> Non
 
 
 def test_resolve_invalid_pool_entry_and_ceilings_frictioned(fake_client) -> None:
-    fake_client.note = _FakeNote(
+    fake_client.note = _ctx_note(
         "projects/loom/loom-project-context.md",
         {
             "develop_reviewers": [

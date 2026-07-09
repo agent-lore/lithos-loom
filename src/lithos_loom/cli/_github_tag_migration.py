@@ -29,7 +29,7 @@ from lithos_loom.cli._github_metadata import (
 )
 from lithos_loom.config import LoomConfig
 from lithos_loom.errors import LithosClientError
-from lithos_loom.lithos_client import LithosClient
+from lithos_loom.lithos_client import LithosClient, NoteClient
 
 # Legacy tag vocabulary — quarantined here, referenced nowhere else.
 _OLD_REPO_PREFIX = "github-repo:"
@@ -201,7 +201,7 @@ async def migrate_github_tags(*, cfg: LoomConfig, dry_run: bool) -> list[Migrati
 
 
 async def _migrate_one(
-    *, client: LithosClient, path: str, slug: str, dry_run: bool
+    *, client: NoteClient, path: str, slug: str, dry_run: bool
 ) -> MigrationItem | None:
     for _attempt in range(_MAX_CAS_ATTEMPTS):
         note = await client.note_read(path=path)

@@ -22,6 +22,7 @@ It structurally satisfies :class:`~lithos_loom.lithos_client.LithosClientProtoco
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -138,8 +139,8 @@ class FakeLithosClient:
         base_url: str = "",
         *,
         agent_id: str | None = None,
-        tasks: tuple[Task, ...] = (),
-        notes: tuple[Note, ...] = (),
+        tasks: Sequence[Task] = (),
+        notes: Sequence[Note] = (),
         fail_connect: BaseException | None = None,
     ) -> None:
         self.base_url = base_url
@@ -154,6 +155,17 @@ class FakeLithosClient:
         #: every call in order
         self.calls: list[Call] = []
         self._id_seq = 0
+
+    # ── seeding (post-construction) ────────────────────────────────────
+    def add_task(self, task: Task) -> Task:
+        """Seed (or replace) a task in the store after construction."""
+        self._tasks[task.id] = task
+        return task
+
+    def add_note(self, note: Note) -> Note:
+        """Seed (or replace) a note in the store after construction."""
+        self._notes[note.id] = note
+        return note
 
     # ── call recording / inspection ────────────────────────────────────
     def _record(self, method: str, **kwargs: Any) -> None:
