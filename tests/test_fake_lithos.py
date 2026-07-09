@@ -74,6 +74,18 @@ async def test_task_update_merges_metadata_and_tags() -> None:
     assert stored.metadata == {"a": 1, "b": 2} and stored.tags == ("z",)
 
 
+async def test_task_update_metadata_none_value_deletes_the_key() -> None:
+    # Lithos #290: a metadata key with value None deletes it; unmentioned keys
+    # are preserved; an empty dict is a no-op for task_update.
+    client = FakeLithosClient(tasks=(make_task("t1", metadata={"a": 1, "b": 2}),))
+    await client.task_update(task_id="t1", metadata={"a": None, "c": 3})
+    stored = await client.task_get(task_id="t1")
+    assert stored is not None and stored.metadata == {"b": 2, "c": 3}
+    await client.task_update(task_id="t1", metadata={})  # no-op
+    stored = await client.task_get(task_id="t1")
+    assert stored is not None and stored.metadata == {"b": 2, "c": 3}
+
+
 async def test_task_update_missing_is_noop() -> None:
     client = FakeLithosClient()
     await client.task_update(task_id="missing", title="x")  # no raise
@@ -119,6 +131,44 @@ async def test_note_write_creates_then_updates_with_version_bump() -> None:
     updated = await client.note_write(title="T2", content="body2", id="n1")
     assert updated.status == "updated" and updated.note is not None
     assert updated.note.version == 2
+
+
+async def test_note_write_update_preserves_omitted_fields() -> None:
+    # Real note_write omits None args, so an update preserves existing
+    # tags/path/status/metadata rather than resetting them to defaults.
+    client = FakeLithosClient(
+        notes=(
+            make_note(
+                "n1",
+                path="projects/p/x.md",
+                tags=("keep",),
+                status="active",
+                metadata={"a": 1},
+            ),
+        )
+    )
+    res = await client.note_write(title="T2", content="new body", id="n1")
+    assert res.note is not None
+    assert res.note.tags == ("keep",)
+    assert res.note.path == "projects/p/x.md"
+    assert res.note.status == "active"
+    assert res.note.metadata == {"a": 1}
+    assert res.note.body == "new body"  # content is always applied
+
+
+async def test_note_write_update_metadata_semantics() -> None:
+    client = FakeLithosClient(notes=(make_note("n1", metadata={"a": 1, "b": 2}),))
+    # None value deletes a key; unmentioned keys preserved; non-null merges.
+    res = await client.note_write(
+        title="T", content="c", id="n1", metadata={"a": None, "c": 3}
+    )
+    assert res.note is not None and res.note.metadata == {"b": 2, "c": 3}
+    # metadata=None preserves existing.
+    res = await client.note_write(title="T", content="c", id="n1")
+    assert res.note is not None and res.note.metadata == {"b": 2, "c": 3}
+    # metadata={} clears all (unlike task_update, where {} is a no-op).
+    res = await client.note_write(title="T", content="c", id="n1", metadata={})
+    assert res.note is not None and res.note.metadata == {}
 
 
 async def test_note_list_filters_by_prefix_tags_metadata_and_limit() -> None:
@@ -178,7 +228,12 @@ async def test_raise_on_injects_a_per_method_failure() -> None:
 # ── Protocol conformance ─────────────────────────────────────────────────────
 
 
-def test_fake_satisfies_the_role_protocols() -> None:
+def test_fake_exposes_the_role_protocol_attributes_at_runtime() -> None:
+    # A cheap smoke check only: @runtime_checkable isinstance verifies method
+    # *presence*, not signatures / async-ness / keyword-only params / returns.
+    # The authoritative signature-level conformance check is the pyright-verified
+    # static assignments (`_fake_conforms` / `_real_conforms`) in
+    # tests/support/fake_lithos.py — this just catches a grossly missing method.
     client = FakeLithosClient()
     assert isinstance(client, TaskClient)
     assert isinstance(client, NoteClient)

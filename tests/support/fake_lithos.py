@@ -22,7 +22,7 @@ It structurally satisfies :class:`~lithos_loom.lithos_client.LithosClientProtoco
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -290,7 +290,9 @@ class FakeLithosClient:
         if tags is not None:
             changes["tags"] = tuple(tags)
         if metadata is not None:
-            changes["metadata"] = {**existing.metadata, **metadata}
+            # Lithos task_update metadata is an additive per-key merge; `{}` is a
+            # no-op there (unlike note_write). _merge_metadata gives both.
+            changes["metadata"] = _merge_metadata(existing.metadata, metadata)
         self._tasks[task_id] = dataclasses.replace(existing, **changes)
 
     async def task_complete(self, *, task_id: str, agent: str | None = None) -> None:
@@ -388,21 +390,46 @@ class FakeLithosClient:
             metadata=metadata,
         )
         existing = self._notes.get(id) if id is not None else None
-        outcome = "updated" if existing is not None else "created"
-        note_id = id or self._mint("note")
+        if existing is not None:
+            # Update: title/content/note_type are always sent by the real client
+            # (note_type defaults to "concept"); tags/path/status/metadata are
+            # omitted-when-None, so an omitted field PRESERVES the existing value.
+            changes: dict[str, Any] = {
+                "title": title,
+                "body": content,
+                "note_type": note_type or "concept",
+                "version": existing.version + 1,
+            }
+            if tags is not None:
+                changes["tags"] = tuple(tags)
+            if path is not None:
+                changes["path"] = path
+            if status is not None:
+                changes["status"] = status
+            if metadata is not None:
+                # note_write treats `{}` as "clear all"; a non-empty dict is a
+                # per-key merge (None deletes). `metadata=None` preserves.
+                changes["metadata"] = (
+                    {}
+                    if metadata == {}
+                    else _merge_metadata(existing.metadata, metadata)
+                )
+            note = dataclasses.replace(existing, **changes)
+            self._notes[note.id] = note
+            return WriteResult(status="updated", note=note)
         note = make_note(
-            note_id,
+            id or self._mint("note"),
             title=title,
             body=content,
-            version=(existing.version + 1) if existing is not None else 1,
+            version=1,
             tags=tuple(tags or ()),
             status=status,
             note_type=note_type or "concept",
             path=path,
             metadata=dict(metadata or {}),
         )
-        self._notes[note_id] = note
-        return WriteResult(status=outcome, note=note)  # type: ignore[arg-type]
+        self._notes[note.id] = note
+        return WriteResult(status="created", note=note)
 
     async def note_list(
         self,
@@ -458,6 +485,22 @@ class FakeLithosClient:
     def findings(self) -> list[dict[str, Any]]:
         """Every posted finding, in order (``id`` / ``task_id`` / ``summary``)."""
         return list(self._findings)
+
+
+def _merge_metadata(
+    existing: Mapping[str, Any], provided: dict[str, Any]
+) -> dict[str, Any]:
+    """Lithos additive per-key metadata merge (#290): a key whose value is
+    ``None`` deletes it, a non-null value overwrites, and unmentioned keys are
+    preserved. An empty ``provided`` is a no-op (yields ``existing`` unchanged) —
+    the note_write "``{}`` clears all" case is handled by its caller."""
+    merged = dict(existing)
+    for key, value in provided.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _metadata_matches(metadata: Any, query: dict[str, Any]) -> bool:
