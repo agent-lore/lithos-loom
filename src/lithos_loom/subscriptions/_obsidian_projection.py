@@ -126,9 +126,6 @@ from lithos_loom.render import (
     due_date_str as _due_date_str,
 )
 from lithos_loom.render import (
-    extract_task_ids as _extract_task_ids,
-)
-from lithos_loom.render import (
     render_line as _render_line,
 )
 from lithos_loom.render import (
@@ -143,6 +140,9 @@ from lithos_loom.subscriptions._human_actionable import (
     would_be_actionable,
 )
 from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.task_line import (
+    extract_task_ids as _extract_task_ids,
+)
 
 __all__ = ["make_handler"]
 
@@ -214,9 +214,9 @@ _FILE_HEADER = (
     "new tasks. %%"
 )
 
-# ``_PRIORITY_EMOJI`` lives in :mod:`lithos_loom.render` (extracted so
-# the capture-macro CLI can re-render lines identical to what the
-# projection writes).
+# The priority-emoji table and the ``🆔`` / ``📅`` marker grammar live in
+# :mod:`lithos_loom.task_line`; the projection renders lines via
+# :mod:`lithos_loom.render`, which composes those shared atoms.
 
 _STATUS_TO_MARKER: dict[str, str] = {
     "open": "[ ]",
@@ -402,9 +402,9 @@ def make_handler(
                     priority=_validated_priority(task),
                     # Reuse the renderer's due_date computation so
                     # the projection's _StateEntry holds exactly
-                    # what the renderer puts on the line. The
-                    # fs-watcher's _DUE_DATE_RE matches that
-                    # string verbatim.
+                    # what the renderer puts on the line. The grammar's
+                    # task_line.parse_due_date matches that string
+                    # verbatim.
                     due_date=_due_date_str(task, cfg.routes, today_val),
                 )
             else:

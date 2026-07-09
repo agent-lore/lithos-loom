@@ -14,25 +14,28 @@ line markdown string. No I/O. Malformed metadata is warn-logged once
 per call (mirrors the projection's silent-degradation contract) and
 the offending marker is omitted.
 
+The marker grammar this writer emits — the ``🆔 lithos:<id>`` marker and
+the priority-enum → emoji table — lives in :mod:`lithos_loom.task_line`,
+the single home shared with the fs-watcher reader and the import parser.
+This module composes those atoms into a full task line and owns the
+task→line *policy* (which markers a task gets: routing, deps, due-date
+rules), not their spelling.
+
 Public surface:
 
 * :func:`render_line` — open-task line (``- [ ] ...``).
 * :func:`render_resolved_line` — terminal-state line (``- [x]`` /
   ``- [-]``) with the resolution date marker.
-* :data:`PRIORITY_EMOJI` — priority enum → Tasks-plugin emoji table.
-  Values: ``highest``/``high``/``medium``/``low``/``lowest``.
 
 The helpers (:func:`priority_marker`, :func:`dep_markers`,
 :func:`due_date_str`, :func:`parse_scheduled_for`,
 :func:`validated_priority`) are also exported so tests can exercise
-the per-marker logic in isolation and the fs-watcher's anti-drift
-test for :data:`PRIORITY_EMOJI` can pin its inverse.
+the per-marker logic in isolation.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
@@ -40,13 +43,11 @@ from typing import Any
 from lithos_loom.config import RouteConfig
 from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions._human_actionable import human_blocking_route_name
+from lithos_loom.task_line import PRIORITY_EMOJI, render_task_id
 
 __all__ = [
-    "PRIORITY_EMOJI",
-    "TASK_ID_RE",
     "dep_markers",
     "due_date_str",
-    "extract_task_ids",
     "parse_scheduled_for",
     "priority_marker",
     "render_line",
@@ -55,48 +56,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-
-TASK_ID_RE = re.compile(r"🆔 lithos:(?P<task_id>[A-Za-z0-9_-]+)")
-"""Matches the ``🆔 lithos:<id>`` stable-identifier marker that both
-:func:`render_line` and :func:`render_resolved_line` emit immediately
-after the title. Consumers parse the id back out of an on-disk line to
-recover which Lithos task a projected/archived line belongs to — the
-projection seeds its ``surfaced`` set from ``tasks.md`` on restart, and
-the task-archive subscription dedups against ids already on disk in a
-``<slug>-done.md`` file. The character class matches the same id shape
-``render_line`` writes (Lithos ids are ``[A-Za-z0-9_-]``)."""
-
-
-def extract_task_ids(text: str) -> set[str]:
-    """Return the set of Lithos task ids referenced by ``🆔 lithos:<id>``
-    markers anywhere in ``text``.
-
-    Used to recover task identity from already-written vault content:
-    the projection's restart seed (parse ``tasks.md``) and the
-    task-archive dedup-cache load (parse ``<slug>-done.md``). Lines
-    without the marker contribute nothing, so prose / headers / blank
-    lines are inert."""
-    return {m.group("task_id") for m in TASK_ID_RE.finditer(text)}
-
-
-PRIORITY_EMOJI: dict[str, str] = {
-    "highest": "🔺",
-    "high": "⏫",
-    "medium": "🔼",
-    "low": "🔽",
-    "lowest": "⏬",
-}
-"""Priority enum → Tasks-plugin emoji.
-
-Values: ``highest``/``high``/``medium``/``low``/``lowest``.
-
-Strict case-sensitive match: the Lithos surface owns this enum, and
-deviation would mean a task with a non-canonical priority value
-silently drops the marker. The fs-watcher's
-``test_priority_emoji_table_matches_projection_table`` test pins
-this table against the inverse map in
-:mod:`lithos_loom.sources.obsidian_fs_watcher`."""
 
 
 def render_line(
@@ -139,7 +98,7 @@ def render_line(
     (see :func:`render_resolved_line`).
     """
     title = " ".join(task.title.split())  # collapse \n, \r, runs of spaces
-    parts: list[str] = [f"- [ ] {title}", f"🆔 lithos:{task.id}"]
+    parts: list[str] = [f"- [ ] {title}", render_task_id(task.id)]
 
     # Tags BEFORE Tasks-plugin emoji metadata so the trailing
     # metadata sorts/filters correctly.
@@ -188,7 +147,7 @@ def render_resolved_line(task: Task, status: str, resolved_at: date) -> str:
     checkbox = "[x]" if status == "completed" else "[-]"
     marker_emoji = "✅" if status == "completed" else "❌"
     title = " ".join(task.title.split())
-    parts: list[str] = [f"- {checkbox} {title}", f"🆔 lithos:{task.id}"]
+    parts: list[str] = [f"- {checkbox} {title}", render_task_id(task.id)]
     project = task.metadata.get("project")
     if isinstance(project, str) and project:
         parts.append(f"#project/{project}")

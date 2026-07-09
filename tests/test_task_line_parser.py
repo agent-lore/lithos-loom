@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from lithos_loom.task_line_parser import (
-    PRIORITY_EMOJI_MAP,
     TAG_REGEX,
     ParsedTaskLine,
     ValidationError,
@@ -172,17 +171,6 @@ def test_priority_emoji_each(emoji: str, expected: str) -> None:
     parsed, _, _ = _parse(text)
     assert parsed[0].priority == expected
     assert emoji not in parsed[0].description
-
-
-def test_priority_emoji_map_covers_all_five() -> None:
-    """Pin the enum: loss of an entry breaks both this and the parametrized test."""
-    assert set(PRIORITY_EMOJI_MAP.values()) == {
-        "highest",
-        "high",
-        "medium",
-        "low",
-        "lowest",
-    }
 
 
 def test_no_priority_emoji_returns_none() -> None:

@@ -70,6 +70,7 @@ graph TD
   Render --> Config
   Render --> LithosClient
   Render --> Subscriptions
+  Render --> Tasks
   Runners --> Errors
   Sources --> Bus
   Sources --> Cli
@@ -78,6 +79,7 @@ graph TD
   Sources --> LithosClient
   Sources --> ProjectContext
   Sources --> State
+  Sources --> Tasks
   Subscriptions --> Bus
   Subscriptions --> Config
   Subscriptions --> Errors
@@ -87,5 +89,6 @@ graph TD
   Subscriptions --> Render
   Subscriptions --> Runners
   Subscriptions --> State
+  Subscriptions --> Tasks
   Supervisor --> Config
 ```
