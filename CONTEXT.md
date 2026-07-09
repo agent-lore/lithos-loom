@@ -44,8 +44,9 @@ dialogue-based** cycle.
   (`meters_cost_usd` — codex reports tokens not USD, #102; `mints_session_handle` — codex mints
   a `thread_id` on turn 1 while claude echoes the caller's uuid; `supports_effort` — codex depth
   is model-driven), how to provision its **container** (config mount + env var, auth files,
-  skills), how to build one turn's CLI argv (bare, or wrapped in `docker exec`), how to parse
-  that turn's structured output into a turn result, and where it writes its **session** transcript.
+  skills), how to build one turn's CLI argv (bare — reused host-side, session-less, by the
+  review-correctness eval judge — or wrapped in `docker exec`), how to parse that turn's
+  structured output into a turn result, and where it writes its **session** transcript.
   One adapter per tool behind a registry (`get_engine`); a new tool is added in one place instead
   of branching on a `tool` string across the container / turn / transcript / config code. The
   capabilities *express* decisions ADR 0002 + #94 already made — the adapter does not re-decide

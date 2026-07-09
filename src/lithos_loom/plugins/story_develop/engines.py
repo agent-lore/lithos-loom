@@ -1,15 +1,16 @@
 """Per-tool Engine adapter — one home for the claude/codex differences.
 
 The claude-vs-codex conditionals used to be scattered across four modules: the
-``docker exec`` argv (``containers.build_exec_command``), the turn-result parsing
-(``turns.parse_claude_result`` / ``parse_codex_result``), the transcript-existence
-probe (``develop._session_transcript_exists``), and the container mount / auth
-constants (``config``). This module concentrates them behind one interface so a
-new tool is added in one place and a caller stops branching on a ``tool`` string.
+``docker exec`` argv, the turn-result parsing, the transcript-existence probe,
+and the container mount / auth constants. This module concentrates them behind
+one interface so a new tool is added in one place and a caller stops branching on
+a ``tool`` string.
 
-Each old public name stays as a **one-line delegate** to the matching Engine
-until its last caller migrates (E2/E3/E5) — this slice (ARCH-2.E1) moves the
-*logic*, not the call sites, so behaviour is pinned twice (old tests + new).
+The migration ran behind one-line delegates so each move was behaviour-preserving
+(logic first, call sites after): E1 introduced the adapter, E2 moved the turn
+path onto it, E3 the container provisioning, and E5 deleted the last delegates
+(``containers.build_exec_command``, ``turns.parse_*``) once their callers — the
+turn driver and the eval judge — invoked the engine directly.
 
 The capability flags (``meters_cost_usd`` / ``mints_session_handle`` /
 ``supports_effort``) **express** decisions ADR 0002 + #94 already made; they are
@@ -431,8 +432,9 @@ ENGINES: dict[str, Engine] = {"claude": ClaudeEngine(), "codex": CodexEngine()}
 def get_engine(tool: str) -> Engine:
     """The :class:`Engine` for *tool*, or ``ValueError`` naming the supported set.
 
-    The message shape matches the former ``build_exec_command`` raise so operator-
-    facing errors are unchanged.
+    The message names the supported tools (via :func:`supported_tools_phrase`) so
+    an unknown-tool error stays operator-actionable — the single raise every
+    caller (turn path, container builder, eval judge) now funnels through.
     """
     try:
         return ENGINES[tool]

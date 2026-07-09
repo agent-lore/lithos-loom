@@ -1,15 +1,25 @@
 """Tests for the mechanism LLM-judge (#183).
 
-The host-direct agent call (`_run_host_agent`) is stubbed, so the judge's
-prompt-building + id-parsing are tested hermetically — no agent, no subprocess.
+The `build_agent_judge` tests stub the host-direct agent call (`_run_host_agent`),
+so the judge's prompt-building + id-parsing are tested hermetically — no agent, no
+subprocess. `_run_host_agent` itself is covered directly (ARCH-2.E5): its argv +
+result parsing route through the `Engine` adapter, with `subprocess.run` faked.
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
+
 import pytest
 
 from lithos_loom.evals.review import judge as judge_mod
-from lithos_loom.evals.review.judge import _parse_matched_ids, build_agent_judge
+from lithos_loom.evals.review.judge import (
+    _parse_matched_ids,
+    _run_host_agent,
+    build_agent_judge,
+)
+from lithos_loom.plugins.story_develop import engines
 
 _FINDINGS = [
     {
@@ -103,3 +113,78 @@ def test_judge_short_circuits_on_no_findings(monkeypatch: pytest.MonkeyPatch) ->
     judge = build_agent_judge()
     assert judge("mech", []) == []
     assert called["n"] == 0  # no agent call when there is nothing to judge
+
+
+# --- _run_host_agent (the migrated Engine wiring, ARCH-2.E5) -----------------
+
+_CLAUDE_SUCCESS = json.dumps(
+    {"type": "result", "is_error": False, "result": "OK", "session_id": "sid-9"}
+)
+_CODEX_SUCCESS = "\n".join(
+    json.dumps(e)
+    for e in (
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "Done the work."},
+        },
+        {"type": "turn.completed", "usage": {}},
+    )
+)
+
+
+def test_run_host_agent_claude_builds_engine_argv_and_parses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        calls["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=_CLAUDE_SUCCESS, stderr="")
+
+    monkeypatch.setattr(judge_mod.subprocess, "run", fake_run)
+    out = _run_host_agent("claude", "judge this", model="opus", timeout=30)
+
+    # The migration's whole point: the argv is the Engine's bare host-side argv,
+    # not a hard-coded per-tool branch in the judge.
+    assert calls["cmd"] == engines.get_engine("claude").cli_argv(
+        prompt="judge this", model="opus"
+    )
+    # ...and the subprocess output is parsed via Engine.parse_turn.
+    assert out == "OK"
+
+
+def test_run_host_agent_codex_builds_engine_argv_and_parses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        calls["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=_CODEX_SUCCESS, stderr="")
+
+    monkeypatch.setattr(judge_mod.subprocess, "run", fake_run)
+    out = _run_host_agent("codex", "judge this", model=None, timeout=30)
+
+    assert calls["cmd"] == engines.get_engine("codex").cli_argv(
+        prompt="judge this", model=None
+    )
+    assert out == "Done the work."
+
+
+def test_run_host_agent_rejects_unsupported_tool() -> None:
+    # Registry-derived validation — no subprocess is spawned for an unknown tool.
+    with pytest.raises(ValueError, match="unsupported judge tool"):
+        _run_host_agent("opencode", "p", model=None, timeout=1)
+
+
+def test_run_host_agent_returns_empty_when_cli_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("claude: command not found")
+
+    monkeypatch.setattr(judge_mod.subprocess, "run", boom)
+    # A missing/timing-out agent CLI is treated as "no match", never a crash.
+    assert _run_host_agent("claude", "p", model=None, timeout=1) == ""

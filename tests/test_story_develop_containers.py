@@ -6,8 +6,31 @@ from pathlib import Path
 
 import pytest
 
-from lithos_loom.plugins.story_develop import containers
+from lithos_loom.plugins.story_develop import containers, engines
 from lithos_loom.plugins.story_develop.config import CONTAINER_NOFILE_ULIMIT
+
+
+def _exec_cmd(
+    *,
+    name: str,
+    tool: str,
+    prompt: str,
+    session_id: str,
+    resume: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
+) -> list[str]:
+    # containers.build_exec_command (the tool->engine delegate) was removed at
+    # ARCH-2.E5; the engine owns the docker-exec argv. This helper keeps the
+    # tool->engine pick local to the tests that pin that argv.
+    return engines.get_engine(tool).build_exec_argv(
+        name=name,
+        prompt=prompt,
+        session_id=session_id,
+        resume=resume,
+        model=model,
+        effort=effort,
+    )
 
 
 def _run_cmd(**over) -> list[str]:
@@ -84,9 +107,7 @@ def test_run_command_no_auth_files() -> None:
 
 
 def test_exec_command_first_turn_uses_session_id() -> None:
-    cmd = containers.build_exec_command(
-        name="c", tool="claude", prompt="do it", session_id="sid-1"
-    )
+    cmd = _exec_cmd(name="c", tool="claude", prompt="do it", session_id="sid-1")
     assert cmd[:5] == ["docker", "exec", "-w", "/workspace", "c"]
     assert "claude" in cmd
     assert cmd[cmd.index("--session-id") + 1] == "sid-1"
@@ -96,7 +117,7 @@ def test_exec_command_first_turn_uses_session_id() -> None:
 
 
 def test_exec_command_resume_uses_resume_flag() -> None:
-    cmd = containers.build_exec_command(
+    cmd = _exec_cmd(
         name="c", tool="claude", prompt="p", session_id="sid-1", resume=True
     )
     assert "--resume" in cmd and "--session-id" not in cmd
@@ -104,14 +125,12 @@ def test_exec_command_resume_uses_resume_flag() -> None:
 
 
 def test_exec_command_adds_model_flag_when_given() -> None:
-    cmd = containers.build_exec_command(
-        name="c", tool="claude", prompt="p", session_id="s", model="opus"
-    )
+    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s", model="opus")
     assert cmd[cmd.index("--model") + 1] == "opus"
 
 
 def test_exec_command_passes_model_on_resume_too() -> None:
-    cmd = containers.build_exec_command(
+    cmd = _exec_cmd(
         name="c", tool="claude", prompt="p", session_id="s", resume=True, model="opus"
     )
     assert "--resume" in cmd
@@ -119,40 +138,30 @@ def test_exec_command_passes_model_on_resume_too() -> None:
 
 
 def test_exec_command_omits_model_flag_when_none() -> None:
-    cmd = containers.build_exec_command(
-        name="c", tool="claude", prompt="p", session_id="s"
-    )
+    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s")
     assert "--model" not in cmd
 
 
 def test_exec_command_adds_effort_flag_when_given() -> None:
-    cmd = containers.build_exec_command(
-        name="c", tool="claude", prompt="p", session_id="s", effort="xhigh"
-    )
+    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s", effort="xhigh")
     assert cmd[cmd.index("--effort") + 1] == "xhigh"
 
 
 def test_exec_command_omits_effort_flag_when_none() -> None:
-    cmd = containers.build_exec_command(
-        name="c", tool="claude", prompt="p", session_id="s"
-    )
+    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s")
     assert "--effort" not in cmd
 
 
 def test_exec_command_rejects_unknown_tool() -> None:
     with pytest.raises(ValueError):
-        containers.build_exec_command(
-            name="c", tool="opencode", prompt="p", session_id="s"
-        )
+        _exec_cmd(name="c", tool="opencode", prompt="p", session_id="s")
 
 
 # ── codex (#94) ────────────────────────────────────────────────────────
 
 
 def test_exec_command_codex_first_turn() -> None:
-    cmd = containers.build_exec_command(
-        name="c", tool="codex", prompt="do it", session_id="unused-uuid"
-    )
+    cmd = _exec_cmd(name="c", tool="codex", prompt="do it", session_id="unused-uuid")
     assert cmd[:5] == ["docker", "exec", "-w", "/workspace", "c"]
     # `codex exec` (no `resume`); the supplied session_id is NOT in the argv —
     # codex mints the thread_id itself on turn 1.
@@ -165,7 +174,7 @@ def test_exec_command_codex_first_turn() -> None:
 
 
 def test_exec_command_codex_resume_passes_thread_id() -> None:
-    cmd = containers.build_exec_command(
+    cmd = _exec_cmd(
         name="c", tool="codex", prompt="p", session_id="thread-7", resume=True
     )
     # `codex exec resume <thread_id>` — handle is positional, right after resume.
@@ -177,7 +186,7 @@ def test_exec_command_codex_resume_passes_thread_id() -> None:
 
 
 def test_exec_command_codex_model_flag_and_effort_ignored() -> None:
-    cmd = containers.build_exec_command(
+    cmd = _exec_cmd(
         name="c", tool="codex", prompt="p", session_id="s", model="o3", effort="high"
     )
     assert cmd[cmd.index("-m") + 1] == "o3"

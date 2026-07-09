@@ -2,44 +2,24 @@
 
 A turn is ``docker exec ...`` into a warm container. Completion, error, and cost
 all come from the parsed structured output + the process exit code — no terminal
-scraping (ADR 0002). The per-tool CLI argv + result parsing now live on the
+scraping (ADR 0002). The per-tool CLI argv + result parsing live on the
 :class:`~lithos_loom.plugins.story_develop.engines.Engine` adapter; this module
 is the tool-agnostic turn driver over it.
 
-:class:`TurnResult` and the ``parse_*`` functions are re-exported / kept as
-one-line delegates here so existing importers keep working while callers migrate
-to :meth:`Engine.parse_turn` directly (ARCH-2.E2).
+:class:`TurnResult` is re-exported for callers that only need the type. The
+``parse_claude_result`` / ``parse_codex_result`` delegates were removed at
+ARCH-2.E5 (their last caller, the eval judge, migrated to
+:meth:`Engine.parse_turn` directly); tests call the engine methods.
 """
 
 from __future__ import annotations
 
 import subprocess
 
-from . import containers, engines
+from . import containers
 from .engines import _TIMEOUT_EXIT, Engine, TurnResult
 
-__all__ = ["TurnResult", "parse_claude_result", "parse_codex_result", "run_turn"]
-
-
-def parse_claude_result(stdout: str, *, exit_code: int, stderr: str) -> TurnResult:
-    """Delegate to :meth:`ClaudeEngine.parse_turn` (kept until callers migrate, E2)."""
-    return engines.get_engine("claude").parse_turn(
-        stdout, exit_code=exit_code, stderr=stderr
-    )
-
-
-def parse_codex_result(
-    stdout: str,
-    *,
-    exit_code: int,
-    stderr: str,
-    session_id: str = "",
-    resume: bool = False,
-) -> TurnResult:
-    """Delegate to :meth:`CodexEngine.parse_turn` (kept until callers migrate, E2)."""
-    return engines.get_engine("codex").parse_turn(
-        stdout, exit_code=exit_code, stderr=stderr, session_id=session_id, resume=resume
-    )
+__all__ = ["TurnResult", "run_turn"]
 
 
 def run_turn(

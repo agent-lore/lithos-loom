@@ -5,6 +5,14 @@ Captures stream-json to ``{work_dir}/{task.id}/agent-output.jsonl`` and parses
 for cost / turn count / tool-call summaries.
 
 On timeout: SIGTERM, then SIGKILL after 5s grace.
+
+FLAGGED FOR DELETION (ARCH-2.E5 → lithos-loom#232): ``run_claude`` / ``run_codex``
+are unimplemented Ralph++-salvage stubs (both raise ``NotImplementedError``) that
+nothing imports. The live coding-agent turn path is
+:func:`lithos_loom.plugins.story_develop.turns.run_turn` over the
+:class:`~lithos_loom.plugins.story_develop.engines.Engine` adapter; this module is
+superseded. Any future host-side runner should be designed against ``Engine``,
+not resurrected from here.
 """
 
 from __future__ import annotations

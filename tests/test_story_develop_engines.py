@@ -6,8 +6,11 @@ and docker-wrapped (:meth:`build_exec_argv`) argv builders, unified turn parsing
 first-ever — the per-tool session-transcript layout probe.
 
 The old delegating surfaces (``containers.build_exec_command``, ``turns.parse_*``,
-``develop._session_transcript_exists``) stay green in their own suites, so the
-behaviour is pinned twice: old call sites + this direct engine coverage.
+``develop._session_transcript_exists``) were deleted as their callers migrated
+(E2/E3/E5), so this is now the primary home for the argv/parse coverage. The
+detailed ``parse_turn`` edge cases still live in ``test_story_develop_turns.py``
+(re-pointed to ``Engine.parse_turn`` at E5); the docker-exec argv is exercised
+here plus via a local helper in ``test_story_develop_containers.py``.
 """
 
 from __future__ import annotations
