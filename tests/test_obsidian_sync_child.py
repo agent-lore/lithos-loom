@@ -21,7 +21,7 @@ import signal
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 
@@ -35,7 +35,7 @@ from lithos_loom.config import (
     RetryPolicy,
     SubscriptionConfig,
 )
-from lithos_loom.lithos_client import Task
+from tests.support import FakeLithosClient, make_task
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -167,182 +167,19 @@ def _event(
 
 
 # ── Stubs for LithosClient + LithosEventStream ─────────────────────────
-
-
-class _StubLithosClient:
-    """Async-context-manager stand-in for ``LithosClient``.
-
-    The real client does an MCP/SSE handshake on __aenter__; tests
-    can't reach a real Lithos, so we substitute this no-op.
-
-    Records ``task_complete``, ``task_cancel``, ``task_update``, and
-    ``finding_post`` invocations on class-level lists so the
-    obsidian-status-transition and obsidian-priority-changed
-    end-to-end tests can assert on the round-trip. The
-    ``_reset_stub_lithos_state`` autouse fixture clears them between
-    tests.
-
-    US22 added a ``task_status`` surface so the status-transition
-    handler can pre-check Lithos-side state before mutating. Pre-seed
-    ``task_status_returns[task_id]`` to either a :class:`Task`
-    instance (returned verbatim) or ``None`` (simulates a deleted
-    task — ``lithos_task_not_found``). Tests that don't pre-seed
-    receive a synthetic open ``Task`` so existing happy-path
-    end-to-end tests reach their mutating call without setup
-    changes.
-
-    Post-lithos#294 the status-transition and priority-changed
-    handlers use ``task_get`` instead of ``task_status`` (lighter:
-    no claims). The stub's ``task_get`` reads from the same
-    ``task_status_returns`` map so a single per-test pre-seed
-    governs both surfaces and the auto-state-transitions on
-    ``task_complete`` / ``task_cancel`` remain visible to whichever
-    method a handler picks. ``task_get_calls`` records lookups so
-    tests can assert which surface was used.
-    """
-
-    task_complete_calls: ClassVar[list[dict[str, Any]]] = []
-    task_cancel_calls: ClassVar[list[dict[str, Any]]] = []
-    task_update_calls: ClassVar[list[dict[str, Any]]] = []
-    finding_post_calls: ClassVar[list[dict[str, Any]]] = []
-    task_status_returns: ClassVar[dict[str, Task | None]] = {}
-    task_status_calls: ClassVar[list[str]] = []
-    task_get_calls: ClassVar[list[str]] = []
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    async def __aenter__(self) -> _StubLithosClient:
-        return self
-
-    async def __aexit__(self, *exc: Any) -> None:
-        return None
-
-    async def finding_post(
-        self,
-        *,
-        task_id: str,
-        summary: str,
-        agent: str | None = None,
-        knowledge_id: str | None = None,
-    ) -> None:
-        type(self).finding_post_calls.append(
-            {
-                "task_id": task_id,
-                "summary": summary,
-                "agent": agent,
-                "knowledge_id": knowledge_id,
-            }
-        )
-
-    async def task_complete(self, *, task_id: str, agent: str | None = None) -> None:
-        type(self).task_complete_calls.append({"task_id": task_id, "agent": agent})
-        # Mirror real Lithos: the task transitions to status=completed.
-        # Lets subsequent ``task_status`` pre-checks observe the new
-        # state without test-side bookkeeping.
-        type(self).task_status_returns[task_id] = Task(
-            id=task_id,
-            title="t",
-            status="completed",
-            tags=(),
-            metadata={},
-            claims=(),
-        )
-
-    async def task_cancel(
-        self,
-        *,
-        task_id: str,
-        agent: str | None = None,
-        reason: str | None = None,
-    ) -> None:
-        type(self).task_cancel_calls.append(
-            {"task_id": task_id, "agent": agent, "reason": reason}
-        )
-        # Mirror real Lithos: the task transitions to status=cancelled.
-        type(self).task_status_returns[task_id] = Task(
-            id=task_id,
-            title="t",
-            status="cancelled",
-            tags=(),
-            metadata={},
-            claims=(),
-        )
-
-    async def task_update(
-        self,
-        *,
-        task_id: str,
-        agent: str | None = None,
-        title: str | None = None,
-        description: str | None = None,
-        tags: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        type(self).task_update_calls.append(
-            {
-                "task_id": task_id,
-                "agent": agent,
-                "title": title,
-                "description": description,
-                "tags": tags,
-                "metadata": metadata,
-            }
-        )
-
-    async def task_status(self, *, task_id: str) -> Task | None:
-        """Return the pre-seeded Task for ``task_id``, or a synthetic
-        open Task by default. ``task_status_returns[task_id] = None``
-        simulates the ``task_not_found`` (deleted-upstream) case.
-
-        Records each lookup in ``task_status_calls`` so US22 round-trip
-        tests can assert the pre-check actually ran.
-        """
-        type(self).task_status_calls.append(task_id)
-        cls = type(self)
-        if task_id in cls.task_status_returns:
-            return cls.task_status_returns[task_id]
-        return Task(
-            id=task_id,
-            title="t",
-            status="open",
-            tags=(),
-            metadata={},
-            claims=(),
-        )
-
-    async def task_get(self, *, task_id: str) -> Task | None:
-        """Post-lithos#294: lightweight single-task fetch (no claims).
-        Reads from the same ``task_status_returns`` map as
-        :meth:`task_status` so auto-state-transitions on
-        ``task_complete`` / ``task_cancel`` remain visible to
-        whichever method a handler picks.
-        """
-        type(self).task_get_calls.append(task_id)
-        cls = type(self)
-        if task_id in cls.task_status_returns:
-            return cls.task_status_returns[task_id]
-        return Task(
-            id=task_id,
-            title="t",
-            status="open",
-            tags=(),
-            metadata={},
-            claims=(),
-        )
-
-
-@pytest.fixture(autouse=True)
-def _reset_stub_lithos_state() -> None:
-    """Clear ``_StubLithosClient`` class-level call records between tests
-    so cross-test leakage can't make an assertion accidentally pass."""
-    _StubLithosClient.task_complete_calls.clear()
-    _StubLithosClient.task_cancel_calls.clear()
-    _StubLithosClient.task_update_calls.clear()
-    _StubLithosClient.finding_post_calls.clear()
-    _StubLithosClient.task_status_returns.clear()
-    _StubLithosClient.task_status_calls.clear()
-    _StubLithosClient.task_get_calls.clear()
+#
+# The Lithos client double is the shared ``FakeLithosClient`` (ARCH-4):
+# an in-memory, async-context-manager drop-in for ``LithosClient``. It
+# records every call (``calls_to``) and models the ``task_complete`` /
+# ``task_cancel`` state transitions natively for SEEDED tasks, so the
+# status-transition + priority-changed round-trip tests seed the task
+# open and then assert on the recorded calls. Unlike the old bespoke
+# stub, an UNSEEDED id returns ``None`` from ``task_get`` / ``task_status``
+# (matching real Lithos ``task_not_found``) — so tests whose handler must
+# see an actionable task seed it open explicitly. The ``lithos_fake``
+# fixture builds a fresh instance per test (no cross-test leakage, so no
+# reset fixture needed) and ``stub_io`` patches the class-name lookup to
+# return it.
 
 
 class _StubSource:
@@ -359,11 +196,30 @@ class _StubSource:
 
 
 @pytest.fixture
-def stub_io(monkeypatch: pytest.MonkeyPatch) -> list[EventBus]:
+def lithos_fake() -> FakeLithosClient:
+    """The shared in-memory Lithos client double for one test.
+
+    Function-scoped, so every test gets a fresh instance with empty call
+    records and an empty task store — no autouse reset needed. Tests that
+    assert on the round-trip (or pre-seed task state) take this fixture
+    alongside ``stub_io``; ``stub_io`` patches ``obs_sync_mod.LithosClient``
+    to hand back this very instance so the production
+    ``async with LithosClient(...) as lithos`` yields the seeded fake."""
+    return FakeLithosClient()
+
+
+@pytest.fixture
+def stub_io(
+    monkeypatch: pytest.MonkeyPatch, lithos_fake: FakeLithosClient
+) -> list[EventBus]:
     """Replace LithosClient + LithosEventStream + LithosNoteStream in
     the obsidian_sync module and return a list that captures the bus
     each _StubSource was constructed with — tests publish to
     ``captured_buses[-1]``.
+
+    Every ``LithosClient(...)`` construction in the child returns the one
+    shared ``lithos_fake`` (same instance the test inspects), so its call
+    records + seeded task state are visible end-to-end.
 
     Slice 4 added the second source; both are stubbed so the wiring
     test can assert which subscriptions cause which sources to spawn
@@ -375,7 +231,7 @@ def stub_io(monkeypatch: pytest.MonkeyPatch) -> list[EventBus]:
             super().__init__(client=client, bus=bus, events_url=events_url, **kw)
             captured.append(bus)
 
-    monkeypatch.setattr(obs_sync_mod, "LithosClient", _StubLithosClient)
+    monkeypatch.setattr(obs_sync_mod, "LithosClient", lambda *a, **k: lithos_fake)
     monkeypatch.setattr(obs_sync_mod, "LithosEventStream", _CapturingSource)
     monkeypatch.setattr(obs_sync_mod, "LithosNoteStream", _CapturingSource)
     return captured
@@ -796,7 +652,7 @@ async def test_obsidian_sync_child_refuses_duplicate_task_archive_specs(
 
 
 async def test_obsidian_sync_child_wires_status_transition_handler(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
     """Slice 2 US17 end-to-end: configure both projection AND
     status-transition subscriptions. Publish a task.created → projection
@@ -812,6 +668,10 @@ async def test_obsidian_sync_child_wires_status_transition_handler(
         ),
     )
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+    # Seed the task open so the handler's task_get pre-check sees it as
+    # actionable (the old bespoke stub returned a synthetic open task for
+    # any unseeded id; the shared fake returns None).
+    lithos_fake.add_task(make_task("abc", status="open"))
 
     async def _drive() -> None:
         # Wait for _amain to wire everything up.
@@ -848,16 +708,16 @@ async def test_obsidian_sync_child_wires_status_transition_handler(
 
     # The status-transition handler must have pushed exactly one
     # task_complete for the ticked task, with the configured agent_id.
-    assert _StubLithosClient.task_complete_calls == [
+    assert lithos_fake.calls_to("task_complete") == [
         {"task_id": "abc", "agent": "lithos-orchestrator-test"}
     ], (
         f"expected one task_complete call for abc; got "
-        f"{_StubLithosClient.task_complete_calls}"
+        f"{lithos_fake.calls_to('task_complete')}"
     )
 
 
 async def test_obsidian_sync_child_status_transition_pushes_cancel_to_lithos(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
     """Slice 2 US18 end-to-end: same wiring as the US17 round-trip,
     but user flips ``[ ]`` to ``[-]`` instead of ``[x]``. Handler must
@@ -872,6 +732,8 @@ async def test_obsidian_sync_child_status_transition_pushes_cancel_to_lithos(
         ),
     )
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+    # Seed open so the cancel pre-check sees an actionable task.
+    lithos_fake.add_task(make_task("cxl", status="open"))
 
     async def _drive() -> None:
         await asyncio.sleep(0.1)
@@ -904,7 +766,7 @@ async def test_obsidian_sync_child_status_transition_pushes_cancel_to_lithos(
     assert rc == 0
 
     # Exactly one task_cancel; zero task_complete (US18-only path).
-    assert _StubLithosClient.task_cancel_calls == [
+    assert lithos_fake.calls_to("task_cancel") == [
         {
             "task_id": "cxl",
             "agent": "lithos-orchestrator-test",
@@ -912,16 +774,16 @@ async def test_obsidian_sync_child_status_transition_pushes_cancel_to_lithos(
         }
     ], (
         f"expected one task_cancel call for cxl; got "
-        f"{_StubLithosClient.task_cancel_calls}"
+        f"{lithos_fake.calls_to('task_cancel')}"
     )
-    assert _StubLithosClient.task_complete_calls == [], (
+    assert lithos_fake.calls_to("task_complete") == [], (
         "task_complete must not be called for [ ]→[-] transitions; "
-        f"got {_StubLithosClient.task_complete_calls}"
+        f"got {lithos_fake.calls_to('task_complete')}"
     )
 
 
 async def test_obsidian_sync_child_status_transition_posts_reopen_finding(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
     """Slice 2 US19 end-to-end: configure both projection AND
     status-transition. Publish a task.created, simulate a user tick
@@ -942,10 +804,11 @@ async def test_obsidian_sync_child_status_transition_posts_reopen_finding(
     )
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
 
-    # US22: the stub auto-transitions ``task_status_returns`` on
-    # task_complete / task_cancel calls, so the pre-check for the
-    # second untick step naturally sees ``status=completed`` after
-    # the first tick step's task_complete records.
+    # Seed the task open. US22: the fake auto-transitions the SEEDED
+    # task to ``status=completed`` on the tick step's task_complete
+    # call, so the pre-check for the second untick step naturally sees
+    # ``status=completed`` and posts the [ReopenRequested] finding.
+    lithos_fake.add_task(make_task("rop", status="open"))
 
     async def _drive() -> None:
         await asyncio.sleep(0.1)
@@ -988,7 +851,7 @@ async def test_obsidian_sync_child_status_transition_posts_reopen_finding(
 
     # Untick must have posted exactly one [ReopenRequested] finding
     # for rop with the expected summary + agent.
-    assert _StubLithosClient.finding_post_calls == [
+    assert lithos_fake.calls_to("finding_post") == [
         {
             "task_id": "rop",
             "summary": _REOPEN_REQUEST_SUMMARY,
@@ -997,21 +860,24 @@ async def test_obsidian_sync_child_status_transition_posts_reopen_finding(
         }
     ], (
         f"expected one [ReopenRequested] finding for rop; got "
-        f"{_StubLithosClient.finding_post_calls}"
+        f"{lithos_fake.calls_to('finding_post')}"
     )
     # And the prior tick is still in the complete-call log (sanity:
     # the handler is correctly dispatching on both transitions).
-    assert _StubLithosClient.task_complete_calls == [
+    assert lithos_fake.calls_to("task_complete") == [
         {"task_id": "rop", "agent": "lithos-orchestrator-test"}
     ], (
         f"expected one task_complete for rop from the prior tick; got "
-        f"{_StubLithosClient.task_complete_calls}"
+        f"{lithos_fake.calls_to('task_complete')}"
     )
 
 
 @pytest.mark.parametrize("marker", ["[/]", "[>]"])
 async def test_obsidian_sync_child_no_op_for_in_progress_or_rescheduled(
-    tmp_path: Path, stub_io: list[EventBus], marker: str
+    tmp_path: Path,
+    stub_io: list[EventBus],
+    lithos_fake: FakeLithosClient,
+    marker: str,
 ) -> None:
     """Slice 2 US20 end-to-end: configure both projection +
     status-transition; publish a task.created so the projection writes
@@ -1065,17 +931,17 @@ async def test_obsidian_sync_child_no_op_for_in_progress_or_rescheduled(
 
     # All three call-record lists MUST be empty — US20's "silent
     # no-op" contract.
-    assert _StubLithosClient.task_complete_calls == [], (
+    assert lithos_fake.calls_to("task_complete") == [], (
         f"task_complete must not be called for {marker} transitions; "
-        f"got {_StubLithosClient.task_complete_calls}"
+        f"got {lithos_fake.calls_to('task_complete')}"
     )
-    assert _StubLithosClient.task_cancel_calls == [], (
+    assert lithos_fake.calls_to("task_cancel") == [], (
         f"task_cancel must not be called for {marker} transitions; "
-        f"got {_StubLithosClient.task_cancel_calls}"
+        f"got {lithos_fake.calls_to('task_cancel')}"
     )
-    assert _StubLithosClient.finding_post_calls == [], (
+    assert lithos_fake.calls_to("finding_post") == [], (
         f"finding_post must not be called for {marker} transitions; "
-        f"got {_StubLithosClient.finding_post_calls}"
+        f"got {lithos_fake.calls_to('finding_post')}"
     )
 
 
@@ -1161,7 +1027,7 @@ async def test_obsidian_sync_child_skips_event_stream_for_status_transition_only
 
 
 async def test_obsidian_sync_child_priority_change_calls_task_update(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
     """Slice 2 US21 end-to-end (post-Lithos #290): configure projection
     + priority-changed (and status-transition for full-stack symmetry).
@@ -1180,6 +1046,10 @@ async def test_obsidian_sync_child_priority_change_calls_task_update(
         ),
     )
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+    # Seed open so the priority handler's task_get pre-check finds the
+    # task; its current priority (unset) differs from the target
+    # ("highest"), so the strict pre-check lets the update through.
+    lithos_fake.add_task(make_task("pri", status="open"))
 
     async def _drive() -> None:
         await asyncio.sleep(0.1)
@@ -1214,10 +1084,10 @@ async def test_obsidian_sync_child_priority_change_calls_task_update(
     assert rc == 0
 
     # Exactly one task_update call for the priority change.
-    assert len(_StubLithosClient.task_update_calls) == 1, (
-        f"expected one task_update call; got {_StubLithosClient.task_update_calls}"
+    assert len(lithos_fake.calls_to("task_update")) == 1, (
+        f"expected one task_update call; got {lithos_fake.calls_to('task_update')}"
     )
-    call = _StubLithosClient.task_update_calls[0]
+    call = lithos_fake.calls_to("task_update")[0]
     assert call["task_id"] == "pri"
     assert call["agent"] == "lithos-orchestrator-test"
     assert call["metadata"] == {"priority": "highest"}
@@ -1232,17 +1102,17 @@ async def test_obsidian_sync_child_priority_change_calls_task_update(
     # must not have fired. No findings either — task_update is the
     # actual API call now, the [PriorityChangeRequested] workaround
     # is gone.
-    assert _StubLithosClient.task_complete_calls == [], (
+    assert lithos_fake.calls_to("task_complete") == [], (
         f"task_complete must not be called for a priority-only edit; "
-        f"got {_StubLithosClient.task_complete_calls}"
+        f"got {lithos_fake.calls_to('task_complete')}"
     )
-    assert _StubLithosClient.task_cancel_calls == [], (
+    assert lithos_fake.calls_to("task_cancel") == [], (
         f"task_cancel must not be called for a priority-only edit; "
-        f"got {_StubLithosClient.task_cancel_calls}"
+        f"got {lithos_fake.calls_to('task_cancel')}"
     )
-    assert _StubLithosClient.finding_post_calls == [], (
+    assert lithos_fake.calls_to("finding_post") == [], (
         f"finding_post must not be called now that task_update is wired; "
-        f"got {_StubLithosClient.finding_post_calls}"
+        f"got {lithos_fake.calls_to('finding_post')}"
     )
 
 
@@ -1297,10 +1167,10 @@ async def test_obsidian_sync_child_rejects_duplicate_priority_changed_specs(
 
 
 async def test_obsidian_sync_child_skips_complete_when_already_completed(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
-    """Slice 2 US22 end-to-end: pre-seed ``task_status_returns`` so the
-    handler's pre-check sees the task already in ``status=completed``.
+    """Slice 2 US22 end-to-end: pre-seed the task already in
+    ``status=completed`` so the handler's pre-check sees it terminal.
     Simulating the user ticking the line must produce zero
     ``task_complete`` calls. The pre-check RPC itself must still fire."""
     cfg = _cfg_with_obsidian(
@@ -1312,15 +1182,8 @@ async def test_obsidian_sync_child_skips_complete_when_already_completed(
     )
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
 
-    # Pre-seed the stub so the pre-check returns a completed task.
-    _StubLithosClient.task_status_returns["dup1"] = Task(
-        id="dup1",
-        title="t",
-        status="completed",
-        tags=(),
-        metadata={},
-        claims=(),
-    )
+    # Pre-seed a completed task so the pre-check returns terminal.
+    lithos_fake.add_task(make_task("dup1", status="completed"))
 
     async def _drive() -> None:
         await asyncio.sleep(0.1)
@@ -1352,20 +1215,20 @@ async def test_obsidian_sync_child_skips_complete_when_already_completed(
     assert rc == 0
 
     # The pre-check fired, but task_complete did not.
-    assert "dup1" in _StubLithosClient.task_get_calls, (
-        f"pre-check task_get must have been called for dup1; "
-        f"got {_StubLithosClient.task_get_calls}"
+    task_get_ids = [c["task_id"] for c in lithos_fake.calls_to("task_get")]
+    assert "dup1" in task_get_ids, (
+        f"pre-check task_get must have been called for dup1; got {task_get_ids}"
     )
-    assert _StubLithosClient.task_complete_calls == [], (
+    assert lithos_fake.calls_to("task_complete") == [], (
         "task_complete must NOT be called when task is already completed; "
-        f"got {_StubLithosClient.task_complete_calls}"
+        f"got {lithos_fake.calls_to('task_complete')}"
     )
 
 
 async def test_obsidian_sync_child_skips_cancel_when_already_cancelled(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
-    """US22: pre-seed the stub so the pre-check sees status=cancelled.
+    """US22: pre-seed a cancelled task so the pre-check sees it terminal.
     Simulating user flipping to [-] must produce zero task_cancel calls."""
     cfg = _cfg_with_obsidian(
         tmp_path,
@@ -1376,14 +1239,7 @@ async def test_obsidian_sync_child_skips_cancel_when_already_cancelled(
     )
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
 
-    _StubLithosClient.task_status_returns["dup2"] = Task(
-        id="dup2",
-        title="t",
-        status="cancelled",
-        tags=(),
-        metadata={},
-        claims=(),
-    )
+    lithos_fake.add_task(make_task("dup2", status="cancelled"))
 
     async def _drive() -> None:
         await asyncio.sleep(0.1)
@@ -1409,15 +1265,16 @@ async def test_obsidian_sync_child_skips_cancel_when_already_cancelled(
         await _cancel_and_drain(driver)
     assert rc == 0
 
-    assert "dup2" in _StubLithosClient.task_get_calls
-    assert _StubLithosClient.task_cancel_calls == [], (
+    task_get_ids = [c["task_id"] for c in lithos_fake.calls_to("task_get")]
+    assert "dup2" in task_get_ids
+    assert lithos_fake.calls_to("task_cancel") == [], (
         "task_cancel must NOT be called when task is already cancelled; "
-        f"got {_StubLithosClient.task_cancel_calls}"
+        f"got {lithos_fake.calls_to('task_cancel')}"
     )
 
 
 async def test_obsidian_sync_child_skips_reopen_when_task_is_open(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
     """US22: untick on a task that Lithos shows as still open (the
     projection-lag case). The handler must NOT post a [ReopenRequested]
@@ -1426,7 +1283,7 @@ async def test_obsidian_sync_child_skips_reopen_when_task_is_open(
 
     Publishes the status_changed event directly onto the bus rather
     than going through the watcher chain — the chain would naturally
-    transition the stub's status (auto-flip via task_complete) and
+    transition the fake's status (auto-flip via task_complete) and
     mask the scenario we want to test. Projection is wired only so
     the bus gets captured via :class:`_CapturingSource`; no projected
     task is needed for the assertion."""
@@ -1437,8 +1294,11 @@ async def test_obsidian_sync_child_skips_reopen_when_task_is_open(
             _status_transition_subscription(),
         ),
     )
-    # The stub's default task_status return is a synthetic open Task,
-    # so the reopen pre-check sees open and skips. No pre-seed needed.
+    # Seed the task OPEN so the reopen pre-check sees open and skips —
+    # exercising the "already open → no reopen" path specifically (not
+    # the deleted/None path). The old bespoke stub gave this for free via
+    # its synthetic-open default; the shared fake needs it explicit.
+    lithos_fake.add_task(make_task("lag1", status="open"))
 
     async def _drive() -> None:
         await asyncio.sleep(0.1)
@@ -1461,18 +1321,18 @@ async def test_obsidian_sync_child_skips_reopen_when_task_is_open(
         await _cancel_and_drain(driver)
     assert rc == 0
 
-    assert "lag1" in _StubLithosClient.task_get_calls, (
-        f"pre-check task_get must have been called for lag1; "
-        f"got {_StubLithosClient.task_get_calls}"
+    task_get_ids = [c["task_id"] for c in lithos_fake.calls_to("task_get")]
+    assert "lag1" in task_get_ids, (
+        f"pre-check task_get must have been called for lag1; got {task_get_ids}"
     )
-    assert _StubLithosClient.finding_post_calls == [], (
+    assert lithos_fake.calls_to("finding_post") == [], (
         "finding_post must NOT be called for untick on already-open task; "
-        f"got {_StubLithosClient.finding_post_calls}"
+        f"got {lithos_fake.calls_to('finding_post')}"
     )
 
 
 async def test_obsidian_sync_child_skips_priority_when_prior_equals_new(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
     """US22: when a third party publishes an
     ``obsidian.task.priority_changed`` event with ``prior == new``,
@@ -1508,20 +1368,19 @@ async def test_obsidian_sync_child_skips_priority_when_prior_equals_new(
         await _cancel_and_drain(driver)
     assert rc == 0
 
-    assert _StubLithosClient.task_update_calls == [], (
+    assert lithos_fake.calls_to("task_update") == [], (
         "task_update must NOT be called when prior==new; "
-        f"got {_StubLithosClient.task_update_calls}"
+        f"got {lithos_fake.calls_to('task_update')}"
     )
 
 
 async def test_obsidian_sync_child_happy_paths_still_work_with_pre_check(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
-    """US22 regression guard: when ``task_status_returns`` is empty
-    (default synthetic open Task), the normal ``[ ]→[x]`` path
-    completes and produces a task_complete call as before. Without
-    this test the pre-check could silently break every happy-path
-    end-to-end flow."""
+    """US22 regression guard: for a task Lithos still shows as open, the
+    normal ``[ ]→[x]`` path completes and produces a task_complete call
+    as before. Without this test the pre-check could silently break every
+    happy-path end-to-end flow."""
     cfg = _cfg_with_obsidian(
         tmp_path,
         subscriptions=(
@@ -1530,6 +1389,9 @@ async def test_obsidian_sync_child_happy_paths_still_work_with_pre_check(
         ),
     )
     tasks_file = cfg.obsidian_sync.vault_path / cfg.obsidian_sync.tasks_file  # type: ignore[union-attr]
+    # Seed open — the pre-check sees an actionable task and the tick
+    # completes it.
+    lithos_fake.add_task(make_task("hp1", status="open"))
 
     async def _drive() -> None:
         await asyncio.sleep(0.1)
@@ -1555,16 +1417,16 @@ async def test_obsidian_sync_child_happy_paths_still_work_with_pre_check(
         await _cancel_and_drain(driver)
     assert rc == 0
 
-    # Pre-check fired and task_complete then fired (default open task).
-    assert "hp1" in _StubLithosClient.task_get_calls, (
-        f"pre-check must have been called for hp1; "
-        f"got {_StubLithosClient.task_get_calls}"
+    # Pre-check fired and task_complete then fired (seeded open task).
+    task_get_ids = [c["task_id"] for c in lithos_fake.calls_to("task_get")]
+    assert "hp1" in task_get_ids, (
+        f"pre-check must have been called for hp1; got {task_get_ids}"
     )
-    assert _StubLithosClient.task_complete_calls == [
+    assert lithos_fake.calls_to("task_complete") == [
         {"task_id": "hp1", "agent": "lithos-orchestrator-test"}
     ], (
         f"happy path must still produce a task_complete call; "
-        f"got {_StubLithosClient.task_complete_calls}"
+        f"got {lithos_fake.calls_to('task_complete')}"
     )
 
 
@@ -1572,14 +1434,14 @@ async def test_obsidian_sync_child_happy_paths_still_work_with_pre_check(
 
 
 async def test_obsidian_sync_child_skips_priority_when_lithos_already_matches(
-    tmp_path: Path, stub_io: list[EventBus]
+    tmp_path: Path, stub_io: list[EventBus], lithos_fake: FakeLithosClient
 ) -> None:
     """Lithos#294 strict priority pre-check end-to-end. Pre-seed the
-    stub so the task already has ``metadata.priority="high"``.
-    Synthesise a ``priority_changed`` event with ``prior="medium",
-    new="high"`` (genuine change from watcher view, but Lithos
-    already has the new value). The handler's strict pre-check must
-    skip the ``task_update`` call."""
+    task so it already has ``metadata.priority="high"``. Synthesise a
+    ``priority_changed`` event with ``prior="medium", new="high"``
+    (genuine change from watcher view, but Lithos already has the new
+    value). The handler's strict pre-check must skip the ``task_update``
+    call."""
     cfg = _cfg_with_obsidian(
         tmp_path,
         subscriptions=(
@@ -1589,13 +1451,8 @@ async def test_obsidian_sync_child_skips_priority_when_lithos_already_matches(
     )
 
     # Lithos already has priority=high — strict pre-check should skip.
-    _StubLithosClient.task_status_returns["pri1"] = Task(
-        id="pri1",
-        title="t",
-        status="open",
-        tags=(),
-        metadata={"priority": "high"},
-        claims=(),
+    lithos_fake.add_task(
+        make_task("pri1", status="open", metadata={"priority": "high"})
     )
 
     async def _drive() -> None:
@@ -1620,13 +1477,13 @@ async def test_obsidian_sync_child_skips_priority_when_lithos_already_matches(
 
     # Pre-check fired but task_update did not — strict idempotency
     # closed the gap that the payload-only check would have missed.
-    assert "pri1" in _StubLithosClient.task_get_calls, (
-        f"strict pre-check task_get must have been called for pri1; "
-        f"got {_StubLithosClient.task_get_calls}"
+    task_get_ids = [c["task_id"] for c in lithos_fake.calls_to("task_get")]
+    assert "pri1" in task_get_ids, (
+        f"strict pre-check task_get must have been called for pri1; got {task_get_ids}"
     )
-    assert _StubLithosClient.task_update_calls == [], (
+    assert lithos_fake.calls_to("task_update") == [], (
         "task_update must NOT be called when Lithos already has the "
-        f"target priority; got {_StubLithosClient.task_update_calls}"
+        f"target priority; got {lithos_fake.calls_to('task_update')}"
     )
 
 

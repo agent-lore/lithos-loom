@@ -21,7 +21,7 @@ import typer
 
 from lithos_loom.config import LoomConfig
 from lithos_loom.errors import LithosClientError
-from lithos_loom.lithos_client import LithosClient, Task
+from lithos_loom.lithos_client import LithosClient, NoteClient, Task, TaskClient
 from lithos_loom.task_graph import TaskCreatePlan
 from lithos_loom.task_line_parser import ParsedTaskLine, ValidationError
 
@@ -413,7 +413,7 @@ async def check_tasks_only_preflight(
     return project_id, existing_tasks
 
 
-async def _resolve_project_id(client: LithosClient, slug: str) -> str | None:
+async def _resolve_project_id(client: NoteClient, slug: str) -> str | None:
     """Look up the canonical project doc id for ``slug``.
 
     Mirrors the canonical-doc picker in ``project_list``: prefer
@@ -432,9 +432,7 @@ async def _resolve_project_id(client: LithosClient, slug: str) -> str | None:
     return canonical.id
 
 
-async def _list_existing_tasks_for_project(
-    client: LithosClient, slug: str
-) -> list[Task]:
+async def _list_existing_tasks_for_project(client: TaskClient, slug: str) -> list[Task]:
     """Return all tasks (any status) whose ``metadata.project == slug``.
 
     The existence check that gates ``--tasks-only`` refusal counts ALL

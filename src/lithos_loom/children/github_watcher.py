@@ -34,7 +34,7 @@ from lithos_loom.bus import Event, EventBus
 from lithos_loom.config import LogLevel, LoomConfig, load_config
 from lithos_loom.cursor_store import CursorStore
 from lithos_loom.github_client import GitHubClient
-from lithos_loom.lithos_client import LithosClient
+from lithos_loom.lithos_client import LithosClient, TaskClient
 from lithos_loom.sources.github_issue_watcher import GitHubIssueWatcher
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
@@ -93,7 +93,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 async def _run_reconcile_pass(
     *,
-    lithos: LithosClient,
+    lithos: TaskClient,
     push_handler: object,
     ctx: SubscriptionContext,
     resolved_window: timedelta | None,

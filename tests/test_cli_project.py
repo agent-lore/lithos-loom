@@ -18,10 +18,10 @@ regardless of which source the operator chose.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from textwrap import dedent
-from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -33,8 +33,9 @@ from lithos_loom.cli.project import (
     _rows_from_toml,
 )
 from lithos_loom.config import ProjectConfig, load_config
-from lithos_loom.lithos_client import NoteSummary
+from lithos_loom.lithos_client import Note, NoteSummary
 from lithos_loom.main import app
+from tests.support import FakeLithosClient, make_note
 
 runner = CliRunner()
 
@@ -389,63 +390,54 @@ def test_project_list_toml_source_empty_json(tmp_path: Path) -> None:
 # ── CLI integration: --source lithos (default) ─────────────────────────
 
 
-class _StubLithosClient:
-    """Async-context-manager stand-in for ``LithosClient``. Records
-    ``note_list`` invocations and returns a scripted response."""
-
-    def __init__(
-        self,
-        *args: Any,
-        responses: list[list[NoteSummary]] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        # Class-level scripted response so we can monkeypatch the
-        # symbol in cli.project and have the inner ``async with``
-        # construct the right stub. See ``_install_lithos_stub``
-        # for the wrapper.
-        self._args = args
-        self._kwargs = kwargs
-
-    async def __aenter__(self) -> _StubLithosClient:
-        return self
-
-    async def __aexit__(self, *exc: Any) -> None:
-        return None
-
-    async def note_list(
-        self,
-        *,
-        path_prefix: str | None = None,
-        tags: list[str] | None = None,
-        limit: int = 100,
-    ) -> list[NoteSummary]:
-        return list(_stub_state["response"])
-
-
-_stub_state: dict[str, Any] = {"response": []}
-
-
 @pytest.fixture
-def lithos_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Replace ``LithosClient`` in cli.project with our stub. Tests
-    set ``state['response']`` to control what ``note_list`` returns."""
-    _stub_state["response"] = []
-    monkeypatch.setattr(project_cli, "LithosClient", _StubLithosClient)
-    return _stub_state
+def install_lithos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., FakeLithosClient]:
+    """Seed a shared :class:`FakeLithosClient` with *notes* and patch it
+    into ``cli.project`` so the CLI's ``async with LithosClient(...) as
+    client`` yields the seeded fake. Returns the fake so a test can
+    inspect the recorded ``note_list`` call.
+
+    ``note_list`` filters the seeded notes exactly as the real client's
+    server would — by ``path_prefix`` (startswith) and ``tags`` (all
+    present) — so seeding project-context notes under
+    ``projects/<slug>/`` reproduces each previously scripted response.
+    """
+
+    def _install(notes: Sequence[Note] = ()) -> FakeLithosClient:
+        fake = FakeLithosClient(notes=tuple(notes))
+        monkeypatch.setattr(project_cli, "LithosClient", lambda *a, **k: fake)
+        return fake
+
+    return _install
 
 
 def test_project_list_lithos_source_default_text(
-    tmp_path: Path, lithos_stub: dict[str, Any]
+    tmp_path: Path,
+    install_lithos: Callable[..., FakeLithosClient],
 ) -> None:
     """Default ``--source lithos --format text``: three-column
     table showing slug + Lithos status + local-overlay marker."""
     repo = tmp_path / "loom"
     repo.mkdir()
     config_path = _write_config(tmp_path, f'[projects.lithos-loom]\nrepo = "{repo}"\n')
-    lithos_stub["response"] = [
-        _summary(slug="lithos-loom"),
-        _summary(slug="influx", id_="doc-2", path="projects/influx/context.md"),
-    ]
+    install_lithos(
+        [
+            make_note(
+                "doc-1",
+                slug="lithos-loom",
+                path="projects/lithos-loom/context.md",
+                tags=("project-context",),
+            ),
+            make_note(
+                "doc-2",
+                slug="influx",
+                path="projects/influx/context.md",
+                tags=("project-context",),
+            ),
+        ]
+    )
 
     result = runner.invoke(app, ["project", "list", "--config", str(config_path)])
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -461,15 +453,28 @@ def test_project_list_lithos_source_default_text(
 
 
 def test_project_list_lithos_source_json_is_slug_array(
-    tmp_path: Path, lithos_stub: dict[str, Any]
+    tmp_path: Path,
+    install_lithos: Callable[..., FakeLithosClient],
 ) -> None:
     """JSON shape is stable across sources: alphabetised array of
     slug strings. The capture macro depends on this exact shape."""
     config_path = _write_config(tmp_path, "# no toml projects needed")
-    lithos_stub["response"] = [
-        _summary(slug="zeta", path="projects/zeta/context.md"),
-        _summary(slug="alpha", path="projects/alpha/context.md"),
-    ]
+    install_lithos(
+        [
+            make_note(
+                "doc-zeta",
+                slug="zeta",
+                path="projects/zeta/context.md",
+                tags=("project-context",),
+            ),
+            make_note(
+                "doc-alpha",
+                slug="alpha",
+                path="projects/alpha/context.md",
+                tags=("project-context",),
+            ),
+        ]
+    )
 
     result = runner.invoke(
         app,
@@ -480,50 +485,40 @@ def test_project_list_lithos_source_json_is_slug_array(
 
 
 def test_project_list_lithos_source_passes_filters(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    install_lithos: Callable[..., FakeLithosClient],
 ) -> None:
     """The Lithos query MUST be ``path_prefix='projects/'`` AND
     ``tags=['project-context']`` — anything broader would list
     non-project-context docs in the operator's project enumeration."""
     config_path = _write_config(tmp_path, "")
-    captured: dict[str, Any] = {}
-
-    class _CapturingClient(_StubLithosClient):
-        async def note_list(
-            self,
-            *,
-            path_prefix: str | None = None,
-            tags: list[str] | None = None,
-            limit: int = 100,
-        ) -> list[NoteSummary]:
-            captured["path_prefix"] = path_prefix
-            captured["tags"] = tags
-            return []
-
-    monkeypatch.setattr(project_cli, "LithosClient", _CapturingClient)
+    fake = install_lithos()
     result = runner.invoke(app, ["project", "list", "--config", str(config_path)])
     assert result.exit_code == 0
-    assert captured["path_prefix"] == "projects/"
-    assert captured["tags"] == ["project-context"]
+    [call] = fake.calls_to("note_list")
+    assert call["path_prefix"] == "projects/"
+    assert call["tags"] == ["project-context"]
 
 
 def test_project_list_lithos_source_empty_text(
-    tmp_path: Path, lithos_stub: dict[str, Any]
+    tmp_path: Path,
+    install_lithos: Callable[..., FakeLithosClient],
 ) -> None:
     """Empty Lithos result + text format → empty stdout."""
     config_path = _write_config(tmp_path, "")
-    lithos_stub["response"] = []
+    install_lithos()
     result = runner.invoke(app, ["project", "list", "--config", str(config_path)])
     assert result.exit_code == 0
     assert result.stdout.strip() == ""
 
 
 def test_project_list_lithos_source_empty_json(
-    tmp_path: Path, lithos_stub: dict[str, Any]
+    tmp_path: Path,
+    install_lithos: Callable[..., FakeLithosClient],
 ) -> None:
     """Empty Lithos result + json format → empty array."""
     config_path = _write_config(tmp_path, "")
-    lithos_stub["response"] = []
+    install_lithos()
     result = runner.invoke(
         app,
         ["project", "list", "--config", str(config_path), "--format", "json"],
@@ -590,7 +585,9 @@ def test_project_list_missing_config(tmp_path: Path) -> None:
 
 
 def test_project_list_uses_env_var_when_no_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lithos_stub: dict[str, Any]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_lithos: Callable[..., FakeLithosClient],
 ) -> None:
     """``LITHOS_LOOM_CONFIG`` is the env-var seam; CLI honors it
     when ``--config`` is omitted. Pinned via the Lithos source
@@ -600,7 +597,16 @@ def test_project_list_uses_env_var_when_no_flag(
     repo.mkdir()
     config_path = _write_config(tmp_path, f'[projects.demo]\nrepo = "{repo}"\n')
     monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(config_path))
-    lithos_stub["response"] = [_summary(slug="demo", path="projects/demo/context.md")]
+    install_lithos(
+        [
+            make_note(
+                "doc-demo",
+                slug="demo",
+                path="projects/demo/context.md",
+                tags=("project-context",),
+            )
+        ]
+    )
 
     result = runner.invoke(app, ["project", "list", "--format", "json"])
     assert result.exit_code == 0
@@ -613,18 +619,8 @@ def test_project_list_lithos_unreachable_exits_with_hint(
     """A transport failure surfaces with a hint to try ``--source toml``
     — operators on flaky networks shouldn't have to dig for the fallback."""
     config_path = _write_config(tmp_path, "")
-
-    class _FailingClient:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        async def __aenter__(self) -> Any:
-            raise OSError("simulated network blip")
-
-        async def __aexit__(self, *exc: Any) -> None:
-            return None
-
-    monkeypatch.setattr(project_cli, "LithosClient", _FailingClient)
+    fake = FakeLithosClient(fail_connect=OSError("simulated network blip"))
+    monkeypatch.setattr(project_cli, "LithosClient", lambda *a, **k: fake)
     result = runner.invoke(app, ["project", "list", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "--source toml" in result.stderr

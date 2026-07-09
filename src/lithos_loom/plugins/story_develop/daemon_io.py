@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...lithos_client import LithosClient
+from ...lithos_client import LithosClient, NoteClient
 from .config import (
     DEFAULT_CODER_TOOL,
     DEFAULT_REVIEWER_NAME,
@@ -158,7 +158,7 @@ def _context_doc_path(slug: str) -> str:
 
 
 async def _fetch_context_metadata(
-    client: LithosClient, slug: str
+    client: NoteClient, slug: str
 ) -> Mapping[str, Any] | None:
     """The project-context doc's metadata, or ``None`` when no doc exists.
 

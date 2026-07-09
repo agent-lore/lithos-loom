@@ -19,6 +19,7 @@ from lithos_loom.bus import Event
 from lithos_loom.config import LoomConfig, ObsidianSyncConfig, OrchestratorConfig
 from lithos_loom.subscriptions import _awaiting_review
 from lithos_loom.subscriptions._awaiting_review import make_handler
+from tests.support import FakeLithosClient, make_task
 
 _NOTE = Path("_lithos/awaiting-review.md")
 _DELIVERED = {
@@ -159,23 +160,6 @@ async def test_atomic_write_leaves_no_temp(tmp_path: Path) -> None:
 # --- cold-start reconcile (#113 review) ----------------------------------------
 
 
-class _StubTask:
-    def __init__(self, id: str, title: str, status: str, metadata: dict) -> None:
-        self.id = id
-        self.title = title
-        self.status = status
-        self.metadata = metadata
-
-
-class _StubLithos:
-    def __init__(self, tasks: list[_StubTask]) -> None:
-        self._tasks = tasks
-
-    async def task_list(self, status: str) -> list[_StubTask]:
-        assert status == "open"
-        return self._tasks
-
-
 async def test_reconcile_cold_start_collapses_stale_note(tmp_path: Path) -> None:
     # A note written by a previous run; on restart there are zero open tasks and
     # the delivered task resolved outside the replay window → no events fire.
@@ -183,7 +167,9 @@ async def test_reconcile_cold_start_collapses_stale_note(tmp_path: Path) -> None
     note.parent.mkdir(parents=True)
     note.write_text("# PRs awaiting review\n\n- **Old** — [PR #1](https://x/pull/1)\n")
     _, reconcile = make_handler(_cfg(tmp_path))
-    await reconcile(_StubLithos([]))  # zero open tasks
+    fake = FakeLithosClient()  # zero open tasks
+    await reconcile(fake)
+    assert fake.calls_to("task_list")[0]["status"] == "open"
     content = note.read_text()
     assert "Old" not in content
     assert "_No PRs awaiting review._" in content
@@ -191,14 +177,16 @@ async def test_reconcile_cold_start_collapses_stale_note(tmp_path: Path) -> None
 
 async def test_reconcile_lists_open_delivered(tmp_path: Path) -> None:
     _, reconcile = make_handler(_cfg(tmp_path))
-    await reconcile(
-        _StubLithos(
-            [
-                _StubTask("t1", "Add note_update", "open", dict(_DELIVERED)),
-                _StubTask("t2", "plain", "open", {}),
-            ]
+    fake = FakeLithosClient(
+        tasks=(
+            make_task(
+                "t1", title="Add note_update", status="open", metadata=dict(_DELIVERED)
+            ),
+            make_task("t2", title="plain", status="open", metadata={}),
         )
     )
+    await reconcile(fake)
+    assert fake.calls_to("task_list")[0]["status"] == "open"
     content = _note(tmp_path)
     assert "**Add note_update**" in content
     assert "plain" not in content

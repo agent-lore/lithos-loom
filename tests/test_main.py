@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 from typer.testing import CliRunner
@@ -15,6 +13,7 @@ from lithos_loom import main as main_module
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import Task
 from lithos_loom.main import app
+from tests.support import FakeLithosClient
 
 runner = CliRunner()
 
@@ -62,69 +61,10 @@ def _task(
     )
 
 
-class _FakeLithos:
-    """Async-context-manager mock that records every call on it.
-
-    Read-only methods (``task_list``, ``task_get``) are explicit.
-    Anything else routed through ``__getattr__`` is recorded under
-    ``mutating_calls`` so tests can assert dry-run stays non-mutating.
-    """
-
-    def __init__(
-        self,
-        tasks: Sequence[Task],
-        *,
-        dep_statuses: dict[str, str | None] | None = None,
-    ) -> None:
-        self._tasks = list(tasks)
-        self._dep_statuses = dict(dep_statuses or {})
-        self.task_list_calls: list[dict[str, Any]] = []
-        self.task_get_calls: list[str] = []
-        self.mutating_calls: list[str] = []
-
-    async def __aenter__(self) -> _FakeLithos:
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        return None
-
-    async def task_list(
-        self,
-        *,
-        status: str | None = None,
-        with_claims: bool = False,
-    ) -> list[Task]:
-        self.task_list_calls.append({"status": status, "with_claims": with_claims})
-        return list(self._tasks)
-
-    async def task_get(self, *, task_id: str) -> Task | None:
-        """Post-lithos#294: dry-run resolves dep statuses via task_get
-        (not task_status). Both surfaces are read-only; this stub only
-        implements the one the production code calls."""
-        self.task_get_calls.append(task_id)
-        if task_id not in self._dep_statuses:
-            return None  # task_not_found
-        return Task(
-            id=task_id,
-            title=f"dep {task_id}",
-            status=self._dep_statuses[task_id] or "open",
-            tags=(),
-            metadata={},
-            claims=(),
-        )
-
-    def __getattr__(self, name: str) -> Any:
-        # Any other call is recorded so tests can assert non-mutation.
-        if name.startswith("task_") or name.startswith("finding_"):
-            self.mutating_calls.append(name)
-            return AsyncMock()
-        raise AttributeError(name)
-
-
-def _patch_client(monkeypatch: pytest.MonkeyPatch, fake: _FakeLithos) -> None:
+def _patch_client(monkeypatch: pytest.MonkeyPatch, fake: FakeLithosClient) -> None:
     """Patch the LithosClient symbol the CLI imports with a factory."""
 
-    def factory(*args: object, **kwargs: object) -> _FakeLithos:
+    def factory(*args: object, **kwargs: object) -> FakeLithosClient:
         return fake
 
     monkeypatch.setattr(main_module, "LithosClient", factory)
@@ -134,7 +74,7 @@ def test_dry_run_lists_matched_routes_per_task(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A task whose tags match a configured route is reported as 'would fire'."""
-    fake = _FakeLithos(
+    fake = FakeLithosClient(
         tasks=[_task("abc123", tags=("trigger:prd-decompose",), title="Decompose me")]
     )
     _patch_client(monkeypatch, fake)
@@ -144,14 +84,16 @@ def test_dry_run_lists_matched_routes_per_task(
     assert result.exit_code == 0, result.output
     assert "abc123" in result.output
     assert "route:prd-decompose" in result.output
-    assert fake.task_list_calls == [{"status": "open", "with_claims": True}]
+    assert fake.calls_to("task_list") == [
+        {"status": "open", "with_claims": True, "resolved_since": None}
+    ]
 
 
 def test_dry_run_flags_orphan_tasks(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An open task with no matching route or subscription is listed as orphan."""
-    fake = _FakeLithos(
+    fake = FakeLithosClient(
         tasks=[_task("orph-1", tags=("unrouted",), title="Nobody wants me")]
     )
     _patch_client(monkeypatch, fake)
@@ -167,7 +109,7 @@ def test_dry_run_flags_dead_routes(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A configured route that matches no open task is flagged as dead config."""
-    fake = _FakeLithos(tasks=[])  # no open tasks → every route is dead
+    fake = FakeLithosClient(tasks=[])  # no open tasks → every route is dead
     _patch_client(monkeypatch, fake)
 
     result = runner.invoke(app, ["validate-config", "--dry-run"])
@@ -181,7 +123,7 @@ def test_dry_run_does_not_call_mutating_lithos_methods(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--dry-run is non-mutating: no claim, complete, update, release, finding_post."""
-    fake = _FakeLithos(tasks=[_task("abc123", tags=("trigger:prd-decompose",))])
+    fake = FakeLithosClient(tasks=[_task("abc123", tags=("trigger:prd-decompose",))])
     _patch_client(monkeypatch, fake)
 
     result = runner.invoke(app, ["validate-config", "--dry-run"])
@@ -205,16 +147,9 @@ def test_dry_run_clear_error_when_lithos_unreachable(
     points the operator at ``lithos-loom doctor`` for follow-up.
     """
 
-    class _UnreachableClient:
-        def __init__(self, *args: object, **kwargs: object) -> None: ...
-
-        async def __aenter__(self) -> _UnreachableClient:
-            raise OSError("connection refused")
-
-        async def __aexit__(self, *args: object) -> None:
-            return None
-
-    monkeypatch.setattr(main_module, "LithosClient", _UnreachableClient)
+    _patch_client(
+        monkeypatch, FakeLithosClient(fail_connect=OSError("connection refused"))
+    )
 
     result = runner.invoke(app, ["validate-config", "--dry-run"])
     assert result.exit_code != 0
@@ -248,7 +183,7 @@ def test_dry_run_matches_subscription_with_where_predicate(
         )
     )
     monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
-    fake = _FakeLithos(
+    fake = FakeLithosClient(
         tasks=[
             _task("hi", title="urgent"),
             _task("lo", title="meh"),
@@ -298,7 +233,7 @@ def test_dry_run_subscription_with_updated_event_type_fires(
         )
     )
     monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
-    fake = _FakeLithos(tasks=[_task("t1", tags=("any-tag",))])
+    fake = FakeLithosClient(tasks=[_task("t1", tags=("any-tag",))])
     _patch_client(monkeypatch, fake)
 
     result = runner.invoke(app, ["validate-config", "--dry-run"])
@@ -320,15 +255,17 @@ def test_dry_run_route_deferred_when_dependencies_not_completed(
     must NOT be reported as 'would fire (claim)'. The runner's actual gate
     defers it; the dry-run output must reflect that.
     """
-    fake = _FakeLithos(
+    fake = FakeLithosClient(
         tasks=[
             _task(
                 "blocked",
                 tags=("trigger:prd-decompose",),
                 metadata={"depends_on": ["dep-1"]},
-            )
+            ),
+            # dep still open → not satisfied (and, realistically, itself an
+            # open task the sweep lists — with no trigger tag, an orphan).
+            _task("dep-1", status="open"),
         ],
-        dep_statuses={"dep-1": "open"},  # dep is still open → not satisfied
     )
     _patch_client(monkeypatch, fake)
 
@@ -349,22 +286,24 @@ def test_dry_run_route_deferred_when_dependencies_not_completed(
         "deferred" in route_row.lower() or "deps not complete" in route_row.lower()
     ), route_row
     # Dep-1 must have been resolved via task_get (post-lithos#294).
-    assert "dep-1" in fake.task_get_calls
+    assert "dep-1" in [c["task_id"] for c in fake.calls_to("task_get")]
 
 
 def test_dry_run_route_fires_when_dependencies_completed(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The dep-gating doesn't over-correct: completed deps allow the route to fire."""
-    fake = _FakeLithos(
+    fake = FakeLithosClient(
         tasks=[
             _task(
                 "ready",
                 tags=("trigger:prd-decompose",),
                 metadata={"depends_on": ["dep-1"]},
-            )
+            ),
+            # completed dep → satisfied; being terminal it's filtered out of
+            # the open-task sweep, so it doesn't appear as its own row.
+            _task("dep-1", status="completed"),
         ],
-        dep_statuses={"dep-1": "completed"},
     )
     _patch_client(monkeypatch, fake)
 

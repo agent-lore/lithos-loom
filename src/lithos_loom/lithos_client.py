@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import TracebackType
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -92,7 +92,17 @@ class _ReconnectRequest:
     error: BaseException | None = None
 
 
-__all__ = ["LithosClient", "Note", "NoteSummary", "Task", "WriteResult"]
+__all__ = [
+    "FindingClient",
+    "LithosClient",
+    "LithosClientProtocol",
+    "Note",
+    "NoteSummary",
+    "NoteClient",
+    "Task",
+    "TaskClient",
+    "WriteResult",
+]
 
 
 WriteStatus = Literal[
@@ -238,6 +248,143 @@ class WriteResult:
     message: str | None = None
     """Operator-readable message on non-success outcomes."""
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+
+# ── Role-scoped client Protocols (ARCH-4) ──────────────────────────────────
+#
+# The concrete ``LithosClient`` below has ONE flat namespace of ~15 methods
+# spanning tasks + notes + findings, but no caller uses more than a sliver.
+# These Protocols let each caller (and its test double) depend on just the
+# role it uses, and let a single shared in-memory fake stand in for the whole
+# surface. They type the *method surface only* — the async-context-manager
+# entry (``async with LithosClient(...)``) is a construction concern the
+# caller owns, so a Protocol annotates the already-entered client. This mirrors
+# the pre-existing ``WatcherLithosClient`` / ``EventStreamClient`` role
+# Protocols (sources/), which this generalises.
+
+
+@runtime_checkable
+class TaskClient(Protocol):
+    """The task-facing Lithos surface: list / read / lifecycle / claim."""
+
+    async def task_list(
+        self,
+        *,
+        status: str | None = None,
+        with_claims: bool = False,
+        resolved_since: datetime | None = None,
+    ) -> list[Task]: ...
+
+    async def task_get(self, *, task_id: str) -> Task | None: ...
+
+    async def task_status(self, *, task_id: str) -> Task | None: ...
+
+    async def task_create(
+        self,
+        *,
+        title: str,
+        agent: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str: ...
+
+    async def task_update(
+        self,
+        *,
+        task_id: str,
+        agent: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    async def task_complete(
+        self, *, task_id: str, agent: str | None = None
+    ) -> None: ...
+
+    async def task_cancel(
+        self, *, task_id: str, agent: str | None = None, reason: str | None = None
+    ) -> None: ...
+
+    async def task_claim(
+        self,
+        *,
+        task_id: str,
+        aspect: str,
+        ttl_minutes: int = 60,
+        agent: str | None = None,
+    ) -> str: ...
+
+    async def task_renew(
+        self,
+        *,
+        task_id: str,
+        aspect: str,
+        ttl_minutes: int = 60,
+        agent: str | None = None,
+    ) -> str: ...
+
+    async def task_release(
+        self, *, task_id: str, aspect: str, agent: str | None = None
+    ) -> None: ...
+
+
+@runtime_checkable
+class NoteClient(Protocol):
+    """The note-facing Lithos surface: read / write / list / delete."""
+
+    async def note_read(
+        self, *, id: str | None = None, path: str | None = None
+    ) -> Note | None: ...
+
+    async def note_write(
+        self,
+        *,
+        agent: str | None = None,
+        title: str,
+        content: str,
+        tags: list[str] | None = None,
+        note_type: str = "concept",
+        path: str | None = None,
+        id: str | None = None,
+        expected_version: int | None = None,
+        status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> WriteResult: ...
+
+    async def note_list(
+        self,
+        *,
+        path_prefix: str | None = None,
+        tags: list[str] | None = None,
+        limit: int = 100,
+        metadata_match: dict[str, Any] | None = None,
+    ) -> list[NoteSummary]: ...
+
+    async def note_delete(self, *, id: str, agent: str | None = None) -> bool: ...
+
+
+@runtime_checkable
+class FindingClient(Protocol):
+    """The finding-facing Lithos surface: post a finding against a task."""
+
+    async def finding_post(
+        self,
+        *,
+        task_id: str,
+        summary: str,
+        agent: str | None = None,
+        knowledge_id: str | None = None,
+    ) -> str | None: ...
+
+
+@runtime_checkable
+class LithosClientProtocol(TaskClient, NoteClient, FindingClient, Protocol):
+    """The full role surface — for callers/tests that span more than one role
+    (e.g. story-develop uses tasks + findings; project-import uses tasks +
+    notes). ``LithosClient`` and the shared test fake both satisfy it."""
 
 
 class LithosClient:
