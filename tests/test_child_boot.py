@@ -12,6 +12,7 @@ import asyncio
 import logging
 import signal
 from collections.abc import Iterator
+from typing import cast
 
 import pytest
 
@@ -61,6 +62,31 @@ def test_parse_child_args_defaults_config_to_none() -> None:
     assert ns.config is None
 
 
+class _NoSignalLoop:
+    """A loop whose signal methods are unsupported.
+
+    Models the platforms ``install_stop_signals`` is written to survive
+    (e.g. Windows Proactor, some embedded loops) where ``add_signal_handler``
+    raises ``NotImplementedError``."""
+
+    def add_signal_handler(self, *args: object, **kwargs: object) -> None:
+        raise NotImplementedError
+
+    def remove_signal_handler(self, *args: object, **kwargs: object) -> None:
+        raise NotImplementedError
+
+
+def test_install_stop_signals_suppresses_unsupported_platform() -> None:
+    """On a loop without signal support, install registers nothing and
+    does not raise — the child still boots (the supervisor terminates it
+    via process signals regardless)."""
+    loop = cast("asyncio.AbstractEventLoop", _NoSignalLoop())
+    installed = _boot.install_stop_signals(loop, lambda: None)
+    assert installed == []
+    # remove must swallow NotImplementedError too, even handed a signal.
+    _boot.remove_stop_signals(loop, [signal.SIGTERM])  # no raise
+
+
 async def test_install_stop_signals_returns_registered_signals() -> None:
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -73,10 +99,16 @@ async def test_install_stop_signals_returns_registered_signals() -> None:
 
 async def test_installed_handler_trips_the_stop_callback() -> None:
     """End-to-end: a delivered SIGINT sets the event via the installed
-    handler (SIGINT's default is overridden while our handler is live)."""
+    handler (SIGINT's default is overridden while our handler is live).
+
+    Skipped on a loop that can't install signal handlers — the helper
+    returns an empty list there, which the suppress-branch test covers."""
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     installed = _boot.install_stop_signals(loop, stop.set)
+    if signal.SIGINT not in installed:
+        _boot.remove_stop_signals(loop, installed)
+        pytest.skip("event loop does not support signal handlers")
     try:
         signal.raise_signal(signal.SIGINT)
         async with asyncio.timeout(1.0):

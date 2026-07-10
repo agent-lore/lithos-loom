@@ -140,6 +140,44 @@ def test_dry_run_does_not_call_mutating_lithos_methods(
     assert not (set(fake.mutating_calls) & forbidden), fake.mutating_calls
 
 
+def test_dry_run_rejects_unknown_subscription_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A misspelled subscription action fails the dry-run loudly.
+
+    The dry-run validates each config action against SUBSCRIPTION_ACTIONS
+    (via build_runners' handler-map check), so a typo like
+    ``obsidian-projction`` surfaces as an unknown handler + non-zero exit
+    instead of a silently inert subscription (ARCH-6)."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        dedent(
+            f"""
+            [orchestrator]
+            agent_id = "typo-test"
+            lithos_url = "http://localhost:8765"
+            work_dir = "{tmp_path / "work"}"
+            max_concurrency = 2
+            log_level = "info"
+
+            [[subscriptions]]
+            name = "typo-sub"
+            on = ["lithos.task.created"]
+            action = "obsidian-projction"
+            """
+        )
+    )
+    _patch_client(monkeypatch, FakeLithosClient(tasks=[]))
+
+    result = runner.invoke(
+        app, ["validate-config", "--dry-run", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "unknown handler" in result.stderr
+    assert "obsidian-projction" in result.stderr
+
+
 def test_dry_run_clear_error_when_lithos_unreachable(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

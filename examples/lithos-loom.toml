@@ -127,10 +127,11 @@ tags = ["trigger:story-review-human"]
 # ── Subscriptions ─────────────────────────────────────────────────────
 #
 # Fire-and-forget side effects on bus events. Each [[subscriptions]]
-# stanza references an `action` resolved from the
-# `lithos_loom.subscriptions.handlers` Python entry-point group. Slice 0
-# ships only the bundled `noop` action; real handlers
-# (`obsidian-projection` etc.) arrive in Slice 1+.
+# stanza names an `action` — one of `subscriptions.SUBSCRIPTION_ACTIONS`,
+# hand-wired to a handler in its hosting child (see ADR 0007). The
+# bundled `noop` action is a stateless placeholder; the real handlers
+# (`obsidian-projection`, `note-push`, `task-archive`, …) are hosted by
+# the obsidian-sync child.
 #
 # Filter precedence (D5): structural `match.<key>` table runs first,
 # then the optional `where` Python expression. Both must hold (AND).
