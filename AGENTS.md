@@ -57,6 +57,30 @@ All three must pass. CI runs the same on every PR.
 
 When changing the plugin contract, update `docs/result-schema.json` AND `tests/test_plugin_runner.py`. When changing config schema, update `examples/lithos-loom.toml` AND `tests/test_config.py`. When adding a new plugin, ship it under `src/lithos_loom/plugins/<name>/` with a `__main__.py` entry point and add an example route stanza to `examples/lithos-loom.toml`. When changing any operator-visible surface (CLI flag, projection rule, event name, finding prefix), update `docs/SPECIFICATION.md` in the same diff.
 
+## Architecture guardrails & generated docs
+
+`docs/generated/` holds generated views of the code — component diagram, domain
+model, architecture metrics, and per-component drill-down pages (indexed by
+`docs/generated/README.md`) — produced by `tests/guardrail/` and drift-checked in
+CI:
+
+- `make diagrams` regenerates everything (it just runs `pytest tests/guardrail/ -q`).
+  Note `make test` runs the same tests, so a test run rewrites `docs/generated/`
+  as a side effect — commit the result if it changed.
+- The CI job `diagrams` (Diagram drift) fails when the committed files disagree
+  with what the code generates. Fix: `make diagrams`, commit.
+- `docs/architecture.toml` is the source of truth for components, tiers,
+  domain-model scanning, and the hard metric budgets. Adding a new module,
+  component, or model? The guardrail orphan/completeness checks fail until you map
+  it there.
+- Directional import rules (Entrypoints → Core → Foundation) are enforced by
+  import-linter (`pyproject.toml [tool.importlinter]`); `test_run_outcome_leaf.py`
+  additionally pins `run_outcome` as a leaf on-disk-contract module.
+- This is the portable "diagrams as tests" kit; `tests/guardrail/AGENTS.md` has the
+  generator contracts. The kit's optional tool-catalog and container adapters are
+  not enabled here (loom is an MCP client; its on-disk state is a per-run directory
+  tree with no central store-config to anchor a container view to).
+
 ## Agent skills
 
 ### Issue tracker

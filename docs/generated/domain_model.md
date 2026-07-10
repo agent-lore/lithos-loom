@@ -3,18 +3,10 @@
 
 # Domain model
 
+## GitHub
+
 ```mermaid
 classDiagram
-  class CategorySpec {
-    +name str
-    +module str
-    +enabled Callable[[LoomConfig], bool]
-    +extra_args tuple[str, ...]
-  }
-  class ChildProcess {
-    +proc asyncio.subprocess.Process
-    +argv tuple[str, ...]
-  }
   class GitHubAuthError
   class GitHubClient {
     +http httpx.AsyncClient
@@ -41,6 +33,37 @@ classDiagram
     +updated_at datetime
     +html_url str
   }
+  class PullRequest {
+    +repo str
+    +number int
+    +state str
+    +merged bool
+    +merged_at datetime | None
+    +merge_commit_sha str | None
+  }
+```
+
+## Supervisor
+
+```mermaid
+classDiagram
+  class CategorySpec {
+    +name str
+    +module str
+    +enabled Callable[[LoomConfig], bool]
+    +extra_args tuple[str, ...]
+  }
+  class ChildProcess {
+    +proc asyncio.subprocess.Process
+    +argv tuple[str, ...]
+  }
+  ChildProcess "1" --> "1" CategorySpec : spec
+```
+
+## Tasks
+
+```mermaid
+classDiagram
   class ParsedTaskLine {
     +line_number int
     +indent int
@@ -51,14 +74,6 @@ classDiagram
     +is_sequential_parent bool
     +is_empty bool
   }
-  class PullRequest {
-    +repo str
-    +number int
-    +state str
-    +merged bool
-    +merged_at datetime | None
-    +merge_commit_sha str | None
-  }
   class TaskCreatePlan {
     +depends_on_line_numbers tuple[int, ...]
     +parallelizable bool
@@ -68,6 +83,5 @@ classDiagram
     +kind ValidationKind
     +message str
   }
-  ChildProcess "1" --> "1" CategorySpec : spec
   TaskCreatePlan "1" --> "1" ParsedTaskLine : line
 ```

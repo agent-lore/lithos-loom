@@ -1,8 +1,9 @@
 # Architecture model for the "diagrams as tests" guardrail.
 #
 # Single source of truth for:
-#   - the generated component diagram (tests/guardrail/test_architecture_diagram.py)
+#   - the generated component diagram + per-component pages
 #   - which modules are scanned for the domain class diagram
+#   - the architecture metrics snapshot and its hard budgets
 #
 # The directional layering contract lives in pyproject.toml
 # ([tool.importlinter]); the tiers below document that intent (dependencies must
@@ -10,6 +11,41 @@
 #
 # `component_of()` matches a module to a component by LONGEST module-prefix, so
 # "lithos_loom.plugins" also captures "lithos_loom.plugins.story_develop" etc.
+#
+# This project uses the portable guardrail kit (tests/guardrail/ + scripts/) with
+# only the core views enabled. The kit's two optional adapters — [tool_catalog]
+# (a decorator-registered MCP tool surface) and [containers] (on-disk data
+# stores) — are omitted: lithos-loom is an MCP client (its CLI is Typer, not an
+# MCP tool surface) and its on-disk state is a per-run directory tree with no
+# central store-config class to anchor a container view to.
+
+[project]
+root_package = "lithos_loom"
+src_layout   = "src"
+
+# One-line description per component, shown at the top of its drill-down page
+# (docs/generated/components/<Component>.md). test_component_pages requires one
+# for every component in [components].
+[component_docs]
+Entrypoint     = "Typer CLI app entry and `python -m` bootstrap (`lithos-loom = lithos_loom.main:app`)."
+Children       = "Child-process entrypoints spawned by the supervisor (watcher / sync child mains)."
+Cli            = "Typer command implementations (task, project, develop, review, obsidian-sync, …)."
+Plugins        = "Bundled subprocess plugins; the mature one is story_develop (the implement→review→fix cycle)."
+Subscriptions  = "Event-subscription handlers and route-runner projection (route runner, awaiting-review, Obsidian projection)."
+Sources        = "Event/issue producers: Lithos SSE event & note streams, GitHub issue watcher, Obsidian watchers."
+Render         = "Rendering of tasks and notes into Obsidian-Tasks-compatible markdown."
+Doctor         = "Environment and configuration diagnostics (`doctor` CLI)."
+Evals          = "The review-eval harness (case / harness / match / judge / patch / stats and its own CLI)."
+Bus            = "In-process async event bus."
+Config         = "TOML config discovery/loading and the config dataclasses (LoomConfig, OrchestratorConfig, …)."
+Errors         = "Shared exception hierarchy (LithosLoomError and friends)."
+LithosClient   = "Async MCP-over-SSE client to the Lithos server (task/note CRUD, event stream, dead-session recovery)."
+GitHub         = "gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient)."
+Tasks          = "Task-creation planning and parsing of Obsidian-Tasks task lines."
+State          = "Durable host-side hot state: the SSE cursor JSON store and projection sync state."
+Runners        = "Route and plugin execution (worktree, git, agent detection, subprocess plugin runner)."
+Supervisor     = "Long-lived child-process supervisor (spawn / monitor / restart by category)."
+ProjectContext = "Bidirectional project-context doc projection between Lithos and Obsidian."
 
 [components]
 Entrypoint     = ["lithos_loom.main", "lithos_loom.__main__"]
@@ -37,8 +73,28 @@ Entrypoints = ["Entrypoint", "Children"]
 Core        = ["Cli", "Plugins", "Subscriptions", "Sources", "Render", "Doctor", "Evals"]
 Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "State", "Runners", "Supervisor", "ProjectContext"]
 
-# Domain class diagram: the GitHub/task data types. Config/settings dataclasses
-# are configuration, not domain entities, so config is excluded.
+# Hard architecture budgets, checked by tests/guardrail/test_metrics_budgets.py
+# against the metrics snapshot (docs/generated/metrics.md explains each one).
+# CI fails if a measured value exceeds its budget. Raising a budget is allowed
+# but must be an explicit, reviewed edit to this file; lower a budget after
+# improving the code to lock in the gain.
+#
+# Most budgets below are tight ratchets pinned at today's value (any regression
+# fails CI). max_module_lines is the exception: it is a STOP-LOSS ceiling set a
+# little above today's largest module so a big module can't quietly balloon — it
+# is deliberately NOT pinned to the exact current high-water mark. Ratchet the
+# *count* of oversized modules down via modules_over_800_lines instead.
+[budgets]
+cross_component_edges  = 62   # measured 2026-07; direction: down
+component_cycles       = 1    # Render <-> Subscriptions; goal: 0
+module_cycles          = 1    # agent_session <-> panel <-> rounds SCC; goal: 0
+modules_over_800_lines = 8    # existing god modules; direction: down, no new ones
+max_module_lines       = 1850 # stop-loss; largest today is lithos_client at 1774
+
+# Domain class diagram: the GitHub/task data types are the domain entities.
+# Everything else (config/settings, plugin-internal working types, eval
+# harness types, infra clients) is not a domain entity and is excluded so the
+# always-on completeness gate (test_every_model_is_scanned_or_excluded) passes.
 [domain]
 include_modules = [
     "lithos_loom.github_client",
@@ -46,4 +102,22 @@ include_modules = [
     "lithos_loom.task_line_parser",
     "lithos_loom.supervisor",
 ]
-exclude_modules = ["lithos_loom.config"]
+exclude_modules = [
+    "lithos_loom.config",
+    "lithos_loom.errors",
+    "lithos_loom.plugins",
+    "lithos_loom.evals",
+    "lithos_loom.sources",
+    "lithos_loom.subscriptions",
+    "lithos_loom.runner",
+    "lithos_loom.plugin_runner",
+    "lithos_loom.render",
+    "lithos_loom.render_project_context",
+    "lithos_loom.lithos_client",
+    "lithos_loom.cli",
+    "lithos_loom.bus",
+    "lithos_loom.doctor",
+    "lithos_loom.children",
+    "lithos_loom.cursor_store",
+    "lithos_loom.sync_state",
+]
