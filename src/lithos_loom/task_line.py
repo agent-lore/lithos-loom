@@ -99,11 +99,17 @@ _PRIORITY_EMOJI_RE = re.compile(
     "(" + "|".join(re.escape(emoji) for emoji in PRIORITY_EMOJI.values()) + ")"
 )
 
-# 📅 YYYY-MM-DD — the Tasks-plugin due-date marker. Only the canonical
-# date form is matched; anything else (``📅 next Friday``, a datetime)
-# reads as "no date" so a malformed edit never bounces a garbage value
-# back to Lithos. The plugin itself only renders ``YYYY-MM-DD``, so the
-# round-trip stays closed under valid inputs.
+# 📅 YYYY-MM-DD — the Tasks-plugin due-date marker. Captures a
+# ``YYYY-MM-DD`` substring after the emoji: a marker with no date-shaped
+# text (``📅 next Friday``) reads as "no date", while a datetime-like
+# edit (``📅 2026-06-15T09:00Z``) is normalized to its date *prefix*
+# (``2026-06-15``) — the trailing time is left unmatched. That
+# normalization is deliberate: the projection only ever writes the
+# canonical ``YYYY-MM-DD`` (``render`` emits ``date.isoformat()``), so
+# the prefix/reject distinction only bites a hand-edit, and recovering
+# the date beats dropping it (dropping would push a due-date *removal*
+# back to Lithos, losing the operator's date). The round-trip stays
+# closed under the writer's own output.
 _DUE_DATE_RE = re.compile(r"📅 (\d{4}-\d{2}-\d{2})")
 
 
@@ -146,11 +152,13 @@ def parse_priority(zone: str) -> str | None:
 
 def parse_due_date(zone: str) -> str | None:
     """Return the ``YYYY-MM-DD`` string of the first ``📅`` marker in
-    ``zone``, or ``None`` when absent / malformed.
+    ``zone``, or ``None`` when no date-shaped substring follows a ``📅``.
 
-    Yielded verbatim as a string — no date parsing or validation here;
-    that is the handler's job. Same trailing-metadata-zone scoping as
-    :func:`parse_priority`.
+    A datetime-like value is normalized to its date prefix
+    (``📅 2026-06-15T09:00Z`` → ``"2026-06-15"``) rather than rejected —
+    see :data:`_DUE_DATE_RE`. Yielded verbatim as a string; no further
+    date parsing or validation here (that is the handler's job). Same
+    trailing-metadata-zone scoping as :func:`parse_priority`.
     """
     m = _DUE_DATE_RE.search(zone)
     return m.group(1) if m else None

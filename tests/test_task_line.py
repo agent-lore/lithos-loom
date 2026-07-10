@@ -130,10 +130,16 @@ def test_parse_due_date_reads_the_canonical_form() -> None:
     assert parse_due_date("#lithos/route 📅 2026-06-15") == "2026-06-15"
 
 
-def test_parse_due_date_rejects_non_canonical_forms() -> None:
+def test_parse_due_date_reads_none_without_a_date_shaped_value() -> None:
     assert parse_due_date("📅 next Friday") is None
-    assert parse_due_date("📅 2026-06-15T09:00Z") == "2026-06-15"  # date prefix only
     assert parse_due_date("no marker") is None
+
+
+def test_parse_due_date_normalizes_a_datetime_edit_to_its_date_prefix() -> None:
+    """A hand-edited datetime keeps its date and drops the trailing time
+    (the regex captures the ``YYYY-MM-DD`` prefix, not "no date") — the
+    normalize-don't-drop behaviour documented on ``_DUE_DATE_RE``."""
+    assert parse_due_date("📅 2026-06-15T09:00Z") == "2026-06-15"
 
 
 # ── writer ↔ grammar round-trip (the headline) ─────────────────────────
