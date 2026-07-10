@@ -44,7 +44,7 @@ Event/issue producers: Lithos SSE event & note streams, GitHub issue watcher, Ob
 
 ## Dependencies
 
-- Depends on: [Bus](Bus.md), [Cli](Cli.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [ProjectContext](ProjectContext.md), [State](State.md)
+- Depends on: [Bus](Bus.md), [Cli](Cli.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [ProjectContext](ProjectContext.md), [State](State.md), [Tasks](Tasks.md)
 - Used by: [Children](Children.md)
 
 [← all generated docs](../README.md)

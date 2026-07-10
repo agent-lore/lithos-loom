@@ -24,14 +24,14 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 8 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | M | 2 | 8 |
-| `lithos_loom.plugins.story_develop.containers` | S | 0 | 6 |
+| `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
-| `lithos_loom.plugins.story_develop.develop` | L | 1 | 1 |
+| `lithos_loom.plugins.story_develop.develop` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 10 |
+| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 11 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | S | 2 | 3 |
@@ -43,10 +43,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | S | 0 | 1 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | XS | 1 | 0 |
+| `lithos_loom.plugins.story_develop.rounds` | M | 3 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
-| `lithos_loom.plugins.story_develop.turns` | XS | 0 | 3 |
+| `lithos_loom.plugins.story_develop.turns` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_implement` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_implement.__main__` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_review_human` | XS | 0 | 0 |
@@ -114,7 +114,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.containers`
 - def `container_name` — Stable, unique-per-run container name, e.g. ``loom-develop-ab12cd34-coder``.
 - def `build_run_command` — Build the ``docker run`` argv for a long-lived idle agent container.
-- def `build_exec_command` — Build the ``docker exec`` argv for one agent turn (coder or reviewer).
 - def `start_container` — Run ``docker run -d`` and return the container id (stdout).
 - def `exec_turn` — Run ``docker exec`` for one turn with stdin closed (no 3s stdin wait).
 - def `stop_container` — Force-remove the container; never raises (teardown must be best-effort).
@@ -172,6 +171,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `render_findings` — Render a reviewer's findings as a compact block for the coder's prompt.
 - def `coder_handoff_name` — Filename for the coder's handoff in a given round (1-based).
 - def `reviewer_handoff_name` — Filename for a reviewer's handoff in a given round.
+- def `render_log_section` — Render one conversation-log section as a list of lines (the caller joins).
 - def `conversation_log` — Assemble an ordered, human-readable log of every round's handoffs.
 - def `seed_handoff_dir` — Create *handoff_dir* and write ``FORMAT.md`` into it.
 - def `parse_review_handoff` — Parse + validate a reviewer handoff. Raises :class:`HandoffError`.
@@ -255,6 +255,19 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.rounds`
 - class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4).
+- class `CycleExit` — A terminal outcome of the develop loop.
+- class `RoundContext` — The explicit successor of ``develop()``'s locals bag (ARCH-1.S6).
+- def `coder_phase` — Build the coder prompt, run its (limit-paused) turn, salvage a missing handoff once (#114), and gate the round on a clean turn + a written handoff.
+- def `dispute_phase` — T7: record the coder's dispute marks from its handoff (round >= 2).
+- def `commit_round` — Commit a round's work as one commit, excluding the handoff dir.
+- def `commit_phase` — Commit the round's work (excluding the handoff dir) and auto-format it in place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
+- def `cost_ceiling_phase` — T7 cost ceiling. Called TWICE per round — ``when="pre_review"`` (before spending on reviews) and ``when="post_review"`` (after). The two calls are kept separate on purpose: approval (:func:`approval_phase`) runs between them and deliberately takes precedence when both an approval and the ceiling land in the same round.
+- def `fast_gate_phase` — #140/ADR §4: run the FAST deterministic checks on the round's new commit (candidate-staged checks are deferred to :func:`approval_phase`). Never terminal.
+- def `panel_phase` — Run the reviewer panel — the one shared primitive (#154). Sets ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
+- def `approval_phase` — Seal approval when ALL reviewers pass their OWN threshold this round (PRD #7). Runs the expensive candidate-staged checks once per committed tree (#140) and holds approval while a *required* check blocks (floor). Approval takes precedence over the same-round cost ceiling (the spend already happened).
+- def `deadlock_phase` — T7 dispute escalation: a coder-disputed finding the reviewer kept blocking for 2 consecutive rounds stops the run with a human breadcrumb rather than grinding to max_rounds.
+- def `stall_phase` — T7 stall guard, keyed off finding IDENTITY: an empty round commit or an unchanged blocking set, two rounds running, stops the run.
+- def `run_round` — Sequence one develop round's phases. Returns the first phase's :class:`CycleExit` (terminating the loop), or ``None`` to continue to the next round. The order — and the TWO ``cost_ceiling_phase`` calls straddling approval — is load-bearing (see :func:`cost_ceiling_phase`).
 
 ### `lithos_loom.plugins.story_develop.run_outcome`
 - def `read_state` — The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
@@ -283,8 +296,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `run_gate_container` — Run the gate container and capture its outcome; never raises on red.
 
 ### `lithos_loom.plugins.story_develop.turns`
-- def `parse_claude_result` — Delegate to :meth:`ClaudeEngine.parse_turn` (kept until callers migrate, E2).
-- def `parse_codex_result` — Delegate to :meth:`CodexEngine.parse_turn` (kept until callers migrate, E2).
 - def `run_turn` — Execute one agent turn in *container* via *engine* and return its result.
 
 ### `lithos_loom.plugins.story_implement.__main__`

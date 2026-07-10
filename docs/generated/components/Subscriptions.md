@@ -91,7 +91,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ## Dependencies
 
-- Depends on: [Bus](Bus.md), [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [State](State.md)
+- Depends on: [Bus](Bus.md), [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [State](State.md), [Tasks](Tasks.md)
 - Used by: [Children](Children.md), [Cli](Cli.md), [Entrypoint](Entrypoint.md), [Render](Render.md)
 
 [← all generated docs](../README.md)

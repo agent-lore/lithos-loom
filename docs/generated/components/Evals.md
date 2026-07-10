@@ -57,4 +57,8 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - Depends on: [Plugins](Plugins.md), [Runners](Runners.md)
 - Used by: [Entrypoint](Entrypoint.md)
 
+## ADRs
+
+- [ADR 0002 — `story-develop` session mechanism: live container + resumable exec, not a live REPL](../../adr/0002-story-develop-session-mechanism.md)
+
 [← all generated docs](../README.md)

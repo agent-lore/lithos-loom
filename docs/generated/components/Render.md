@@ -11,12 +11,11 @@ Rendering of tasks and notes into Obsidian-Tasks-compatible markdown.
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.render` | M | 0 | 8 |
+| `lithos_loom.render` | S | 0 | 7 |
 
 ## Public API
 
 ### `lithos_loom.render`
-- def `extract_task_ids` — Return the set of Lithos task ids referenced by ``🆔 lithos:<id>`` markers anywhere in ``text``.
 - def `render_line` — Render one Tasks-plugin task line for an open task.
 - def `render_resolved_line` — Render the historical-line shape for completed/cancelled tasks.
 - def `priority_marker` — Map ``task.metadata.priority`` to its Tasks-plugin emoji.
@@ -27,7 +26,7 @@ Rendering of tasks and notes into Obsidian-Tasks-compatible markdown.
 
 ## Dependencies
 
-- Depends on: [Config](Config.md), [LithosClient](LithosClient.md), [Subscriptions](Subscriptions.md)
+- Depends on: [Config](Config.md), [LithosClient](LithosClient.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
 - Used by: [Cli](Cli.md), [Subscriptions](Subscriptions.md)
 
 [← all generated docs](../README.md)

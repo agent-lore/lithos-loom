@@ -12,6 +12,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.task_graph` | S | 1 | 1 |
+| `lithos_loom.task_line` | S | 0 | 4 |
 | `lithos_loom.task_line_parser` | S | 2 | 1 |
 
 ## Public API
@@ -19,6 +20,12 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 ### `lithos_loom.task_graph`
 - class `TaskCreatePlan` — One Lithos ``task_create`` call's worth of structured input.
 - def `build_plan` — Build task-create plans with dependency edges from indentation.
+
+### `lithos_loom.task_line`
+- def `render_task_id` — Render the ``🆔 lithos:<id>`` stable-identifier marker.
+- def `extract_task_ids` — Return every Lithos task id referenced by a ``🆔 lithos:<id>`` marker anywhere in ``text``.
+- def `parse_priority` — Return the priority enum for the first priority emoji in ``zone``, or ``None`` when none is present.
+- def `parse_due_date` — Return the ``YYYY-MM-DD`` string of the first ``📅`` marker in ``zone``, or ``None`` when no date-shaped substring follows a ``📅``.
 
 ### `lithos_loom.task_line_parser`
 - class `ParsedTaskLine` — One parsed ``- [ ]`` task line, ready for graph-building.
@@ -28,6 +35,6 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 ## Dependencies
 
 - Depends on: —
-- Used by: [Cli](Cli.md)
+- Used by: [Cli](Cli.md), [Render](Render.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
 
 [← all generated docs](../README.md)
