@@ -42,7 +42,7 @@ from pathlib import Path
 
 from lithos_loom.bus import Event
 from lithos_loom.config import LoomConfig
-from lithos_loom.render import extract_task_ids, render_resolved_line
+from lithos_loom.render import render_resolved_line
 from lithos_loom.subscriptions import Handler, SubscriptionContext
 
 # Reused verbatim from the tasks projection so the archived Task is
@@ -54,6 +54,7 @@ from lithos_loom.subscriptions._obsidian_projection import (
     _task_from_payload,
 )
 from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.task_line import extract_task_ids
 
 __all__ = ["make_handler"]
 

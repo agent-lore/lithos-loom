@@ -3,6 +3,21 @@
 Ubiquitous language for lithos-loom. Terms here are domain-meaningful (operator /
 integrator facing), not implementation detail.
 
+## Obsidian bridge
+
+- **task line** — the single Obsidian Tasks-plugin markdown line that represents one
+  Lithos task in the vault: ``- [ ] <title> 🆔 lithos:<id> [#project/<slug>]
+  [#lithos/<route>] [⛔ lithos:<dep>]… [<priority-emoji>] [📅 <date>]`` (and the
+  terminal ``- [x]`` / ``- [-]`` … ``✅``/``❌ <date>`` forms). The ``🆔 lithos:<id>``
+  marker is the stable anchor other lines reference and the projection re-identifies a
+  task by across re-writes; the trailing Tasks-plugin emoji (priority, ⛔ deps, 📅 date)
+  are the only positions the plugin parses for sort/filter. The line's **grammar** — the
+  priority-enum ↔ emoji bijection and the render/parse inverse pairs for the 🆔, priority,
+  and 📅 markers — is owned by the ``task_line`` module, the single home shared by the
+  projection writer (``render``), the fs-watcher reader (``obsidian_fs_watcher``), and the
+  import parser (``task_line_parser``). Writer and reader are inverses under valid inputs,
+  pinned by a round-trip property test rather than a per-table drift test.
+
 ## story-develop plugin
 
 The plugin that automates Dave's manual conversational code-review workflow. Replaces

@@ -22,7 +22,8 @@ import typer
 from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.lithos_client import LithosClient, Task
-from lithos_loom.render import PRIORITY_EMOJI, render_line, validated_priority
+from lithos_loom.render import render_line, validated_priority
+from lithos_loom.task_line import PRIORITY_EMOJI
 
 # Canonical project-context query (mirrors the `project list` default and
 # the capture macro's dropdown source). Kept in sync with the same

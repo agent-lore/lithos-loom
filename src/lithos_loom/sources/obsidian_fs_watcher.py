@@ -65,8 +65,9 @@ from typing import Any
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.task_line import TASK_ID_RE, parse_due_date, parse_priority
 
-__all__ = ["EMOJI_TO_PRIORITY", "ObsidianFsWatcher", "VALID_STATUS_MARKERS"]
+__all__ = ["ObsidianFsWatcher", "VALID_STATUS_MARKERS"]
 
 logger = logging.getLogger(__name__)
 
@@ -80,42 +81,18 @@ among these; the status-transition subscription decides which ones map
 to Lithos calls."""
 
 
-EMOJI_TO_PRIORITY: dict[str, str] = {
-    "🔺": "highest",
-    "⏫": "high",
-    "🔼": "medium",
-    "🔽": "low",
-    "⏬": "lowest",
-}
-"""Priority emoji → enum string, inverse of the projection's
-``PRIORITY_EMOJI``. The two tables are pinned to agree by an anti-drift
-test in ``tests/test_obsidian_fs_watcher.py``
-(``test_priority_emoji_table_matches_projection_table``); if either
-changes, that test fails loudly. Public (no underscore) so the
-anti-drift test can import it without reaching into private internals."""
-
+# The priority-emoji table and the 🆔 / 📅 marker grammar this reader
+# parses live in :mod:`lithos_loom.task_line` (the single home shared with
+# the projection writer and the import parser): ``TASK_ID_RE`` anchors the
+# line, ``parse_priority`` / ``parse_due_date`` read the trailing-metadata
+# zone after it.
 
 # `- [<m>] ...` where <m> is exactly one character (single-char markers
 # are the projected line shape; the regex deliberately rejects multi-char
-# weirdness rather than guessing).
+# weirdness rather than guessing). Reader-specific: it accepts any marker
+# a user might have typed (`[/]`, `[>]`), broader than what the writer
+# emits, so it stays here rather than in the shared grammar.
 _LINE_RE = re.compile(r"^- \[(?P<marker>.)\] ")
-_TASK_ID_RE = re.compile(r"🆔 lithos:(?P<task_id>[A-Za-z0-9_-]+)")
-# Match any of the five priority emoji. The projection renders the emoji
-# in the trailing-metadata zone *after* the 🆔 marker (see
-# ``render.render_line``). The parser scopes search to the zone after
-# ``id_match.end()`` so titles freely containing one of these emoji
-# can't be misread as the task's priority. Mid-line emoji in titles are
-# by design ignored — only trailing-zone metadata is authoritative.
-_PRIORITY_EMOJI_RE = re.compile(r"(🔺|⏫|🔼|🔽|⏬)")
-# Match the Tasks-plugin due-date marker: `📅 YYYY-MM-DD`. Same
-# trailing-zone-only scoping as the priority regex above — a title
-# like "Prepare 📅 2026-06-15 review notes" must NOT be misread
-# as a due date. We match the canonical format only; anything else
-# (e.g. `📅 next Friday`, `📅 2026-06-15T09:00Z`) is treated as
-# "no date" so a malformed user edit doesn't bounce a garbage
-# value back to Lithos. Tasks plugin itself only renders
-# `YYYY-MM-DD` so the round-trip stays closed under valid inputs.
-_DUE_DATE_RE = re.compile(r"📅 (\d{4}-\d{2}-\d{2})")
 
 
 @dataclass
@@ -167,7 +144,7 @@ class ObsidianFsWatcher:
         # value here — "user committed a line with no 📅 marker" — so
         # the type is ``dict[str, str | None]``. The string values are
         # canonical ``YYYY-MM-DD`` strings the renderer emits / the
-        # ``_DUE_DATE_RE`` regex matches.
+        # grammar's :func:`~lithos_loom.task_line.parse_due_date` reads.
         self._observed_dates: dict[str, str | None] = {}
         # Snapshot of ``sync_state.write_version`` from our last poll.
         # If it's advanced, the projection has committed a re-render
@@ -398,8 +375,8 @@ class ObsidianFsWatcher:
         ``prior`` / ``new`` carry the canonical priority enum strings
         (``"highest"``, ``"high"``, ``"medium"``, ``"low"``,
         ``"lowest"``) or ``None`` for "no priority". The handler
-        consumes enums; the emoji-to-enum translation is the
-        watcher's job (see :data:`EMOJI_TO_PRIORITY`).
+        consumes enums; the emoji-to-enum translation is the watcher's
+        job (see :func:`~lithos_loom.task_line.parse_priority`).
         """
         event = Event(
             type="obsidian.task.priority_changed",
@@ -420,8 +397,8 @@ class ObsidianFsWatcher:
         """Publish ``obsidian.task.due_date_changed``.
 
         ``prior`` / ``new`` carry the canonical ``YYYY-MM-DD`` strings
-        the renderer emits / the ``_DUE_DATE_RE`` regex matches — or
-        ``None`` for "no 📅 marker on the line". The handler pushes
+        the renderer emits / :func:`~lithos_loom.task_line.parse_due_date`
+        reads — or ``None`` for "no 📅 marker on the line". The handler pushes
         the change back to Lithos as
         ``task_update(metadata={"scheduled_for": new})``.
         """
@@ -475,9 +452,10 @@ def _parse_line_markers(
     where ``<prio>`` is one of the five priority emoji (or absent)
     and ``<date>`` is the YYYY-MM-DD form Tasks plugin renders. The
     priority emoji is mapped to its canonical enum string via
-    :data:`EMOJI_TO_PRIORITY`; the due date is yielded verbatim as a
-    string (no parse / no validation here — that's the handler's
-    job). Both default to ``None`` when absent.
+    :func:`~lithos_loom.task_line.parse_priority`; the due date is
+    yielded verbatim via :func:`~lithos_loom.task_line.parse_due_date`
+    (no parse / no validation here — that's the handler's job). Both
+    default to ``None`` when absent.
 
     The 🆔 marker is the only fixed anchor in the line, and the
     renderer always writes priority / date in the trailing-metadata
@@ -508,15 +486,13 @@ def _parse_line_markers(
                 line,
             )
             continue
-        id_match = _TASK_ID_RE.search(line)
+        id_match = TASK_ID_RE.search(line)
         if id_match is None:
             continue
         # Trailing metadata only — title text is whatever precedes
-        # ``🆔 lithos:<id>`` and is explicitly out of scope for
-        # priority / date parsing. See module-level regex comments.
+        # ``🆔 lithos:<id>`` and is explicitly out of scope for priority /
+        # date parsing. The grammar's parse atoms read only this zone.
         metadata_zone = line[id_match.end() :]
-        prio_match = _PRIORITY_EMOJI_RE.search(metadata_zone)
-        priority = EMOJI_TO_PRIORITY[prio_match.group(1)] if prio_match else None
-        due_match = _DUE_DATE_RE.search(metadata_zone)
-        due_date = due_match.group(1) if due_match else None
+        priority = parse_priority(metadata_zone)
+        due_date = parse_due_date(metadata_zone)
         yield id_match.group("task_id"), marker, priority, due_date

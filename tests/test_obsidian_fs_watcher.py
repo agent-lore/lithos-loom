@@ -368,23 +368,6 @@ async def test_priority_change_subject_to_self_write_suppression(
     assert watcher._observed_priorities == {}
 
 
-async def test_priority_emoji_table_matches_projection_table() -> None:
-    """Anti-drift: ``EMOJI_TO_PRIORITY`` (watcher) is the exact inverse
-    of ``_PRIORITY_EMOJI`` (projection). If either is changed the
-    other must change too — same enum, same emoji set, no missing
-    keys, no swapped pairs. Anything else means an emoji edit would
-    parse to a different enum than the projection rendered for."""
-    from lithos_loom.render import PRIORITY_EMOJI as _PRIORITY_EMOJI
-    from lithos_loom.sources.obsidian_fs_watcher import EMOJI_TO_PRIORITY
-
-    assert set(EMOJI_TO_PRIORITY.values()) == set(_PRIORITY_EMOJI.keys())
-    for enum_value, emoji in _PRIORITY_EMOJI.items():
-        assert EMOJI_TO_PRIORITY[emoji] == enum_value, (
-            f"emoji {emoji!r} → {EMOJI_TO_PRIORITY[emoji]!r} in watcher but "
-            f"projection renders {enum_value!r} → {emoji!r}"
-        )
-
-
 async def test_user_priority_edit_followed_by_unrelated_save_does_not_re_emit(
     bus: EventBus,
     tasks_path: Path,
@@ -1306,14 +1289,6 @@ def test_regex_does_not_match_header_lines() -> None:
     assert _LINE_RE.match("- [x] Real line") is not None
 
 
-def test_task_id_regex_extracts_uuid_like_strings() -> None:
-    from lithos_loom.sources.obsidian_fs_watcher import _TASK_ID_RE
-
-    m = _TASK_ID_RE.search("- [ ] Title 🆔 lithos:abc-123_XYZ #project/foo")
-    assert m is not None
-    assert m.group("task_id") == "abc-123_XYZ"
-
-
 def test_module_exports_status_markers() -> None:
     from lithos_loom.sources.obsidian_fs_watcher import VALID_STATUS_MARKERS
 
@@ -1337,24 +1312,14 @@ def test_line_regex_only_matches_dash_bracket_prefix() -> None:
     assert _LINE_RE.match("- [x] with-space") is not None
 
 
-def test_task_id_regex_stops_at_non_id_char() -> None:
-    """``task.id`` charset is ``[A-Za-z0-9_-]+`` — periods, slashes,
-    spaces break it (this matches Lithos task-id format)."""
-    from lithos_loom.sources.obsidian_fs_watcher import _TASK_ID_RE
-
-    m = _TASK_ID_RE.search("🆔 lithos:abc.def")
-    assert m is not None
-    assert m.group("task_id") == "abc"  # stops at .
-    assert _TASK_ID_RE.search("🆔 lithos:") is None  # empty
-
-
 def test_line_regex_compiles_and_pattern_visible() -> None:
-    """Defensive: confirm the module-level regex objects are exposed for
-    these tests to import (not leak-through-the-back-door)."""
+    """Defensive: confirm the reader's line-shape regex is exposed for
+    these tests to import (not leak-through-the-back-door). The 🆔 id
+    regex now lives in the shared grammar — see ``tests/test_task_line.py``
+    for its charset coverage."""
     from lithos_loom.sources import obsidian_fs_watcher as mod
 
     assert isinstance(mod._LINE_RE, re.Pattern)
-    assert isinstance(mod._TASK_ID_RE, re.Pattern)
 
 
 # ── Soak 2026-05-29: file-absence visibility ────────────────────────────

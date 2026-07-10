@@ -22,7 +22,6 @@ import pytest
 from lithos_loom.config import RouteConfig, RouteMatch
 from lithos_loom.lithos_client import Task
 from lithos_loom.render import (
-    PRIORITY_EMOJI,
     dep_markers,
     due_date_str,
     parse_scheduled_for,
@@ -305,11 +304,6 @@ def test_parse_scheduled_for_returns_none_for_non_string(bad: Any) -> None:
     assert parse_scheduled_for(bad) is None
 
 
-# ── PRIORITY_EMOJI public surface ──────────────────────────────────────
-
-
-def test_priority_emoji_covers_all_five_d18_values() -> None:
-    """Pin the D18 enum set so future renames at either end of the
-    pipeline break this loudly."""
-    assert set(PRIORITY_EMOJI.keys()) == {"highest", "high", "medium", "low", "lowest"}
-    assert set(PRIORITY_EMOJI.values()) == {"🔺", "⏫", "🔼", "🔽", "⏬"}
+# The ``PRIORITY_EMOJI`` table now lives in :mod:`lithos_loom.task_line`
+# (the shared grammar); its enum/emoji sets are pinned by
+# ``tests/test_task_line.py`` rather than here.

@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from lithos_loom.task_line import EMOJI_TO_PRIORITY
+
 # Tag pattern: allowed chars ``[A-Za-z0-9_/-]``. Must be preceded by
 # whitespace or line start so ``foo#bar`` (where ``#bar`` isn't a tag)
 # isn't picked up. The all-digit exclusion (``#123`` isn't a tag) is
@@ -26,17 +28,12 @@ from typing import Literal
 # exported regex simple so callers can swap their own filter if needed.
 TAG_REGEX = re.compile(r"(?:^|(?<=\s))#[A-Za-z0-9_/-]+")
 
-# Priority emojis recognised on import. Order = precedence: when
-# multiple priority emojis appear on one task line (unusual but
-# possible) the highest one wins. All emojis are stripped from the
-# description regardless of which "won".
-PRIORITY_EMOJI_MAP: dict[str, str] = {
-    "\U0001f53a": "highest",  # 🔺
-    "⏫": "high",  # ⏫
-    "\U0001f53c": "medium",  # 🔼
-    "\U0001f53d": "low",  # 🔽
-    "⏬": "lowest",  # ⏬
-}
+# Priority emojis recognised on import come from the shared task-line
+# grammar's ``EMOJI_TO_PRIORITY`` (emoji → enum). Its declaration order is
+# highest → lowest, which is the precedence this importer relies on: when
+# multiple priority emojis appear on one task line (unusual but possible)
+# the highest one wins. All emojis are stripped from the description
+# regardless of which "won".
 
 # Marker an operator puts in a parent task description to flip its
 # children from parallel (the default) to sequential. Case-sensitive
@@ -227,12 +224,12 @@ def _parse_task_body(
 def _extract_priority(text: str) -> tuple[str | None, str]:
     """Return (priority_name, text_with_priority_emojis_stripped).
 
-    Iterates ``PRIORITY_EMOJI_MAP`` in declaration order so the first
-    hit wins (precedence: highest → lowest). All priority emojis are
-    stripped from the returned text regardless of which won.
+    Iterates ``EMOJI_TO_PRIORITY`` in declaration order so the first hit
+    wins (precedence: highest → lowest). All priority emojis are stripped
+    from the returned text regardless of which won.
     """
     priority: str | None = None
-    for emoji, name in PRIORITY_EMOJI_MAP.items():
+    for emoji, name in EMOJI_TO_PRIORITY.items():
         if emoji in text:
             if priority is None:
                 priority = name
