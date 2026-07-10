@@ -12,7 +12,8 @@ Event/issue producers: Lithos SSE event & note streams, GitHub issue watcher, Ob
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.sources` | XS | 0 | 0 |
-| `lithos_loom.sources.github_issue_watcher` | L | 3 | 3 |
+| `lithos_loom.sources.github_issue_watcher` | M | 3 | 0 |
+| `lithos_loom.sources.github_watch_state` | M | 2 | 3 |
 | `lithos_loom.sources.lithos_event_stream` | M | 2 | 0 |
 | `lithos_loom.sources.lithos_note_stream` | M | 2 | 0 |
 | `lithos_loom.sources.obsidian_dir_watcher` | M | 1 | 0 |
@@ -23,10 +24,14 @@ Event/issue producers: Lithos SSE event & note streams, GitHub issue watcher, Ob
 ### `lithos_loom.sources.github_issue_watcher`
 - class `WatchedRepo` — Per-project watcher state derived from the project-context doc.
 - class `WatcherLithosClient` — Minimum Lithos surface the watcher source depends on.
+- class `GitHubIssueWatcher` — Polling source: bus → bootstrap → poll-loop → cursor persistence.
+
+### `lithos_loom.sources.github_watch_state`
 - def `parse_cursors` — Parse the coord doc body into a ``{repo: cursor}`` map.
 - def `parse_stuck` — Parse ``stuck:owner/name#<number>`` rows out of the coord doc.
 - def `format_cursors` — Render the coord doc body.
-- class `GitHubIssueWatcher` — Polling source: bus → bootstrap → poll-loop → cursor persistence.
+- class `CoordDocClient` — The minimal Lithos note surface the state store reads/writes.
+- class `GitHubWatchStateStore` — Owns the github-watcher's cursor + stuck-issue coordination state.
 
 ### `lithos_loom.sources.lithos_event_stream`
 - class `EventStreamClient` — Minimum surface the event-stream source depends on.
