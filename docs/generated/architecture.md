@@ -64,6 +64,7 @@ graph TD
   LithosClient --> Errors
   Plugins --> Config
   Plugins --> Errors
+  Plugins --> GitHub
   Plugins --> LithosClient
   Plugins --> Runners
   ProjectContext --> LithosClient

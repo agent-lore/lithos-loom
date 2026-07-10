@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from lithos_loom.github_client import parse_github_ref
+
 from . import containers, engines, handoff, run_outcome, turns
 from .agent_session import build_run_cmd
 from .check_runner import run_delivery_test_gate
@@ -86,14 +88,15 @@ class DeliveryOutcome:
 
 
 def parse_issue_ref(github_issue_url: str) -> tuple[str, int] | None:
-    """``https://github.com/o/r/issues/42`` -> ``("o/r", 42)``; None if not."""
-    m = re.match(
-        r"https://github\.com/([^/]+/[^/]+)/issues/(\d+)/?$",
-        github_issue_url.strip(),
-    )
-    if not m:
+    """``https://github.com/o/r/issues/42`` -> ``("o/r", 42)``; None if not.
+
+    Thin adapter over :func:`~lithos_loom.github_client.parse_github_ref`,
+    filtered to issue (not PR) refs.
+    """
+    ref = parse_github_ref(github_issue_url)
+    if ref is None or ref.kind != "issue":
         return None
-    return m.group(1), int(m.group(2))
+    return ref.repo, ref.number
 
 
 def closes_line(github_issue_url: str | None, pr_repo: str) -> str:
@@ -263,10 +266,15 @@ def create_pr(wt: Path, *, branch: str, base: str, title: str, body: str) -> str
 
 
 def pr_number_from_url(url: str) -> int:
-    m = re.search(r"/pull/(\d+)", url)
-    if not m:
+    """Extract the PR number from a canonical GitHub PR URL; raise if it can't.
+
+    Thin adapter over :func:`~lithos_loom.github_client.parse_github_ref`; the
+    hard failure (vs. ``None``) is deliberate — delivery has a real PR URL here.
+    """
+    ref = parse_github_ref(url)
+    if ref is None or ref.kind != "pull":
         raise RuntimeError(f"cannot parse PR number from {url!r}")
-    return int(m.group(1))
+    return ref.number
 
 
 def request_copilot(wt: Path, repo: str, pr_number: int) -> bool:

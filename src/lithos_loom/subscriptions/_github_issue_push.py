@@ -28,14 +28,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from lithos_loom.bus import Event
-from lithos_loom.errors import LithosClientError
 from lithos_loom.github_client import (
     GitHubAuthError,
     GitHubClient,
     GitHubIssueNotFoundError,
     GitHubRepoNotFoundError,
+    parse_github_ref,
 )
 from lithos_loom.subscriptions import Handler, SubscriptionContext
+from lithos_loom.subscriptions._findings import post_finding_then_mark
 
 __all__ = ["EVENT_TYPES", "GH_ISSUE_GONE_KEY", "LINKED_ISSUE_GONE", "make_handler"]
 
@@ -342,28 +343,14 @@ async def _heal_orphan_link(
         f"{issue_url} no longer exists (deleted); the Lithos→GH link is "
         f"orphaned and further pushes to it are suppressed."
     )
-    try:
-        await ctx.lithos.finding_post(task_id=task_id, summary=summary)
-    except LithosClientError as exc:
-        if exc.code != "task_not_found":
-            ctx.logger.warning(
-                "[Friction] github-issue-push: posting LinkedIssueGone finding "
-                "for task %s failed (%s); will retry next event",
-                task_id,
-                exc,
-            )
-            return  # leave the marker unset → retry the heal next event
-    try:
-        await ctx.lithos.task_update(
-            task_id=task_id, metadata={GH_ISSUE_GONE_KEY: issue_url}
-        )
-    except LithosClientError as exc:
-        if exc.code != "task_not_found":
-            ctx.logger.warning(
-                "[Friction] github-issue-push: marking task %s issue-gone failed (%s)",
-                task_id,
-                exc,
-            )
+    await post_finding_then_mark(
+        ctx,
+        task_id=task_id,
+        summary=summary,
+        marker={GH_ISSUE_GONE_KEY: issue_url},
+        subsystem="github-issue-push",
+        retry_hint="will retry next event",
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -382,31 +369,27 @@ def _coerce_dict(value: Any) -> dict[str, Any]:
 def _resolve_repo_number(metadata: dict[str, Any]) -> tuple[str | None, int | None]:
     """Extract (repo, number) from task.metadata.
 
-    Prefers ``github_issue_url`` because it is the canonical Slice 7.1
-    field; falls back to ``github_issue_number`` paired with a repo
-    inferred from the URL when the explicit number field is missing.
+    The canonical ``github_issue_url`` is parsed by the shared
+    :func:`~lithos_loom.github_client.parse_github_ref`. A defensive fallback
+    covers the one shape that grammar rejects but this module can still recover:
+    a github.com *issues* URL whose trailing segment is non-numeric — the number
+    is taken from the explicit ``github_issue_number`` field
+    (written by ``_github_issue_sync``), paired with the URL's repo.
 
     Returns ``(None, None)`` when nothing parseable is present.
     """
     url = metadata.get("github_issue_url")
-    if not isinstance(url, str) or not url:
-        return None, None
-    # Format: https://github.com/<owner>/<repo>/issues/<n>
-    # Just enough parsing to extract the three relevant segments.
+    ref = parse_github_ref(url)
+    if ref is not None and ref.kind == "issue":
+        return ref.repo, ref.number
+    # Fallback: a github.com issues URL with a non-numeric id (parse_github_ref
+    # requires a numeric id, so it returned None above) → recover the number
+    # from the explicit field.
     prefix = "https://github.com/"
-    if not url.startswith(prefix):
-        return None, None
-    rest = url[len(prefix) :]
-    parts = rest.split("/")
-    if len(parts) < 4 or parts[2] != "issues":
-        return None, None
-    repo = f"{parts[0]}/{parts[1]}"
-    try:
-        number = int(parts[3])
-    except ValueError:
-        # Fall back to the explicit number field if URL is malformed.
-        explicit = metadata.get("github_issue_number")
-        if isinstance(explicit, int):
-            return repo, explicit
-        return None, None
-    return repo, number
+    if isinstance(url, str) and url.startswith(prefix):
+        parts = url[len(prefix) :].split("/")
+        if len(parts) >= 4 and parts[2] == "issues":
+            explicit = metadata.get("github_issue_number")
+            if isinstance(explicit, int):
+                return f"{parts[0]}/{parts[1]}", explicit
+    return None, None
