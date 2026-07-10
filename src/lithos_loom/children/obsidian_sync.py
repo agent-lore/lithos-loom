@@ -33,19 +33,16 @@ Invocation contract (set by the supervisor):
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-import contextlib
 import logging
-import signal
 import sys
 from collections.abc import Sequence
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
 from lithos_loom.bus import EventBus
-from lithos_loom.config import LogLevel, LoomConfig, SubscriptionConfig, load_config
+from lithos_loom.children import _boot
+from lithos_loom.config import LoomConfig, SubscriptionConfig, load_config
 from lithos_loom.cursor_store import CursorStore
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
@@ -53,6 +50,7 @@ from lithos_loom.sources.lithos_note_stream import LithosNoteStream
 from lithos_loom.sources.obsidian_dir_watcher import ObsidianDirWatcher
 from lithos_loom.sources.obsidian_fs_watcher import ObsidianFsWatcher
 from lithos_loom.subscriptions import (
+    SUBSCRIPTION_ACTIONS,
     Handler,
     SubscriptionContext,
     build_runners,
@@ -83,70 +81,15 @@ from lithos_loom.subscriptions._task_archive import (
 )
 from lithos_loom.sync_state import ProjectionSyncState
 
-# Actions this child is willing to host. Subscriptions whose ``action``
-# is outside this set are silently skipped — some other child's job
-# (route-runner for routes, a future generic subscription-runner for
-# things like ``noop``).
-_CHILD_ACTIONS: frozenset[str] = frozenset(
-    {
-        "obsidian-projection",
-        "obsidian-awaiting-review",
-        "obsidian-status-transition",
-        "obsidian-priority-changed",
-        "obsidian-due-date-changed",
-        "project-context-projection",
-        "note-push",
-        "task-archive",
-    }
-)
-
-_LEVEL_MAP: dict[LogLevel, int] = {
-    "debug": logging.DEBUG,
-    "info": logging.INFO,
-    "warning": logging.WARNING,
-    "error": logging.ERROR,
-}
-
-# Mirror route_runner + github_watcher: httpx logs every HTTP request at
-# INFO — every MCP POST plus the SSE GET — which drowns out the
-# projection / dir-watcher / handler lifecycle the operator is watching
-# for. At ``debug`` the operator asked for the firehose; otherwise pin
-# to WARNING so the application logs aren't lost in the noise.
-_NOISY_LIBRARY_LOGGERS = ("httpx", "httpx_sse")
+# Actions this child hosts. It hosts every real subscription action, so
+# derive from the shared catalog rather than re-listing them: ``noop`` is a
+# test/smoke placeholder no child hosts. Subscriptions whose ``action`` is
+# outside this set are silently skipped — some other child's job
+# (route-runner for routes). If a future child hosts a subscription action,
+# replace this derivation with an explicit set here and there.
+_CHILD_ACTIONS: frozenset[str] = SUBSCRIPTION_ACTIONS - {"noop"}
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(level: LogLevel) -> None:
-    logging.basicConfig(
-        level=_LEVEL_MAP[level],
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    if level == "debug":
-        for name in _NOISY_LIBRARY_LOGGERS:
-            logging.getLogger(name).setLevel(logging.NOTSET)
-    else:
-        for name in _NOISY_LIBRARY_LOGGERS:
-            logging.getLogger(name).setLevel(logging.WARNING)
-    # The MCP SDK's SSE reader (``mcp.client.sse.sse_reader``) logs a
-    # full ERROR-level traceback whenever its persistent session is
-    # torn down — e.g. when Lithos restarts. Our LithosClient's outer
-    # reconnect loop (and the subscription handlers' retry policy) is
-    # what's actually responsible for recovery here; the SDK's
-    # traceback is just noise that buries our own reconnect timeline.
-    # Pin it to CRITICAL so we still see real failures (auth errors,
-    # protocol bugs) but not the routine "peer closed connection"
-    # exceptions that fire every time Lithos cycles. Conservative
-    # version (WARNING) would still let the traceback through; the
-    # SDK doesn't currently log anything informational below ERROR
-    # we'd want to keep.
-    logging.getLogger("mcp.client.sse").setLevel(logging.CRITICAL)
-
-
-def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="lithos_loom.children.obsidian_sync")
-    parser.add_argument("--config", type=Path, default=None)
-    return parser.parse_args(argv)
 
 
 async def _amain(cfg: LoomConfig) -> int:
@@ -309,11 +252,7 @@ async def _amain(cfg: LoomConfig) -> int:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    installed: list[int] = []
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop_event.set)
-            installed.append(sig)
+    installed = _boot.install_stop_signals(loop, stop_event.set)
 
     try:
         # The fs watcher's lifecycle is gated on ``[obsidian_sync]``
@@ -528,17 +467,15 @@ async def _amain(cfg: LoomConfig) -> int:
         # Mirror the supervisor's install/uninstall pair so the test
         # process's event loop isn't left with handlers attached after
         # _amain returns (Copilot review on #16).
-        for sig in installed:
-            with contextlib.suppress(NotImplementedError):
-                loop.remove_signal_handler(sig)
+        _boot.remove_stop_signals(loop, installed)
         logger.info("obsidian-sync child stopping")
     return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parse_args(argv)
+    args = _boot.parse_child_args("lithos_loom.children.obsidian_sync", argv)
     cfg = load_config(args.config)
-    _configure_logging(cfg.orchestrator.log_level)
+    _boot.configure_logging(cfg.orchestrator.log_level)
     try:
         return asyncio.run(_amain(cfg))
     except KeyboardInterrupt:

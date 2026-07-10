@@ -17,21 +17,18 @@ Invocation contract (set by the supervisor)::
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-import contextlib
 import logging
-import signal
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, cast
 
 import httpx
 
 from lithos_loom.bus import Event, EventBus
-from lithos_loom.config import LogLevel, LoomConfig, load_config
+from lithos_loom.children import _boot
+from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.cursor_store import CursorStore
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.lithos_client import LithosClient, TaskClient
@@ -53,42 +50,7 @@ from lithos_loom.subscriptions._github_issue_sync import (
     make_handler as make_github_issue_sync_handler,
 )
 
-_LEVEL_MAP: dict[LogLevel, int] = {
-    "debug": logging.DEBUG,
-    "info": logging.INFO,
-    "warning": logging.WARNING,
-    "error": logging.ERROR,
-}
-
-# Mirror route_runner: httpx logs every HTTP request at INFO — every
-# Lithos MCP POST AND every GitHub API GET/PATCH — which drowns out the
-# watcher's own per-cycle progress messages. At ``debug`` the operator
-# asked for the firehose; otherwise pin to WARNING.
-_NOISY_LIBRARY_LOGGERS = ("httpx", "httpx_sse")
-
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(level: LogLevel) -> None:
-    logging.basicConfig(
-        level=_LEVEL_MAP[level],
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    if level == "debug":
-        for name in _NOISY_LIBRARY_LOGGERS:
-            logging.getLogger(name).setLevel(logging.NOTSET)
-    else:
-        for name in _NOISY_LIBRARY_LOGGERS:
-            logging.getLogger(name).setLevel(logging.WARNING)
-    # Same noise suppression as obsidian-sync — the MCP SDK logs a
-    # full traceback every Lithos reconnect.
-    logging.getLogger("mcp.client.sse").setLevel(logging.CRITICAL)
-
-
-def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="lithos_loom.children.github_watcher")
-    parser.add_argument("--config", type=Path, default=None)
-    return parser.parse_args(argv)
 
 
 async def _run_reconcile_pass(
@@ -257,11 +219,7 @@ async def _amain(cfg: LoomConfig) -> int:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    installed: list[int] = []
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop_event.set)
-            installed.append(sig)
+    installed = _boot.install_stop_signals(loop, stop_event.set)
 
     try:
         bus = EventBus()
@@ -363,6 +321,13 @@ async def _amain(cfg: LoomConfig) -> int:
 
             async def consume_push() -> None:
                 """Drain the Lithos→GH subscription with transient-error retry.
+
+                NOTE (ARCH-6 follow-up #237): this retry/backoff loop
+                duplicates ``SubscriptionRunner._dispatch_with_retry``. It
+                can't route through the bus (fire-and-forget would drop on a
+                full queue and advance the cursor past a lost reconcile), so
+                consolidation means lifting the retry primitive out of the
+                runner — tracked separately.
 
                 Push handler raises on transient GH errors (5xx, network,
                 rate-limit exhausted). Permanent errors (auth, 404) are
@@ -481,17 +446,15 @@ async def _amain(cfg: LoomConfig) -> int:
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        for sig in installed:
-            with contextlib.suppress(NotImplementedError):
-                loop.remove_signal_handler(sig)
+        _boot.remove_stop_signals(loop, installed)
         logger.info("github-watcher child stopping")
     return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parse_args(argv)
+    args = _boot.parse_child_args("lithos_loom.children.github_watcher", argv)
     cfg = load_config(args.config)
-    _configure_logging(cfg.orchestrator.log_level)
+    _boot.configure_logging(cfg.orchestrator.log_level)
     try:
         return asyncio.run(_amain(cfg))
     except KeyboardInterrupt:
