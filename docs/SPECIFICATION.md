@@ -258,9 +258,9 @@ tags = ["trigger:story-develop"]
 # ── Subscriptions (fire-and-forget side effects) ──────────────────────
 #
 # Each [[subscriptions]] stanza is a fire-and-forget subscriber that
-# consumes one or more event types, runs an `action` registered as a
-# Python entry-point handler, retries on failure with exponential or
-# linear backoff, and posts a [Friction] finding on persistent failure
+# consumes one or more event types, runs an `action` (a handler
+# hand-wired in its hosting child), retries on failure with exponential
+# or linear backoff, and posts a [Friction] finding on persistent failure
 # (default; set to "ignore" to suppress).
 
 [[subscriptions]]
@@ -830,7 +830,7 @@ Sources are async coroutines spawned by their owning child. They consume externa
 
 ### 6.6 Subscription Action Registry
 
-Subscriptions resolve their `action` field against the `lithos_loom.subscriptions.handlers` Python entry-point group:
+A subscription's `action` field names a handler that the hosting child hand-wires (constructs by name with its runtime dependencies) and feeds to `build_runners`. The known action names live in one catalog, `subscriptions.SUBSCRIPTION_ACTIONS`; `validate-config --dry-run` validates config actions against it. There is no entry-point discovery — handlers carry dependencies a zero-arg lookup can't supply (see [ADR 0007](adr/0007-subscription-registration-hand-wired.md)). The actions:
 
 | Action | Module | Consumes | Effect |
 |---|---|---|---|
@@ -846,7 +846,7 @@ Subscriptions resolve their `action` field against the `lithos_loom.subscription
 | `github-issue-sync` | `_github_issue_sync` | `github.issue.seen` | Auto-wired by the github-watcher child (not declared in `[[subscriptions]]`). Resolves the `<!-- lithos:<id> -->` marker, then creates / closes / no-ops + GH → Lithos drift (title / body / labels) per §2.2. Reopen on a terminal task posts `[ReopenRequested]` once (de-duped via `metadata.github_state_snapshot`). |
 | `github-issue-push` | `_github_issue_push` | `lithos.task.created` / `lithos.task.completed` / `lithos.task.cancelled` / `lithos.task.updated` | Auto-wired by the github-watcher child. Mirrors Lithos terminal status to a GH close with the matching `state_reason`; mirrors title renames from Lithos → GH on `task.updated` and (for bootstrap-replayed open tasks) `task.created`. Idempotent re-fetch dodges redundant PATCHes when the GH → Lithos path already converged. Consumer retries transient GH failures with exponential backoff capped at 60s, up to 8 attempts before dropping `[Friction]`. |
 
-Third-party handlers can be registered via Python entry points. Each handler receives an `Event` and a `SubscriptionContext` carrying a shared `LithosClient`, a scoped `logging.Logger`, and the orchestrator's `agent_id`.
+Each handler receives an `Event` and a `SubscriptionContext` carrying a shared `LithosClient`, a scoped `logging.Logger`, and the orchestrator's `agent_id`. A new handler is added by wiring its factory in the hosting child and listing its action in `SUBSCRIPTION_ACTIONS` — there is no out-of-tree plugin registry (see [ADR 0007](adr/0007-subscription-registration-hand-wired.md)).
 
 ---
 

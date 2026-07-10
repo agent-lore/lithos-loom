@@ -32,10 +32,10 @@ from lithos_loom.config import (
 )
 from lithos_loom.errors import ConfigError, LithosLoomError
 from lithos_loom.subscriptions import (
+    SUBSCRIPTION_ACTIONS,
     SubscriptionContext,
     SubscriptionRunner,
     build_runners,
-    discover_handlers,
 )
 from lithos_loom.subscriptions._noop import handle as noop_handle
 
@@ -512,11 +512,18 @@ async def test_runner_does_not_post_finding_in_ignore_mode() -> None:
     finding_post.assert_not_called()
 
 
-# ── Entry-point discovery ──────────────────────────────────────────────
+# ── Action catalog ─────────────────────────────────────────────────────
 
 
-def test_discover_handlers_finds_bundled_noop() -> None:
-    handlers = discover_handlers()
-    assert "noop" in handlers
-    # Confirm it's a callable that matches the bundled noop module.
-    assert handlers["noop"] is noop_handle
+def test_subscription_actions_catalog_includes_noop_and_real_actions() -> None:
+    """The catalog is the single source of truth for known action names.
+
+    ``noop`` is the bundled test/smoke placeholder; the real actions are
+    hand-wired in their hosting child. A typo'd config action is rejected
+    by ``build_runners`` because it's absent from the map derived here."""
+    assert "noop" in SUBSCRIPTION_ACTIONS
+    assert "obsidian-projection" in SUBSCRIPTION_ACTIONS
+    assert "task-archive" in SUBSCRIPTION_ACTIONS
+    # A made-up action is not in the catalog, so the dry-run + child wiring
+    # both reject it rather than silently no-op.
+    assert "obsidian-projction" not in SUBSCRIPTION_ACTIONS

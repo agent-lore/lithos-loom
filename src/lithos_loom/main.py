@@ -37,10 +37,11 @@ from lithos_loom.doctor import format_results, run_project_checks, run_vault_che
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.lithos_client import LithosClient, Task
 from lithos_loom.subscriptions import (
+    SUBSCRIPTION_ACTIONS,
     SubscriptionContext,
     build_runners,
-    discover_handlers,
 )
+from lithos_loom.subscriptions._noop import handle as _noop_handle
 from lithos_loom.supervisor import Supervisor, default_categories
 
 app = typer.Typer(
@@ -384,8 +385,14 @@ def _build_subscription_predicates(
     Uses :func:`build_runners` so the dry-run uses exactly the matcher
     machinery the runtime would — same structural-match semantics, same
     where-expression scope, same handler-action validation.
+
+    The handler map is every known action bound to the stateless ``noop``
+    handler: the dry-run never dispatches (``lithos=None``), so the handler
+    body is irrelevant — the map exists only so ``build_runners`` can
+    validate each config action against :data:`SUBSCRIPTION_ACTIONS` and
+    reject a typo'd action as an unknown handler.
     """
-    handlers = discover_handlers()
+    handlers: dict[str, Any] = dict.fromkeys(SUBSCRIPTION_ACTIONS, _noop_handle)
     bus = EventBus()
     ctx = SubscriptionContext(
         lithos=None,  # never invoked: dry-run does not dispatch handlers

@@ -314,16 +314,6 @@ async def test_reconcile_pass_skips_pr_poll_when_disabled() -> None:
     github.get_pull_request.assert_not_awaited()
 
 
-def test_configure_logging_silences_mcp_sse_at_critical() -> None:
-    """At any level, the MCP SDK's per-reconnect tracebacks are pinned to CRITICAL.
-
-    Same noise suppression as obsidian-sync — without this, every Lithos
-    restart shows an SDK traceback that buries our own reconnect timeline.
-    """
-    import logging
-
-    from lithos_loom.children.github_watcher import _configure_logging
-
-    logging.getLogger("mcp.client.sse").setLevel(logging.NOTSET)
-    _configure_logging("info")
-    assert logging.getLogger("mcp.client.sse").level == logging.CRITICAL
+# The child's configure_logging boot code moved to children/_boot.py
+# (ARCH-6); its MCP-SSE-pin behaviour is pinned once in
+# tests/test_child_boot.py.

@@ -1688,47 +1688,7 @@ async def test_dir_watcher_spawns_when_obsidian_sync_present(
     assert rc == 0
 
 
-# ── MCP SDK logger suppression (soak regression 2026-05-24) ────────────
-
-
-def test_configure_logging_pins_mcp_sse_logger_to_critical() -> None:
-    """The MCP SDK's ``mcp.client.sse.sse_reader`` logs a multi-page
-    ERROR traceback whenever its session is torn down — fires on every
-    Lithos restart. Our LithosClient + the stream sources' reconnect
-    loops are what actually recover; the SDK's trace is noise.
-
-    Soak 2026-05-24 confirmed the daemon log was dominated by these
-    tracebacks during a Lithos cycle. ``_configure_logging`` pins the
-    SDK logger to CRITICAL so real auth/protocol failures still show
-    but routine 'peer closed connection' tracebacks are suppressed.
-    """
-    obs_sync_mod._configure_logging("info")
-    mcp_logger = logging.getLogger("mcp.client.sse")
-    actual = logging.getLevelName(mcp_logger.level)
-    assert mcp_logger.level == logging.CRITICAL, (
-        f"mcp.client.sse logger must be pinned to CRITICAL to suppress "
-        f"SDK tracebacks on Lithos restart; got {actual}"
-    )
-
-
-def test_configure_logging_silences_httpx_at_info_level() -> None:
-    """Soak 2026-05-29: the obsidian-sync child was emitting one
-    INFO-level httpx line per MCP POST during bootstrap (one per
-    projected note, plus one per ongoing event), drowning the
-    projection / handler logs. Mirror the route-runner +
-    github-watcher suppression.
-    """
-    logging.getLogger("httpx").setLevel(logging.NOTSET)
-    logging.getLogger("httpx_sse").setLevel(logging.NOTSET)
-    obs_sync_mod._configure_logging("info")
-    assert logging.getLogger("httpx").level == logging.WARNING
-    assert logging.getLogger("httpx_sse").level == logging.WARNING
-
-
-def test_configure_logging_leaves_httpx_alone_at_debug_level() -> None:
-    """At debug, the operator asked for the firehose — don't filter."""
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpx_sse").setLevel(logging.WARNING)
-    obs_sync_mod._configure_logging("debug")
-    assert logging.getLogger("httpx").level == logging.NOTSET
-    assert logging.getLogger("httpx_sse").level == logging.NOTSET
+# The child's configure_logging / arg-parse / signal-install boot code
+# moved to children/_boot.py (ARCH-6); the MCP-SSE-pin + httpx-silencing
+# behaviour (originally soak regressions 2026-05-24 / 2026-05-29) is now
+# pinned once in tests/test_child_boot.py.

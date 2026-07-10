@@ -7,14 +7,21 @@
   its handler with retry-and-friction semantics.
 * :func:`build_runners` — turns a tuple of :class:`SubscriptionConfig`
   (parsed from TOML) into a list of ready-to-run
-  :class:`SubscriptionRunner` instances. Resolves handler entry-point
-  names, compiles ``where`` expressions with restricted globals, and
-  registers each subscription on the bus.
-* :func:`discover_handlers` — looks up handlers via the
-  ``lithos_loom.subscriptions.handlers`` Python entry-point group.
+  :class:`SubscriptionRunner` instances. Validates each spec's ``action``
+  against a caller-supplied handler map, compiles ``where`` expressions
+  with restricted globals, and registers each subscription on the bus.
+* :data:`SUBSCRIPTION_ACTIONS` — the catalog of known handler action
+  names. It is the single source of truth for "which actions exist";
+  ``validate-config --dry-run`` checks config actions against it.
 
-A bundled ``noop`` handler (in :mod:`._noop`) is available for tests and
-smoke checks. Real handlers are registered via the same entry-point group.
+Handlers are **hand-wired**, not discovered. Each hosting child
+(``children/obsidian_sync.py`` today) constructs its handlers by name —
+they are factories needing runtime dependencies (config, ``LithosClient``,
+``ProjectionSyncState``) that a zero-arg plugin-discovery lookup can't
+supply — and feeds the resulting ``{action: handler}`` map to
+:func:`build_runners`. That map *is* the registration seam; there is no
+entry-point registry. A bundled ``noop`` handler (in :mod:`._noop`) is a
+stateless placeholder used by tests and smoke checks.
 
 Idempotency is the handler's responsibility: the bus is fire-and-forget
 with bounded buffers, and sources are re-authoritative on restart. The
@@ -24,7 +31,6 @@ runner assumes idempotency and never deduplicates events.
 from __future__ import annotations
 
 import asyncio
-import importlib.metadata
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -35,14 +41,40 @@ from lithos_loom.config import RetryPolicy, SubscriptionConfig
 from lithos_loom.errors import LithosLoomError
 
 __all__ = [
+    "SUBSCRIPTION_ACTIONS",
     "Handler",
     "SubscriptionContext",
     "SubscriptionRunner",
     "build_runners",
-    "discover_handlers",
 ]
 
-_HANDLER_ENTRY_POINT_GROUP = "lithos_loom.subscriptions.handlers"
+
+SUBSCRIPTION_ACTIONS: frozenset[str] = frozenset(
+    {
+        "obsidian-projection",
+        "obsidian-awaiting-review",
+        "obsidian-status-transition",
+        "obsidian-priority-changed",
+        "obsidian-due-date-changed",
+        "project-context-projection",
+        "note-push",
+        "task-archive",
+        "noop",
+    }
+)
+"""The catalog of known subscription handler action names.
+
+Single source of truth for "which ``[[subscriptions]]`` actions exist".
+Each real action is hand-wired to a handler factory in its hosting child
+(all of them in ``children/obsidian_sync.py`` today, which derives its
+hosted set from this catalog); ``noop`` is the stateless test/smoke
+placeholder no child hosts. ``validate-config --dry-run`` validates config
+actions against this set, so a typo like ``obsidian-projction`` surfaces as
+a dead subscription instead of a silent no-op.
+
+Not a plugin registry: handlers carry runtime dependencies and cannot be
+resolved from a name alone (see the module docstring). This is just the
+name vocabulary shared by the dry-run validator and the child wiring."""
 
 
 class Handler(Protocol):
@@ -191,14 +223,6 @@ def build_runners(
             )
         )
     return runners
-
-
-def discover_handlers() -> dict[str, Handler]:
-    """Load handlers via the ``lithos_loom.subscriptions.handlers`` group."""
-    out: dict[str, Handler] = {}
-    for ep in importlib.metadata.entry_points(group=_HANDLER_ENTRY_POINT_GROUP):
-        out[ep.name] = ep.load()
-    return out
 
 
 # ── where compilation ──────────────────────────────────────────────────
