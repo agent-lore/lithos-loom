@@ -27,4 +27,8 @@ Durable host-side hot state: the SSE cursor JSON store and projection sync state
 - Depends on: —
 - Used by: [Children](Children.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
 
+## ADRs
+
+- [ADR 0007 — Subscription handlers are hand-wired, not discovered](../../adr/0007-subscription-registration-hand-wired.md)
+
 [← all generated docs](../README.md)

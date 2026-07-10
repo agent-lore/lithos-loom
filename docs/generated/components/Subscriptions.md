@@ -11,7 +11,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.subscriptions` | S | 3 | 2 |
+| `lithos_loom.subscriptions` | S | 3 | 1 |
 | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._develop_pr_merge` | S | 0 | 1 |
@@ -36,7 +36,6 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - class `SubscriptionContext` — Shared services injected into every handler invocation.
 - class `SubscriptionRunner` — Drains one bus subscription, dispatching with retry + friction.
 - def `build_runners` — Construct one :class:`SubscriptionRunner` per spec.
-- def `discover_handlers` — Load handlers via the ``lithos_loom.subscriptions.handlers`` group.
 
 ### `lithos_loom.subscriptions._atomic_write`
 - def `write_file_atomic` — Atomically rewrite ``path`` with ``content``.
@@ -93,5 +92,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 - Depends on: [Bus](Bus.md), [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [State](State.md), [Tasks](Tasks.md)
 - Used by: [Children](Children.md), [Cli](Cli.md), [Entrypoint](Entrypoint.md), [Render](Render.md)
+
+## ADRs
+
+- [ADR 0007 — Subscription handlers are hand-wired, not discovered](../../adr/0007-subscription-registration-hand-wired.md)
 
 [← all generated docs](../README.md)

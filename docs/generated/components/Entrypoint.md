@@ -27,4 +27,8 @@ Typer CLI app entry and `python -m` bootstrap (`lithos-loom = lithos_loom.main:a
 - Depends on: [Bus](Bus.md), [Cli](Cli.md), [Config](Config.md), [Doctor](Doctor.md), [Errors](Errors.md), [Evals](Evals.md), [LithosClient](LithosClient.md), [Subscriptions](Subscriptions.md), [Supervisor](Supervisor.md)
 - Used by: —
 
+## ADRs
+
+- [ADR 0007 — Subscription handlers are hand-wired, not discovered](../../adr/0007-subscription-registration-hand-wired.md)
+
 [← all generated docs](../README.md)

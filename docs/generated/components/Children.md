@@ -12,12 +12,19 @@ Child-process entrypoints spawned by the supervisor (watcher / sync child mains)
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.children` | XS | 0 | 0 |
+| `lithos_loom.children._boot` | S | 0 | 4 |
 | `lithos_loom.children._echo` | XS | 0 | 1 |
 | `lithos_loom.children.github_watcher` | M | 0 | 1 |
 | `lithos_loom.children.obsidian_sync` | M | 0 | 1 |
 | `lithos_loom.children.route_runner` | S | 0 | 1 |
 
 ## Public API
+
+### `lithos_loom.children._boot`
+- def `configure_logging` — Configure root logging at ``level`` and silence noisy libraries.
+- def `parse_child_args` — Parse the shared child CLI (``--config <path>``).
+- def `install_stop_signals` — Register ``callback`` for SIGTERM + SIGINT; return the signals that stuck.
+- def `remove_stop_signals` — Remove the signal handlers :func:`install_stop_signals` registered.
 
 ### `lithos_loom.children._echo`
 - def `main`
