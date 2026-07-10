@@ -86,8 +86,7 @@ Top 10 most complex functions:
 | 25 | `lithos_loom.cli.develop._outcome_line` |
 | 23 | `lithos_loom.main._print_dry_run_report` |
 
-## Domain, tools & tests
+## Domain & tests
 
 - Domain models: **12** (2 associations, 0 without docstrings)
-- MCP tools: **0** (0 without docstrings)
-- Test-to-source line ratio: **1.52** (48678 test lines / 32026 source lines)
+- Test-to-source line ratio: **1.52** (48761 test lines / 32026 source lines)
