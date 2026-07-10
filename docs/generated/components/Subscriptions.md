@@ -15,6 +15,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._develop_pr_merge` | S | 0 | 1 |
+| `lithos_loom.subscriptions._findings` | XS | 0 | 2 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
 | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |
 | `lithos_loom.subscriptions._human_actionable` | S | 0 | 3 |
@@ -45,6 +46,10 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._develop_pr_merge`
 - def `reconcile_develop_pr` — Reconcile one open task's delivered-PR merge state.
+
+### `lithos_loom.subscriptions._findings`
+- def `write_marker` — Write a de-dup marker via ``task_update``, swallowing ``task_not_found``.
+- def `post_finding_then_mark` — Post a one-shot prefixed finding, then write a scoped de-dup marker.
 
 ### `lithos_loom.subscriptions._github_issue_push`
 - def `make_handler` — Build a stateful handler closing over the shared GitHub client.
@@ -95,6 +100,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ## ADRs
 
+- [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
 - [ADR 0007 — Subscription handlers are hand-wired, not discovered](../../adr/0007-subscription-registration-hand-wired.md)
 
 [← all generated docs](../README.md)

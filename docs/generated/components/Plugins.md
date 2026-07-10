@@ -218,7 +218,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `push_branch` — Host-side push of the worktree branch to origin. Raises on failure.
 - def `repo_name_with_owner` — ``owner/repo`` of the worktree's origin (via gh).
 - def `create_pr` — Open the PR; returns its URL. Raises on failure.
-- def `pr_number_from_url`
+- def `pr_number_from_url` — Extract the PR number from a canonical GitHub PR URL; raise if it can't.
 - def `request_copilot` — Request the Copilot reviewer; False (logged) on failure — non-fatal.
 - def `request_operator_review` — Request *login* as a reviewer on the PR; assign them if they authored it.
 - def `copilot_expected_comments` — The comment count Copilot's review summary claims, or status markers.
@@ -306,7 +306,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ## Dependencies
 
-- Depends on: [Config](Config.md), [Errors](Errors.md), [LithosClient](LithosClient.md), [Runners](Runners.md)
+- Depends on: [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Runners](Runners.md)
 - Used by: [Cli](Cli.md), [Evals](Evals.md)
 
 ## ADRs

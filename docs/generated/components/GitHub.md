@@ -11,11 +11,13 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.github_client` | M | 8 | 3 |
+| `lithos_loom.github_client` | M | 9 | 4 |
 
 ## Public API
 
 ### `lithos_loom.github_client`
+- class `GitHubRef` — A parsed reference to a GitHub issue or pull request.
+- def `parse_github_ref` — Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
 - class `GitHubError` — Base for GitHub-watcher errors. Subclasses carry actionable context.
 - class `GitHubAuthError` — Raised when GitHub auth fails (401, 403, or missing/broken gh CLI).
 - class `GitHubRepoNotFoundError` — Raised when a watched repo returns 404.
@@ -31,6 +33,6 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 ## Dependencies
 
 - Depends on: [Errors](Errors.md)
-- Used by: [Children](Children.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
+- Used by: [Children](Children.md), [Plugins](Plugins.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
 
 [← all generated docs](../README.md)
