@@ -29,8 +29,9 @@ from __future__ import annotations
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
-from lithos_loom.github_client import GitHubClient, GitHubError
+from lithos_loom.github_client import GitHubClient, GitHubError, parse_github_ref
 from lithos_loom.subscriptions import SubscriptionContext
+from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 
 __all__ = [
     "MERGE_STATE_KEY",
@@ -60,25 +61,18 @@ MERGE_STATE_TERMINAL: frozenset[str] = frozenset(
     {"merged", "closed_unmerged", "gone", "unparseable"}
 )
 
-_GH_PREFIX = "https://github.com/"
-
 
 def _parse_pr_url(url: object) -> tuple[str | None, int | None]:
     """``https://github.com/<owner>/<repo>/pull/<n>`` → ``("owner/repo", n)``.
 
-    Returns ``(None, None)`` on anything unparseable. Mirrors
-    ``_github_issue_push._resolve_repo_number`` but the path segment is
-    ``pull`` (issues use ``issues``).
+    Thin adapter over :func:`~lithos_loom.github_client.parse_github_ref` that
+    keeps this module's ``(None, None)``-on-failure tuple convention and filters
+    to PR (``pull``) refs — an issue URL returns ``(None, None)`` here.
     """
-    if not isinstance(url, str) or not url.startswith(_GH_PREFIX):
+    ref = parse_github_ref(url)
+    if ref is None or ref.kind != "pull":
         return None, None
-    parts = url[len(_GH_PREFIX) :].split("/")
-    if len(parts) < 4 or parts[2] != "pull":
-        return None, None
-    try:
-        return f"{parts[0]}/{parts[1]}", int(parts[3])
-    except ValueError:
-        return None, None
+    return ref.repo, ref.number
 
 
 async def reconcile_develop_pr(
@@ -215,44 +209,31 @@ async def _complete_merged(
 async def _friction_and_mark(
     task: Any, ctx: SubscriptionContext, marker: str, pr_url: str, summary: str
 ) -> None:
-    """Post a one-shot finding, then write the (state, url) marker.
+    """Post a one-shot finding, then write this module's (state, url) marker.
 
-    Post-then-mark ordering: a crash between the two costs at most one
-    duplicate finding on the next sweep — the accepted tradeoff (cf.
-    ``_github_issue_sync`` snapshot writes). The marker is what makes the
-    finding one-shot for this ``pr_url``.
+    Builds the develop-pr-merge marker dict and delegates the finding-then-mark
+    idiom to :func:`~lithos_loom.subscriptions._findings.post_finding_then_mark`
+    (shared with ``_github_issue_push``).
     """
-    try:
-        await ctx.lithos.finding_post(task_id=task.id, summary=summary)
-    except LithosClientError as exc:
-        if exc.code != "task_not_found":
-            ctx.logger.warning(
-                "[Friction] develop-pr-merge: posting finding for task %s "
-                "failed (%s); will retry next sweep",
-                task.id,
-                exc,
-            )
-            return  # leave the marker unset → retry next sweep
-    await _mark(task, ctx, marker, pr_url)
+    await post_finding_then_mark(
+        ctx,
+        task_id=task.id,
+        summary=summary,
+        marker={MERGE_STATE_KEY: marker, MERGE_STATE_URL_KEY: pr_url},
+        subsystem="develop-pr-merge",
+        retry_hint="will retry next sweep",
+    )
 
 
 async def _mark(task: Any, ctx: SubscriptionContext, state: str, pr_url: str) -> None:
-    """Write the de-dup marker (state + the url it resolved).
+    """Write the de-dup marker (state + the url it resolved), no finding.
 
-    Swallows ``task_not_found`` defensively: post-lithos#303 a terminal task
-    accepts the update, so this now only fires for a genuinely deleted task
-    (nothing left to mark). Any other error warns and leaves the marker unset.
+    The finding-less path (merged → mark ``merged``); delegates to the shared
+    :func:`~lithos_loom.subscriptions._findings.write_marker`.
     """
-    try:
-        await ctx.lithos.task_update(
-            task_id=task.id,
-            metadata={MERGE_STATE_KEY: state, MERGE_STATE_URL_KEY: pr_url},
-        )
-    except LithosClientError as exc:
-        if exc.code != "task_not_found":
-            ctx.logger.warning(
-                "[Friction] develop-pr-merge: marking task %s %s failed (%s)",
-                task.id,
-                state,
-                exc,
-            )
+    await write_marker(
+        ctx,
+        task_id=task.id,
+        marker={MERGE_STATE_KEY: state, MERGE_STATE_URL_KEY: pr_url},
+        subsystem="develop-pr-merge",
+    )

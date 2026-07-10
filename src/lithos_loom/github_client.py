@@ -24,7 +24,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -41,6 +41,57 @@ _USER_AGENT = "lithos-loom-github-watcher"
 #   <!-- LITHOS:ABC-123 -->  → case-insensitive tolerated
 # Captured group 1 is the task id.
 _MARKER_RE = re.compile(r"<!--\s*lithos:\s*([A-Za-z0-9_-]+)\s*-->", re.IGNORECASE)
+
+# The one home for the canonical GitHub issue/PR web-URL grammar (ARCH-7). Every
+# marker/reconcile path that carries a ``develop_pr_url`` or ``github_issue_url``
+# parsed it independently before — six near-identical prefix-splits and regexes
+# that could drift on host, trailing path, or numeric id. They are now thin
+# adapters over ``parse_github_ref``. Anchored at both ends: a single trailing
+# slash is tolerated, any extra path segment (``/pull/82/files``) is not.
+_GITHUB_REF_RE = re.compile(
+    r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
+    r"(?P<kind>issues|pull)/(?P<number>\d+)/?$"
+)
+
+
+@dataclass(frozen=True)
+class GitHubRef:
+    """A parsed reference to a GitHub issue or pull request.
+
+    ``repo`` is ``"owner/name"``; ``number`` is the issue/PR number; ``kind`` is
+    the canonical singular ``"issue"`` or ``"pull"``. Produced only by
+    :func:`parse_github_ref`.
+    """
+
+    repo: str
+    number: int
+    kind: Literal["issue", "pull"]
+
+
+def parse_github_ref(url: object) -> GitHubRef | None:
+    """Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
+
+    Returns a :class:`GitHubRef`, or ``None`` for anything that is not exactly
+    that shape — a non-string, a non-github host, a non-https scheme, an unknown
+    kind, a trailing path segment, or a non-numeric id. A single trailing slash
+    is tolerated and surrounding whitespace is stripped.
+
+    This is the single home for the GitHub issue/PR URL grammar; the per-caller
+    helpers (``pr_delivery.parse_issue_ref`` / ``pr_delivery.pr_number_from_url``,
+    ``_develop_pr_merge._parse_pr_url``, ``_github_issue_push._resolve_repo_number``)
+    are thin adapters that filter on ``kind`` and shape the return their own way.
+    """
+    if not isinstance(url, str):
+        return None
+    m = _GITHUB_REF_RE.match(url.strip())
+    if m is None:
+        return None
+    kind: Literal["issue", "pull"] = "issue" if m.group("kind") == "issues" else "pull"
+    return GitHubRef(
+        repo=f"{m.group('owner')}/{m.group('repo')}",
+        number=int(m.group("number")),
+        kind=kind,
+    )
 
 
 class GitHubError(LithosLoomError):

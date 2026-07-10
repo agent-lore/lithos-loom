@@ -28,6 +28,7 @@ from lithos_loom.github_client import (
     GitHubClient,
     GitHubError,
     GitHubIssueNotFoundError,
+    GitHubRef,
     GitHubRepoNotFoundError,
     Issue,
     PullRequest,
@@ -35,6 +36,7 @@ from lithos_loom.github_client import (
     _parse_pull_request,
     _resolve_gh_token,
     apply_marker,
+    parse_github_ref,
     parse_marker,
 )
 
@@ -181,6 +183,48 @@ def test_parse_marker_ignores_malformed_markers() -> None:
     """No task id, weird shapes — refuse to guess."""
     assert parse_marker("<!-- lithos: -->") is None
     assert parse_marker("<!-- lithos -->") is None
+
+
+# ── parse_github_ref (the one home for the issue/PR URL grammar, ARCH-7) ──
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # Canonical issue / PR URLs.
+        (
+            "https://github.com/agent-lore/lithos-loom/issues/42",
+            GitHubRef("agent-lore/lithos-loom", 42, "issue"),
+        ),
+        (
+            "https://github.com/o/r/pull/82",
+            GitHubRef("o/r", 82, "pull"),
+        ),
+        # A single trailing slash is tolerated; surrounding whitespace stripped.
+        ("https://github.com/o/r/issues/1/", GitHubRef("o/r", 1, "issue")),
+        ("  https://github.com/o/r/pull/9  ", GitHubRef("o/r", 9, "pull")),
+        # Rejected shapes → None.
+        ("https://github.com/o/r", None),  # no kind / number
+        ("https://github.com/o/r/pull/notanum", None),  # non-numeric id
+        ("https://github.com/o/r/pull/82/files", None),  # trailing path segment
+        ("https://github.com/o/r/discussions/3", None),  # unknown kind
+        ("https://example.com/o/r/pull/1", None),  # wrong host
+        ("http://github.com/o/r/pull/1", None),  # non-https scheme
+        ("not a url", None),
+        ("", None),
+        (None, None),  # non-string
+        (42, None),  # non-string
+    ],
+)
+def test_parse_github_ref(url: object, expected: GitHubRef | None) -> None:
+    assert parse_github_ref(url) == expected
+
+
+def test_parse_github_ref_kind_is_singular() -> None:
+    """The URL segment is ``issues``/``pull``; the ref normalises to the
+    singular ``issue``/``pull`` so callers filter on one canonical vocabulary."""
+    assert parse_github_ref("https://github.com/o/r/issues/1").kind == "issue"  # type: ignore[union-attr]
+    assert parse_github_ref("https://github.com/o/r/pull/1").kind == "pull"  # type: ignore[union-attr]
 
 
 def test_apply_marker_appends_when_absent() -> None:

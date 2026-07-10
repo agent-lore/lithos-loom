@@ -23,6 +23,11 @@ classDiagram
   }
   class GitHubIssueNotFoundError
   class GitHubRateLimitError
+  class GitHubRef {
+    +repo str
+    +number int
+    +kind Literal['issue', 'pull']
+  }
   class GitHubRepoNotFoundError
   class Issue {
     +repo str
