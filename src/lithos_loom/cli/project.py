@@ -51,7 +51,7 @@ from lithos_loom.cli._github_tag_migration import migrate_github_tags
 from lithos_loom.cli._project_import_bulk import (
     ImportPlan,
     PartialImportError,
-    TasksOnlyPreflightError,
+    ProjectImportError,
     check_tasks_only_preflight,
     create_tasks,
     force_tasks_cleanup,
@@ -715,6 +715,333 @@ def _read_body(body: str | None, body_file: Path | None) -> str | None:
     return ""
 
 
+@dataclass(frozen=True)
+class DryRunResult:
+    """``import_project`` outcome for --dry-run: the plan text to print (stdout)."""
+
+    plan_text: str
+
+
+@dataclass(frozen=True)
+class AbortedResult:
+    """``import_project`` outcome when the operator declines the force-tasks
+    confirmation: a message to print (stderr) with a clean exit 0."""
+
+    message: str
+
+
+@dataclass(frozen=True)
+class ImportedResult:
+    """``import_project`` success: the created/updated project + task count."""
+
+    id: str
+    slug: str
+    vault_path: Path
+    tasks_created: int
+
+
+def import_project(
+    *,
+    cfg: LoomConfig,
+    source: Path,
+    slug: str | None,
+    tags: str | None,
+    tasks_only: bool,
+    no_tasks: bool,
+    force_tasks: bool,
+    yes: bool,
+    dry_run: bool,
+    confirm: Callable[[str], bool],
+) -> DryRunResult | AbortedResult | ImportedResult:
+    """Orchestrate a ``project import`` run against an already-loaded config.
+
+    The Typer command is a thin wrapper: it loads the config, supplies a
+    ``confirm`` callback (``typer.confirm``), calls this, then renders the
+    returned outcome or the raised :class:`ProjectImportError`. Lifting the
+    sequencing here makes it unit-testable without a ``CliRunner`` — every exit
+    path is a typed result or a ``ProjectImportError(message, exit_code)`` rather
+    than an inline ``typer.echo`` + ``sys.exit``.
+
+    ``confirm`` is called only on the tasks-only + existing-tasks + --force-tasks
+    path (unless --yes); returning ``False`` yields an :class:`AbortedResult`.
+    """
+    if cfg.obsidian_sync is None:
+        raise ProjectImportError(
+            "lithos-loom: project import requires [obsidian_sync] in config", 2
+        )
+
+    # E7: mutually-exclusive flag validation (raises ProjectImportError on conflict)
+    validate_import_flags(
+        tasks_only=tasks_only,
+        no_tasks=no_tasks,
+        force_tasks=force_tasks,
+        slug=slug,
+    )
+
+    # Read source
+    try:
+        raw = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ProjectImportError(
+            f"lithos-loom: could not read {source}: {exc}", 2
+        ) from exc
+
+    frontmatter, body = extract_frontmatter(raw)
+    lithos_id_in_frontmatter = (
+        frontmatter.get("lithos_id") if isinstance(frontmatter, dict) else None
+    )
+    if not isinstance(lithos_id_in_frontmatter, str):
+        lithos_id_in_frontmatter = None
+
+    # Greenfield: refuse already-projected files (existing behaviour)
+    if not tasks_only and lithos_id_in_frontmatter is not None:
+        raise ProjectImportError(
+            f"lithos-loom: {source} already carries lithos_id "
+            f"{lithos_id_in_frontmatter!r} in frontmatter — refusing to "
+            "re-import in greenfield mode (would create a duplicate doc). "
+            "Use --tasks-only --slug <slug> to add tasks against the "
+            "existing project, or edit the original doc in Lithos.",
+            2,
+        )
+
+    # Title + slug derivation
+    fm_title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
+    if isinstance(fm_title, str) and fm_title:
+        title = str(fm_title)
+    else:
+        title = _title_from_stem(source.stem)
+
+    if slug is not None:
+        resolved_slug = slug
+    elif isinstance(fm_title, str) and fm_title:
+        # Frontmatter title is explicit operator intent, NOT prefix-stripped.
+        resolved_slug = _slugify(title)
+    else:
+        # Default-slug from stem, prefix-stripped.
+        resolved_slug = _slugify(resolve_default_slug_from_stem(source))
+
+    if not _SLUG_RE.match(resolved_slug):
+        raise ProjectImportError(
+            f"lithos-loom: invalid slug {resolved_slug!r}; must match "
+            f"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$ "
+            f"(lowercase alphanumerics + hyphens, must start+end alphanumeric)",
+            2,
+        )
+
+    fm_tags = frontmatter.get("tags") if isinstance(frontmatter, dict) else None
+    fm_tag_list = [str(t) for t in fm_tags] if isinstance(fm_tags, list) else []
+    tag_list = _merge_tags(fm_tag_list, tags)
+
+    # Parse + plan tasks (unless --no-tasks)
+    plans: list = []
+    parsed_lines: list = []
+    stripped_body = body
+    if not no_tasks:
+        parsed_lines, parse_errors, stripped_body = parse_doc(body, resolved_slug)
+        graph_plans, graph_errors = build_plan(parsed_lines)
+        all_errors = parse_errors + graph_errors
+        if all_errors:
+            raise ProjectImportError(render_validation_report(all_errors), 2)
+        plans = graph_plans
+
+    # --dry-run: run the same read-only pre-flight the real run would, then
+    # return the plan. Tasks-only verifies project exists + lithos_id
+    # consistency; greenfield verifies slug doesn't collide.
+    if dry_run:
+        project_existed = False
+        if tasks_only:
+            try:
+                project_id, _ = asyncio.run(
+                    check_tasks_only_preflight(
+                        cfg=cfg,
+                        slug=resolved_slug,
+                        lithos_id_in_frontmatter=lithos_id_in_frontmatter,
+                    )
+                )
+                project_existed = project_id is not None
+            except OSError as exc:
+                raise ProjectImportError(
+                    f"lithos-loom: could not reach Lithos at "
+                    f"{cfg.orchestrator.lithos_url} ({exc})",
+                    1,
+                ) from exc
+            except LithosClientError as exc:
+                raise ProjectImportError(
+                    f"lithos-loom: lithos call failed: {exc}", 1
+                ) from exc
+        else:
+            try:
+                asyncio.run(_check_slug_collision_async(cfg=cfg, slug=resolved_slug))
+            except _SlugCollisionError as exc:
+                raise ProjectImportError(
+                    f"lithos-loom: slug {resolved_slug!r} already exists at "
+                    f"doc id {exc.existing_id} ({exc.existing_path}); did you "
+                    f"mean --tasks-only --slug {resolved_slug}?",
+                    1,
+                ) from exc
+            except OSError as exc:
+                raise ProjectImportError(
+                    f"lithos-loom: could not reach Lithos at "
+                    f"{cfg.orchestrator.lithos_url} ({exc})",
+                    1,
+                ) from exc
+            except LithosClientError as exc:
+                raise ProjectImportError(
+                    f"lithos-loom: note_list failed: {exc}", 1
+                ) from exc
+
+        plan = ImportPlan(
+            source=source,
+            slug=resolved_slug,
+            title=title,
+            body_after_strip=stripped_body,
+            tags=tag_list,
+            plans=plans,
+            parsed_lines=parsed_lines,
+            is_tasks_only=tasks_only,
+            is_force_tasks=force_tasks,
+            yes=yes,
+            lithos_id_in_frontmatter=lithos_id_in_frontmatter,
+        )
+        return DryRunResult(
+            plan_text=render_dry_run_plan(plan, project_existed=project_existed)
+        )
+
+    # ── Real execution ──
+    filename = _DEFAULT_DOC_FILENAME_TEMPLATE.format(slug=resolved_slug)
+    obs = cfg.obsidian_sync
+    vault_path = obs.vault_path / obs.projects_dir / resolved_slug / filename
+    project_id: str
+
+    if tasks_only:
+        # Tasks-only mode: verify project exists; deal with existing tasks.
+        try:
+            project_id, existing_tasks = asyncio.run(
+                check_tasks_only_preflight(
+                    cfg=cfg,
+                    slug=resolved_slug,
+                    lithos_id_in_frontmatter=lithos_id_in_frontmatter,
+                )
+            )
+        except OSError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: could not reach Lithos at "
+                f"{cfg.orchestrator.lithos_url} ({exc})",
+                1,
+            ) from exc
+        except LithosClientError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: lithos call failed: {exc}", 1
+            ) from exc
+
+        if existing_tasks:
+            open_count = sum(1 for t in existing_tasks if t.status == "open")
+            resolved_count = len(existing_tasks) - open_count
+            if not force_tasks:
+                breakdown = f"{open_count} open" + (
+                    f" + {resolved_count} resolved (history)" if resolved_count else ""
+                )
+                raise ProjectImportError(
+                    f"lithos-loom: project {resolved_slug!r} already has "
+                    f"{len(existing_tasks)} existing task"
+                    f"{'s' if len(existing_tasks) != 1 else ''} on record "
+                    f"({breakdown}); refusing to add more (would duplicate). "
+                    f"Re-run with --force-tasks to cancel open tasks and "
+                    f"re-import (resolved history is preserved).",
+                    1,
+                )
+
+            history_note = (
+                f" ({resolved_count} resolved task"
+                f"{'s' if resolved_count != 1 else ''} will remain as history)"
+                if resolved_count
+                else ""
+            )
+            if not yes and not confirm(
+                f"Cancel {open_count} open task"
+                f"{'s' if open_count != 1 else ''}{history_note} and create "
+                f"{len(plans)} new ones?"
+            ):
+                return AbortedResult(message="aborted; no changes made")
+            try:
+                asyncio.run(force_tasks_cleanup(cfg=cfg, existing_tasks=existing_tasks))
+            except OSError as exc:
+                raise ProjectImportError(
+                    f"lithos-loom: could not reach Lithos at "
+                    f"{cfg.orchestrator.lithos_url} ({exc})",
+                    1,
+                ) from exc
+            except LithosClientError as exc:
+                raise ProjectImportError(
+                    f"lithos-loom: task_cancel failed: {exc}", 1
+                ) from exc
+    else:
+        # Greenfield: create the project doc
+        try:
+            project_result = asyncio.run(
+                _create_project_async(
+                    cfg=cfg,
+                    slug=resolved_slug,
+                    title=title,
+                    content=stripped_body,
+                    tags=tag_list,
+                    filename=filename,
+                )
+            )
+        except _SlugCollisionError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: slug {resolved_slug!r} already exists at "
+                f"doc id {exc.existing_id} ({exc.existing_path}); did you "
+                f"mean --tasks-only --slug {resolved_slug}?",
+                1,
+            ) from exc
+        except OSError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: could not reach Lithos at "
+                f"{cfg.orchestrator.lithos_url} ({exc})",
+                1,
+            ) from exc
+        except LithosClientError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: note_write failed: {exc}", 1
+            ) from exc
+        project_id = project_result.id
+
+    # Create the tasks (if any)
+    n_tasks_created = 0
+    if plans:
+        try:
+            n_tasks_created = asyncio.run(
+                create_tasks(cfg=cfg, slug=resolved_slug, plans=plans, source=source)
+            )
+        except PartialImportError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: partial import — created {exc.n_created}/"
+                f"{exc.n_total} tasks before failure ({exc.underlying}). "
+                f"A [Friction] finding has been posted with the recovery "
+                f"command; re-run with --tasks-only --slug {resolved_slug} "
+                f"--force-tasks to complete.",
+                1,
+            ) from exc
+        except OSError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: could not reach Lithos at "
+                f"{cfg.orchestrator.lithos_url} ({exc})",
+                1,
+            ) from exc
+        except LithosClientError as exc:
+            raise ProjectImportError(
+                f"lithos-loom: task_create failed: {exc}", 1
+            ) from exc
+
+    return ImportedResult(
+        id=project_id,
+        slug=resolved_slug,
+        vault_path=vault_path,
+        tasks_created=n_tasks_created,
+    )
+
+
 @project_app.command("import")
 def project_import(
     source: Path = typer.Argument(
@@ -825,307 +1152,45 @@ def project_import(
         typer.echo(f"lithos-loom: {exc}", err=True)
         sys.exit(1)
 
-    if cfg.obsidian_sync is None:
-        typer.echo(
-            "lithos-loom: project import requires [obsidian_sync] in config",
-            err=True,
-        )
-        sys.exit(2)
-
-    # E7: mutually-exclusive flag validation (raises typer.Exit on conflict)
-    validate_import_flags(
-        tasks_only=tasks_only,
-        no_tasks=no_tasks,
-        force_tasks=force_tasks,
-        slug=slug,
-    )
-
-    # Read source
     try:
-        raw = source.read_text(encoding="utf-8")
-    except OSError as exc:
-        typer.echo(f"lithos-loom: could not read {source}: {exc}", err=True)
-        sys.exit(2)
-
-    frontmatter, body = extract_frontmatter(raw)
-    lithos_id_in_frontmatter = (
-        frontmatter.get("lithos_id") if isinstance(frontmatter, dict) else None
-    )
-    if not isinstance(lithos_id_in_frontmatter, str):
-        lithos_id_in_frontmatter = None
-
-    # Greenfield: refuse already-projected files (existing behaviour)
-    if not tasks_only and lithos_id_in_frontmatter is not None:
-        typer.echo(
-            f"lithos-loom: {source} already carries lithos_id "
-            f"{lithos_id_in_frontmatter!r} in frontmatter — refusing to "
-            "re-import in greenfield mode (would create a duplicate doc). "
-            "Use --tasks-only --slug <slug> to add tasks against the "
-            "existing project, or edit the original doc in Lithos.",
-            err=True,
-        )
-        sys.exit(2)
-
-    # Title + slug derivation
-    fm_title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
-    if isinstance(fm_title, str) and fm_title:
-        title = str(fm_title)
-    else:
-        title = _title_from_stem(source.stem)
-
-    if slug is not None:
-        resolved_slug = slug
-    elif isinstance(fm_title, str) and fm_title:
-        # Frontmatter title is explicit operator intent, NOT prefix-stripped.
-        resolved_slug = _slugify(title)
-    else:
-        # Default-slug from stem, prefix-stripped.
-        resolved_slug = _slugify(resolve_default_slug_from_stem(source))
-
-    if not _SLUG_RE.match(resolved_slug):
-        typer.echo(
-            f"lithos-loom: invalid slug {resolved_slug!r}; must match "
-            f"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$ "
-            f"(lowercase alphanumerics + hyphens, must start+end alphanumeric)",
-            err=True,
-        )
-        sys.exit(2)
-
-    fm_tags = frontmatter.get("tags") if isinstance(frontmatter, dict) else None
-    fm_tag_list = [str(t) for t in fm_tags] if isinstance(fm_tags, list) else []
-    tag_list = _merge_tags(fm_tag_list, tags)
-
-    # Parse + plan tasks (unless --no-tasks)
-    plans: list = []
-    parsed_lines: list = []
-    stripped_body = body
-    if not no_tasks:
-        parsed_lines, parse_errors, stripped_body = parse_doc(body, resolved_slug)
-        graph_plans, graph_errors = build_plan(parsed_lines)
-        all_errors = parse_errors + graph_errors
-        if all_errors:
-            typer.echo(render_validation_report(all_errors), err=True)
-            sys.exit(2)
-        plans = graph_plans
-
-    # --dry-run: run the same read-only pre-flight the real run would,
-    # then print the plan. Tasks-only verifies project exists +
-    # lithos_id consistency; greenfield verifies slug doesn't collide.
-    # Both paths exit non-zero on pre-flight failure so the operator
-    # catches the problem before committing.
-    if dry_run:
-        project_existed = False
-        if tasks_only:
-            try:
-                project_id, _ = asyncio.run(
-                    check_tasks_only_preflight(
-                        cfg=cfg,
-                        slug=resolved_slug,
-                        lithos_id_in_frontmatter=lithos_id_in_frontmatter,
-                    )
-                )
-                project_existed = project_id is not None
-            except TasksOnlyPreflightError as exc:
-                typer.echo(exc.message, err=True)
-                sys.exit(exc.exit_code)
-            except OSError as exc:
-                typer.echo(
-                    f"lithos-loom: could not reach Lithos at "
-                    f"{cfg.orchestrator.lithos_url} ({exc})",
-                    err=True,
-                )
-                sys.exit(1)
-            except LithosClientError as exc:
-                typer.echo(f"lithos-loom: lithos call failed: {exc}", err=True)
-                sys.exit(1)
-        else:
-            try:
-                asyncio.run(_check_slug_collision_async(cfg=cfg, slug=resolved_slug))
-            except _SlugCollisionError as exc:
-                typer.echo(
-                    f"lithos-loom: slug {resolved_slug!r} already exists at "
-                    f"doc id {exc.existing_id} ({exc.existing_path}); did you "
-                    f"mean --tasks-only --slug {resolved_slug}?",
-                    err=True,
-                )
-                sys.exit(1)
-            except OSError as exc:
-                typer.echo(
-                    f"lithos-loom: could not reach Lithos at "
-                    f"{cfg.orchestrator.lithos_url} ({exc})",
-                    err=True,
-                )
-                sys.exit(1)
-            except LithosClientError as exc:
-                typer.echo(f"lithos-loom: note_list failed: {exc}", err=True)
-                sys.exit(1)
-
-        plan = ImportPlan(
+        result = import_project(
+            cfg=cfg,
             source=source,
-            slug=resolved_slug,
-            title=title,
-            body_after_strip=stripped_body,
-            tags=tag_list,
-            plans=plans,
-            parsed_lines=parsed_lines,
-            is_tasks_only=tasks_only,
-            is_force_tasks=force_tasks,
+            slug=slug,
+            tags=tags,
+            tasks_only=tasks_only,
+            no_tasks=no_tasks,
+            force_tasks=force_tasks,
             yes=yes,
-            lithos_id_in_frontmatter=lithos_id_in_frontmatter,
+            dry_run=dry_run,
+            confirm=lambda message: typer.confirm(message, default=False),
         )
-        typer.echo(render_dry_run_plan(plan, project_existed=project_existed))
+    except ProjectImportError as exc:
+        typer.echo(exc.message, err=True)
+        sys.exit(exc.exit_code)
+
+    if isinstance(result, DryRunResult):
+        typer.echo(result.plan_text)
+        return
+    if isinstance(result, AbortedResult):
+        typer.echo(result.message, err=True)
         return
 
-    # ── Real execution ──
-    filename = _DEFAULT_DOC_FILENAME_TEMPLATE.format(slug=resolved_slug)
-    obs = cfg.obsidian_sync
-    vault_path = obs.vault_path / obs.projects_dir / resolved_slug / filename
-    project_id: str
-
-    if tasks_only:
-        # Tasks-only mode: verify project exists; deal with existing tasks.
-        try:
-            project_id, existing_tasks = asyncio.run(
-                check_tasks_only_preflight(
-                    cfg=cfg,
-                    slug=resolved_slug,
-                    lithos_id_in_frontmatter=lithos_id_in_frontmatter,
-                )
-            )
-        except TasksOnlyPreflightError as exc:
-            typer.echo(exc.message, err=True)
-            sys.exit(exc.exit_code)
-        except OSError as exc:
-            typer.echo(
-                f"lithos-loom: could not reach Lithos at "
-                f"{cfg.orchestrator.lithos_url} ({exc})",
-                err=True,
-            )
-            sys.exit(1)
-        except LithosClientError as exc:
-            typer.echo(f"lithos-loom: lithos call failed: {exc}", err=True)
-            sys.exit(1)
-
-        if existing_tasks:
-            open_count = sum(1 for t in existing_tasks if t.status == "open")
-            resolved_count = len(existing_tasks) - open_count
-            if not force_tasks:
-                breakdown = f"{open_count} open" + (
-                    f" + {resolved_count} resolved (history)" if resolved_count else ""
-                )
-                typer.echo(
-                    f"lithos-loom: project {resolved_slug!r} already has "
-                    f"{len(existing_tasks)} existing task"
-                    f"{'s' if len(existing_tasks) != 1 else ''} on record "
-                    f"({breakdown}); refusing to add more (would duplicate). "
-                    f"Re-run with --force-tasks to cancel open tasks and "
-                    f"re-import (resolved history is preserved).",
-                    err=True,
-                )
-                sys.exit(1)
-
-            history_note = (
-                f" ({resolved_count} resolved task"
-                f"{'s' if resolved_count != 1 else ''} will remain as history)"
-                if resolved_count
-                else ""
-            )
-            if not yes and not typer.confirm(
-                f"Cancel {open_count} open task"
-                f"{'s' if open_count != 1 else ''}{history_note} and create "
-                f"{len(plans)} new ones?",
-                default=False,
-            ):
-                typer.echo("aborted; no changes made", err=True)
-                sys.exit(0)
-            try:
-                asyncio.run(force_tasks_cleanup(cfg=cfg, existing_tasks=existing_tasks))
-            except OSError as exc:
-                typer.echo(
-                    f"lithos-loom: could not reach Lithos at "
-                    f"{cfg.orchestrator.lithos_url} ({exc})",
-                    err=True,
-                )
-                sys.exit(1)
-            except LithosClientError as exc:
-                typer.echo(f"lithos-loom: task_cancel failed: {exc}", err=True)
-                sys.exit(1)
-    else:
-        # Greenfield: create the project doc
-        try:
-            project_result = asyncio.run(
-                _create_project_async(
-                    cfg=cfg,
-                    slug=resolved_slug,
-                    title=title,
-                    content=stripped_body,
-                    tags=tag_list,
-                    filename=filename,
-                )
-            )
-        except _SlugCollisionError as exc:
-            typer.echo(
-                f"lithos-loom: slug {resolved_slug!r} already exists at "
-                f"doc id {exc.existing_id} ({exc.existing_path}); did you "
-                f"mean --tasks-only --slug {resolved_slug}?",
-                err=True,
-            )
-            sys.exit(1)
-        except OSError as exc:
-            typer.echo(
-                f"lithos-loom: could not reach Lithos at "
-                f"{cfg.orchestrator.lithos_url} ({exc})",
-                err=True,
-            )
-            sys.exit(1)
-        except LithosClientError as exc:
-            typer.echo(f"lithos-loom: note_write failed: {exc}", err=True)
-            sys.exit(1)
-        project_id = project_result.id
-
-    # Create the tasks (if any)
-    n_tasks_created = 0
-    if plans:
-        try:
-            n_tasks_created = asyncio.run(
-                create_tasks(cfg=cfg, slug=resolved_slug, plans=plans, source=source)
-            )
-        except PartialImportError as exc:
-            typer.echo(
-                f"lithos-loom: partial import — created {exc.n_created}/"
-                f"{exc.n_total} tasks before failure ({exc.underlying}). "
-                f"A [Friction] finding has been posted with the recovery "
-                f"command; re-run with --tasks-only --slug {resolved_slug} "
-                f"--force-tasks to complete.",
-                err=True,
-            )
-            sys.exit(1)
-        except OSError as exc:
-            typer.echo(
-                f"lithos-loom: could not reach Lithos at "
-                f"{cfg.orchestrator.lithos_url} ({exc})",
-                err=True,
-            )
-            sys.exit(1)
-        except LithosClientError as exc:
-            typer.echo(f"lithos-loom: task_create failed: {exc}", err=True)
-            sys.exit(1)
-
-    # Output
+    # ImportedResult — render the requested output format.
     if output_format == _FORMAT_JSON:
         typer.echo(
             json.dumps(
                 {
-                    "id": project_id,
-                    "slug": resolved_slug,
-                    "vault_path": str(vault_path),
-                    "tasks_created": n_tasks_created,
+                    "id": result.id,
+                    "slug": result.slug,
+                    "vault_path": str(result.vault_path),
+                    "tasks_created": result.tasks_created,
                 }
             )
         )
         return
     if output_format == _FORMAT_TEXT:
-        typer.echo(str(vault_path))
+        typer.echo(str(result.vault_path))
         return
     typer.echo(
         f"lithos-loom: unknown --format {output_format!r} "

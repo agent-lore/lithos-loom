@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
-import typer
-
 from lithos_loom.config import LoomConfig
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import LithosClient, NoteClient, Task, TaskClient
@@ -57,18 +55,30 @@ class ImportPlan:
     lithos_id_in_frontmatter: str | None
 
 
-class TasksOnlyPreflightError(Exception):
-    """Raised by :func:`check_tasks_only_preflight` for tasks-only mode failures.
+class ProjectImportError(Exception):
+    """A ``project import`` failure that maps to a CLI message + exit code.
 
-    Carries the exit code the CLI should use — 1 for "project not
-    found" (operator error, recoverable with greenfield), 2 for
-    "lithos_id mismatch" (input validation).
+    The orchestration seam (:func:`cli.project.import_project`) raises this for
+    every failure path; the thin Typer command catches it once and renders
+    ``typer.echo(exc.message, err=True); sys.exit(exc.exit_code)``. Carrying the
+    message + exit code on the exception (rather than echoing inline) is what
+    makes the sequencing unit-testable without a ``CliRunner``.
     """
 
     def __init__(self, message: str, exit_code: int) -> None:
         super().__init__(message)
         self.message = message
         self.exit_code = exit_code
+
+
+class TasksOnlyPreflightError(ProjectImportError):
+    """Raised by :func:`check_tasks_only_preflight` for tasks-only mode failures.
+
+    Carries the exit code the CLI should use — 1 for "project not
+    found" (operator error, recoverable with greenfield), 2 for
+    "lithos_id mismatch" (input validation). A :class:`ProjectImportError`
+    subclass so the command's single handler catches it too.
+    """
 
 
 class PartialImportError(Exception):
@@ -100,36 +110,33 @@ def validate_import_flags(
 ) -> None:
     """Validate the new --tasks-only / --no-tasks / --force-tasks / --slug combos.
 
-    Raises :class:`typer.Exit` with exit code 2 on any mutual-exclusion
-    violation, after echoing a helpful error to stderr.
+    Raises :class:`ProjectImportError` (exit code 2) on any mutual-exclusion
+    violation; the CLI renders the message.
 
     ``--yes`` without ``--force-tasks`` is silently a no-op (matches
     typical CLI ergonomics: the bypass flag is harmless when there's
     nothing to confirm).
     """
     if no_tasks and tasks_only:
-        typer.echo(
+        raise ProjectImportError(
             "lithos-loom: --no-tasks and --tasks-only are mutually exclusive "
             "(no-tasks skips task extraction; tasks-only is task extraction only)",
-            err=True,
+            2,
         )
-        raise typer.Exit(2)
     if no_tasks and force_tasks:
-        typer.echo(
+        raise ProjectImportError(
             "lithos-loom: --no-tasks and --force-tasks are mutually exclusive "
             "(--force-tasks deletes existing tasks before re-importing; "
             "meaningless when --no-tasks suppresses task extraction)",
-            err=True,
+            2,
         )
-        raise typer.Exit(2)
     if tasks_only and slug is None:
-        typer.echo(
+        raise ProjectImportError(
             "lithos-loom: --tasks-only requires --slug (frontmatter is ignored "
             "for routing in tasks-only mode — required to prevent silent "
             "mis-routing)",
-            err=True,
+            2,
         )
-        raise typer.Exit(2)
 
 
 # ── Prefix-strip slug derivation ────────────────────────────────────────
