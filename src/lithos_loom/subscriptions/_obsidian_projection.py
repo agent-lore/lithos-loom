@@ -139,7 +139,7 @@ from lithos_loom.subscriptions._human_actionable import (
     is_human_actionable,
     would_be_actionable,
 )
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import ArchiveGateState, TaskSyncState
 from lithos_loom.task_line import (
     extract_task_ids as _extract_task_ids,
 )
@@ -166,8 +166,8 @@ class _StateEntry:
     rendered line lets the handler distinguish open vs resolved
     entries without parsing the line back out, lets the TTL sweep
     walk by resolved_at cheaply, and lets ``_flush`` extract per-task
-    priority + due_date for the ``sync_state`` maps without
-    re-parsing the rendered line. The ``sync_state`` maps in turn
+    priority + due_date for the ``task_sync`` maps without
+    re-parsing the rendered line. The ``task_sync`` maps in turn
     feed the fs-watcher's diff for the corresponding
     ``obsidian.task.priority_changed`` / ``obsidian.task.due_date_changed``
     event families.
@@ -225,7 +225,7 @@ _STATUS_TO_MARKER: dict[str, str] = {
 }
 """Map a ``_StateEntry.status`` to the checkbox marker the renderer
 emits. Used by ``_flush`` to publish per-task marker state into the
-shared :class:`ProjectionSyncState` so the fs watcher can tell
+shared :class:`TaskSyncState` so the fs watcher can tell
 projection writes from user edits on a per-task basis."""
 
 
@@ -234,7 +234,8 @@ def make_handler(
     *,
     today_provider: Callable[[], date] = date.today,
     debounce_seconds: float = 0.0,
-    sync_state: ProjectionSyncState | None = None,
+    task_sync: TaskSyncState | None = None,
+    archive_gate: ArchiveGateState | None = None,
 ) -> Any:
     """Build a stateful obsidian-projection handler bound to ``cfg``.
 
@@ -268,16 +269,18 @@ def make_handler(
     and the first divergent event writes the corrected content. Lost
     flushes therefore self-heal — no Loom-side persistence required.
 
-    ``sync_state`` is the coordination handle shared with the fs watcher.
-    The handler updates ``sync_state.last_written_hash`` and
-    ``sync_state.task_status_markers`` *before* committing each atomic
-    rename so the
-    :class:`~lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher`
-    can identify projection-driven file changes as self-writes and
-    suppress them. ``None`` (test default) constructs a fresh isolated
-    state — the projection still works, just without a watcher
-    consumer. Production callers in
-    :mod:`lithos_loom.children.obsidian_sync` pass a shared instance.
+    ``task_sync`` is the coordination handle shared with the fs watcher. The
+    handler updates ``task_sync.last_written_hash`` and
+    ``task_sync.task_status_markers`` *before* committing each atomic rename so the
+    :class:`~lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher` can identify
+    projection-driven file changes as self-writes and suppress them. ``archive_gate``
+    is the surfaced/archived handshake shared with the task-archive subscription —
+    the handler sets ``archive_gate.surfaced[id]`` (the archiver's gate) and reads
+    ``archive_gate.archived[id]`` for its flush-time eviction, and installs its
+    re-flush hook on it. Each ``None`` (test default) constructs a fresh isolated
+    object — the projection still works, just without the corresponding consumer.
+    Production callers in :mod:`lithos_loom.children.obsidian_sync` pass shared
+    instances.
     """
     obs = cfg.obsidian_sync
     if obs is None:
@@ -288,18 +291,19 @@ def make_handler(
 
     tasks_path = obs.vault_path / obs.tasks_file
     state: dict[str, _StateEntry] = {}
-    sync_state = sync_state if sync_state is not None else ProjectionSyncState()
+    task_sync = task_sync if task_sync is not None else TaskSyncState()
+    archive_gate = archive_gate if archive_gate is not None else ArchiveGateState()
     # Content-hash dedup: seeded from disk so the convergent flush —
     # where the in-memory state lands at the same content as what was
     # on disk before the restart — skips the write entirely. With
     # debounce_seconds > 0, multi-event bootstrap coalesces into one
     # flush at quiescence; that single flush is what the disk-seed
     # short-circuits. FileNotFound / OSError → None, first write seeds
-    # the hash from new content. Seeded into sync_state only when not
+    # the hash from new content. Seeded into task_sync only when not
     # already set, so the obsidian-sync child's pre-seeding (if any)
     # wins over the projection's defensive re-read.
-    if sync_state.last_written_hash is None:
-        sync_state.last_written_hash = _hash_existing_file(tasks_path)
+    if task_sync.last_written_hash is None:
+        task_sync.last_written_hash = _hash_existing_file(tasks_path)
     # Seed the surfaced-set from the task ids already on disk in
     # tasks.md. A task that was visible before a restart must still
     # count as operator-surfaced when its ``completed`` replay arrives
@@ -309,9 +313,9 @@ def make_handler(
     # already-resolved task), so the disk seed is the only signal.
     # Guarded so a child that pre-seeds the shared state wins over
     # this defensive re-read.
-    if not sync_state.surfaced:
+    if not archive_gate.surfaced:
         for task_id in _surfaced_ids_on_disk(tasks_path):
-            sync_state.surfaced[task_id] = True
+            archive_gate.surfaced[task_id] = True
     # Pending debounced flush task (None when not debouncing or when
     # the last burst has already flushed). Subsequent events within
     # the debounce window cancel-and-reschedule this task.
@@ -347,7 +351,7 @@ def make_handler(
         # archiver's flag is reliably already set.
         today_val = today_provider()
         evicted = _evict_expired(state, today_val, obs.resolved_ttl_days)
-        evicted += _evict_archived(state, sync_state.archived)
+        evicted += _evict_archived(state, archive_gate.archived)
 
         prior = state.get(task.id)
 
@@ -435,14 +439,14 @@ def make_handler(
         """Render current state, hash, compare, and (maybe) write.
 
         Skips the atomic-write dance when the rendered content's
-        SHA-256 matches ``sync_state.last_written_hash`` (which is
+        SHA-256 matches ``task_sync.last_written_hash`` (which is
         seeded from disk on init, then updated after each successful
         write).
 
-        **Ordering — write first, sync_state second.** The disk
-        commit runs before the ``sync_state`` update; that keeps
-        ``sync_state`` from ever being ahead of disk. If the atomic
-        write raises, ``sync_state`` is simply never touched, so no
+        **Ordering — write first, task_sync second.** The disk
+        commit runs before the ``task_sync`` update; that keeps
+        ``task_sync`` from ever being ahead of disk. If the atomic
+        write raises, ``task_sync`` is simply never touched, so no
         rollback is needed and ``write_version`` can't drift either
         — the retry on the next event re-renders the same content,
         the hash-skip short-circuit fires correctly, and the watcher's
@@ -456,12 +460,12 @@ def make_handler(
         ``record_projection_write`` call below — a watcher poll
         can only happen at a suspension point, and the first one
         after the rename is the trailing ``asyncio.sleep(0)`` *after*
-        sync_state has already been updated.
+        task_sync has already been updated.
 
         ``CancelledError`` is intentionally not caught. Cancellation
         cannot fire mid-rename (no yields in the atomic write), and
         if it ever fires at the trailing ``sleep(0)`` the rename and
-        sync_state update are both already complete and consistent.
+        task_sync update are both already complete and consistent.
         """
         # Re-run eviction at flush time. This is the load-bearing
         # eviction for the immediate-evict path: on a terminal event,
@@ -473,10 +477,10 @@ def make_handler(
         # set, so the just-archived line is dropped in the same write
         # that the terminal event scheduled. Must precede the
         # render+hash below so the dropped entry actually changes content.
-        _evict_archived(state, sync_state.archived)
+        _evict_archived(state, archive_gate.archived)
         content = _render_file(state)
         content_hash = hashlib.sha256(content.encode("utf-8")).digest()
-        if content_hash == sync_state.last_written_hash:
+        if content_hash == task_sync.last_written_hash:
             logger.debug("obsidian-projection: flush content unchanged; skipping write")
             return
         markers = {tid: _STATUS_TO_MARKER[entry.status] for tid, entry in state.items()}
@@ -497,16 +501,16 @@ def make_handler(
             tid: (entry.due_date if entry.status == "open" else None)
             for tid, entry in state.items()
         }
-        # Disk first. Raises → sync_state untouched → next event retries.
+        # Disk first. Raises → task_sync untouched → next event retries.
         await write_file_atomic(tasks_path, content)
-        # Synchronously update sync_state. No yield between the
+        # Synchronously update task_sync. No yield between the
         # rename returning and this call, so the fs watcher never
         # observes the new file content without the matching
         # coordination state. The ``write_version`` bump inside
         # ``record_projection_write`` only happens here on the
         # success path, so a failed write doesn't trick the watcher
         # into thinking the projection wrote.
-        sync_state.record_projection_write(
+        task_sync.record_projection_write(
             content_hash=content_hash,
             task_status_markers=markers,
             task_priority_markers=priority_markers,
@@ -522,9 +526,9 @@ def make_handler(
         # were already written (and flagged) by the prior write or
         # seeded from disk at init.
         for tid in state:
-            sync_state.surfaced[tid] = True
+            archive_gate.surfaced[tid] = True
         # Cancellation point for clean shutdown between events; safe
-        # to fire here because both the rename AND the sync_state
+        # to fire here because both the rename AND the task_sync
         # update are already complete.
         await asyncio.sleep(0)
 
@@ -566,7 +570,7 @@ def make_handler(
     # for a (re-)flush right after it sets ``archived[id]`` — eviction
     # then causally follows archiving rather than racing the debounce
     # Shared instance, so the archiver picks it up.
-    sync_state.request_projection_flush = _schedule_flush
+    archive_gate.install_flush_hook(_schedule_flush)
 
     return handle
 
@@ -722,7 +726,7 @@ def _render_file(state: dict[str, _StateEntry]) -> str:
 def _surfaced_ids_on_disk(path: Path) -> set[str]:
     """Recover the set of task ids currently written into ``tasks.md``.
 
-    Used by ``make_handler`` to seed ``sync_state.surfaced`` on restart
+    Used by ``make_handler`` to seed ``archive_gate.surfaced`` on restart
     so the task-archive subscription treats tasks that were
     operator-visible before the restart as surfaced when their
     ``completed``/``cancelled`` events replay. Returns an empty set when

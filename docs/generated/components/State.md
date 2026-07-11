@@ -12,7 +12,7 @@ Durable host-side hot state: the SSE cursor JSON store and projection sync state
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cursor_store` | S | 1 | 0 |
-| `lithos_loom.sync_state` | M | 1 | 0 |
+| `lithos_loom.sync_state` | M | 3 | 0 |
 
 ## Public API
 
@@ -20,7 +20,9 @@ Durable host-side hot state: the SSE cursor JSON store and projection sync state
 - class `CursorStore` — Read/write SSE Last-Event-ID values to a JSON file under *path*.
 
 ### `lithos_loom.sync_state`
-- class `ProjectionSyncState` — In-process coordination state between projection writer and fs watcher.
+- class `TaskSyncState` — Coordination between the ``_lithos/tasks.md`` projection and the fs watcher.
+- class `NoteSyncState` — Coordination between the project-context-doc projection and the dir watcher.
+- class `ArchiveGateState` — The surfaced/archived handshake between the task projection and the task-archive subscription, plus the projection's re-flush hook.
 
 ## Dependencies
 

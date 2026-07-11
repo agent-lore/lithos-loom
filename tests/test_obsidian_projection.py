@@ -1844,23 +1844,23 @@ async def test_atomic_write_failure_does_not_advance_last_written_hash(
     in-memory state, and the watcher's per-task suppression would
     desync from disk reality.
 
-    Verified via the explicit ``sync_state`` handle so we can observe
+    Verified via the explicit ``task_sync`` handle so we can observe
     its post-failure values directly without reaching into the
     handler's closure.
     """
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import TaskSyncState
 
-    sync_state = ProjectionSyncState()
+    task_sync = TaskSyncState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, task_sync=task_sync)
     # Cold start: nothing on disk → seed is None.
-    assert sync_state.last_written_hash is None
-    assert sync_state.task_status_markers == {}
+    assert task_sync.last_written_hash is None
+    assert task_sync.task_status_markers == {}
 
     # First write succeeds → hash advances away from None.
     await handler(_event("lithos.task.created", task_id="a"), _ctx())
-    hash_after_a = sync_state.last_written_hash
-    markers_after_a = dict(sync_state.task_status_markers)
+    hash_after_a = task_sync.last_written_hash
+    markers_after_a = dict(task_sync.task_status_markers)
     assert hash_after_a is not None, "successful write should seed the hash"
     assert markers_after_a == {"a": "[ ]"}
 
@@ -1872,32 +1872,32 @@ async def test_atomic_write_failure_does_not_advance_last_written_hash(
     with pytest.raises(OSError, match="simulated replace failure"):
         await handler(_event("lithos.task.created", task_id="b"), _ctx())
 
-    assert sync_state.last_written_hash == hash_after_a, (
-        "sync_state.last_written_hash must not advance when os.replace raises"
+    assert task_sync.last_written_hash == hash_after_a, (
+        "task_sync.last_written_hash must not advance when os.replace raises"
     )
-    assert sync_state.task_status_markers == markers_after_a, (
-        "sync_state.task_status_markers must not advance when os.replace raises"
+    assert task_sync.task_status_markers == markers_after_a, (
+        "task_sync.task_status_markers must not advance when os.replace raises"
     )
 
 
 async def test_atomic_write_failure_does_not_advance_write_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``ProjectionSyncState.write_version`` must NOT advance on a
+    """``TaskSyncState.write_version`` must NOT advance on a
     failed write. The watcher uses ``write_version > _last_processed``
     to detect "projection wrote since my last poll"; if version
     advanced on a failed write, the watcher would clear
     ``_observed_markers`` and emit a duplicate transition on the
     next real user edit. Regression for Copilot review on PR #26.
     """
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import TaskSyncState
 
-    sync_state = ProjectionSyncState()
+    task_sync = TaskSyncState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, task_sync=task_sync)
 
     await handler(_event("lithos.task.created", task_id="a"), _ctx())
-    version_after_a = sync_state.write_version
+    version_after_a = task_sync.write_version
     assert version_after_a == 1, "successful first write must bump version to 1"
 
     def _failing(src: str | Path, dst: str | Path) -> None:
@@ -1907,9 +1907,9 @@ async def test_atomic_write_failure_does_not_advance_write_version(
     with pytest.raises(OSError, match="simulated replace failure"):
         await handler(_event("lithos.task.created", task_id="b"), _ctx())
 
-    assert sync_state.write_version == version_after_a, (
+    assert task_sync.write_version == version_after_a, (
         "write_version must not advance when os.replace raises; "
-        f"got {sync_state.write_version} (expected {version_after_a})"
+        f"got {task_sync.write_version} (expected {version_after_a})"
     )
 
 
@@ -2186,20 +2186,20 @@ async def test_under_debounce_in_memory_short_circuit_still_works(
     assert calls == [], f"replayed event should have stayed inert; got {calls}"
 
 
-# ── US21: priority on _StateEntry + sync_state ride-through ────────────
+# ── US21: priority on _StateEntry + task_sync ride-through ────────────
 
 
-async def test_flush_passes_priority_to_sync_state_for_open_task(
+async def test_flush_passes_priority_to_task_sync_for_open_task(
     tmp_path: Path,
 ) -> None:
-    """After ``_flush``, ``sync_state.task_priority_markers`` reflects
+    """After ``_flush``, ``task_sync.task_priority_markers`` reflects
     the per-task priority for open tasks. Drives the fs-watcher's
     US21 priority diff."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import TaskSyncState
 
-    sync_state = ProjectionSyncState()
+    task_sync = TaskSyncState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, task_sync=task_sync)
     await handler(
         _event(
             "lithos.task.created",
@@ -2208,36 +2208,36 @@ async def test_flush_passes_priority_to_sync_state_for_open_task(
         ),
         _ctx(),
     )
-    assert sync_state.task_priority_markers == {"ap": "high"}
+    assert task_sync.task_priority_markers == {"ap": "high"}
 
 
 async def test_flush_passes_none_priority_when_metadata_absent(
     tmp_path: Path,
 ) -> None:
-    """Open task with no priority → sync_state carries ``None`` (not
+    """Open task with no priority → task_sync carries ``None`` (not
     a missing key). The fs-watcher relies on the dict entry existing
     to distinguish "projection knows about this task, no priority"
     from "projection has never written this task"."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import TaskSyncState
 
-    sync_state = ProjectionSyncState()
+    task_sync = TaskSyncState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, task_sync=task_sync)
     await handler(_event("lithos.task.created", task_id="np"), _ctx())
-    assert sync_state.task_priority_markers == {"np": None}
+    assert task_sync.task_priority_markers == {"np": None}
 
 
 async def test_flush_drops_priority_for_unknown_enum_value(
     tmp_path: Path,
 ) -> None:
     """Lithos sends an unknown priority enum (typo, future value) →
-    sync_state stores ``None`` so the watcher diff doesn't trip
+    task_sync stores ``None`` so the watcher diff doesn't trip
     against a value the projection never rendered."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import TaskSyncState
 
-    sync_state = ProjectionSyncState()
+    task_sync = TaskSyncState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, task_sync=task_sync)
     await handler(
         _event(
             "lithos.task.created",
@@ -2246,21 +2246,21 @@ async def test_flush_drops_priority_for_unknown_enum_value(
         ),
         _ctx(),
     )
-    assert sync_state.task_priority_markers == {"up": None}
+    assert task_sync.task_priority_markers == {"up": None}
 
 
 async def test_resolved_state_entry_has_none_priority(
     tmp_path: Path,
 ) -> None:
-    """Completed/cancelled lines drop the priority marker; sync_state
+    """Completed/cancelled lines drop the priority marker; task_sync
     must mirror that with ``None`` for resolved entries so the
     watcher's diff doesn't fire against a stale projection-known
     priority after the task resolves."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import TaskSyncState
 
-    sync_state = ProjectionSyncState()
+    task_sync = TaskSyncState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, task_sync=task_sync)
     await handler(
         _event(
             "lithos.task.created",
@@ -2269,7 +2269,7 @@ async def test_resolved_state_entry_has_none_priority(
         ),
         _ctx(),
     )
-    assert sync_state.task_priority_markers == {"rp": "high"}
+    assert task_sync.task_priority_markers == {"rp": "high"}
     # Now complete it.
     await handler(
         _event(
@@ -2280,7 +2280,7 @@ async def test_resolved_state_entry_has_none_priority(
         ),
         _ctx(),
     )
-    assert sync_state.task_priority_markers == {"rp": None}
+    assert task_sync.task_priority_markers == {"rp": None}
 
 
 # ── Slice 6 task-archive coupling: surfaced + archived-driven eviction ──
@@ -2289,21 +2289,21 @@ async def test_resolved_state_entry_has_none_priority(
 async def test_surfaced_flag_set_on_open_actionable_line(tmp_path: Path) -> None:
     """The projection marks a task surfaced the moment it writes its open
     line — the task-archive D38 gate reads this."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import ArchiveGateState
 
-    sync_state = ProjectionSyncState()
+    archive_gate = ArchiveGateState()
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, sync_state=sync_state)
+    handler = make_handler(cfg, archive_gate=archive_gate)
     await handler(
         _event("lithos.task.created", task_id="vis", title="Review PR"), _ctx()
     )
-    assert sync_state.surfaced.get("vis") is True
+    assert archive_gate.surfaced.get("vis") is True
 
 
 async def test_surfaced_flag_not_set_for_non_actionable(tmp_path: Path) -> None:
     """Autonomous-route work never reaches the operator's view, so it
     never gets a surfaced flag (→ the archiver later skips it)."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import ArchiveGateState
 
     routes = (
         RouteConfig(
@@ -2313,20 +2313,20 @@ async def test_surfaced_flag_not_set_for_non_actionable(tmp_path: Path) -> None:
             human_blocking=False,
         ),
     )
-    sync_state = ProjectionSyncState()
+    archive_gate = ArchiveGateState()
     cfg = _cfg(tmp_path, routes=routes)
-    handler = make_handler(cfg, sync_state=sync_state)
+    handler = make_handler(cfg, archive_gate=archive_gate)
     await handler(
         _event("lithos.task.created", task_id="bg", tags=("trigger:auto",)), _ctx()
     )
-    assert "bg" not in sync_state.surfaced
+    assert "bg" not in archive_gate.surfaced
 
 
 async def test_surfaced_seeded_from_existing_tasks_file_on_init(tmp_path: Path) -> None:
     """On restart the projection seeds ``surfaced`` from the task ids
     already on disk, so a replayed terminal event for a task visible
     before the restart still passes the archiver's D38 gate."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import ArchiveGateState
 
     tasks_path = tmp_path / "_lithos/tasks.md"
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2335,34 +2335,34 @@ async def test_surfaced_seeded_from_existing_tasks_file_on_init(tmp_path: Path) 
         "- [ ] Open one 🆔 lithos:t1\n"
         "- [x] Done two 🆔 lithos:t2 ✅ 2026-05-19\n"
     )
-    sync_state = ProjectionSyncState()
-    make_handler(_cfg(tmp_path), sync_state=sync_state)
-    assert sync_state.surfaced == {"t1": True, "t2": True}
+    archive_gate = ArchiveGateState()
+    make_handler(_cfg(tmp_path), archive_gate=archive_gate)
+    assert archive_gate.surfaced == {"t1": True, "t2": True}
 
 
 async def test_init_seed_does_not_clobber_preseeded_surfaced(tmp_path: Path) -> None:
     """A child that pre-seeds the shared state wins over the defensive
     disk re-read (guard mirrors the last_written_hash seed)."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import ArchiveGateState
 
     tasks_path = tmp_path / "_lithos/tasks.md"
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
     tasks_path.write_text("- [ ] On disk 🆔 lithos:disk\n")
-    sync_state = ProjectionSyncState()
-    sync_state.surfaced["preseed"] = True
-    make_handler(_cfg(tmp_path), sync_state=sync_state)
-    assert sync_state.surfaced == {"preseed": True}
+    archive_gate = ArchiveGateState()
+    archive_gate.surfaced["preseed"] = True
+    make_handler(_cfg(tmp_path), archive_gate=archive_gate)
+    assert archive_gate.surfaced == {"preseed": True}
 
 
 async def test_archived_flag_evicts_resolved_line_within_ttl(tmp_path: Path) -> None:
     """D32: a resolved task flagged ``archived`` is evicted on the next
     flush even though it's well within ``resolved_ttl_days`` — that's
     what makes the global file 'only what's still actionable'."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import ArchiveGateState
 
-    sync_state = ProjectionSyncState()
+    archive_gate = ArchiveGateState()
     cfg = _cfg(tmp_path)  # ttl = 7
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, archive_gate=archive_gate)
     # Complete X today → lingers in file (within TTL).
     await handler(
         _resolved_event("lithos.task.completed", task_id="x", title="t", when=_TODAY),
@@ -2370,7 +2370,7 @@ async def test_archived_flag_evicts_resolved_line_within_ttl(tmp_path: Path) -> 
     )
     assert "lithos:x" in (tmp_path / "_lithos/tasks.md").read_text()
     # The archiver (sibling handler) archived it.
-    sync_state.archived["x"] = True
+    archive_gate.archived["x"] = True
     # Any subsequent event flush drops the archived line.
     await handler(_event("lithos.task.created", task_id="y", title="new"), _ctx())
     text = (tmp_path / "_lithos/tasks.md").read_text()
@@ -2382,11 +2382,11 @@ async def test_unarchived_resolved_line_stays_within_ttl(tmp_path: Path) -> None
     """Fallback (no regression): a resolved task that was NOT archived
     (archive write failed, or archiver disabled) still lingers under the
     TTL — it is not dropped early."""
-    from lithos_loom.sync_state import ProjectionSyncState
+    from lithos_loom.sync_state import ArchiveGateState
 
-    sync_state = ProjectionSyncState()
+    archive_gate = ArchiveGateState()
     cfg = _cfg(tmp_path)  # ttl = 7
-    handler = make_handler(cfg, today_provider=_fixed_today, sync_state=sync_state)
+    handler = make_handler(cfg, today_provider=_fixed_today, archive_gate=archive_gate)
     await handler(
         _resolved_event("lithos.task.completed", task_id="x", title="t", when=_TODAY),
         _ctx(),

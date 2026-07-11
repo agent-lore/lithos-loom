@@ -29,7 +29,7 @@ Lifecycle per event:
      file alone.
 
 The handler is **stateful** via :func:`make_handler` because it
-needs ``sync_state`` (to coordinate self-write suppression with the
+needs ``note_sync`` (to coordinate self-write suppression with the
 dir-watcher) and ``conflicts_dir`` (derived from
 ``cfg.obsidian_sync.vault_path``). Mirror-shape of the projection's
 factory.
@@ -39,7 +39,7 @@ no-op because the renderer produces byte-stable output for a given
 Note, and :meth:`LithosClient.note_write` returns ``"updated"`` even
 when ``content`` matches (the version bump happens server-side
 unconditionally). The next dir-watcher poll then sees the bumped
-frontmatter as a self-write (sync_state matches), absorbs it, and
+frontmatter as a self-write (note_sync matches), absorbs it, and
 moves on.
 """
 
@@ -57,7 +57,7 @@ from lithos_loom.render_project_context import compute_body_hash, render_doc
 from lithos_loom.subscriptions import Handler, SubscriptionContext
 from lithos_loom.subscriptions._atomic_write import write_file_atomic
 from lithos_loom.subscriptions._note_conflict import resolve_conflict
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 __all__ = ["make_handler"]
 
@@ -70,15 +70,15 @@ _CONFLICTS_RELPATH = Path("_lithos/conflicts")
 def make_handler(
     cfg: LoomConfig,
     *,
-    sync_state: ProjectionSyncState | None = None,
+    note_sync: NoteSyncState | None = None,
 ) -> Handler:
     """Build the note-push handler bound to ``cfg``.
 
     ``cfg.obsidian_sync`` must be set; the obsidian-sync child's
-    spawn gate guarantees this. ``sync_state=None`` (test default)
+    spawn gate guarantees this. ``note_sync=None`` (test default)
     constructs a fresh isolated state — fine for unit tests where the
     dir-watcher isn't running, but production wiring shares one
-    sync_state between the projection, the dir-watcher, and this
+    note_sync between the projection, the dir-watcher, and this
     handler so all three see consistent coordination state.
     """
     obs = cfg.obsidian_sync
@@ -88,7 +88,7 @@ def make_handler(
             "supervisor's spawn gate should have prevented this"
         )
     conflicts_dir = obs.vault_path / _CONFLICTS_RELPATH
-    sync_state = sync_state if sync_state is not None else ProjectionSyncState()
+    note_sync = note_sync if note_sync is not None else NoteSyncState()
 
     async def handle(event: Event, ctx: SubscriptionContext) -> None:
         try:
@@ -166,7 +166,7 @@ def make_handler(
                 note=post_write,
                 lithos_path=_pick_lithos_path(post_write, current, slug, filename),
                 local_path=local_path,
-                sync_state=sync_state,
+                note_sync=note_sync,
                 ctx=ctx,
             )
             return
@@ -211,7 +211,7 @@ def make_handler(
                 conflicts_dir=conflicts_dir,
                 slug=slug,
                 filename=filename,
-                sync_state=sync_state,
+                note_sync=note_sync,
                 doc_id=doc_id,
                 logger_=ctx.logger,
             )
@@ -237,7 +237,7 @@ async def _refresh_local_frontmatter(
     note: Note,
     lithos_path: str,
     local_path: Path,
-    sync_state: ProjectionSyncState,
+    note_sync: NoteSyncState,
     ctx: SubscriptionContext,
 ) -> None:
     """After a successful push, re-render the local file with the
@@ -249,7 +249,7 @@ async def _refresh_local_frontmatter(
     Without this step the next edit would push with a stale version
     and trip a guaranteed conflict on every single save.
 
-    sync_state records BEFORE the atomic write, matching the
+    note_sync records BEFORE the atomic write, matching the
     projection's ordering invariant: a dir-watcher poll racing this
     rewrite must see both the new bytes AND the matching coordination
     state so the rewrite is absorbed as a self-write.
@@ -261,7 +261,7 @@ async def _refresh_local_frontmatter(
     file_hash = hashlib.sha256(rendered.encode("utf-8")).digest()
     body_hash = compute_body_hash(rendered)
 
-    sync_state.record_project_context_write(
+    note_sync.record_project_context_write(
         doc_id=doc_id,
         file_hash=file_hash,
         body_hash=body_hash,

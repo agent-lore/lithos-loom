@@ -190,7 +190,7 @@ def validated_priority(task: Task) -> str | None:
     Parallel to :func:`priority_marker` but returns the enum string
     rather than the emoji — the projection's ``_StateEntry`` carries
     the enum so ``_flush`` can pass per-task priority into
-    :meth:`ProjectionSyncState.record_projection_write` without
+    :meth:`TaskSyncState.record_projection_write` without
     re-parsing the rendered line. Deliberately silent on malformed
     values: :func:`priority_marker` already warns on the same code
     path (called by :func:`render_line`), so we'd duplicate the

@@ -22,7 +22,7 @@ import pytest
 from lithos_loom.bus import Event, EventBus, Subscription
 from lithos_loom.render_project_context import compute_body_hash
 from lithos_loom.sources.obsidian_dir_watcher import ObsidianDirWatcher
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -66,17 +66,17 @@ def _write_doc(
 
 
 def _record_projection(
-    sync_state: ProjectionSyncState,
+    note_sync: NoteSyncState,
     path: Path,
     doc_id: str,
     version: int,
 ) -> None:
-    """Stand in for the projection's write — record sync_state so
+    """Stand in for the projection's write — record note_sync so
     the dir-watcher's self-write check has something to compare."""
     text = path.read_text(encoding="utf-8")
     file_hash = hashlib.sha256(text.encode("utf-8")).digest()
     body_hash = compute_body_hash(text)
-    sync_state.record_project_context_write(
+    note_sync.record_project_context_write(
         doc_id=doc_id,
         file_hash=file_hash,
         body_hash=body_hash,
@@ -110,7 +110,7 @@ async def test_poll_with_no_files_emits_nothing(
 ) -> None:
     """Empty projects directory → no events, no errors."""
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=ProjectionSyncState()
+        bus=bus, projects_root=projects_root, note_sync=NoteSyncState()
     )
     n = await watcher.poll_once()
     assert n == 0
@@ -123,7 +123,7 @@ async def test_poll_with_missing_projects_root_returns_zero(
     """projects_root not yet created → no errors, just zero work."""
     nonexistent = tmp_path / "no" / "such" / "dir"
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=nonexistent, sync_state=ProjectionSyncState()
+        bus=bus, projects_root=nonexistent, note_sync=NoteSyncState()
     )
     n = await watcher.poll_once()
     assert n == 0
@@ -134,16 +134,16 @@ async def test_unchanged_file_polled_twice_emits_once(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
     """Operator-edited file on poll 1 → emit. Poll 2 with no change → silent."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nOld body\n")
-    _record_projection(sync_state, path, "doc-1", 5)
+    _record_projection(note_sync, path, "doc-1", 5)
 
     # Operator edits the body.
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nNew body\n")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
 
     n1 = await watcher.poll_once()
@@ -159,14 +159,14 @@ async def test_unchanged_file_polled_twice_emits_once(
 async def test_projection_write_is_absorbed_silently(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
-    """File matches sync_state.note_file_hashes → no emit."""
-    sync_state = ProjectionSyncState()
+    """File matches note_sync.note_file_hashes → no emit."""
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nBody\n")
-    _record_projection(sync_state, path, "doc-1", 5)
+    _record_projection(note_sync, path, "doc-1", 5)
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     n = await watcher.poll_once()
     assert n == 0
@@ -180,13 +180,13 @@ async def test_projection_rewrite_after_operator_edit_resets_baseline(
     upstream) → silent (the rewrite is authoritative). Subsequent
     operator edit on the new baseline → emits the new transition,
     not a stale one."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nOriginal\n")
-    _record_projection(sync_state, path, "doc-1", 5)
+    _record_projection(note_sync, path, "doc-1", 5)
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
 
     # Operator edits.
@@ -195,7 +195,7 @@ async def test_projection_rewrite_after_operator_edit_resets_baseline(
 
     # Projection rewrites with a fresh body (Lithos updated upstream).
     _write_doc(path, lithos_id="doc-1", lithos_version=6, body="# T\n\nServer body\n")
-    _record_projection(sync_state, path, "doc-1", 6)
+    _record_projection(note_sync, path, "doc-1", 6)
     assert await watcher.poll_once() == 0
 
     # Operator edits AGAIN, this time on top of the server body.
@@ -212,15 +212,15 @@ async def test_body_edit_emits(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
     """Operator changes the body → ``obsidian.note.modified`` emitted."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nOriginal\n")
-    _record_projection(sync_state, path, "doc-1", 5)
+    _record_projection(note_sync, path, "doc-1", 5)
 
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nNew body\n")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     n = await watcher.poll_once()
     assert n == 1
@@ -241,10 +241,10 @@ async def test_frontmatter_only_edit_is_absorbed(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
     """D28: operator adds a Dataview field, no body change → silent."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nBody\n")
-    _record_projection(sync_state, path, "doc-1", 5)
+    _record_projection(note_sync, path, "doc-1", 5)
 
     _write_doc(
         path,
@@ -255,7 +255,7 @@ async def test_frontmatter_only_edit_is_absorbed(
     )
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     n = await watcher.poll_once()
     assert n == 0
@@ -269,13 +269,13 @@ async def test_body_edit_after_frontmatter_edit_emits_once(
     Second save must emit even though the first updated our cached
     file-hash. Without the body-hash baseline this would silently
     swallow the body edit because the file-hash had already advanced."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nOriginal\n")
-    _record_projection(sync_state, path, "doc-1", 5)
+    _record_projection(note_sync, path, "doc-1", 5)
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
 
     _write_doc(
@@ -303,15 +303,15 @@ async def test_repeated_body_save_with_same_content_emits_once(
     """Operator save → edit → save (with the SAME body as the edit)
     must emit exactly once. The local observed-hash overlay prevents
     repeat emissions of the same body transition."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nOriginal\n")
-    _record_projection(sync_state, path, "doc-1", 5)
+    _record_projection(note_sync, path, "doc-1", 5)
 
     _write_doc(path, lithos_id="doc-1", lithos_version=5, body="# T\n\nNew\n")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 1
 
@@ -327,19 +327,19 @@ async def test_multiple_docs_emit_independently(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
     """Two docs, each with an operator edit → two events."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path_a = projects_root / "foo" / "context.md"
     path_b = projects_root / "bar" / "context.md"
     _write_doc(path_a, lithos_id="doc-a", lithos_version=1, body="# A\n\nold-a\n")
     _write_doc(path_b, lithos_id="doc-b", lithos_version=2, body="# B\n\nold-b\n")
-    _record_projection(sync_state, path_a, "doc-a", 1)
-    _record_projection(sync_state, path_b, "doc-b", 2)
+    _record_projection(note_sync, path_a, "doc-a", 1)
+    _record_projection(note_sync, path_b, "doc-b", 2)
 
     _write_doc(path_a, lithos_id="doc-a", lithos_version=1, body="# A\n\nnew-a\n")
     _write_doc(path_b, lithos_id="doc-b", lithos_version=2, body="# B\n\nnew-b\n")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     n = await watcher.poll_once()
     assert n == 2
@@ -352,14 +352,14 @@ async def test_nested_filename_yields_slash_separated_filename(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
     """Doc at ``<slug>/sub/notes.md`` yields filename=``sub/notes.md``."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "sub" / "notes.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=1, body="# T\n\nOld\n")
-    _record_projection(sync_state, path, "doc-1", 1)
+    _record_projection(note_sync, path, "doc-1", 1)
 
     _write_doc(path, lithos_id="doc-1", lithos_version=1, body="# T\n\nNew\n")
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 1
     events = _drain(sub)
@@ -376,12 +376,12 @@ async def test_operator_created_file_without_projection_is_skipped(
     """Operator creates a file with a lithos_id we've never projected
     → first sight seeds the body baseline silently, no emit (we have
     nothing authoritative to push)."""
-    sync_state = ProjectionSyncState()  # empty
+    note_sync = NoteSyncState()  # empty
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=1, body="# T\n\nBody\n")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 0
     assert _drain(sub) == []
@@ -391,12 +391,12 @@ async def test_operator_created_file_then_edits_emits_on_edit(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
     """The seeded baseline lets a SUBSEQUENT edit on the same file emit."""
-    sync_state = ProjectionSyncState()  # empty
+    note_sync = NoteSyncState()  # empty
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=1, body="# T\n\nOriginal\n")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     # First poll seeds baseline; no emit.
     assert await watcher.poll_once() == 0
@@ -418,13 +418,13 @@ async def test_file_with_no_frontmatter_is_skipped(
     import logging
 
     caplog.set_level(logging.WARNING)
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# Just a doc\n\nNo frontmatter\n", encoding="utf-8")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 0
     assert _drain(sub) == []
@@ -443,7 +443,7 @@ async def test_done_file_excluded_from_walk(
     import logging
 
     caplog.set_level(logging.WARNING)
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     done = projects_root / "lithos-loom" / "lithos-loom-done.md"
     done.parent.mkdir(parents=True, exist_ok=True)
     done.write_text(
@@ -452,7 +452,7 @@ async def test_done_file_excluded_from_walk(
     )
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 0
     assert _drain(sub) == []
@@ -467,12 +467,12 @@ async def test_done_file_edit_stays_inert(
 ) -> None:
     """Editing a ``-done.md`` file (operator untick / cosmetic fix)
     never produces an obsidian.note.modified event."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     done = projects_root / "lithos-loom" / "lithos-loom-done.md"
     done.parent.mkdir(parents=True, exist_ok=True)
     done.write_text("- [x] One 🆔 lithos:t1 ✅ 2026-05-20\n", encoding="utf-8")
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 0
     # Operator edits the archive file.
@@ -488,13 +488,13 @@ async def test_malformed_frontmatter_is_skipped(
     bus: EventBus, sub: Subscription, projects_root: Path
 ) -> None:
     """Operator typed garbage in the YAML → skip; don't crash."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("---\n}}}}\n---\n# T\n\nBody\n", encoding="utf-8")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 0
     assert _drain(sub) == []
@@ -512,13 +512,13 @@ async def test_missing_lithos_version_skips_with_warning(
     import logging
 
     caplog.set_level(logging.WARNING)
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("---\nlithos_id: doc-1\n---\n# T\n\nOriginal\n", encoding="utf-8")
-    # Seed sync_state via baseline_body_hash mechanism — write the
+    # Seed note_sync via baseline_body_hash mechanism — write the
     # body-only hash so we can simulate "previously known" doc.
-    sync_state.note_body_hashes["doc-1"] = compute_body_hash(
+    note_sync.note_body_hashes["doc-1"] = compute_body_hash(
         "---\nlithos_id: doc-1\n---\n# T\n\nOriginal\n"
     )
 
@@ -526,7 +526,7 @@ async def test_missing_lithos_version_skips_with_warning(
     path.write_text("---\nlithos_id: doc-1\n---\n# T\n\nEdited\n", encoding="utf-8")
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 0
     assert _drain(sub) == []
@@ -538,13 +538,13 @@ async def test_removed_file_drops_cached_hash(
 ) -> None:
     """File polled, then deleted → cached hash dropped so a re-creation
     later isn't suppressed."""
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=1, body="# T\n\nBody\n")
-    _record_projection(sync_state, path, "doc-1", 1)
+    _record_projection(note_sync, path, "doc-1", 1)
 
     watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=projects_root, sync_state=sync_state
+        bus=bus, projects_root=projects_root, note_sync=note_sync
     )
     assert await watcher.poll_once() == 0
     # File now in cache.
@@ -564,16 +564,16 @@ async def test_emitted_event_timestamp_uses_now_provider(
 ) -> None:
     """Tests can pin the emitted event's timestamp via the now_provider seam."""
     fixed = datetime(2026, 1, 15, 9, 30, 0, tzinfo=UTC)
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     path = projects_root / "lithos-loom" / "context.md"
     _write_doc(path, lithos_id="doc-1", lithos_version=1, body="# T\n\nOld\n")
-    _record_projection(sync_state, path, "doc-1", 1)
+    _record_projection(note_sync, path, "doc-1", 1)
     _write_doc(path, lithos_id="doc-1", lithos_version=1, body="# T\n\nNew\n")
 
     watcher = ObsidianDirWatcher(
         bus=bus,
         projects_root=projects_root,
-        sync_state=sync_state,
+        note_sync=note_sync,
         _now_provider=lambda: fixed,
     )
     assert await watcher.poll_once() == 1
@@ -595,7 +595,7 @@ async def test_poll_warns_once_when_projects_root_missing(
     watcher = ObsidianDirWatcher(
         bus=bus,
         projects_root=missing_root,
-        sync_state=ProjectionSyncState(),
+        note_sync=NoteSyncState(),
     )
     with caplog.at_level(
         logging.WARNING, logger="lithos_loom.sources.obsidian_dir_watcher"
@@ -628,9 +628,7 @@ async def test_poll_info_logs_when_projects_root_appears(
     """When the projects dir appears after a missing-warning, the watcher
     logs once at INFO so the operator sees the recovery."""
     root = tmp_path / "vault" / "lazy" / "projects"
-    watcher = ObsidianDirWatcher(
-        bus=bus, projects_root=root, sync_state=ProjectionSyncState()
-    )
+    watcher = ObsidianDirWatcher(bus=bus, projects_root=root, note_sync=NoteSyncState())
     await watcher.poll_once()  # warns
 
     root.mkdir(parents=True)

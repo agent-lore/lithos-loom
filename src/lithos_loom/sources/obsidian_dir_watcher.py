@@ -35,16 +35,16 @@ Two layers, cheapest-first, mirroring the single-file watcher:
    per-file ``_last_seen_file_hashes`` entry → nothing happened since
    our last poll. The hot-path no-op.
 2. **Projection self-write.** ``current_file_hash`` matches
-   ``sync_state.note_file_hashes[doc_id]`` — the projection (or the
+   ``note_sync.note_file_hashes[doc_id]`` — the projection (or the
    note-push handler's post-success re-render) committed these exact
    bytes. Update local state and absorb without emitting.
 3. **Body-only diff.** ``current_body_hash`` compared against the
    ``_observed_body_hashes`` entry layered over
-   ``sync_state.note_body_hashes`` (the projection's view). Match →
+   ``note_sync.note_body_hashes`` (the projection's view). Match →
    frontmatter-only edit, absorb. Mismatch → real body edit, emit
    ``obsidian.note.modified``.
 
-The body-only baseline comes from sync_state by design: the projection
+The body-only baseline comes from note_sync by design: the projection
 records body hash at write time so a watcher poll that sees the new
 file also sees the matching body-hash baseline. Local in-memory
 ``_observed_body_hashes`` layers on top so successive polls comparing
@@ -93,7 +93,7 @@ from typing import Any
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.render_project_context import compute_body_hash, extract_frontmatter
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 __all__ = ["ObsidianDirWatcher"]
 
@@ -105,7 +105,7 @@ class ObsidianDirWatcher:
     """Polling-based source for project-context vault edits.
 
     Constructed by the ``obsidian-sync`` child with a bus + the same
-    :class:`ProjectionSyncState` handed to the project-context
+    :class:`NoteSyncState` handed to the project-context
     projection. ``run()`` loops forever; cancel the task to stop.
 
     ``projects_root`` is the absolute path to
@@ -115,7 +115,7 @@ class ObsidianDirWatcher:
 
     bus: EventBus
     projects_root: Path
-    sync_state: ProjectionSyncState
+    note_sync: NoteSyncState
     poll_interval_seconds: float = 0.25
     _now_provider: Any = field(default=lambda: datetime.now(UTC))
     """Wall-clock seam for tests so emitted event timestamps are
@@ -127,9 +127,9 @@ class ObsidianDirWatcher:
         # frontmatter parsing happens.
         self._last_seen_file_hashes: dict[Path, bytes] = {}
         # Per-doc-id body hash we last observed the operator commit to
-        # disk. Layered ON TOP of ``sync_state.note_body_hashes`` (the
+        # disk. Layered ON TOP of ``note_sync.note_body_hashes`` (the
         # projection's view): on first sight of a doc we fall back to
-        # sync_state, then advance this map as we observe each user
+        # note_sync, then advance this map as we observe each user
         # edit so a frontmatter-only re-save after a body edit doesn't
         # re-emit the same body transition. Mirror of
         # ``_observed_markers`` in the single-file watcher.
@@ -146,7 +146,7 @@ class ObsidianDirWatcher:
 
         Unlike the single-file watcher we don't pre-seed any hash here
         — per-file state populates on first poll. The first poll for
-        each file performs the layered self-write check (sync_state +
+        each file performs the layered self-write check (note_sync +
         ``_observed_body_hashes``) so projection-known docs at their
         projected hash are silently absorbed and operator-edited docs
         emit on the first real body diff.
@@ -275,7 +275,7 @@ class ObsidianDirWatcher:
         # way we wrote these bytes; absorb silently and refresh the
         # body-hash baseline so a subsequent operator edit measures
         # against the projection's fresh view.
-        projection_file_hash = self.sync_state.note_file_hashes.get(doc_id)
+        projection_file_hash = self.note_sync.note_file_hashes.get(doc_id)
         if (
             projection_file_hash is not None
             and projection_file_hash == current_file_hash
@@ -289,7 +289,7 @@ class ObsidianDirWatcher:
             self._last_seen_file_hashes[path] = current_file_hash
             # Drop the local body-hash override; projection is the
             # fresh authority. Next operator edit measures against
-            # ``sync_state.note_body_hashes`` until we observe one.
+            # ``note_sync.note_body_hashes`` until we observe one.
             self._observed_body_hashes.pop(doc_id, None)
             return False
 
@@ -300,12 +300,12 @@ class ObsidianDirWatcher:
         # don't re-emit.
         current_body_hash = compute_body_hash(text)
         # Prefer the local observed-hash if we have one (operator has
-        # made an edit we already processed) over sync_state's view
+        # made an edit we already processed) over note_sync's view
         # (projection's last-rendered body) — without this, two
         # successive saves of the same body would emit twice.
         baseline_body_hash = self._observed_body_hashes.get(
             doc_id
-        ) or self.sync_state.note_body_hashes.get(doc_id)
+        ) or self.note_sync.note_body_hashes.get(doc_id)
 
         if baseline_body_hash is None:
             # First sight of a doc that has frontmatter but no
@@ -345,7 +345,7 @@ class ObsidianDirWatcher:
             lithos_version = int(lithos_version_raw)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             # Frontmatter missing/malformed version. We could fall back
-            # to ``sync_state.note_versions[doc_id]`` but that may be
+            # to ``note_sync.note_versions[doc_id]`` but that may be
             # stale relative to what's actually in the file the
             # operator's looking at. Safer to skip the push than to
             # provide a bogus ``expected_version`` and walk straight

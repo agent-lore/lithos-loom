@@ -3,7 +3,7 @@
 Watches a single projected file, polls its SHA-256 at
 ``poll_interval_seconds``, parses per-task ``[ ]/[x]/[-]`` markers,
 compares against the projection's last known emission via
-:class:`~lithos_loom.sync_state.ProjectionSyncState`, and publishes
+:class:`~lithos_loom.sync_state.TaskSyncState`, and publishes
 ``obsidian.task.status_changed`` events for tasks whose marker flipped
 under user editing.
 
@@ -21,17 +21,17 @@ Self-write suppression has two layers, cheapest-first:
 1. **Unchanged hash.** ``current_hash == self._last_seen_hash`` →
    no edits since last poll → return without parsing.
 2. **Projection self-write.** ``current_hash ==
-   self.sync_state.last_written_hash`` → the projection committed this
+   self.task_sync.last_written_hash`` → the projection committed this
    exact content → update ``_last_seen_hash`` and return without
-   emitting. The projection updates ``sync_state.last_written_hash``
+   emitting. The projection updates ``task_sync.last_written_hash``
    *before* committing the atomic rename (see
-   :meth:`ProjectionSyncState.record_projection_write`), so any poll
+   :meth:`TaskSyncState.record_projection_write`), so any poll
    that sees the new file always sees the matching coordination
    state.
 3. **Per-task suppression.** When the file changed AND it wasn't a
    self-write, parse the lines and emit
    ``obsidian.task.status_changed`` for each task whose parsed marker
-   differs from ``sync_state.task_status_markers[task_id]``. Tasks
+   differs from ``task_sync.task_status_markers[task_id]``. Tasks
    the projection has never written (``projection_marker is None``)
    are ignored — they are new lines inserted by the capture-macro.
 
@@ -64,7 +64,7 @@ from types import MappingProxyType
 from typing import Any
 
 from lithos_loom.bus import Event, EventBus
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import TaskSyncState
 from lithos_loom.task_line import TASK_ID_RE, parse_due_date, parse_priority
 
 __all__ = ["ObsidianFsWatcher", "VALID_STATUS_MARKERS"]
@@ -100,13 +100,13 @@ class ObsidianFsWatcher:
     """Polling-based filesystem source for the projected tasks file.
 
     Constructed by the ``obsidian-sync`` child with a bus + a shared
-    :class:`ProjectionSyncState` instance also handed to the
+    :class:`TaskSyncState` instance also handed to the
     projection. ``run()`` loops forever; cancel the task to stop.
     """
 
     bus: EventBus
     tasks_path: Path
-    sync_state: ProjectionSyncState
+    task_sync: TaskSyncState
     poll_interval_seconds: float = 0.25
     _now_provider: Any = field(default=lambda: datetime.now(UTC))
     """Wall-clock seam for tests so emitted event timestamps are
@@ -115,11 +115,11 @@ class ObsidianFsWatcher:
     def __post_init__(self) -> None:
         # Seeded by the first poll (or by run()'s init read). Tracking
         # the last hash we processed lets the cheap unchanged-since-last-
-        # poll path short-circuit before consulting sync_state or
+        # poll path short-circuit before consulting task_sync or
         # parsing.
         self._last_seen_hash: bytes | None = None
         # Per-task marker memory layered on top of
-        # ``sync_state.task_status_markers``. The sync_state map only
+        # ``task_sync.task_status_markers``. The task_sync map only
         # advances on projection writes — without local memory of what
         # we've already observed and emitted for, a user edit followed
         # by any subsequent file save (unrelated whitespace change,
@@ -146,7 +146,7 @@ class ObsidianFsWatcher:
         # canonical ``YYYY-MM-DD`` strings the renderer emits / the
         # grammar's :func:`~lithos_loom.task_line.parse_due_date` reads.
         self._observed_dates: dict[str, str | None] = {}
-        # Snapshot of ``sync_state.write_version`` from our last poll.
+        # Snapshot of ``task_sync.write_version`` from our last poll.
         # If it's advanced, the projection has committed a re-render
         # since we last looked. We use that signal to distinguish
         # genuine projection self-writes (file matches new
@@ -169,17 +169,17 @@ class ObsidianFsWatcher:
         """Poll forever. Cancellable.
 
         Seeds ``_last_seen_hash`` from
-        ``sync_state.last_written_hash`` — i.e. what the projection
+        ``task_sync.last_written_hash`` — i.e. what the projection
         believes is on disk — rather than re-reading disk directly.
         That closes a small startup-race window: if a user edited the
         file in the gap between projection-seed and watcher-start,
         seeding from current disk content would silently swallow that
         edit (initial hash matches the user's edited content, no
-        emit). Seeding from sync_state means the first poll sees the
+        emit). Seeding from task_sync means the first poll sees the
         user's edit as a real change and emits the expected event.
         """
-        self._last_seen_hash = self.sync_state.last_written_hash
-        self._last_processed_write_version = self.sync_state.write_version
+        self._last_seen_hash = self.task_sync.last_written_hash
+        self._last_processed_write_version = self.task_sync.write_version
         logger.info(
             "ObsidianFsWatcher: watching %s (poll=%.3fs, seeded_hash=%s, "
             "seeded_write_version=%d)",
@@ -254,18 +254,18 @@ class ObsidianFsWatcher:
         # version is unchanged and we fall through to layer 3 so the
         # real transition is emitted.
         projection_wrote_since_last_poll = (
-            self.sync_state.write_version > self._last_processed_write_version
+            self.task_sync.write_version > self._last_processed_write_version
         )
         if (
             projection_wrote_since_last_poll
             and current_hash is not None
-            and current_hash == self.sync_state.last_written_hash
+            and current_hash == self.task_sync.last_written_hash
         ):
             logger.debug(
                 "ObsidianFsWatcher: %s changed to projection-known content; "
                 "suppressing self-write (write_version=%d)",
                 self.tasks_path,
-                self.sync_state.write_version,
+                self.task_sync.write_version,
             )
             # The projection's re-rendered file is authoritative over
             # any user edits we'd previously observed — drop them so
@@ -276,7 +276,7 @@ class ObsidianFsWatcher:
             self._observed_priorities.clear()
             self._observed_dates.clear()
             self._last_seen_hash = current_hash
-            self._last_processed_write_version = self.sync_state.write_version
+            self._last_processed_write_version = self.task_sync.write_version
             return 0
 
         # If the projection wrote but the file doesn't match (user
@@ -288,7 +288,7 @@ class ObsidianFsWatcher:
             self._observed_markers.clear()
             self._observed_priorities.clear()
             self._observed_dates.clear()
-            self._last_processed_write_version = self.sync_state.write_version
+            self._last_processed_write_version = self.task_sync.write_version
 
         # Layer 3: real user edit. Parse + per-task transition detection.
         # The "prior" is the marker the user last committed to disk for
@@ -305,7 +305,7 @@ class ObsidianFsWatcher:
         for task_id, marker, priority, due_date in _parse_line_markers(text):
             # ─── status diff ──────────────────────────────────────────
             prior_status = self._observed_markers.get(
-                task_id, self.sync_state.task_status_markers.get(task_id)
+                task_id, self.task_sync.task_status_markers.get(task_id)
             )
             if prior_status is None:
                 # Task not in the projection's last-known render and
@@ -329,7 +329,7 @@ class ObsidianFsWatcher:
             if task_id in self._observed_priorities:
                 prior_priority = self._observed_priorities[task_id]
             else:
-                prior_priority = self.sync_state.task_priority_markers.get(task_id)
+                prior_priority = self.task_sync.task_priority_markers.get(task_id)
             if priority != prior_priority:
                 await self._publish_priority_change(task_id, prior_priority, priority)
                 self._observed_priorities[task_id] = priority
@@ -339,12 +339,12 @@ class ObsidianFsWatcher:
             # Same shape as the priority diff above. ``None`` is
             # meaningful ("no 📅 marker on the line"), so we use
             # explicit membership for the observed-map lookup. The
-            # baseline fallback is ``sync_state.task_due_date_markers``
+            # baseline fallback is ``task_sync.task_due_date_markers``
             # which the projection populates on each flush.
             if task_id in self._observed_dates:
                 prior_due = self._observed_dates[task_id]
             else:
-                prior_due = self.sync_state.task_due_date_markers.get(task_id)
+                prior_due = self.task_sync.task_due_date_markers.get(task_id)
             if due_date != prior_due:
                 await self._publish_due_date_change(task_id, prior_due, due_date)
                 self._observed_dates[task_id] = due_date

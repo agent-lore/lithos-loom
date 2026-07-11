@@ -1,41 +1,34 @@
-"""Coordination state shared between the obsidian-projection writer and
-the obsidian-fs-watcher source.
+"""Concern-scoped coordination state shared inside the ``obsidian-sync`` child.
 
-The fs watcher and projection live in the same subprocess (the
-``obsidian-sync`` child). The projection writes ``_lithos/tasks.md``;
-the watcher polls the same file. Without coordination, every projection
-write would trip the watcher and emit a spurious
-``obsidian.task.status_changed`` event that the status-transition
-subscription would then echo back to Lithos — a feedback loop the
-coordination seam is designed to prevent.
+The child runs the projection writers and the fs/dir watchers in one subprocess.
+The projections write vault files; the watchers poll those same files. Without
+coordination, every projection write would trip a watcher and emit a spurious
+``obsidian.*`` event that a status/note subscription would then echo back to
+Lithos — a feedback loop this state is designed to prevent.
 
-This module is the coordination seam: a single :class:`ProjectionSyncState`
-instance is constructed by the child and handed to both sides. The
-projection updates it *before* committing each write; the watcher reads
-it on every poll and short-circuits when the on-disk content matches the
-projection's last known emission.
+Historically this was one 12-field ``ProjectionSyncState`` object handed by
+reference to every consumer, even though each consumer only touched one concern's
+fields. It is now split into three concern-scoped objects, so each consumer depends
+only on the interface it uses (ARCH-10):
 
-Three pieces of state matter:
+* :class:`TaskSyncState` — the ``_lithos/tasks.md`` projection ↔ fs-watcher seam
+  (whole-file hash, per-task markers, the write counter).
+* :class:`NoteSyncState` — the project-context-doc projection ↔ dir-watcher seam
+  (per-doc file/body hashes, versions, projected paths).
+* :class:`ArchiveGateState` — the surfaced/archived handshake between the task
+  projection and the task-archive subscription, plus the projection's re-flush hook.
 
-* ``last_written_hash`` — SHA-256 of the projection's most recent
-  successful write. Lets the watcher cheaply skip the parse step when
-  the file content is byte-identical to what the projection just wrote
-  (the common case immediately after any Lithos event).
-* ``task_status_markers`` — per-task ``[ ]/[x]/[-]`` checkbox marker
-  the projection most recently emitted. Lets the watcher distinguish
-  user edits from projection-driven status changes on a per-task basis
-  when the file content does differ (e.g. user edited an unrelated
-  line, projection added a new task, etc.).
-* ``task_priority_markers`` — per-task priority enum
-  (``"highest"``/``"high"``/``"medium"``/``"low"``/``"lowest"`` or
-  ``None`` for no priority) the projection most recently emitted.
-  Same role for ``obsidian.task.priority_changed`` as the status map
-  has for ``obsidian.task.status_changed``.
-
-Both updates happen in :meth:`ProjectionSyncState.record_projection_write`
-before the projection commits its atomic rename, so a watcher poll that
-sees the new file always sees consistent state for it. Single-threaded
-asyncio (no locks needed).
+The ``obsidian-sync`` child constructs one of each and wires the relevant object(s)
+into each handler/source. All three are mutated only on the single asyncio event
+loop (no locks needed). Each projection couples its sync-state update with the
+atomic file write so a concurrent watcher poll never sees new file content without
+the matching coordination state — but the two projections do this with *opposite*
+orderings: the task projection records *after* the rename returns (relying on no
+``await`` in between), while the note projection records *before* the rename and
+rolls back on failure. Both are made safe by
+:func:`._atomic_write.write_file_atomic` having no internal await points.
+:class:`ArchiveGateState` has no rename-ordering invariant — it's a
+flag/flush handshake, not a file writer.
 """
 
 from __future__ import annotations
@@ -44,17 +37,21 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["ProjectionSyncState"]
+__all__ = ["TaskSyncState", "NoteSyncState", "ArchiveGateState"]
 
 
 @dataclass
-class ProjectionSyncState:
-    """In-process coordination state between projection writer and fs watcher.
+class TaskSyncState:
+    """Coordination between the ``_lithos/tasks.md`` projection and the fs watcher.
 
-    Constructed by the ``obsidian-sync`` child and shared by reference
-    with both the :func:`~lithos_loom.subscriptions._obsidian_projection.make_handler`
-    handler and the :class:`~lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher`
-    source. Not thread-safe; mutated only on the event loop.
+    The projection updates this *after* committing each write — with no ``await``
+    between the atomic rename returning and the update, so the fs watcher never
+    observes the new file without the matching state. The fs watcher reads it on
+    every poll and short-circuits when the on-disk content matches the
+    projection's last known emission. Constructed by the ``obsidian-sync`` child and
+    shared by reference with :func:`_obsidian_projection.make_handler` and
+    :class:`~lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher`. Not
+    thread-safe; mutated only on the event loop.
     """
 
     last_written_hash: bytes | None = None
@@ -107,6 +104,58 @@ class ProjectionSyncState:
     transition that must NOT be suppressed). Without this counter the
     flip-then-flip-back case was silently dropped."""
 
+    def record_projection_write(
+        self,
+        *,
+        content_hash: bytes,
+        task_status_markers: Mapping[str, str],
+        task_priority_markers: Mapping[str, str | None],
+        task_due_date_markers: Mapping[str, str | None],
+    ) -> None:
+        """Capture the state the projection just committed.
+
+        Called by the projection's ``_flush`` immediately *after* the
+        atomic rename returns, with no ``await`` in between, so any
+        concurrent watcher poll that sees the new file content also
+        sees the matching coordination state. This is the opposite
+        ordering from the note projection, which records *before* its
+        rename and rolls back on failure (see
+        :meth:`NoteSyncState.record_project_context_write`); the task
+        projection has nothing to roll back because a failed write
+        simply never reaches this call.
+
+        ``task_status_markers`` / ``task_priority_markers`` /
+        ``task_due_date_markers`` are each copied into fresh dicts so
+        subsequent mutation of the projection's render-state dicts
+        cannot silently change suppression behaviour after this point.
+
+        ``write_version`` increments unconditionally — even
+        same-content overwrites bump it, so the watcher's "did
+        projection write since last poll" check stays accurate. (In
+        practice ``_flush`` short-circuits on hash-match before
+        calling this, so the counter only advances when content
+        actually changed.)
+        """
+        self.last_written_hash = content_hash
+        self.task_status_markers = dict(task_status_markers)
+        self.task_priority_markers = dict(task_priority_markers)
+        self.task_due_date_markers = dict(task_due_date_markers)
+        self.write_version += 1
+
+
+@dataclass
+class NoteSyncState:
+    """Coordination between the project-context-doc projection and the dir watcher.
+
+    Per-doc state (keyed by Lithos doc id) the projection captures before each
+    atomic write, and the dir watcher reads on every poll to suppress self-writes
+    without mis-classifying a frontmatter-only rewrite as an operator body edit.
+    Shared by reference with the project-context projection, the note-push and
+    note-conflict handlers (writers), and
+    :class:`~lithos_loom.sources.obsidian_dir_watcher.ObsidianDirWatcher` (reader).
+    Not thread-safe; mutated only on the event loop.
+    """
+
     note_file_hashes: dict[str, bytes] = field(default_factory=dict)
     """Per-project-context-doc **full-file** hash the projection most
     recently emitted (SHA-256 of the entire rendered output —
@@ -132,9 +181,14 @@ class ProjectionSyncState:
 
     note_versions: dict[str, int] = field(default_factory=dict)
     """Per-project-context-doc ``lithos_version`` the projection most
-    recently wrote into vault frontmatter. The note-push handler reads
-    this to provide ``expected_version`` to ``lithos_write`` for
-    optimistic locking. Keyed by Lithos doc id."""
+    recently wrote into vault frontmatter, keyed by Lithos doc id.
+
+    Written by every note writer for symmetry with the other three maps
+    and restored on a write-failure rollback, but note: it has no live
+    *reader* today — the note-push handler takes ``expected_version``
+    from the on-disk frontmatter the dir-watcher parsed, not from here.
+    Kept as the recorded baseline (and to keep the four per-doc maps in
+    lock-step) rather than removed."""
 
     note_body_hashes: dict[str, bytes] = field(default_factory=dict)
     """Per-project-context-doc **body-only** hash (SHA-256 of the
@@ -179,6 +233,82 @@ class ProjectionSyncState:
     path, not the OLD one). Cleared by ``forget_project_context``
     on delete + on cleanup-driven-by-filter-rejection."""
 
+    def record_project_context_write(
+        self,
+        *,
+        doc_id: str,
+        file_hash: bytes,
+        body_hash: bytes,
+        version: int,
+        projected_path: Path,
+    ) -> None:
+        """Capture the post-render state for a single project-context
+        doc the projection is about to commit.
+
+        Per-doc state lives in four parallel maps keyed by doc id:
+        ``note_file_hashes`` (whole-file hash — used by the projection
+        for self-dedup), ``note_body_hashes`` (body-only hash — used
+        by the dir-watcher to suppress self-writes without false-positive
+        matches against frontmatter-only changes),
+        ``note_versions`` (the recorded version baseline) and
+        ``note_projected_paths`` (the absolute vault path of the
+        current projection — used for stale-file cleanup on path
+        migration / tag-removal / out-of-projects-move).
+
+        Called by the project-context projection per doc *before* the
+        atomic rename, with the write rolled back on failure, so any
+        concurrent dir-watcher poll that sees the new file also sees the
+        matching coordination state. This is the *opposite* ordering
+        from the task projection's
+        :meth:`TaskSyncState.record_projection_write` (which records
+        *after* its rename): a single doc's write can fail independently,
+        so recording first and rolling back on a failed rename is what
+        keeps this per-doc state consistent with the file.
+
+        Unlike the task projection's ``write_version`` (one counter
+        shared across all tasks in a single file), per-doc projection
+        is naturally file-scoped — re-rendering one doc doesn't
+        invalidate the dir-watcher's view of any other doc — so no
+        global counter is needed here. The dir-watcher compares
+        per-file hash against the per-doc entry directly.
+        """
+        self.note_file_hashes[doc_id] = file_hash
+        self.note_body_hashes[doc_id] = body_hash
+        self.note_versions[doc_id] = version
+        self.note_projected_paths[doc_id] = projected_path
+
+    def forget_project_context(self, *, doc_id: str) -> None:
+        """Drop a doc's projection state (called on
+        ``lithos.note.deleted`` after the local file is removed, and
+        on filter-rejection-driven cleanup after the stale file is
+        unlinked).
+
+        Keeping a stale hash here would cause the dir-watcher to
+        suppress a subsequent re-creation of the same doc (e.g. if
+        the operator restores it from KB, or re-adds the
+        ``project-context`` tag) as a self-write. Idempotent — silent
+        no-op when the id isn't tracked. Clears all four parallel
+        maps in one shot."""
+        self.note_file_hashes.pop(doc_id, None)
+        self.note_body_hashes.pop(doc_id, None)
+        self.note_versions.pop(doc_id, None)
+        self.note_projected_paths.pop(doc_id, None)
+
+
+@dataclass
+class ArchiveGateState:
+    """The surfaced/archived handshake between the task projection and the
+    task-archive subscription, plus the projection's re-flush hook.
+
+    The task projection sets :attr:`surfaced` when it writes a task's line and reads
+    :attr:`archived` for its flush-time eviction predicate; the task-archive
+    subscription reads :attr:`surfaced` as its gate and sets :attr:`archived` after a
+    durable append, then asks the projection to re-flush via :meth:`request_flush`.
+    Shared by reference between :func:`_obsidian_projection.make_handler` and
+    :func:`_task_archive.make_handler`. Not thread-safe; mutated only on the event
+    loop.
+    """
+
     surfaced: dict[str, bool] = field(default_factory=dict)
     """Per-task "was this task ever written into the global
     ``_lithos/tasks.md`` projection" flag, keyed by Lithos task id.
@@ -220,108 +350,33 @@ class ProjectionSyncState:
     tasks resolved during the session — negligible for the daemon's
     throughput; revisit only if a soak surfaces real memory pressure."""
 
-    request_projection_flush: Callable[[], Awaitable[None]] | None = None
-    """Hook the obsidian-projection installs so a sibling handler can
-    ask it to (re-)flush ``tasks.md``. Set by the projection's
-    ``make_handler`` to its debounced flush-scheduler; ``None`` until
-    then (and when no projection is wired).
+    _flush_hook: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
+    """The projection's debounced flush-scheduler, installed via
+    :meth:`install_flush_hook`. Private — callers go through
+    :meth:`request_flush` so the "no projection wired → no-op" case is handled
+    in one place instead of at every call site."""
 
-    The task-archive subscription calls this *after* it sets
-    ``archived[id]``, so the resulting flush is guaranteed to see the
-    flag and evict the line — making eviction causally follow archiving
-    instead of relying on the archiver winning a race against the
-    projection's own debounce timer. (Both handlers share one event
-    loop; the archiver's append is synchronous, so the projection
-    usually evicts on its own scheduled flush, but under a backlog or a
-    slow disk the archiver can finish after that flush has already run —
-    this hook closes that window.)"""
+    def install_flush_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
+        """Register the projection's (debounced) flush-scheduler.
 
-    def record_projection_write(
-        self,
-        *,
-        content_hash: bytes,
-        task_status_markers: Mapping[str, str],
-        task_priority_markers: Mapping[str, str | None],
-        task_due_date_markers: Mapping[str, str | None],
-    ) -> None:
-        """Capture the post-render state the projection is about to commit.
+        Called by the projection's ``make_handler`` so a sibling handler can ask
+        it to (re-)flush ``tasks.md``. Exactly one projection installs the hook;
+        it stays ``None`` when no projection is wired."""
+        self._flush_hook = hook
 
-        Called by the projection's ``_flush`` *before* it commits the
-        atomic rename, so any concurrent watcher poll that sees the new
-        file content also sees the matching coordination state.
+    async def request_flush(self) -> None:
+        """Ask the projection to (re-)flush ``tasks.md``, if a projection is wired.
 
-        ``task_status_markers`` / ``task_priority_markers`` /
-        ``task_due_date_markers`` are each copied into fresh dicts so
-        subsequent mutation of the projection's render-state dicts
-        cannot silently change suppression behaviour after this point.
+        The task-archive subscription calls this *after* it sets
+        ``archived[id]``, so the resulting flush is guaranteed to see the flag and
+        evict the line — making eviction causally follow archiving instead of
+        relying on the archiver winning a race against the projection's own
+        debounce timer. (Both handlers share one event loop; the archiver's append
+        is synchronous, so the projection usually evicts on its own scheduled
+        flush, but under a backlog or a slow disk the archiver can finish after
+        that flush has already run — this hook closes that window.)
 
-        ``write_version`` increments unconditionally — even
-        same-content overwrites bump it, so the watcher's "did
-        projection write since last poll" check stays accurate. (In
-        practice ``_flush`` short-circuits on hash-match before
-        calling this, so the counter only advances when content
-        actually changed.)
-        """
-        self.last_written_hash = content_hash
-        self.task_status_markers = dict(task_status_markers)
-        self.task_priority_markers = dict(task_priority_markers)
-        self.task_due_date_markers = dict(task_due_date_markers)
-        self.write_version += 1
-
-    def record_project_context_write(
-        self,
-        *,
-        doc_id: str,
-        file_hash: bytes,
-        body_hash: bytes,
-        version: int,
-        projected_path: Path,
-    ) -> None:
-        """Capture the post-render state for a single project-context
-        doc the projection is about to commit.
-
-        Per-doc state lives in four parallel maps keyed by doc id:
-        ``note_file_hashes`` (whole-file hash — used by the projection
-        for self-dedup), ``note_body_hashes`` (body-only hash — used
-        by the dir-watcher to suppress self-writes without false-positive
-        matches against frontmatter-only changes),
-        ``note_versions`` (the version the note-push handler provides
-        to ``expected_version`` for optimistic locking), and
-        ``note_projected_paths`` (the absolute vault path of the
-        current projection — used for stale-file cleanup on path
-        migration / tag-removal / out-of-projects-move).
-
-        Called by the project-context projection per doc, before the
-        atomic rename — same ordering invariant as
-        :meth:`record_projection_write` so any concurrent dir-watcher
-        poll that sees the new file also sees the matching
-        coordination state.
-
-        Unlike the task projection's ``write_version`` (one counter
-        shared across all tasks in a single file), per-doc projection
-        is naturally file-scoped — re-rendering one doc doesn't
-        invalidate the dir-watcher's view of any other doc — so no
-        global counter is needed here. The dir-watcher compares
-        per-file hash against the per-doc entry directly.
-        """
-        self.note_file_hashes[doc_id] = file_hash
-        self.note_body_hashes[doc_id] = body_hash
-        self.note_versions[doc_id] = version
-        self.note_projected_paths[doc_id] = projected_path
-
-    def forget_project_context(self, *, doc_id: str) -> None:
-        """Drop a doc's projection state (called on
-        ``lithos.note.deleted`` after the local file is removed, and
-        on filter-rejection-driven cleanup after the stale file is
-        unlinked).
-
-        Keeping a stale hash here would cause the dir-watcher to
-        suppress a subsequent re-creation of the same doc (e.g. if
-        the operator restores it from KB, or re-adds the
-        ``project-context`` tag) as a self-write. Idempotent — silent
-        no-op when the id isn't tracked. Clears all four parallel
-        maps in one shot."""
-        self.note_file_hashes.pop(doc_id, None)
-        self.note_body_hashes.pop(doc_id, None)
-        self.note_versions.pop(doc_id, None)
-        self.note_projected_paths.pop(doc_id, None)
+        A no-op when no projection is wired (no hook installed) — the archiver
+        runs standalone in that case."""
+        if self._flush_hook is not None:
+            await self._flush_hook()

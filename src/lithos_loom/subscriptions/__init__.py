@@ -17,7 +17,8 @@
 Handlers are **hand-wired**, not discovered. Each hosting child
 (``children/obsidian_sync.py`` today) constructs its handlers by name —
 they are factories needing runtime dependencies (config, ``LithosClient``,
-``ProjectionSyncState``) that a zero-arg plugin-discovery lookup can't
+the projection sync-state objects ``TaskSyncState`` / ``NoteSyncState`` /
+``ArchiveGateState``) that a zero-arg plugin-discovery lookup can't
 supply — and feeds the resulting ``{action: handler}`` map to
 :func:`build_runners`. That map *is* the registration seam; there is no
 entry-point registry. A bundled ``noop`` handler (in :mod:`._noop`) is a

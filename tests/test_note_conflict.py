@@ -19,7 +19,7 @@ from lithos_loom.subscriptions._note_conflict import (
     format_conflict_filename,
     resolve_conflict,
 )
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 
 def _note(
@@ -91,7 +91,7 @@ async def test_resolve_moves_local_and_writes_canonical(
     local.parent.mkdir(parents=True, exist_ok=True)
     local.write_text("---\nlithos_id: doc-1\n---\n# T\n\nOperator body\n")
     conflicts_dir = tmp_path / "vault" / "_lithos" / "conflicts"
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     canonical = _note(body="Server body")
 
     fixed = datetime(2026, 5, 24, 14, 30, 0, tzinfo=UTC)
@@ -102,7 +102,7 @@ async def test_resolve_moves_local_and_writes_canonical(
         conflicts_dir=conflicts_dir,
         slug="loom",
         filename="context.md",
-        sync_state=sync_state,
+        note_sync=note_sync,
         doc_id="doc-1",
         timestamp_provider=lambda: fixed,
     )
@@ -122,7 +122,7 @@ async def test_resolve_moves_local_and_writes_canonical(
     assert "Server body" in body
 
 
-async def test_resolve_records_canonical_into_sync_state(
+async def test_resolve_records_canonical_into_note_sync(
     tmp_path: Path,
 ) -> None:
     """Sync state is updated BEFORE the canonical write so a concurrent
@@ -131,7 +131,7 @@ async def test_resolve_records_canonical_into_sync_state(
     local.parent.mkdir(parents=True, exist_ok=True)
     local.write_text("---\nlithos_id: doc-1\n---\n# T\n\nOperator\n")
     conflicts_dir = tmp_path / "vault" / "_lithos" / "conflicts"
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
 
     canonical = _note(body="Server", version=99)
 
@@ -142,18 +142,18 @@ async def test_resolve_records_canonical_into_sync_state(
         conflicts_dir=conflicts_dir,
         slug="loom",
         filename="context.md",
-        sync_state=sync_state,
+        note_sync=note_sync,
         doc_id="doc-1",
     )
 
-    # sync_state should match the canonical render the resolver wrote.
+    # note_sync should match the canonical render the resolver wrote.
     rendered = local.read_text()
     expected_file_hash = hashlib.sha256(rendered.encode("utf-8")).digest()
     expected_body_hash = compute_body_hash(rendered)
-    assert sync_state.note_file_hashes["doc-1"] == expected_file_hash
-    assert sync_state.note_body_hashes["doc-1"] == expected_body_hash
-    assert sync_state.note_versions["doc-1"] == 99
-    assert sync_state.note_projected_paths["doc-1"] == local
+    assert note_sync.note_file_hashes["doc-1"] == expected_file_hash
+    assert note_sync.note_body_hashes["doc-1"] == expected_body_hash
+    assert note_sync.note_versions["doc-1"] == 99
+    assert note_sync.note_projected_paths["doc-1"] == local
 
 
 async def test_resolve_logs_friction_breadcrumb(
@@ -165,7 +165,7 @@ async def test_resolve_logs_friction_breadcrumb(
     local.parent.mkdir(parents=True, exist_ok=True)
     local.write_text("---\nlithos_id: doc-1\n---\n# T\n\nOperator\n")
     conflicts_dir = tmp_path / "vault" / "_lithos" / "conflicts"
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     canonical = _note()
 
     await resolve_conflict(
@@ -175,7 +175,7 @@ async def test_resolve_logs_friction_breadcrumb(
         conflicts_dir=conflicts_dir,
         slug="loom",
         filename="context.md",
-        sync_state=sync_state,
+        note_sync=note_sync,
         doc_id="doc-1",
     )
 
@@ -200,7 +200,7 @@ async def test_resolve_creates_conflicts_dir_lazily(
         conflicts_dir=conflicts_dir,
         slug="loom",
         filename="context.md",
-        sync_state=ProjectionSyncState(),
+        note_sync=NoteSyncState(),
         doc_id="doc-1",
     )
 
@@ -229,7 +229,7 @@ async def test_resolve_overwrites_existing_conflict_file(
         conflicts_dir=conflicts_dir,
         slug="loom",
         filename="context.md",
-        sync_state=ProjectionSyncState(),
+        note_sync=NoteSyncState(),
         doc_id="doc-1",
         timestamp_provider=lambda: fixed,
     )
@@ -248,7 +248,7 @@ async def test_resolve_canonical_render_uses_provided_path_and_slug(
     local.parent.mkdir(parents=True, exist_ok=True)
     local.write_text("---\nlithos_id: doc-1\n---\n# T\n\nOperator\n")
     conflicts_dir = tmp_path / "vault" / "_lithos" / "conflicts"
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     canonical = _note(body="Server body")
     # Path field empty in canonical (mirrors lithos_read's actual
     # response shape; see lithos_client.py docstring).
@@ -261,7 +261,7 @@ async def test_resolve_canonical_render_uses_provided_path_and_slug(
         conflicts_dir=conflicts_dir,
         slug="loom",
         filename="context.md",
-        sync_state=sync_state,
+        note_sync=note_sync,
         doc_id="doc-1",
     )
 
@@ -277,7 +277,7 @@ async def test_resolved_canonical_renders_byte_stable_with_render_doc(
     tmp_path: Path,
 ) -> None:
     """The canonical body written by the resolver must be byte-equal
-    to ``render_doc(canonical)`` — otherwise the sync_state.file_hash
+    to ``render_doc(canonical)`` — otherwise the note_sync.file_hash
     we recorded BEFORE the write doesn't match the on-disk bytes,
     breaking dir-watcher self-write suppression."""
     import dataclasses
@@ -286,7 +286,7 @@ async def test_resolved_canonical_renders_byte_stable_with_render_doc(
     local.parent.mkdir(parents=True, exist_ok=True)
     local.write_text("---\nlithos_id: doc-1\n---\n# T\n\nOperator\n")
     conflicts_dir = tmp_path / "vault" / "_lithos" / "conflicts"
-    sync_state = ProjectionSyncState()
+    note_sync = NoteSyncState()
     canonical = _note(body="Server")
 
     await resolve_conflict(
@@ -296,7 +296,7 @@ async def test_resolved_canonical_renders_byte_stable_with_render_doc(
         conflicts_dir=conflicts_dir,
         slug="loom",
         filename="context.md",
-        sync_state=sync_state,
+        note_sync=note_sync,
         doc_id="doc-1",
     )
 

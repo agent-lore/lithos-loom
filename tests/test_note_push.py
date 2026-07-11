@@ -27,7 +27,7 @@ from lithos_loom.lithos_client import Note, WriteResult
 from lithos_loom.render_project_context import extract_frontmatter
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._note_push import make_handler
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 
 def _note(
@@ -127,8 +127,8 @@ async def test_updated_status_pushes_body_and_refreshes_frontmatter(
     and every subsequent edit would immediate-conflict."""
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     lithos = AsyncMock()
     # Two note_read calls expected: pre-write (canonical at v5) and
@@ -166,11 +166,11 @@ async def test_updated_status_pushes_body_and_refreshes_frontmatter(
     fm, _ = extract_frontmatter(rendered)
     assert fm["lithos_version"] == 6
 
-    # sync_state records the new file hash so the dir-watcher's next
+    # note_sync records the new file hash so the dir-watcher's next
     # poll absorbs this rewrite as a self-write.
-    assert "doc-1" in sync_state.note_file_hashes
-    assert "doc-1" in sync_state.note_body_hashes
-    assert sync_state.note_versions["doc-1"] == 6
+    assert "doc-1" in note_sync.note_file_hashes
+    assert "doc-1" in note_sync.note_body_hashes
+    assert note_sync.note_versions["doc-1"] == 6
 
 
 async def test_post_write_fetch_vanished_skips_refresh(
@@ -185,8 +185,8 @@ async def test_post_write_fetch_vanished_skips_refresh(
     caplog.set_level(logging.WARNING)
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     lithos = AsyncMock()
     lithos.note_read.side_effect = [_note(version=5), None]
@@ -195,8 +195,8 @@ async def test_post_write_fetch_vanished_skips_refresh(
     await handler(_event(vault_path=local), _ctx(lithos))
 
     assert any("vanished between successful push" in r.message for r in caplog.records)
-    # sync_state not updated — we couldn't refresh.
-    assert "doc-1" not in sync_state.note_file_hashes
+    # note_sync not updated — we couldn't refresh.
+    assert "doc-1" not in note_sync.note_file_hashes
 
 
 async def test_duplicate_status_skips_rewrite(
@@ -208,8 +208,8 @@ async def test_duplicate_status_skips_rewrite(
     caplog.set_level(logging.INFO)
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(version=5)
@@ -221,8 +221,8 @@ async def test_duplicate_status_skips_rewrite(
     # File unchanged (no rewrite); no post-write fetch attempted.
     assert local.read_text() == original
     assert lithos.note_read.await_count == 1
-    # sync_state untouched — no write happened.
-    assert "doc-1" not in sync_state.note_file_hashes
+    # note_sync untouched — no write happened.
+    assert "doc-1" not in note_sync.note_file_hashes
     # Info-level log explains why we skipped (operator-friendly).
     assert any("duplicate" in r.message for r in caplog.records)
 
@@ -235,8 +235,8 @@ async def test_version_conflict_invokes_resolver(
 ) -> None:
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     canonical = _note(version=99, body="Canonical body")
     lithos = AsyncMock()
@@ -270,7 +270,7 @@ async def test_version_conflict_with_vanished_doc_skips_gracefully(
     caplog.set_level(logging.WARNING)
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
-    handler = make_handler(cfg, sync_state=ProjectionSyncState())
+    handler = make_handler(cfg, note_sync=NoteSyncState())
 
     lithos = AsyncMock()
     # First note_read returns the doc; second (inside conflict path)
@@ -296,7 +296,7 @@ async def test_doc_not_found_pre_fetch_skips_gracefully(
     """Pre-fetch returns None → log + skip, no note_write attempt."""
     caplog.set_level(logging.WARNING)
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, sync_state=ProjectionSyncState())
+    handler = make_handler(cfg, note_sync=NoteSyncState())
 
     lithos = AsyncMock()
     lithos.note_read.return_value = None
@@ -316,8 +316,8 @@ async def test_invalid_input_status_leaves_file_alone(
     caplog.set_level(logging.WARNING)
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(version=5)
@@ -330,8 +330,8 @@ async def test_invalid_input_status_leaves_file_alone(
 
     assert local.read_text() == original
     assert any("invalid_input" in r.message for r in caplog.records)
-    # No sync_state entry — we didn't write anything.
-    assert "doc-1" not in sync_state.note_file_hashes
+    # No note_sync entry — we didn't write anything.
+    assert "doc-1" not in note_sync.note_file_hashes
 
 
 # ── Malformed payloads ─────────────────────────────────────────────────
@@ -342,7 +342,7 @@ async def test_malformed_payload_skips_with_warning(
 ) -> None:
     caplog.set_level(logging.WARNING)
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, sync_state=ProjectionSyncState())
+    handler = make_handler(cfg, note_sync=NoteSyncState())
 
     # Missing required fields.
     event = Event(
@@ -362,7 +362,7 @@ async def test_missing_vault_path_skips_with_warning(
 ) -> None:
     caplog.set_level(logging.WARNING)
     cfg = _cfg(tmp_path)
-    handler = make_handler(cfg, sync_state=ProjectionSyncState())
+    handler = make_handler(cfg, note_sync=NoteSyncState())
 
     event = Event(
         type="obsidian.note.modified",
@@ -393,11 +393,11 @@ async def test_re_firing_after_successful_push_is_safe(
 ) -> None:
     """Re-firing the same event after a successful push pushes again
     (Lithos bumps version on every write). The local frontmatter ends
-    up at the latest version; sync_state tracks each rewrite."""
+    up at the latest version; note_sync tracks each rewrite."""
     cfg = _cfg(tmp_path)
     local = _setup_local_file(tmp_path)
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     lithos = AsyncMock()
     # Each push: pre-write fetch + post-write fetch. Both pushes
@@ -414,13 +414,13 @@ async def test_re_firing_after_successful_push_is_safe(
 
     event = _event(vault_path=local)
     await handler(event, _ctx(lithos))
-    first_hash = sync_state.note_file_hashes["doc-1"]
+    first_hash = note_sync.note_file_hashes["doc-1"]
 
     # Re-fire — note_write is called again, but we don't crash.
     await handler(event, _ctx(lithos))
-    # sync_state is consistent (same hash because the second call
+    # note_sync is consistent (same hash because the second call
     # returns the same version).
-    assert sync_state.note_file_hashes["doc-1"] == first_hash
+    assert note_sync.note_file_hashes["doc-1"] == first_hash
     assert lithos.note_write.await_count == 2
 
 
