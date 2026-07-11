@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...plugins.story_develop.personas import canonical_personas
-from ...plugins.story_develop.profiles import CANONICAL_PROFILES
+from ...plugins.story_develop.profiles import UnknownProfileError, get_profile
 
 _SEVERITIES = ("critical", "major", "minor")
 
@@ -96,12 +96,10 @@ def load_case(case_dir: Path) -> Case:
     # DIFFERENT panel or check-set than the case declares, so the reported
     # catch-rate would not describe the panel under test.
     profile = str(case.get("profile", "standard"))
-    known_profiles = tuple(p.name for p in CANONICAL_PROFILES)
-    if profile not in known_profiles:
-        raise ValueError(
-            f"case {case.get('id')}: unknown profile {profile!r}; "
-            f"known: {', '.join(known_profiles)}"
-        )
+    try:
+        get_profile(profile)
+    except UnknownProfileError as exc:
+        raise ValueError(f"case {case.get('id')}: {exc}") from exc
     personas = tuple(case.get("personas", ()))
     if not personas:
         raise ValueError(

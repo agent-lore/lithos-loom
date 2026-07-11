@@ -38,7 +38,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.panel` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 2 | 20 |
-| `lithos_loom.plugins.story_develop.profiles` | S | 4 | 3 |
+| `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | S | 0 | 1 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
@@ -236,7 +236,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `ProfileCheck` — One deterministic check a profile asks the gate to run.
 - class `ReviewProfile` — A named {panel, check-set, blocking policy} bundle (ADR §1).
 - def `validate_monotonic` — Enforce the ADR §2 monotonicity invariant or raise :class:`MonotonicityError`.
-- def `get_profile` — The canonical :class:`ReviewProfile` for *name*, or the built-in default.
+- class `UnknownProfileError` — A profile name that is not one of the canonical profiles (fail-closed, ADR §2).
+- def `get_profile` — The canonical :class:`ReviewProfile` for *name* — the single known-name seam.
 - class `ProfileResolution` — The outcome of :func:`resolve_profile`.
 - def `resolve_profile` — Resolve the selected Review Profile (ADR §2).
 
