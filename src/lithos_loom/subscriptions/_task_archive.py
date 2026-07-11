@@ -21,16 +21,20 @@ child over one shared :class:`ArchiveGateState`:
   with that flag set — automated / route-claimed-only work that never
   reached the operator's view is skipped.
 * **Archive-then-evict.** On success the archiver sets
-  ``archive_gate.archived[id]``; the projection's flush-time eviction
-  predicate drops the line from the global file in the same write the
-  terminal event scheduled. A failed append leaves the flag unset, so
-  the task stays ``[x]``/``[-]`` in the global file under the TTL
-  fallback — no data-loss window.
+  ``archive_gate.archived[id]`` then awaits
+  ``archive_gate.request_flush()``, so the projection's flush-time
+  eviction predicate drops the line from the global file causally
+  rather than racing the debounce timer. A failed append leaves the
+  flag unset, so the task stays ``[x]``/``[-]`` in the global file
+  under the TTL fallback — no data-loss window.
 
-The handler does synchronous I/O only (no internal ``await``): a single
-O_APPEND write per event. It never schedules a projection flush — it
-just sets the flag and lets the projection's own debounced flush do the
-eviction.
+The handler's archive write is synchronous — a single O_APPEND per
+event — but after a successful append (or a dedup hit on a task already
+on disk) it awaits the archive gate's optional flush hook
+(:meth:`ArchiveGateState.request_flush`) so the projection evicts the
+archived line causally instead of waiting for its own debounce timer.
+When no projection is wired the hook is a no-op and the archiver runs
+standalone.
 """
 
 from __future__ import annotations

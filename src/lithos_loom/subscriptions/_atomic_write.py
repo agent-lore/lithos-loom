@@ -33,22 +33,29 @@ async def write_file_atomic(path: Path, content: str) -> None:
     ``os.replace`` is a same-filesystem rename and therefore atomic.
 
     **No internal** ``await`` **points** — load-bearing invariant for
-    every projection that uses this. Two properties depend on it:
+    every projection that uses this. Callers pair their sync-state
+    update with the rename in one of two orderings, and both rely on
+    this function never yielding:
 
-    1. The fs watcher's self-write suppression. The caller updates
-       its sync-state object *before* awaiting this function; if there
-       were a yield between that update and ``os.replace``, the watcher
-       could poll with ``task_sync.last_written_hash`` pointing at
-       the new content while the file still showed the old, mis-firing
-       per-task suppression. The same window exists for any per-file
-       projection.
-    2. The caller's failure-rollback contract. The caller catches
-       ``Exception`` to roll back its sync-state object when the rename
-       didn't apply, and lets ``CancelledError`` propagate without
-       rolling back on the grounds that cancellation cannot fire
+    1. The watcher's self-write suppression. There must be no yield
+       between the caller's sync-state record and ``os.replace`` — else
+       a poll could see the new file content without the matching state
+       (or vice-versa), mis-firing per-task suppression. The task
+       projection records *after* this returns (relying on no yield
+       between the rename and the return); the project-context
+       projection records *before* calling this (relying on no yield
+       between the record and the rename). The no-internal-await
+       property closes both windows.
+    2. The record-before caller's failure-rollback contract. A caller
+       that records *before* the write (the project-context projection)
+       catches ``Exception`` to roll back its sync-state object when the
+       rename didn't apply, and lets ``CancelledError`` propagate
+       without rolling back on the grounds that cancellation cannot fire
        mid-rename. That reasoning requires this function to have no
        suspension points where cancellation could fire after the
-       rename but before this function returns.
+       rename but before this function returns. (The record-after task
+       projection has nothing to roll back — a failed write never
+       reaches its record call.)
 
     Don't add ``await`` here without re-deriving both invariants. If
     write latency becomes an issue, ``asyncio.to_thread`` wraps this

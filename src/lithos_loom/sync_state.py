@@ -20,9 +20,15 @@ only on the interface it uses (ARCH-10):
 
 The ``obsidian-sync`` child constructs one of each and wires the relevant object(s)
 into each handler/source. All three are mutated only on the single asyncio event
-loop (no locks needed); the record-before-rename ordering invariant each documents
-is what makes a concurrent watcher poll always see coordination state consistent
-with the file it just read.
+loop (no locks needed). Each projection couples its sync-state update with the
+atomic file write so a concurrent watcher poll never sees new file content without
+the matching coordination state — but the two projections do this with *opposite*
+orderings: the task projection records *after* the rename returns (relying on no
+``await`` in between), while the note projection records *before* the rename and
+rolls back on failure. Both are made safe by
+:func:`._atomic_write.write_file_atomic` having no internal await points.
+:class:`ArchiveGateState` has no rename-ordering invariant — it's a
+flag/flush handshake, not a file writer.
 """
 
 from __future__ import annotations
@@ -38,8 +44,10 @@ __all__ = ["TaskSyncState", "NoteSyncState", "ArchiveGateState"]
 class TaskSyncState:
     """Coordination between the ``_lithos/tasks.md`` projection and the fs watcher.
 
-    The projection updates this *before* committing each write; the fs watcher reads
-    it on every poll and short-circuits when the on-disk content matches the
+    The projection updates this *after* committing each write — with no ``await``
+    between the atomic rename returning and the update, so the fs watcher never
+    observes the new file without the matching state. The fs watcher reads it on
+    every poll and short-circuits when the on-disk content matches the
     projection's last known emission. Constructed by the ``obsidian-sync`` child and
     shared by reference with :func:`_obsidian_projection.make_handler` and
     :class:`~lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher`. Not
@@ -104,11 +112,17 @@ class TaskSyncState:
         task_priority_markers: Mapping[str, str | None],
         task_due_date_markers: Mapping[str, str | None],
     ) -> None:
-        """Capture the post-render state the projection is about to commit.
+        """Capture the state the projection just committed.
 
-        Called by the projection's ``_flush`` *before* it commits the
-        atomic rename, so any concurrent watcher poll that sees the new
-        file content also sees the matching coordination state.
+        Called by the projection's ``_flush`` immediately *after* the
+        atomic rename returns, with no ``await`` in between, so any
+        concurrent watcher poll that sees the new file content also
+        sees the matching coordination state. This is the opposite
+        ordering from the note projection, which records *before* its
+        rename and rolls back on failure (see
+        :meth:`NoteSyncState.record_project_context_write`); the task
+        projection has nothing to roll back because a failed write
+        simply never reaches this call.
 
         ``task_status_markers`` / ``task_priority_markers`` /
         ``task_due_date_markers`` are each copied into fresh dicts so
@@ -241,11 +255,15 @@ class NoteSyncState:
         current projection — used for stale-file cleanup on path
         migration / tag-removal / out-of-projects-move).
 
-        Called by the project-context projection per doc, before the
-        atomic rename — same ordering invariant as
-        :meth:`TaskSyncState.record_projection_write` so any concurrent
-        dir-watcher poll that sees the new file also sees the matching
-        coordination state.
+        Called by the project-context projection per doc *before* the
+        atomic rename, with the write rolled back on failure, so any
+        concurrent dir-watcher poll that sees the new file also sees the
+        matching coordination state. This is the *opposite* ordering
+        from the task projection's
+        :meth:`TaskSyncState.record_projection_write` (which records
+        *after* its rename): a single doc's write can fail independently,
+        so recording first and rolling back on a failed rename is what
+        keeps this per-doc state consistent with the file.
 
         Unlike the task projection's ``write_version`` (one counter
         shared across all tasks in a single file), per-doc projection

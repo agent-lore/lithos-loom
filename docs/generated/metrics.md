@@ -47,14 +47,14 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Render | 1 | 289 | 234 | 2 | 4 | 0.67 | 8 (`lithos_loom.render.dep_markers`) | 0 |
 | Runners | 6 | 625 | 485 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
 | Sources | 7 | 3107 | 2340 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
-| State | 2 | 506 | 421 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 18 | 5381 | 4084 | 4 | 10 | 0.71 | 13 (`lithos_loom.subscriptions._note_push.make_handler.handle`) | 8 |
+| State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
+| Subscriptions | 18 | 5392 | 4095 | 4 | 10 | 0.71 | 13 (`lithos_loom.subscriptions._note_push.make_handler.handle`) | 8 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
 | Tasks | 3 | 598 | 418 | 4 | 0 | 0.00 | 17 (`lithos_loom.task_graph.build_plan`) | 2 |
 
 ## Size
 
-- Modules: **114**, lines: **32909**, SLOC: **26119**
+- Modules: **114**, lines: **32938**, SLOC: **26148**
 - Largest module: `lithos_loom.lithos_client` (1774 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -86,4 +86,4 @@ Top 10 most complex functions:
 ## Domain & tests
 
 - Domain models: **13** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.54** (50790 test lines / 32909 source lines)
+- Test-to-source line ratio: **1.54** (50847 test lines / 32938 source lines)
