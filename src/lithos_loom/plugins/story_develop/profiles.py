@@ -36,6 +36,7 @@ __all__ = [
     "ProfileResolution",
     "resolve_profile",
     "get_profile",
+    "UnknownProfileError",
 ]
 
 # ``Stage`` (when a check runs — ``fast``/``candidate``) is owned by :mod:`check_set`
@@ -192,15 +193,37 @@ validate_monotonic(CANONICAL_PROFILES)
 _BY_NAME: dict[str, ReviewProfile] = {p.name: p for p in CANONICAL_PROFILES}
 
 
-def get_profile(name: str) -> ReviewProfile:
-    """The canonical :class:`ReviewProfile` for *name*, or the built-in default.
+class UnknownProfileError(ValueError):
+    """A profile name that is not one of the canonical profiles (fail-closed, ADR §2).
 
-    A run only reaches this with a name :func:`resolve_profile` already accepted
-    (known, or a halt the caller short-circuits), so an unknown name here is a
-    defensive fallthrough — return ``standard`` rather than raise, since the
-    check-set builder must always produce *some* set.
+    Raised by :func:`get_profile` — the single known-name seam. The ``develop
+    review`` CLI and the eval case loader validate their explicit profile name
+    through it and re-wrap this into their own error surface (a ``typer.BadParameter``
+    / a case-prefixed ``ValueError``). ``resolve_profile`` applies the host
+    ``halt``/``strongest`` *policy* to an unknown name and so does not raise.
     """
-    return _BY_NAME.get(name, _BY_NAME[DEFAULT_PROFILE_NAME])
+
+    def __init__(self, name: str, known: tuple[str, ...]) -> None:
+        self.name = name
+        self.known = known
+        super().__init__(f"unknown profile {name!r}; known: {', '.join(known)}")
+
+
+def get_profile(name: str) -> ReviewProfile:
+    """The canonical :class:`ReviewProfile` for *name* — the single known-name seam.
+
+    Fail-closed (ADR §2): an unknown name raises :class:`UnknownProfileError` rather
+    than silently returning ``standard``. Every path that reaches here has already
+    validated the name — :func:`resolve_profile` (daemon + standalone) resolves
+    known-or-halt, and the ``develop review`` CLI + the eval case loader validate the
+    explicit name through this function — so an unknown name here is an unvalidated
+    path or a bug, and downgrading it to ``standard`` would run a *weaker* review
+    than the operator asked for.
+    """
+    profile = _BY_NAME.get(name)
+    if profile is None:
+        raise UnknownProfileError(name, tuple(_BY_NAME))
+    return profile
 
 
 @dataclass(frozen=True)

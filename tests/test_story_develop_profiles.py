@@ -183,16 +183,33 @@ def test_unknown_name_strongest_falls_back_never_weaker() -> None:
     assert r.profile.name == "thorough"
 
 
-# --- get_profile + the DevelopConfig default (#140) ---------------------------
+# --- get_profile: the single fail-closed known-name seam (ADR §2) -------------
 
 
-def test_get_profile_known_and_unknown_fallback() -> None:
+def test_get_profile_known_returns_it() -> None:
     from lithos_loom.plugins.story_develop.profiles import get_profile
 
     assert get_profile("thorough").name == "thorough"
-    # An unknown name is a defensive fallthrough to the default, never a raise —
-    # the builder must always produce some set.
-    assert get_profile("bogus").name == DEFAULT_PROFILE_NAME
+
+
+def test_get_profile_unknown_raises_fail_closed() -> None:
+    # get_profile is the ONE known-name seam: an unknown name fails closed (raises)
+    # rather than silently downgrading to standard, which would run a *weaker*
+    # review than asked. Every caller pre-validates through it — resolve_profile
+    # (daemon/standalone) resolves known-or-halt; the `develop review` CLI and the
+    # eval case loader validate the explicit name through this function.
+    from lithos_loom.plugins.story_develop.profiles import (
+        UnknownProfileError,
+        get_profile,
+    )
+
+    with pytest.raises(UnknownProfileError) as excinfo:
+        get_profile("bogus")
+    exc = excinfo.value
+    assert exc.name == "bogus"
+    assert DEFAULT_PROFILE_NAME in exc.known  # the known set is surfaced
+    assert "bogus" in str(exc)
+    assert DEFAULT_PROFILE_NAME in str(exc)
 
 
 def test_develop_config_default_matches_default_profile_name() -> None:

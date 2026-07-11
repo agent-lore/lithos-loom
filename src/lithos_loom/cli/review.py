@@ -21,11 +21,12 @@ from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
 from lithos_loom.plugins.story_develop.personas import canonical_personas
-from lithos_loom.plugins.story_develop.profiles import CANONICAL_PROFILES
+from lithos_loom.plugins.story_develop.profiles import (
+    UnknownProfileError,
+    get_profile,
+)
 from lithos_loom.plugins.story_develop.review_only import review_change
 from lithos_loom.plugins.story_develop.review_resolve import resolve_change
-
-_KNOWN_PROFILES = tuple(p.name for p in CANONICAL_PROFILES)
 
 
 def review_command(
@@ -65,12 +66,13 @@ def review_command(
 ) -> None:
     """Run the reviewer panel + deterministic gate against an existing change."""
     # Fail closed on an unknown profile rather than silently running `standard`
-    # while mislabeling the report (the resolved-profile contract — get_profile
-    # falls back defensively, so we must validate the explicit name here).
-    if profile not in _KNOWN_PROFILES:
-        raise typer.BadParameter(
-            f"unknown profile {profile!r}; known: {', '.join(_KNOWN_PROFILES)}"
-        )
+    # while mislabeling the report — validate the explicit name through the single
+    # known-profile seam (get_profile, the same funnel resolve_profile / the eval
+    # case loader use), so the known set lives in exactly one place.
+    try:
+        get_profile(profile)
+    except UnknownProfileError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     repo = repo or Path.cwd()
     host = load_config(config)
 
