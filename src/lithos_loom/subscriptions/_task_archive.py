@@ -13,15 +13,15 @@ excludes ``-done.md`` files so operator edits to them are inert (no
 push, no reopen-request findings).
 
 Coupling with the tasks projection, both running in the ``obsidian-sync``
-child over one shared :class:`ProjectionSyncState`:
+child over one shared :class:`ArchiveGateState`:
 
-* **Surfaced gate.** The projection sets ``sync_state.surfaced[id]``
+* **Surfaced gate.** The projection sets ``archive_gate.surfaced[id]``
   when it writes an open actionable task line (and seeds it from the
   on-disk ``tasks.md`` at startup). The archiver only archives tasks
   with that flag set — automated / route-claimed-only work that never
   reached the operator's view is skipped.
 * **Archive-then-evict.** On success the archiver sets
-  ``sync_state.archived[id]``; the projection's flush-time eviction
+  ``archive_gate.archived[id]``; the projection's flush-time eviction
   predicate drops the line from the global file in the same write the
   terminal event scheduled. A failed append leaves the flag unset, so
   the task stays ``[x]``/``[-]`` in the global file under the TTL
@@ -53,7 +53,7 @@ from lithos_loom.subscriptions._obsidian_projection import (
     _resolved_at_for,
     _task_from_payload,
 )
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import ArchiveGateState
 from lithos_loom.task_line import extract_task_ids
 
 __all__ = ["make_handler"]
@@ -153,13 +153,13 @@ def _append_line(path: Path, line: str) -> None:
 def make_handler(
     cfg: LoomConfig,
     *,
-    sync_state: ProjectionSyncState | None = None,
+    archive_gate: ArchiveGateState | None = None,
 ) -> Handler:
     """Build a stateful ``task-archive`` handler bound to ``cfg``.
 
     Captures the vault path + projects_dir from ``cfg.obsidian_sync``, a
-    per-slug dedup cache, and the shared ``sync_state`` (the coupling
-    seam with the tasks projection). ``sync_state=None`` (test default)
+    per-slug dedup cache, and the shared ``archive_gate`` (the coupling
+    seam with the tasks projection). ``archive_gate=None`` (test default)
     constructs a fresh isolated state — note the archiver is then a no-op
     in practice because nothing populates ``surfaced``; production wires
     the shared instance from the obsidian-sync child.
@@ -175,7 +175,7 @@ def make_handler(
             "supervisor's spawn gate should have prevented this"
         )
     projects_root = obs.vault_path / obs.projects_dir
-    sync_state = sync_state if sync_state is not None else ProjectionSyncState()
+    archive_gate = archive_gate if archive_gate is not None else ArchiveGateState()
     # Per-slug set of task ids already on disk in that project's done
     # file. Lazily loaded on the first event for a slug (see _load_done_ids).
     dedup_cache: dict[str, set[str]] = {}
@@ -203,7 +203,7 @@ def make_handler(
         # flag is the authoritative "was operator-visible" signal —
         # re-running ``would_be_actionable`` here would be redundant and
         # could disagree if route config changed mid-session.
-        if not sync_state.surfaced.get(task.id):
+        if not archive_gate.surfaced.get(task.id):
             ctx.logger.debug(
                 "task-archive: skipping never-surfaced task %s on %s",
                 task.id,
@@ -225,8 +225,8 @@ def make_handler(
             ctx.logger.debug(
                 "task-archive: %s already in %s; skipping append", task.id, done_path
             )
-            sync_state.archived[task.id] = True
-            await _request_projection_evict()
+            archive_gate.archived[task.id] = True
+            await archive_gate.request_flush()
             return
 
         status = "completed" if event.type.endswith("completed") else "cancelled"
@@ -240,19 +240,14 @@ def make_handler(
         _append_line(done_path, line)
 
         seen.add(task.id)
-        sync_state.archived[task.id] = True
+        archive_gate.archived[task.id] = True
         # Bounded-memory cleanup: the surfaced flag has done its job for
         # this task now that it's terminal + archived.
-        sync_state.surfaced.pop(task.id, None)
+        archive_gate.surfaced.pop(task.id, None)
         ctx.logger.info("task-archive: appended %s to %s", task.id, done_path.name)
         # Ask the projection to flush now that ``archived`` is set, so the
         # line is evicted from tasks.md causally (not racing the debounce
         # timer). No-op when no projection is wired.
-        await _request_projection_evict()
-
-    async def _request_projection_evict() -> None:
-        reflush = sync_state.request_projection_flush
-        if reflush is not None:
-            await reflush()
+        await archive_gate.request_flush()
 
     return handle

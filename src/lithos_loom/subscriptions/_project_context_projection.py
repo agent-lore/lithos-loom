@@ -17,13 +17,13 @@ The handler is intentionally simpler than the tasks projection
 - No in-memory ``_StateEntry`` map. The task projection accumulates
   all open tasks into one file; project context is one file per doc,
   so each event is self-contained. State lives in
-  :class:`~lithos_loom.sync_state.ProjectionSyncState` (per-doc hash
+  :class:`~lithos_loom.sync_state.NoteSyncState` (per-doc hash
   + version) rather than per-handler.
 - No TTL eviction. Project-context docs persist until deleted in
   Lithos.
 - No debouncing. Each event corresponds to a distinct file; there's
   no coalescing benefit.
-- Per-doc dedup via the body hash recorded in sync_state — on
+- Per-doc dedup via the body hash recorded in note_sync — on
   bootstrap with N unchanged docs, N writes are short-circuited.
 
 Lifecycle per event:
@@ -36,9 +36,9 @@ Lifecycle per event:
    tags can be stale (the bootstrap path doesn't carry tags at all).
    Re-check after fetch.
 4. **Render** via :func:`render_project_context.render_doc`.
-5. **Dedup.** If the body hash matches ``sync_state.note_content_hashes[id]``
+5. **Dedup.** If the body hash matches ``note_sync.note_body_hashes[id]``
    skip the write — same content already on disk.
-6. **Atomic write.** Record sync_state *before* committing the
+6. **Atomic write.** Record note_sync *before* committing the
    rename (same ordering invariant as the tasks projection).
 7. **Deleted events** remove the local file (best-effort) and
    ``forget_project_context`` so a re-creation later isn't suppressed
@@ -66,7 +66,7 @@ from lithos_loom.render_project_context import compute_body_hash, render_doc
 from lithos_loom.subscriptions import Handler, SubscriptionContext
 from lithos_loom.subscriptions._atomic_write import write_file_atomic
 from lithos_loom.subscriptions._note_conflict import resolve_conflict
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 __all__ = ["make_handler"]
 
@@ -93,13 +93,13 @@ _REMOVAL_EVENTS: frozenset[str] = frozenset({"lithos.note.deleted"})
 def make_handler(
     cfg: LoomConfig,
     *,
-    sync_state: ProjectionSyncState | None = None,
+    note_sync: NoteSyncState | None = None,
 ) -> Handler:
     """Build a stateful ``project-context-projection`` handler bound to ``cfg``.
 
     The returned coroutine captures the vault path + projects_dir
     from ``cfg.obsidian_sync`` and the per-doc state living in
-    ``sync_state``. ``sync_state=None`` (test default) constructs a
+    ``note_sync``. ``note_sync=None`` (test default) constructs a
     fresh isolated state — the projection still works, just without
     a dir-watcher consumer to coordinate with.
 
@@ -115,7 +115,7 @@ def make_handler(
         )
     projects_root = obs.vault_path / obs.projects_dir
     conflicts_dir = obs.vault_path / _CONFLICTS_RELPATH
-    sync_state = sync_state if sync_state is not None else ProjectionSyncState()
+    note_sync = note_sync if note_sync is not None else NoteSyncState()
 
     async def handle(event: Event, ctx: SubscriptionContext) -> None:
         # Branch on event type first — guards against malformed payloads
@@ -153,7 +153,7 @@ def make_handler(
                     exc,
                 )
                 return
-            await _handle_deleted(note_id, path, projects_root, sync_state, ctx)
+            await _handle_deleted(note_id, path, projects_root, note_sync, ctx)
             return
 
         # Path-prefix filter at the subscription boundary. The source
@@ -184,7 +184,7 @@ def make_handler(
             # deletes, not for moves/retags.
             _cleanup_stale_projection(
                 note_id,
-                sync_state,
+                note_sync,
                 ctx,
                 reason=f"sse path {sse_path!r} outside projects/",
             )
@@ -216,7 +216,7 @@ def make_handler(
         if _PROJECT_CONTEXT_TAG not in note.tags:
             _cleanup_stale_projection(
                 note_id,
-                sync_state,
+                note_sync,
                 ctx,
                 reason=(
                     f"fetched tags {list(note.tags)} do not include "
@@ -226,7 +226,7 @@ def make_handler(
             return
 
         await _project_note(
-            note, sse_path, projects_root, conflicts_dir, sync_state, ctx
+            note, sse_path, projects_root, conflicts_dir, note_sync, ctx
         )
 
     return handle
@@ -234,7 +234,7 @@ def make_handler(
 
 def _cleanup_stale_projection(
     note_id: str,
-    sync_state: ProjectionSyncState,
+    note_sync: NoteSyncState,
     ctx: Any,
     *,
     reason: str,
@@ -248,7 +248,7 @@ def _cleanup_stale_projection(
     no-op. The ``note_projected_paths`` map is the source of truth
     for "did we ever write this doc."
     """
-    prior_path = sync_state.note_projected_paths.get(note_id)
+    prior_path = note_sync.note_projected_paths.get(note_id)
     if prior_path is None:
         # No prior projection — the doc was never projected (e.g.
         # an event for a non-project-context doc that we cheaply
@@ -263,7 +263,7 @@ def _cleanup_stale_projection(
 
     with contextlib.suppress(FileNotFoundError):
         prior_path.unlink()
-    sync_state.forget_project_context(doc_id=note_id)
+    note_sync.forget_project_context(doc_id=note_id)
     ctx.logger.info(
         "project-context-projection: cleaned up stale projection at %s "
         "(note %s no longer qualifies: %s)",
@@ -278,7 +278,7 @@ async def _project_note(
     lithos_path: str,
     projects_root: Path,
     conflicts_dir: Path,
-    sync_state: ProjectionSyncState,
+    note_sync: NoteSyncState,
     ctx: Any,
 ) -> None:
     """Render and write a single project-context note to the vault.
@@ -311,7 +311,7 @@ async def _project_note(
     Self-write coordination: ``record_project_context_write`` fires
     *before* the atomic rename so a concurrent dir-watcher poll that
     sees the new file also sees the matching coordination state. On
-    write failure, sync_state is rolled back to its
+    write failure, note_sync is rolled back to its
     *prior* state (not cleared) — preserving the prior_path memory
     so the next event can retry the migration with the same
     cleanup semantics rather than treating it as a fresh
@@ -344,10 +344,10 @@ async def _project_note(
     # the exact pre-event values (NOT to empty — preserving the
     # prior_path memory is what lets a retried migration still
     # know about the orphan old file).
-    prior_hash = sync_state.note_file_hashes.get(note.id)
-    prior_body_hash = sync_state.note_body_hashes.get(note.id)
-    prior_version = sync_state.note_versions.get(note.id)
-    prior_path = sync_state.note_projected_paths.get(note.id)
+    prior_hash = note_sync.note_file_hashes.get(note.id)
+    prior_body_hash = note_sync.note_body_hashes.get(note.id)
+    prior_version = note_sync.note_versions.get(note.id)
+    prior_path = note_sync.note_projected_paths.get(note.id)
 
     # Whole-file dedup. Skip only when the prior projection is at
     # the SAME path AND the rendered bytes are identical.
@@ -364,7 +364,7 @@ async def _project_note(
     # every project-context doc when the daemon starts. If the daemon
     # was previously running and the operator edited a projected file
     # while it was down, the local body differs from the canonical body
-    # Lithos has — and sync_state is empty across restart so the
+    # Lithos has — and note_sync is empty across restart so the
     # in-memory baseline doesn't tell us "this is an operator edit."
     # Without this check, the projection would silently overwrite the
     # operator's edit with the canonical body (data loss).
@@ -383,25 +383,25 @@ async def _project_note(
     # for the common "daemon restart with no operator edits" case).
     if (
         target.exists()
-        and note.id not in sync_state.note_body_hashes
+        and note.id not in note_sync.note_body_hashes
         and await _resolve_cold_start_divergence(
             note=note,
             lithos_path=lithos_path,
             target=target,
             rendered_body_hash=rendered_body_hash,
             conflicts_dir=conflicts_dir,
-            sync_state=sync_state,
+            note_sync=note_sync,
             ctx=ctx,
         )
     ):
         # Resolver moved local + pulled canonical + populated
-        # sync_state. Nothing else to do — the normal write path
+        # note_sync. Nothing else to do — the normal write path
         # would re-write what the resolver already wrote.
         return
 
     # Coordination state BEFORE the write — any concurrent dir-watcher
     # poll that sees the new file's bytes must also see matching state.
-    sync_state.record_project_context_write(
+    note_sync.record_project_context_write(
         doc_id=note.id,
         file_hash=rendered_file_hash,
         body_hash=rendered_body_hash,
@@ -416,20 +416,20 @@ async def _project_note(
         # field so the next event sees the old projection and can
         # retry the migration / write cleanly.
         if prior_hash is None:
-            sync_state.forget_project_context(doc_id=note.id)
+            note_sync.forget_project_context(doc_id=note.id)
         else:
-            sync_state.note_file_hashes[note.id] = prior_hash
+            note_sync.note_file_hashes[note.id] = prior_hash
             # prior_body_hash + prior_version + prior_path are populated
             # together with prior_hash — all four are written by
             # ``record_project_context_write`` in one shot — so the
             # paired asserts express the invariant rather than guarding
             # against drift in this method.
             assert prior_body_hash is not None
-            sync_state.note_body_hashes[note.id] = prior_body_hash
+            note_sync.note_body_hashes[note.id] = prior_body_hash
             assert prior_version is not None
-            sync_state.note_versions[note.id] = prior_version
+            note_sync.note_versions[note.id] = prior_version
             assert prior_path is not None
-            sync_state.note_projected_paths[note.id] = prior_path
+            note_sync.note_projected_paths[note.id] = prior_path
         raise
 
     # Write succeeded. Now safe to remove the old file if this was
@@ -462,22 +462,22 @@ async def _resolve_cold_start_divergence(
     target: Path,
     rendered_body_hash: bytes,
     conflicts_dir: Path,
-    sync_state: ProjectionSyncState,
+    note_sync: NoteSyncState,
     ctx: Any,
 ) -> bool:
     """If the on-disk file's body differs from canonical, route through
     the conflict resolver and return True; otherwise return False.
 
     Called by :func:`_project_note` when a file exists on disk but no
-    sync_state baseline exists for this doc this session (= cold
+    note_sync baseline exists for this doc this session (= cold
     start). A matching body means the operator didn't edit while we
     were down; the caller falls through to the normal write path
     (which then writes canonical bytes — needed because frontmatter
     may have advanced even when body didn't).
 
-    The resolver itself updates sync_state with the canonical hashes,
+    The resolver itself updates note_sync with the canonical hashes,
     so subsequent events for this doc go through the normal write
-    path (the ``note.id in sync_state.note_body_hashes`` gate flips
+    path (the ``note.id in note_sync.note_body_hashes`` gate flips
     True).
     """
     try:
@@ -531,7 +531,7 @@ async def _resolve_cold_start_divergence(
         conflicts_dir=conflicts_dir,
         slug=slug,
         filename=filename,
-        sync_state=sync_state,
+        note_sync=note_sync,
         doc_id=note.id,
         logger_=ctx.logger,
     )
@@ -542,13 +542,13 @@ async def _handle_deleted(
     note_id: str,
     lithos_path: str,
     projects_root: Path,
-    sync_state: ProjectionSyncState,
+    note_sync: NoteSyncState,
     ctx: Any,
 ) -> None:
     """Remove the local file and forget the projection state.
 
     Best-effort delete: missing file (operator manually removed,
-    earlier failed write) is fine. The sync_state forget is what
+    earlier failed write) is fine. The note_sync forget is what
     prevents a subsequent re-creation of the same doc from being
     suppressed as a self-write.
     """
@@ -565,7 +565,7 @@ async def _handle_deleted(
 
     with contextlib.suppress(FileNotFoundError):
         target.unlink()
-    sync_state.forget_project_context(doc_id=note_id)
+    note_sync.forget_project_context(doc_id=note_id)
 
     ctx.logger.info(
         "project-context-projection: removed %s (note %s deleted in Lithos)",

@@ -36,14 +36,14 @@ async def write_file_atomic(path: Path, content: str) -> None:
     every projection that uses this. Two properties depend on it:
 
     1. The fs watcher's self-write suppression. The caller updates
-       ``sync_state`` *before* awaiting this function; if there were
-       a yield between that update and ``os.replace``, the watcher
-       could poll with ``sync_state.last_written_hash`` pointing at
+       its sync-state object *before* awaiting this function; if there
+       were a yield between that update and ``os.replace``, the watcher
+       could poll with ``task_sync.last_written_hash`` pointing at
        the new content while the file still showed the old, mis-firing
        per-task suppression. The same window exists for any per-file
        projection.
     2. The caller's failure-rollback contract. The caller catches
-       ``Exception`` to roll back ``sync_state`` when the rename
+       ``Exception`` to roll back its sync-state object when the rename
        didn't apply, and lets ``CancelledError`` propagate without
        rolling back on the grounds that cancellation cannot fire
        mid-rename. That reasoning requires this function to have no

@@ -13,7 +13,7 @@ Resolution strategy:
 2. Atomically move the operator's local file to
    ``<vault>/_lithos/conflicts/<slug>.<filename>.<timestamp>.md``.
 3. Record the canonical hash + body hash + version + path into
-   ``sync_state`` **before** writing the canonical body. This is the
+   ``note_sync`` **before** writing the canonical body. This is the
    same ordering invariant the projection upholds — any dir-watcher
    poll racing against the canonical write must see matching
    coordination state so the rewrite is absorbed as a self-write
@@ -29,7 +29,7 @@ ends up with NO file at the original path — visible in daemon logs
 and recoverable from the conflicts directory. If we wrote canonical
 first and then moved, a failure between the write and the move would
 leave the operator's local body in the conflicts archive AND the
-canonical at the local path, but with sync_state still pointing at
+canonical at the local path, but with note_sync still pointing at
 the local hash — the next poll would re-emit, hammering Lithos.
 
 We deliberately do NOT post a Lithos ``finding`` here: the current
@@ -56,7 +56,7 @@ from pathlib import Path
 from lithos_loom.lithos_client import Note
 from lithos_loom.render_project_context import compute_body_hash, render_doc
 from lithos_loom.subscriptions._atomic_write import write_file_atomic
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 __all__ = ["format_conflict_filename", "resolve_conflict"]
 
@@ -96,7 +96,7 @@ async def resolve_conflict(
     conflicts_dir: Path,
     slug: str,
     filename: str,
-    sync_state: ProjectionSyncState,
+    note_sync: NoteSyncState,
     doc_id: str,
     timestamp_provider: Callable[[], datetime] = lambda: datetime.now(UTC),
     logger_: logging.Logger | None = None,
@@ -152,11 +152,11 @@ async def resolve_conflict(
         filename,
     )
 
-    # Record sync_state BEFORE the canonical write. A concurrent
+    # Record note_sync BEFORE the canonical write. A concurrent
     # dir-watcher poll racing this rewrite must see the new file
     # AND the matching coordination state — otherwise it re-emits
     # the canonical body as a "user edit" and loops the push.
-    sync_state.record_project_context_write(
+    note_sync.record_project_context_write(
         doc_id=doc_id,
         file_hash=canonical_file_hash,
         body_hash=canonical_body_hash,
@@ -180,10 +180,10 @@ async def resolve_conflict(
         )
         with contextlib.suppress(OSError):
             os.replace(conflict_path, local_path)
-        # Reset sync_state — we don't know what's on disk now, so
+        # Reset note_sync — we don't know what's on disk now, so
         # the next event needs to start fresh rather than trusting
         # a hash for content that may not exist.
-        sync_state.forget_project_context(doc_id=doc_id)
+        note_sync.forget_project_context(doc_id=doc_id)
         raise
 
     # Stable [Friction] breadcrumb. Matches the project's other

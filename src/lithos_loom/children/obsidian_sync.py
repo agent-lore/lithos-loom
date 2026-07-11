@@ -79,7 +79,11 @@ from lithos_loom.subscriptions._project_context_projection import (
 from lithos_loom.subscriptions._task_archive import (
     make_handler as make_task_archive_handler,
 )
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import (
+    ArchiveGateState,
+    NoteSyncState,
+    TaskSyncState,
+)
 
 # Actions this child hosts. It hosts every real subscription action, so
 # derive from the shared catalog rather than re-listing them: ``noop`` is a
@@ -182,7 +186,7 @@ async def _amain(cfg: LoomConfig) -> int:
     awaiting_review_spec = awaiting_review_specs[0] if awaiting_review_specs else None
 
     # status-transition / priority-changed / due-date-changed all need
-    # the projection's ``sync_state`` populated for the fs watcher to
+    # the projection's ``task_sync`` populated for the fs watcher to
     # emit any events at all (the watcher silently skips tasks with no
     # projection-known baseline). Configuring any of them without
     # projection is permitted but inert — call that out at startup
@@ -203,7 +207,7 @@ async def _amain(cfg: LoomConfig) -> int:
             )
 
     # The task-archive handler depends on the projection: the projection
-    # populates ``sync_state.surfaced``, which is the archiver's
+    # populates ``archive_gate.surfaced``, which is the archiver's
     # "was this task operator-visible" gate. Without it, nothing ever
     # sets the flag, so the archiver would skip every task.
     if task_archive_spec is not None and projection_spec is None:
@@ -263,7 +267,13 @@ async def _amain(cfg: LoomConfig) -> int:
         # behaviour is identical to the previous "idle and warn" path,
         # but the source itself is independently spawnable so the
         # spawn gate doesn't have to be re-plumbed as more actions land.
-        sync_state = ProjectionSyncState()
+        # One concern-scoped coordinator each (ARCH-10): the task-projection ↔
+        # fs-watcher seam, the note-projection ↔ dir-watcher seam, and the
+        # surfaced/archived handshake between the task projection and the archiver.
+        # Each consumer below receives only the object(s) it uses.
+        task_sync = TaskSyncState()
+        note_sync = NoteSyncState()
+        archive_gate = ArchiveGateState()
         cursor_store = CursorStore(
             cfg.orchestrator.work_dir / "obsidian-sync" / "sse_cursors.json"
         )
@@ -271,18 +281,18 @@ async def _amain(cfg: LoomConfig) -> int:
         fs_watcher = ObsidianFsWatcher(
             bus=bus,
             tasks_path=obs.vault_path / obs.tasks_file,
-            sync_state=sync_state,
+            task_sync=task_sync,
         )
-        # Spawn the dir-watcher alongside the file-watcher. SAME
-        # sync_state instance — the projection populates the per-doc
-        # body-hash baseline that the dir-watcher reads against, and the
-        # note-push handler updates sync_state after a successful push so
-        # the dir-watcher absorbs the post-push frontmatter rewrite as a
-        # self-write. All three see one coordinator state.
+        # Spawn the dir-watcher alongside the file-watcher. SAME note_sync
+        # instance as the project-context projection + note-push handler — the
+        # projection populates the per-doc body-hash baseline that the dir-watcher
+        # reads against, and the note-push handler updates note_sync after a
+        # successful push so the dir-watcher absorbs the post-push frontmatter
+        # rewrite as a self-write.
         dir_watcher = ObsidianDirWatcher(
             bus=bus,
             projects_root=obs.vault_path / obs.projects_dir,
-            sync_state=sync_state,
+            note_sync=note_sync,
         )
         tasks: list[asyncio.Task[None]] = [
             asyncio.create_task(fs_watcher.run(), name="obsidian-fs-watcher"),
@@ -319,7 +329,10 @@ async def _amain(cfg: LoomConfig) -> int:
             # quiescence. The disk-seeded content-hash check then turns
             # a quiet-KB restart into zero on-disk writes.
             my_handlers["obsidian-projection"] = make_obsidian_projection_handler(
-                cfg, debounce_seconds=0.05, sync_state=sync_state
+                cfg,
+                debounce_seconds=0.05,
+                task_sync=task_sync,
+                archive_gate=archive_gate,
             )
         if status_transition_spec is not None:
             logger.info(
@@ -347,30 +360,28 @@ async def _amain(cfg: LoomConfig) -> int:
                 project_context_projection_spec.name,
             )
             my_handlers["project-context-projection"] = (
-                make_project_context_projection_handler(cfg, sync_state=sync_state)
+                make_project_context_projection_handler(cfg, note_sync=note_sync)
             )
         if note_push_spec is not None:
             logger.info(
                 "obsidian-sync: wiring subscription %r",
                 note_push_spec.name,
             )
-            my_handlers["note-push"] = make_note_push_handler(
-                cfg, sync_state=sync_state
-            )
+            my_handlers["note-push"] = make_note_push_handler(cfg, note_sync=note_sync)
         if task_archive_spec is not None:
             logger.info("obsidian-sync: wiring subscription %r", task_archive_spec.name)
-            # SAME sync_state instance: the projection sets surfaced[id]
-            # (the archiver's gate) and reads archived[id] (set here) for
-            # its flush-time eviction. No debounce — the archiver does a
-            # single synchronous O_APPEND per event and never flushes.
+            # SAME archive_gate instance as the projection: the projection sets
+            # surfaced[id] (the archiver's gate) and reads archived[id] (set here)
+            # for its flush-time eviction. No debounce — the archiver does a single
+            # synchronous O_APPEND per event and never flushes.
             my_handlers["task-archive"] = make_task_archive_handler(
-                cfg, sync_state=sync_state
+                cfg, archive_gate=archive_gate
             )
         if awaiting_review_spec is not None:
             logger.info(
                 "obsidian-sync: wiring subscription %r", awaiting_review_spec.name
             )
-            # #113: read-only projection — no sync_state (never round-tripped
+            # #113: read-only projection — no task_sync (never round-tripped
             # by the fs watcher) and no LithosEventStream of its own (it rides
             # the same upstream events the projection's stream publishes).
             aw_handle, awaiting_review_reconcile = make_awaiting_review_handler(cfg)

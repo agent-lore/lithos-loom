@@ -32,7 +32,7 @@ from lithos_loom.subscriptions._obsidian_projection import (
     make_handler as make_projection_handler,
 )
 from lithos_loom.subscriptions._task_archive import make_handler
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import ArchiveGateState
 
 # ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -106,8 +106,8 @@ def _done_file(tmp_path: Path, slug: str) -> Path:
     return tmp_path / "_lithos/projects" / slug / f"{slug}-done.md"
 
 
-def _surfaced(*task_ids: str) -> ProjectionSyncState:
-    state = ProjectionSyncState()
+def _surfaced(*task_ids: str) -> ArchiveGateState:
+    state = ArchiveGateState()
     for tid in task_ids:
         state.surfaced[tid] = True
     return state
@@ -118,7 +118,7 @@ def _surfaced(*task_ids: str) -> ProjectionSyncState:
 
 async def test_completed_surfaced_task_appends_done_line(tmp_path: Path) -> None:
     state = _surfaced("t1")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(_terminal_event(task_id="t1", title="Ship it"), _ctx())
 
     done = _done_file(tmp_path, "demo")
@@ -132,7 +132,7 @@ async def test_completed_surfaced_task_appends_done_line(tmp_path: Path) -> None
 
 async def test_cancelled_surfaced_task_appends_cancel_line(tmp_path: Path) -> None:
     state = _surfaced("t2")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(
         _terminal_event(task_id="t2", title="Drop it", completed=False), _ctx()
     )
@@ -146,8 +146,8 @@ async def test_cancelled_surfaced_task_appends_cancel_line(tmp_path: Path) -> No
 
 
 async def test_unsurfaced_task_skipped(tmp_path: Path) -> None:
-    state = ProjectionSyncState()  # surfaced is empty
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    state = ArchiveGateState()  # surfaced is empty
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(_terminal_event(task_id="bg"), _ctx())
 
     assert not _done_file(tmp_path, "demo").exists()
@@ -159,7 +159,7 @@ async def test_unsurfaced_task_skipped(tmp_path: Path) -> None:
 
 async def test_missing_project_falls_back_to_unassigned(tmp_path: Path) -> None:
     state = _surfaced("t3")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(
         _terminal_event(task_id="t3", title="Loose end", project=None), _ctx()
     )
@@ -176,7 +176,7 @@ async def test_missing_project_falls_back_to_unassigned(tmp_path: Path) -> None:
 async def test_unsafe_slug_routed_to_unassigned(tmp_path: Path, bad_slug: str) -> None:
     """Path-traversal / nested-dir slugs never escape projects_root."""
     state = _surfaced("t4")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(_terminal_event(task_id="t4", project=bad_slug), _ctx())
 
     # Write lands in the _unassigned bucket, inside projects_root.
@@ -199,7 +199,7 @@ async def test_cold_start_dedup_skips_on_disk_id(tmp_path: Path) -> None:
     done.write_text("- [x] Old line 🆔 lithos:t5 #project/demo ✅ 2026-05-01\n")
 
     state = _surfaced("t5")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(_terminal_event(task_id="t5"), _ctx())
 
     content = done.read_text()
@@ -215,7 +215,7 @@ async def test_duplicate_event_blocked_by_surfaced_gate(tmp_path: Path) -> None:
     fails the D38 gate before it ever reaches the append (the dedup cache
     is the cold-start defence; the surfaced-pop is the in-session one)."""
     state = _surfaced("t6")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(_terminal_event(task_id="t6"), _ctx())
     assert "t6" not in state.surfaced  # popped on success
     # A duplicate terminal event now no-ops at the surfaced gate.
@@ -241,7 +241,7 @@ async def test_archive_write_failure_leaves_flag_unset(
     monkeypatch.setattr(_task_archive.os, "open", _failing_open)
 
     state = _surfaced("t7")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     with pytest.raises(OSError, match="simulated append failure"):
         await handler(_terminal_event(task_id="t7"), _ctx())
 
@@ -267,7 +267,7 @@ async def test_lazy_cache_loaded_once_per_slug(
     monkeypatch.setattr(_task_archive, "_load_done_ids", _spy_loader)
 
     state = _surfaced("a", "b")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(_terminal_event(task_id="a"), _ctx())
     await handler(_terminal_event(task_id="b"), _ctx())
 
@@ -280,7 +280,7 @@ async def test_lazy_cache_loaded_once_per_slug(
 
 async def test_non_terminal_event_ignored(tmp_path: Path) -> None:
     state = _surfaced("t8")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     evt = Event(
         type="lithos.task.created",
         timestamp=datetime.now(UTC),
@@ -312,7 +312,7 @@ async def test_append_loops_on_partial_write(
     monkeypatch.setattr(_task_archive.os, "write", _short_write)
 
     state = _surfaced("t9")
-    handler = make_handler(_cfg(tmp_path), sync_state=state)
+    handler = make_handler(_cfg(tmp_path), archive_gate=state)
     await handler(
         _terminal_event(task_id="t9", title="A reasonably long title"), _ctx()
     )
@@ -335,13 +335,13 @@ async def test_archiver_reflush_evicts_when_projection_flushed_first(
     """If the projection renders the [x] line and flushes BEFORE the
     archiver appends, the archiver's reflush still evicts the line — it
     doesn't linger until an unrelated future event (D39 / review F1)."""
-    state = ProjectionSyncState()
+    state = ArchiveGateState()
     cfg = _cfg(tmp_path)
     # debounce=0 → projection flushes inline, so the [x] line is on disk
     # before the archiver runs. The archiver's request_projection_flush
     # call must still drive the eviction.
-    projection = make_projection_handler(cfg, sync_state=state)
-    archiver = make_handler(cfg, sync_state=state)
+    projection = make_projection_handler(cfg, archive_gate=state)
+    archiver = make_handler(cfg, archive_gate=state)
     tasks_file = tmp_path / "_lithos/tasks.md"
 
     await projection(_open_event("x"), _ctx())
@@ -365,10 +365,10 @@ async def test_fast_open_complete_within_window_not_archived(tmp_path: Path) -> 
     coalesced inside one debounce window) is not surfaced, so the
     archiver correctly skips it — surfaced means 'written to tasks.md'
     (D38), not 'entered render state' (review F3)."""
-    state = ProjectionSyncState()
+    state = ArchiveGateState()
     cfg = _cfg(tmp_path)
-    projection = make_projection_handler(cfg, sync_state=state, debounce_seconds=0.05)
-    archiver = make_handler(cfg, sync_state=state)
+    projection = make_projection_handler(cfg, archive_gate=state, debounce_seconds=0.05)
+    archiver = make_handler(cfg, archive_gate=state)
 
     # Created then completed before the 50ms flush fires: no write yet.
     await projection(_open_event("fast"), _ctx())

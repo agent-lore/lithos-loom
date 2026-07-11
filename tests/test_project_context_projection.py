@@ -34,7 +34,7 @@ from lithos_loom.render_project_context import (
 )
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._project_context_projection import make_handler
-from lithos_loom.sync_state import ProjectionSyncState
+from lithos_loom.sync_state import NoteSyncState
 
 # ── Test helpers ────────────────────────────────────────────────────────
 
@@ -110,8 +110,8 @@ async def test_created_writes_projected_file(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
@@ -126,8 +126,8 @@ async def test_updated_overwrites_existing_file(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(version=1, body="Original.")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # First write
     await handler(_event("lithos.note.created"), _ctx(lithos))
@@ -152,8 +152,8 @@ async def test_re_fetches_via_note_read_on_each_event(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
@@ -168,8 +168,8 @@ async def test_filters_event_with_path_outside_projects(tmp_path: Path) -> None:
     the ``note_read`` round-trip — saves the redundant lookup."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     event = _event("lithos.note.created", path="observations/inbox/foo.md")
     await handler(event, _ctx(lithos))
@@ -185,8 +185,8 @@ async def test_skips_event_with_missing_path_in_payload(tmp_path: Path) -> None:
     writing to the projects-root."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # Build an event with id but no path.
     event = Event(
@@ -212,8 +212,8 @@ async def test_filters_fetched_note_without_project_context_tag(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(tags=("other-tag",))
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
@@ -242,8 +242,8 @@ async def test_projects_using_sse_path_when_fetched_note_has_empty_path(
     lithos = AsyncMock()
     # Real-Lithos shape: path is empty in the read response.
     lithos.note_read.return_value = _note(path="")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
@@ -264,8 +264,8 @@ async def test_skips_when_note_not_found_in_lithos(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = None
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
@@ -277,7 +277,7 @@ async def test_skips_when_note_not_found_in_lithos(tmp_path: Path) -> None:
 # ── Sync-state coordination ────────────────────────────────────────────
 
 
-async def test_records_file_hash_version_and_path_in_sync_state(
+async def test_records_file_hash_version_and_path_in_note_sync(
     tmp_path: Path,
 ) -> None:
     """The dir-watcher (Slice 5) reads these to suppress self-writes
@@ -287,15 +287,15 @@ async def test_records_file_hash_version_and_path_in_sync_state(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(version=7)
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
-    assert "doc-1" in sync_state.note_file_hashes
-    assert sync_state.note_versions["doc-1"] == 7
+    assert "doc-1" in note_sync.note_file_hashes
+    assert note_sync.note_versions["doc-1"] == 7
     expected_path = _vault_path(tmp_path, "lithos-loom/context.md")
-    assert sync_state.note_projected_paths["doc-1"] == expected_path
+    assert note_sync.note_projected_paths["doc-1"] == expected_path
 
 
 async def test_skips_write_when_file_hash_matches_last_write(tmp_path: Path) -> None:
@@ -306,8 +306,8 @@ async def test_skips_write_when_file_hash_matches_last_write(tmp_path: Path) -> 
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
     target = _vault_path(tmp_path, "lithos-loom/context.md")
@@ -323,8 +323,8 @@ async def test_body_change_writes_new_content(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(body="v1")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
     target = _vault_path(tmp_path, "lithos-loom/context.md")
@@ -359,8 +359,8 @@ async def test_version_bump_with_unchanged_body_rewrites_file(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(version=1, body="Stable body.")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
     target = _vault_path(tmp_path, "lithos-loom/context.md")
@@ -379,7 +379,7 @@ async def test_version_bump_with_unchanged_body_rewrites_file(
     assert target.stat().st_mtime_ns != first_mtime, (
         "file should have been rewritten on version bump"
     )
-    assert sync_state.note_versions["doc-1"] == 2
+    assert note_sync.note_versions["doc-1"] == 2
 
 
 async def test_tag_addition_with_unchanged_body_rewrites_file(
@@ -392,8 +392,8 @@ async def test_tag_addition_with_unchanged_body_rewrites_file(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(tags=("project-context",))
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
     target = _vault_path(tmp_path, "lithos-loom/context.md")
@@ -428,8 +428,8 @@ async def test_status_change_with_unchanged_body_rewrites_file(
         path="projects/lithos-loom/context.md",
         slug="lithos-loom",
     )
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
     target = _vault_path(tmp_path, "lithos-loom/context.md")
@@ -474,8 +474,8 @@ async def test_path_migration_within_projects_removes_old_file(
     lithos.note_read.return_value = _note(
         path="projects/old-slug/context.md",
     )
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(
         _event("lithos.note.created", path="projects/old-slug/context.md"),
@@ -499,7 +499,7 @@ async def test_path_migration_within_projects_removes_old_file(
         "old projection must be removed — otherwise the moved doc "
         "would have a stale duplicate"
     )
-    assert sync_state.note_projected_paths["doc-1"] == new_path
+    assert note_sync.note_projected_paths["doc-1"] == new_path
 
 
 async def test_filename_change_within_same_slug_removes_old_file(
@@ -512,8 +512,8 @@ async def test_filename_change_within_same_slug_removes_old_file(
     lithos.note_read.return_value = _note(
         path="projects/lithos-loom/context.md",
     )
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
     old_path = _vault_path(tmp_path, "lithos-loom/context.md")
@@ -545,8 +545,8 @@ async def test_tag_removed_cleans_up_stale_projection(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(tags=("project-context",))
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
     target = _vault_path(tmp_path, "lithos-loom/context.md")
@@ -560,8 +560,8 @@ async def test_tag_removed_cleans_up_stale_projection(tmp_path: Path) -> None:
         "stale projection must be cleaned up when the doc no longer "
         "qualifies (lost project-context tag)"
     )
-    assert "doc-1" not in sync_state.note_file_hashes
-    assert "doc-1" not in sync_state.note_projected_paths
+    assert "doc-1" not in note_sync.note_file_hashes
+    assert "doc-1" not in note_sync.note_projected_paths
 
 
 async def test_doc_moved_out_of_projects_cleans_up_stale_projection(
@@ -573,8 +573,8 @@ async def test_doc_moved_out_of_projects_cleans_up_stale_projection(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(path="projects/foo/context.md")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(
         _event("lithos.note.created", path="projects/foo/context.md"),
@@ -595,7 +595,7 @@ async def test_doc_moved_out_of_projects_cleans_up_stale_projection(
     )
 
     assert not target.exists()
-    assert "doc-1" not in sync_state.note_projected_paths
+    assert "doc-1" not in note_sync.note_projected_paths
 
 
 async def test_cleanup_with_no_prior_projection_is_silent_no_op(
@@ -607,14 +607,14 @@ async def test_cleanup_with_no_prior_projection_is_silent_no_op(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(tags=("some-other-tag",))
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # Filter rejects on first event — no prior projection on record.
     await handler(_event("lithos.note.created"), _ctx(lithos))
 
     # No exception, no state change.
-    assert sync_state.note_projected_paths == {}
+    assert note_sync.note_projected_paths == {}
 
 
 # ── Slug + path mapping ────────────────────────────────────────────────
@@ -629,8 +629,8 @@ async def test_slug_drives_subdirectory(tmp_path: Path) -> None:
         id_="doc-influx",
         path="projects/influx/context.md",
     )
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(
         _event(
@@ -656,8 +656,8 @@ async def test_nested_filename_preserved_under_slug(tmp_path: Path) -> None:
     lithos.note_read.return_value = _note(
         path="projects/lithos-loom/architecture/design.md"
     )
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(
         _event(
@@ -678,8 +678,8 @@ async def test_deleted_removes_local_file(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # Create first
     await handler(_event("lithos.note.created"), _ctx(lithos))
@@ -692,23 +692,23 @@ async def test_deleted_removes_local_file(tmp_path: Path) -> None:
     assert not target.exists()
 
 
-async def test_deleted_forgets_sync_state(tmp_path: Path) -> None:
+async def test_deleted_forgets_note_sync(tmp_path: Path) -> None:
     """After delete, ``forget_project_context`` must clear the
     per-doc hash so a subsequent re-creation of the same doc is
     NOT suppressed as a self-write."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.created"), _ctx(lithos))
-    assert "doc-1" in sync_state.note_file_hashes
+    assert "doc-1" in note_sync.note_file_hashes
 
     await handler(_event("lithos.note.deleted"), _ctx(lithos))
 
-    assert "doc-1" not in sync_state.note_file_hashes
-    assert "doc-1" not in sync_state.note_versions
+    assert "doc-1" not in note_sync.note_file_hashes
+    assert "doc-1" not in note_sync.note_versions
 
 
 async def test_deleted_missing_file_is_silent(tmp_path: Path) -> None:
@@ -716,14 +716,14 @@ async def test_deleted_missing_file_is_silent(tmp_path: Path) -> None:
     manually, or earlier failed write) is fine."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # No prior create — straight to delete.
     await handler(_event("lithos.note.deleted"), _ctx(lithos))
 
-    # No exception, sync_state still clean.
-    assert sync_state.note_file_hashes == {}
+    # No exception, note_sync still clean.
+    assert note_sync.note_file_hashes == {}
 
 
 async def test_deleted_does_not_call_note_read(tmp_path: Path) -> None:
@@ -731,8 +731,8 @@ async def test_deleted_does_not_call_note_read(tmp_path: Path) -> None:
     ``note_read`` would return None anyway. Skip the round-trip."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(_event("lithos.note.deleted"), _ctx(lithos))
 
@@ -745,8 +745,8 @@ async def test_deleted_skips_path_outside_projects(tmp_path: Path) -> None:
     directory tree."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(
         _event(
@@ -767,8 +767,8 @@ async def test_deleted_skips_path_outside_projects(tmp_path: Path) -> None:
 async def test_unknown_event_type_is_silently_ignored(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     await handler(
         _event("lithos.task.created"),  # wrong namespace
@@ -785,8 +785,8 @@ async def test_malformed_payload_warns_and_returns(
     """Missing ``id`` in payload → warn-log + drop, no crash."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     event = Event(
         type="lithos.note.created",
@@ -800,7 +800,7 @@ async def test_malformed_payload_warns_and_returns(
     assert any("malformed payload" in m for m in warn_msgs), warn_msgs
 
 
-async def test_write_failure_rolls_back_sync_state(tmp_path: Path) -> None:
+async def test_write_failure_rolls_back_note_sync(tmp_path: Path) -> None:
     """If the atomic write raises on a CREATE (no prior projection),
     the per-doc hash must NOT be recorded — otherwise the next event
     would see "matches last write" and skip, leaving the disk
@@ -808,8 +808,8 @@ async def test_write_failure_rolls_back_sync_state(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note()
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # Make the projects_root unwritable to force write_file_atomic to fail.
     # mkdir-then-chmod the parent so the recursive parent creation can't
@@ -824,7 +824,7 @@ async def test_write_failure_rolls_back_sync_state(tmp_path: Path) -> None:
             await handler(_event("lithos.note.created"), _ctx(lithos))
 
         # State rolled back — re-firing must retry the write.
-        assert "doc-1" not in sync_state.note_file_hashes
+        assert "doc-1" not in note_sync.note_file_hashes
     finally:
         projects_root.chmod(0o755)  # restore for cleanup
 
@@ -838,14 +838,14 @@ async def test_migration_write_failure_preserves_old_file(
     a transient write failure would leave the vault with neither
     the old nor new file until some later event re-projects.
 
-    Also pins the sync_state rollback contract: prior state is
+    Also pins the note_sync rollback contract: prior state is
     restored (not cleared), so the next event still knows about
     the old projection and can retry the migration."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(path="projects/old/context.md")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # First write succeeds — projection at projects/old/context.md.
     await handler(
@@ -854,9 +854,9 @@ async def test_migration_write_failure_preserves_old_file(
     )
     old_path = _vault_path(tmp_path, "old/context.md")
     assert old_path.exists()
-    assert sync_state.note_projected_paths["doc-1"] == old_path
-    prior_hash = sync_state.note_file_hashes["doc-1"]
-    prior_version = sync_state.note_versions["doc-1"]
+    assert note_sync.note_projected_paths["doc-1"] == old_path
+    prior_hash = note_sync.note_file_hashes["doc-1"]
+    prior_version = note_sync.note_versions["doc-1"]
 
     # Now move the doc — but make the new target's parent unwritable
     # so write_file_atomic raises. ``projects_root`` (the new slug's
@@ -885,12 +885,12 @@ async def test_migration_write_failure_preserves_old_file(
             "migration — otherwise the doc vanishes from the vault"
         )
 
-        # sync_state restored to prior values (not cleared), so the
+        # note_sync restored to prior values (not cleared), so the
         # next event still knows about the old path and can retry
         # the migration cleanly.
-        assert sync_state.note_projected_paths["doc-1"] == old_path
-        assert sync_state.note_file_hashes["doc-1"] == prior_hash
-        assert sync_state.note_versions["doc-1"] == prior_version
+        assert note_sync.note_projected_paths["doc-1"] == old_path
+        assert note_sync.note_file_hashes["doc-1"] == prior_hash
+        assert note_sync.note_versions["doc-1"] == prior_version
     finally:
         projects_root.chmod(0o755)
 
@@ -901,13 +901,13 @@ async def test_migration_retried_after_failure_succeeds(
     """Sequel to the failure test: after a transient migration
     failure, the next event with the new path must successfully
     write the new file AND clean up the old one. Without the
-    prior-state rollback, sync_state would have lost the old path
+    prior-state rollback, note_sync would have lost the old path
     knowledge and the old file would linger as an orphan."""
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(path="projects/old/context.md")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # Initial projection.
     await handler(
@@ -944,7 +944,7 @@ async def test_migration_retried_after_failure_succeeds(
         "retried migration must clean up the old file — the prior-"
         "state rollback is what makes this work"
     )
-    assert sync_state.note_projected_paths["doc-1"] == new_path
+    assert note_sync.note_projected_paths["doc-1"] == new_path
 
 
 # ── make_handler defensive checks ──────────────────────────────────────
@@ -964,7 +964,7 @@ def test_make_handler_raises_without_obsidian_sync_config() -> None:
         make_handler(cfg)
 
 
-def test_make_handler_creates_fresh_sync_state_when_none() -> None:
+def test_make_handler_creates_fresh_note_sync_when_none() -> None:
     """Test convenience: passing None constructs a fresh state so
     tests don't have to wire one when they don't care about
     cross-handler coordination."""
@@ -975,7 +975,7 @@ def test_make_handler_creates_fresh_sync_state_when_none() -> None:
         ),
         obsidian_sync=ObsidianSyncConfig(vault_path=Path("/tmp/v")),  # nosec B108
     )
-    handler = make_handler(cfg)  # no sync_state
+    handler = make_handler(cfg)  # no note_sync
     # Should construct without raising.
     assert callable(handler)
 
@@ -1006,8 +1006,8 @@ async def test_cold_start_divergence_routes_to_conflict_resolver(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(body="Server body")
-    sync_state = ProjectionSyncState()  # empty — cold start
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()  # empty — cold start
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # Pre-existing file from a prior session, edited by the operator
     # while we were down. Frontmatter looks legit (some prior version),
@@ -1037,9 +1037,9 @@ async def test_cold_start_divergence_routes_to_conflict_resolver(
     assert fm["lithos_version"] == 12  # canonical's version
     assert "Server body" in body
 
-    # sync_state populated by the resolver so subsequent events for
+    # note_sync populated by the resolver so subsequent events for
     # the same doc take the normal path.
-    assert "doc-1" in sync_state.note_body_hashes
+    assert "doc-1" in note_sync.note_body_hashes
 
 
 async def test_cold_start_matching_body_takes_normal_write_path(
@@ -1054,8 +1054,8 @@ async def test_cold_start_matching_body_takes_normal_write_path(
     canonical = _note(body="Same body on both sides")
     lithos = AsyncMock()
     lithos.note_read.return_value = canonical
-    sync_state = ProjectionSyncState()  # empty — cold start
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()  # empty — cold start
+    handler = make_handler(cfg, note_sync=note_sync)
 
     # Pre-render canonical to get the exact body that's about to be
     # on disk too. Stripping a leading-H1 line and trailing whitespace
@@ -1094,7 +1094,7 @@ async def test_cold_start_matching_body_takes_normal_write_path(
 async def test_cold_start_check_does_not_fire_after_first_event(
     tmp_path: Path,
 ) -> None:
-    """After the first event populates ``sync_state.note_body_hashes``
+    """After the first event populates ``note_sync.note_body_hashes``
     for a doc, subsequent events MUST take the normal path even if
     the on-disk file diverges from canonical. (Runtime divergence is
     handled by the dir-watcher → note-push → version_conflict path,
@@ -1102,14 +1102,14 @@ async def test_cold_start_check_does_not_fire_after_first_event(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(body="Server")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
-    # First event populates sync_state.
+    # First event populates note_sync.
     await handler(_event("lithos.note.created"), _ctx(lithos))
     target = _vault_path(tmp_path, "lithos-loom/context.md")
     assert target.exists()
-    baseline_body_hash = sync_state.note_body_hashes["doc-1"]
+    baseline_body_hash = note_sync.note_body_hashes["doc-1"]
 
     # Operator races in with an edit BEFORE we see the next Lithos
     # event (real-runtime case; the dir-watcher would emit and the
@@ -1122,7 +1122,7 @@ async def test_cold_start_check_does_not_fire_after_first_event(
     )
 
     # Second projection event arrives. Cold-start check MUST NOT
-    # fire — sync_state has a baseline for this doc. Normal write
+    # fire — note_sync has a baseline for this doc. Normal write
     # path runs and overwrites the operator's edit. That's the
     # intended behavior: runtime divergence is the dir-watcher's
     # job; if the operator edited and we got a Lithos update at
@@ -1136,9 +1136,9 @@ async def test_cold_start_check_does_not_fire_after_first_event(
     if conflicts_dir.exists():
         assert list(conflicts_dir.iterdir()) == []
 
-    # sync_state body hash advanced to the new canonical (not the
+    # note_sync body hash advanced to the new canonical (not the
     # operator's body), confirming the normal path ran.
-    assert sync_state.note_body_hashes["doc-1"] != baseline_body_hash
+    assert note_sync.note_body_hashes["doc-1"] != baseline_body_hash
 
 
 async def test_cold_start_unreadable_file_falls_through(
@@ -1150,8 +1150,8 @@ async def test_cold_start_unreadable_file_falls_through(
     cfg = _cfg(tmp_path)
     lithos = AsyncMock()
     lithos.note_read.return_value = _note(body="Server")
-    sync_state = ProjectionSyncState()
-    handler = make_handler(cfg, sync_state=sync_state)
+    note_sync = NoteSyncState()
+    handler = make_handler(cfg, note_sync=note_sync)
 
     target = _vault_path(tmp_path, "lithos-loom/context.md")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1170,4 +1170,4 @@ async def test_cold_start_unreadable_file_falls_through(
             target.chmod(0o644)
 
     # The doc was projected.
-    assert "doc-1" in sync_state.note_body_hashes
+    assert "doc-1" in note_sync.note_body_hashes

@@ -259,7 +259,7 @@ def test_compute_body_hash_changes_when_body_changes() -> None:
 
 
 def test_compute_body_hash_returns_bytes() -> None:
-    """Caller stores in ``sync_state.note_content_hashes: dict[str, bytes]``
+    """Caller stores in ``note_sync.note_body_hashes: dict[str, bytes]``
     — raw bytes, not hex, so byte-compare is direct."""
     h = compute_body_hash(render_doc(_note()))
     assert isinstance(h, bytes)
