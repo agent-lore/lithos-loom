@@ -42,7 +42,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Evals | 9 | 975 | 785 | 1 | 2 | 0.67 | 18 (`lithos_loom.evals.review.harness.run_case`) | 2 |
 | GitHub | 1 | 603 | 462 | 4 | 1 | 0.20 | 7 (`lithos_loom.github_client.GitHubClient.update_issue_fields`) | 0 |
 | LithosClient | 1 | 1774 | 1470 | 9 | 1 | 0.10 | 21 (`lithos_loom.lithos_client._parse_note`) | 4 |
-| Plugins | 41 | 10749 | 8650 | 2 | 5 | 0.71 | 92 (`lithos_loom.plugins.story_develop.__main__.main`) | 21 |
+| Plugins | 41 | 10751 | 8652 | 2 | 5 | 0.71 | 92 (`lithos_loom.plugins.story_develop.__main__.main`) | 21 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 289 | 234 | 2 | 4 | 0.67 | 8 (`lithos_loom.render.dep_markers`) | 0 |
 | Runners | 6 | 625 | 485 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
@@ -54,7 +54,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **114**, lines: **32859**, SLOC: **26082**
+- Modules: **114**, lines: **32861**, SLOC: **26084**
 - Largest module: `lithos_loom.lithos_client` (1774 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -86,4 +86,4 @@ Top 10 most complex functions:
 ## Domain & tests
 
 - Domain models: **13** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.53** (50436 test lines / 32859 source lines)
+- Test-to-source line ratio: **1.54** (50471 test lines / 32861 source lines)

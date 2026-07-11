@@ -15,6 +15,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import pytest
+
 from lithos_loom.plugins.story_develop.settings_resolver import (
     ScalarSettings,
     resolve_scalar_settings,
@@ -108,16 +110,49 @@ def test_bad_project_value_frictions_and_keeps_default() -> None:
     )
 
 
-def test_bad_task_value_frictions_and_keeps_project() -> None:
-    settings, frictions = _resolve(
-        {"develop_image": "img:proj"},
-        {"develop_image": 123},  # non-string invalid
-    )
-    assert settings.image == "img:proj"  # the project value is kept
-    assert frictions == (
-        "task metadata.develop_image: image must be a non-empty string "
-        "(got 123); keeping project default",
-    )
+@pytest.mark.parametrize(
+    ("key", "attr", "project_value", "bad_task_value", "expected_friction"),
+    [
+        (
+            "develop_image",
+            "image",
+            "img:proj",
+            123,
+            "task metadata.develop_image: image must be a non-empty string "
+            "(got 123); keeping project default",
+        ),
+        (
+            "develop_test_command",
+            "test_command",
+            "cmd:proj",
+            123,
+            "task metadata.develop_test_command: test_command must be a non-empty "
+            "string (got 123); keeping project default",
+        ),
+        (
+            "develop_test_gate",
+            "test_gate",
+            True,
+            "true",  # a string is not a bool
+            "task metadata.develop_test_gate: must be a boolean true/false "
+            "(got 'true'); keeping project default",
+        ),
+    ],
+)
+def test_bad_task_override_frictions_and_keeps_project_for_every_table_field(
+    key: str,
+    attr: str,
+    project_value: object,
+    bad_task_value: object,
+    expected_friction: str,
+) -> None:
+    # Every _PROJECT_THEN_TASK_FIELDS row shares the invalid-task-override path: the
+    # project value is kept and the "; keeping project default" suffix is appended.
+    # Pinned per row so a future table/key/parser mistake for one field can't slip
+    # past the "byte-identical friction text" claim.
+    settings, frictions = _resolve({key: project_value}, {key: bad_task_value})
+    assert getattr(settings, attr) == project_value  # the project value is kept
+    assert frictions == (expected_friction,)
 
 
 def test_test_gate_rejects_non_bool() -> None:

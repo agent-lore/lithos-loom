@@ -1,4 +1,4 @@
-"""Pure metadata → scalar develop-settings resolution (ARCH-9 slice 2).
+"""I/O-free metadata → scalar develop-settings resolution (ARCH-9 slice 2).
 
 The precedence + parse + friction core for the *scalar* per-run develop settings,
 lifted out of :func:`daemon_io.resolve_project_settings` so it has its own test
@@ -6,8 +6,10 @@ surface. Given two plain dicts — the project context-doc metadata and the task
 metadata — plus a ``frictions`` accumulator, it returns a frozen
 :class:`ScalarSettings`. **No I/O**: the caller fetches the context-doc metadata
 and resolves the bespoke reviewer panel + the review-profile precedence (those need
-Lithos / the host config); this module is the pure part a unit test drives with two
-dicts.
+Lithos / the host config); this module is the I/O-free part a unit test drives with
+two dicts and a ``frictions`` list. It is a value resolver with an *append-only
+friction sink* — not strictly pure: ``frictions`` is mutated by design, because its
+append order is itself part of the preserved contract.
 
 Precedence for the scalar fields (ADR 0003 §2 shape): per-task
 ``task.metadata.develop_*`` > per-project context-doc ``develop_*`` > built-in
