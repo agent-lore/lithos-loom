@@ -15,11 +15,11 @@ lower a budget after improving the code to lock in the gain.
 | `cross_component_edges` | 62 | 62 | 0 |
 | `max_module_lines` | 1774 | 1850 | 76 |
 | `module_cycles` | 1 | 1 | 0 |
-| `modules_over_800_lines` | 6 | 8 | 2 |
+| `modules_over_800_lines` | 6 | 6 | 0 |
 
 ## Import graph
 
-- Cross-component edges: **62**
+- Cross-component edges: **62** (197 module-level)
 - Component cycles: Render ↔ Subscriptions
 - Module cycles: lithos_loom.plugins.story_develop.agent_session ↔ lithos_loom.plugins.story_develop.panel ↔ lithos_loom.plugins.story_develop.rounds
 - Tier-skipping edges (Entrypoints → Foundation): 10 (Children -> Bus, Children -> Config, Children -> GitHub, Children -> LithosClient, Children -> State, Entrypoint -> Bus, Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> LithosClient, Entrypoint -> Supervisor)
@@ -86,4 +86,4 @@ Top 10 most complex functions:
 ## Domain & tests
 
 - Domain models: **13** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.54** (50471 test lines / 32861 source lines)
+- Test-to-source line ratio: **1.55** (50794 test lines / 32861 source lines)
