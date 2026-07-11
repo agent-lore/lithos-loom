@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lithos_loom.github_client import PullRequest
 from lithos_loom.plugins.story_develop import review_resolve
 
 
@@ -82,23 +83,29 @@ def test_unknown_ref_raises(tmp_git_repo: Path) -> None:
 # --- PR form (gh stubbed) ----------------------------------------------------
 
 
+def _stub_pr(number: str) -> PullRequest:
+    return PullRequest(
+        repo="agent-lore/lithos-loom",
+        number=int(number),
+        state="open",
+        merged=False,
+        merged_at=None,
+        merge_commit_sha=None,
+        head_sha="h" * 40,
+        base_ref="main",
+        head_ref="contributor:feature",
+        title="Add a thing",
+        body="This PR adds a thing.\n\n## Acceptance\n- it works",
+    )
+
+
 @pytest.fixture
 def stub_gh(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    # Mirror real ``gh pr view --json`` output: it exposes headRefOid but NOT
-    # baseRefOid (#207). The base sha is derived locally via merge-base, so the
-    # stub records the merge-base call and returns a known sentinel rather than
-    # handing back a base oid gh never provides.
+    # ``_gh_pr_view`` now returns a typed PullRequest. The base sha is still
+    # derived locally via merge-base (never from the PR object's base ref — the
+    # reason #207 is moot), so the stub records the merge-base call.
     calls = SimpleNamespace(fetches=[], merge_base=[])
-    pr = {
-        "headRefOid": "h" * 40,
-        "baseRefName": "main",
-        "headRefName": "contributor:feature",
-        "title": "Add a thing",
-        "body": "This PR adds a thing.\n\n## Acceptance\n- it works",
-    }
-    monkeypatch.setattr(
-        review_resolve, "_gh_pr_view", lambda repo, n: dict(pr, number=n)
-    )
+    monkeypatch.setattr(review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n))
     monkeypatch.setattr(
         review_resolve, "_git_fetch", lambda repo, *refs: calls.fetches.append(refs)
     )
@@ -111,18 +118,11 @@ def stub_gh(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     return calls
 
 
-def test_pr_json_fields_exclude_baserefoid() -> None:
-    # #207: ``gh pr view`` does not expose baseRefOid; requesting it fails the
-    # whole PR-resolution path with "Unknown JSON field". Guard the field set so
-    # a reintroduced baseRefOid is caught here, not in production.
-    assert "baseRefOid" not in review_resolve._PR_JSON_FIELDS
-    assert "headRefOid" in review_resolve._PR_JSON_FIELDS
-
-
 def test_resolves_pr_number(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     change = review_resolve.resolve_change(tmp_path, "#142")
     # base is the merge-base of the base branch and the PR head — the real diff
-    # base GitHub shows — derived locally, not a baseRefOid gh never returned.
+    # base GitHub shows — derived locally, NOT from the PR object's base ref
+    # (which is why #207's missing baseRefOid never mattered).
     assert change.base_sha == "m" * 40
     assert stub_gh.merge_base == [("origin/main", "h" * 40)]
     assert change.head_sha == "h" * 40
@@ -148,3 +148,40 @@ def test_resolves_pr_url(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
 
 def fetches_for(fetches: list, number: str) -> bool:
     return any(any(number in r for r in refs) for refs in fetches)
+
+
+def test_gh_pr_view_resolves_local_owner_then_fetches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # gh pr view always resolved the PR against the LOCAL checkout; the typed
+    # path preserves that — resolve owner/repo from the tree, fetch that repo's
+    # PR by number (the number, not any URL, selects the PR).
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        review_resolve, "repo_name_with_owner", lambda repo: "agent-lore/lithos-loom"
+    )
+
+    def fake_call(op: object) -> PullRequest:
+        # Run the op against a stub client to capture (repo, number).
+        class _Stub:
+            async def get_pull_request(self, repo: str, number: int) -> PullRequest:
+                seen["repo"], seen["number"] = repo, number
+                return _stub_pr(str(number))
+
+        import asyncio
+
+        return asyncio.run(op(_Stub()))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(review_resolve, "github_call", fake_call)
+    pr = review_resolve._gh_pr_view(tmp_path, "142")
+    assert (seen["repo"], seen["number"]) == ("agent-lore/lithos-loom", 142)
+    assert pr.head_sha == "h" * 40
+
+
+def test_gh_pr_view_missing_pr_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(review_resolve, "repo_name_with_owner", lambda repo: "o/r")
+    monkeypatch.setattr(review_resolve, "github_call", lambda op: None)
+    with pytest.raises(RuntimeError, match="PR #999 not found in o/r"):
+        review_resolve._gh_pr_view(tmp_path, "999")

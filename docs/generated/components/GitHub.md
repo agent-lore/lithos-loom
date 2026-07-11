@@ -11,7 +11,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.github_client` | M | 9 | 4 |
+| `lithos_loom.github_client` | L | 11 | 4 |
 
 ## Public API
 
@@ -24,7 +24,9 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - class `GitHubIssueNotFoundError` — Raised when an issue-level endpoint returns 404 (the issue is gone).
 - class `GitHubRateLimitError` — Raised when a rate-limit retry exhausts (currently only on a second 403).
 - class `Issue` — The slice of GitHub's issue payload the watcher cares about.
-- class `PullRequest` — The slice of GitHub's pull-request payload the PR-merge watcher cares about.
+- class `PullRequest` — The pull-request payload two consumers share off the single-PR endpoint.
+- class `PullRequestReview` — A single PR review: the reviewer login + the review-summary body.
+- class `PullRequestReviewComment` — A single inline review comment on a PR.
 - def `parse_marker` — Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
 - def `apply_marker` — Return ``body`` with a canonical marker appended at the end.
 - def `strip_marker` — Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.

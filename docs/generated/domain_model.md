@@ -40,6 +40,23 @@ classDiagram
     +merged bool
     +merged_at datetime | None
     +merge_commit_sha str | None
+    +head_sha str
+    +base_ref str
+    +head_ref str
+    +title str
+    +body str
+  }
+  class PullRequestReview {
+    +author str
+    +body str
+  }
+  class PullRequestReviewComment {
+    +comment_id int
+    +author str
+    +path str
+    +line int | None
+    +body str
+    +in_reply_to_id int | None
   }
 ```
 

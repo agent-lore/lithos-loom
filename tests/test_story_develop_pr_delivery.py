@@ -7,14 +7,15 @@ no Docker.
 
 from __future__ import annotations
 
+import asyncio
 import json
-import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from lithos_loom.github_client import GitHubError
 from lithos_loom.plugins.story_develop import containers, pr_delivery
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
@@ -129,92 +130,101 @@ def test_pr_number_from_url() -> None:
 # --- request_operator_review (#113) --------------------------------------------
 
 
-def _completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout="", stderr=stderr
-    )
+class _RecordingGitHubClient:
+    """A recording GitHubClient double for the request_operator_review branch
+    tests: records request_reviewers / add_assignees calls and raises a preset
+    typed error to drive the self-author-422 fallback logic. ``github_call(op)``
+    runs ``op`` against it (see :func:`_patch_github_call`)."""
+
+    def __init__(
+        self,
+        *,
+        request_error: GitHubError | None = None,
+        assign_error: GitHubError | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, str, int, tuple[str, ...]]] = []
+        self._request_error = request_error
+        self._assign_error = assign_error
+
+    async def request_reviewers(
+        self, repo: str, number: int, reviewers: list[str]
+    ) -> None:
+        self.calls.append(("request_reviewers", repo, number, tuple(reviewers)))
+        if self._request_error is not None:
+            raise self._request_error
+
+    async def add_assignees(self, repo: str, number: int, assignees: list[str]) -> None:
+        self.calls.append(("add_assignees", repo, number, tuple(assignees)))
+        if self._assign_error is not None:
+            raise self._assign_error
+
+
+def _patch_github_call(
+    monkeypatch: pytest.MonkeyPatch, fake: _RecordingGitHubClient
+) -> None:
+    """Route ``pr_delivery.github_call(op)`` through the recording fake client."""
+    monkeypatch.setattr(pr_delivery, "github_call", lambda op: asyncio.run(op(fake)))
 
 
 def test_request_operator_review_requests_reviewer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
-
-    def fake_run(args, *, cwd, timeout=120):
-        calls.append(" ".join(args))
-        return _completed(0)
-
-    monkeypatch.setattr(pr_delivery, "_run", fake_run)
-    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave")
-    assert out == "review_requested"
-    assert any("requested_reviewers" in c and "dave" in c for c in calls)
-    assert not any("assignees" in c for c in calls)
+    fake = _RecordingGitHubClient()
+    _patch_github_call(monkeypatch, fake)
+    assert pr_delivery.request_operator_review("o/r", 7, "dave") == "review_requested"
+    assert fake.calls == [("request_reviewers", "o/r", 7, ("dave",))]
 
 
 def test_request_operator_review_assigns_when_author_422(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
-
-    def fake_run(args, *, cwd, timeout=120):
-        joined = " ".join(args)
-        calls.append(joined)
-        if "requested_reviewers" in joined:
-            return _completed(
-                1, "HTTP 422: Review cannot be requested from pull request author."
-            )
-        return _completed(0)  # assignees
-
-    monkeypatch.setattr(pr_delivery, "_run", fake_run)
-    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave")
-    assert out == "assigned"
-    assert any("issues/7/assignees" in c and "dave" in c for c in calls)
+    fake = _RecordingGitHubClient(
+        request_error=GitHubError(
+            "GitHub 422 for o/r: Review cannot be requested from pull request author."
+        )
+    )
+    _patch_github_call(monkeypatch, fake)
+    assert pr_delivery.request_operator_review("o/r", 7, "dave") == "assigned"
+    assert ("add_assignees", "o/r", 7, ("dave",)) in fake.calls
 
 
 def test_request_operator_review_non_author_failure_does_not_assign(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
-
-    def fake_run(args, *, cwd, timeout=120):
-        calls.append(" ".join(args))
-        return _completed(1, "HTTP 404: Not Found")
-
-    monkeypatch.setattr(pr_delivery, "_run", fake_run)
-    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave")
-    assert out == "failed"
-    assert not any("assignees" in c for c in calls)
+    fake = _RecordingGitHubClient(
+        request_error=GitHubError("GitHub 404 for o/r: Not Found")
+    )
+    _patch_github_call(monkeypatch, fake)
+    assert pr_delivery.request_operator_review("o/r", 7, "dave") == "failed"
+    assert not any(c[0] == "add_assignees" for c in fake.calls)
 
 
 def test_request_operator_review_non_author_422_does_not_assign(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A 422 that is NOT the self-author case (e.g. a non-collaborator / bad
     # login) must surface as a real failure, not a silent assignee downgrade.
-    calls: list[str] = []
-
-    def fake_run(args, *, cwd, timeout=120):
-        calls.append(" ".join(args))
-        return _completed(
-            1, "HTTP 422: Reviews may only be requested from collaborators."
+    fake = _RecordingGitHubClient(
+        request_error=GitHubError(
+            "GitHub 422 for o/r: Reviews may only be requested from collaborators."
         )
-
-    monkeypatch.setattr(pr_delivery, "_run", fake_run)
-    out = pr_delivery.request_operator_review(tmp_path, "o/r", 7, "ghost")
-    assert out == "failed"
-    assert not any("assignees" in c for c in calls)
+    )
+    _patch_github_call(monkeypatch, fake)
+    assert pr_delivery.request_operator_review("o/r", 7, "ghost") == "failed"
+    assert not any(c[0] == "add_assignees" for c in fake.calls)
 
 
 def test_request_operator_review_failed_assign_returns_failed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(args, *, cwd, timeout=120):
-        if "requested_reviewers" in " ".join(args):
-            return _completed(1, "422 pull request author")
-        return _completed(1, "assign exploded")
-
-    monkeypatch.setattr(pr_delivery, "_run", fake_run)
-    assert pr_delivery.request_operator_review(tmp_path, "o/r", 7, "dave") == "failed"
+    fake = _RecordingGitHubClient(
+        request_error=GitHubError(
+            "GitHub 422 for o/r: cannot be requested from pull request author"
+        ),
+        assign_error=GitHubError("GitHub 500 for o/r: assign exploded"),
+    )
+    _patch_github_call(monkeypatch, fake)
+    assert pr_delivery.request_operator_review("o/r", 7, "dave") == "failed"
 
 
 # --- deliver() orchestration ------------------------------------------------------
@@ -313,12 +323,12 @@ def _install(
     monkeypatch.setattr(
         pr_delivery,
         "post_thread_reply",
-        lambda wt, repo, pr, cid, body: state["replies"].append((cid, body)) or True,
+        lambda repo, pr, cid, body: state["replies"].append((cid, body)) or True,
     )
     monkeypatch.setattr(
         pr_delivery,
         "post_pr_comment",
-        lambda wt, pr, body: state["pr_comments"].append(body) or True,
+        lambda repo, pr, body: state["pr_comments"].append(body) or True,
     )
 
     def fake_start(run_cmd):
@@ -410,7 +420,7 @@ def test_deliver_notifies_operator_when_configured(
     monkeypatch.setattr(
         pr_delivery,
         "request_operator_review",
-        lambda wt, repo, pr_number, login: (
+        lambda repo, pr_number, login: (
             calls.append((repo, pr_number, login)) or "review_requested"
         ),
     )
@@ -718,7 +728,7 @@ def test_settled_fetch_waits_for_lagging_comments(
     arrived = [CopilotComment(comment_id=1, path="a.py", line=1, body="x")]
     clock = {"t": 0.0}
 
-    def fake_fetch(wt, repo, pr):
+    def fake_fetch(repo, pr):
         calls["n"] += 1
         return arrived if calls["n"] >= 3 else []
 
@@ -730,7 +740,7 @@ def test_settled_fetch_waits_for_lagging_comments(
 
     monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
     out, settled = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
+        "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
     )
     assert out == arrived
     assert settled is True  # comments arrived + stabilised before the deadline
@@ -744,13 +754,13 @@ def test_settled_fetch_zero_expected_returns_immediately(
 ) -> None:
     calls = {"n": 0}
 
-    def fake_fetch(wt, repo, pr):
+    def fake_fetch(repo, pr):
         calls["n"] += 1
         return []
 
     monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
     out, settled = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=0, grace_seconds=120
+        "o/r", 1, expected=0, grace_seconds=120
     )
     assert out == [] and calls["n"] == 1  # no pointless polling
     assert settled is True  # expected 0 → genuinely nothing to wait for
@@ -768,7 +778,7 @@ def test_settled_fetch_grace_bounds_the_wait(
 
     monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
     out, settled = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=2, grace_seconds=30
+        "o/r", 1, expected=2, grace_seconds=30
     )
     assert out == []  # gave up after the grace window
     assert settled is False  # deadline hit before the comments arrived
@@ -785,7 +795,7 @@ def test_settled_fetch_catches_late_arriving_comments(
     clock = {"t": 0.0}
 
     # c1 arrives at t=5 (poll 2), c2 arrives at t=15 (poll 4)
-    def fake_fetch(wt, repo, pr):
+    def fake_fetch(repo, pr):
         if clock["t"] < 5:
             return []
         if clock["t"] < 15:
@@ -802,7 +812,7 @@ def test_settled_fetch_catches_late_arriving_comments(
 
     # expected=1 — old code would have returned [c1] immediately at t=5
     out, settled = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
+        "o/r", 1, expected=1, grace_seconds=120, settle_seconds=15
     )
     assert len(out) == 2  # settle window caught c2
     assert settled is True
@@ -817,7 +827,7 @@ def test_settled_fetch_unknown_expected_waits_for_stability(
     c2 = CopilotComment(comment_id=2, path="b.py", line=2, body="y")
     clock = {"t": 0.0}
 
-    def fake_fetch(wt, repo, pr):
+    def fake_fetch(repo, pr):
         if clock["t"] < 5:
             return []
         if clock["t"] < 10:
@@ -833,7 +843,7 @@ def test_settled_fetch_unknown_expected_waits_for_stability(
     monkeypatch.setattr(pr_delivery.time, "sleep", fake_sleep)
 
     out, settled = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=-1, grace_seconds=120, settle_seconds=15
+        "o/r", 1, expected=-1, grace_seconds=120, settle_seconds=15
     )
     # c2 arrived at t=10, settle window of 15 s starts THEN, so returns at ~t=25
     assert len(out) == 2
@@ -850,7 +860,7 @@ def test_settled_fetch_unknown_expected_unstable_at_deadline_not_settled(
     c2 = CopilotComment(comment_id=2, path="b.py", line=2, body="y")
     clock = {"t": 0.0}
 
-    def fake_fetch(wt, repo, pr):
+    def fake_fetch(repo, pr):
         return [c1] if clock["t"] < 10 else [c1, c2]  # changes at t=10
 
     monkeypatch.setattr(pr_delivery, "fetch_copilot_comments", fake_fetch)
@@ -860,7 +870,7 @@ def test_settled_fetch_unknown_expected_unstable_at_deadline_not_settled(
     )
     # deadline t=20; count last changed at t=10, so only 10 s stable (< 15)
     out, settled = pr_delivery.fetch_copilot_comments_settled(
-        tmp_path, "o/r", 1, expected=-1, grace_seconds=20, settle_seconds=15
+        "o/r", 1, expected=-1, grace_seconds=20, settle_seconds=15
     )
     assert len(out) == 2
     assert settled is False  # never stabilised within the window
