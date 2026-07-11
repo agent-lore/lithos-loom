@@ -15,11 +15,11 @@ lower a budget after improving the code to lock in the gain.
 | `cross_component_edges` | 62 | 62 | 0 |
 | `max_module_lines` | 1774 | 1850 | 76 |
 | `module_cycles` | 1 | 1 | 0 |
-| `modules_over_800_lines` | 6 | 8 | 2 |
+| `modules_over_800_lines` | 7 | 8 | 1 |
 
 ## Import graph
 
-- Cross-component edges: **62**
+- Cross-component edges: **62** (197 module-level)
 - Component cycles: Render ↔ Subscriptions
 - Module cycles: lithos_loom.plugins.story_develop.agent_session ↔ lithos_loom.plugins.story_develop.panel ↔ lithos_loom.plugins.story_develop.rounds
 - Tier-skipping edges (Entrypoints → Foundation): 10 (Children -> Bus, Children -> Config, Children -> GitHub, Children -> LithosClient, Children -> State, Entrypoint -> Bus, Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> LithosClient, Entrypoint -> Supervisor)
@@ -42,7 +42,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Evals | 9 | 975 | 785 | 1 | 2 | 0.67 | 18 (`lithos_loom.evals.review.harness.run_case`) | 2 |
 | GitHub | 1 | 603 | 462 | 4 | 1 | 0.20 | 7 (`lithos_loom.github_client.GitHubClient.update_issue_fields`) | 0 |
 | LithosClient | 1 | 1774 | 1470 | 9 | 1 | 0.10 | 21 (`lithos_loom.lithos_client._parse_note`) | 4 |
-| Plugins | 41 | 10751 | 8652 | 2 | 5 | 0.71 | 92 (`lithos_loom.plugins.story_develop.__main__.main`) | 21 |
+| Plugins | 40 | 10596 | 8523 | 2 | 5 | 0.71 | 92 (`lithos_loom.plugins.story_develop.__main__.main`) | 22 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 289 | 234 | 2 | 4 | 0.67 | 8 (`lithos_loom.render.dep_markers`) | 0 |
 | Runners | 6 | 625 | 485 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
@@ -54,19 +54,20 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **114**, lines: **32861**, SLOC: **26084**
+- Modules: **113**, lines: **32706**, SLOC: **25955**
 - Largest module: `lithos_loom.lithos_client` (1774 lines)
-- Modules over 800 lines: **6**
+- Modules over 800 lines: **7**
   - `lithos_loom.cli.develop`
   - `lithos_loom.cli.project`
   - `lithos_loom.config`
   - `lithos_loom.lithos_client`
   - `lithos_loom.plugins.story_develop.__main__`
+  - `lithos_loom.plugins.story_develop.daemon_io`
   - `lithos_loom.plugins.story_develop.pr_delivery`
 
 ## Complexity
 
-- Functions: **849**, cyclomatic > 10: **66**
+- Functions: **840**, cyclomatic > 10: **67**
 
 Top 10 most complex functions:
 
@@ -75,15 +76,15 @@ Top 10 most complex functions:
 | 92 | `lithos_loom.plugins.story_develop.__main__.main` |
 | 49 | `lithos_loom.cli.project.import_project` |
 | 44 | `lithos_loom.children.obsidian_sync._amain` |
+| 43 | `lithos_loom.plugins.story_develop.daemon_io.resolve_project_settings` |
 | 31 | `lithos_loom.plugins.story_develop.develop.develop` |
 | 28 | `lithos_loom.config._parse_obsidian_sync` |
 | 28 | `lithos_loom.plugins.story_develop.pr_delivery._deliver_after_open` |
 | 26 | `lithos_loom.plugins.story_develop.__main__._daemon_main` |
 | 25 | `lithos_loom.cli.develop._outcome_line` |
 | 23 | `lithos_loom.main._print_dry_run_report` |
-| 22 | `lithos_loom.cli.project.project_regenerate_done` |
 
 ## Domain & tests
 
 - Domain models: **13** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.54** (50471 test lines / 32861 source lines)
+- Test-to-source line ratio: **1.55** (50553 test lines / 32706 source lines)

@@ -5,6 +5,10 @@
 
 ```mermaid
 graph TD
+  subgraph tier_Entrypoints["Entrypoints"]
+    Children
+    Entrypoint
+  end
   subgraph tier_Core["Core"]
     Cli
     Doctor
@@ -13,10 +17,6 @@ graph TD
     Render
     Sources
     Subscriptions
-  end
-  subgraph tier_Entrypoints["Entrypoints"]
-    Children
-    Entrypoint
   end
   subgraph tier_Foundation["Foundation"]
     Bus
