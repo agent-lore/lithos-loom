@@ -45,6 +45,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | M | 3 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
+| `lithos_loom.plugins.story_develop.settings_resolver` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
 | `lithos_loom.plugins.story_develop.turns` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_implement` | XS | 0 | 0 |
@@ -286,6 +287,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `delivered_pr_url` — The delivered PR url for an approved run, or ``None`` (#188).
 - def `capture_outcome` — Snapshot the terminal outcome into *outcome* from the already-read *state*.
 - def `is_clean_success` — Whether the run reached the only success status (``approved``) **and** fully delivered.
+
+### `lithos_loom.plugins.story_develop.settings_resolver`
+- class `ScalarSettings` — The scalar develop settings resolved from metadata.
+- def `resolve_scalar_settings` — Resolve every scalar develop setting from project + task metadata.
 
 ### `lithos_loom.plugins.story_develop.test_gate`
 - class `GateResult` — Outcome of one test-gate run against a round commit.

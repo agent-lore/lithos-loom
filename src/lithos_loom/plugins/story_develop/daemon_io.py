@@ -38,16 +38,14 @@ from .config import (
     DEFAULT_CODER_TOOL,
     DEFAULT_REVIEWER_NAME,
     ReviewerSpec,
-    parse_bool_setting,
     parse_effort,
-    parse_image,
     parse_model,
     parse_reviewer_entry,
-    parse_test_command,
 )
 from .lithos_io import AGENT_ID, TaskContext
 from .personas import canonical_personas
 from .profiles import DEFAULT_PROFILE_NAME, get_profile, resolve_profile
+from .settings_resolver import resolve_scalar_settings
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -285,169 +283,28 @@ def resolve_project_settings(
         _selection = meta.get("develop_default_reviewers")
     reviewers_explicit = isinstance(_selection, list) and bool(_selection)
 
-    coder = DEFAULT_CODER_TOOL
-    coder_model: str | None = None
-    coder_effort: str | None = None
-    raw_coder = meta.get("develop_coder")
-    if isinstance(raw_coder, dict):
-        raw_tool = raw_coder.get("tool")
-        if isinstance(raw_tool, str):
-            coder = raw_tool
-        elif raw_tool is not None:
-            frictions.append("develop_coder.tool must be a string; using default")
-        # model/effort are optional within develop_coder (#93); each is
-        # validated independently so one bad value doesn't drop the other.
-        try:
-            coder_model = parse_model(
-                raw_coder.get("model"), where="develop_coder.model"
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; ignoring")
-        try:
-            coder_effort = parse_effort(
-                raw_coder.get("effort"), where="develop_coder.effort"
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; ignoring")
-    elif raw_coder is not None:
-        frictions.append(
-            "develop_coder must be an object with optional tool/model/effort; ignoring"
-        )
-
-    # Per-task override (#93): a task flags "this one is cheap / needs deep
-    # reasoning" by pinning the CODER's model/effort. Reviewer models stay
-    # project policy (per-reviewer in develop_reviewers) — a blanket per-task
-    # downgrade must never silently weaken a strict security reviewer.
-    if task_metadata.get("develop_model") is not None:
-        try:
-            coder_model = parse_model(
-                task_metadata["develop_model"], where="task metadata.develop_model"
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; keeping project default")
-    if task_metadata.get("develop_effort") is not None:
-        try:
-            coder_effort = parse_effort(
-                task_metadata["develop_effort"],
-                where="task metadata.develop_effort",
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; keeping project default")
-
-    # Per-project sandbox image (``develop_image``), with an optional per-task
-    # override — a single task can opt into a heavier / specialised image
-    # (e.g. one carrying a GPU toolchain) without changing project policy.
-    # Per-task wins; both degrade to friction on a bad value so resolution
-    # never fails the run.
-    image: str | None = None
-    try:
-        image = parse_image(meta.get("develop_image"), where="develop_image")
-    except ValueError as exc:
-        frictions.append(f"{exc}; ignoring")
-    if task_metadata.get("develop_image") is not None:
-        try:
-            image = parse_image(
-                task_metadata["develop_image"], where="task metadata.develop_image"
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; keeping project default")
-
-    # Per-project test-gate overrides (#127), each with an optional per-task
-    # override and a friction (never a failure) on a bad value — mirroring
-    # ``develop_image``. ``develop_test_command`` is trusted as-is by the gate
-    # (no auto-detection); ``develop_test_gate`` is a boolean. ``None`` at every
-    # layer means "inherit the route-level flag".
-    test_command: str | None = None
-    try:
-        test_command = parse_test_command(
-            meta.get("develop_test_command"), where="develop_test_command"
-        )
-    except ValueError as exc:
-        frictions.append(f"{exc}; ignoring")
-    if task_metadata.get("develop_test_command") is not None:
-        try:
-            test_command = parse_test_command(
-                task_metadata["develop_test_command"],
-                where="task metadata.develop_test_command",
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; keeping project default")
-
-    test_gate: bool | None = None
-    try:
-        test_gate = parse_bool_setting(
-            meta.get("develop_test_gate"), where="develop_test_gate"
-        )
-    except ValueError as exc:
-        frictions.append(f"{exc}; ignoring")
-    if task_metadata.get("develop_test_gate") is not None:
-        try:
-            test_gate = parse_bool_setting(
-                task_metadata["develop_test_gate"],
-                where="task metadata.develop_test_gate",
-            )
-        except ValueError as exc:
-            frictions.append(f"{exc}; keeping project default")
-
-    # #140: `develop_block_on_red` is removed — the `test` check's blocking is now
-    # the resolved review profile's `ProfileCheck("test", ...)` (single source of
-    # truth). A lingering key is inert; surface a one-shot deprecation friction so
-    # the change in behaviour (the profile floor governs test) is not silent.
-    if (
-        meta.get("develop_block_on_red") is not None
-        or task_metadata.get("develop_block_on_red") is not None
-    ):
-        frictions.append(
-            "develop_block_on_red is removed and ignored; the `test` check's blocking "
-            "is now governed by the review profile (its ProfileCheck state) — use "
-            "develop_review_profile / develop_test_gate instead"
-        )
-
-    raw_chain = meta.get("develop_fallback_chain")
-    chain: tuple[str, ...] = ()
-    if isinstance(raw_chain, list) and all(isinstance(t, str) for t in raw_chain):
-        chain = tuple(raw_chain)
-    elif raw_chain is not None:
-        frictions.append("develop_fallback_chain must be a list of strings; ignoring")
-
-    max_rounds = meta.get("develop_max_rounds")
-    if max_rounds is not None and (not isinstance(max_rounds, int) or max_rounds < 1):
-        frictions.append(f"develop_max_rounds {max_rounds!r} invalid; ignoring")
-        max_rounds = None
-
-    max_cost = meta.get("develop_max_cost_usd")
-    if max_cost is not None and (
-        not isinstance(max_cost, (int, float)) or max_cost <= 0
-    ):
-        frictions.append(f"develop_max_cost_usd {max_cost!r} invalid; ignoring")
-        max_cost = None
-
-    # Review Profile (#139): carry the project-layer name only; the full
-    # task > project > host resolution needs the host policy and runs in
-    # :func:`apply_review_profile` (this resolver stays host-config-free).
-    raw_profile = meta.get("develop_review_profile")
-    review_profile_project: str | None = None
-    if isinstance(raw_profile, str) and raw_profile.strip():
-        review_profile_project = raw_profile.strip()
-    elif raw_profile is not None:
-        frictions.append(
-            f"develop_review_profile {raw_profile!r} invalid; ignoring "
-            "(must be a non-empty string)"
-        )
+    # The scalar per-run settings (coder tool/model/effort, image, test-gate,
+    # fallback chain, round/cost caps, project-layer review-profile name) — their
+    # precedence + parse + friction resolution is the pure, table-driven
+    # :func:`settings_resolver.resolve_scalar_settings` (ARCH-9). It appends its
+    # frictions to the shared list in the same order this function always used; the
+    # reviewer panel (above) and the review-profile precedence
+    # (:func:`apply_review_profile`) stay bespoke here.
+    scalars = resolve_scalar_settings(meta, task_metadata, frictions)
 
     return ProjectDevelopSettings(
         reviewers=reviewers,
         reviewers_explicit=reviewers_explicit,
-        coder=coder,
-        coder_model=coder_model,
-        coder_effort=coder_effort,
-        fallback_chain=chain,
-        max_rounds=max_rounds,
-        max_cost_usd=float(max_cost) if max_cost is not None else None,
-        image=image,
-        test_command=test_command,
-        test_gate=test_gate,
-        review_profile_project=review_profile_project,
+        coder=scalars.coder,
+        coder_model=scalars.coder_model,
+        coder_effort=scalars.coder_effort,
+        fallback_chain=scalars.fallback_chain,
+        max_rounds=scalars.max_rounds,
+        max_cost_usd=scalars.max_cost_usd,
+        image=scalars.image,
+        test_command=scalars.test_command,
+        test_gate=scalars.test_gate,
+        review_profile_project=scalars.review_profile_project,
         frictions=tuple(frictions),
     )
 
