@@ -88,7 +88,7 @@ Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "St
 cross_component_edges  = 62   # measured 2026-07; direction: down
 component_cycles       = 1    # Render <-> Subscriptions; goal: 0
 module_cycles          = 1    # agent_session <-> panel <-> rounds SCC; goal: 0
-modules_over_800_lines = 8    # existing god modules; direction: down, no new ones
+modules_over_800_lines = 6  # 8->6 via ARCH-9 slices 1-2; direction: down
 max_module_lines       = 1850 # stop-loss; largest today is lithos_client at 1774
 
 # Domain class diagram: the GitHub/task data types are the domain entities.

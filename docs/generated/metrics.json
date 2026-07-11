@@ -52,7 +52,7 @@
         "max_function": "lithos_loom.lithos_client._parse_note"
       },
       "Plugins": {
-        "functions_over_10": 22,
+        "functions_over_10": 21,
         "max_complexity": 92,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
@@ -97,7 +97,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 67,
+    "functions_over_10": 66,
     "top_functions": [
       {
         "complexity": 92,
@@ -110,10 +110,6 @@
       {
         "complexity": 44,
         "qualname": "lithos_loom.children.obsidian_sync._amain"
-      },
-      {
-        "complexity": 43,
-        "qualname": "lithos_loom.plugins.story_develop.daemon_io.resolve_project_settings"
       },
       {
         "complexity": 31,
@@ -138,9 +134,13 @@
       {
         "complexity": 23,
         "qualname": "lithos_loom.main._print_dry_run_report"
+      },
+      {
+        "complexity": 22,
+        "qualname": "lithos_loom.cli.project.project_regenerate_done"
       }
     ],
-    "total_functions": 840
+    "total_functions": 849
   },
   "domain": {
     "associations": 2,
@@ -384,14 +384,14 @@
         "sloc": 1470
       },
       "Plugins": {
-        "classes": 47,
-        "functions": 297,
+        "classes": 49,
+        "functions": 306,
         "largest_module": "lithos_loom.plugins.story_develop.pr_delivery",
         "largest_module_lines": 981,
-        "lines": 10596,
-        "modules": 40,
-        "public_symbols": 185,
-        "sloc": 8523
+        "lines": 10751,
+        "modules": 41,
+        "public_symbols": 187,
+        "sloc": 8652
       },
       "ProjectContext": {
         "classes": 0,
@@ -482,16 +482,15 @@
       "lithos_loom.config",
       "lithos_loom.lithos_client",
       "lithos_loom.plugins.story_develop.__main__",
-      "lithos_loom.plugins.story_develop.daemon_io",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 32706,
-    "total_modules": 113,
-    "total_sloc": 25955
+    "total_lines": 32861,
+    "total_modules": 114,
+    "total_sloc": 26084
   },
   "tests": {
     "ratio": 1.55,
-    "src_lines": 32706,
-    "test_lines": 50553
+    "src_lines": 32861,
+    "test_lines": 50794
   }
 }
