@@ -190,17 +190,18 @@ async def _run_task_graph_checks_async(cfg: LoomConfig) -> list[CheckResult]:
 
     ``LithosClient.__aenter__`` surfaces a transport failure as whatever the
     MCP/anyio connect raised — a plain ``OSError`` or, when it happens inside a
-    task group, a ``BaseExceptionGroup`` wrapping (e.g.) ``httpx.ConnectError``
-    — so the catch spans both, plus ``LithosClientError``. ``BaseException``
-    (``KeyboardInterrupt`` / ``SystemExit`` / bare ``CancelledError``) still
-    propagates.
+    task group, an ``ExceptionGroup`` wrapping (e.g.) ``httpx.ConnectError`` —
+    so the catch spans both, plus ``LithosClientError``. We catch
+    ``ExceptionGroup`` (all-``Exception`` leaves) rather than the wider
+    ``BaseExceptionGroup`` so a group carrying ``KeyboardInterrupt`` /
+    ``SystemExit`` / bare ``CancelledError`` still propagates.
     """
     try:
         async with LithosClient(
             cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
         ) as client:
             return await run_task_graph_checks(client, agent=cfg.orchestrator.agent_id)
-    except (LithosClientError, OSError, BaseExceptionGroup) as exc:
+    except (LithosClientError, OSError, ExceptionGroup) as exc:
         return [
             CheckResult(
                 "lithos_unreachable",
