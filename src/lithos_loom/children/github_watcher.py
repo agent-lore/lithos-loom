@@ -28,7 +28,7 @@ import httpx
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.children import _boot
-from lithos_loom.config import LoomConfig, load_config
+from lithos_loom.config import LoomConfig, RetryPolicy, load_config
 from lithos_loom.cursor_store import CursorStore
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.lithos_client import LithosClient, TaskClient
@@ -49,8 +49,24 @@ from lithos_loom.subscriptions._github_issue_sync import (
 from lithos_loom.subscriptions._github_issue_sync import (
     make_handler as make_github_issue_sync_handler,
 )
+from lithos_loom.subscriptions.retry import run_with_retry
 
 logger = logging.getLogger(__name__)
+
+# Retry policy for the Lithos→GH push consumer. 8 attempts with a 60s cap
+# give inter-attempt waits of 2, 4, 8, 16, 32, 60, 60s (≈3 minutes total
+# before drop) — wide enough to absorb realistic short outages and GH 5xx
+# flares. Outages longer than this fall through to the periodic reconcile
+# sweep + LithosEventStream bootstrap replay on restart. (PR-review
+# finding 3, round 4, 2026-05-30: a 3-attempt cap discarded events after
+# only ~6s, losing anything longer than a transient hiccup.)
+# Public so the backoff curve is a pinned contract (tested directly).
+PUSH_RETRY = RetryPolicy(
+    attempts=8,
+    initial_delay_seconds=2.0,
+    max_delay_seconds=60.0,
+    backoff="exponential",
+)
 
 
 async def _run_reconcile_pass(
@@ -322,62 +338,61 @@ async def _amain(cfg: LoomConfig) -> int:
             async def consume_push() -> None:
                 """Drain the Lithos→GH subscription with transient-error retry.
 
-                NOTE (ARCH-6 follow-up #237): this retry/backoff loop
-                duplicates ``SubscriptionRunner._dispatch_with_retry``. It
-                can't route through the bus (fire-and-forget would drop on a
-                full queue and advance the cursor past a lost reconcile), so
-                consolidation means lifting the retry primitive out of the
-                runner — tracked separately.
-
                 Push handler raises on transient GH errors (5xx, network,
                 rate-limit exhausted). Permanent errors (auth, 404) are
-                logged + swallowed inside the handler. Here we retry
-                transient failures with exponential backoff capped at
-                ``max_delay_seconds``. With 8 attempts and a 60s cap the
-                inter-attempt waits are 2, 4, 8, 16, 32, 60, 60s
-                (182s ≈ 3 minutes total before drop) — wide enough to
-                absorb realistic short outages and GH 5xx flares
-                (PR-review finding 3, round 4, 2026-05-30: round-3's
-                3-attempt cap discarded events after only ~6 seconds,
-                which lost work to anything longer than a transient
-                hiccup). Outages longer than this fall through to the
-                periodic reconciliation sweep + ``LithosEventStream``
-                bootstrap replay window on daemon restart.
+                logged + swallowed inside the handler. Transient failures
+                retry with exponential backoff via the shared
+                ``run_with_retry`` primitive under ``PUSH_RETRY``; on
+                exhaustion the event is dropped (a ``[Friction]`` warning)
+                and recovered by the periodic reconcile sweep + restart
+                replay.
+
+                The retry loop is shared with ``SubscriptionRunner`` (#237),
+                but the consumer stays hand-wired: per ADR 0007 routing this
+                through the fire-and-forget bus would drop on a full queue
+                and advance the cursor past a lost reconcile.
                 """
-                max_attempts = 8
-                max_delay_seconds = 60
+
+                def _log_retry(
+                    attempt: int, exc: Exception, next_delay: float | None
+                ) -> None:
+                    if next_delay is None:
+                        return
+                    logger.info(
+                        "github-watcher: push handler attempt %d/%d "
+                        "failed (%s); retrying in %ds",
+                        attempt + 1,
+                        PUSH_RETRY.attempts,
+                        type(exc).__name__,
+                        int(next_delay),
+                    )
+
                 while True:
                     event = await push_sub.queue.get()
-                    for attempt in range(1, max_attempts + 1):
-                        try:
-                            await push_handler(event, ctx)
-                            break
-                        except Exception as exc:
-                            if attempt >= max_attempts:
-                                logger.warning(
-                                    "[Friction] github-watcher: push handler "
-                                    "exhausted %d attempts on %s "
-                                    "(%s: %s); dropping (outage outlasts "
-                                    "retry budget — periodic reconcile "
-                                    "sweep within reconcile_interval_minutes "
-                                    "or next daemon restart within "
-                                    "resolved_replay_days will replay it)",
-                                    max_attempts,
-                                    event.type,
-                                    type(exc).__name__,
-                                    exc,
-                                )
-                                break
-                            delay = min(2**attempt, max_delay_seconds)
-                            logger.info(
-                                "github-watcher: push handler attempt %d/%d "
-                                "failed (%s); retrying in %ds",
-                                attempt,
-                                max_attempts,
-                                type(exc).__name__,
-                                delay,
-                            )
-                            await asyncio.sleep(delay)
+
+                    async def _drop(
+                        exc: BaseException | None, event: Event = event
+                    ) -> None:
+                        logger.warning(
+                            "[Friction] github-watcher: push handler "
+                            "exhausted %d attempts on %s "
+                            "(%s: %s); dropping (outage outlasts "
+                            "retry budget — periodic reconcile "
+                            "sweep within reconcile_interval_minutes "
+                            "or next daemon restart within "
+                            "resolved_replay_days will replay it)",
+                            PUSH_RETRY.attempts,
+                            event.type,
+                            type(exc).__name__ if exc else "?",
+                            exc,
+                        )
+
+                    await run_with_retry(
+                        lambda event=event: push_handler(event, ctx),
+                        PUSH_RETRY,
+                        on_attempt_failed=_log_retry,
+                        on_give_up=_drop,
+                    )
 
             reconcile_seconds = gh_cfg.reconcile_interval_minutes * 60
 
