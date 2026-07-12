@@ -347,6 +347,29 @@ async def test_fake_task_ready_filters_by_tags_and_metadata() -> None:
     assert [t.id for t in ready] == [a]
 
 
+async def test_fake_edge_upsert_is_idempotent_and_replaces_metadata() -> None:
+    """The real tool is an *upsert*: a repeat on the same (from, to, type)
+    updates the one edge (full metadata replace) instead of duplicating it.
+    Verified against live Lithos: second call's metadata wins, one edge left."""
+    client = FakeLithosClient(agent_id="a1")
+    a = await client.task_create(title="a")
+    b = await client.task_create(title="b")
+
+    await client.task_edge_upsert(
+        from_task_id=a, to_task_id=b, type="blocks", metadata={"round": 1, "keep": "x"}
+    )
+    await client.task_edge_upsert(
+        from_task_id=a, to_task_id=b, type="blocks", metadata={"round": 2}
+    )
+
+    edges = await client.task_edge_list(task_id=b)
+    assert len(edges) == 1  # not duplicated
+    assert edges[0].metadata == {"round": 2}  # full replace, not merge/preserve
+    # And task_blocked reports a single reason, not two.
+    blocked = await client.task_blocked()
+    assert len(blocked[0].blockers) == 1
+
+
 async def test_fake_edge_upsert_rejects_self_edge() -> None:
     client = FakeLithosClient(agent_id="a1")
     t = await client.task_create(title="t")

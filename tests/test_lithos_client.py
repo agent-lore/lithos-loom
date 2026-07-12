@@ -2265,6 +2265,29 @@ async def test_task_blocked_defaults_missing_blocker_and_task_fields() -> None:
     assert bt.task.task_type == "task"  # default when absent
 
 
+async def test_task_blocked_defaults_missing_blockers_list_to_empty() -> None:
+    """A task entry without a ``blockers`` key parses to an empty tuple
+    rather than raising — defensive against a lean/edge-case response."""
+    client, _ = _client_with_session(
+        _content(
+            {
+                "tasks": [
+                    {
+                        "id": "dep",
+                        "title": "d",
+                        "status": "open",
+                        "tags": [],
+                        "metadata": {},
+                    }
+                ]
+            }
+        )
+    )
+    bt = (await client.task_blocked())[0]
+    assert bt.task.id == "dep"
+    assert bt.blockers == ()
+
+
 async def test_task_blocked_raises_when_tasks_key_missing() -> None:
     client, _ = _client_with_session(_content({"unexpected": "shape"}))
     with pytest.raises(LithosClientError) as exc:

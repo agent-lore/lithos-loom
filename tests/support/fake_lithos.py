@@ -632,15 +632,25 @@ class FakeLithosClient:
                 raise LithosClientError(
                     "edge_cycle", "blocks edge would create a dependency cycle"
                 )
-        self._edges.append(
-            _Edge(
-                from_task_id=from_task_id,
-                to_task_id=to_task_id,
-                type=edge_type,
-                metadata=metadata,
-                created_by=self.agent_id or "",
-            )
+        # Upsert on the (from, to, type) key: a repeat replaces the existing
+        # edge (metadata is a full replace, not a merge — matching the live
+        # server), so the store never accrues duplicate edges.
+        new_edge = _Edge(
+            from_task_id=from_task_id,
+            to_task_id=to_task_id,
+            type=edge_type,
+            metadata=metadata,
+            created_by=self.agent_id or "",
         )
+        for index, edge in enumerate(self._edges):
+            if (
+                edge.from_task_id == from_task_id
+                and edge.to_task_id == to_task_id
+                and edge.type == edge_type
+            ):
+                self._edges[index] = new_edge
+                return
+        self._edges.append(new_edge)
 
     def _work_candidates(
         self,
