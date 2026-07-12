@@ -21,6 +21,7 @@ classDiagram
     +kind Literal['issue', 'pull']
   }
   class GitHubRepoNotFoundError
+  class GitHubTransportError
   class Issue {
     +repo str
     +number int

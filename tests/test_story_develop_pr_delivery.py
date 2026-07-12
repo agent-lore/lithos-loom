@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from lithos_loom.github_client import GitHubError
+from lithos_loom.github_client import GitHubError, GitHubTransportError
 from lithos_loom.plugins.story_develop import containers, pr_delivery
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
@@ -225,6 +225,60 @@ def test_request_operator_review_failed_assign_returns_failed(
     )
     _patch_github_call(monkeypatch, fake)
     assert pr_delivery.request_operator_review("o/r", 7, "dave") == "failed"
+
+
+# --- best-effort wrappers stay best-effort on a TRANSPORT failure --------------
+# GitHubTransportError is a GitHubError, so a connect/read/reset error at the
+# HTTP layer degrades to the same fallback the old `gh api` non-zero exit did —
+# it must NOT escape and abort the post-PR delivery flow.
+
+
+_TRANSPORT_ERR = GitHubTransportError(
+    "https://api.github.com/repos/o/r/pulls/7", OSError("connection reset")
+)
+
+
+def _github_call_raises(exc: Exception) -> object:
+    def _raise(op: object) -> object:
+        raise exc
+
+    return _raise
+
+
+def test_request_copilot_returns_false_on_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_delivery, "github_call", _github_call_raises(_TRANSPORT_ERR))
+    assert pr_delivery.request_copilot("o/r", 7) is False
+
+
+def test_request_operator_review_returns_failed_on_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A transport error is not the self-author 422 → "failed", never aborts.
+    monkeypatch.setattr(pr_delivery, "github_call", _github_call_raises(_TRANSPORT_ERR))
+    assert pr_delivery.request_operator_review("o/r", 7, "dave") == "failed"
+
+
+def test_copilot_expected_comments_returns_none_on_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_delivery, "github_call", _github_call_raises(_TRANSPORT_ERR))
+    assert pr_delivery.copilot_expected_comments("o/r", 7) is None
+
+
+def test_fetch_copilot_comments_returns_empty_on_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_delivery, "github_call", _github_call_raises(_TRANSPORT_ERR))
+    assert pr_delivery.fetch_copilot_comments("o/r", 7) == []
+
+
+def test_post_pr_comment_returns_false_on_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_delivery, "github_call", _github_call_raises(_TRANSPORT_ERR))
+    assert pr_delivery.post_pr_comment("o/r", 7, "body") is False
 
 
 # --- deliver() orchestration ------------------------------------------------------

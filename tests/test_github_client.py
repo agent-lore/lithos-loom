@@ -31,6 +31,7 @@ from lithos_loom.github_client import (
     GitHubIssueNotFoundError,
     GitHubRef,
     GitHubRepoNotFoundError,
+    GitHubTransportError,
     Issue,
     PullRequest,
     PullRequestReview,
@@ -1127,3 +1128,37 @@ async def test_pr_write_maps_404_to_repo_not_found() -> None:
         client = GitHubClient(http=http, token="fake")
         with pytest.raises(GitHubRepoNotFoundError):
             await client.create_issue_comment(_REPO, 7, "hello")
+
+
+def test_github_transport_error_is_a_github_error() -> None:
+    # story-develop's best-effort wrappers and the watcher's `except GitHubError`
+    # handlers (which document that they catch "network" failures) both rely on
+    # transport failures being part of the typed hierarchy, not raw httpx.
+    assert issubclass(GitHubTransportError, GitHubError)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_transport_error_is_wrapped_as_github_transport_error() -> None:
+    """A connect/read/reset failure at the httpx layer surfaces as a typed
+    GitHubTransportError, not a raw httpx.HTTPError — so every caller's
+    `except GitHubError` degrades gracefully instead of the error escaping."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/1").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubTransportError, match="pulls/1"):
+            await client.get_pull_request(_REPO, 1)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_transport_error_on_a_post_is_wrapped() -> None:
+    respx.post(
+        f"https://api.github.com/repos/{_REPO}/pulls/7/requested_reviewers"
+    ).mock(side_effect=httpx.ReadTimeout("timed out"))
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubTransportError):
+            await client.request_reviewers(_REPO, 7, ["dave"])

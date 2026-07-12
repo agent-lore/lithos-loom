@@ -133,6 +133,21 @@ class GitHubRateLimitError(GitHubError):
     """Raised when a rate-limit retry exhausts (currently only on a second 403)."""
 
 
+class GitHubTransportError(GitHubError):
+    """Raised when the HTTP request itself fails (connect/read/reset/timeout).
+
+    A member of the typed hierarchy so callers that ``except GitHubError`` — the
+    story-develop best-effort PR wrappers, and the watcher handlers that document
+    catching "network" failures — degrade gracefully instead of a raw
+    ``httpx.HTTPError`` escaping the seam. Wraps the underlying httpx error.
+    """
+
+    def __init__(self, url: str, cause: Exception) -> None:
+        super().__init__(f"GitHub transport error for {url}: {cause!r}")
+        self.url = url
+        self.__cause__ = cause
+
+
 @dataclass(frozen=True)
 class Issue:
     """The slice of GitHub's issue payload the watcher cares about."""
@@ -469,13 +484,22 @@ class GitHubClient:
         attempts = 0
         while True:
             attempts += 1
-            response = await self.http.request(
-                method,
-                url,
-                params=params,
-                json=json,
-                headers=self._headers(),
-            )
+            try:
+                response = await self.http.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json,
+                    headers=self._headers(),
+                )
+            except httpx.HTTPError as exc:
+                # Connect/read/reset/timeout etc. — normalise into the typed
+                # hierarchy so callers that ``except GitHubError`` (the
+                # story-develop best-effort wrappers, the watcher's
+                # network-transient handlers) don't have a raw httpx error
+                # escape the seam. Not retried here: rate-limit is the only
+                # in-loop retry; transport retries are the caller's poll/round.
+                raise GitHubTransportError(url, exc) from exc
             if response.status_code != 403:
                 return response
             # 403 is overloaded: rate-limit signal vs permission-denied. Distinguish
