@@ -344,7 +344,7 @@
         "functions": 23,
         "largest_module": "lithos_loom.children.obsidian_sync",
         "largest_module_lines": 497,
-        "lines": 1284,
+        "lines": 1285,
         "modules": 6,
         "public_symbols": 8,
         "sloc": 962
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 33138,
+    "total_lines": 33139,
     "total_modules": 115,
     "total_sloc": 26288
   },
   "tests": {
     "ratio": 1.56,
-    "src_lines": 33138,
-    "test_lines": 51858
+    "src_lines": 33139,
+    "test_lines": 51854
   }
 }

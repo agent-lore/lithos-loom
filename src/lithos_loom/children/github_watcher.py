@@ -60,7 +60,8 @@ logger = logging.getLogger(__name__)
 # sweep + LithosEventStream bootstrap replay on restart. (PR-review
 # finding 3, round 4, 2026-05-30: a 3-attempt cap discarded events after
 # only ~6s, losing anything longer than a transient hiccup.)
-_PUSH_RETRY = RetryPolicy(
+# Public so the backoff curve is a pinned contract (tested directly).
+PUSH_RETRY = RetryPolicy(
     attempts=8,
     initial_delay_seconds=2.0,
     max_delay_seconds=60.0,
@@ -341,7 +342,7 @@ async def _amain(cfg: LoomConfig) -> int:
                 rate-limit exhausted). Permanent errors (auth, 404) are
                 logged + swallowed inside the handler. Transient failures
                 retry with exponential backoff via the shared
-                ``run_with_retry`` primitive under ``_PUSH_RETRY``; on
+                ``run_with_retry`` primitive under ``PUSH_RETRY``; on
                 exhaustion the event is dropped (a ``[Friction]`` warning)
                 and recovered by the periodic reconcile sweep + restart
                 replay.
@@ -361,7 +362,7 @@ async def _amain(cfg: LoomConfig) -> int:
                         "github-watcher: push handler attempt %d/%d "
                         "failed (%s); retrying in %ds",
                         attempt + 1,
-                        _PUSH_RETRY.attempts,
+                        PUSH_RETRY.attempts,
                         type(exc).__name__,
                         int(next_delay),
                     )
@@ -380,7 +381,7 @@ async def _amain(cfg: LoomConfig) -> int:
                             "sweep within reconcile_interval_minutes "
                             "or next daemon restart within "
                             "resolved_replay_days will replay it)",
-                            _PUSH_RETRY.attempts,
+                            PUSH_RETRY.attempts,
                             event.type,
                             type(exc).__name__ if exc else "?",
                             exc,
@@ -388,7 +389,7 @@ async def _amain(cfg: LoomConfig) -> int:
 
                     await run_with_retry(
                         lambda event=event: push_handler(event, ctx),
-                        _PUSH_RETRY,
+                        PUSH_RETRY,
                         on_attempt_failed=_log_retry,
                         on_give_up=_drop,
                     )

@@ -13,6 +13,7 @@ import asyncio
 
 import pytest
 
+from lithos_loom.children.github_watcher import PUSH_RETRY
 from lithos_loom.config import RetryPolicy
 from lithos_loom.subscriptions.retry import run_with_retry
 
@@ -168,23 +169,18 @@ async def test_on_attempt_failed_next_delay_is_none_on_final_attempt() -> None:
 
 
 async def test_backoff_curve_matches_github_push_policy() -> None:
-    """Pins the consume_push docstring's 2,4,8,16,32,60,60 sequence: the
-    watcher's hard-coded push backoff is exactly this policy's curve."""
+    """Pins the consume_push docstring's 2,4,8,16,32,60,60 sequence against
+    the watcher's *actual* ``PUSH_RETRY`` constant, so an accidental drift
+    in the constant is caught here (not just a duplicate policy)."""
 
     async def op() -> None:
         raise RuntimeError("boom")
 
     delays: list[float | None] = []
 
-    push_policy = RetryPolicy(
-        attempts=8,
-        initial_delay_seconds=2.0,
-        max_delay_seconds=60.0,
-        backoff="exponential",
-    )
     await run_with_retry(
         op,
-        push_policy,
+        PUSH_RETRY,
         on_attempt_failed=lambda i, e, d: delays.append(d),
         on_give_up=_noop_give_up,
     )
