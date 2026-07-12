@@ -20,6 +20,9 @@ Public surface:
   for the TOML-vs-Lithos slug presence check. Skips cleanly when
   ``[projects]`` is empty or Lithos is unreachable (transient
   outages mustn't fail doctor).
+* :func:`run_task_graph_checks` — async; probes the Lithos task-graph
+  extension end to end (Epic G US1). Returns one ``task_graph_extension``
+  :class:`CheckResult`; the daemon boot gate refuses to start on a fail.
 * :func:`format_results` — pretty-print to a list of lines for the
   CLI to echo.
 """
@@ -31,13 +34,24 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from lithos_loom.config import LoomConfig
 from lithos_loom.errors import LithosClientError
-from lithos_loom.lithos_client import NoteSummary
+from lithos_loom.lithos_client import Blocker, NoteSummary, TaskClient
 
 _PROJECTS_PATH_PREFIX = "projects/"
 _PROJECT_CONTEXT_TAG = "project-context"
+
+TASK_GRAPH_CHECK = "task_graph_extension"
+"""Name of the task-graph capability check (Epic G US1).
+
+The daemon boot gate keys off this name: a failing ``task_graph_extension``
+result means refuse to start. A connectivity failure surfaces under the
+separate ``lithos_unreachable`` name so callers can tell "server incompatible"
+from "server unreachable"."""
+
+_PROBE_TASK_TITLE = "[loom-doctor] task-graph probe (auto-cleaned)"
 
 PROBE_FILENAME = ".doctor-probe.tmp"
 """Fixed filename used for the write+read round-trip probe.
@@ -256,3 +270,106 @@ async def run_project_checks(
                 )
             )
     return results
+
+
+# ── Task-graph capability probe (Epic G US1) ────────────────────────────
+
+
+async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[CheckResult]:
+    """Probe the Lithos task-graph extension end to end.
+
+    Creates two throwaway tasks + a ``blocks`` edge, then asserts the
+    server's ready-queue honours it: the dependent is excluded from
+    :meth:`task_ready` and named by :meth:`task_blocked` (``kind="task"``);
+    cancelling the blocker keeps the dependent blocked as
+    ``blocker_unsatisfiable`` (the epic-G precondition — a released
+    dependent-of-a-cancelled-task would be dispatched wrongly); and
+    :meth:`task_spawn` / ``task_type`` round-trip. The probe tasks are
+    cancelled on the way out (even on failure).
+
+    Returns exactly one :class:`CheckResult` named ``task_graph_extension``:
+    passing when every invariant holds, failing on the first violation or on
+    a graph-tool error (the boot gate refuses to start on the failure). A
+    transport error mid-probe is folded into the same failing check — a fully
+    unreachable server is classified by the caller's connect wrapper as
+    ``lithos_unreachable`` instead.
+    """
+    probe_tag = f"loom-doctor-probe:{uuid4().hex}"
+    created: list[str] = []
+
+    def _fail(message: str) -> list[CheckResult]:
+        return [CheckResult(TASK_GRAPH_CHECK, False, message)]
+
+    try:
+        blocker = await client.task_create(
+            title=_PROBE_TASK_TITLE, agent=agent, tags=[probe_tag], task_type="task"
+        )
+        created.append(blocker)
+        dependent = await client.task_create(
+            title=_PROBE_TASK_TITLE, agent=agent, tags=[probe_tag]
+        )
+        created.append(dependent)
+        await client.task_edge_upsert(
+            from_task_id=blocker, to_task_id=dependent, type="blocks", agent=agent
+        )
+
+        ready = await client.task_ready(tags=[probe_tag])
+        ready_ids = {t.id for t in ready}
+        if blocker not in ready_ids or dependent in ready_ids:
+            return _fail(
+                "ready-queue did not honour the blocks edge "
+                "(blocker missing from, or dependent leaked into, task_ready)"
+            )
+        if not any(t.task_type for t in ready):
+            return _fail("task records carry no task_type (extension incomplete)")
+
+        reasons = await _blockers_of(client, dependent, tag=probe_tag)
+        if not any(b.kind == "task" and b.task_id == blocker for b in reasons):
+            return _fail(
+                "task_blocked did not report the open predecessor as a blocker"
+            )
+
+        # Precondition: cancelling the blocker must NOT release the dependent.
+        await client.task_cancel(
+            task_id=blocker, agent=agent, reason="doctor task-graph probe"
+        )
+        if dependent in {t.id for t in await client.task_ready(tags=[probe_tag])}:
+            return _fail(
+                "cancelled blocker wrongly released its dependent — the ready-queue "
+                "would dispatch a task whose predecessor was cancelled"
+            )
+        reasons = await _blockers_of(client, dependent, tag=probe_tag)
+        if not any(b.kind == "blocker_unsatisfiable" for b in reasons):
+            return _fail("a cancelled blocker did not surface as blocker_unsatisfiable")
+
+        spawned = await client.task_spawn(
+            source_task_id=dependent, title=_PROBE_TASK_TITLE, agent=agent
+        )
+        created.append(spawned)
+    except (LithosClientError, OSError) as exc:
+        return _fail(f"task-graph extension probe failed: {exc}")
+    finally:
+        for task_id in created:
+            with contextlib.suppress(LithosClientError, OSError):
+                await client.task_cancel(
+                    task_id=task_id, agent=agent, reason="doctor task-graph probe"
+                )
+
+    return [
+        CheckResult(
+            TASK_GRAPH_CHECK,
+            True,
+            "task-graph extension present (ready/blocked/edge/spawn round-trip "
+            "+ cancelled-blocker precondition holds)",
+        )
+    ]
+
+
+async def _blockers_of(
+    client: TaskClient, task_id: str, *, tag: str
+) -> tuple[Blocker, ...]:
+    """The structured blocker reasons Lithos reports for ``task_id`` within the
+    probe's tag scope (empty if it isn't in the blocked set)."""
+    blocked = {bt.task.id: bt for bt in await client.task_blocked(tags=[tag])}
+    waiting = blocked.get(task_id)
+    return waiting.blockers if waiting is not None else ()

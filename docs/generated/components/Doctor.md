@@ -11,7 +11,7 @@ Environment and configuration diagnostics (`doctor` CLI).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.doctor` | S | 1 | 3 |
+| `lithos_loom.doctor` | M | 1 | 4 |
 
 ## Public API
 
@@ -20,6 +20,7 @@ Environment and configuration diagnostics (`doctor` CLI).
 - def `run_vault_checks` — Run the three vault probes against ``cfg``.
 - def `format_results` — Render check results as indented bullet lines for CLI echo.
 - def `run_project_checks` — Verify every TOML ``[projects.<slug>]`` entry has a matching Lithos project-context doc.
+- def `run_task_graph_checks` — Probe the Lithos task-graph extension end to end.
 
 ## Dependencies
 

@@ -21,6 +21,7 @@ from lithos_loom.doctor import (
     _check_vault_path_exists,
     format_results,
     run_project_checks,
+    run_task_graph_checks,
     run_vault_checks,
 )
 from lithos_loom.errors import LithosClientError
@@ -356,3 +357,54 @@ async def test_run_project_checks_lithos_client_error_surfaces_as_unreachable(
     results = await run_project_checks(cfg, client)
     assert len(results) == 1
     assert results[0].name == "lithos_unreachable"
+
+
+# ── run_task_graph_checks (Epic G US1) ─────────────────────────────────
+
+
+class _ReleasesCancelledBlocker(FakeLithosClient):
+    """Non-conformant fake: (wrongly) treats a *cancelled* predecessor as
+    satisfied, so a dependent becomes ready after its blocker is cancelled.
+    Used to prove the probe's cancelled-blocker precondition guard bites."""
+
+    def _blockers_for(self, task_id: str):  # type: ignore[override]
+        return [b for b in super()._blockers_for(task_id) if b.status != "cancelled"]
+
+
+async def test_task_graph_probe_passes_against_a_conformant_server() -> None:
+    client = FakeLithosClient(agent_id="doctor-agent")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert [r.name for r in results] == ["task_graph_extension"]
+    assert results[0].passed, results[0].message
+    # The probe cleans up after itself — nothing left open.
+    assert await client.task_ready() == []
+
+
+async def test_task_graph_probe_fails_when_extension_absent() -> None:
+    """A server without the extension errors on the graph tools; the probe
+    folds that into one failing check (the boot gate refuses on it)."""
+    client = FakeLithosClient(agent_id="doctor-agent")
+    client.raise_on["task_ready"] = LithosClientError("unknown_tool", "no such tool")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert results[0].name == "task_graph_extension"
+    assert not results[0].passed
+    assert "unknown_tool" in results[0].message or "no such tool" in results[0].message
+
+
+async def test_task_graph_probe_fails_when_cancelled_blocker_releases_dep() -> None:
+    """The precondition guard: a server that wrongly releases a dependent whose
+    blocker was cancelled must be caught (else ready-dispatch would run a task
+    whose predecessor was cancelled)."""
+    client = _ReleasesCancelledBlocker(agent_id="doctor-agent")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert not results[0].passed
+    assert "cancelled" in results[0].message.lower()
+
+
+async def test_task_graph_probe_cleans_up_even_on_failure() -> None:
+    """A mid-probe failure still cancels every task the probe created."""
+    client = _ReleasesCancelledBlocker(agent_id="doctor-agent")
+    await run_task_graph_checks(client, agent="doctor-agent")
+    # Every probe task ended terminal (cancelled) — none linger as open work.
+    assert await client.task_ready() == []
+    assert await client.task_blocked() == []
