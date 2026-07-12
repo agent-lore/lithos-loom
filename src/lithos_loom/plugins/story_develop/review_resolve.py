@@ -11,20 +11,18 @@ the resolution logic is unit-testable without a network round-trip.
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from lithos_loom.github_client import PullRequest
+
+from .github_access import github_call, repo_name_with_owner
+
 # A PR argument: ``#142``, bare ``142``, or a GitHub PR URL ending ``/pull/142``.
 _PR_URL_RE = re.compile(r"/pull/(\d+)\b")
 _PR_HASH_RE = re.compile(r"^#?(\d+)$")
-
-# ``gh pr view --json`` exposes ``headRefOid`` but NOT ``baseRefOid`` — requesting
-# the latter fails the whole call with "Unknown JSON field" (#207). The base sha is
-# derived locally via merge-base instead (see :func:`_resolve_pr`).
-_PR_JSON_FIELDS = "headRefOid,baseRefName,headRefName,title,body"
 
 
 @dataclass(frozen=True)
@@ -67,20 +65,19 @@ def _git_fetch(repo: Path, *refspecs: str) -> None:
     _run_git(repo, "fetch", "origin", *refspecs)
 
 
-def _gh_pr_view(repo: Path, number: str) -> dict:
-    """Fetch PR metadata via ``gh`` (raises on failure)."""
-    result = subprocess.run(
-        ["gh", "pr", "view", number, "--json", _PR_JSON_FIELDS],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"gh pr view {number} failed (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
-        )
-    return json.loads(result.stdout)
+def _gh_pr_view(repo: Path, number: str) -> PullRequest:
+    """Fetch PR #*number* via the typed GitHub client (raises if not found).
+
+    ``gh pr view <number>`` resolved the PR against the LOCAL checkout — it
+    never consulted any URL's owner/repo, just the working tree's origin
+    remote. Preserve that exactly: resolve ``owner/repo`` from the tree (a gh
+    convenience the REST API can't do), then fetch that repo's PR #*number*.
+    """
+    owner_repo = repo_name_with_owner(repo)
+    pr = github_call(lambda c: c.get_pull_request(owner_repo, int(number)))
+    if pr is None:
+        raise RuntimeError(f"PR #{number} not found in {owner_repo}")
+    return pr
 
 
 def _parse_pr_number(spec: str) -> str | None:
@@ -129,25 +126,26 @@ def resolve_change(
 def _resolve_pr(
     repo: Path, number: str, *, base_override: str | None
 ) -> ResolvedChange:
-    info = _gh_pr_view(repo, number)
-    head_sha = info["headRefOid"]
-    base_ref_name = info["baseRefName"]
+    pr = _gh_pr_view(repo, number)
+    head_sha = pr.head_sha
+    base_ref_name = pr.base_ref
     # Fetch the PR head (works for forks too) and the base branch so both
     # commits are local before we materialise a worktree / diff against them.
     _git_fetch(repo, f"pull/{number}/head", base_ref_name)
     if base_override:
         base_sha = _rev_parse(repo, base_override)
     else:
-        # gh pr view doesn't expose the base-ref OID, so derive the PR's true diff
-        # base as the merge-base of the base branch and the head (what GitHub
-        # diffs). Using the merge-base — not the base branch tip — also avoids
-        # spurious deletions when the base branch advanced after the PR was cut.
-        # The base branch was just fetched, so its tip is local at origin/<base>.
+        # Derive the PR's true diff base as the merge-base of the base branch
+        # and the head (what GitHub diffs) rather than the PR object's base ref
+        # OID — using the merge-base, not the base branch tip, avoids spurious
+        # deletions when the base branch advanced after the PR was cut (this is
+        # also why not requesting the base OID at all sidesteps #207). The base
+        # branch was just fetched, so its tip is local at origin/<base>.
         base_sha = _merge_base(repo, f"origin/{base_ref_name}", head_sha)
     return ResolvedChange(
         base_sha=base_sha,
         head_sha=head_sha,
-        head_ref=f"#{number} ({info.get('headRefName', '')})".strip(),
-        title=info.get("title", ""),
-        body=info.get("body", ""),
+        head_ref=f"#{number} ({pr.head_ref})".strip(),
+        title=pr.title,
+        body=pr.body,
     )

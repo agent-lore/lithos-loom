@@ -31,13 +31,14 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
+| `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |
 | `lithos_loom.plugins.story_develop.handoff` | M | 3 | 11 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | S | 2 | 3 |
 | `lithos_loom.plugins.story_develop.panel` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_develop.pr_delivery` | L | 2 | 20 |
+| `lithos_loom.plugins.story_develop.pr_delivery` | L | 2 | 19 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | S | 0 | 1 |
@@ -161,6 +162,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `GateFinding` — One deterministic finding from a gate check (already severity-mapped).
 - class `GateLedger` — Gate-owned registry of deterministic findings with stable per-check ids.
 
+### `lithos_loom.plugins.story_develop.github_access`
+- def `github_call` — Run one GitHub REST operation against a typed client, synchronously.
+- def `repo_name_with_owner` — ``owner/repo`` of the local checkout's ``origin`` remote, via ``gh``.
+
 ### `lithos_loom.plugins.story_develop.handoff`
 - def `severity_at_or_above` — True if *severity* meets or exceeds *threshold* (minor < major < critical).
 - def `max_severity` — Highest severity in the list, or ``None`` when empty.
@@ -217,7 +222,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `comments_to_handoff_text` — Render Copilot's inline comments as a synthetic review handoff.
 - def `reply_body` — The per-thread reply: fix reference, held-back notice, or pushback.
 - def `push_branch` — Host-side push of the worktree branch to origin. Raises on failure.
-- def `repo_name_with_owner` — ``owner/repo`` of the worktree's origin (via gh).
 - def `create_pr` — Open the PR; returns its URL. Raises on failure.
 - def `pr_number_from_url` — Extract the PR number from a canonical GitHub PR URL; raise if it can't.
 - def `request_copilot` — Request the Copilot reviewer; False (logged) on failure — non-fatal.
@@ -322,5 +326,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - [ADR 0003 — Code quality & review strength: selectable Review Profiles + a multi-check deterministic gate](../../adr/0003-code-quality-review-strength.md)
 - [ADR 0004 — Review-only mode: run the panel + gate on an existing change](../../adr/0004-review-only-mode.md)
 - [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
+- [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
 
 [← all generated docs](../README.md)

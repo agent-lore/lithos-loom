@@ -52,4 +52,8 @@ Event/issue producers: Lithos SSE event & note streams, GitHub issue watcher, Ob
 - Depends on: [Bus](Bus.md), [Cli](Cli.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [ProjectContext](ProjectContext.md), [State](State.md), [Tasks](Tasks.md)
 - Used by: [Children](Children.md)
 
+## ADRs
+
+- [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
+
 [← all generated docs](../README.md)

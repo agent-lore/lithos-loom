@@ -15,6 +15,7 @@ respx (already a project dev dep) to mock ``httpx.AsyncClient`` round-trips.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
@@ -30,8 +31,11 @@ from lithos_loom.github_client import (
     GitHubIssueNotFoundError,
     GitHubRef,
     GitHubRepoNotFoundError,
+    GitHubTransportError,
     Issue,
     PullRequest,
+    PullRequestReview,
+    PullRequestReviewComment,
     _parse_issues_response,
     _parse_pull_request,
     _resolve_gh_token,
@@ -891,3 +895,270 @@ class _FakeProc:
 @pytest.mark.asyncio
 async def test_asyncio_marker_works() -> None:
     await asyncio.sleep(0)
+
+
+# ── PR access surface (ARCH-7c: story-develop's PR ops on the typed seam) ──
+
+_REPO = "agent-lore/lithos-loom"
+
+
+def test_parse_pull_request_includes_refs_title_body() -> None:
+    """The single-PR endpoint carries head/base refs + title/body — the review-only
+    resolver (review_resolve) reads these off the same typed PullRequest the merge
+    watcher uses for state/merged."""
+    pr = _parse_pull_request(
+        {
+            "number": 142,
+            "state": "open",
+            "merged": False,
+            "merged_at": None,
+            "head": {"sha": "h" * 40, "ref": "feature"},
+            "base": {"sha": "b" * 40, "ref": "main"},
+            "title": "Add a thing",
+            "body": "This PR adds a thing.",
+        },
+        repo=_REPO,
+    )
+    assert pr.head_sha == "h" * 40
+    assert pr.base_ref == "main"
+    assert pr.head_ref == "feature"
+    assert pr.title == "Add a thing"
+    assert pr.body == "This PR adds a thing."
+
+
+def test_parse_pull_request_tolerates_missing_ref_fields() -> None:
+    """A minimal row (the merge-watcher's older test shape) still parses — the new
+    ref/title/body fields default to empty rather than KeyError-ing."""
+    pr = _parse_pull_request(
+        {"number": 7, "state": "closed", "merged": True, "merged_at": None}, repo=_REPO
+    )
+    assert pr.head_sha == "" and pr.base_ref == "" and pr.title == "" and pr.body == ""
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_pull_request_exposes_refs_and_body() -> None:
+    route = respx.get(f"https://api.github.com/repos/{_REPO}/pulls/142").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 142,
+                "state": "open",
+                "merged": False,
+                "merged_at": None,
+                "head": {"sha": "a" * 40, "ref": "topic"},
+                "base": {"sha": "c" * 40, "ref": "main"},
+                "title": "T",
+                "body": "B",
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        pr = await client.get_pull_request(_REPO, 142)
+    assert pr is not None
+    assert pr.head_sha == "a" * 40 and pr.base_ref == "main" and pr.body == "B"
+    assert route.calls[0].request.headers["authorization"] == "Bearer fake"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_pull_request_reviews_happy_path() -> None:
+    route = respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/reviews").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"user": {"login": "copilot[bot]"}, "body": "generated 3 comments"},
+                {"user": {"login": "human"}, "body": "lgtm"},
+            ],
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        reviews = await client.list_pull_request_reviews(_REPO, 9)
+    assert reviews == [
+        PullRequestReview(author="copilot[bot]", body="generated 3 comments"),
+        PullRequestReview(author="human", body="lgtm"),
+    ]
+    assert route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_pull_request_reviews_paginates() -> None:
+    base = f"https://api.github.com/repos/{_REPO}/pulls/9/reviews"
+    # Register the page-2 route first (with an explicit ``page=2`` matcher) so
+    # first-match-wins routes the second request here rather than re-matching
+    # the paramless page-1 route (which would loop on its own Link header).
+    respx.get(base, params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[{"user": {"login": "b"}, "body": "two"}])
+    )
+    respx.get(base).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"user": {"login": "a"}, "body": "one"}],
+            headers={"Link": f'<{base}?page=2>; rel="next"'},
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        reviews = await client.list_pull_request_reviews(_REPO, 9)
+    assert [r.author for r in reviews] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_pull_request_review_comments_maps_fields() -> None:
+    route = respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/comments").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 111,
+                    "user": {"login": "copilot[bot]"},
+                    "path": "src/x.py",
+                    "line": 12,
+                    "body": "nit",
+                    "in_reply_to_id": None,
+                },
+                {
+                    "id": 112,
+                    "user": {"login": "copilot[bot]"},
+                    "path": "src/y.py",
+                    "line": None,
+                    "original_line": 5,
+                    "body": "on an outdated line",
+                    "in_reply_to_id": 111,
+                },
+            ],
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        comments = await client.list_pull_request_review_comments(_REPO, 9)
+    assert comments[0] == PullRequestReviewComment(
+        comment_id=111,
+        author="copilot[bot]",
+        path="src/x.py",
+        line=12,
+        body="nit",
+        in_reply_to_id=None,
+    )
+    # line falls back to original_line for comments on since-changed lines.
+    assert comments[1].line == 5 and comments[1].in_reply_to_id == 111
+    assert route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_request_reviewers_posts_reviewers_body() -> None:
+    route = respx.post(
+        f"https://api.github.com/repos/{_REPO}/pulls/7/requested_reviewers"
+    ).mock(return_value=httpx.Response(201, json={}))
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.request_reviewers(_REPO, 7, ["dave"])
+    assert json.loads(route.calls[0].request.content) == {"reviewers": ["dave"]}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_request_reviewers_422_raises_github_error_with_message() -> None:
+    """A 422 (e.g. self-author) surfaces as a typed GitHubError whose message
+    carries GitHub's text — the caller branches on 'pull request author'."""
+    respx.post(
+        f"https://api.github.com/repos/{_REPO}/pulls/7/requested_reviewers"
+    ).mock(
+        return_value=httpx.Response(
+            422,
+            json={"message": "Review cannot be requested from pull request author."},
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubError, match="pull request author"):
+            await client.request_reviewers(_REPO, 7, ["dave"])
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_add_assignees_posts_assignees_body() -> None:
+    route = respx.post(f"https://api.github.com/repos/{_REPO}/issues/7/assignees").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.add_assignees(_REPO, 7, ["dave"])
+    assert json.loads(route.calls[0].request.content) == {"assignees": ["dave"]}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_review_comment_reply_posts_body() -> None:
+    route = respx.post(
+        f"https://api.github.com/repos/{_REPO}/pulls/7/comments/55/replies"
+    ).mock(return_value=httpx.Response(201, json={}))
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.create_review_comment_reply(_REPO, 7, 55, "thanks")
+    assert json.loads(route.calls[0].request.content) == {"body": "thanks"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_issue_comment_posts_body() -> None:
+    route = respx.post(f"https://api.github.com/repos/{_REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.create_issue_comment(_REPO, 7, "hello")
+    assert json.loads(route.calls[0].request.content) == {"body": "hello"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pr_write_maps_404_to_repo_not_found() -> None:
+    """A repo-level 404 on a write routes through _raise_for_status like the
+    read paths (the caller catches GitHubError)."""
+    respx.post(f"https://api.github.com/repos/{_REPO}/issues/7/comments").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubRepoNotFoundError):
+            await client.create_issue_comment(_REPO, 7, "hello")
+
+
+def test_github_transport_error_is_a_github_error() -> None:
+    # story-develop's best-effort wrappers and the watcher's `except GitHubError`
+    # handlers (which document that they catch "network" failures) both rely on
+    # transport failures being part of the typed hierarchy, not raw httpx.
+    assert issubclass(GitHubTransportError, GitHubError)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_transport_error_is_wrapped_as_github_transport_error() -> None:
+    """A connect/read/reset failure at the httpx layer surfaces as a typed
+    GitHubTransportError, not a raw httpx.HTTPError — so every caller's
+    `except GitHubError` degrades gracefully instead of the error escaping."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/1").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubTransportError, match="pulls/1"):
+            await client.get_pull_request(_REPO, 1)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_transport_error_on_a_post_is_wrapped() -> None:
+    respx.post(
+        f"https://api.github.com/repos/{_REPO}/pulls/7/requested_reviewers"
+    ).mock(side_effect=httpx.ReadTimeout("timed out"))
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        with pytest.raises(GitHubTransportError):
+            await client.request_reviewers(_REPO, 7, ["dave"])

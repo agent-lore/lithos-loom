@@ -22,7 +22,6 @@ thin ``gh`` / ``git`` wrappers at the bottom (monkeypatched in tests).
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
@@ -31,12 +30,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from lithos_loom.github_client import parse_github_ref
+from lithos_loom.github_client import GitHubError, parse_github_ref
 
 from . import containers, engines, handoff, run_outcome, turns
 from .agent_session import build_run_cmd
 from .check_runner import run_delivery_test_gate
 from .findings import FindingLedger
+from .github_access import github_call, repo_name_with_owner
 from .rounds import commit_round
 
 logger = logging.getLogger(__name__)
@@ -227,17 +227,6 @@ def push_branch(wt: Path, branch: str) -> None:
         raise RuntimeError(f"git push failed: {proc.stderr.strip()}")
 
 
-def repo_name_with_owner(wt: Path) -> str:
-    """``owner/repo`` of the worktree's origin (via gh)."""
-    proc = _run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        cwd=wt,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"gh repo view failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
-
-
 def create_pr(wt: Path, *, branch: str, base: str, title: str, body: str) -> str:
     """Open the PR; returns its URL. Raises on failure."""
     proc = _run(
@@ -277,32 +266,22 @@ def pr_number_from_url(url: str) -> int:
     return ref.number
 
 
-def request_copilot(wt: Path, repo: str, pr_number: int) -> bool:
+def request_copilot(repo: str, pr_number: int) -> bool:
     """Request the Copilot reviewer; False (logged) on failure — non-fatal."""
-    proc = _run(
-        [
-            "gh",
-            "api",
-            "-X",
-            "POST",
-            f"repos/{repo}/pulls/{pr_number}/requested_reviewers",
-            "-f",
-            f"reviewers[]={COPILOT_REVIEWER}",
-        ],
-        cwd=wt,
-    )
-    if proc.returncode != 0:
+    try:
+        github_call(lambda c: c.request_reviewers(repo, pr_number, [COPILOT_REVIEWER]))
+    except GitHubError as exc:
         logger.warning(
             "story-develop: requesting Copilot on %s#%d failed: %s",
             repo,
             pr_number,
-            proc.stderr.strip(),
+            exc,
         )
         return False
     return True
 
 
-def request_operator_review(wt: Path, repo: str, pr_number: int, login: str) -> str:
+def request_operator_review(repo: str, pr_number: int, login: str) -> str:
     """Request *login* as a reviewer on the PR; assign them if they authored it.
 
     Best-effort and non-fatal (mirrors :func:`request_copilot`): never raises,
@@ -313,81 +292,57 @@ def request_operator_review(wt: Path, repo: str, pr_number: int, login: str) -> 
 
     Returns ``"review_requested"``, ``"assigned"``, or ``"failed"``.
     """
-    proc = _run(
-        [
-            "gh",
-            "api",
-            "-X",
-            "POST",
-            f"repos/{repo}/pulls/{pr_number}/requested_reviewers",
-            "-f",
-            f"reviewers[]={login}",
-        ],
-        cwd=wt,
-    )
-    if proc.returncode == 0:
+    try:
+        github_call(lambda c: c.request_reviewers(repo, pr_number, [login]))
         return "review_requested"
+    except GitHubError as exc:
+        # Only the specific self-author 422 ("Review cannot be requested from
+        # pull request author") falls back to assigning. Every other failure —
+        # a bad login, a non-collaborator, repo policy, or any other 422 — is a
+        # real failure the operator should see, NOT silently downgraded to an
+        # assignee.
+        if "pull request author" not in str(exc):
+            logger.warning(
+                "story-develop: requesting review from %s on %s#%d failed: %s",
+                login,
+                repo,
+                pr_number,
+                exc,
+            )
+            return "failed"
 
-    stderr = proc.stderr.strip()
-    # Only the specific self-author 422 ("Review cannot be requested from pull
-    # request author") falls back to assigning. Every other failure — a bad
-    # login, a non-collaborator, repo policy, or any other 422 — is a real
-    # failure the operator should see, NOT silently downgraded to an assignee.
-    if "pull request author" not in stderr:
+    try:
+        github_call(lambda c: c.add_assignees(repo, pr_number, [login]))
+        return "assigned"
+    except GitHubError as exc:
         logger.warning(
-            "story-develop: requesting review from %s on %s#%d failed: %s",
+            "story-develop: assigning %s to %s#%d failed: %s",
             login,
             repo,
             pr_number,
-            stderr,
+            exc,
         )
         return "failed"
-
-    assigned = _run(
-        [
-            "gh",
-            "api",
-            "-X",
-            "POST",
-            f"repos/{repo}/issues/{pr_number}/assignees",
-            "-f",
-            f"assignees[]={login}",
-        ],
-        cwd=wt,
-    )
-    if assigned.returncode == 0:
-        return "assigned"
-    logger.warning(
-        "story-develop: assigning %s to %s#%d failed: %s",
-        login,
-        repo,
-        pr_number,
-        assigned.stderr.strip(),
-    )
-    return "failed"
 
 
 _GENERATED_RE = re.compile(r"generated (\d+|no) comments?", re.IGNORECASE)
 
 
-def copilot_expected_comments(wt: Path, repo: str, pr_number: int) -> int | None:
+def copilot_expected_comments(repo: str, pr_number: int) -> int | None:
     """The comment count Copilot's review summary claims, or status markers.
 
-    Returns ``None`` while no Copilot review exists yet; ``-1`` when a review
-    exists but its body doesn't state a count (treat as "unknown, expect
-    some"); otherwise the stated count (``"no comments"`` -> 0).
+    Returns ``None`` while no Copilot review exists yet (or the fetch failed);
+    ``-1`` when a review exists but its body doesn't state a count (treat as
+    "unknown, expect some"); otherwise the stated count (``"no comments"`` -> 0).
     """
-    proc = _run(["gh", "api", f"repos/{repo}/pulls/{pr_number}/reviews"], cwd=wt)
-    if proc.returncode != 0:
-        return None
     try:
-        reviews: list[dict[str, Any]] = json.loads(proc.stdout)
-    except json.JSONDecodeError:
+        reviews = github_call(lambda c: c.list_pull_request_reviews(repo, pr_number))
+    except GitHubError:
         return None
     for r in reviews:
-        if (r.get("user") or {}).get("login") != COPILOT_LOGIN:
+        if r.author != COPILOT_LOGIN:
             continue
-        m = _GENERATED_RE.search(str(r.get("body") or ""))
+        m = _GENERATED_RE.search(r.body)
         if m is None:
             return -1
         token = m.group(1)
@@ -395,34 +350,27 @@ def copilot_expected_comments(wt: Path, repo: str, pr_number: int) -> int | None
     return None
 
 
-def fetch_copilot_comments(wt: Path, repo: str, pr_number: int) -> list[CopilotComment]:
+def fetch_copilot_comments(repo: str, pr_number: int) -> list[CopilotComment]:
     """Copilot's top-level inline comments on the PR (replies excluded)."""
-    proc = _run(["gh", "api", f"repos/{repo}/pulls/{pr_number}/comments"], cwd=wt)
-    if proc.returncode != 0:
-        return []
     try:
-        raw: list[dict[str, Any]] = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return []
-    out: list[CopilotComment] = []
-    for c in raw:
-        if (c.get("user") or {}).get("login") != COPILOT_LOGIN:
-            continue
-        if c.get("in_reply_to_id"):  # thread replies are not findings
-            continue
-        out.append(
-            CopilotComment(
-                comment_id=int(c["id"]),
-                path=str(c.get("path") or ""),
-                line=c.get("line") or c.get("original_line"),
-                body=str(c.get("body") or ""),
-            )
+        comments = github_call(
+            lambda c: c.list_pull_request_review_comments(repo, pr_number)
         )
-    return out
+    except GitHubError:
+        return []
+    return [
+        CopilotComment(
+            comment_id=c.comment_id,
+            path=c.path,
+            line=c.line,
+            body=c.body,
+        )
+        for c in comments
+        if c.author == COPILOT_LOGIN and not c.in_reply_to_id  # replies aren't findings
+    ]
 
 
 def wait_for_copilot(
-    wt: Path,
     repo: str,
     pr_number: int,
     *,
@@ -433,7 +381,7 @@ def wait_for_copilot(
     ``None`` on timeout (see :func:`copilot_expected_comments`)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        expected = copilot_expected_comments(wt, repo, pr_number)
+        expected = copilot_expected_comments(repo, pr_number)
         if expected is not None:
             return expected
         time.sleep(min(poll_seconds, max(1, deadline - time.monotonic())))
@@ -441,7 +389,6 @@ def wait_for_copilot(
 
 
 def fetch_copilot_comments_settled(
-    wt: Path,
     repo: str,
     pr_number: int,
     *,
@@ -470,13 +417,13 @@ def fetch_copilot_comments_settled(
     was the root cause of the recurrence.
     """
     if expected == 0:
-        return fetch_copilot_comments(wt, repo, pr_number), True
+        return fetch_copilot_comments(repo, pr_number), True
     deadline = time.monotonic() + grace_seconds
     comments: list[CopilotComment] = []
     prev_count = 0
     settled_at: float | None = None  # monotonic time the count last changed
     while True:
-        comments = fetch_copilot_comments(wt, repo, pr_number)
+        comments = fetch_copilot_comments(repo, pr_number)
         now = time.monotonic()
         if len(comments) != prev_count:
             prev_count = len(comments)
@@ -494,35 +441,26 @@ def fetch_copilot_comments_settled(
         time.sleep(min(poll_seconds, max(1, deadline - now)))
 
 
-def post_thread_reply(
-    wt: Path, repo: str, pr_number: int, comment_id: int, body: str
-) -> bool:
-    proc = _run(
-        [
-            "gh",
-            "api",
-            "-X",
-            "POST",
-            f"repos/{repo}/pulls/{pr_number}/comments/{comment_id}/replies",
-            "-f",
-            f"body={body}",
-        ],
-        cwd=wt,
-    )
-    if proc.returncode != 0:
+def post_thread_reply(repo: str, pr_number: int, comment_id: int, body: str) -> bool:
+    try:
+        github_call(
+            lambda c: c.create_review_comment_reply(repo, pr_number, comment_id, body)
+        )
+    except GitHubError as exc:
         logger.warning(
             "story-develop: reply to comment %d failed: %s",
             comment_id,
-            proc.stderr.strip(),
+            exc,
         )
         return False
     return True
 
 
-def post_pr_comment(wt: Path, pr_number: int, body: str) -> bool:
-    proc = _run(["gh", "pr", "comment", str(pr_number), "--body", body], cwd=wt)
-    if proc.returncode != 0:
-        logger.warning("story-develop: PR comment failed: %s", proc.stderr.strip())
+def post_pr_comment(repo: str, pr_number: int, body: str) -> bool:
+    try:
+        github_call(lambda c: c.create_issue_comment(repo, pr_number, body))
+    except GitHubError as exc:
+        logger.warning("story-develop: PR comment failed: %s", exc)
         return False
     return True
 
@@ -725,9 +663,7 @@ def _deliver_after_open(
     # #113: notify the operator their PR awaits review (native GitHub
     # notification). Best-effort; the note threads into every return below.
     if config.notify_github_login:
-        notified = request_operator_review(
-            wt, repo, pr_number, config.notify_github_login
-        )
+        notified = request_operator_review(repo, pr_number, config.notify_github_login)
         if notified == "review_requested":
             notes.append(f"requested review from @{config.notify_github_login}")
         elif notified == "assigned":
@@ -741,14 +677,14 @@ def _deliver_after_open(
     if no_copilot:
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
 
-    requested = request_copilot(wt, repo, pr_number)
+    requested = request_copilot(repo, pr_number)
     if not requested:
         notes.append("Copilot review request failed; respond manually")
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
     # copilot_timeout is the whole-round budget: the review summary wait AND
     # the comment-materialisation wait share it.
     copilot_deadline = time.monotonic() + copilot_timeout
-    expected = wait_for_copilot(wt, repo, pr_number, timeout=copilot_timeout)
+    expected = wait_for_copilot(repo, pr_number, timeout=copilot_timeout)
     if expected is None:
         notes.append(
             f"Copilot review not received within {copilot_timeout}s; "
@@ -769,7 +705,7 @@ def _deliver_after_open(
     # round is flagged incomplete (below), which is honest.
     settle_budget = max(0, int(copilot_deadline - time.monotonic()))
     comments, settled = fetch_copilot_comments_settled(
-        wt, repo, pr_number, expected=expected, grace_seconds=settle_budget
+        repo, pr_number, expected=expected, grace_seconds=settle_budget
     )
     # `settled` is authoritative (the fetch reports whether the comments
     # actually arrived + stabilised, vs hit the deadline). A non-settle means
@@ -863,7 +799,7 @@ def _deliver_after_open(
             "unanswered — respond manually"
         )
         post_pr_comment(
-            wt,
+            repo,
             pr_number,
             "story-develop attempted an automated response to Copilot's "
             f"review but the coder turn failed.\n\n{AUTOMATED_MARKER}",
@@ -911,7 +847,7 @@ def _deliver_after_open(
                 f"{gate.verdict} on the fix commit (kept locally in the worktree)"
             )
             post_pr_comment(
-                wt,
+                repo,
                 pr_number,
                 "story-develop prepared a fix for Copilot's comments but the "
                 f"regression test gate came back {gate.verdict}, so it was NOT "
@@ -936,7 +872,7 @@ def _deliver_after_open(
             coder_response=coder_response,
             held_back_verdict=held_back,
         )
-        if post_thread_reply(wt, repo, pr_number, comment.comment_id, body_text):
+        if post_thread_reply(repo, pr_number, comment.comment_id, body_text):
             replies += 1
 
     # Audit parity: the conversation log must include the Copilot exchange.

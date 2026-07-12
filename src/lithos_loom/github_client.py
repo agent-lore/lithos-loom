@@ -133,6 +133,21 @@ class GitHubRateLimitError(GitHubError):
     """Raised when a rate-limit retry exhausts (currently only on a second 403)."""
 
 
+class GitHubTransportError(GitHubError):
+    """Raised when the HTTP request itself fails (connect/read/reset/timeout).
+
+    A member of the typed hierarchy so callers that ``except GitHubError`` — the
+    story-develop best-effort PR wrappers, and the watcher handlers that document
+    catching "network" failures — degrade gracefully instead of a raw
+    ``httpx.HTTPError`` escaping the seam. Wraps the underlying httpx error.
+    """
+
+    def __init__(self, url: str, cause: Exception) -> None:
+        super().__init__(f"GitHub transport error for {url}: {cause!r}")
+        self.url = url
+        self.__cause__ = cause
+
+
 @dataclass(frozen=True)
 class Issue:
     """The slice of GitHub's issue payload the watcher cares about."""
@@ -151,12 +166,20 @@ class Issue:
 
 @dataclass(frozen=True)
 class PullRequest:
-    """The slice of GitHub's pull-request payload the PR-merge watcher cares about.
+    """The pull-request payload two consumers share off the single-PR endpoint.
 
     ``merged`` is a top-level boolean on the single-PR endpoint
     (``GET /pulls/{n}``) — reliable there, unlike the list endpoint where it
     is absent. ``merged_at`` / ``merge_commit_sha`` are populated only once the
-    PR has actually merged.
+    PR has actually merged. The PR-merge watcher (#87) reads those.
+
+    ``head_sha`` / ``base_ref`` / ``head_ref`` / ``title`` / ``body`` come from
+    the same response and drive review-only resolution (``review_resolve``,
+    #154 / ARCH-7c) — the head commit to diff, the base branch to merge-base
+    against, and the PR's title/body as the default acceptance-criteria source.
+    They default to empty so a minimal row (e.g. a list-endpoint slice or an
+    older test fixture) still parses; the single-PR endpoint always populates
+    them in practice.
     """
 
     repo: str
@@ -165,6 +188,38 @@ class PullRequest:
     merged: bool
     merged_at: datetime | None
     merge_commit_sha: str | None
+    head_sha: str = ""
+    base_ref: str = ""
+    head_ref: str = ""
+    title: str = ""
+    body: str = ""
+
+
+@dataclass(frozen=True)
+class PullRequestReview:
+    """A single PR review: the reviewer login + the review-summary body.
+
+    story-develop's Copilot round reads these to detect Copilot's review and
+    parse its "generated N comments" marker (see ``pr_delivery``)."""
+
+    author: str
+    body: str
+
+
+@dataclass(frozen=True)
+class PullRequestReviewComment:
+    """A single inline review comment on a PR.
+
+    ``line`` falls back to ``original_line`` (GitHub drops ``line`` for comments
+    anchored to a since-changed line). ``in_reply_to_id`` is set on thread
+    replies — story-develop excludes those when collecting Copilot findings."""
+
+    comment_id: int
+    author: str
+    path: str
+    line: int | None
+    body: str
+    in_reply_to_id: int | None
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────
@@ -209,6 +264,8 @@ def _parse_pull_request(row: dict[str, Any], *, repo: str) -> PullRequest:
     """Convert a GitHub ``GET /pulls/{n}`` response row into a typed PullRequest."""
     merged_at_raw = row.get("merged_at")
     sha = row.get("merge_commit_sha")
+    head = row.get("head") or {}
+    base = row.get("base") or {}
     return PullRequest(
         repo=repo,
         number=int(row["number"]),
@@ -216,6 +273,31 @@ def _parse_pull_request(row: dict[str, Any], *, repo: str) -> PullRequest:
         merged=bool(row.get("merged", False)),
         merged_at=_parse_iso(str(merged_at_raw)) if merged_at_raw else None,
         merge_commit_sha=str(sha) if sha else None,
+        head_sha=str(head.get("sha") or ""),
+        base_ref=str(base.get("ref") or ""),
+        head_ref=str(head.get("ref") or ""),
+        title=str(row.get("title") or ""),
+        body=str(row.get("body") or ""),
+    )
+
+
+def _parse_pull_request_review(row: dict[str, Any]) -> PullRequestReview:
+    return PullRequestReview(
+        author=str((row.get("user") or {}).get("login", "")),
+        body=str(row.get("body") or ""),
+    )
+
+
+def _parse_pull_request_review_comment(row: dict[str, Any]) -> PullRequestReviewComment:
+    return PullRequestReviewComment(
+        comment_id=int(row["id"]),
+        author=str((row.get("user") or {}).get("login", "")),
+        path=str(row.get("path") or ""),
+        # ``line`` is null for comments anchored to a since-changed line;
+        # GitHub then exposes the position via ``original_line``.
+        line=row.get("line") or row.get("original_line"),
+        body=str(row.get("body") or ""),
+        in_reply_to_id=row.get("in_reply_to_id"),
     )
 
 
@@ -355,6 +437,33 @@ class GitHubClient:
             "PATCH", url, params=None, json=json
         )
 
+    async def _post(self, path: str, *, json: dict[str, Any]) -> httpx.Response:
+        url = f"{self.base_url}{path}"
+        return await self._request_with_rate_limit_retry(
+            "POST", url, params=None, json=json
+        )
+
+    async def _get_all_pages(
+        self, path: str, *, repo: str, params: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """GET every page of a list endpoint, following ``Link: rel="next"``.
+
+        Returns the concatenated raw JSON rows. Mirrors the pagination
+        :meth:`list_issues_since` does inline; used by the PR review /
+        review-comment list methods so a busy PR's later reviews aren't
+        silently dropped past the first page.
+        """
+        rows: list[dict[str, Any]] = []
+        url: str | None = f"{self.base_url}{path}"
+        page_params: dict[str, Any] | None = params
+        while url is not None:
+            response = await self._get_url(url, params=page_params)
+            _raise_for_status(response, repo=repo)
+            rows.extend(response.json())
+            url = _parse_next_link(response.headers.get("Link"))
+            page_params = None
+        return rows
+
     async def _request_with_rate_limit_retry(
         self,
         method: str,
@@ -375,13 +484,22 @@ class GitHubClient:
         attempts = 0
         while True:
             attempts += 1
-            response = await self.http.request(
-                method,
-                url,
-                params=params,
-                json=json,
-                headers=self._headers(),
-            )
+            try:
+                response = await self.http.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json,
+                    headers=self._headers(),
+                )
+            except httpx.HTTPError as exc:
+                # Connect/read/reset/timeout etc. — normalise into the typed
+                # hierarchy so callers that ``except GitHubError`` (the
+                # story-develop best-effort wrappers, the watcher's
+                # network-transient handlers) don't have a raw httpx error
+                # escape the seam. Not retried here: rate-limit is the only
+                # in-loop retry; transport retries are the caller's poll/round.
+                raise GitHubTransportError(url, exc) from exc
             if response.status_code != 403:
                 return response
             # 403 is overloaded: rate-limit signal vs permission-denied. Distinguish
@@ -464,6 +582,72 @@ class GitHubClient:
             return None
         _raise_for_status(response, repo=repo)
         return _parse_pull_request(response.json(), repo=repo)
+
+    async def list_pull_request_reviews(
+        self, repo: str, number: int
+    ) -> list[PullRequestReview]:
+        """Every review on the PR (author + summary body), all pages.
+
+        story-develop scans these for Copilot's review and its "generated N
+        comments" marker (:mod:`.pr_delivery`)."""
+        rows = await self._get_all_pages(
+            f"/repos/{repo}/pulls/{number}/reviews", repo=repo
+        )
+        return [_parse_pull_request_review(row) for row in rows]
+
+    async def list_pull_request_review_comments(
+        self, repo: str, number: int
+    ) -> list[PullRequestReviewComment]:
+        """Every inline review comment on the PR, all pages.
+
+        story-develop keeps the top-level Copilot comments (``in_reply_to_id``
+        is ``None``) as findings to hand back to the coder."""
+        rows = await self._get_all_pages(
+            f"/repos/{repo}/pulls/{number}/comments", repo=repo
+        )
+        return [_parse_pull_request_review_comment(row) for row in rows]
+
+    async def request_reviewers(
+        self, repo: str, number: int, reviewers: list[str]
+    ) -> None:
+        """Request reviews from ``reviewers`` on the PR.
+
+        Raises the typed error hierarchy on failure — notably a ``422`` (e.g.
+        GitHub forbids requesting review from the PR author) surfaces as a
+        :class:`GitHubError` whose message carries GitHub's text, which the
+        caller inspects to decide whether to fall back to assigning."""
+        response = await self._post(
+            f"/repos/{repo}/pulls/{number}/requested_reviewers",
+            json={"reviewers": reviewers},
+        )
+        _raise_for_status(response, repo=repo)
+
+    async def add_assignees(self, repo: str, number: int, assignees: list[str]) -> None:
+        """Assign ``assignees`` to the issue/PR (assignment is allowed for the
+        author, unlike review-request — the self-author fallback)."""
+        response = await self._post(
+            f"/repos/{repo}/issues/{number}/assignees",
+            json={"assignees": assignees},
+        )
+        _raise_for_status(response, repo=repo)
+
+    async def create_review_comment_reply(
+        self, repo: str, number: int, comment_id: int, body: str
+    ) -> None:
+        """Reply to an inline review comment thread (Copilot dispute/ack)."""
+        response = await self._post(
+            f"/repos/{repo}/pulls/{number}/comments/{comment_id}/replies",
+            json={"body": body},
+        )
+        _raise_for_status(response, repo=repo)
+
+    async def create_issue_comment(self, repo: str, number: int, body: str) -> None:
+        """Post a top-level comment on the issue/PR conversation (a PR is an
+        issue for the comments endpoint)."""
+        response = await self._post(
+            f"/repos/{repo}/issues/{number}/comments", json={"body": body}
+        )
+        _raise_for_status(response, repo=repo)
 
     async def update_issue_body(self, repo: str, number: int, body: str) -> None:
         """Replace the issue body. Used to write/refresh the linkage marker.
