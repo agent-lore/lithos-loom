@@ -37,4 +37,8 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - Depends on: [Errors](Errors.md)
 - Used by: [Children](Children.md), [Plugins](Plugins.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
 
+## ADRs
+
+- [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
+
 [← all generated docs](../README.md)

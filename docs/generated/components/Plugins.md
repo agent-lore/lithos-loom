@@ -326,5 +326,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - [ADR 0003 — Code quality & review strength: selectable Review Profiles + a multi-check deterministic gate](../../adr/0003-code-quality-review-strength.md)
 - [ADR 0004 — Review-only mode: run the panel + gate on an existing change](../../adr/0004-review-only-mode.md)
 - [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
+- [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
 
 [← all generated docs](../README.md)
