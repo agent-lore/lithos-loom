@@ -30,9 +30,9 @@ codex_config = "/home/you/.codex-lithos"
 
 # ── Routes ────────────────────────────────────────────────────────────
 #
-# Three bundled MVP plugins. Each route's `command` is invoked as a
-# subprocess; substitution tokens {{task_json}}, {{work_dir}},
-# {{result_file}} are filled in by the daemon.
+# Bundled plugins. Each route's `command` is invoked as a subprocess;
+# substitution tokens {{task_json}}, {{work_dir}}, {{result_file}} are
+# filled in by the daemon.
 
 [[routes]]
 name = "prd-decompose"
@@ -41,14 +41,6 @@ max_runtime_seconds = 1800
 
 [routes.match]
 tags = ["trigger:prd-decompose"]
-
-[[routes]]
-name = "story-implement"
-command = "uv run python -m lithos_loom.plugins.story_implement --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
-max_runtime_seconds = 7200
-
-[routes.match]
-tags = ["trigger:story-implement"]
 
 [[routes]]
 name = "story-develop"
@@ -95,20 +87,6 @@ completes_task = false
 
 [routes.match]
 tags = ["trigger:story-develop"]
-
-[[routes]]
-name = "story-review-human"
-command = "uv run python -m lithos_loom.plugins.story_review_human --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
-# Long max_runtime — this plugin can run for days waiting on a human merge.
-max_runtime_seconds = 604800
-# US8: human_blocking=true surfaces tasks tagged for this route in the
-# operator's Obsidian view via the obsidian-projection subscription.
-# Routes default to human_blocking=false (the daemon handles them
-# autonomously; nothing for the human to do).
-human_blocking = true
-
-[routes.match]
-tags = ["trigger:story-review-human"]
 
 # echo — a zero-cost smoke-test route. The plugin does no work: it writes a
 # status="succeeded" result.json and exits, so the task completes immediately.
