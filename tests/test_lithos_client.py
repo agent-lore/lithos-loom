@@ -20,10 +20,13 @@ from mcp.types import CallToolResult, TextContent
 from lithos_loom import lithos_client as lithos_client_mod
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import (
+    BlockedTask,
+    Blocker,
     LithosClient,
     Note,
     NoteSummary,
     Task,
+    TaskEdge,
     WriteResult,
     _parse_note_list_response,
     _parse_note_read_response,
@@ -2112,3 +2115,499 @@ async def test_note_list_omits_metadata_match_when_none() -> None:
     await client.note_list()
     args = session.call_tool.await_args.kwargs["arguments"]
     assert "metadata_match" not in args
+
+
+# ── Graph surface (Epic G US3) ─────────────────────────────────────────
+#
+# task_edge_upsert / task_edge_list / task_ready / task_blocked /
+# task_spawn / task_children, plus task_create's task_type/parent_task_id/
+# depends_on kwargs and task_complete's unblocked return. Wire shapes below
+# were captured against a live Lithos (the extension is confirmed live).
+
+
+# Response parsing (exercised through the public methods so the private
+# parse helpers stay out of the test imports — keeps tests_private_imports flat).
+
+
+async def test_task_edge_list_parses_all_edge_fields() -> None:
+    client, _ = _client_with_session(
+        _content(
+            {
+                "edges": [
+                    {
+                        "from_task_id": "a",
+                        "to_task_id": "b",
+                        "type": "blocks",
+                        "direction": "incoming",
+                        "metadata": {"note": "x"},
+                        "created_by": "claude-code-dns",
+                        "created_at": "2026-07-12T12:57:08.461249+00:00",
+                    }
+                ]
+            }
+        )
+    )
+    e = (await client.task_edge_list(task_id="b"))[0]
+    assert isinstance(e, TaskEdge)
+    assert (e.from_task_id, e.to_task_id, e.type, e.direction) == (
+        "a",
+        "b",
+        "blocks",
+        "incoming",
+    )
+    assert e.metadata == {"note": "x"}
+    assert e.created_by == "claude-code-dns"
+    assert e.created_at is not None
+
+
+async def test_task_edge_list_defaults_optional_edge_fields() -> None:
+    """A lean edge record (only from/to/type/direction) still parses —
+    metadata / created_by / created_at are best-effort."""
+    client, _ = _client_with_session(
+        _content(
+            {
+                "edges": [
+                    {
+                        "from_task_id": "a",
+                        "to_task_id": "b",
+                        "type": "parent_child",
+                        "direction": "outgoing",
+                    }
+                ]
+            }
+        )
+    )
+    e = (await client.task_edge_list(task_id="a"))[0]
+    assert e.metadata == {}
+    assert e.created_by == ""
+    assert e.created_at is None
+
+
+async def test_task_edge_list_raises_when_edges_key_missing() -> None:
+    client, _ = _client_with_session(_content({"unexpected": "shape"}))
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_edge_list(task_id="b")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_task_edge_list_propagates_error_envelope() -> None:
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "task_not_found", "message": "no"})
+    )
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_edge_list(task_id="ghost")
+    assert exc.value.code == "task_not_found"
+
+
+async def test_task_blocked_parses_structured_blocker_fields() -> None:
+    client, _ = _client_with_session(
+        _content(
+            {
+                "tasks": [
+                    {
+                        "id": "dep",
+                        "title": "dependent",
+                        "status": "open",
+                        "task_type": "task",
+                        "tags": [],
+                        "metadata": {},
+                        "blockers": [
+                            {
+                                "kind": "blocker_unsatisfiable",
+                                "task_id": "pred",
+                                "type": "blocks",
+                                "status": "cancelled",
+                                "message": "predecessor cancelled",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    bt = (await client.task_blocked())[0]
+    assert isinstance(bt, BlockedTask)
+    assert bt.task.id == "dep"
+    b = bt.blockers[0]
+    assert isinstance(b, Blocker)
+    assert (b.kind, b.task_id, b.type, b.status) == (
+        "blocker_unsatisfiable",
+        "pred",
+        "blocks",
+        "cancelled",
+    )
+    assert b.message == "predecessor cancelled"
+
+
+async def test_task_blocked_defaults_missing_blocker_and_task_fields() -> None:
+    """A cycle blocker may omit the predecessor id / status, and a task may
+    omit task_type — the parser fills falsy defaults rather than raising."""
+    client, _ = _client_with_session(
+        _content(
+            {
+                "tasks": [
+                    {
+                        "id": "dep",
+                        "title": "d",
+                        "status": "open",
+                        "tags": [],
+                        "metadata": {},
+                        "blockers": [{"kind": "cycle", "message": "cycle detected"}],
+                    }
+                ]
+            }
+        )
+    )
+    bt = (await client.task_blocked())[0]
+    assert bt.blockers[0].kind == "cycle"
+    assert bt.blockers[0].task_id == ""
+    assert bt.blockers[0].status == ""
+    assert bt.task.task_type == "task"  # default when absent
+
+
+async def test_task_blocked_raises_when_tasks_key_missing() -> None:
+    client, _ = _client_with_session(_content({"unexpected": "shape"}))
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_blocked()
+    assert exc.value.code == "invalid_response"
+
+
+async def test_task_ready_reads_task_type() -> None:
+    """The graph responses carry a first-class ``task_type``; the shared
+    parser surfaces it (defaulting to ``task`` for pre-extension servers)."""
+    client, _ = _client_with_session(
+        _content(
+            {
+                "tasks": [
+                    {
+                        "id": "e",
+                        "title": "epic",
+                        "status": "open",
+                        "task_type": "epic",
+                        "tags": [],
+                        "metadata": {},
+                        "claims": [],
+                    }
+                ]
+            }
+        )
+    )
+    assert (await client.task_ready())[0].task_type == "epic"
+
+
+# task_edge_upsert.
+
+
+async def test_task_edge_upsert_passes_arguments() -> None:
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_edge_upsert(from_task_id="a", to_task_id="b", type="blocks")
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_edge_upsert",
+        arguments={
+            "from_task_id": "a",
+            "to_task_id": "b",
+            "type": "blocks",
+            "agent": "lithos-orchestrator-test",
+        },
+    )
+
+
+async def test_task_edge_upsert_forwards_metadata_when_provided() -> None:
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_edge_upsert(
+        from_task_id="a", to_task_id="b", type="blocks", metadata={"why": "x"}
+    )
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["metadata"] == {"why": "x"}
+
+
+async def test_task_edge_upsert_omits_metadata_when_none() -> None:
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_edge_upsert(from_task_id="a", to_task_id="b", type="blocks")
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert "metadata" not in args
+
+
+async def test_task_edge_upsert_propagates_error_envelope() -> None:
+    """A cycle-creating blocks edge (or self-edge / missing task) surfaces
+    as a typed error, not a silent success."""
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "edge_cycle", "message": "would cycle"})
+    )
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_edge_upsert(from_task_id="a", to_task_id="b", type="blocks")
+    assert exc.value.code == "edge_cycle"
+
+
+async def test_task_edge_upsert_raises_when_no_agent_anywhere() -> None:
+    client = LithosClient(base_url="http://example.test:8765")
+    client._session = AsyncMock()  # type: ignore[assignment]
+    with pytest.raises(LithosClientError, match="agent"):
+        await client.task_edge_upsert(from_task_id="a", to_task_id="b", type="blocks")
+
+
+# task_edge_list.
+
+
+async def test_task_edge_list_returns_edges_and_forwards_defaults() -> None:
+    client, session = _client_with_session(
+        _content(
+            {
+                "edges": [
+                    {
+                        "from_task_id": "a",
+                        "to_task_id": "b",
+                        "type": "blocks",
+                        "direction": "incoming",
+                    }
+                ]
+            }
+        )
+    )
+    edges = await client.task_edge_list(task_id="b")
+    assert [e.type for e in edges] == ["blocks"]
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_edge_list",
+        arguments={"task_id": "b", "direction": "both"},
+    )
+
+
+async def test_task_edge_list_forwards_direction_and_types() -> None:
+    client, session = _client_with_session(_content({"edges": []}))
+    await client.task_edge_list(
+        task_id="b", direction="incoming", types=["blocks", "waits_on_gate"]
+    )
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["direction"] == "incoming"
+    assert args["types"] == ["blocks", "waits_on_gate"]
+
+
+async def test_task_edge_list_omits_types_when_none() -> None:
+    client, session = _client_with_session(_content({"edges": []}))
+    await client.task_edge_list(task_id="b")
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert "types" not in args
+
+
+# task_ready.
+
+
+async def test_task_ready_returns_tasks_and_forwards_filters() -> None:
+    client, session = _client_with_session(
+        _content(
+            {
+                "tasks": [
+                    {
+                        "id": "r",
+                        "title": "ready",
+                        "status": "open",
+                        "tags": ["orchestration"],
+                        "metadata": {"project": "lithos-loom"},
+                        "claims": [],
+                    }
+                ]
+            }
+        )
+    )
+    ready = await client.task_ready(
+        project="lithos-loom", tags=["orchestration"], limit=10
+    )
+    assert [t.id for t in ready] == ["r"]
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_ready",
+        arguments={
+            "limit": 10,
+            "with_claims": True,
+            "project": "lithos-loom",
+            "tags": ["orchestration"],
+        },
+    )
+
+
+async def test_task_ready_omits_optional_filters_when_none() -> None:
+    client, session = _client_with_session(_content({"tasks": []}))
+    await client.task_ready()
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert set(args.keys()) == {"limit", "with_claims"}
+    assert args["limit"] == 50
+    assert args["with_claims"] is True
+
+
+async def test_task_ready_forwards_metadata_match_and_with_claims() -> None:
+    client, session = _client_with_session(_content({"tasks": []}))
+    await client.task_ready(metadata_match={"phase": "impl"}, with_claims=False)
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["metadata_match"] == {"phase": "impl"}
+    assert args["with_claims"] is False
+
+
+async def test_task_ready_propagates_error_envelope() -> None:
+    client, _ = _client_with_session(
+        _content({"status": "error", "code": "invalid_input", "message": "bad"})
+    )
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_ready()
+    assert exc.value.code == "invalid_input"
+
+
+# task_blocked.
+
+
+async def test_task_blocked_returns_blocked_tasks_and_forwards_filters() -> None:
+    client, session = _client_with_session(
+        _content(
+            {
+                "tasks": [
+                    {
+                        "id": "dep",
+                        "title": "d",
+                        "status": "open",
+                        "tags": [],
+                        "metadata": {},
+                        "blockers": [
+                            {
+                                "kind": "task",
+                                "task_id": "pred",
+                                "type": "blocks",
+                                "status": "open",
+                                "message": "waiting",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    blocked = await client.task_blocked(project="lithos-loom")
+    assert blocked[0].task.id == "dep"
+    assert blocked[0].blockers[0].kind == "task"
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_blocked",
+        arguments={"limit": 50, "project": "lithos-loom"},
+    )
+
+
+async def test_task_blocked_omits_optional_filters_when_none() -> None:
+    client, session = _client_with_session(_content({"tasks": []}))
+    await client.task_blocked()
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert set(args.keys()) == {"limit"}
+
+
+# task_spawn.
+
+
+async def test_task_spawn_returns_task_id_and_passes_arguments() -> None:
+    client, session = _client_with_session(_content({"task_id": "spawned-1"}))
+    task_id = await client.task_spawn(source_task_id="src", title="follow-on")
+    assert task_id == "spawned-1"
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_spawn",
+        arguments={
+            "source_task_id": "src",
+            "title": "follow-on",
+            "agent": "lithos-orchestrator-test",
+            "relation_type": "discovered_from",
+            "inherit_project": True,
+            "inherit_tags": True,
+            "inherit_context": True,
+        },
+    )
+
+
+async def test_task_spawn_forwards_optional_fields() -> None:
+    client, session = _client_with_session(_content({"task_id": "x"}))
+    await client.task_spawn(
+        source_task_id="src",
+        title="t",
+        description="brief",
+        relation_type="blocks",
+        inherit_tags=False,
+        metadata={"phase": "impl"},
+    )
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["description"] == "brief"
+    assert args["relation_type"] == "blocks"
+    assert args["inherit_tags"] is False
+    assert args["metadata"] == {"phase": "impl"}
+
+
+async def test_task_spawn_raises_when_response_missing_task_id() -> None:
+    client, _ = _client_with_session(_content({"unexpected": "shape"}))
+    with pytest.raises(LithosClientError) as exc:
+        await client.task_spawn(source_task_id="src", title="t")
+    assert exc.value.code == "invalid_response"
+
+
+# task_children.
+
+
+async def test_task_children_returns_tasks_and_forwards_flags() -> None:
+    client, session = _client_with_session(
+        _content(
+            {
+                "tasks": [
+                    {
+                        "id": "c",
+                        "title": "child",
+                        "status": "open",
+                        "tags": [],
+                        "metadata": {},
+                        "claims": [],
+                    }
+                ]
+            }
+        )
+    )
+    kids = await client.task_children(
+        task_id="epic", recursive=True, include_closed=True
+    )
+    assert [t.id for t in kids] == ["c"]
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_children",
+        arguments={"task_id": "epic", "recursive": True, "include_closed": True},
+    )
+
+
+# task_create graph kwargs.
+
+
+async def test_task_create_forwards_graph_kwargs() -> None:
+    client, session = _client_with_session(_content({"task_id": "x"}))
+    await client.task_create(
+        title="subtask",
+        task_type="epic",
+        parent_task_id="parent-1",
+        depends_on=["p1", "p2"],
+    )
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["task_type"] == "epic"
+    assert args["parent_task_id"] == "parent-1"
+    assert args["depends_on"] == ["p1", "p2"]
+
+
+async def test_task_create_omits_graph_kwargs_when_none() -> None:
+    client, session = _client_with_session(_content({"task_id": "x"}))
+    await client.task_create(title="plain")
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert "task_type" not in args
+    assert "parent_task_id" not in args
+    assert "depends_on" not in args
+
+
+# task_complete unblocked return.
+
+
+async def test_task_complete_returns_unblocked_ids() -> None:
+    client, _ = _client_with_session(
+        _content({"success": True, "unblocked": ["dep-1", "dep-2"]})
+    )
+    unblocked = await client.task_complete(task_id="blocker")
+    assert unblocked == ["dep-1", "dep-2"]
+
+
+async def test_task_complete_returns_empty_when_no_unblocked_key() -> None:
+    """A pre-extension Lithos returns just ``{success: true}``; the client
+    degrades to an empty unblocked set rather than raising."""
+    client, _ = _client_with_session(_content({"success": True}))
+    assert await client.task_complete(task_id="blocker") == []

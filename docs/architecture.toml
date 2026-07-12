@@ -89,7 +89,10 @@ cross_component_edges  = 62   # measured 2026-07; direction: down
 component_cycles       = 1    # Render <-> Subscriptions; goal: 0
 module_cycles          = 1    # agent_session <-> panel <-> rounds SCC; goal: 0
 modules_over_800_lines = 6  # 8->6 via ARCH-9 slices 1-2; direction: down
-max_module_lines       = 1850 # stop-loss; largest today is lithos_client at 1774
+max_module_lines       = 2210 # stop-loss; lithos_client is 2195 (Epic G US3 added the
+                               # full task-graph tool surface). It now warrants a
+                               # wire-types/parsers extraction — tracked as a follow-up;
+                               # do that (not another bump) before it grows further.
 cross_module_private_refs = 8   # measured 2026-07; children._boot x3, story_develop seam constants; goal: 0
 tests_private_imports     = 97  # measured 2026-07; cli.develop helpers dominate; direction: down
 

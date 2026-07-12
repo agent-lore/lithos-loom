@@ -143,6 +143,11 @@ class Task:
     ``lithos_task_get`` tool). They default to falsy values so the
     parser stays backwards-compatible with pre-#294 servers that
     don't return them.
+
+    ``task_type`` (Epic G task-graph extension: ``task`` | ``epic`` |
+    ``gate``) is carried on every graph response (``task_ready`` /
+    ``task_blocked`` / ``task_children``); it defaults to ``task`` so
+    a pre-extension server that omits it still parses.
     """
 
     id: str
@@ -156,6 +161,7 @@ class Task:
     created_by: str = ""
     created_at: datetime | None = None
     outcome: str | None = None
+    task_type: str = "task"
 
 
 @dataclass(frozen=True)
@@ -250,6 +256,62 @@ class WriteResult:
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
 
+# ── Task-graph types (Epic G) ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class TaskEdge:
+    """One typed relation between two tasks, as returned by
+    ``lithos_task_edge_list``.
+
+    ``type`` is the edge type (``blocks`` | ``parent_child`` |
+    ``discovered_from`` | ``waits_on_gate``); ``direction`` is relative to
+    the queried task (``incoming`` = the queried task is ``to_task_id``,
+    ``outgoing`` = it is ``from_task_id``). ``created_by`` / ``created_at``
+    are provenance and default to falsy so a lean edge record still parses.
+    """
+
+    from_task_id: str
+    to_task_id: str
+    type: str
+    direction: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    created_by: str = ""
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class Blocker:
+    """Why a task is not ready, as returned inside ``lithos_task_blocked``.
+
+    ``kind`` is the structured reason: ``task`` (predecessor still open —
+    just waiting), ``gate`` (waiting on an unresolved gate),
+    ``blocker_unsatisfiable`` (predecessor / gate was cancelled — needs
+    intervention), or ``cycle`` (the dependency chain forms a cycle).
+    ``task_id`` / ``type`` / ``status`` describe the blocking predecessor
+    or gate and default to falsy (a ``cycle`` blocker may omit them).
+    """
+
+    kind: str
+    message: str
+    task_id: str = ""
+    type: str = ""
+    status: str = ""
+
+
+@dataclass(frozen=True)
+class BlockedTask:
+    """A not-ready task plus its structured blocker reasons.
+
+    Pairs the full :class:`Task` record with the ``blockers`` list from
+    ``lithos_task_blocked`` so callers (the dry-run report, the projection's
+    ⛔ markers) render *why* a task is deferred without a second round-trip.
+    """
+
+    task: Task
+    blockers: tuple[Blocker, ...]
+
+
 # ── Role-scoped client Protocols (ARCH-4) ──────────────────────────────────
 #
 # The concrete ``LithosClient`` below has ONE flat namespace of ~15 methods
@@ -287,6 +349,9 @@ class TaskClient(Protocol):
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        task_type: str | None = None,
+        parent_task_id: str | None = None,
+        depends_on: list[str] | None = None,
     ) -> str: ...
 
     async def task_update(
@@ -302,11 +367,72 @@ class TaskClient(Protocol):
 
     async def task_complete(
         self, *, task_id: str, agent: str | None = None
-    ) -> None: ...
+    ) -> list[str]: ...
 
     async def task_cancel(
         self, *, task_id: str, agent: str | None = None, reason: str | None = None
     ) -> None: ...
+
+    # ── task-graph surface (Epic G) ──────────────────────────────────────
+
+    async def task_edge_upsert(
+        self,
+        *,
+        from_task_id: str,
+        to_task_id: str,
+        type: str,
+        agent: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    async def task_edge_list(
+        self,
+        *,
+        task_id: str,
+        direction: str = "both",
+        types: list[str] | None = None,
+    ) -> list[TaskEdge]: ...
+
+    async def task_ready(
+        self,
+        *,
+        project: str | None = None,
+        tags: list[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
+        limit: int = 50,
+        with_claims: bool = True,
+    ) -> list[Task]: ...
+
+    async def task_blocked(
+        self,
+        *,
+        project: str | None = None,
+        tags: list[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
+        limit: int = 50,
+    ) -> list[BlockedTask]: ...
+
+    async def task_spawn(
+        self,
+        *,
+        source_task_id: str,
+        title: str,
+        agent: str | None = None,
+        description: str | None = None,
+        relation_type: str = "discovered_from",
+        inherit_project: bool = True,
+        inherit_tags: bool = True,
+        inherit_context: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> str: ...
+
+    async def task_children(
+        self,
+        *,
+        task_id: str,
+        recursive: bool = False,
+        include_closed: bool = False,
+    ) -> list[Task]: ...
 
     async def task_claim(
         self,
@@ -1022,6 +1148,9 @@ class LithosClient:
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        task_type: str | None = None,
+        parent_task_id: str | None = None,
+        depends_on: list[str] | None = None,
     ) -> str:
         """Create a coordination task. Returns the new task's ``id``.
 
@@ -1030,6 +1159,13 @@ class LithosClient:
         Omitted when ``None``, matching :meth:`task_update`'s
         omit-when-default pattern so old/strict Lithos servers don't
         reject an unexpected key.
+
+        ``task_type`` (``task`` | ``epic`` | ``gate``), ``parent_task_id``
+        (creates a ``parent_child`` edge), and ``depends_on`` (predecessor
+        ids, each creating a ``blocks`` edge) are the Epic G task-graph
+        arguments; they too are omitted when ``None`` so a pre-extension
+        server never sees them. Dependencies are first-class edges now —
+        pass ``depends_on`` here rather than ``metadata["depends_on"]``.
 
         Wraps the ``lithos_task_create`` MCP tool's
         ``{task_id: string}`` response shape. Domain errors
@@ -1045,6 +1181,12 @@ class LithosClient:
             arguments["tags"] = tags
         if metadata is not None:
             arguments["metadata"] = metadata
+        if task_type is not None:
+            arguments["task_type"] = task_type
+        if parent_task_id is not None:
+            arguments["parent_task_id"] = parent_task_id
+        if depends_on is not None:
+            arguments["depends_on"] = depends_on
         payload = await self._call("lithos_task_create", arguments)
         task_id = payload.get("task_id") if isinstance(payload, dict) else None
         if not isinstance(task_id, str) or not task_id:
@@ -1058,14 +1200,23 @@ class LithosClient:
         *,
         task_id: str,
         agent: str | None = None,
-    ) -> None:
-        """Mark a task as completed. Releases all claims as a side effect."""
+    ) -> list[str]:
+        """Mark a task as completed. Releases all claims as a side effect.
+
+        Returns the ids of the tasks this completion **newly unblocked**
+        (Epic G: the ``unblocked`` list Lithos computes when a ``blocks``
+        predecessor resolves). Callers that don't care ignore the return;
+        the runner (US6) consumes it to re-dispatch immediately without
+        waiting for a ``task.updated`` round-trip. A pre-extension server
+        that omits ``unblocked`` degrades to an empty list.
+        """
         agent_id = agent or self.agent_id
         if not agent_id:
             raise LithosClientError("missing_agent", "task_complete needs an agent id")
-        await self._call(
+        payload = await self._call(
             "lithos_task_complete", {"task_id": task_id, "agent": agent_id}
         )
+        return _parse_unblocked(payload)
 
     async def task_cancel(
         self,
@@ -1181,6 +1332,177 @@ class LithosClient:
             if exc.code == "task_not_found":
                 return None
             raise
+
+    # ── task-graph surface (Epic G) ──────────────────────────────────
+
+    async def task_edge_upsert(
+        self,
+        *,
+        from_task_id: str,
+        to_task_id: str,
+        type: str,
+        agent: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Create (or update) a typed ``from_task_id -> to_task_id`` edge.
+
+        ``type`` is ``blocks`` | ``parent_child`` | ``discovered_from`` |
+        ``waits_on_gate``. Domain errors — an unaccepted type, a self-edge,
+        a missing task, or a ``blocks`` edge that would create a dependency
+        cycle — raise :class:`LithosClientError` (the ``{success: true}``
+        envelope carries nothing else, so success returns ``None``).
+        """
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError(
+                "missing_agent", "task_edge_upsert needs an agent id"
+            )
+        arguments: dict[str, Any] = {
+            "from_task_id": from_task_id,
+            "to_task_id": to_task_id,
+            "type": type,
+            "agent": agent_id,
+        }
+        if metadata is not None:
+            arguments["metadata"] = metadata
+        await self._call("lithos_task_edge_upsert", arguments)
+
+    async def task_edge_list(
+        self,
+        *,
+        task_id: str,
+        direction: str = "both",
+        types: list[str] | None = None,
+    ) -> list[TaskEdge]:
+        """List edges touching ``task_id``.
+
+        ``direction`` is ``incoming`` | ``outgoing`` | ``both`` (default),
+        relative to ``task_id``; ``types`` optionally filters by edge type.
+        Returns the parsed :class:`TaskEdge` records.
+        """
+        arguments: dict[str, Any] = {"task_id": task_id, "direction": direction}
+        if types is not None:
+            arguments["types"] = types
+        result = await self._invoke("lithos_task_edge_list", arguments)
+        return _parse_task_edge_list_response(result)
+
+    async def task_ready(
+        self,
+        *,
+        project: str | None = None,
+        tags: list[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
+        limit: int = 50,
+        with_claims: bool = True,
+    ) -> list[Task]:
+        """Return the ready frontier: open, non-gate/epic tasks with every
+        ``blocks`` predecessor completed and no unresolved gate.
+
+        Same filter surface as :meth:`task_list` (``project`` is shorthand
+        for ``metadata.project == project``; ``tags`` requires all; scalar
+        ``metadata_match`` is AND-ed). This replaces Loom's client-side
+        dependency gate — readiness is Lithos's to compute now.
+        """
+        arguments: dict[str, Any] = {"limit": limit, "with_claims": with_claims}
+        if project is not None:
+            arguments["project"] = project
+        if tags is not None:
+            arguments["tags"] = tags
+        if metadata_match is not None:
+            arguments["metadata_match"] = metadata_match
+        result = await self._invoke("lithos_task_ready", arguments)
+        return _parse_task_list_response(result)
+
+    async def task_blocked(
+        self,
+        *,
+        project: str | None = None,
+        tags: list[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
+        limit: int = 50,
+    ) -> list[BlockedTask]:
+        """Return open tasks that are NOT ready, each with structured
+        :class:`Blocker` reasons (predecessor / gate / unsatisfiable /
+        cycle). Same filter surface as :meth:`task_ready`.
+        """
+        arguments: dict[str, Any] = {"limit": limit}
+        if project is not None:
+            arguments["project"] = project
+        if tags is not None:
+            arguments["tags"] = tags
+        if metadata_match is not None:
+            arguments["metadata_match"] = metadata_match
+        result = await self._invoke("lithos_task_blocked", arguments)
+        return _parse_task_blocked_response(result)
+
+    async def task_spawn(
+        self,
+        *,
+        source_task_id: str,
+        title: str,
+        agent: str | None = None,
+        description: str | None = None,
+        relation_type: str = "discovered_from",
+        inherit_project: bool = True,
+        inherit_tags: bool = True,
+        inherit_context: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Create a follow-on task edged from ``source_task_id`` and return
+        its id.
+
+        ``relation_type`` is ``discovered_from`` (default, non-blocking) or
+        ``blocks`` (the spawned task waits on the source). The ``inherit_*``
+        flags copy the source's project / tags / scheduling-convention
+        metadata. ``metadata`` must NOT contain ``depends_on`` — spawn edges
+        are first-class. Domain errors raise :class:`LithosClientError`.
+        """
+        agent_id = agent or self.agent_id
+        if not agent_id:
+            raise LithosClientError("missing_agent", "task_spawn needs an agent id")
+        arguments: dict[str, Any] = {
+            "source_task_id": source_task_id,
+            "title": title,
+            "agent": agent_id,
+            "relation_type": relation_type,
+            "inherit_project": inherit_project,
+            "inherit_tags": inherit_tags,
+            "inherit_context": inherit_context,
+        }
+        if description is not None:
+            arguments["description"] = description
+        if metadata is not None:
+            arguments["metadata"] = metadata
+        payload = await self._call("lithos_task_spawn", arguments)
+        task_id = payload.get("task_id") if isinstance(payload, dict) else None
+        if not isinstance(task_id, str) or not task_id:
+            raise LithosClientError(
+                "invalid_response", "task_spawn response missing task_id"
+            )
+        return task_id
+
+    async def task_children(
+        self,
+        *,
+        task_id: str,
+        recursive: bool = False,
+        include_closed: bool = False,
+    ) -> list[Task]:
+        """Return the child tasks of a parent / epic (via ``parent_child``
+        edges).
+
+        ``recursive`` walks the full descendant subtree; ``include_closed``
+        keeps completed/cancelled children (default is open children only).
+        """
+        result = await self._invoke(
+            "lithos_task_children",
+            {
+                "task_id": task_id,
+                "recursive": recursive,
+                "include_closed": include_closed,
+            },
+        )
+        return _parse_task_list_response(result)
 
     # ── KB-doc surface ────────────────────────────────────────────────
 
@@ -1490,6 +1812,7 @@ def _parse_task(raw: Any) -> Task:
             created_by=str(raw.get("created_by") or ""),
             created_at=_parse_iso_datetime(raw.get("created_at")),
             outcome=str(outcome_raw) if outcome_raw is not None else None,
+            task_type=str(raw.get("task_type") or "task"),
         )
     except KeyError as exc:
         raise LithosClientError(
@@ -1517,6 +1840,104 @@ def _parse_task_get_response(result: CallToolResult) -> Task:
             "invalid_response", "missing 'task' key in lithos_task_get response"
         )
     return _parse_task(payload["task"])
+
+
+def _parse_task_edge_list_response(result: CallToolResult) -> list[TaskEdge]:
+    """Parse the ``lithos_task_edge_list`` ``{"edges": [...]}`` envelope."""
+    payload = _payload_from_result(result)
+    if not isinstance(payload, dict):
+        raise LithosClientError(
+            "invalid_response",
+            f"expected dict response, got {type(payload).__name__}",
+        )
+    _raise_if_error_envelope(payload)
+    raw_edges = payload.get("edges")
+    if not isinstance(raw_edges, list):
+        raise LithosClientError(
+            "invalid_response", "missing 'edges' list in lithos_task_edge_list response"
+        )
+    return [_parse_task_edge(e) for e in raw_edges]
+
+
+def _parse_task_edge(raw: Any) -> TaskEdge:
+    if not isinstance(raw, dict):
+        raise LithosClientError(
+            "invalid_response", f"edge entry must be a dict, got {type(raw).__name__}"
+        )
+    try:
+        return TaskEdge(
+            from_task_id=str(raw["from_task_id"]),
+            to_task_id=str(raw["to_task_id"]),
+            type=str(raw["type"]),
+            direction=str(raw["direction"]),
+            metadata=dict(raw.get("metadata") or {}),
+            created_by=str(raw.get("created_by") or ""),
+            created_at=_parse_iso_datetime(raw.get("created_at")),
+        )
+    except KeyError as exc:
+        raise LithosClientError(
+            "invalid_response", f"edge entry missing required field: {exc.args[0]}"
+        ) from exc
+
+
+def _parse_task_blocked_response(result: CallToolResult) -> list[BlockedTask]:
+    """Parse the ``lithos_task_blocked`` ``{"tasks": [{...task, blockers}]}``
+    envelope into :class:`BlockedTask` pairs."""
+    payload = _payload_from_result(result)
+    if not isinstance(payload, dict):
+        raise LithosClientError(
+            "invalid_response",
+            f"expected dict response, got {type(payload).__name__}",
+        )
+    _raise_if_error_envelope(payload)
+    raw_tasks = payload.get("tasks")
+    if not isinstance(raw_tasks, list):
+        raise LithosClientError(
+            "invalid_response", "missing 'tasks' list in lithos_task_blocked response"
+        )
+    return [
+        BlockedTask(
+            task=_parse_task(t),
+            blockers=tuple(
+                _parse_blocker(b)
+                for b in (t.get("blockers") if isinstance(t, dict) else None) or []
+            ),
+        )
+        for t in raw_tasks
+    ]
+
+
+def _parse_blocker(raw: Any) -> Blocker:
+    if not isinstance(raw, dict):
+        raise LithosClientError(
+            "invalid_response",
+            f"blocker entry must be a dict, got {type(raw).__name__}",
+        )
+    try:
+        return Blocker(
+            kind=str(raw["kind"]),
+            message=str(raw.get("message") or ""),
+            task_id=str(raw.get("task_id") or ""),
+            type=str(raw.get("type") or ""),
+            status=str(raw.get("status") or ""),
+        )
+    except KeyError as exc:
+        raise LithosClientError(
+            "invalid_response", f"blocker entry missing required field: {exc.args[0]}"
+        ) from exc
+
+
+def _parse_unblocked(payload: Any) -> list[str]:
+    """The ``unblocked`` task ids from a ``lithos_task_complete`` response.
+
+    Degrades to ``[]`` when the key is absent (pre-extension server) or not
+    a list, so a completion never fails on the newly-added field."""
+    if not isinstance(payload, dict):
+        return []
+    raw = payload.get("unblocked")
+    if not isinstance(raw, list):
+        return []
+    return [str(x) for x in raw]
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
