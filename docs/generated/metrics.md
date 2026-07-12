@@ -14,7 +14,7 @@ lower a budget after improving the code to lock in the gain.
 | `component_cycles` | 1 | 1 | 0 |
 | `cross_component_edges` | 62 | 62 | 0 |
 | `cross_module_private_refs` | 8 | 8 | 0 |
-| `max_module_lines` | 1774 | 1850 | 76 |
+| `max_module_lines` | 2195 | 2210 | 15 |
 | `module_cycles` | 1 | 1 | 0 |
 | `modules_over_800_lines` | 6 | 6 | 0 |
 | `tests_private_imports` | 97 | 97 | 0 |
@@ -43,7 +43,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Errors | 1 | 50 | 30 | 10 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
 | Evals | 9 | 975 | 785 | 1 | 2 | 0.67 | 18 (`lithos_loom.evals.review.harness.run_case`) | 2 |
 | GitHub | 1 | 787 | 608 | 4 | 1 | 0.20 | 10 (`lithos_loom.github_client._parse_pull_request`) | 0 |
-| LithosClient | 1 | 1774 | 1470 | 9 | 1 | 0.10 | 21 (`lithos_loom.lithos_client._parse_note`) | 4 |
+| LithosClient | 1 | 2195 | 1841 | 9 | 1 | 0.10 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Plugins | 42 | 10755 | 8641 | 2 | 5 | 0.71 | 92 (`lithos_loom.plugins.story_develop.__main__.main`) | 21 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 289 | 234 | 2 | 4 | 0.67 | 8 (`lithos_loom.render.dep_markers`) | 0 |
@@ -56,8 +56,8 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **115**, lines: **33139**, SLOC: **26288**
-- Largest module: `lithos_loom.lithos_client` (1774 lines)
+- Modules: **115**, lines: **33560**, SLOC: **26659**
+- Largest module: `lithos_loom.lithos_client` (2195 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
   - `lithos_loom.cli.project`
@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **865**, cyclomatic > 10: **66**
+- Functions: **882**, cyclomatic > 10: **68**
 
 Top 10 most complex functions:
 
@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **16** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.56** (51854 test lines / 33139 source lines)
+- Test-to-source line ratio: **1.58** (53087 test lines / 33560 source lines)

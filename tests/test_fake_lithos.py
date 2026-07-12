@@ -239,3 +239,229 @@ def test_fake_exposes_the_role_protocol_attributes_at_runtime() -> None:
     assert isinstance(client, NoteClient)
     assert isinstance(client, FindingClient)
     assert isinstance(client, LithosClientProtocol)
+
+
+# ── graph / readiness model (Epic G US3) ────────────────────────────────────
+#
+# The fake owns an in-memory edge store + readiness/blocked model that mirrors
+# Lithos's server-side ready-queue: a ``blocks`` predecessor blocks a task until
+# it is *completed* (a *cancelled* predecessor keeps the task blocked as
+# ``blocker_unsatisfiable`` — the epic-G precondition), and a gate blocks its
+# waiter until resolved. This is the hermetic contract; test_graph_live.py
+# validates it against a real Lithos.
+
+
+async def _blocker_chain() -> tuple[FakeLithosClient, str, str]:
+    """A fake holding one open blocker and one dependent linked by a
+    ``blocks`` edge (created via ``task_create(depends_on=...)``). Returns
+    the client + the two ids."""
+    client = FakeLithosClient(agent_id="a1")
+    blocker = await client.task_create(
+        title="blocker", tags=["g"], metadata={"project": "p"}
+    )
+    dependent = await client.task_create(
+        title="dependent", tags=["g"], metadata={"project": "p"}, depends_on=[blocker]
+    )
+    return client, blocker, dependent
+
+
+async def test_fake_depends_on_creates_blocks_edge_and_blocks_dependent() -> None:
+    client, blocker, dependent = await _blocker_chain()
+
+    ready = await client.task_ready(project="p")
+    blocked = await client.task_blocked(project="p")
+
+    assert [t.id for t in ready] == [blocker]  # only the free head is ready
+    assert [bt.task.id for bt in blocked] == [dependent]
+    reasons = blocked[0].blockers
+    assert [b.kind for b in reasons] == ["task"]
+    assert reasons[0].task_id == blocker
+    assert reasons[0].type == "blocks"
+
+
+async def test_fake_completed_blocker_unblocks_and_reports_unblocked() -> None:
+    client, blocker, dependent = await _blocker_chain()
+
+    unblocked = await client.task_complete(task_id=blocker)
+
+    assert unblocked == [dependent]
+    assert [t.id for t in await client.task_ready(project="p")] == [dependent]
+    assert await client.task_blocked(project="p") == []
+
+
+async def test_fake_cancelled_blocker_keeps_dependent_unsatisfiable() -> None:
+    """The epic-G precondition: a cancelled predecessor does NOT release its
+    dependent — it stays blocked as ``blocker_unsatisfiable``."""
+    client, blocker, dependent = await _blocker_chain()
+
+    await client.task_cancel(task_id=blocker)
+
+    assert await client.task_ready(project="p") == []
+    blocked = await client.task_blocked(project="p")
+    assert [bt.task.id for bt in blocked] == [dependent]
+    reason = blocked[0].blockers[0]
+    assert reason.kind == "blocker_unsatisfiable"
+    assert reason.status == "cancelled"
+
+
+async def test_fake_gate_blocks_waiter_until_resolved() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    gate = await client.task_create(
+        title="human gate", task_type="gate", metadata={"project": "p"}
+    )
+    waiter = await client.task_create(title="waits", metadata={"project": "p"})
+    await client.task_edge_upsert(
+        from_task_id=gate, to_task_id=waiter, type="waits_on_gate"
+    )
+
+    blocked = await client.task_blocked(project="p")
+    assert [bt.task.id for bt in blocked] == [waiter]
+    assert blocked[0].blockers[0].kind == "gate"
+    # A gate/epic is itself never offered as ready work.
+    assert gate not in [t.id for t in await client.task_ready(project="p")]
+
+    unblocked = await client.task_complete(task_id=gate)
+    assert waiter in unblocked
+    assert waiter in [t.id for t in await client.task_ready(project="p")]
+
+
+async def test_fake_ready_never_offers_gate_or_epic_tasks() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    await client.task_create(title="epic", task_type="epic", metadata={"project": "p"})
+    await client.task_create(title="gate", task_type="gate", metadata={"project": "p"})
+    plain = await client.task_create(title="plain", metadata={"project": "p"})
+    assert [t.id for t in await client.task_ready(project="p")] == [plain]
+
+
+async def test_fake_task_ready_filters_by_tags_and_metadata() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    a = await client.task_create(
+        title="a", tags=["x"], metadata={"project": "p", "phase": "impl"}
+    )
+    await client.task_create(
+        title="b", tags=["y"], metadata={"project": "p", "phase": "review"}
+    )
+    ready = await client.task_ready(
+        project="p", tags=["x"], metadata_match={"phase": "impl"}
+    )
+    assert [t.id for t in ready] == [a]
+
+
+async def test_fake_edge_upsert_is_idempotent_and_replaces_metadata() -> None:
+    """The real tool is an *upsert*: a repeat on the same (from, to, type)
+    updates the one edge (full metadata replace) instead of duplicating it.
+    Verified against live Lithos: second call's metadata wins, one edge left."""
+    client = FakeLithosClient(agent_id="a1")
+    a = await client.task_create(title="a")
+    b = await client.task_create(title="b")
+
+    await client.task_edge_upsert(
+        from_task_id=a, to_task_id=b, type="blocks", metadata={"round": 1, "keep": "x"}
+    )
+    await client.task_edge_upsert(
+        from_task_id=a, to_task_id=b, type="blocks", metadata={"round": 2}
+    )
+
+    edges = await client.task_edge_list(task_id=b)
+    assert len(edges) == 1  # not duplicated
+    assert edges[0].metadata == {"round": 2}  # full replace, not merge/preserve
+    # And task_blocked reports a single reason, not two.
+    blocked = await client.task_blocked()
+    assert len(blocked[0].blockers) == 1
+
+
+async def test_fake_edge_upsert_rejects_self_edge() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    t = await client.task_create(title="t")
+    with pytest.raises(Exception):  # noqa: B017 — LithosClientError, kept loose for RED
+        await client.task_edge_upsert(from_task_id=t, to_task_id=t, type="blocks")
+
+
+async def test_fake_edge_upsert_rejects_missing_task() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    t = await client.task_create(title="t")
+    with pytest.raises(Exception):  # noqa: B017
+        await client.task_edge_upsert(from_task_id=t, to_task_id="ghost", type="blocks")
+
+
+async def test_fake_edge_upsert_rejects_blocks_cycle() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    a = await client.task_create(title="a")
+    b = await client.task_create(title="b", depends_on=[a])  # a blocks b
+    with pytest.raises(Exception):  # noqa: B017 — b -> a would close the loop
+        await client.task_edge_upsert(from_task_id=b, to_task_id=a, type="blocks")
+
+
+async def test_fake_task_blocked_reports_cycle_kind() -> None:
+    """A cycle can't be built through ``task_edge_upsert`` (it rejects), so a
+    test injects one via ``add_edge`` to pin the cycle blocker kind."""
+    client = FakeLithosClient(agent_id="a1")
+    a = await client.task_create(title="a", metadata={"project": "p"})
+    b = await client.task_create(title="b", metadata={"project": "p"})
+    client.add_edge(from_task_id=a, to_task_id=b, type="blocks")
+    client.add_edge(from_task_id=b, to_task_id=a, type="blocks")
+
+    blocked = await client.task_blocked(project="p")
+    kinds = {bt.task.id: bt.blockers[0].kind for bt in blocked}
+    assert kinds == {a: "cycle", b: "cycle"}
+
+
+async def test_fake_task_children_returns_parent_child() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    parent = await client.task_create(title="epic", task_type="epic")
+    child = await client.task_create(title="child", parent_task_id=parent)
+    other = await client.task_create(title="unrelated")
+
+    kids = await client.task_children(task_id=parent)
+    kid_ids = [t.id for t in kids]
+    assert child in kid_ids
+    assert other not in kid_ids
+
+
+async def test_fake_task_edge_list_reports_direction() -> None:
+    client, blocker, dependent = await _blocker_chain()
+
+    incoming = await client.task_edge_list(task_id=dependent)
+    outgoing = await client.task_edge_list(task_id=blocker)
+
+    assert [(e.type, e.direction) for e in incoming] == [("blocks", "incoming")]
+    assert [(e.type, e.direction) for e in outgoing] == [("blocks", "outgoing")]
+
+
+async def test_fake_task_edge_list_filters_by_type() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    a = await client.task_create(title="a")
+    b = await client.task_create(title="b", parent_task_id=a)  # parent_child edge
+    await client.task_create(title="c", depends_on=[a])  # blocks edge from a
+
+    only_blocks = await client.task_edge_list(task_id=a, types=["blocks"])
+    assert [e.type for e in only_blocks] == ["blocks"]
+    assert b  # silence unused
+
+
+async def test_fake_task_spawn_creates_task_and_blocking_edge() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    src = await client.task_create(title="src", metadata={"project": "p"})
+    spawned = await client.task_spawn(
+        source_task_id=src, title="follow-on", relation_type="blocks"
+    )
+
+    # The spawned task exists and is blocked by its source.
+    assert (await client.task_get(task_id=spawned)) is not None
+    blocked = await client.task_blocked(project="p")
+    assert spawned in [bt.task.id for bt in blocked]
+
+
+async def test_fake_graph_writes_are_recorded_as_mutating() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    a = await client.task_create(title="a")
+    b = await client.task_create(title="b")
+    await client.task_edge_upsert(from_task_id=a, to_task_id=b, type="blocks")
+    await client.task_spawn(source_task_id=a, title="s")
+    # reads don't count; writes do
+    await client.task_ready()
+    await client.task_blocked()
+    await client.task_edge_list(task_id=a)
+    assert "task_edge_upsert" in client.mutating_calls
+    assert "task_spawn" in client.mutating_calls
+    assert "task_ready" not in client.mutating_calls
