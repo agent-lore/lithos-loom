@@ -28,6 +28,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
+| `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | M | 1 | 0 |
 
 ## Public API
@@ -89,6 +90,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
+
+### `lithos_loom.subscriptions.retry`
+- def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.
 
 ### `lithos_loom.subscriptions.route_runner`
 - class `RouteRunner` — One claim-bound subscriber per route.

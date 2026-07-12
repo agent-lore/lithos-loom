@@ -31,15 +31,15 @@ runner assumes idempotency and never deduplicates events.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from lithos_loom.bus import Event, EventBus, Subscription
-from lithos_loom.config import RetryPolicy, SubscriptionConfig
+from lithos_loom.config import SubscriptionConfig
 from lithos_loom.errors import LithosLoomError
+from lithos_loom.subscriptions.retry import run_with_retry
 
 __all__ = [
     "SUBSCRIPTION_ACTIONS",
@@ -125,25 +125,23 @@ class SubscriptionRunner:
             await self._dispatch_with_retry(event)
 
     async def _dispatch_with_retry(self, event: Event) -> None:
-        last_exc: BaseException | None = None
-        for attempt in range(self.spec.retry.attempts):
-            try:
-                await self.handler(event, self.ctx)
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                last_exc = exc
-                self.ctx.logger.warning(
-                    "subscription %s handler attempt %d/%d failed: %r",
-                    self.spec.name,
-                    attempt + 1,
-                    self.spec.retry.attempts,
-                    exc,
-                )
-                if attempt < self.spec.retry.attempts - 1:
-                    await asyncio.sleep(_backoff_delay(self.spec.retry, attempt))
-        await self._on_persistent_failure(event, last_exc)
+        def _log_attempt(
+            attempt: int, exc: Exception, _next_delay: float | None
+        ) -> None:
+            self.ctx.logger.warning(
+                "subscription %s handler attempt %d/%d failed: %r",
+                self.spec.name,
+                attempt + 1,
+                self.spec.retry.attempts,
+                exc,
+            )
+
+        await run_with_retry(
+            lambda: self.handler(event, self.ctx),
+            self.spec.retry,
+            on_attempt_failed=_log_attempt,
+            on_give_up=lambda exc: self._on_persistent_failure(event, exc),
+        )
 
     async def _on_persistent_failure(
         self, event: Event, last_exc: BaseException | None
@@ -247,15 +245,3 @@ def _compile_where(name: str, expr: str) -> Callable[[Event], bool]:
         return bool(eval(code, globals_, scope))  # noqa: S307 — sandboxed  # nosec B307
 
     return predicate
-
-
-# ── backoff ────────────────────────────────────────────────────────────
-
-
-def _backoff_delay(retry: RetryPolicy, attempt: int) -> float:
-    """Delay before the *next* attempt, given the just-failed ``attempt``."""
-    if retry.backoff == "linear":
-        delay = retry.initial_delay_seconds * (attempt + 1)
-    else:  # exponential
-        delay = retry.initial_delay_seconds * (2**attempt)
-    return min(delay, retry.max_delay_seconds)
