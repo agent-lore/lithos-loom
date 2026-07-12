@@ -159,16 +159,14 @@ class GitHubIssueWatcher:
     poll_interval_seconds: int
     coord_doc_path: str
     agent_id: str
-    # Inline dispatcher for the GH→Lithos sync handler. When set, the
-    # watcher calls it per issue and ties cursor advancement to the
-    # dispatcher's success — see ``_poll_one_repo`` and PR-review
-    # finding 1 (2026-05-30). When ``None`` the watcher falls back to
-    # publishing on the bus only (legacy path, used by tests that assert
-    # on queue contents). Production wiring always injects a real
-    # dispatcher; without one, a cursor advance gets out ahead of any
-    # downstream reconciliation and dropped-queue events strand
-    # permanently.
-    dispatch: Callable[[Event], Awaitable[None]] | None = None
+    # Inline dispatcher for the GH→Lithos sync handler: the watcher calls
+    # it per issue and ties cursor advancement to the dispatcher's success
+    # — see ``_poll_one_repo`` and PR-review finding 1 (2026-05-30).
+    # Required (#234): production wiring always injects a real dispatcher.
+    # Routing through the bus instead would let a cursor advance get out
+    # ahead of any downstream reconciliation (the bus is fire-and-forget
+    # and drops on queue-full), stranding events permanently.
+    dispatch: Callable[[Event], Awaitable[None]]
     # Backoff used after a polling-loop iteration that raised. Mirrors
     # :class:`LithosNoteStream` shape.
     reconnect_backoff_seconds: float = 1.0
@@ -633,14 +631,12 @@ class GitHubIssueWatcher:
             )
 
     async def _publish_issue(self, *, slug: str, issue: Issue) -> None:
-        """Build the event for ``issue`` and dispatch.
+        """Build the event for ``issue`` and dispatch it inline.
 
-        When :attr:`dispatch` is injected (production), call it inline
-        and propagate any exception so the caller can hold the cursor at
-        the prior successful issue. When ``None`` (legacy / tests that
-        assert on bus queue contents), publish onto the in-process bus
-        which silently drops on queue-full — *not* a path the production
-        wiring should rely on for correctness.
+        Calls :attr:`dispatch` and propagates any exception so the caller
+        can hold the cursor at the prior successful issue — inbound-mirror
+        correctness depends on cursor advancement being tied to the
+        dispatcher's success, not to fire-and-forget bus delivery.
         """
         watched = self._watch_list.get(slug)
         # The slug being absent here is a defensive guard — _poll_all_repos
@@ -667,7 +663,4 @@ class GitHubIssueWatcher:
                 "exclude_authors": exclude_authors,
             },
         )
-        if self.dispatch is not None:
-            await self.dispatch(event)
-            return
-        await self.bus.publish(event)
+        await self.dispatch(event)
