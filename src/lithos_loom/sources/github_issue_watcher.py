@@ -1,9 +1,9 @@
 """GitHubIssueWatcher — polling source for the github-issue-watcher feature.
 
 Slice 7.1 of ``docs/prd/github-issue-watcher.md``. Polls watched GitHub
-repos on a timer, emits one ``github.issue.seen`` event per issue onto
-the in-process bus, and persists per-repo ``updated_at`` cursors in a
-Lithos coord doc so daemon restart doesn't re-walk every open issue.
+repos on a timer, hands one ``github.issue.seen`` event per issue to the
+injected inline dispatcher, and persists per-repo ``updated_at`` cursors
+in a Lithos coord doc so daemon restart doesn't re-walk every open issue.
 
 Architecture mirrors :class:`LithosNoteStream` for the reconnect /
 backoff shape but the work loop is poll-driven rather than SSE-driven:
@@ -91,12 +91,13 @@ class WatchedRepo:
 logger = logging.getLogger(__name__)
 
 GITHUB_ISSUE_EVENT_TYPE = "github.issue.seen"
-"""Bus event type emitted for every issue seen during a poll.
+"""Event type built for every issue seen during a poll and handed to the
+watcher's injected inline dispatcher.
 
-One event per issue per poll — the subscription handler decides whether
-to create/update/close the corresponding Lithos task based on the
-linkage marker + the issue's own state. Funnelling create+update through
-one type means the source doesn't have to look up prior state."""
+One event per issue per poll — the sync handler decides whether to
+create/update/close the corresponding Lithos task based on the linkage
+marker + the issue's own state. Funnelling create+update through one type
+means the source doesn't have to look up prior state."""
 
 _BUS_QUEUE_SIZE = 256
 

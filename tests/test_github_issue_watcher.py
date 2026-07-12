@@ -378,7 +378,7 @@ async def test_refresh_watch_list_preserves_state_on_transport_failure() -> None
 
 
 @pytest.mark.asyncio
-async def test_poll_one_repo_publishes_issue_events() -> None:
+async def test_poll_one_repo_dispatches_issue_events() -> None:
     dispatch = _CapturingDispatch()
     issue = _make_issue(number=42)
     github = _fake_github_client()
