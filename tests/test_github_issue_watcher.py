@@ -128,6 +128,9 @@ def _make_watcher(
     bus: EventBus | None = None,
     dispatch: Any = None,
 ) -> GitHubIssueWatcher:
+    # dispatch is required (#234); tests that don't assert on dispatched
+    # events get a recording no-op so cursor / coord-doc behaviour still
+    # exercises the inline path.
     return GitHubIssueWatcher(
         github=cast(GitHubClient, github),
         lithos=lithos,
@@ -135,7 +138,7 @@ def _make_watcher(
         poll_interval_seconds=60,
         coord_doc_path="projects/_lithos-loom-internal/github-watcher-state.md",
         agent_id="test-agent",
-        dispatch=dispatch,
+        dispatch=dispatch or _CapturingDispatch(),
     )
 
 
@@ -149,6 +152,41 @@ async def _drain(bus: EventBus, queue_size: int = 64) -> list[Event]:
     while not sub.queue.empty():
         out.append(sub.queue.get_nowait())
     return out
+
+
+class _CapturingDispatch:
+    """Inline dispatcher that records the events it is handed.
+
+    Replaces the removed bus-publish fallback (#234): production always
+    injects a real dispatcher, so the watcher tests inject this and assert
+    on ``.events`` rather than on the in-process bus queue.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[Event] = []
+
+    async def __call__(self, event: Event) -> None:
+        self.events.append(event)
+
+
+# ── construction contract ─────────────────────────────────────────────
+
+
+def test_watcher_requires_a_dispatch() -> None:
+    """``dispatch`` is a required dependency (#234). Production wiring
+    always injects one; the test-only ``dispatch is None`` → bus-publish
+    fallback was removed, so constructing without a dispatch is an error.
+    """
+    kwargs: dict[str, Any] = {
+        "github": cast(GitHubClient, _fake_github_client()),
+        "lithos": _fake_lithos_client(),
+        "bus": EventBus(),
+        "poll_interval_seconds": 60,
+        "coord_doc_path": "projects/_lithos-loom-internal/github-watcher-state.md",
+        "agent_id": "test-agent",
+    }
+    with pytest.raises(TypeError):
+        GitHubIssueWatcher(**kwargs)  # dispatch omitted
 
 
 # ── _refresh_watch_list ───────────────────────────────────────────────
@@ -340,21 +378,22 @@ async def test_refresh_watch_list_preserves_state_on_transport_failure() -> None
 
 
 @pytest.mark.asyncio
-async def test_poll_one_repo_publishes_issue_events() -> None:
-    bus = EventBus()
-    sub = bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+async def test_poll_one_repo_dispatches_issue_events() -> None:
+    dispatch = _CapturingDispatch()
     issue = _make_issue(number=42)
     github = _fake_github_client()
     github.list_issues_since = AsyncMock(return_value=[issue])
-    watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+    watcher = _make_watcher(
+        github=github, lithos=_fake_lithos_client(), dispatch=dispatch
+    )
     watcher._watch_list = {
         "lithos-loom": WatchedRepo(repos=("agent-lore/lithos-loom",))
     }
 
     await watcher._poll_one_repo(slug="lithos-loom", repo="agent-lore/lithos-loom")
 
-    assert sub.queue.qsize() == 1
-    event = sub.queue.get_nowait()
+    assert len(dispatch.events) == 1
+    event = dispatch.events[0]
     assert event.type == GITHUB_ISSUE_EVENT_TYPE
     assert event.payload["slug"] == "lithos-loom"
     assert event.payload["repo"] == "agent-lore/lithos-loom"
@@ -419,12 +458,13 @@ async def test_poll_one_repo_surfaces_closed_issue_state_to_handler() -> None:
     state_reason) so the handler can drive task_complete / task_cancel.
     Incremental poll path (cursor present), which uses state="all".
     """
-    bus = EventBus()
-    sub = bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    dispatch = _CapturingDispatch()
     closed = _make_issue(number=99, state="closed", state_reason="completed")
     github = _fake_github_client()
     github.list_issues_since = AsyncMock(return_value=[closed])
-    watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+    watcher = _make_watcher(
+        github=github, lithos=_fake_lithos_client(), dispatch=dispatch
+    )
     # Cursor present → incremental (state="all") path, which is where
     # closes naturally surface.
     watcher._store._cursors["agent-lore/lithos-loom"] = datetime(
@@ -433,8 +473,8 @@ async def test_poll_one_repo_surfaces_closed_issue_state_to_handler() -> None:
 
     await watcher._poll_one_repo(slug="x", repo="agent-lore/lithos-loom")
 
-    assert sub.queue.qsize() == 1
-    event = sub.queue.get_nowait()
+    assert len(dispatch.events) == 1
+    event = dispatch.events[0]
     assert event.payload["state"] == "closed"
     assert event.payload["state_reason"] == "completed"
 
@@ -980,8 +1020,7 @@ async def test_refresh_loop_ignores_coord_doc_writes() -> None:
 
 @pytest.mark.asyncio
 async def test_poll_all_repos_iterates_watch_list() -> None:
-    bus = EventBus()
-    sub = bus.subscribe(event_types=(GITHUB_ISSUE_EVENT_TYPE,), queue_size=16)
+    dispatch = _CapturingDispatch()
     github = _fake_github_client()
 
     def fake_list(
@@ -990,7 +1029,9 @@ async def test_poll_all_repos_iterates_watch_list() -> None:
         return [_make_issue(number=1, repo=repo)]
 
     github.list_issues_since = AsyncMock(side_effect=fake_list)
-    watcher = _make_watcher(github=github, lithos=_fake_lithos_client(), bus=bus)
+    watcher = _make_watcher(
+        github=github, lithos=_fake_lithos_client(), dispatch=dispatch
+    )
     watcher._watch_list = {
         "a": WatchedRepo(repos=("owner/a",)),
         "b": WatchedRepo(repos=("owner/b",)),
@@ -999,7 +1040,7 @@ async def test_poll_all_repos_iterates_watch_list() -> None:
     await watcher._poll_all_repos()
 
     assert github.list_issues_since.await_count == 2
-    assert sub.queue.qsize() == 2
+    assert len(dispatch.events) == 2
 
 
 @pytest.mark.asyncio
@@ -1103,5 +1144,5 @@ async def test_poll_loop_backs_off_on_exception() -> None:
 
 
 def test_event_type_constant_is_namespaced() -> None:
-    """``github.issue.seen`` is the bus contract; subscription handler binds to it."""
+    """``github.issue.seen`` is the watcher/sync-handler event contract."""
     assert GITHUB_ISSUE_EVENT_TYPE == "github.issue.seen"
