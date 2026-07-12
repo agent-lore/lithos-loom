@@ -533,7 +533,11 @@ def test_run_refuses_to_boot_when_lithos_unreachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _write_doctor_config(tmp_path, vault_path=None)
-    _patch_client(monkeypatch, FakeLithosClient(fail_connect=OSError("refused")))
+    # Model the real connect failure: LithosClient.__aenter__ re-raises the
+    # anyio-wrapped ExceptionGroup (not a bare OSError), so the boot gate must
+    # catch that too rather than crash with an unhandled exception.
+    boom = ExceptionGroup("connect failed", [ConnectionError("refused")])
+    _patch_client(monkeypatch, FakeLithosClient(fail_connect=boom))
     constructed = _stub_supervisor(monkeypatch)
 
     result = runner.invoke(app, ["run", "--config", str(config)])

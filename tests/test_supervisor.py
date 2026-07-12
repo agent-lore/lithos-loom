@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from lithos_loom import main as main_module
 from lithos_loom.config import (
     LoomConfig,
     ObsidianSyncConfig,
@@ -24,6 +25,15 @@ from lithos_loom.config import (
 )
 from lithos_loom.main import app
 from lithos_loom.supervisor import CategorySpec, Supervisor, default_categories
+from tests.support import FakeLithosClient
+
+
+def _pass_boot_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the ``run`` boot gate (Epic G US1) hermetic: its task-graph probe
+    talks to a conformant in-memory fake instead of a real Lithos, so a
+    ``run`` smoke test passes without (and regardless of) a live server."""
+    monkeypatch.setattr(main_module, "LithosClient", lambda *a, **k: FakeLithosClient())
+
 
 runner = CliRunner()
 
@@ -343,6 +353,7 @@ def test_run_command_exits_cleanly_when_no_routes_or_subscriptions(
         'lithos_url = "http://localhost:8765"\n'
     )
     monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg))
+    _pass_boot_gate(monkeypatch)
     result = runner.invoke(app, ["run"])
     assert result.exit_code == 0, result.output
 
@@ -374,6 +385,7 @@ def test_run_command_configures_parent_logging(
         calls.append(kwargs)
 
     monkeypatch.setattr(logging, "basicConfig", _spy)
+    _pass_boot_gate(monkeypatch)
 
     result = runner.invoke(app, ["run"])
     assert result.exit_code == 0, result.output

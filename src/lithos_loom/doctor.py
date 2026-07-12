@@ -278,14 +278,20 @@ async def run_project_checks(
 async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[CheckResult]:
     """Probe the Lithos task-graph extension end to end.
 
-    Creates two throwaway tasks + a ``blocks`` edge, then asserts the
-    server's ready-queue honours it: the dependent is excluded from
-    :meth:`task_ready` and named by :meth:`task_blocked` (``kind="task"``);
-    cancelling the blocker keeps the dependent blocked as
-    ``blocker_unsatisfiable`` (the epic-G precondition — a released
-    dependent-of-a-cancelled-task would be dispatched wrongly); and
-    :meth:`task_spawn` / ``task_type`` round-trip. The probe tasks are
-    cancelled on the way out (even on failure).
+    Asserts the surface the extension advertises actually persists, not just
+    that the tools return without error:
+
+    * ``task_type`` — create a non-default ``epic`` and read it back with
+      ``task_get`` (a server that ignores the field would default to ``task``);
+    * ready-queue — a ``blocks`` predecessor excludes the dependent from
+      :meth:`task_ready` and names it in :meth:`task_blocked` (``kind="task"``);
+    * the epic-G precondition — cancelling the blocker keeps the dependent
+      blocked as ``blocker_unsatisfiable`` (a released dependent-of-a-
+      cancelled-task would be dispatched wrongly);
+    * ``task_spawn`` — the follow-on task exists (``task_get``) *and* its
+      ``discovered_from`` source edge was persisted (``task_edge_list``).
+
+    The probe tasks are cancelled on the way out (even on failure).
 
     Returns exactly one :class:`CheckResult` named ``task_graph_extension``:
     passing when every invariant holds, failing on the first violation or on
@@ -301,8 +307,23 @@ async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[Check
         return [CheckResult(TASK_GRAPH_CHECK, False, message)]
 
     try:
+        # task_type must persist server-side. A server that ignores it would
+        # store the default "task", so create a *non-default* epic and read it
+        # back — ``any(t.task_type)`` would pass on the client-side default and
+        # prove nothing.
+        epic = await client.task_create(
+            title=_PROBE_TASK_TITLE, agent=agent, tags=[probe_tag], task_type="epic"
+        )
+        created.append(epic)
+        epic_record = await client.task_get(task_id=epic)
+        if epic_record is None or epic_record.task_type != "epic":
+            got = "missing" if epic_record is None else repr(epic_record.task_type)
+            return _fail(
+                f"task_type did not persist (created an epic, read back {got})"
+            )
+
         blocker = await client.task_create(
-            title=_PROBE_TASK_TITLE, agent=agent, tags=[probe_tag], task_type="task"
+            title=_PROBE_TASK_TITLE, agent=agent, tags=[probe_tag]
         )
         created.append(blocker)
         dependent = await client.task_create(
@@ -313,15 +334,12 @@ async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[Check
             from_task_id=blocker, to_task_id=dependent, type="blocks", agent=agent
         )
 
-        ready = await client.task_ready(tags=[probe_tag])
-        ready_ids = {t.id for t in ready}
+        ready_ids = {t.id for t in await client.task_ready(tags=[probe_tag])}
         if blocker not in ready_ids or dependent in ready_ids:
             return _fail(
                 "ready-queue did not honour the blocks edge "
                 "(blocker missing from, or dependent leaked into, task_ready)"
             )
-        if not any(t.task_type for t in ready):
-            return _fail("task records carry no task_type (extension incomplete)")
 
         reasons = await _blockers_of(client, dependent, tag=probe_tag)
         if not any(b.kind == "task" and b.task_id == blocker for b in reasons):
@@ -342,10 +360,24 @@ async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[Check
         if not any(b.kind == "blocker_unsatisfiable" for b in reasons):
             return _fail("a cancelled blocker did not surface as blocker_unsatisfiable")
 
+        # task_spawn must persist BOTH the follow-on task and its source edge —
+        # a bare returned id proves neither.
         spawned = await client.task_spawn(
             source_task_id=dependent, title=_PROBE_TASK_TITLE, agent=agent
         )
         created.append(spawned)
+        if await client.task_get(task_id=spawned) is None:
+            return _fail(
+                "task_spawn returned an id but the spawned task does not exist"
+            )
+        spawn_edges = await client.task_edge_list(task_id=spawned)
+        if not any(
+            e.type == "discovered_from" and e.from_task_id == dependent
+            for e in spawn_edges
+        ):
+            return _fail(
+                "task_spawn did not persist the discovered_from edge from its source"
+            )
     except (LithosClientError, OSError) as exc:
         return _fail(f"task-graph extension probe failed: {exc}")
     finally:
@@ -359,8 +391,8 @@ async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[Check
         CheckResult(
             TASK_GRAPH_CHECK,
             True,
-            "task-graph extension present (ready/blocked/edge/spawn round-trip "
-            "+ cancelled-blocker precondition holds)",
+            "task-graph extension present (task_type persistence, ready/blocked "
+            "+ cancelled-blocker precondition, task_spawn task+edge — all verified)",
         )
     ]
 

@@ -4,6 +4,7 @@ probes (Slice 4 US32)."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,7 +27,7 @@ from lithos_loom.doctor import (
 )
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import Note
-from tests.support import FakeLithosClient, make_note
+from tests.support import FakeLithosClient, make_note, make_task
 
 
 def _cfg(
@@ -408,3 +409,96 @@ async def test_task_graph_probe_cleans_up_even_on_failure() -> None:
     # Every probe task ended terminal (cancelled) — none linger as open work.
     assert await client.task_ready() == []
     assert await client.task_blocked() == []
+
+
+class _IgnoresTaskType(FakeLithosClient):
+    """Non-conformant fake: a server that drops ``task_type`` and persists the
+    default regardless — so the probe's read-back must catch the mismatch."""
+
+    async def task_create(
+        self,
+        *,
+        title: str,
+        agent: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        task_type: str | None = None,
+        parent_task_id: str | None = None,
+        depends_on: list[str] | None = None,
+    ) -> str:
+        return await super().task_create(
+            title=title,
+            agent=agent,
+            description=description,
+            tags=tags,
+            metadata=metadata,
+            task_type="task",  # drop the requested type
+            parent_task_id=parent_task_id,
+            depends_on=depends_on,
+        )
+
+
+class _SpawnReturnsPhantom(FakeLithosClient):
+    """Non-conformant fake: ``task_spawn`` returns an id but persists neither
+    the follow-on task nor its source edge."""
+
+    async def task_spawn(
+        self,
+        *,
+        source_task_id: str,
+        title: str,
+        agent: str | None = None,
+        description: str | None = None,
+        relation_type: str = "discovered_from",
+        inherit_project: bool = True,
+        inherit_tags: bool = True,
+        inherit_context: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        return self._mint("task")  # bare id — nothing stored
+
+
+class _SpawnSkipsEdge(FakeLithosClient):
+    """Non-conformant fake: ``task_spawn`` persists the follow-on task but not
+    the ``discovered_from`` source edge."""
+
+    async def task_spawn(
+        self,
+        *,
+        source_task_id: str,
+        title: str,
+        agent: str | None = None,
+        description: str | None = None,
+        relation_type: str = "discovered_from",
+        inherit_project: bool = True,
+        inherit_tags: bool = True,
+        inherit_context: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        task_id = self._mint("task")
+        self._tasks[task_id] = make_task(task_id, title=title)  # task but no edge
+        return task_id
+
+
+async def test_task_graph_probe_fails_when_task_type_not_persisted() -> None:
+    """The probe creates a non-default epic and reads it back — a server that
+    ignores task_type (defaults to "task") must be caught."""
+    client = _IgnoresTaskType(agent_id="doctor-agent")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert not results[0].passed
+    assert "task_type" in results[0].message
+
+
+async def test_task_graph_probe_fails_when_spawn_does_not_persist_task() -> None:
+    client = _SpawnReturnsPhantom(agent_id="doctor-agent")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert not results[0].passed
+    assert "spawned task does not exist" in results[0].message
+
+
+async def test_task_graph_probe_fails_when_spawn_skips_the_edge() -> None:
+    client = _SpawnSkipsEdge(agent_id="doctor-agent")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert not results[0].passed
+    assert "discovered_from edge" in results[0].message
