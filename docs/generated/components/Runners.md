@@ -13,7 +13,6 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 |---|---|---:|---:|
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
-| `lithos_loom.runner.agents` | XS | 1 | 2 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | XS | 0 | 6 |
 | `lithos_loom.runner.worktree` | S | 0 | 4 |
@@ -24,11 +23,6 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `write_result_atomically` — Write ``payload`` to ``path`` atomically: temp + fsync + rename.
 - def `run_plugin` — Spawn the plugin subprocess and return the parsed + validated result.
 - def `validate_result_schema`
-
-### `lithos_loom.runner.agents`
-- class `AgentResult`
-- def `run_claude` — Stub — implement per docs/prd/orchestration.md.
-- def `run_codex` — Stub — Codex mirror of :func:`run_claude`.
 
 ### `lithos_loom.runner.detection`
 - def `detect_ecosystems` — Detect the language ecosystem(s) present in *repo_path*, in fixed order.
