@@ -13,9 +13,11 @@ lower a budget after improving the code to lock in the gain.
 |---|---:|---:|---:|
 | `component_cycles` | 1 | 1 | 0 |
 | `cross_component_edges` | 62 | 62 | 0 |
+| `cross_module_private_refs` | 8 | 8 | 0 |
 | `max_module_lines` | 1774 | 1850 | 76 |
 | `module_cycles` | 1 | 1 | 0 |
 | `modules_over_800_lines` | 6 | 6 | 0 |
+| `tests_private_imports` | 97 | 97 | 0 |
 
 ## Import graph
 
@@ -83,7 +85,54 @@ Top 10 most complex functions:
 | 23 | `lithos_loom.main._print_dry_run_report` |
 | 22 | `lithos_loom.cli.project.project_regenerate_done` |
 
+## Seams
+
+Private-name reaches across module seams. Both counts can be pinned as
+`[budgets]` ratchets (`cross_module_private_refs`, `tests_private_imports`).
+
+- Cross-module private refs (src): **8**
+  - `lithos_loom.children.github_watcher -> lithos_loom.children._boot`
+  - `lithos_loom.children.obsidian_sync -> lithos_loom.children._boot`
+  - `lithos_loom.children.route_runner -> lithos_loom.children._boot`
+  - `lithos_loom.plugins.story_develop.panel -> lithos_loom.plugins.story_develop.agent_session._CONTINUATION_PROMPT`
+  - `lithos_loom.plugins.story_develop.turns -> lithos_loom.plugins.story_develop.engines._TIMEOUT_EXIT`
+  - `lithos_loom.sources.github_issue_watcher -> lithos_loom.sources.github_watch_state._isoformat`
+  - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._resolved_at_for`
+  - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._task_from_payload`
+- Tests importing src privates: **97**
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._resolve (x4)`
+  - `tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x4)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._active_agent (x3)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._run_info (x3)`
+  - `tests/test_obsidian_fs_watcher.py -> lithos_loom.sources.obsidian_fs_watcher._LINE_RE (x3)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._MAX_HANDOFF_BYTES (x2)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._agent_state (x2)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._iter_new_handoffs (x2)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._read_handoff (x2)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._run_containers (x2)`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._task_title (x2)`
+  - `tests/test_eval_review_patch.py -> lithos_loom.evals.review.patch._materialise_patched_head (x2)`
+  - `tests/test_review_resolve.py -> lithos_loom.plugins.story_develop.review_resolve._gh_pr_view (x2)`
+  - `tests/test_story_develop_idempotency.py -> lithos_loom.plugins.story_develop.idempotency._record_path (x2)`
+  - `tests/test_story_develop_pr_delivery.py -> lithos_loom.plugins.story_develop.pr_delivery._GENERATED_RE (x2)`
+  - `tests/test_awaiting_review.py -> lithos_loom.subscriptions._awaiting_review`
+  - `tests/test_child_boot.py -> lithos_loom.children._boot`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._iter_run_dirs`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._latest_mtime`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._round_and_reviewers`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._sanitize`
+  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._wait_for_run`
+  - `tests/test_cli_project.py -> lithos_loom.cli.project._ProjectRow`
+  - `tests/test_cli_project.py -> lithos_loom.cli.project._merge_lithos_with_toml`
+  - `tests/test_cli_project.py -> lithos_loom.cli.project._rows_from_toml`
+  - `tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags`
+  - `tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags`
+  - … (list capped at 30 pairs)
+
 ## Domain & tests
 
 - Domain models: **16** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.55** (51294 test lines / 33126 source lines)
+- Test-to-source line ratio: **1.56** (51603 test lines / 33126 source lines)
