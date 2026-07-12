@@ -354,7 +354,7 @@ codex  = "gpt-5.4"
 
 `lithos-loom validate-config` parses, typechecks, and lists projects / routes / subscriptions. `validate-config --dry-run` additionally polls Lithos and prints which routes / subscriptions would fire for each currently-open task plus any orphans (tasks no route matches) and dead config (routes / subscriptions no task currently matches). Both forms exit non-zero on invalid TOML.
 
-`lithos-loom doctor` verifies the configured `vault_path` exists, `_lithos/` is creatable, and a probe write+read round-trip works. It also reads `lithos_list(path_prefix='projects/')` and warns about TOML `[projects.<slug>]` entries with no corresponding Lithos project-context doc.
+`lithos-loom doctor` verifies the configured `vault_path` exists, `_lithos/` is creatable, and a probe write+read round-trip works. It probes the **Lithos task-graph extension** end to end (creates throwaway probe tasks — an `epic`, a blocker + dependent joined by a `blocks` edge, and a spawned follow-on — asserts `lithos_task_ready` / `lithos_task_blocked` honour the edge — including that a *cancelled* blocker keeps its dependent `blocker_unsatisfiable` — and that `task_type` / `lithos_task_spawn` round-trip, then cancels the probe tasks). It also reads `lithos_list(path_prefix='projects/')` and warns about TOML `[projects.<slug>]` entries with no corresponding Lithos project-context doc. The same task-graph probe gates `lithos-loom run` (see §4.1).
 
 ---
 
@@ -366,11 +366,13 @@ All commands accept `--config / -c <path>` to override discovery. JSON-emitting 
 
 Starts the daemon: supervisor + per-domain children. Foregrounded process; SIGINT / SIGTERM trigger graceful shutdown — the supervisor signals children to stop, in-flight plugin subprocesses are cancelled, and the supervisor waits up to a timeout before SIGKILLing any child that didn't exit. Cancelled plugins that don't write a result file trigger the contract-violation release path; claims may also be left to age out via Lithos's claim TTL.
 
+**Boot gate (Epic G).** Before starting the supervisor, `run` runs the same task-graph capability probe as `doctor` (a real Lithos round-trip) and **refuses to start** (exit non-zero) if the extension is missing / broken — the runner schedules dependencies via Lithos's server-side ready-queue, so an incompatible server must surface at boot, not mid-PRD. This means the daemon also won't start while Lithos is unreachable or mid-restart (the probe reports `lithos_unreachable`); re-run once Lithos is back.
+
 ```
 lithos-loom run [-c config.toml]
 ```
 
-Exit codes: `0` clean exit, non-zero on child crash before shutdown or SIGKILL after timeout.
+Exit codes: `0` clean exit, non-zero on child crash before shutdown or SIGKILL after timeout, or when the boot gate refuses (task-graph extension unavailable).
 
 ### 4.2 `lithos-loom validate-config`
 
@@ -387,7 +389,7 @@ lithos-loom validate-config [-c config.toml] [--dry-run]
 lithos-loom doctor [-c config.toml]
 ```
 
-Probes vault writability + the Lithos project surface. Each check prints PASS/FAIL with an actionable message. Non-zero exit if any check fails.
+Probes vault writability, the Lithos task-graph extension (the `task_graph_extension` capability check the boot gate keys off — §4.1), and the Lithos project surface. Each check prints PASS/FAIL with an actionable message. Non-zero exit if any check fails.
 
 ### 4.4 `lithos-loom config`
 

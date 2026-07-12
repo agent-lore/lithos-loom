@@ -3,9 +3,8 @@
 Subcommands:
 
 * ``lithos-loom run`` — start the daemon (supervisor + child processes)
-* ``lithos-loom doctor`` — verify the vault is writable and project
-  TOML entries match Lithos; Lithos-connectivity probe is tracked as a
-  follow-up
+* ``lithos-loom doctor`` — verify the vault is writable, Lithos speaks
+  the task-graph extension, and project TOML entries match Lithos
 * ``lithos-loom validate-config`` — typecheck the TOML config
 * ``lithos-loom validate-config --dry-run`` — also poll Lithos and print
   which routes / subscriptions would fire for each open task
@@ -33,8 +32,14 @@ from lithos_loom.config import (
     SubscriptionConfig,
     load_config,
 )
-from lithos_loom.doctor import format_results, run_project_checks, run_vault_checks
-from lithos_loom.errors import LithosLoomError
+from lithos_loom.doctor import (
+    CheckResult,
+    format_results,
+    run_project_checks,
+    run_task_graph_checks,
+    run_vault_checks,
+)
+from lithos_loom.errors import LithosClientError, LithosLoomError
 from lithos_loom.lithos_client import LithosClient, Task
 from lithos_loom.subscriptions import (
     SUBSCRIPTION_ACTIONS,
@@ -95,6 +100,12 @@ def run(
     # operational logs. Demote to WARNING — connection failures still
     # surface, per-call traffic doesn't.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Boot gate (Epic G US1): refuse to start against a Lithos that lacks the
+    # task-graph extension — the runner's dependency scheduling relies on it, so
+    # an incompatible server must surface at boot, not mid-PRD. This is a real
+    # startup round-trip; if Lithos is unreachable / mid-restart the daemon also
+    # won't start (re-run once Lithos is back).
+    _require_task_graph_or_exit(cfg)
     sup = Supervisor(cfg, default_categories())
     exit_code = asyncio.run(sup.run())
     raise typer.Exit(exit_code)
@@ -109,12 +120,14 @@ def doctor(
         help="Explicit TOML config path.",
     ),
 ) -> None:
-    """Verify the vault is writable and project TOML entries match Lithos.
+    """Verify the vault is writable, Lithos speaks the task-graph extension,
+    and project TOML entries match Lithos.
 
     Runs three vault probes (vault_path exists, ``_lithos/`` creatable,
-    write+read round-trip) and verifies every TOML ``[projects.<slug>]``
-    entry has a matching Lithos project-context doc. A Lithos-connectivity
-    probe is tracked as a follow-up.
+    write+read round-trip), probes the Lithos task-graph extension end to end
+    (the same capability the daemon boot gate requires — Epic G US1), and
+    verifies every TOML ``[projects.<slug>]`` entry has a matching Lithos
+    project-context doc.
 
     Exit codes: 0 if all checks passed (or were skipped); 1 if any
     check failed; 2 if the config couldn't be loaded.
@@ -129,6 +142,13 @@ def doctor(
     else:
         typer.echo("  ⊘ vault probe skipped: no [obsidian_sync] in config")
 
+    # Lithos task-graph capability: the same probe the daemon boot gate runs.
+    # Always checked (it's a server capability, not project-dependent); a
+    # connectivity failure surfaces as a single failing check, not a crash.
+    task_graph_results = asyncio.run(_run_task_graph_checks_async(cfg))
+    for line in format_results(task_graph_results):
+        typer.echo(line)
+
     # TOML project entries must match Lithos project-context docs. Skip
     # cleanly when [projects] is empty; otherwise spin up a one-shot
     # LithosClient. Transport failures surface as a single failing
@@ -141,8 +161,9 @@ def doctor(
     else:
         typer.echo("  ⊘ project probe skipped: [projects] table is empty")
 
-    failed = [r for r in vault_results + project_results if not r.passed]
-    passed = [r for r in vault_results + project_results if r.passed]
+    all_results = vault_results + task_graph_results + project_results
+    failed = [r for r in all_results if not r.passed]
+    passed = [r for r in all_results if r.passed]
     if failed:
         typer.echo(f"FAIL: {len(passed)} passed, {len(failed)} failed")
         raise typer.Exit(1)
@@ -157,6 +178,55 @@ async def _run_project_checks_async(cfg: LoomConfig) -> list:
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
         return await run_project_checks(cfg, client)
+
+
+async def _run_task_graph_checks_async(cfg: LoomConfig) -> list[CheckResult]:
+    """One-shot ``LithosClient`` wrapper around :func:`run_task_graph_checks`.
+
+    A failure to even connect (``async with`` entry raises) is classified as
+    ``lithos_unreachable`` — distinct from the ``task_graph_extension`` failure
+    the probe itself returns when the server is reachable but incompatible —
+    so callers can word the message accordingly. Both still fail the boot gate.
+
+    ``LithosClient.__aenter__`` surfaces a transport failure as whatever the
+    MCP/anyio connect raised — a plain ``OSError`` or, when it happens inside a
+    task group, an ``ExceptionGroup`` wrapping (e.g.) ``httpx.ConnectError`` —
+    so the catch spans both, plus ``LithosClientError``. We catch
+    ``ExceptionGroup`` (all-``Exception`` leaves) rather than the wider
+    ``BaseExceptionGroup`` so a group carrying ``KeyboardInterrupt`` /
+    ``SystemExit`` / bare ``CancelledError`` still propagates.
+    """
+    try:
+        async with LithosClient(
+            cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
+        ) as client:
+            return await run_task_graph_checks(client, agent=cfg.orchestrator.agent_id)
+    except (LithosClientError, OSError, ExceptionGroup) as exc:
+        return [
+            CheckResult(
+                "lithos_unreachable",
+                False,
+                f"could not reach Lithos at {cfg.orchestrator.lithos_url}: {exc}",
+            )
+        ]
+
+
+def _require_task_graph_or_exit(cfg: LoomConfig) -> None:
+    """Boot gate: run the task-graph probe and refuse to start on any failure.
+
+    Echoes each check line, then exits non-zero if the extension is missing /
+    broken or Lithos is unreachable — the daemon cannot schedule dependencies
+    without the server-side ready-queue, so it must not start half-crippled.
+    """
+    results = asyncio.run(_run_task_graph_checks_async(cfg))
+    for line in format_results(results):
+        typer.echo(line)
+    if any(not r.passed for r in results):
+        typer.echo(
+            "refusing to start: the Lithos task-graph extension is required "
+            "(run `lithos-loom doctor` to diagnose)"
+        )
+        raise typer.Exit(1)
 
 
 @app.command("validate-config")

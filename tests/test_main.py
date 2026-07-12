@@ -394,52 +394,64 @@ def _write_doctor_config(
     return config_path
 
 
-def test_doctor_succeeds_on_healthy_vault(tmp_path: Path) -> None:
-    """All three vault checks pass against a real tmp_path vault."""
+def test_doctor_succeeds_on_healthy_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All three vault checks + the task-graph probe pass."""
     vault = tmp_path / "vault"
     vault.mkdir()
     config = _write_doctor_config(tmp_path, vault_path=vault)
+    _patch_client(monkeypatch, FakeLithosClient())
 
     result = runner.invoke(app, ["doctor", "--config", str(config)])
     assert result.exit_code == 0, result.output
     assert "vault_path_exists" in result.output
     assert "lithos_subdir_creatable" in result.output
     assert "probe_write_read_roundtrip" in result.output
-    assert "OK: 3 passed, 0 failed" in result.output
+    assert "task_graph_extension" in result.output
+    assert "OK: 4 passed, 0 failed" in result.output
     # Probe file cleaned up.
     assert not (vault / "_lithos" / ".doctor-probe.tmp").exists()
 
 
-def test_doctor_fails_with_exit_1_on_missing_vault(tmp_path: Path) -> None:
-    """vault_path pointing at a nonexistent dir → ✗ + FAIL + exit 1."""
+def test_doctor_fails_with_exit_1_on_missing_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """vault_path pointing at a nonexistent dir → ✗ + FAIL + exit 1
+    (task-graph probe still passes against the fake)."""
     missing_vault = tmp_path / "no-such-vault"
     config = _write_doctor_config(tmp_path, vault_path=missing_vault)
+    _patch_client(monkeypatch, FakeLithosClient())
 
     result = runner.invoke(app, ["doctor", "--config", str(config)])
     assert result.exit_code == 1, result.output
     assert "vault_path_exists" in result.output
     assert "does not exist" in result.output
-    assert "FAIL: 0 passed, 1 failed" in result.output
+    assert "FAIL: 1 passed, 1 failed" in result.output
 
 
-def test_doctor_skips_vault_probes_when_no_obsidian_sync(tmp_path: Path) -> None:
-    """No [obsidian_sync] → skip note + exit 0 (nothing failed)."""
+def test_doctor_skips_vault_probes_when_no_obsidian_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No [obsidian_sync] → skip vault; the task-graph probe still runs."""
     config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
 
     result = runner.invoke(app, ["doctor", "--config", str(config)])
     assert result.exit_code == 0, result.output
     assert "vault probe skipped" in result.output
-    assert "OK: 0 passed, 0 failed" in result.output
+    assert "OK: 1 passed, 0 failed" in result.output
 
 
 def test_doctor_skips_project_probe_when_no_projects_table(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Slice 4 replaced the US-35 placeholder with the actual project
     probe. When ``[projects]`` is empty the probe is skipped cleanly
     (no Lithos round-trip, no failure) — the operator sees a clear
     ⊘ line rather than a fail-cascade."""
     config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
     result = runner.invoke(app, ["doctor", "--config", str(config)])
     assert "project probe skipped" in result.output
     assert "[projects] table is empty" in result.output
@@ -452,3 +464,95 @@ def test_doctor_fails_with_exit_nonzero_on_missing_config(tmp_path: Path) -> Non
         app, ["doctor", "--config", str(tmp_path / "no-such-config.toml")]
     )
     assert result.exit_code != 0
+
+
+# ── doctor task-graph probe + run boot gate (Epic G US1) ───────────────
+
+
+def test_doctor_fails_when_task_graph_extension_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Lithos that errors on the graph tools fails the doctor run (exit 1)."""
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    fake = FakeLithosClient()
+    fake.raise_on["task_ready"] = LithosClientError("unknown_tool", "no such tool")
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["doctor", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert "task_graph_extension" in result.output
+    assert "FAIL" in result.output
+
+
+def test_doctor_reports_lithos_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connect failure surfaces as lithos_unreachable, not a crash."""
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient(fail_connect=OSError("refused")))
+
+    result = runner.invoke(app, ["doctor", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert "lithos_unreachable" in result.output
+
+
+def _stub_supervisor(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Replace Supervisor with a stub recording construction; ``run()`` → 0.
+
+    Lets the boot-gate tests assert whether ``run`` reached the supervisor
+    without spawning real child processes."""
+    constructed: list = []
+
+    class _StubSupervisor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            constructed.append((args, kwargs))
+
+        async def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(main_module, "Supervisor", _StubSupervisor)
+    return constructed
+
+
+def test_run_refuses_to_boot_without_task_graph_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    fake = FakeLithosClient()
+    fake.raise_on["task_ready"] = LithosClientError("unknown_tool", "no such tool")
+    _patch_client(monkeypatch, fake)
+    constructed = _stub_supervisor(monkeypatch)
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert "refusing to start" in result.output
+    assert constructed == []  # never reached the supervisor
+
+
+def test_run_refuses_to_boot_when_lithos_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    # Model the real connect failure: LithosClient.__aenter__ re-raises the
+    # anyio-wrapped ExceptionGroup (not a bare OSError), so the boot gate must
+    # catch that too rather than crash with an unhandled exception.
+    boom = ExceptionGroup("connect failed", [ConnectionError("refused")])
+    _patch_client(monkeypatch, FakeLithosClient(fail_connect=boom))
+    constructed = _stub_supervisor(monkeypatch)
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert "lithos_unreachable" in result.output
+    assert constructed == []
+
+
+def test_run_boots_when_task_graph_extension_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
+    constructed = _stub_supervisor(monkeypatch)
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert len(constructed) == 1  # boot gate passed → supervisor started

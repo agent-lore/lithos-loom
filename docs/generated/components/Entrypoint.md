@@ -18,7 +18,7 @@ Typer CLI app entry and `python -m` bootstrap (`lithos-loom = lithos_loom.main:a
 
 ### `lithos_loom.main`
 - def `run` — Start the daemon: poll Lithos, claim matching tasks, dispatch plugins.
-- def `doctor` — Verify the vault is writable and project TOML entries match Lithos.
+- def `doctor` — Verify the vault is writable, Lithos speaks the task-graph extension, and project TOML entries match Lithos.
 - def `validate_config` — Typecheck the TOML; with ``--dry-run`` also simulate routing.
 - def `show_config` — Inspect the loaded configuration.
 
