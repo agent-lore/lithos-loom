@@ -1144,5 +1144,5 @@ async def test_poll_loop_backs_off_on_exception() -> None:
 
 
 def test_event_type_constant_is_namespaced() -> None:
-    """``github.issue.seen`` is the bus contract; subscription handler binds to it."""
+    """``github.issue.seen`` is the watcher/sync-handler event contract."""
     assert GITHUB_ISSUE_EVENT_TYPE == "github.issue.seen"
