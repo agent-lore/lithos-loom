@@ -236,7 +236,7 @@ async def test_claimed_by_human_blocking_route_promotes_task(tmp_path: Path) -> 
     hidden (autonomous-route-claimable) becomes actionable the moment a
     human_blocking route claims it. This is the real runtime path the
     projection needs to react to — without it, US8 would never surface
-    story-review-human tasks until they hit a created/updated event."""
+    human_blocking tasks until they hit a created/updated event."""
     routes = (
         RouteConfig(
             name="review-human",

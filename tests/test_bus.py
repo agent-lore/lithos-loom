@@ -78,17 +78,17 @@ async def test_bus_match_table_filters_by_tag_membership() -> None:
     bus = EventBus()
     listener = bus.subscribe(
         event_types=["lithos.task.created"],
-        match={"tags": ["trigger:story-implement"]},
+        match={"tags": ["trigger:story-develop"]},
     )
 
     await bus.publish(
-        _evt(payload={"tags": ["trigger:story-implement", "priority:high"]})
+        _evt(payload={"tags": ["trigger:story-develop", "priority:high"]})
     )
     await bus.publish(_evt(payload={"tags": ["trigger:prd-decompose"]}))
 
     assert listener.queue.qsize() == 1
     delivered = listener.queue.get_nowait()
-    assert "trigger:story-implement" in delivered.payload["tags"]
+    assert "trigger:story-develop" in delivered.payload["tags"]
 
 
 async def test_bus_match_scalar_uses_equality() -> None:
@@ -126,7 +126,7 @@ async def test_bus_match_missing_key_means_no_match() -> None:
     bus = EventBus()
     listener = bus.subscribe(
         event_types=["lithos.task.created"],
-        match={"tags": ["trigger:story-implement"]},
+        match={"tags": ["trigger:story-develop"]},
     )
 
     await bus.publish(_evt(payload={}))  # no "tags" key at all
@@ -155,12 +155,12 @@ async def test_bus_match_and_where_combined_with_and_semantics() -> None:
     bus = EventBus()
     listener = bus.subscribe(
         event_types=["lithos.task.created"],
-        match={"tags": ["trigger:story-implement"]},
+        match={"tags": ["trigger:story-develop"]},
         where=lambda e: e.payload.get("priority") == "high",
     )
 
-    matching = _evt(payload={"tags": ["trigger:story-implement"], "priority": "high"})
-    only_match = _evt(payload={"tags": ["trigger:story-implement"], "priority": "low"})
+    matching = _evt(payload={"tags": ["trigger:story-develop"], "priority": "high"})
+    only_match = _evt(payload={"tags": ["trigger:story-develop"], "priority": "low"})
     only_where = _evt(payload={"tags": ["other"], "priority": "high"})
 
     await bus.publish(matching)

@@ -50,7 +50,7 @@ def test_parse_task_list_returns_typed_tasks() -> None:
                     "id": "abc",
                     "title": "Build it",
                     "status": "open",
-                    "tags": ["trigger:story-implement"],
+                    "tags": ["trigger:story-develop"],
                     "metadata": {"project": "lithos-loom"},
                     "claims": [],
                 },
@@ -64,7 +64,7 @@ def test_parse_task_list_returns_typed_tasks() -> None:
     assert t.id == "abc"
     assert t.title == "Build it"
     assert t.status == "open"
-    assert t.tags == ("trigger:story-implement",)
+    assert t.tags == ("trigger:story-develop",)
     assert t.metadata == {"project": "lithos-loom"}
     assert t.claims == ()
 

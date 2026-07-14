@@ -102,7 +102,7 @@ def test_subscription_block_parses_from_toml(
             name = "obsidian-projection"
             on = ["lithos.task.created", "lithos.task.updated"]
             action = "noop"
-            match.tags = ["trigger:story-implement"]
+            match.tags = ["trigger:story-develop"]
             where = "task.get('priority') == 'high'"
             on_persistent_failure = "friction"
 
@@ -121,7 +121,7 @@ def test_subscription_block_parses_from_toml(
     assert sub.name == "obsidian-projection"
     assert sub.event_types == ("lithos.task.created", "lithos.task.updated")
     assert sub.action == "noop"
-    assert sub.match == {"tags": ["trigger:story-implement"]}
+    assert sub.match == {"tags": ["trigger:story-develop"]}
     assert sub.where == "task.get('priority') == 'high'"
     assert sub.retry.attempts == 5
     assert sub.retry.backoff == "exponential"

@@ -100,7 +100,7 @@ def test_multi_tag_route_partial_overlap_treats_task_as_orphan() -> None:
 
 def test_claimed_by_human_blocking_route_is_actionable() -> None:
     """The defining case: a route-runner has claimed this task on behalf
-    of the human, e.g. story-review-human waiting for a PR merge."""
+    of the human, e.g. a human_blocking review route waiting for a PR merge."""
     routes = [_route("review-human", tags=("trigger:review",), human_blocking=True)]
     task = _task(tags=("trigger:review",), claims=(_claim("review-human"),))
     assert is_human_actionable(task, routes, _cfg()) is True

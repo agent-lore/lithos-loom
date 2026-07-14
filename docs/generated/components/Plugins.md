@@ -49,10 +49,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.settings_resolver` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
 | `lithos_loom.plugins.story_develop.turns` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_implement` | XS | 0 | 0 |
-| `lithos_loom.plugins.story_implement.__main__` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_review_human` | XS | 0 | 0 |
-| `lithos_loom.plugins.story_review_human.__main__` | XS | 0 | 1 |
 
 ## Public API
 
@@ -307,12 +303,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.turns`
 - def `run_turn` — Execute one agent turn in *container* via *engine* and return its result.
-
-### `lithos_loom.plugins.story_implement.__main__`
-- def `main` — Stub — superseded by story-develop; see US-2 in docs/prd/orchestration.md.
-
-### `lithos_loom.plugins.story_review_human.__main__`
-- def `main` — Stub — superseded by story-develop; see US-2 in docs/prd/orchestration.md.
 
 ## Dependencies
 

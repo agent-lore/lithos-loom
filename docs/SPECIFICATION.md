@@ -234,13 +234,13 @@ codex_config  = "/home/you/.codex-lithos"      # optional, parsed but unused tod
 #                      (one route serves all projects; unresolvable → finding)
 
 [[routes]]
-name = "story-implement"
-command = "uv run python -m lithos_loom.plugins.story_implement --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
-max_runtime_seconds = 7200
+name = "prd-decompose"
+command = "uv run python -m lithos_loom.plugins.prd_decompose --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
+max_runtime_seconds = 1800
 human_blocking = false  # if true, surfaced in Obsidian projection once claimed
 
 [routes.match]
-tags = ["trigger:story-implement"]  # task must carry ALL listed tags
+tags = ["trigger:prd-decompose"]  # task must carry ALL listed tags
 
 # story-develop: {{repo}} resolves per task from [projects.<slug>].repo, so
 # one route serves every project. Reviewer config comes from the
@@ -660,7 +660,7 @@ The route-runner enforces `max_runtime_seconds` (per-route config). On timeout, 
 
 ### 5.4 Bundled Plugins (scaffolded)
 
-`prd-decompose`, `story-implement`, `story-review-human` are present under `src/lithos_loom/plugins/` as Python modules with prompt files. Their bodies are stubs; they do not yet produce real `result.json` output. The route-runner code path is the load-bearing piece exercised by tests.
+`prd-decompose` is present under `src/lithos_loom/plugins/` as a Python module with a prompt file. Its body is a stub; it does not yet produce real `result.json` output. The route-runner code path is the load-bearing piece exercised by tests. (The former `story-implement` / `story-review-human` stubs were removed — `story-develop` is the one implement→review→PR path; see §5.5.)
 
 ### 5.5 story-develop (shipped)
 
@@ -1061,7 +1061,7 @@ Obsidian Sync (the app) handles delivering the vault to the operator's secondary
 
 The following are absent from the current surface. Some are explicit non-goals; others are queued in `docs/prd/`. Listed here so readers don't go looking.
 
-- **Plugin bodies for `prd-decompose`, `story-implement`, `story-review-human`.** Scaffolding under `src/lithos_loom/plugins/`; no real logic.
+- **Plugin body for `prd-decompose`.** Scaffolding under `src/lithos_loom/plugins/`; no real logic.
 - **Application of `result.json` fields beyond `status`.** `metadata_updates`, `artifacts`, `commits`, `spawned_tasks`, `exit_code`, `error.retriable` are schema-validated but not used by the runner today (§5.2).
 - **`orchestrator.max_concurrency` enforcement.** Parsed and stored but never read at runtime — there is no global cap on concurrent plugin runs. A single route runs its tasks serially; multiple routes run concurrently without contending. Tracked in [#85](https://github.com/agent-lore/lithos-loom/issues/85).
 - **Resolved project entry in `task.json`.** Plugins receive `{"task": <payload>}` only.

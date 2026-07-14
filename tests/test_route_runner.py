@@ -32,9 +32,9 @@ from lithos_loom.subscriptions.route_runner import RouteRunner
 
 
 def _route(
-    name: str = "story-implement",
+    name: str = "story-develop",
     *,
-    tags: tuple[str, ...] = ("trigger:story-implement",),
+    tags: tuple[str, ...] = ("trigger:story-develop",),
     command: str = "echo {{task_json}} {{work_dir}} {{result_file}}",
     max_runtime_seconds: int | None = None,
     completes_task: bool = True,
@@ -52,7 +52,7 @@ def _payload(
     task_id: str = "task-1",
     *,
     status: str = "open",
-    tags: tuple[str, ...] = ("trigger:story-implement",),
+    tags: tuple[str, ...] = ("trigger:story-develop",),
     metadata: Mapping[str, Any] | None = None,
     claims: tuple[Mapping[str, Any], ...] = (),
 ) -> Mapping[str, Any]:
@@ -220,7 +220,7 @@ async def test_runner_claims_runs_plugin_then_completes_task(
     claim_args = lithos.task_claim.await_args.kwargs
     assert claim_args["task_id"] == "task-1"
     assert claim_args["agent"] == "lithos-orchestrator-test"
-    assert claim_args["aspect"] == "story-implement"
+    assert claim_args["aspect"] == "story-develop"
 
     lithos.task_complete.assert_awaited_once()
     complete_args = lithos.task_complete.await_args.kwargs
@@ -280,7 +280,7 @@ async def test_runner_failed_result_releases_and_posts_finding(
     lithos.finding_post.assert_awaited_once()
     summary = lithos.finding_post.await_args.kwargs["summary"]
     assert summary.startswith("[BlockerFailed]")
-    assert "story-implement" in summary
+    assert "story-develop" in summary
     assert "plugin gave up" in summary
 
 
@@ -681,7 +681,7 @@ async def test_runner_interrupted_with_resume_redispatches(tmp_path: Path) -> No
         id="task-1",
         title="t",
         status="open",
-        tags=("trigger:story-implement",),
+        tags=("trigger:story-develop",),
         metadata={},
         claims=(),
     )
@@ -708,7 +708,7 @@ async def test_runner_resume_dropped_when_task_no_longer_open(
         id="task-1",
         title="t",
         status="completed",
-        tags=("trigger:story-implement",),
+        tags=("trigger:story-develop",),
         metadata={},
         claims=(),
     )
@@ -825,7 +825,7 @@ async def test_resume_redispatch_uses_fresh_task_content(tmp_path: Path) -> None
         id="task-1",
         title="EDITED title",
         status="open",
-        tags=("trigger:story-implement",),
+        tags=("trigger:story-develop",),
         metadata={"project": "loom", "acceptance_criteria": "NEW criteria"},
         claims=(),
         description="EDITED body",
