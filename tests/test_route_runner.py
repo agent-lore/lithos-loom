@@ -26,7 +26,8 @@ from lithos_loom.bus import Event, EventBus
 from lithos_loom.config import RouteConfig, RouteMatch
 from lithos_loom.errors import LithosClientError, PluginContractError
 from lithos_loom.lithos_client import Task
-from lithos_loom.subscriptions.route_runner import RouteRunner
+from lithos_loom.subscriptions.route_runner import READY_QUERY_LIMIT, RouteRunner
+from tests.support import FakeLithosClient, make_task
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -79,6 +80,46 @@ def _evt(
     )
 
 
+class _AnyTaskId(str):
+    """A task id equal to every id — the `mock.ANY` trick, but typed as `str`
+    so it fits `Task.id`.
+
+    Lets the default `task_ready` stub mean "Lithos considers everything
+    ready" without each test enumerating the ids it happens to use. Tests that
+    are ABOUT readiness pass explicit `ready_ids` instead.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return hash("")
+
+
+def _ready(*task_ids: str) -> list[Task]:
+    """Build a `task_ready` frontier containing exactly ``task_ids``."""
+    return [
+        Task(id=tid, title="t", status="open", tags=(), metadata={}, claims=())
+        for tid in task_ids
+    ]
+
+
+def _lithos_mock(*, ready_ids: tuple[str, ...] | None = None) -> AsyncMock:
+    """An `AsyncMock` Lithos carrying sane task-graph defaults.
+
+    ``ready_ids=None`` (default) puts every task on the ready frontier, so
+    tests that aren't about readiness dispatch as they always did. US6's
+    `task_complete` defaults to unblocking nothing.
+    """
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos.task_ready.return_value = (
+        _ready(_AnyTaskId()) if ready_ids is None else _ready(*ready_ids)
+    )
+    lithos.task_complete.return_value = []
+    return lithos
+
+
 def _make_runner(
     *,
     bus: EventBus,
@@ -87,10 +128,17 @@ def _make_runner(
     work_dir: Path,
     succeeded_result: dict[str, Any] | None = None,
     plugin_runner: Any = None,
+    ready_ids: tuple[str, ...] | None = None,
 ) -> tuple[RouteRunner, AsyncMock]:
     if lithos is None:
-        lithos = AsyncMock()
-        lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+        lithos = _lithos_mock(ready_ids=ready_ids)
+    else:
+        # A caller-supplied bare AsyncMock still needs the task-graph
+        # defaults; it keeps whatever else the test configured.
+        lithos.task_ready.return_value = (
+            _ready(_AnyTaskId()) if ready_ids is None else _ready(*ready_ids)
+        )
+        lithos.task_complete.return_value = []
     runner = RouteRunner(
         route=route or _route(),
         bus=bus,
@@ -142,45 +190,265 @@ async def test_runner_skips_non_open_tasks(tmp_path: Path) -> None:
     lithos.task_claim.assert_not_called()
 
 
-async def test_runner_skips_when_dependencies_not_completed(tmp_path: Path) -> None:
+async def test_runner_skips_task_absent_from_ready_frontier(tmp_path: Path) -> None:
+    """US4: readiness is Lithos's answer, not the runner's. A task the
+    ready-queue omits (blocked by a predecessor, a gate, or a cycle) is
+    deferred — the runner no longer inspects metadata.depends_on itself."""
     bus = EventBus()
-    lithos = AsyncMock()
-    # task_get for the dep returns an open dep task — not completed.
-    # (Post-lithos#294 the runner uses task_get rather than task_status:
-    # claims aren't needed for the dep check.)
-    lithos.task_get.return_value = Task(
-        id="dep-1", title="t", status="open", tags=(), metadata={}, claims=()
-    )
-    runner, _ = _make_runner(
-        bus=bus,
-        lithos=lithos,
-        work_dir=tmp_path,
-    )
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, ready_ids=())
 
-    await bus.publish(_evt(payload=_payload(metadata={"depends_on": ["dep-1"]})))
+    await bus.publish(_evt(payload=_payload()))
     await _run_for(runner)
-    lithos.task_get.assert_awaited_with(task_id="dep-1")
     lithos.task_claim.assert_not_called()
 
 
-async def test_runner_runs_when_dependencies_are_completed(tmp_path: Path) -> None:
+async def test_runner_runs_task_present_in_ready_frontier(tmp_path: Path) -> None:
     bus = EventBus()
-    lithos = AsyncMock()
-    lithos.task_claim.return_value = "expires"
-    lithos.task_get.return_value = Task(
-        id="dep-1",
-        title="t",
-        status="completed",
-        tags=(),
-        metadata={},
-        claims=(),
-    )
-    runner, _ = _make_runner(bus=bus, lithos=lithos, work_dir=tmp_path)
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, ready_ids=("task-1",))
 
-    await bus.publish(_evt(payload=_payload(metadata={"depends_on": ["dep-1"]})))
+    await bus.publish(_evt(payload=_payload()))
     await _run_for(runner)
     lithos.task_claim.assert_awaited_once()
     lithos.task_complete.assert_awaited_once()
+
+
+async def test_ready_query_is_narrowed_by_route_tags_and_project(
+    tmp_path: Path,
+) -> None:
+    """`task_ready` has no per-task filter, so the membership query must be
+    narrowed by the route's tags AND the task's project to keep the frontier
+    small enough that our task is actually on the page."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, ready_ids=("task-1",))
+
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lithos-loom"})))
+    await _run_for(runner)
+
+    kwargs = lithos.task_ready.await_args.kwargs
+    assert kwargs["tags"] == ["trigger:story-develop"]
+    assert kwargs["project"] == "lithos-loom"
+
+
+async def test_ready_query_omits_project_when_task_has_none(tmp_path: Path) -> None:
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, ready_ids=("task-1",))
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner)
+    assert lithos.task_ready.await_args.kwargs["project"] is None
+
+
+async def test_runner_defers_and_warns_when_ready_frontier_is_truncated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A full page means the frontier was truncated, so absence from it is
+    NOT evidence of blocked-ness. Defer (the safe direction — the inverse
+    error would dispatch a blocked task) and say so loudly."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    lithos.task_ready.return_value = _ready(
+        *(f"other-{i}" for i in range(READY_QUERY_LIMIT))
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await bus.publish(_evt(payload=_payload()))
+        await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()
+    assert "query limit" in caplog.text
+    assert "task-1" in caplog.text
+
+
+# ── Newly-unblocked re-dispatch (US6) ──────────────────────────────────
+
+
+async def _run_all(*runners: RouteRunner, seconds: float = 0.2) -> None:
+    tasks = [asyncio.create_task(r.run()) for r in runners]
+    await asyncio.sleep(seconds)
+    for t in tasks:
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+
+async def test_completion_re_dispatches_newly_unblocked_task(tmp_path: Path) -> None:
+    """US6: task_complete names the tasks whose last blocker just cleared.
+    The runner re-evaluates them immediately rather than waiting for a
+    task.updated round-trip from Lithos."""
+    bus = EventBus()
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, ready_ids=("task-1", "task-2")
+    )
+    lithos.task_complete.side_effect = [["task-2"], []]
+    lithos.task_get.return_value = Task(
+        id="task-2",
+        title="t",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt(payload=_payload(task_id="task-1")))
+    await _run_all(runner)
+
+    claimed = {c.kwargs["task_id"] for c in lithos.task_claim.await_args_list}
+    assert claimed == {"task-1", "task-2"}
+
+
+async def test_newly_unblocked_task_re_dispatches_to_a_different_route(
+    tmp_path: Path,
+) -> None:
+    """The point of routing the nudge through the bus rather than calling
+    _handle directly: the unblocked task usually belongs to a DIFFERENT
+    route than the one that just completed its blocker."""
+    bus = EventBus()
+    lithos = AsyncMock()
+    lithos.task_claim.return_value = "expires"
+    runner_a, _ = _make_runner(
+        bus=bus,
+        route=_route(name="route-a", tags=("trigger:a",)),
+        lithos=lithos,
+        work_dir=tmp_path,
+        ready_ids=("task-1", "task-2"),
+    )
+    runner_b, _ = _make_runner(
+        bus=bus,
+        route=_route(name="route-b", tags=("trigger:b",)),
+        lithos=lithos,
+        work_dir=tmp_path,
+        ready_ids=("task-1", "task-2"),
+    )
+    lithos.task_complete.side_effect = [["task-2"], []]
+    lithos.task_get.return_value = Task(
+        id="task-2",
+        title="t",
+        status="open",
+        tags=("trigger:b",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt(payload=_payload(task_id="task-1", tags=("trigger:a",))))
+    await _run_all(runner_a, runner_b)
+
+    by_aspect = {
+        c.kwargs["aspect"]: c.kwargs["task_id"]
+        for c in lithos.task_claim.await_args_list
+    }
+    assert by_aspect == {"route-a": "task-1", "route-b": "task-2"}
+
+
+async def test_unblocked_task_no_longer_open_is_not_re_dispatched(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, ready_ids=("task-1", "task-2")
+    )
+    lithos.task_complete.side_effect = [["task-2"], []]
+    lithos.task_get.return_value = Task(
+        id="task-2",
+        title="t",
+        status="completed",
+        tags=("trigger:story-develop",),
+        metadata={},
+        claims=(),
+    )
+
+    await bus.publish(_evt(payload=_payload(task_id="task-1")))
+    await _run_all(runner)
+
+    claimed = {c.kwargs["task_id"] for c in lithos.task_claim.await_args_list}
+    assert claimed == {"task-1"}
+
+
+async def test_re_dispatch_failure_does_not_fail_the_completed_task(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The task is already completed by the time we nudge its dependents —
+    a failure here must not surface as a run error or undo the completion."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, ready_ids=("task-1",))
+    lithos.task_complete.side_effect = [["task-2"], []]
+    lithos.task_get.side_effect = LithosClientError("boom", "lithos fell over")
+
+    with caplog.at_level(logging.ERROR):
+        await bus.publish(_evt(payload=_payload(task_id="task-1")))
+        await _run_all(runner)
+
+    lithos.task_complete.assert_awaited_once()
+    assert "task-2" in caplog.text
+    assert "unhandled error" not in caplog.text
+
+
+async def test_blocks_edge_chain_dispatches_in_order_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """US4+US6 through the real client contract, not mock assumptions.
+
+    `FakeLithosClient` is the hermetic stand-in whose readiness model is
+    validated against live Lithos by the LITHOS_URL-guarded test (US3). Wiring
+    the runner to it exercises the actual shapes: `task_ready` returning Task
+    objects the membership check reads `.id` off, and `task_complete` returning
+    the real unblocked id list US6 consumes.
+
+    The chain: `blocker` blocks `dependent`. The dependent must sit out until
+    the blocker completes, then dispatch off the completion alone — no further
+    Lithos event.
+    """
+    fake = FakeLithosClient()
+    for tid in ("blocker", "dependent"):
+        fake.add_task(
+            make_task(
+                tid,
+                status="open",
+                tags=("trigger:story-develop",),
+                metadata={"project": "loom"},
+            )
+        )
+    fake.add_edge(from_task_id="blocker", to_task_id="dependent", type="blocks")
+
+    bus = EventBus()
+    runner = RouteRunner(
+        route=_route(),
+        bus=bus,
+        lithos=fake,
+        agent_id="lithos-orchestrator-test",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=AsyncMock(
+            return_value={
+                "schema_version": 1,
+                "task_id": "x",
+                "status": "succeeded",
+                "exit_code": 0,
+            }
+        ),
+    )
+
+    async def _status(task_id: str) -> str:
+        task = await fake.task_get(task_id=task_id)
+        assert task is not None
+        return task.status
+
+    # The dependent alone goes nowhere — Lithos says it is blocked.
+    await bus.publish(
+        _evt(payload=_payload(task_id="dependent", metadata={"project": "loom"}))
+    )
+    await _run_all(runner, seconds=0.1)
+    assert not fake.called("task_claim")
+    assert await _status("dependent") == "open"
+
+    # Completing the blocker clears it; US6 dispatches the dependent off the
+    # returned unblocked set, with no further event published by the test.
+    await bus.publish(
+        _evt(payload=_payload(task_id="blocker", metadata={"project": "loom"}))
+    )
+    await _run_all(runner, seconds=0.3)
+
+    assert await _status("blocker") == "completed"
+    assert await _status("dependent") == "completed"
 
 
 # ── Claim race ─────────────────────────────────────────────────────────
@@ -868,8 +1136,7 @@ async def test_repo_token_resolved_from_projects_map(tmp_path: Path) -> None:
             "exit_code": 0,
         }
 
-    lithos = AsyncMock()
-    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos = _lithos_mock()
     runner = RouteRunner(
         route=_repo_route(),
         bus=bus,
@@ -913,8 +1180,7 @@ async def test_repo_token_with_spaces_is_shell_quoted(tmp_path: Path) -> None:
             "exit_code": 0,
         }
 
-    lithos = AsyncMock()
-    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos = _lithos_mock()
     spaced = "/home/x/my projects/loom repo"
     runner = RouteRunner(
         route=_repo_route(),
@@ -946,8 +1212,7 @@ async def test_repo_token_without_project_releases_with_finding(
     release with a finding, never run the plugin."""
     bus = EventBus()
     plugin = AsyncMock()
-    lithos = AsyncMock()
-    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos = _lithos_mock()
     runner = RouteRunner(
         route=_repo_route(),
         bus=bus,
@@ -974,8 +1239,7 @@ async def test_repo_token_unregistered_project_releases_with_finding(
     """A {{repo}} route + a task whose project isn't in [projects.*]: same."""
     bus = EventBus()
     plugin = AsyncMock()
-    lithos = AsyncMock()
-    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos = _lithos_mock()
     runner = RouteRunner(
         route=_repo_route(),
         bus=bus,
@@ -1104,8 +1368,7 @@ async def test_delivered_marker_failure_posts_friction(tmp_path: Path) -> None:
     """If marking loom_delivered fails, the restart-re-develop risk is made
     visible as a [Friction] finding, not just logged (Copilot #95)."""
     bus = EventBus()
-    lithos = AsyncMock()
-    lithos.task_claim.return_value = "2026-05-13T13:00:00Z"
+    lithos = _lithos_mock()
     lithos.task_update.side_effect = RuntimeError("lithos unavailable")
     runner, _ = _make_runner(
         bus=bus, route=_develop_route(), lithos=lithos, work_dir=tmp_path

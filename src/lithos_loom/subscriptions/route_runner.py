@@ -33,7 +33,7 @@ import json
 import logging
 import shlex
 import shutil
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,6 +74,16 @@ _HANDLED_EVENT_TYPES = (
 # for the operator. Distinct from the failure retry budget (issue #11):
 # resume is "try again after the limit lifts", not "retry a failure".
 MAX_RESUMES_PER_TASK = 3
+
+# Page size for the `task_ready` membership query (US4). `task_ready` has no
+# per-task filter — the runner asks for the frontier and looks for its task on
+# it — so the page must be big enough to hold a realistic frontier. The query
+# is already narrowed to one route's tags and one project, but that can still
+# be large: a decomposed PRD's parallel stories all carry the same trigger tag
+# and all become ready at once. The default limit of 50 would quietly truncate
+# such a frontier, so ask for far more and treat a full page as undetermined
+# rather than as "not ready" (see `_is_ready`).
+READY_QUERY_LIMIT = 500
 
 
 def _task_to_payload(task: Any) -> dict[str, Any]:
@@ -232,10 +242,9 @@ class RouteRunner:
             )
             return
 
-        depends_on = metadata.get("depends_on") or []
-        if depends_on and not await self._deps_satisfied(depends_on):
+        if not await self._is_ready(task_id, metadata):
             logger.info(
-                "RouteRunner %s: deferring %s — dependencies not complete",
+                "RouteRunner %s: deferring %s — not on Lithos's ready frontier",
                 self.route.name,
                 task_id,
             )
@@ -267,16 +276,83 @@ class RouteRunner:
         logger.info("RouteRunner %s: claimed %s", self.route.name, task_id)
         await self._run_claimed_task(task_id, payload)
 
-    async def _deps_satisfied(self, dep_ids: list[str]) -> bool:
-        # Use task_get (post-lithos#294) — only ``.status`` is read here,
-        # so skipping claim serialization with the dedicated single-task
-        # endpoint is a small per-call efficiency win, plus we get an
-        # explicit task_not_found envelope instead of an empty-list miss.
-        for dep_id in dep_ids:
-            status = await self.lithos.task_get(task_id=dep_id)
-            if status is None or status.status != "completed":
-                return False
-        return True
+    async def _is_ready(self, task_id: str, metadata: Mapping[str, Any]) -> bool:
+        """Is ``task_id`` on Lithos's ready frontier for this route? (US4)
+
+        Readiness — every ``blocks`` predecessor completed, no unmet gate, no
+        cycle — is computed once, server-side, and shared with every other
+        agent. The runner no longer mirrors it from ``metadata.depends_on``.
+
+        ``task_ready`` has no per-task filter, so this is a membership test
+        over a frontier narrowed to the route's tags and (when the task
+        declares one) its project. A *full* page means the frontier was
+        truncated, which makes absence from it meaningless — so that case is
+        reported as not-ready-yet rather than trusted, and logged. Deferring
+        is the safe direction: the inverse mistake would dispatch a task whose
+        blocker is still open, which is exactly what this gate exists to stop.
+        """
+        project = metadata.get("project")
+        ready = await self.lithos.task_ready(
+            tags=list(self.route.match.tags),
+            project=project if isinstance(project, str) else None,
+            limit=READY_QUERY_LIMIT,
+            # Claims never exclude a task from the frontier (collision-safety
+            # comes from the atomic claim below), so don't pay to fetch them.
+            with_claims=False,
+        )
+        if any(task.id == task_id for task in ready):
+            return True
+        if len(ready) >= READY_QUERY_LIMIT:
+            logger.warning(
+                "RouteRunner %s: ready frontier for tags %s hit the %d-task query "
+                "limit, so %s's readiness is undetermined — deferring. Raise "
+                "READY_QUERY_LIMIT if a frontier this wide is expected.",
+                self.route.name,
+                list(self.route.match.tags),
+                READY_QUERY_LIMIT,
+                task_id,
+            )
+        return False
+
+    async def _re_dispatch_unblocked(self, task_ids: Sequence[str]) -> None:
+        """Re-evaluate route matching for tasks Lithos just unblocked (US6).
+
+        ``task_complete`` returns the tasks whose last blocker cleared as a
+        result of this completion. Rather than wait for a ``task.updated``
+        round-trip, republish each onto the bus as a synthetic
+        ``lithos.task.updated``: the bus's tag filter routes it to whichever
+        route matches — usually a *different* route than this one — and the
+        normal ``_handle`` path (ready check, then collision-safe claim)
+        applies unchanged. Double-evaluation is harmless; the claim decides.
+
+        Never raises. The task is already completed by the time we get here,
+        so a failure nudging its dependents must not surface as a run error.
+        A dropped nudge is recoverable — a later event, or the restart
+        bootstrap, re-surfaces the task.
+        """
+        for unblocked_id in task_ids:
+            try:
+                task = await self.lithos.task_get(task_id=unblocked_id)
+                if task is None or task.status != "open":
+                    continue
+                await self.bus.publish(
+                    Event(
+                        type="lithos.task.updated",
+                        timestamp=datetime.now(UTC),
+                        payload=_task_to_payload(task),
+                    )
+                )
+                logger.info(
+                    "RouteRunner %s: re-dispatching newly-unblocked %s",
+                    self.route.name,
+                    unblocked_id,
+                )
+            except Exception:
+                logger.exception(
+                    "RouteRunner %s: could not re-dispatch newly-unblocked %s",
+                    self.route.name,
+                    unblocked_id,
+                )
 
     # ── claimed-task lifecycle ────────────────────────────────────────
 
@@ -390,8 +466,13 @@ class RouteRunner:
         status = result.get("status")
         if status == "succeeded":
             if self.route.completes_task:
-                await self.lithos.task_complete(task_id=task_id, agent=self.agent_id)
+                unblocked = await self.lithos.task_complete(
+                    task_id=task_id, agent=self.agent_id
+                )
                 logger.info("RouteRunner %s: completed %s", self.route.name, task_id)
+                # US6: dispatch whatever this completion just released without
+                # waiting for Lithos to tell us about it.
+                await self._re_dispatch_unblocked(unblocked or ())
             else:
                 # PR-producing route: success means a reviewed branch + PR
                 # exist, awaiting human merge — NOT that the task is done.
