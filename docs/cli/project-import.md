@@ -41,8 +41,13 @@ For each `- [ ]` open-task line in the source body, a Lithos task is created wit
 | `tags` | the line's `#foo` tags + auto-added `#project/<slug>` |
 | `metadata.project` | the importing project's slug |
 | `metadata.priority` | mapped from priority emoji if present |
-| `metadata.depends_on` | child task ids when this line had indented children below it |
-| `metadata.parallelizable` | `true` when this line is a sibling under a non-`[sequential]` parent |
+| `task_type` | `epic` when this line had indented children below it, else `task` |
+| `parent_task_id` | the containing line's task id, when this line was indented under one (creates a `parent_child` edge) |
+| `depends_on` | the previous sibling's task id, when the parent carried `[sequential]` (creates a `blocks` edge) |
+
+Tasks are created in **document order**, which Lithos requires: a `parent_task_id`
+or `depends_on` target must already exist, and a parent always precedes its
+children (as does a sequential sibling its successor).
 
 The matched task lines are **stripped from the persisted doc body** — the project-context doc holds narrative only; tasks live as Lithos task entities (single source of truth).
 
@@ -130,9 +135,9 @@ The marker is case-sensitive (lowercase `s`), must be a standalone token (won't 
 
 ### Hierarchy from indentation
 
-- **Top-level tasks** (no indent) are flat: no `depends_on` between them. Doc ordering imposes no execution semantics.
-- **Indented children** represent composition: parent gets `metadata.depends_on = [child_ids]`; children have NO `depends_on` back to the parent. Parent is marked complete manually after all children are done.
-- **Sibling children** are parallelizable by default; `[sequential]` on the parent flips them to a chain.
+- **Top-level tasks** (no indent) are flat: no dependencies between them. Doc ordering imposes no execution semantics.
+- **Indented children** represent composition: the parent becomes an `epic` and each child gets a `parent_task_id` pointing at it — a `parent_child` edge. The epic is a container, not work: Lithos's ready-queue excludes epics by type, so nothing ever dispatches it, and it takes no dependency on its children. Mark it complete manually once the children are done.
+- **Sibling children** are parallel by default — that is the absence of any `blocks` edge between them, not a flag. `[sequential]` on the parent chains them instead: each child gets `depends_on = [previous sibling]`.
 
 Mixed indentation (tabs + spaces in the same doc) is supported — anything with a strictly-deeper leading-whitespace count than the previous line is treated as a child. Pure-tab and pure-spaces docs work intuitively; mixed indentation gives you what you wrote.
 
@@ -223,12 +228,12 @@ WOULD CREATE project:
   tags=['project-context', 'productivity']
   body=<284 chars after stripping 9 task lines>
 
-WOULD CREATE 9 tasks (top-level: flat; nested: depends_on parent):
+WOULD CREATE 9 tasks (top-level: flat; nested: children of an epic):
   1. "Set up GTD inbox" #productivity #project/organising-myself priority=high
   2. "Triage weekly review" #productivity #weekly #project/organising-myself priority=medium
-  3. "Implement next-actions list" #project/organising-myself
-    3a. "Define context tags" #project/organising-myself parallelizable=true
-    3b. "Build weekly review template" #project/organising-myself parallelizable=true
+  3. "Implement next-actions list" #project/organising-myself type=epic
+    3a. "Define context tags" #project/organising-myself
+    3b. "Build weekly review template" #project/organising-myself
   ...
 
 NO CHANGES MADE — re-run without --dry-run to apply

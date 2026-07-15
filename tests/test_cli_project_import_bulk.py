@@ -288,22 +288,49 @@ def test_indented_children_parallel_default(tmp_path: Path) -> None:
         "- [ ] Parent\n  - [ ] Child A\n  - [ ] Child B\n",
         encoding="utf-8",
     )
-    client = _stub_client(task_create_ids=["task-A", "task-B", "task-parent"])
+    client = _stub_client(task_create_ids=["task-parent", "task-A", "task-B"])
     runner = CliRunner()
     with _patched_client(client):
         result = runner.invoke(
             project_app, ["import", str(source), "-c", str(cfg_path)]
         )
     assert result.exit_code == 0, result.stdout
-    # 3 task_create calls — children first per E4
+    # 3 task_create calls, parent FIRST — Lithos requires parent_task_id to
+    # already exist, and document order satisfies that (US9).
     calls = client.task_create.await_args_list
-    assert calls[0].kwargs["title"] == "Child A"
-    assert calls[0].kwargs["metadata"]["parallelizable"] is True
-    assert calls[1].kwargs["title"] == "Child B"
-    assert calls[1].kwargs["metadata"]["parallelizable"] is True
-    # Parent has depends_on referencing the freshly-created child ids
-    assert calls[2].kwargs["title"] == "Parent"
-    assert set(calls[2].kwargs["metadata"]["depends_on"]) == {"task-A", "task-B"}
+    assert calls[0].kwargs["title"] == "Parent"
+    assert calls[0].kwargs["task_type"] == "epic"
+    assert calls[0].kwargs["parent_task_id"] is None
+    # Children hang off the epic; parallel siblings share no blocks edge.
+    for call, title in ((calls[1], "Child A"), (calls[2], "Child B")):
+        assert call.kwargs["title"] == title
+        assert call.kwargs["task_type"] == "task"
+        assert call.kwargs["parent_task_id"] == "task-parent"
+        assert call.kwargs["depends_on"] is None
+
+
+def test_import_never_writes_rejected_graph_metadata_keys(tmp_path: Path) -> None:
+    """Lithos rejects ``metadata.depends_on`` outright (``invalid_metadata_key``:
+    "task dependencies are first-class task edges"), which broke import for any
+    doc with indented children. The graph moved to real edges — nothing may put
+    it back in metadata."""
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "- [ ] Build [sequential]\n  - [ ] Step 1\n  - [ ] Step 2\n",
+        encoding="utf-8",
+    )
+    client = _stub_client(task_create_ids=["task-parent", "task-step1", "task-step2"])
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.stdout
+    for call in client.task_create.await_args_list:
+        assert "depends_on" not in call.kwargs["metadata"]
+        assert "blocked_on" not in call.kwargs["metadata"]
+        assert "parallelizable" not in call.kwargs["metadata"]
 
 
 # ── 4. Sequential marker override ─────────────────────────────────────
@@ -316,7 +343,7 @@ def test_sequential_marker_creates_chain(tmp_path: Path) -> None:
         "- [ ] Build [sequential]\n  - [ ] Step 1\n  - [ ] Step 2\n",
         encoding="utf-8",
     )
-    client = _stub_client(task_create_ids=["task-step1", "task-step2", "task-parent"])
+    client = _stub_client(task_create_ids=["task-parent", "task-step1", "task-step2"])
     runner = CliRunner()
     with _patched_client(client):
         result = runner.invoke(
@@ -327,16 +354,16 @@ def test_sequential_marker_creates_chain(tmp_path: Path) -> None:
     step1_call = next(c for c in calls if c.kwargs["title"] == "Step 1")
     step2_call = next(c for c in calls if c.kwargs["title"] == "Step 2")
     parent_call = next(c for c in calls if c.kwargs["title"] == "Build")
-    # Step 1: no depends_on; NOT parallelizable
-    assert "depends_on" not in step1_call.kwargs["metadata"]
-    assert "parallelizable" not in step1_call.kwargs["metadata"]
-    # Step 2: depends on Step 1; NOT parallelizable
-    assert step2_call.kwargs["metadata"]["depends_on"] == ["task-step1"]
-    # Parent depends on both children (D64 unchanged)
-    assert set(parent_call.kwargs["metadata"]["depends_on"]) == {
-        "task-step1",
-        "task-step2",
-    }
+    # The parent contains the chain but does not depend on it.
+    assert parent_call.kwargs["task_type"] == "epic"
+    assert parent_call.kwargs["depends_on"] is None
+    # Step 1: first in the chain, so no predecessor.
+    assert step1_call.kwargs["depends_on"] is None
+    # Step 2: one blocks edge back to Step 1's freshly-minted id.
+    assert step2_call.kwargs["depends_on"] == ["task-step1"]
+    # Both are children of the epic regardless of the chain.
+    assert step1_call.kwargs["parent_task_id"] == "task-parent"
+    assert step2_call.kwargs["parent_task_id"] == "task-parent"
 
 
 # ── 5. Tasks-only happy path ──────────────────────────────────────────
@@ -621,6 +648,51 @@ def test_dry_run_includes_task_metadata(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "priority=high" in result.stdout
     assert "#foo" in result.stdout
+
+
+def test_dry_run_previews_the_graph_it_will_build(tmp_path: Path) -> None:
+    """The preview's promise is "what you see is what gets written", so the
+    tree must show the epic/child structure at its real nesting depth.
+
+    Depth is the parent chain, NOT the source's raw indent width: the parser
+    treats any deeper leading whitespace as exactly one level down, so the
+    4-space and 6-space children below are siblings and preview alike.
+    """
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "- [ ] Root\n"
+        "  - [ ] Mid\n"
+        "    - [ ] Leaf A\n"
+        "      - [ ] Deep [sequential]\n"
+        "        - [ ] Deep 1\n"
+        "        - [ ] Deep 2\n"
+        "    - [ ] Leaf B\n",
+        encoding="utf-8",
+    )
+    client = _stub_client()
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path), "--dry-run"]
+        )
+    assert result.exit_code == 0, result.stdout
+    body = [ln.rstrip() for ln in result.stdout.splitlines()]
+
+    def _line(label: str) -> str:
+        return next(ln for ln in body if ln.strip().startswith(f"{label}. "))
+
+    # Each generation is indented one step deeper than its parent.
+    assert _line("1").startswith('  1. "Root"')
+    assert _line("1a").startswith('    1a. "Mid"')
+    assert _line("1aa").startswith('      1aa. "Leaf A"')
+    assert _line("1aaa").startswith('        1aaa. "Deep"')
+    # Siblings share an indent regardless of their differing source widths.
+    assert _line("1ab").startswith('      1ab. "Leaf B"')
+    # Lines with children preview as epics; the chain shows its blocks edge.
+    assert "type=epic" in _line("1aaa")
+    assert "type=epic" not in _line("1ab")
+    assert "(depends_on=#1aaaa)" in _line("1aaab")
 
 
 def test_dry_run_shows_auto_added_project_tag(tmp_path: Path) -> None:

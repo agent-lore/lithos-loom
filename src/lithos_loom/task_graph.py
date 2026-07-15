@@ -1,25 +1,38 @@
-"""Pure dependency-graph builder for bulk task import.
+"""Pure task-graph builder for bulk task import.
 
 Takes the list of ``ParsedTaskLine`` produced by ``task_line_parser``
-and returns ``TaskCreatePlan`` entries with dependency edges derived
-from indentation:
+and returns ``TaskCreatePlan`` entries describing the graph the
+indentation implies (Epic G / US9):
 
-- Top-level tasks are flat (no ``depends_on`` between them).
-- Indented children represent composition: parent gets
-  ``metadata.depends_on = [child_line_numbers]``; children have NO
-  ``depends_on`` back to the parent. Parent is marked complete
-  manually after all children are done.
-- Sibling children of a parent are parallelizable by default
-  (``parallelizable = True``, no ``depends_on`` between siblings).
-  When the parent carries the ``[sequential]`` marker
-  (``is_sequential_parent = True``), that parent's children form a
-  chain: child[i] depends on child[i-1].
-- Parent tasks with empty descriptions (just a heading) are flagged
-  as validation errors.
+- A line with indented children is an **epic** (``task_type="epic"``) and
+  its children carry ``parent_task_id`` — a first-class ``parent_child``
+  edge. Containment is now structural, so an epic is never dispatched as
+  work (``lithos_task_ready`` excludes epics by construction) and no
+  longer needs to fake "wait for my children" with dependency edges.
+- Sibling children are parallel by default — *absence* of a ``blocks``
+  edge is what parallelism means now, so nothing is written for it. When
+  the parent carries the ``[sequential]`` marker
+  (``is_sequential_parent = True``) its children form a chain instead:
+  child[i] ``depends_on`` child[i-1], one ``blocks`` edge each.
+- Top-level tasks are flat: no parent, no dependencies.
+- Parent tasks with empty descriptions (just a heading) are flagged as
+  validation errors.
 
-The builder is I/O-free. Line-number references in
-``depends_on_line_numbers`` are resolved to Lithos task ids at
-execution time by the CLI layer.
+This replaces an older encoding that had **the parent depend on its
+children** via ``metadata.depends_on``, plus ``metadata.parallelizable``.
+That was a workaround for a Lithos with no edge surface: containment had
+to be spelled as a dependency. It is gone for two reasons — Lithos now
+*rejects* ``metadata.depends_on`` outright (``invalid_metadata_key``:
+"task dependencies are first-class task edges"), and the parent→child
+dependency inverted the real relationship.
+
+Because a parent always precedes its children in the document and
+siblings appear in order, **document order is a valid creation order**:
+every ``parent_task_id`` and ``depends_on`` reference points at a line
+that was already created. No topological sort is needed.
+
+The builder is I/O-free. Line-number references are resolved to Lithos
+task ids at execution time by the CLI layer.
 """
 
 from __future__ import annotations
@@ -28,27 +41,34 @@ from dataclasses import dataclass
 
 from lithos_loom.task_line_parser import ParsedTaskLine, ValidationError
 
+EPIC = "epic"
+TASK = "task"
+
 
 @dataclass(frozen=True)
 class TaskCreatePlan:
     """One Lithos ``task_create`` call's worth of structured input.
 
-    ``depends_on_line_numbers`` references other ``ParsedTaskLine``s
-    by their ``line_number`` field. The CLI layer creates tasks in
-    topological order (children before parents) and resolves each
-    line number to a freshly-minted Lithos task id when the parent's
-    turn comes.
+    ``parent_line_number`` / ``depends_on_line_numbers`` reference other
+    ``ParsedTaskLine``s by their ``line_number``; the CLI layer creates
+    tasks in document order and resolves each to a freshly-minted Lithos
+    task id by the time it is referenced.
+
+    ``task_type`` is ``epic`` for a line with children (a container, not
+    work) and ``task`` otherwise. Lithos has no ``subtask`` type — a child
+    is a plain ``task`` that carries a ``parent_task_id``.
     """
 
     line: ParsedTaskLine
+    task_type: str
+    parent_line_number: int | None
     depends_on_line_numbers: tuple[int, ...]
-    parallelizable: bool
 
 
 def build_plan(
     lines: list[ParsedTaskLine],
 ) -> tuple[list[TaskCreatePlan], list[ValidationError]]:
-    """Build task-create plans with dependency edges from indentation.
+    """Build task-create plans with graph edges derived from indentation.
 
     Walks ``lines`` in document order, tracking a stack of open
     ancestors. A line whose indent is deeper than the top of the
@@ -58,16 +78,16 @@ def build_plan(
     task).
 
     Returns:
-        (plans, errors). ``plans`` preserves the input order (caller
-        topologically sorts at task-create time). ``errors`` contains
-        empty-parent violations only — cross-project tag violations
-        come from the parser itself and are passed through the CLI
-        separately.
+        (plans, errors). ``plans`` preserves the input order, which is
+        also a valid creation order — see the module docstring.
+        ``errors`` contains empty-parent violations only —
+        cross-project tag violations come from the parser itself and
+        are passed through the CLI separately.
     """
     plans: list[TaskCreatePlan] = []
     errors: list[ValidationError] = []
 
-    # Map line_number → list of child line_numbers (parent.depends_on).
+    # Map line_number → list of child line_numbers, in document order.
     children_of: dict[int, list[int]] = {ln.line_number: [] for ln in lines}
     # Map line_number → parent line_number (for sibling sequencing).
     parent_of: dict[int, int | None] = {ln.line_number: None for ln in lines}
@@ -112,39 +132,28 @@ def build_plan(
                 )
             )
 
-    # Build per-task depends_on + parallelizable.
+    # Build per-task type / parent / dependencies.
     for line in lines:
-        own_children = children_of[line.line_number]
         parent_ln = parent_of[line.line_number]
 
-        # Depends_on: parents depend on children. Children of a
-        # [sequential] parent ALSO depend on their previous sibling.
-        depends_on: list[int] = list(own_children)
+        # A line with children is a container, not a unit of work.
+        task_type = EPIC if children_of[line.line_number] else TASK
 
-        if parent_ln is not None:
-            parent_line = line_by_number[parent_ln]
-            if parent_line.is_sequential_parent:
-                siblings = children_of[parent_ln]
-                idx = siblings.index(line.line_number)
-                if idx > 0:
-                    depends_on.append(siblings[idx - 1])
-
-        # Parallelizable: True for siblings under a non-sequential
-        # parent. False for top-level tasks (they have no parallelism
-        # contract), for parent tasks themselves (they're gated on
-        # their children), and for siblings of a [sequential] parent
-        # (they're explicitly serialized).
-        parallelizable = False
-        if parent_ln is not None:
-            parent_line = line_by_number[parent_ln]
-            if not parent_line.is_sequential_parent:
-                parallelizable = True
+        # Dependencies: only the [sequential] sibling chain. Containment is
+        # `parent_task_id`, and parallel siblings are the *absence* of edges.
+        depends_on: list[int] = []
+        if parent_ln is not None and line_by_number[parent_ln].is_sequential_parent:
+            siblings = children_of[parent_ln]
+            idx = siblings.index(line.line_number)
+            if idx > 0:
+                depends_on.append(siblings[idx - 1])
 
         plans.append(
             TaskCreatePlan(
                 line=line,
+                task_type=task_type,
+                parent_line_number=parent_ln,
                 depends_on_line_numbers=tuple(depends_on),
-                parallelizable=parallelizable,
             )
         )
 

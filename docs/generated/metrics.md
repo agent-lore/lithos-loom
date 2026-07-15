@@ -36,7 +36,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 |---|---:|---:|---:|---:|---:|---:|---|---:|
 | Bus | 1 | 198 | 160 | 4 | 0 | 0.00 | 11 (`lithos_loom.bus._matches_struct`) | 1 |
 | Children | 6 | 1285 | 962 | 0 | 7 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 1 |
-| Cli | 10 | 4569 | 3796 | 2 | 8 | 0.80 | 49 (`lithos_loom.cli.project.import_project`) | 15 |
+| Cli | 10 | 4533 | 3762 | 2 | 8 | 0.80 | 49 (`lithos_loom.cli.project.import_project`) | 14 |
 | Config | 1 | 1040 | 871 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 407 | 334 | 1 | 3 | 0.75 | 20 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
 | Entrypoint | 2 | 560 | 444 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
@@ -44,7 +44,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Evals | 9 | 975 | 785 | 1 | 2 | 0.67 | 18 (`lithos_loom.evals.review.harness.run_case`) | 2 |
 | GitHub | 1 | 787 | 608 | 4 | 1 | 0.20 | 10 (`lithos_loom.github_client._parse_pull_request`) | 0 |
 | LithosClient | 1 | 2195 | 1841 | 9 | 1 | 0.10 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
-| Plugins | 38 | 10692 | 8598 | 2 | 5 | 0.71 | 92 (`lithos_loom.plugins.story_develop.__main__.main`) | 21 |
+| Plugins | 38 | 10697 | 8602 | 2 | 5 | 0.71 | 92 (`lithos_loom.plugins.story_develop.__main__.main`) | 21 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 5 | 572 | 443 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
@@ -52,11 +52,11 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
 | Subscriptions | 20 | 5656 | 4301 | 4 | 10 | 0.71 | 13 (`lithos_loom.subscriptions._note_push.make_handler.handle`) | 8 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
-| Tasks | 3 | 598 | 418 | 4 | 0 | 0.00 | 17 (`lithos_loom.task_graph.build_plan`) | 2 |
+| Tasks | 3 | 607 | 428 | 4 | 0 | 0.00 | 16 (`lithos_loom.task_graph.build_plan`) | 2 |
 
 ## Size
 
-- Modules: **112**, lines: **33960**, SLOC: **26965**
+- Modules: **112**, lines: **33938**, SLOC: **26945**
 - Largest module: `lithos_loom.lithos_client` (2195 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **890**, cyclomatic > 10: **70**
+- Functions: **888**, cyclomatic > 10: **69**
 
 Top 10 most complex functions:
 
@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **16** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.58** (53783 test lines / 33960 source lines)
+- Test-to-source line ratio: **1.59** (53904 test lines / 33938 source lines)

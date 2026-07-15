@@ -474,7 +474,7 @@ Task extraction parses:
 - Tags matching `#[A-Za-z0-9_/-]+` (all-digit tokens like `#123` excluded).
 - Priority emoji `🔺⏫🔼🔽⏬` mapped to `metadata.priority`.
 - Cross-project `#project/<other-slug>` tags refuse the import (exit 2).
-- Indented children become `metadata.depends_on` from parent → children; siblings are `metadata.parallelizable = true` by default; `[sequential]` token on parent flips children to a chain.
+- Indented children build a task graph out of Lithos's first-class edges: the parent becomes an `epic` and each child is created with `parent_task_id` (a `parent_child` edge). Siblings are parallel by default — that is simply the absence of a `blocks` edge between them. A `[sequential]` token on the parent chains its children instead: each child is created with `depends_on = [previous sibling]`, one `blocks` edge apiece. Tasks are created in document order, which satisfies Lithos's "predecessor / parent must already exist" rule.
 
 Exit codes: `0` success, `1` Lithos call failure / slug collision / missing project / partial-import failure, `2` input validation failure.
 
@@ -1036,10 +1036,11 @@ Loom requires a Lithos server exposing the MCP-over-SSE surface plus these primi
 | `lithos_task_list(status='open', with_claims=true)` | Source bootstrap. |
 | `lithos_task_status`, `_create`, `_complete`, `_cancel`, `_update`, `_claim`, `_release` | Task lifecycle. |
 | `lithos_task_create(metadata=...)` | Single-shot create with metadata (post `agent-lore/lithos#295`). |
+| `lithos_task_create(task_type=…, parent_task_id=…, depends_on=…)` | `project import` builds its epic / child / sequential-chain graph in one call per task (§4.8). |
 | `lithos_finding_post` | `[Friction]` / `[ReopenRequested]` / `[BlockerFailed]` breadcrumbs. |
 | `lithos_write(id=..., expected_version=...)` | Note push with optimistic locking; `version_conflict` envelope drives the conflict resolver. |
 | `lithos_read`, `lithos_list(path_prefix=...)`, `lithos_delete` | Project-context projection + CLI surface. |
-| `task.metadata` field on tasks | All `metadata.*` references throughout (priority, scheduled_for, project, depends_on, parallelizable, etc.). |
+| `task.metadata` field on tasks | All `metadata.*` references throughout (priority, scheduled_for, project, etc.). Note `depends_on` / `blocked_on` are **rejected** metadata keys — dependencies are task edges. |
 | `task.updated` event (minimal `{task_id}` payload) | Cache-invalidation signal; `LithosEventStream` force-refreshes via `task_list(status='open')` to pick up the new field values. Other task events are served from cache where possible. |
 | `note.created` / `note.updated` / `note.deleted` events on `GET /events` SSE | Project-context projection. |
 

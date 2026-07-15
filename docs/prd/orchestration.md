@@ -88,7 +88,7 @@ The extension makes the dependency graph **first-class in Lithos** and shared
 across every agent. That collapses a whole class of Loom-private logic, gives a
 deterministic resume point (`lithos_task_ready`), turns the PR-merge-wait hack
 into a principled gate, and makes "review a 28-story PRD" tractable through
-epic/subtask hierarchy. None of it changes Loom's identity: Lithos owns *what is
+epic/child hierarchy. None of it changes Loom's identity: Lithos owns *what is
 the state of the work graph and what is runnable*; Loom owns *route → claim →
 run a plugin → react to the result*.
 
@@ -107,7 +107,7 @@ external triggers. The extension just lets several of those land smaller.
 | Gate *resolution* (observing the PR merged / CI green / human approved) | **Loom** (Lithos never polls — §5.3 of the extension) |
 | Route matching (tag → plugin), claim/renew/release, plugin subprocess + `result.json` | Loom (unchanged) |
 | Worktrees, agent invocation, work-dir lifecycle, resume/re-dispatch | Loom (unchanged) |
-| Concurrency / project-affinity / host-affinity enforcement | Loom (`parallelizable`/`priority` stay advisory until extension Phase 4) |
+| Concurrency / project-affinity / host-affinity enforcement | Loom (`priority` stays advisory until extension Phase 4) |
 | `story-develop` internals (conversational review, containers, PR delivery) | Loom (unchanged) |
 
 ## How the extension reshapes Loom
@@ -171,13 +171,18 @@ three previously-separate things — the `loom_delivered` hack, the unbuilt
 (`merge-stories`) use the same pattern: a gate task the operator or a plugin
 completes when the condition is met; `timer` gates resolve at query time.
 
-### 3. Spawn + epic/subtask hierarchy replace `metadata.depends_on` chaining
+### 3. Spawn + epic/child hierarchy replace `metadata.depends_on` chaining
 
 `prd-decompose` stops writing `metadata.depends_on` (rejected post-migration
 anyway) and instead builds a real graph:
 
-- The decompose task (or the PRD) is the **`epic`**. Each story is a
-  **`subtask`** created with `parent_task_id=<epic>` (→ `parent_child` edge) and
+> **There is no `subtask` task_type.** Lithos has `task` / `epic` / `gate` only —
+> a child is a plain `task` that carries a `parent_task_id`. Earlier drafts of
+> this plan said `epic|subtask`; US9 corrected it against the live schema. Don't
+> reintroduce it.
+
+- The decompose task (or the PRD) is the **`epic`**. Each story is a plain
+  **`task`** created with `parent_task_id=<epic>` (→ `parent_child` edge) and
   `depends_on=[predecessor ids]` (→ `blocks` edges). Strict-sequential =
   chained `blocks` edges; parallel siblings = *no* edges between them (they fall
   out of `lithos_task_ready` together). "Parallelizable" stops being a metadata
@@ -191,7 +196,7 @@ anyway) and instead builds a real graph:
 - The same applies to the **bulk `project import`** path: `task_graph.build_plan`
   already computes the parent/child + sequencing structure from indentation; it
   now emits `task_type` + `parent_task_id` + `depends_on=` on `task_create`
-  instead of `metadata.depends_on` / `metadata.parallelizable`.
+  instead of `metadata.depends_on` / `metadata.parallelizable` (US9, shipped).
 
 > **Dependency on the Lithos edit.** The extension as written treats a `blocks`
 > edge as *resolved* when the blocker is merely *not open* — so a **cancelled**
@@ -256,11 +261,15 @@ Each is independently grabbable. Findings keep the established stable prefixes
    `include_blocked` filter reflect Lithos's authoritative blocked set
    (including gate and cycle blockers), not a metadata heuristic.
 9. As the operator, I want `project import` (and `task_graph.build_plan`) to
-   create the imported tree as `epic` / `subtask` tasks with `parent_task_id`
-   and `depends_on=` (→ edges) instead of `metadata.depends_on` /
-   `metadata.parallelizable`, so that imported projects are scheduler-aware the
-   same way decomposed PRDs are, and the indentation→graph logic has one
-   representation.
+   create the imported tree as an `epic` per parent with its children carrying
+   `parent_task_id`, and `depends_on=` (→ `blocks` edges) for `[sequential]`
+   chains, instead of `metadata.depends_on` / `metadata.parallelizable`, so that
+   imported projects are scheduler-aware the same way decomposed PRDs are, and
+   the indentation→graph logic has one representation.
+   *(Shipped — and a live bug fix, not just a refactor: Lithos had begun
+   rejecting `metadata.depends_on` with `invalid_metadata_key`, so importing any
+   doc with indented children was failing at the first parent. See §3 above for
+   the type vocabulary this settled.)*
 
 ### H — Human-merge gate (retire the `loom_delivered` hack)
 
@@ -329,7 +338,7 @@ Each is independently grabbable. Findings keep the established stable prefixes
     runs one structured-output Claude turn (Pocock `to-issues` shape), writes one
     `task_record` story doc per story (`derived_from_ids: [prd_id]`), creates the
     `loom/<prd-slug>` integration branch, and creates the story **DAG**: the
-    decompose task as `epic`, each story a `subtask` with `parent_task_id` +
+    decompose task as `epic`, each story a plain `task` with `parent_task_id` +
     `depends_on=` (→ edges), default strict-sequential, retrying once on
     schema-invalid output, so that handing Loom a Pocock PRD yields a runnable,
     hierarchical pipeline.
@@ -411,7 +420,7 @@ Each is independently grabbable. Findings keep the established stable prefixes
     together is a first-class wait, fail-fast on red spawns one `story-fix` task
     per failing test (via `lithos_task_spawn`), and green opens the final PR to
     `main` with a synthesised changelog, tagged with the project + linked to the
-    epic. Epic roll-up (extension Phase 4) closes the epic when all subtasks
+    epic. Epic roll-up (extension Phase 4) closes the epic when all its children
     resolve.
 
 ### A6 — A2A endpoint
@@ -497,9 +506,10 @@ plugin-runner, result-file IO, TOML config, worktree/agent/git runner helpers,
   `blocks` edges).
 - `parent_task_id` — superseded by `parent_child` edges (set via `task_create`'s
   `parent_task_id` arg, which creates the edge).
-- `parallelizable` — superseded by the structural absence of a `blocks` edge
-  (kept only as an advisory hint for Loom's concurrency policy until extension
-  Phase 4 promotes priority/parallelism to first-class).
+- `parallelizable` — **gone** (US9). Superseded by the structural absence of a
+  `blocks` edge; nothing writes it and nothing ever read it. Concurrency policy
+  is `max_concurrency` (#85) until extension Phase 4 promotes priority/
+  parallelism to first-class.
 - `host_affinity`, `review_policy_override`, `friction_count`, `cost_total_usd`
   — as in the old full PRD (A7/A3/A5/cost).
 - Gate-bearing tasks carry the extension's gate metadata (`gate_type` + per-type
@@ -551,7 +561,7 @@ plugin that calls a model.
 **Integration coverage:**
 
 - `prd-decompose` against the lithos-lens M1 PRD (live Claude): asserts 8–28
-  stories, each ≥80-word brief + ≥2 acceptance criteria, the epic/subtask
+  stories, each ≥80-word brief + ≥2 acceptance criteria, the epic/child
   hierarchy exists (`lithos_task_children` returns them), `blocks` edges chain
   per the emitted dep list, integration branch created.
 - `story-develop` daemon happy path → asserts the `pr` gate + `waits_on_gate`

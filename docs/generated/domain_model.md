@@ -93,8 +93,9 @@ classDiagram
     +is_empty bool
   }
   class TaskCreatePlan {
+    +task_type str
+    +parent_line_number int | None
     +depends_on_line_numbers tuple[int, ...]
-    +parallelizable bool
   }
   class ValidationError {
     +line_number int

@@ -12,7 +12,7 @@
         "max_function": "lithos_loom.children.obsidian_sync._amain"
       },
       "Cli": {
-        "functions_over_10": 15,
+        "functions_over_10": 14,
         "max_complexity": 49,
         "max_function": "lithos_loom.cli.project.import_project"
       },
@@ -93,11 +93,11 @@
       },
       "Tasks": {
         "functions_over_10": 2,
-        "max_complexity": 17,
+        "max_complexity": 16,
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 70,
+    "functions_over_10": 69,
     "top_functions": [
       {
         "complexity": 92,
@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.cli.project.project_regenerate_done"
       }
     ],
-    "total_functions": 890
+    "total_functions": 888
   },
   "domain": {
     "associations": 2,
@@ -351,13 +351,13 @@
       },
       "Cli": {
         "classes": 18,
-        "functions": 106,
+        "functions": 104,
         "largest_module": "lithos_loom.cli.project",
         "largest_module_lines": 1705,
-        "lines": 4569,
+        "lines": 4533,
         "modules": 10,
         "public_symbols": 49,
-        "sloc": 3796
+        "sloc": 3762
       },
       "Config": {
         "classes": 10,
@@ -434,10 +434,10 @@
         "functions": 306,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 950,
-        "lines": 10692,
+        "lines": 10697,
         "modules": 38,
         "public_symbols": 186,
-        "sloc": 8598
+        "sloc": 8602
       },
       "ProjectContext": {
         "classes": 0,
@@ -514,10 +514,10 @@
         "functions": 11,
         "largest_module": "lithos_loom.task_line_parser",
         "largest_module_lines": 283,
-        "lines": 598,
+        "lines": 607,
         "modules": 3,
         "public_symbols": 9,
-        "sloc": 418
+        "sloc": 428
       }
     },
     "max_module": "lithos_loom.lithos_client",
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 33960,
+    "total_lines": 33938,
     "total_modules": 112,
-    "total_sloc": 26965
+    "total_sloc": 26945
   },
   "tests": {
-    "ratio": 1.58,
-    "src_lines": 33960,
-    "test_lines": 53783
+    "ratio": 1.59,
+    "src_lines": 33938,
+    "test_lines": 53904
   }
 }
