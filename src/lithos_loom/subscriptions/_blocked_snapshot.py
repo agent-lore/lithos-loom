@@ -32,6 +32,26 @@ class BlockedSnapshot:
     accuracy this replaced — the old ``metadata.depends_on`` mirror showed a ⛔
     for a dependency that had completed months ago, because the list records
     what a task *declared*, not what still holds it.
+
+    **Truncation.** ``lithos_task_blocked`` has no per-task filter and no
+    cursor, so a full page means the set was cut short and absence from it is
+    no longer evidence of anything. This sweep is unnarrowed (the projection
+    spans every project), so it is the likeliest of Loom's three to truncate —
+    hence the explicit warning below.
+
+    The degradation is chosen deliberately, and *differs* from the runner's.
+    There, one direction is plainly unsafe: dispatching a task whose blocker is
+    still open violates the dependency, so it defers. Here both directions are
+    display errors, so the tiebreak is which one the operator can recover from:
+
+    * unknown → **unblocked**: a blocked task shows, without ⛔, and
+      ``include_blocked = false`` fails to hide it. The operator sees work they
+      wanted filtered out — visible, obvious, ignorable.
+    * unknown → **blocked**: an *actionable* task silently vanishes from the
+      vault. Nobody can recover from work they cannot see.
+
+    So the rule is: **hide only on positive evidence of blocked-ness, never on
+    inferred unblocked-ness** — and say loudly when the evidence is partial.
     """
 
     def __init__(self) -> None:
@@ -56,6 +76,19 @@ class BlockedSnapshot:
                 exc_info=True,
             )
             return {}
+        if len(blocked) >= READY_QUERY_LIMIT:
+            # See the class docstring: absence from a truncated page proves
+            # nothing, so tasks past the cut render without ⛔ and slip past
+            # `include_blocked = false`. That is the recoverable direction, but
+            # the operator should know their filter is running on partial data.
+            ctx.logger.warning(
+                "obsidian-projection: lithos_task_blocked returned a full "
+                "%d-task page, so the blocked set is truncated — tasks beyond it "
+                "render without ⛔ markers and are not hidden by "
+                "include_blocked=false. Raise READY_QUERY_LIMIT if a blocked set "
+                "this large is expected.",
+                READY_QUERY_LIMIT,
+            )
         self._snapshot = {bt.task.id: bt.blockers for bt in blocked}
         return self._snapshot
 

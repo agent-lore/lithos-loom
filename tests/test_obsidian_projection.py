@@ -27,6 +27,7 @@ from lithos_loom.config import (
     RouteConfig,
     RouteMatch,
 )
+from lithos_loom.lithos_client import BlockedTask, Blocker
 from lithos_loom.subscriptions._obsidian_projection import make_handler
 from tests.support import FakeLithosClient, make_task
 
@@ -1110,6 +1111,44 @@ async def test_blocked_sweep_failure_degrades_to_unblocked(
     assert "⛔" not in _projected_line(tmp_path)
     warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
     assert any("task_blocked" in m for m in warns), warns
+
+
+async def test_truncated_blocked_sweep_warns_and_still_shows_the_task(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A full page means the blocked set was cut short, so absence from it
+    proves nothing. The operator must be told their include_blocked filter is
+    running on partial data — but the task still SHOWS: unknown-as-blocked
+    would silently vanish actionable work, and nobody can recover from work
+    they cannot see (unknown-as-unblocked merely shows something ignorable).
+    """
+    import logging as _logging
+
+    class _FullPageLithos:
+        """A Lithos whose blocked sweep always comes back exactly full."""
+
+        async def task_blocked(self, *, limit: int) -> list[BlockedTask]:
+            return [
+                BlockedTask(
+                    task=make_task(f"other-{i}", status="open"),
+                    blockers=(Blocker(kind="task", message="", task_id="x"),),
+                )
+                for i in range(limit)
+            ]
+
+    cfg = _cfg(tmp_path, include_blocked=False)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    ctx = _StubCtx(
+        logger=logging.getLogger("test.obsidian_projection"),
+        lithos=_FullPageLithos(),  # type: ignore[arg-type]
+    )
+    with caplog.at_level(_logging.WARNING):
+        await handler(_event("lithos.task.created", task_id="unknown"), ctx)
+
+    warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
+    assert any("truncated" in m for m in warns), warns
+    # Not hidden: we hide only on positive evidence of blocked-ness.
+    assert "🆔 lithos:unknown" in _projected_line(tmp_path)
 
 
 async def test_blocked_sweep_is_shared_across_a_burst(tmp_path: Path) -> None:
