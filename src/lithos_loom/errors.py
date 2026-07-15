@@ -24,10 +24,6 @@ class ProjectNotRegisteredError(LithosLoomError):
     """Raised when a task's ``metadata.project`` does not match any project entry."""
 
 
-class DependencyCycleError(LithosLoomError):
-    """Raised when ``metadata.depends_on`` graph contains a cycle (US-9)."""
-
-
 class PluginContractError(LithosLoomError):
     """Raised when a plugin's ``result.json`` violates the schema (US-3)."""
 

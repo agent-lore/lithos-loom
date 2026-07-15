@@ -286,74 +286,93 @@ def test_dry_run_subscription_with_updated_event_type_fires(
     assert any("would fire" in line.lower() or "✓" in line for line in sub_lines)
 
 
-def test_dry_run_route_deferred_when_dependencies_not_completed(
+def _route_row(output: str, task_id: str, route: str = "prd-decompose") -> str:
+    """The route row printed under ``task_id``'s heading."""
+    lines = output.splitlines()
+    idx = next(i for i, line in enumerate(lines) if line.startswith(task_id))
+    return next(line for line in lines[idx + 1 : idx + 5] if f"route:{route}" in line)
+
+
+def test_dry_run_route_deferred_when_task_is_blocked(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A tag-matching open task whose depends_on includes an unfinished dep
-    must NOT be reported as 'would fire (claim)'. The runner's actual gate
-    defers it; the dry-run output must reflect that.
-    """
+    """US7: a tag-matching open task Lithos does not consider ready must NOT
+    be reported as 'would fire'. Readiness comes from lithos_task_ready — the
+    dry-run no longer mirrors the scheduler client-side (US5)."""
     fake = FakeLithosClient(
         tasks=[
-            _task(
-                "blocked",
-                tags=("trigger:prd-decompose",),
-                metadata={"depends_on": ["dep-1"]},
-            ),
-            # dep still open → not satisfied (and, realistically, itself an
-            # open task the sweep lists — with no trigger tag, an orphan).
-            _task("dep-1", status="open"),
+            _task("blocked", tags=("trigger:prd-decompose",)),
+            _task("upstream", status="open"),
         ],
     )
+    fake.add_edge(from_task_id="upstream", to_task_id="blocked", type="blocks")
     _patch_client(monkeypatch, fake)
 
     result = runner.invoke(app, ["validate-config", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    # Find the row under the "blocked" task heading.
-    lines = result.output.splitlines()
-    blocked_idx = next(i for i, line in enumerate(lines) if "blocked" in line)
-    # Subsequent lines indent under it; find the prd-decompose route row.
-    route_row = next(
-        line
-        for line in lines[blocked_idx + 1 : blocked_idx + 5]
-        if "route:prd-decompose" in line
-    )
-    assert "✓" not in route_row, route_row
-    assert (
-        "deferred" in route_row.lower() or "deps not complete" in route_row.lower()
-    ), route_row
-    # Dep-1 must have been resolved via task_get (post-lithos#294).
-    assert "dep-1" in [c["task_id"] for c in fake.calls_to("task_get")]
+    row = _route_row(result.output, "blocked")
+    assert "✓" not in row, row
+    assert "deferred" in row.lower(), row
+    # The dry-run asked Lithos rather than resolving deps itself.
+    assert fake.called("task_ready")
+    assert not fake.called("task_get")
 
 
-def test_dry_run_route_fires_when_dependencies_completed(
+def test_dry_run_shows_structured_blocker_reason(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The dep-gating doesn't over-correct: completed deps allow the route to fire."""
+    """US7: the operator sees WHICH predecessor holds the task, and of what
+    kind — not a flat 'deps not complete' string."""
     fake = FakeLithosClient(
         tasks=[
-            _task(
-                "ready",
-                tags=("trigger:prd-decompose",),
-                metadata={"depends_on": ["dep-1"]},
-            ),
-            # completed dep → satisfied; being terminal it's filtered out of
-            # the open-task sweep, so it doesn't appear as its own row.
-            _task("dep-1", status="completed"),
+            _task("blocked", tags=("trigger:prd-decompose",)),
+            _task("upstream", status="open"),
         ],
     )
+    fake.add_edge(from_task_id="upstream", to_task_id="blocked", type="blocks")
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["validate-config", "--dry-run"])
+
+    # kind + which predecessor + its status — not a flat "deps not complete".
+    assert "deferred (task: upstream (open))" in _route_row(result.output, "blocked")
+
+
+def test_dry_run_cancelled_blocker_reported_as_unsatisfiable(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The epic-G precondition, surfaced to the operator: a CANCELLED blocker
+    keeps its dependent blocked, and the reason says it needs intervention
+    rather than looking like an ordinary wait."""
+    fake = FakeLithosClient(
+        tasks=[
+            _task("blocked", tags=("trigger:prd-decompose",)),
+            _task("upstream", status="cancelled"),
+        ],
+    )
+    fake.add_edge(from_task_id="upstream", to_task_id="blocked", type="blocks")
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["validate-config", "--dry-run"])
+
+    row = _route_row(result.output, "blocked")
+    assert "✓" not in row, row
+    # Distinct from an ordinary wait: this one needs intervention.
+    assert "deferred (blocker_unsatisfiable: upstream (cancelled))" in row, row
+
+
+def test_dry_run_route_fires_when_task_is_ready(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate doesn't over-correct: an unblocked task still fires."""
+    fake = FakeLithosClient(tasks=[_task("ready", tags=("trigger:prd-decompose",))])
     _patch_client(monkeypatch, fake)
 
     result = runner.invoke(app, ["validate-config", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    lines = result.output.splitlines()
-    idx = next(i for i, line in enumerate(lines) if "ready" in line)
-    route_row = next(
-        line for line in lines[idx + 1 : idx + 5] if "route:prd-decompose" in line
-    )
-    assert "✓" in route_row, route_row
+    assert "✓" in _route_row(result.output, "ready")
 
 
 # Sentinel that keeps LithosClientError importable in this module so tests

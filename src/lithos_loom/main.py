@@ -16,7 +16,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -40,13 +41,14 @@ from lithos_loom.doctor import (
     run_vault_checks,
 )
 from lithos_loom.errors import LithosClientError, LithosLoomError
-from lithos_loom.lithos_client import LithosClient, Task
+from lithos_loom.lithos_client import BlockedTask, Blocker, LithosClient, Task
 from lithos_loom.subscriptions import (
     SUBSCRIPTION_ACTIONS,
     SubscriptionContext,
     build_runners,
 )
 from lithos_loom.subscriptions._noop import handle as _noop_handle
+from lithos_loom.subscriptions.route_runner import READY_QUERY_LIMIT
 from lithos_loom.supervisor import Supervisor, default_categories
 
 app = typer.Typer(
@@ -315,39 +317,69 @@ async def _dry_run_async(cfg: LoomConfig) -> int:
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
         tasks = await client.task_list(status="open", with_claims=True)
-        dep_status = await _resolve_dep_statuses(client, tasks)
-    _print_dry_run_report(cfg, tasks, dep_status)
+        # US7: readiness and the reasons behind it are Lithos's answer. The
+        # dry-run asks the same ready-queue the runner dispatches off (US4),
+        # rather than re-deriving it from metadata.depends_on (the mirror
+        # US5 deletes) — so the report can't drift from the runtime.
+        ready = await client.task_ready(limit=READY_QUERY_LIMIT, with_claims=False)
+        blocked = await client.task_blocked(limit=READY_QUERY_LIMIT)
+    _print_dry_run_report(cfg, tasks, _Readiness.from_queries(ready, blocked))
     return 0
 
 
-async def _resolve_dep_statuses(
-    client: Any, tasks: list[Task]
-) -> dict[str, str | None]:
-    """Resolve the status of every ``metadata.depends_on`` referenced by ``tasks``.
+@dataclass(frozen=True)
+class _Readiness:
+    """Lithos's answer to "what can run, and why not" (US7).
 
-    Mirrors what :class:`~lithos_loom.subscriptions.route_runner.RouteRunner`
-    does at runtime: ``task_get`` per unique dep id (post-lithos#294).
-    Returns the status string (``"completed"`` / ``"open"`` /
-    ``"cancelled"``) or ``None`` for ``task_not_found``. Without this
-    the dry-run would report ``✓ (claim)`` for tasks the real runner
-    would defer because their deps aren't done.
+    Bundles one ``task_ready`` + one ``task_blocked`` sweep so the report can
+    render each task's outcome without a per-task round-trip.
     """
-    dep_ids: set[str] = set()
-    for task in tasks:
-        for dep_id in task.metadata.get("depends_on") or []:
-            if isinstance(dep_id, str) and dep_id:
-                dep_ids.add(dep_id)
-    statuses: dict[str, str | None] = {}
-    for dep_id in dep_ids:
-        result = await client.task_get(task_id=dep_id)
-        statuses[dep_id] = result.status if result is not None else None
-    return statuses
+
+    ready_ids: frozenset[str]
+    blockers: Mapping[str, tuple[Blocker, ...]]
+    truncated: bool
+
+    @classmethod
+    def from_queries(cls, ready: list[Task], blocked: list[BlockedTask]) -> _Readiness:
+        return cls(
+            ready_ids=frozenset(task.id for task in ready),
+            blockers={bt.task.id: bt.blockers for bt in blocked},
+            # Neither query has a per-task filter, so a full page means the
+            # sweep was cut short and rows below may be wrong. Say so rather
+            # than printing a confidently incomplete picture.
+            truncated=(
+                len(ready) >= READY_QUERY_LIMIT or len(blocked) >= READY_QUERY_LIMIT
+            ),
+        )
+
+    def defer_reason(self, task_id: str) -> str:
+        """Why ``task_id`` isn't dispatchable, in Lithos's own terms."""
+        blockers = self.blockers.get(task_id, ())
+        if blockers:
+            return "; ".join(_format_blocker(b) for b in blockers)
+        # Ready-queue omissions that aren't blocker-shaped: a gate/epic task
+        # (never dispatchable work) or a frontier this sweep didn't see.
+        return "not on Lithos's ready frontier"
+
+
+def _format_blocker(blocker: Blocker) -> str:
+    """Render one structured blocker reason for the dry-run table.
+
+    ``kind`` is the machine-meaningful part (``task`` — just waiting; ``gate``;
+    ``blocker_unsatisfiable`` — the predecessor was cancelled, so this needs
+    intervention; ``cycle``), and the id + status say WHICH predecessor. Falls
+    back to the server's own message when there's no id to name.
+    """
+    if blocker.task_id:
+        status = f" ({blocker.status})" if blocker.status else ""
+        return f"{blocker.kind}: {blocker.task_id}{status}"
+    return f"{blocker.kind}: {blocker.message}" if blocker.message else blocker.kind
 
 
 def _print_dry_run_report(
     cfg: LoomConfig,
     tasks: list[Task],
-    dep_status: dict[str, str | None],
+    readiness: _Readiness,
 ) -> int:
     """Emit the dry-run table + orphan / dead-config summary."""
     typer.echo("")
@@ -355,6 +387,11 @@ def _print_dry_run_report(
     typer.echo(f"  open tasks:     {len(tasks)}")
     typer.echo(f"  routes:         {len(cfg.routes)}")
     typer.echo(f"  subscriptions:  {len(cfg.subscriptions)}")
+    if readiness.truncated:
+        typer.echo(
+            f"  ⚠ the ready/blocked sweep hit its {READY_QUERY_LIMIT}-task query "
+            "limit; rows below may be incomplete"
+        )
     typer.echo("")
 
     fired_routes: set[str] = set()
@@ -370,7 +407,7 @@ def _print_dry_run_report(
         title_summary = f"{task.id}  {task.title!r}"
         typer.echo(title_summary)
         for route in cfg.routes:
-            would_fire, defer_reason = _route_outcome(route, task, dep_status)
+            would_fire, defer_reason = _route_outcome(route, task, readiness)
             if would_fire:
                 marker = "✓ (claim)"
             elif defer_reason:
@@ -419,32 +456,23 @@ def _print_dry_run_report(
 def _route_outcome(
     route: RouteConfig,
     task: Task,
-    dep_status: dict[str, str | None],
+    readiness: _Readiness,
 ) -> tuple[bool, str | None]:
-    """Mirror :class:`RouteRunner` exactly: status + tags + deps gate.
+    """Mirror :class:`RouteRunner`: status + tags + Lithos's ready frontier.
 
-    Returns ``(would_fire, defer_reason)``. The defer reason is non-None
-    when the tag filter passes but dependencies are not yet completed —
-    the operator should see "deferred" not just "—" so the difference
-    between "doesn't match" and "matches-but-blocked" is visible.
+    Returns ``(would_fire, defer_reason)``. The defer reason is non-None when
+    the tag filter passes but Lithos doesn't consider the task ready — the
+    operator should see "deferred" *and why* (which predecessor, which gate,
+    or a cycle), not just "—", so "doesn't match" and "matches-but-blocked"
+    stay distinguishable.
     """
     if task.status != "open":
         return False, None
     if not set(route.match.tags).issubset(set(task.tags)):
         return False, None
-    pending = _pending_deps(task, dep_status)
-    if pending:
-        return False, f"deps not complete: {', '.join(sorted(pending))}"
-    return True, None
-
-
-def _pending_deps(task: Task, dep_status: dict[str, str | None]) -> list[str]:
-    deps = task.metadata.get("depends_on") or []
-    return [
-        str(dep_id)
-        for dep_id in deps
-        if isinstance(dep_id, str) and dep_status.get(dep_id) != "completed"
-    ]
+    if task.id in readiness.ready_ids:
+        return True, None
+    return False, readiness.defer_reason(task.id)
 
 
 def _build_subscription_predicates(
