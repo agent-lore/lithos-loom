@@ -408,11 +408,43 @@ class FakeLithosClient:
         self._resolve(task_id, "cancelled")
 
     def _resolve(self, task_id: str, status: str) -> None:
+        """Apply a terminal transition, mirroring Lithos's lifecycle rule.
+
+        **A resolved task cannot be resolved again.** ``task_complete`` and
+        ``task_cancel`` both reject an already-completed *or* already-cancelled
+        task with ``task_not_found`` ("not in an open state") — verified live
+        2026-07-15, and general lifecycle rather than anything gate-specific.
+
+        Two consequences worth keeping in view:
+
+        * A **cancelled gate is terminal**, so "proceed anyway by completing
+          the gate" is impossible — which is why epic H's resolver leaves a
+          closed-unmerged PR's gate open instead of cancelling it.
+        * Callers that legitimately race to finish the same task (the
+          github-watcher's merge sweep vs the issue close-mirror) must swallow
+          ``task_not_found`` rather than assume they won — the fake now makes
+          an unswallowed one fail loudly in ``make check``.
+
+        The rule covers only the two terminal *transitions*: ``task_update``
+        still applies to a resolved task (lithos#303 — annotate an archived
+        task without reviving it), which the marker writes depend on.
+
+        Known divergence: a genuinely **missing** task is a silent no-op here
+        while the live server returns ``task_not_found``. Left as-is — that is
+        an existence rule, not a state rule, and several suites lean on the
+        no-op for tasks they never seeded.
+        """
         existing = self._tasks.get(task_id)
-        if existing is not None:
-            self._tasks[task_id] = dataclasses.replace(
-                existing, status=status, resolved_at=RESOLVED_AT
+        if existing is None:
+            return
+        if existing.status != "open":
+            raise LithosClientError(
+                "task_not_found",
+                f"Task {task_id!r} not found or not in an open state.",
             )
+        self._tasks[task_id] = dataclasses.replace(
+            existing, status=status, resolved_at=RESOLVED_AT
+        )
 
     async def task_claim(
         self,

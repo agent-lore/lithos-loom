@@ -422,6 +422,64 @@ async def test_fake_detects_a_cycle_spanning_a_waits_on_gate_edge() -> None:
     assert excinfo.value.code == "cycle"
 
 
+async def test_fake_rejects_completing_a_cancelled_gate() -> None:
+    """A cancelled gate is terminal: "proceed anyway" by completing it is
+    IMPOSSIBLE, and only ``task_reopen`` recovers.
+
+    This is the semantic that reshaped epic H — the resolver must leave a
+    closed-unmerged PR's gate *open* rather than cancelling it, because a
+    cancelled gate strands its waiter permanently unsatisfiable. A fake that
+    lets the gate be completed afterwards would green-light exactly the design
+    the live server forbids.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    gate = await client.task_create(
+        title="pr gate", task_type="gate", metadata={"gate_type": "pr"}
+    )
+    await client.task_cancel(task_id=gate)
+    with pytest.raises(LithosClientError) as excinfo:
+        await client.task_complete(task_id=gate)
+    assert excinfo.value.code == "task_not_found"
+
+
+@pytest.mark.parametrize("first", ["completed", "cancelled"])
+@pytest.mark.parametrize("second", ["complete", "cancel"])
+async def test_fake_rejects_any_terminal_transition_on_a_resolved_task(
+    first: str, second: str
+) -> None:
+    """Live rule, verified 2026-07-15: ``task_complete`` / ``task_cancel``
+    reject *any* already-resolved task with ``task_not_found`` ("not in an
+    open state"). It is general lifecycle, not a gate special case.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    task_id = await client.task_create(title="t")
+    if first == "completed":
+        await client.task_complete(task_id=task_id)
+    else:
+        await client.task_cancel(task_id=task_id)
+
+    with pytest.raises(LithosClientError) as excinfo:
+        if second == "complete":
+            await client.task_complete(task_id=task_id)
+        else:
+            await client.task_cancel(task_id=task_id)
+    assert excinfo.value.code == "task_not_found"
+
+
+async def test_fake_still_allows_task_update_on_a_terminal_task() -> None:
+    """The boundary of the rule: the two terminal *transitions* are rejected,
+    but ``task_update`` still applies (lithos#303 — annotating an archived
+    task without reviving it). The develop-pr-merge sweep depends on this: it
+    completes a task, then writes its marker onto the now-terminal task.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    task_id = await client.task_create(title="t")
+    await client.task_complete(task_id=task_id)
+    await client.task_update(task_id=task_id, metadata={"marker": "merged"})
+    stored = await client.task_get(task_id=task_id)
+    assert stored is not None and stored.metadata == {"marker": "merged"}
+
+
 async def test_fake_reports_a_blocks_cycle_with_the_live_error_code() -> None:
     """The code is ``cycle``, not ``edge_cycle`` (which the fake invented and
     no server ever returns)."""
