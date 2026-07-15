@@ -27,7 +27,9 @@ from lithos_loom.config import (
     RouteConfig,
     RouteMatch,
 )
+from lithos_loom.lithos_client import BlockedTask, Blocker
 from lithos_loom.subscriptions._obsidian_projection import make_handler
+from tests.support import FakeLithosClient, make_task
 
 # ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -37,10 +39,31 @@ class _StubCtx:
     """Mimics the bits of SubscriptionContext the handler reads."""
 
     logger: logging.Logger
+    lithos: FakeLithosClient
 
 
-def _ctx() -> _StubCtx:
-    return _StubCtx(logger=logging.getLogger("test.obsidian_projection"))
+def _ctx(lithos: FakeLithosClient | None = None) -> _StubCtx:
+    """A ctx whose Lithos reports nothing blocked unless the test seeds it.
+
+    US8: the projection sweeps ``lithos_task_blocked`` once per flush cycle,
+    so every handler invocation needs a client.
+    """
+    return _StubCtx(
+        logger=logging.getLogger("test.obsidian_projection"),
+        lithos=lithos if lithos is not None else FakeLithosClient(),
+    )
+
+
+def _blocked_ctx(task_id: str, *blocker_ids: str) -> _StubCtx:
+    """A ctx whose Lithos reports ``task_id`` blocked by each of
+    ``blocker_ids`` via a real ``blocks`` edge — blocked-ness comes from
+    Lithos now, not from ``metadata.depends_on``."""
+    fake = FakeLithosClient()
+    fake.add_task(make_task(task_id, status="open"))
+    for blocker_id in blocker_ids:
+        fake.add_task(make_task(blocker_id, status="open"))
+        fake.add_edge(from_task_id=blocker_id, to_task_id=task_id, type="blocks")
+    return _ctx(fake)
 
 
 def _cfg(
@@ -814,11 +837,10 @@ async def test_full_marker_set_orders_correctly(tmp_path: Path) -> None:
                 "project": "lithos-loom",
                 "scheduled_for": "2026-06-15",
                 "priority": "high",
-                "depends_on": ["dep-456"],
             },
             claims=({"agent": "loom", "aspect": "review-human"},),
         ),
-        _ctx(),
+        _blocked_ctx("full", "dep-456"),
     )
     # Tasks-plugin layout: title → 🆔 → tags → trailing emoji metadata
     # (deps → priority → date). See render.py docstring.
@@ -1009,12 +1031,8 @@ async def test_single_dep_renders_one_marker(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg, today_provider=_fixed_today)
     await handler(
-        _event(
-            "lithos.task.created",
-            task_id="t",
-            metadata={"depends_on": ["dep-1"]},
-        ),
-        _ctx(),
+        _event("lithos.task.created", task_id="t"),
+        _blocked_ctx("t", "dep-1"),
     )
     assert "⛔ lithos:dep-1" in _projected_line(tmp_path)
 
@@ -1022,18 +1040,13 @@ async def test_single_dep_renders_one_marker(tmp_path: Path) -> None:
 async def test_multiple_deps_render_one_marker_each_in_order(
     tmp_path: Path,
 ) -> None:
-    """List order is preserved — D19 says dep order has graph meaning
-    upstream; reshuffling would lose that signal."""
+    """Blocker order is preserved — dep order has graph meaning upstream;
+    reshuffling would lose that signal."""
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg, today_provider=_fixed_today)
     await handler(
-        _event(
-            "lithos.task.created",
-            task_id="t",
-            title="multi",
-            metadata={"depends_on": ["dep-a", "dep-b", "dep-c"]},
-        ),
-        _ctx(),
+        _event("lithos.task.created", task_id="t", title="multi"),
+        _blocked_ctx("t", "dep-a", "dep-b", "dep-c"),
     )
     assert _projected_line(tmp_path) == (
         "- [ ] multi 🆔 lithos:t ⛔ lithos:dep-a ⛔ lithos:dep-b ⛔ lithos:dep-c"
@@ -1050,9 +1063,9 @@ async def test_dep_markers_slot_between_id_and_date(tmp_path: Path) -> None:
             "lithos.task.created",
             task_id="s",
             title="slotted",
-            metadata={"depends_on": ["dep-1"], "scheduled_for": "2026-06-15"},
+            metadata={"scheduled_for": "2026-06-15"},
         ),
-        _ctx(),
+        _blocked_ctx("s", "dep-1"),
     )
     assert _projected_line(tmp_path) == (
         "- [ ] slotted 🆔 lithos:s ⛔ lithos:dep-1 📅 2026-06-15"
@@ -1076,74 +1089,118 @@ async def test_empty_depends_on_omits_dep_markers(tmp_path: Path) -> None:
     assert "⛔" not in _projected_line(tmp_path)
 
 
-async def test_non_list_depends_on_warns_and_omits(
+async def test_blocked_sweep_failure_degrades_to_unblocked(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Defensive: a string-by-mistake (instead of list of strings) is
-    warn-logged and dropped, never crashes the subscription loop."""
+    """US8 robustness: the projection is a *display*. If the task_blocked
+    sweep fails, render the task without ⛔ rather than raising and losing the
+    line — a missing marker beats a missing task. Replaces the old
+    malformed-``metadata.depends_on`` defence, which is unreachable now that
+    blocked-ness arrives as typed Blockers from Lithos, not free-form metadata.
+    """
     import logging as _logging
 
+    fake = FakeLithosClient()
+    fake.raise_on["task_blocked"] = RuntimeError("lithos fell over")
     cfg = _cfg(tmp_path)
     handler = make_handler(cfg, today_provider=_fixed_today)
     with caplog.at_level(_logging.WARNING):
-        await handler(
-            _event(
-                "lithos.task.created",
-                task_id="nl",
-                metadata={"depends_on": "dep-a"},
-            ),
-            _ctx(),
-        )
+        await handler(_event("lithos.task.created", task_id="sf"), _ctx(fake))
+
+    assert "🆔 lithos:sf" in _projected_line(tmp_path)
     assert "⛔" not in _projected_line(tmp_path)
     warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
-    assert any("depends_on" in m and "dep-a" in m for m in warns), warns
+    assert any("task_blocked" in m for m in warns), warns
 
 
-async def test_non_string_entries_skipped_with_warn(
+async def test_truncated_blocked_sweep_warns_and_still_shows_the_task(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Mixed list — only string entries become markers; bad entries get
-    one consolidated warning."""
+    """A full page means the blocked set was cut short, so absence from it
+    proves nothing. The operator must be told their include_blocked filter is
+    running on partial data — but the task still SHOWS: unknown-as-blocked
+    would silently vanish actionable work, and nobody can recover from work
+    they cannot see (unknown-as-unblocked merely shows something ignorable).
+    """
     import logging as _logging
 
-    cfg = _cfg(tmp_path)
+    class _FullPageLithos:
+        """A Lithos whose blocked sweep always comes back exactly full."""
+
+        async def task_blocked(self, *, limit: int) -> list[BlockedTask]:
+            return [
+                BlockedTask(
+                    task=make_task(f"other-{i}", status="open"),
+                    blockers=(Blocker(kind="task", message="", task_id="x"),),
+                )
+                for i in range(limit)
+            ]
+
+    cfg = _cfg(tmp_path, include_blocked=False)
     handler = make_handler(cfg, today_provider=_fixed_today)
-    with caplog.at_level(_logging.WARNING):
-        await handler(
-            _event(
-                "lithos.task.created",
-                task_id="m",
-                title="mixed",
-                metadata={"depends_on": ["dep-a", 42, None, "", "dep-b"]},
-            ),
-            _ctx(),
-        )
-    assert _projected_line(tmp_path) == (
-        "- [ ] mixed 🆔 lithos:m ⛔ lithos:dep-a ⛔ lithos:dep-b"
+    ctx = _StubCtx(
+        logger=logging.getLogger("test.obsidian_projection"),
+        lithos=_FullPageLithos(),  # type: ignore[arg-type]
     )
+    with caplog.at_level(_logging.WARNING):
+        await handler(_event("lithos.task.created", task_id="unknown"), ctx)
+
     warns = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
-    assert any("depends_on" in m and "invalid" in m for m in warns), warns
+    assert any("truncated" in m for m in warns), warns
+    # Not hidden: we hide only on positive evidence of blocked-ness.
+    assert "🆔 lithos:unknown" in _projected_line(tmp_path)
 
 
-async def test_duplicate_dep_ids_deduped_preserving_first_occurrence(
+async def test_blocked_sweep_is_shared_across_a_burst(tmp_path: Path) -> None:
+    """One sweep per flush cycle, not per event: the restart bootstrap
+    re-emits EVERY open task as ``created``, so a per-event sweep would cost
+    one Lithos round-trip per task."""
+    fake = FakeLithosClient()
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg, today_provider=_fixed_today, debounce_seconds=0.05)
+    ctx = _ctx(fake)
+    for i in range(5):
+        await handler(_event("lithos.task.created", task_id=f"b{i}"), ctx)
+
+    assert len(fake.calls_to("task_blocked")) == 1
+
+
+async def test_blocked_task_hidden_when_include_blocked_false(
     tmp_path: Path,
 ) -> None:
-    """Two ⛔ markers for the same dep is visual noise; emit once at the
-    first-occurrence position."""
-    cfg = _cfg(tmp_path)
+    """US8: the include_blocked opt-out now keys off Lithos's blocked set.
+    A task that merely *declares* deps is no longer hidden — only one Lithos
+    actually reports as blocked is."""
+    cfg = _cfg(tmp_path, include_blocked=False)
+    handler = make_handler(cfg, today_provider=_fixed_today)
+    await handler(
+        _event("lithos.task.created", task_id="hid", title="hidden"),
+        _blocked_ctx("hid", "dep-a"),
+    )
+    # Nothing actionable → the file may not even be written; either way the
+    # hidden task must not appear.
+    tasks_file = tmp_path / "_lithos/tasks.md"
+    content = tasks_file.read_text() if tasks_file.exists() else ""
+    assert "lithos:hid" not in content
+
+
+async def test_task_declaring_deps_but_unblocked_is_shown(
+    tmp_path: Path,
+) -> None:
+    """The inverse, and the whole point of US8: a stale metadata.depends_on
+    entry whose dep has long since completed no longer hides the task."""
+    cfg = _cfg(tmp_path, include_blocked=False)
     handler = make_handler(cfg, today_provider=_fixed_today)
     await handler(
         _event(
             "lithos.task.created",
-            task_id="d",
-            title="dup",
-            metadata={"depends_on": ["dep-a", "dep-b", "dep-a"]},
+            task_id="shown",
+            title="shown",
+            metadata={"depends_on": ["long-since-done"]},
         ),
         _ctx(),
     )
-    assert _projected_line(tmp_path) == (
-        "- [ ] dup 🆔 lithos:d ⛔ lithos:dep-a ⛔ lithos:dep-b"
-    )
+    assert _projected_line(tmp_path) == ("- [ ] shown 🆔 lithos:shown")
 
 
 # ── US13 resolved-task TTL lingering ───────────────────────────────────

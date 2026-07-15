@@ -294,7 +294,7 @@ tasks_file        = "_lithos/tasks.md"           # relative to vault_path
 projects_dir      = "_lithos/projects"           # relative to vault_path
 awaiting_review_file = "_lithos/awaiting-review.md"  # #113 PRs-awaiting-review note (relative)
 resolved_ttl_days = 7                            # see §6.3 task-archive interaction
-include_blocked   = true                         # project tasks with metadata.depends_on
+include_blocked   = true                         # project tasks Lithos reports as blocked
 exclude_tags      = ["debug:trace"]              # suppress projection for these tags
 
 # ── GitHub issue watcher (per-host gate) ──────────────────────────────
@@ -898,7 +898,7 @@ The renderer always emits fields in this exact order. Priority, deps, and due-da
 | `🆔 lithos:<id>` | Task ID | `task.id` | One-way (identity; never edited by operator). |
 | `#project/<slug>` | Project tag | `task.metadata.project` | One-way. |
 | `#lithos/<route-name>` | Active human-blocking claim's route | route lookup based on the active claim | One-way; surfaces while a human-blocking route holds the claim. |
-| `⛔ lithos:<dep_id>` | One marker per `metadata.depends_on` entry | `task.metadata.depends_on[]` | One-way (Lithos canonical). |
+| `⛔ lithos:<blocker_id>` | One marker per Lithos blocker naming another task (US8) | `lithos_task_blocked` | One-way (Lithos canonical). |
 | `🔺⏫🔼🔽⏬` | Priority (highest / high / medium / low / lowest) | `task.metadata.priority` | Bidirectional. Absent emoji = no priority. |
 | `📅 YYYY-MM-DD` | Due date | `metadata.scheduled_for` if set; else `today` for human-blocking tasks; else absent | Bidirectional via `metadata.scheduled_for`. |
 | `✅ YYYY-MM-DD` | Completed date | `task.resolved_at` | One-way; only rendered for `[x]` lines within TTL. |
@@ -973,7 +973,9 @@ The done file is **vault-only and append-only** — the dir-watcher excludes the
 
 ### 7.7 Filter Knobs
 
-- **`include_blocked`** (default `true`): when `false`, tasks with non-empty `metadata.depends_on` are not projected.
+- **`include_blocked`** (default `true`): when `false`, tasks **Lithos reports as blocked** are not projected.
+
+**Blocked-ness in the projection (Epic G / US8).** The ⛔ markers and the `include_blocked` gate read Lithos's authoritative blocked set via `lithos_task_blocked`, not `metadata.depends_on`. That list records what a task *declared*, so it stayed true forever — a ⛔ persisted long after its dependency completed, and `include_blocked = false` hid a task that nothing was actually waiting on. The set is swept **once per flush cycle** (the restart bootstrap re-emits every open task, and a burst renders into one file write anyway), so a change landing mid-burst is picked up on the next cycle. A sweep failure degrades to "nothing blocked" and logs — the projection is a display, and a missing marker beats a missing task. `lithos_task_blocked` has no per-task filter and no cursor, so the sweep is capped at `READY_QUERY_LIMIT` (500) and a **full page** means the set is truncated: tasks beyond the cut render without ⛔ and slip past `include_blocked = false`, and a WARNING says so. This sweep is unnarrowed (it spans every project), so it is the likeliest of the three to truncate. The degradation deliberately *differs* from the runner's (§2.2): there, one direction is plainly unsafe (dispatching a task whose blocker is still open), whereas here both are display errors — so the tiebreak is recoverability. Hiding an actionable task makes it vanish from the vault with nobody able to notice; showing a blocked task is visible and ignorable. Hence: **hide only on positive evidence of blocked-ness, never on inferred unblocked-ness.** Markers are emitted only for blockers naming *another* task: ⛔ references another line's 🆔, so a `cycle` blocker (which names the task itself) has nothing valid to point at. Gate blockers — invisible to the old metadata mirror — now render.
 - **`exclude_tags`** (default `[]`): tasks carrying any listed tag are not projected. Useful for suppressing automation noise (e.g. `["influx:run", "influx:backfill"]`).
 - **`resolved_ttl_days`** (default `7`): how long resolved tasks linger in `tasks_file` when `task-archive` is NOT configured, OR (when `task-archive` IS configured) the bootstrap-replay window the archiver looks back over on restart.
 

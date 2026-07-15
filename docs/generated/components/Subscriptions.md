@@ -14,6 +14,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions` | S | 3 | 1 |
 | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
+| `lithos_loom.subscriptions._blocked_snapshot` | XS | 1 | 0 |
 | `lithos_loom.subscriptions._develop_pr_merge` | S | 0 | 1 |
 | `lithos_loom.subscriptions._findings` | XS | 0 | 2 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
@@ -44,6 +45,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._awaiting_review`
 - def `make_handler` — Build the awaiting-review handler + its cold-start reconcile, bound to *cfg*.
+
+### `lithos_loom.subscriptions._blocked_snapshot`
+- class `BlockedSnapshot` — Lithos's blocked set for the current projection flush cycle.
 
 ### `lithos_loom.subscriptions._develop_pr_merge`
 - def `reconcile_develop_pr` — Reconcile one open task's delivered-PR merge state.

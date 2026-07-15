@@ -63,8 +63,8 @@
       },
       "Render": {
         "functions_over_10": 0,
-        "max_complexity": 8,
-        "max_function": "lithos_loom.render.dep_markers"
+        "max_complexity": 6,
+        "max_function": "lithos_loom.render.render_line"
       },
       "Runners": {
         "functions_over_10": 0,
@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.cli.project.project_regenerate_done"
       }
     ],
-    "total_functions": 887
+    "total_functions": 890
   },
   "domain": {
     "associations": 2,
@@ -252,7 +252,7 @@
       }
     },
     "cross_component_edges": 62,
-    "cross_component_module_edges": 202,
+    "cross_component_module_edges": 203,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
@@ -453,11 +453,11 @@
         "classes": 0,
         "functions": 7,
         "largest_module": "lithos_loom.render",
-        "largest_module_lines": 289,
-        "lines": 289,
+        "largest_module_lines": 281,
+        "lines": 281,
         "modules": 1,
         "public_symbols": 7,
-        "sloc": 234
+        "sloc": 225
       },
       "Runners": {
         "classes": 0,
@@ -490,14 +490,14 @@
         "sloc": 439
       },
       "Subscriptions": {
-        "classes": 7,
-        "functions": 111,
+        "classes": 8,
+        "functions": 114,
         "largest_module": "lithos_loom.subscriptions._obsidian_projection",
-        "largest_module_lines": 764,
-        "lines": 5530,
-        "modules": 19,
-        "public_symbols": 26,
-        "sloc": 4211
+        "largest_module_lines": 785,
+        "lines": 5656,
+        "modules": 20,
+        "public_symbols": 27,
+        "sloc": 4301
       },
       "Supervisor": {
         "classes": 3,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 33842,
-    "total_modules": 111,
-    "total_sloc": 26884
+    "total_lines": 33960,
+    "total_modules": 112,
+    "total_sloc": 26965
   },
   "tests": {
-    "ratio": 1.59,
-    "src_lines": 33842,
-    "test_lines": 53689
+    "ratio": 1.58,
+    "src_lines": 33960,
+    "test_lines": 53783
   }
 }

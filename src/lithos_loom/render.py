@@ -41,7 +41,7 @@ from datetime import date, datetime
 from typing import Any
 
 from lithos_loom.config import RouteConfig
-from lithos_loom.lithos_client import Task
+from lithos_loom.lithos_client import Blocker, Task
 from lithos_loom.subscriptions._human_actionable import human_blocking_route_name
 from lithos_loom.task_line import PRIORITY_EMOJI, render_task_id
 
@@ -62,6 +62,7 @@ def render_line(
     task: Task,
     routes: Sequence[RouteConfig],
     today: date,
+    blockers: Sequence[Blocker] = (),
 ) -> str:
     """Render one Tasks-plugin task line for an open task.
 
@@ -111,7 +112,7 @@ def render_line(
         parts.append(f"#lithos/{route_name}")
 
     # Trailing Tasks-plugin emoji metadata: deps → priority → due date.
-    parts.extend(dep_markers(task))
+    parts.extend(dep_markers(task, blockers))
 
     priority = priority_marker(task)
     if priority is not None:
@@ -202,44 +203,35 @@ def validated_priority(task: Task) -> str | None:
     return None
 
 
-def dep_markers(task: Task) -> list[str]:
-    """Render one ``⛔ lithos:<dep_id>`` marker per entry in
-    ``task.metadata.depends_on``.
+def dep_markers(task: Task, blockers: Sequence[Blocker] = ()) -> list[str]:
+    """Render one ``⛔ lithos:<id>`` marker per Lithos blocker (US8).
 
-    Preserves list order; dedups duplicate IDs (first occurrence
-    wins) since the marker is a visual signal not a count. Returns
-    ``[]`` for absent / ``None`` / non-list / all-invalid inputs.
-    Non-string and empty-string entries are skipped with a single
-    warn per event — same shape as :func:`priority_marker` and
-    :func:`parse_scheduled_for`, so malformed metadata can never
-    crash the subscription loop.
+    ``blockers`` is this task's entry from a ``lithos_task_blocked`` sweep, so
+    the marker reflects Lithos's **authoritative, current** blocked set — gate
+    blockers included, and blockers the task never declared in metadata. It
+    replaces the old mirror of the static ``metadata.depends_on`` list, which
+    showed a ⛔ for a dep that had long since completed (the list records what
+    the task *declared*, not what still holds it).
+
+    Only blockers that name *another* task get a marker: ⛔ is a reference to
+    another line's 🆔, so a ``cycle`` blocker (which names the task itself) has
+    nothing valid to point at and is skipped — such a task is still hidden by
+    ``include_blocked = false``, and its reason is visible in `--dry-run`.
+
+    Preserves order and dedups repeated ids (first wins) — the marker is a
+    visual signal, not a count. ``()`` (the default, for callers with no sweep
+    in hand, e.g. the capture CLI) renders no markers.
     """
-    raw = task.metadata.get("depends_on")
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        logger.warning(
-            "render: ignoring non-list metadata.depends_on=%r",
-            raw,
-        )
-        return []
-
     seen: set[str] = set()
     markers: list[str] = []
-    bad: list[Any] = []
-    for entry in raw:
-        if not isinstance(entry, str) or not entry:
-            bad.append(entry)
+    for blocker in blockers:
+        dep_id = blocker.task_id
+        if not dep_id or dep_id == task.id:
             continue
-        if entry in seen:
+        if dep_id in seen:
             continue
-        seen.add(entry)
-        markers.append(f"⛔ lithos:{entry}")
-    if bad:
-        logger.warning(
-            "render: skipping invalid entries in metadata.depends_on=%r",
-            bad,
-        )
+        seen.add(dep_id)
+        markers.append(f"⛔ lithos:{dep_id}")
     return markers
 
 
