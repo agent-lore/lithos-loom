@@ -23,7 +23,7 @@
       },
       "Doctor": {
         "functions_over_10": 1,
-        "max_complexity": 20,
+        "max_complexity": 21,
         "max_function": "lithos_loom.doctor.run_task_graph_checks"
       },
       "Entrypoint": {
@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.cli.project.project_regenerate_done"
       }
     ],
-    "total_functions": 888
+    "total_functions": 889
   },
   "domain": {
     "associations": 2,
@@ -371,13 +371,13 @@
       },
       "Doctor": {
         "classes": 2,
-        "functions": 10,
+        "functions": 11,
         "largest_module": "lithos_loom.doctor",
-        "largest_module_lines": 407,
-        "lines": 407,
+        "largest_module_lines": 474,
+        "lines": 474,
         "modules": 1,
         "public_symbols": 5,
-        "sloc": 334
+        "sloc": 393
       },
       "Entrypoint": {
         "classes": 1,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 33938,
+    "total_lines": 34005,
     "total_modules": 112,
-    "total_sloc": 26945
+    "total_sloc": 27004
   },
   "tests": {
     "ratio": 1.59,
-    "src_lines": 33938,
-    "test_lines": 53904
+    "src_lines": 34005,
+    "test_lines": 54188
   }
 }

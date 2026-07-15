@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import (
     FindingClient,
     LithosClientProtocol,
@@ -307,7 +308,9 @@ async def test_fake_cancelled_blocker_keeps_dependent_unsatisfiable() -> None:
 async def test_fake_gate_blocks_waiter_until_resolved() -> None:
     client = FakeLithosClient(agent_id="a1")
     gate = await client.task_create(
-        title="human gate", task_type="gate", metadata={"project": "p"}
+        title="human gate",
+        task_type="gate",
+        metadata={"project": "p", "gate_type": "human"},
     )
     waiter = await client.task_create(title="waits", metadata={"project": "p"})
     await client.task_edge_upsert(
@@ -328,9 +331,167 @@ async def test_fake_gate_blocks_waiter_until_resolved() -> None:
 async def test_fake_ready_never_offers_gate_or_epic_tasks() -> None:
     client = FakeLithosClient(agent_id="a1")
     await client.task_create(title="epic", task_type="epic", metadata={"project": "p"})
-    await client.task_create(title="gate", task_type="gate", metadata={"project": "p"})
+    await client.task_create(
+        title="gate", task_type="gate", metadata={"project": "p", "gate_type": "pr"}
+    )
     plain = await client.task_create(title="plain", metadata={"project": "p"})
     assert [t.id for t in await client.task_ready(project="p")] == [plain]
+
+
+# ── gate validation (Epic H) ───────────────────────────────────────────────
+#
+# The fake models gate *readiness* but used to skip Lithos's gate *validation*.
+# Under the hermetic-gate rule (AGENTS.md) `make check` runs with no live
+# Lithos, so the fake IS the contract under test: a gate shape the fake accepts
+# but the server rejects ships green and fails in production. Every code and
+# message below was pinned against the live server on 2026-07-15.
+
+
+async def test_fake_rejects_a_gate_without_a_gate_type() -> None:
+    """Live: ``invalid_input`` — "a gate task requires metadata.gate_type in
+    ['ci', 'external_task', 'human', 'pr', 'timer'], got None."
+
+    Without this the fake green-lights a gate Lithos refuses to create.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    with pytest.raises(LithosClientError) as excinfo:
+        await client.task_create(title="gate", task_type="gate")
+    assert excinfo.value.code == "invalid_input"
+
+
+async def test_fake_rejects_a_gate_with_an_unknown_gate_type() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    with pytest.raises(LithosClientError) as excinfo:
+        await client.task_create(
+            title="gate", task_type="gate", metadata={"gate_type": "merge"}
+        )
+    assert excinfo.value.code == "invalid_input"
+
+
+async def test_fake_accepts_every_live_gate_type() -> None:
+    """The enum is five values, not the four the PRD listed."""
+    client = FakeLithosClient(agent_id="a1")
+    for gate_type in ("human", "timer", "ci", "pr", "external_task"):
+        assert await client.task_create(
+            title=f"{gate_type} gate",
+            task_type="gate",
+            metadata={"gate_type": gate_type},
+        )
+
+
+async def test_fake_rejects_waits_on_gate_from_a_non_gate() -> None:
+    """Live: ``not_a_gate`` — "a waits_on_gate edge requires the from_task
+    (…) to be a 'gate' task, got task_type='task'."
+
+    This is the edge that catches the *reversal* mistake — writing
+    ``from=story, to=gate`` reads naturally ("the story waits on the gate")
+    but is backwards, and without this check the fake accepts it silently.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    gate = await client.task_create(
+        title="gate", task_type="gate", metadata={"gate_type": "pr"}
+    )
+    story = await client.task_create(title="story")
+    with pytest.raises(LithosClientError) as excinfo:
+        await client.task_edge_upsert(
+            from_task_id=story, to_task_id=gate, type="waits_on_gate"
+        )
+    assert excinfo.value.code == "not_a_gate"
+
+
+async def test_fake_detects_a_cycle_spanning_a_waits_on_gate_edge() -> None:
+    """Lithos's cycle traversal spans ``blocks`` + ``waits_on_gate`` as one
+    dependency graph; the fake used to walk ``blocks`` only.
+
+    Verified live: the mixed cycle below is rejected with code ``cycle``.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    gate = await client.task_create(
+        title="ci gate", task_type="gate", metadata={"gate_type": "ci"}
+    )
+    story = await client.task_create(title="story")
+    # story waits on the gate …
+    await client.task_edge_upsert(
+        from_task_id=gate, to_task_id=story, type="waits_on_gate"
+    )
+    # … and the gate waits on the story: a deadlock.
+    with pytest.raises(LithosClientError) as excinfo:
+        await client.task_edge_upsert(
+            from_task_id=story, to_task_id=gate, type="blocks"
+        )
+    assert excinfo.value.code == "cycle"
+
+
+async def test_fake_rejects_completing_a_cancelled_gate() -> None:
+    """A cancelled gate is terminal: "proceed anyway" by completing it is
+    IMPOSSIBLE, and only ``task_reopen`` recovers.
+
+    This is the semantic that reshaped epic H — the resolver must leave a
+    closed-unmerged PR's gate *open* rather than cancelling it, because a
+    cancelled gate strands its waiter permanently unsatisfiable. A fake that
+    lets the gate be completed afterwards would green-light exactly the design
+    the live server forbids.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    gate = await client.task_create(
+        title="pr gate", task_type="gate", metadata={"gate_type": "pr"}
+    )
+    await client.task_cancel(task_id=gate)
+    with pytest.raises(LithosClientError) as excinfo:
+        await client.task_complete(task_id=gate)
+    assert excinfo.value.code == "task_not_found"
+
+
+@pytest.mark.parametrize("first", ["completed", "cancelled"])
+@pytest.mark.parametrize("second", ["complete", "cancel"])
+async def test_fake_rejects_any_terminal_transition_on_a_resolved_task(
+    first: str, second: str
+) -> None:
+    """Live rule, verified 2026-07-15: ``task_complete`` / ``task_cancel``
+    reject *any* already-resolved task with ``task_not_found`` ("not in an
+    open state"). It is general lifecycle, not a gate special case.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    task_id = await client.task_create(title="t")
+    if first == "completed":
+        await client.task_complete(task_id=task_id)
+    else:
+        await client.task_cancel(task_id=task_id)
+
+    with pytest.raises(LithosClientError) as excinfo:
+        if second == "complete":
+            await client.task_complete(task_id=task_id)
+        else:
+            await client.task_cancel(task_id=task_id)
+    assert excinfo.value.code == "task_not_found"
+
+
+async def test_fake_still_allows_task_update_on_a_terminal_task() -> None:
+    """The boundary of the rule: the two terminal *transitions* are rejected,
+    but ``task_update`` still applies (lithos#303 — annotating an archived
+    task without reviving it). The develop-pr-merge sweep depends on this: it
+    completes a task, then writes its marker onto the now-terminal task.
+    """
+    client = FakeLithosClient(agent_id="a1")
+    task_id = await client.task_create(title="t")
+    await client.task_complete(task_id=task_id)
+    await client.task_update(task_id=task_id, metadata={"marker": "merged"})
+    stored = await client.task_get(task_id=task_id)
+    assert stored is not None and stored.metadata == {"marker": "merged"}
+
+
+async def test_fake_reports_a_blocks_cycle_with_the_live_error_code() -> None:
+    """The code is ``cycle``, not ``edge_cycle`` (which the fake invented and
+    no server ever returns)."""
+    client = FakeLithosClient(agent_id="a1")
+    first = await client.task_create(title="first")
+    second = await client.task_create(title="second")
+    await client.task_edge_upsert(from_task_id=first, to_task_id=second, type="blocks")
+    with pytest.raises(LithosClientError) as excinfo:
+        await client.task_edge_upsert(
+            from_task_id=second, to_task_id=first, type="blocks"
+        )
+    assert excinfo.value.code == "cycle"
 
 
 async def test_fake_task_ready_filters_by_tags_and_metadata() -> None:

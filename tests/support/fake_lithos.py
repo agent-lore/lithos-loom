@@ -48,6 +48,10 @@ _BLOCKING_EDGE_TYPES = frozenset({"blocks", "waits_on_gate"})
 # Task types that are never offered as ready work and never counted as blocked
 # frontier work (they are structural / external waits).
 _NON_WORK_TASK_TYPES = frozenset({"gate", "epic"})
+# Gate types Lithos accepts on ``metadata.gate_type``. Sorted for the error
+# message, which mirrors the server's. Verified against the live server
+# 2026-07-15 — note it is FIVE values; the orchestration PRD listed four.
+_GATE_TYPES = ("ci", "external_task", "human", "pr", "timer")
 
 _MUTATING = frozenset(
     {
@@ -65,6 +69,29 @@ _MUTATING = frozenset(
         "finding_post",
     }
 )
+
+
+def _validate_gate_metadata(metadata: dict[str, Any] | None) -> None:
+    """Mirror Lithos's strict gate validation (Epic H).
+
+    A ``gate`` task must carry a known ``metadata.gate_type``; the server
+    rejects anything else with ``invalid_input`` before the task exists. The
+    fake enforces it so a malformed gate fails in ``make check`` rather than
+    on the first live run — the hermetic gate is the only thing standing
+    between a gate-shape typo and a story that silently never gets gated.
+
+    ``timer`` gates additionally require a parseable ``metadata.ready_at``
+    server-side; that is not modelled here (the fake has no query-time timer
+    resolution either), so a ``timer`` gate is a known fake/server divergence.
+    Nothing in loom creates one today.
+    """
+    gate_type = (metadata or {}).get("gate_type")
+    if gate_type not in _GATE_TYPES:
+        raise LithosClientError(
+            "invalid_input",
+            f"a gate task requires metadata.gate_type in {list(_GATE_TYPES)}, "
+            f"got {gate_type!r}.",
+        )
 
 
 @dataclass(frozen=True)
@@ -298,6 +325,9 @@ class FakeLithosClient:
             parent_task_id=parent_task_id,
             depends_on=depends_on,
         )
+        resolved_type = task_type or "task"
+        if resolved_type == "gate":
+            _validate_gate_metadata(metadata)
         task_id = self._mint("task")
         self._tasks[task_id] = make_task(
             task_id,
@@ -305,7 +335,7 @@ class FakeLithosClient:
             tags=tuple(tags or ()),
             metadata=dict(metadata or {}),
             description=description,
-            task_type=task_type or "task",
+            task_type=resolved_type,
         )
         # depends_on predecessors become blocks edges (predecessor -> this);
         # a parent becomes a parent_child edge (parent -> this).
@@ -378,11 +408,43 @@ class FakeLithosClient:
         self._resolve(task_id, "cancelled")
 
     def _resolve(self, task_id: str, status: str) -> None:
+        """Apply a terminal transition, mirroring Lithos's lifecycle rule.
+
+        **A resolved task cannot be resolved again.** ``task_complete`` and
+        ``task_cancel`` both reject an already-completed *or* already-cancelled
+        task with ``task_not_found`` ("not in an open state") — verified live
+        2026-07-15, and general lifecycle rather than anything gate-specific.
+
+        Two consequences worth keeping in view:
+
+        * A **cancelled gate is terminal**, so "proceed anyway by completing
+          the gate" is impossible — which is why epic H's resolver leaves a
+          closed-unmerged PR's gate open instead of cancelling it.
+        * Callers that legitimately race to finish the same task (the
+          github-watcher's merge sweep vs the issue close-mirror) must swallow
+          ``task_not_found`` rather than assume they won — the fake now makes
+          an unswallowed one fail loudly in ``make check``.
+
+        The rule covers only the two terminal *transitions*: ``task_update``
+        still applies to a resolved task (lithos#303 — annotate an archived
+        task without reviving it), which the marker writes depend on.
+
+        Known divergence: a genuinely **missing** task is a silent no-op here
+        while the live server returns ``task_not_found``. Left as-is — that is
+        an existence rule, not a state rule, and several suites lean on the
+        no-op for tasks they never seeded.
+        """
         existing = self._tasks.get(task_id)
-        if existing is not None:
-            self._tasks[task_id] = dataclasses.replace(
-                existing, status=status, resolved_at=RESOLVED_AT
+        if existing is None:
+            return
+        if existing.status != "open":
+            raise LithosClientError(
+                "task_not_found",
+                f"Task {task_id!r} not found or not in an open state.",
             )
+        self._tasks[task_id] = dataclasses.replace(
+            existing, status=status, resolved_at=RESOLVED_AT
+        )
 
     async def task_claim(
         self,
@@ -628,9 +690,25 @@ class FakeLithosClient:
                 raise LithosClientError(
                     "task_not_found", "edge references unknown task"
                 )
-            if edge_type == "blocks" and self._blocks_reaches(to_task_id, from_task_id):
+            # The blocker of a waits_on_gate edge must really be a gate. This
+            # catches the reversal (from=waiter, to=gate) — which reads
+            # naturally as "the story waits on the gate" but is backwards.
+            if edge_type == "waits_on_gate":
+                blocker = self._tasks[from_task_id]
+                if blocker.task_type != "gate":
+                    raise LithosClientError(
+                        "not_a_gate",
+                        f"a waits_on_gate edge requires the from_task "
+                        f"({from_task_id}) to be a 'gate' task, got "
+                        f"task_type={blocker.task_type!r}.",
+                    )
+            if edge_type in _BLOCKING_EDGE_TYPES and self._blocking_reaches(
+                to_task_id, from_task_id
+            ):
                 raise LithosClientError(
-                    "edge_cycle", "blocks edge would create a dependency cycle"
+                    "cycle",
+                    f"{edge_type} edge {from_task_id} -> {to_task_id} would "
+                    "create a dependency cycle",
                 )
         # Upsert on the (from, to, type) key: a repeat replaces the existing
         # edge (metadata is a full replace, not a merge — matching the live
@@ -674,7 +752,7 @@ class FakeLithosClient:
 
     def _blockers_for(self, task_id: str) -> list[Blocker]:
         """Structured reasons ``task_id`` is not ready (empty = ready)."""
-        if self._blocks_reaches(task_id, task_id):
+        if self._blocking_reaches(task_id, task_id):
             return [Blocker(kind="cycle", message="dependency cycle", task_id=task_id)]
         blockers: list[Blocker] = []
         for edge in self._edges:
@@ -704,14 +782,19 @@ class FakeLithosClient:
             )
         return blockers
 
-    def _blocks_reaches(self, start: str, target: str) -> bool:
-        """Whether ``target`` is reachable from ``start`` following ``blocks``
+    def _blocking_reaches(self, start: str, target: str) -> bool:
+        """Whether ``target`` is reachable from ``start`` following *blocking*
         edges forward (``from -> to``). ``start == target`` reachable through
-        ≥1 edge means ``start`` sits on a blocks cycle."""
+        ≥1 edge means ``start`` sits on a dependency cycle.
+
+        Spans ``blocks`` **and** ``waits_on_gate``: Lithos treats them as one
+        dependency graph for cycle detection, so a gate waiting on a task that
+        waits on that gate is a rejected deadlock, not just a slow gate.
+        """
         frontier = [
             edge.to_task_id
             for edge in self._edges
-            if edge.type == "blocks" and edge.from_task_id == start
+            if edge.type in _BLOCKING_EDGE_TYPES and edge.from_task_id == start
         ]
         seen: set[str] = set()
         while frontier:
@@ -724,7 +807,7 @@ class FakeLithosClient:
             frontier.extend(
                 edge.to_task_id
                 for edge in self._edges
-                if edge.type == "blocks" and edge.from_task_id == node
+                if edge.type in _BLOCKING_EDGE_TYPES and edge.from_task_id == node
             )
         return False
 
