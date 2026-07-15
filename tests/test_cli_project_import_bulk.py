@@ -650,6 +650,51 @@ def test_dry_run_includes_task_metadata(tmp_path: Path) -> None:
     assert "#foo" in result.stdout
 
 
+def test_dry_run_previews_the_graph_it_will_build(tmp_path: Path) -> None:
+    """The preview's promise is "what you see is what gets written", so the
+    tree must show the epic/child structure at its real nesting depth.
+
+    Depth is the parent chain, NOT the source's raw indent width: the parser
+    treats any deeper leading whitespace as exactly one level down, so the
+    4-space and 6-space children below are siblings and preview alike.
+    """
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "- [ ] Root\n"
+        "  - [ ] Mid\n"
+        "    - [ ] Leaf A\n"
+        "      - [ ] Deep [sequential]\n"
+        "        - [ ] Deep 1\n"
+        "        - [ ] Deep 2\n"
+        "    - [ ] Leaf B\n",
+        encoding="utf-8",
+    )
+    client = _stub_client()
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path), "--dry-run"]
+        )
+    assert result.exit_code == 0, result.stdout
+    body = [ln.rstrip() for ln in result.stdout.splitlines()]
+
+    def _line(label: str) -> str:
+        return next(ln for ln in body if ln.strip().startswith(f"{label}. "))
+
+    # Each generation is indented one step deeper than its parent.
+    assert _line("1").startswith('  1. "Root"')
+    assert _line("1a").startswith('    1a. "Mid"')
+    assert _line("1aa").startswith('      1aa. "Leaf A"')
+    assert _line("1aaa").startswith('        1aaa. "Deep"')
+    # Siblings share an indent regardless of their differing source widths.
+    assert _line("1ab").startswith('      1ab. "Leaf B"')
+    # Lines with children preview as epics; the chain shows its blocks edge.
+    assert "type=epic" in _line("1aaa")
+    assert "type=epic" not in _line("1ab")
+    assert "(depends_on=#1aaaa)" in _line("1aaab")
+
+
 def test_dry_run_shows_auto_added_project_tag(tmp_path: Path) -> None:
     """--dry-run must preview the `#project/<slug>` tag that create_tasks adds.
 

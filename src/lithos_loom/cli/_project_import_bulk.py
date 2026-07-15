@@ -271,6 +271,7 @@ def _format_task_tree(plans: list[TaskCreatePlan], *, slug: str) -> list[str]:
     project_tag = f"project/{slug}"
     parent_label: dict[int, str] = {}
     counters: dict[int, int] = {}
+    depth: dict[int, int] = {}
     out: list[str] = []
     top_level_count = 0
     for plan in plans:
@@ -279,15 +280,21 @@ def _format_task_tree(plans: list[TaskCreatePlan], *, slug: str) -> list[str]:
         if parent_ln is None:
             top_level_count += 1
             label = str(top_level_count)
-            indent_str = ""
+            own_depth = 0
         else:
             parent_lbl = parent_label.get(parent_ln, "?")
             counters[parent_ln] = counters.get(parent_ln, 0) + 1
             child_letter = chr(ord("a") + counters[parent_ln] - 1)
             label = f"{parent_lbl}{child_letter}"
-            indent_str = "  "
+            # Nesting depth, not the source's raw indent width: the parser
+            # treats *any* deeper leading whitespace as one level down, so a
+            # 2-space and an 8-space child of the same parent are siblings and
+            # must preview alike.
+            own_depth = depth.get(parent_ln, 0) + 1
         parent_label[line.line_number] = label
+        depth[line.line_number] = own_depth
         counters.setdefault(line.line_number, 0)
+        indent_str = "  " * own_depth
 
         # Mirror create_tasks's tag composition: user tags + auto-added project tag.
         rendered_tags = list(line.tags)
