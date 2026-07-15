@@ -360,6 +360,10 @@ async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[Check
         if not any(b.kind == "blocker_unsatisfiable" for b in reasons):
             return _fail("a cancelled blocker did not surface as blocker_unsatisfiable")
 
+        gate_failure = await _probe_gates(client, agent, probe_tag, created)
+        if gate_failure is not None:
+            return [gate_failure]
+
         # task_spawn must persist BOTH the follow-on task and its source edge —
         # a bare returned id proves neither.
         spawned = await client.task_spawn(
@@ -392,9 +396,72 @@ async def run_task_graph_checks(client: TaskClient, *, agent: str) -> list[Check
             TASK_GRAPH_CHECK,
             True,
             "task-graph extension present (task_type persistence, ready/blocked "
-            "+ cancelled-blocker precondition, task_spawn task+edge — all verified)",
+            "+ cancelled-blocker precondition, gate block + resolution, "
+            "task_spawn task+edge — all verified)",
         )
     ]
+
+
+async def _probe_gates(
+    client: TaskClient, agent: str, probe_tag: str, created: list[str]
+) -> CheckResult | None:
+    """Probe gate semantics (extension Phase 3). ``None`` = all good.
+
+    Epic H encodes "PR raised, awaiting human merge" as a `pr` gate, so a
+    server without gate semantics would leave every delivered story either
+    stuck behind a gate nothing can resolve, or — worse — re-developed into a
+    duplicate PR because the gate never withheld it from the ready frontier.
+
+    Appends everything it creates to *created* so the caller's ``finally``
+    cleans up even when a leg fails mid-probe.
+    """
+    gate = await client.task_create(
+        title=_PROBE_TASK_TITLE,
+        agent=agent,
+        tags=[probe_tag],
+        task_type="gate",
+        metadata={"gate_type": "pr"},
+    )
+    created.append(gate)
+    waiter = await client.task_create(
+        title=_PROBE_TASK_TITLE, agent=agent, tags=[probe_tag]
+    )
+    created.append(waiter)
+    await client.task_edge_upsert(
+        from_task_id=gate, to_task_id=waiter, type="waits_on_gate", agent=agent
+    )
+
+    ready_ids = {t.id for t in await client.task_ready(tags=[probe_tag])}
+    if waiter in ready_ids or gate in ready_ids:
+        return CheckResult(
+            TASK_GRAPH_CHECK,
+            False,
+            "an unresolved gate did not withhold its waiter from task_ready "
+            "(or the gate itself leaked in as workable)",
+        )
+    reasons = await _blockers_of(client, waiter, tag=probe_tag)
+    if not any(b.kind == "gate" and b.task_id == gate for b in reasons):
+        return CheckResult(
+            TASK_GRAPH_CHECK,
+            False,
+            "task_blocked did not report the open gate as a blocker",
+        )
+
+    # Resolving a gate = completing it, and that must release the waiter.
+    unblocked = await client.task_complete(task_id=gate, agent=agent)
+    if waiter not in unblocked:
+        return CheckResult(
+            TASK_GRAPH_CHECK,
+            False,
+            "completing a gate did not report its waiter as newly unblocked",
+        )
+    if waiter not in {t.id for t in await client.task_ready(tags=[probe_tag])}:
+        return CheckResult(
+            TASK_GRAPH_CHECK,
+            False,
+            "completing a gate did not release its waiter into task_ready",
+        )
+    return None
 
 
 async def _blockers_of(

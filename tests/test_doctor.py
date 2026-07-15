@@ -402,6 +402,42 @@ async def test_task_graph_probe_fails_when_cancelled_blocker_releases_dep() -> N
     assert "cancelled" in results[0].message.lower()
 
 
+class _IgnoresGates(FakeLithosClient):
+    """Non-conformant fake: treats an unresolved gate as satisfied, so a waiter
+    is ready while its `pr` gate is still open. Epic H would then re-develop a
+    story whose PR is still awaiting merge."""
+
+    def _blockers_for(self, task_id: str):  # type: ignore[override]
+        return [b for b in super()._blockers_for(task_id) if b.kind != "gate"]
+
+
+class _GateCompletionReportsNothing(FakeLithosClient):
+    """Non-conformant fake: resolves a gate but never reports its waiter as
+    newly unblocked (a server whose ``newly_unblocked_by`` was not widened to
+    gate waiters)."""
+
+    async def task_complete(  # type: ignore[override]
+        self, *, task_id: str, agent: str | None = None
+    ) -> list[str]:
+        unblocked = await super().task_complete(task_id=task_id, agent=agent)
+        task = self._tasks.get(task_id)
+        return [] if task is not None and task.task_type == "gate" else unblocked
+
+
+async def test_task_graph_probe_fails_when_a_gate_does_not_block_its_waiter() -> None:
+    client = _IgnoresGates(agent_id="doctor-agent")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert not results[0].passed
+    assert "gate" in results[0].message.lower()
+
+
+async def test_task_graph_probe_fails_when_gate_completion_reports_no_waiter() -> None:
+    client = _GateCompletionReportsNothing(agent_id="doctor-agent")
+    results = await run_task_graph_checks(client, agent="doctor-agent")
+    assert not results[0].passed
+    assert "unblocked" in results[0].message.lower()
+
+
 async def test_task_graph_probe_cleans_up_even_on_failure() -> None:
     """A mid-probe failure still cancels every task the probe created."""
     client = _ReleasesCancelledBlocker(agent_id="doctor-agent")

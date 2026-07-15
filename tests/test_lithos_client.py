@@ -2352,14 +2352,18 @@ async def test_task_edge_upsert_omits_metadata_when_none() -> None:
 
 
 async def test_task_edge_upsert_propagates_error_envelope() -> None:
-    """A cycle-creating blocks edge (or self-edge / missing task) surfaces
-    as a typed error, not a silent success."""
+    """A cycle-creating blocks edge (or self-edge / missing task / not_a_gate)
+    surfaces as a typed error, not a silent success.
+
+    ``cycle`` is the code the live server actually returns (verified
+    2026-07-15); this test used to assert a fictional ``edge_cycle``.
+    """
     client, _ = _client_with_session(
-        _content({"status": "error", "code": "edge_cycle", "message": "would cycle"})
+        _content({"status": "error", "code": "cycle", "message": "would cycle"})
     )
     with pytest.raises(LithosClientError) as exc:
         await client.task_edge_upsert(from_task_id="a", to_task_id="b", type="blocks")
-    assert exc.value.code == "edge_cycle"
+    assert exc.value.code == "cycle"
 
 
 async def test_task_edge_upsert_raises_when_no_agent_anywhere() -> None:
