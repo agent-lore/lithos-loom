@@ -394,9 +394,14 @@ def _print_dry_run_report(
         )
     typer.echo("")
 
-    fired_routes: set[str] = set()
+    # Tag-matched (whether or not ready) vs would-claim-now. Orphan / dead
+    # config are *routing* questions, so they key off MATCHED: a deferred task
+    # is routed and waiting on the ready-queue, not missing config, and saying
+    # otherwise would send the operator to fix routing that is already correct.
+    matched_routes: set[str] = set()
     fired_subs: set[str] = set()
     orphan_tasks: list[Task] = []
+    deferred_tasks: list[Task] = []
 
     sub_predicates = _build_subscription_predicates(cfg.subscriptions)
 
@@ -404,6 +409,8 @@ def _print_dry_run_report(
         typer.echo("  (no open tasks; nothing to simulate)")
     for task in tasks:
         any_match = False
+        route_fired = False
+        route_matched = False
         title_summary = f"{task.id}  {task.title!r}"
         typer.echo(title_summary)
         for route in cfg.routes:
@@ -415,9 +422,11 @@ def _print_dry_run_report(
             else:
                 marker = "—"
             typer.echo(f"    route:{route.name:<30} {marker}")
-            if would_fire:
-                fired_routes.add(route.name)
+            if would_fire or defer_reason:
+                matched_routes.add(route.name)
+                route_matched = True
                 any_match = True
+            route_fired = route_fired or would_fire
         for spec in cfg.subscriptions:
             would_fire = sub_predicates[spec.name](task)
             marker = "✓ (would fire)" if would_fire else "—"
@@ -427,6 +436,8 @@ def _print_dry_run_report(
                 any_match = True
         if not any_match:
             orphan_tasks.append(task)
+        elif route_matched and not route_fired:
+            deferred_tasks.append(task)
 
     typer.echo("")
     typer.echo("── Summary ─────────────────────────────────────────────")
@@ -437,7 +448,17 @@ def _print_dry_run_report(
     else:
         typer.echo("  no orphan tasks")
 
-    dead_routes = [r.name for r in cfg.routes if r.name not in fired_routes]
+    if deferred_tasks:
+        # Not a config problem — surfaced so the shorter orphan list doesn't
+        # read as "nothing to do here". Per-task reasons are in the table.
+        typer.echo(
+            f"  deferred tasks ({len(deferred_tasks)}) — routed, waiting on "
+            "Lithos's ready-queue:"
+        )
+        for task in deferred_tasks:
+            typer.echo(f"    {task.id}  {task.title!r}")
+
+    dead_routes = [r.name for r in cfg.routes if r.name not in matched_routes]
     dead_subs = [s.name for s in cfg.subscriptions if s.name not in fired_subs]
     if dead_routes:
         typer.echo(f"  dead routes ({len(dead_routes)}):")

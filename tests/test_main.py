@@ -13,6 +13,7 @@ from lithos_loom import main as main_module
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import Task
 from lithos_loom.main import app
+from lithos_loom.subscriptions.route_runner import READY_QUERY_LIMIT
 from tests.support import FakeLithosClient
 
 runner = CliRunner()
@@ -360,6 +361,63 @@ def test_dry_run_cancelled_blocker_reported_as_unsatisfiable(
     assert "✓" not in row, row
     # Distinct from an ordinary wait: this one needs intervention.
     assert "deferred (blocker_unsatisfiable: upstream (cancelled))" in row, row
+
+
+def _summary_lines(output: str, header: str) -> list[str]:
+    """The indented entries under a Summary section header (``[]`` if absent)."""
+    lines = output.splitlines()
+    start = next((i for i, line in enumerate(lines) if header in line), None)
+    if start is None:
+        return []
+    entries: list[str] = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("    "):
+            break
+        entries.append(line.strip())
+    return entries
+
+
+def test_dry_run_deferred_task_is_not_an_orphan_and_its_route_is_not_dead(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocked task IS routed — it's waiting on the ready-queue, not missing
+    config. Counting it as unmatched would report it as an orphan and its route
+    as dead config, telling the operator to fix routing when the truth is
+    'not ready yet'. `upstream` (no trigger tag) is the genuine orphan here.
+    """
+    fake = FakeLithosClient(
+        tasks=[
+            _task("blocked", tags=("trigger:prd-decompose",)),
+            _task("upstream", status="open"),
+        ],
+    )
+    fake.add_edge(from_task_id="upstream", to_task_id="blocked", type="blocks")
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["validate-config", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    orphans = _summary_lines(result.output, "orphan tasks")
+    assert any(line.startswith("upstream") for line in orphans), orphans
+    assert not any(line.startswith("blocked") for line in orphans), orphans
+    assert "prd-decompose" not in _summary_lines(result.output, "dead routes")
+
+
+def test_dry_run_readiness_sweeps_are_bounded_and_claim_free(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither sweep has a per-task filter, so both must be explicitly capped
+    (the default limit of 50 would silently truncate); and the ready sweep
+    shouldn't pay to fetch claims the report never reads."""
+    fake = FakeLithosClient(tasks=[_task("ready", tags=("trigger:prd-decompose",))])
+    _patch_client(monkeypatch, fake)
+
+    runner.invoke(app, ["validate-config", "--dry-run"])
+
+    ready_call = fake.calls_to("task_ready")[0]
+    assert ready_call["limit"] == READY_QUERY_LIMIT
+    assert ready_call["with_claims"] is False
+    assert fake.calls_to("task_blocked")[0]["limit"] == READY_QUERY_LIMIT
 
 
 def test_dry_run_route_fires_when_task_is_ready(
