@@ -20,7 +20,7 @@ Rendering of tasks and notes into Obsidian-Tasks-compatible markdown.
 - def `render_resolved_line` — Render the historical-line shape for completed/cancelled tasks.
 - def `priority_marker` — Map ``task.metadata.priority`` to its Tasks-plugin emoji.
 - def `validated_priority` — Return ``task.metadata.priority`` only when it's a known enum value, else ``None``.
-- def `dep_markers` — Render one ``⛔ lithos:<dep_id>`` marker per entry in ``task.metadata.depends_on``.
+- def `dep_markers` — Render one ``⛔ lithos:<id>`` marker per Lithos blocker (US8).
 - def `due_date_str` — Hybrid due-date policy for the ``📅`` marker.
 - def `parse_scheduled_for` — Best-effort parse of ``metadata.scheduled_for``.
 

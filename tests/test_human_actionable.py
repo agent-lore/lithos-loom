@@ -165,9 +165,12 @@ def test_claim_aspect_for_unknown_route_does_not_actionable() -> None:
 
 def test_include_blocked_false_with_deps_returns_false() -> None:
     """Operator opted out of blocked work — even an orphan blocked task is hidden."""
-    task = _task(tags=(), metadata={"depends_on": ["other-task-id"]})
+    task = _task(tags=())
     assert (
-        is_human_actionable(task, routes=[], cfg=_cfg(include_blocked=False)) is False
+        is_human_actionable(
+            task, routes=[], cfg=_cfg(include_blocked=False), blocked=True
+        )
+        is False
     )
 
 
@@ -315,10 +318,8 @@ def test_would_be_actionable_excluded_tag_false() -> None:
 
 
 def test_would_be_actionable_blocked_with_include_blocked_false() -> None:
-    """include_blocked=False + non-empty depends_on → hide, same as
+    """include_blocked=False + Lithos says blocked → hide, same as
     is_human_actionable."""
-    task = _task(
-        status="completed", tags=("anything",), metadata={"depends_on": ["dep-1"]}
-    )
+    task = _task(status="completed", tags=("anything",))
     cfg = _cfg(include_blocked=False)
-    assert would_be_actionable(task, routes=[], cfg=cfg) is False
+    assert would_be_actionable(task, routes=[], cfg=cfg, blocked=True) is False

@@ -21,8 +21,9 @@ Line shape:
         - [x] <title> ✅ <date> 🆔 lithos:<id> [#project/<slug>]
         - [-] <title> ❌ <date> 🆔 lithos:<id> [#project/<slug>]
 
-(``[⛔ lithos:<dep>]...`` is zero-or-more — one marker per entry
-in ``task.metadata.depends_on``.) Optional markers are emitted
+(``[⛔ lithos:<dep>]...`` is zero-or-more — one marker per Lithos
+blocker naming another task, from the per-flush ``lithos_task_blocked``
+sweep; see ``BlockedSnapshot``.) Optional markers are emitted
 only when they apply (see ``_render_line`` and
 ``_render_resolved_line``). Resolved lines drop actionability-only
 markers (priority, deps, due date, ``#lithos/<route>``) — they are
@@ -31,12 +32,13 @@ historical record, not work. The base line shape —
 with no priority / deps / project / scheduled_for / claim, which
 is the most common case during early adoption.
 
-Dependency-blocked tasks still project by default:
-``include_blocked = True`` is the ``ObsidianSyncConfig`` default
-and ``is_human_actionable`` only hides blocked tasks when the
-operator explicitly opts out — so by default a task with
-``depends_on`` set still appears, just decorated with ``⛔``
-markers the Tasks plugin uses to recognise it as blocked.
+Blocked tasks still project by default: ``include_blocked = True``
+is the ``ObsidianSyncConfig`` default and ``is_human_actionable``
+only hides blocked tasks when the operator explicitly opts out — so
+by default a blocked task still appears, just decorated with the
+``⛔`` markers the Tasks plugin uses to recognise it as blocked.
+Blocked-ness is Lithos's answer (``lithos_task_blocked``), not the
+static ``metadata.depends_on`` list this used to mirror (US8).
 
 Completed/cancelled lines are kept for ``resolved_ttl_days``
 (default 7) so the operator's "done this week" / "cancelled this
@@ -135,6 +137,7 @@ from lithos_loom.render import (
     validated_priority as _validated_priority,
 )
 from lithos_loom.subscriptions._atomic_write import write_file_atomic
+from lithos_loom.subscriptions._blocked_snapshot import BlockedSnapshot
 from lithos_loom.subscriptions._human_actionable import (
     is_human_actionable,
     would_be_actionable,
@@ -320,6 +323,9 @@ def make_handler(
     # the last burst has already flushed). Subsequent events within
     # the debounce window cancel-and-reschedule this task.
     pending_flush: asyncio.Task[None] | None = None
+    # US8: Lithos's blocked set, fetched once per flush cycle. See
+    # BlockedSnapshot for why this is batched rather than read per event.
+    blocked_cache = BlockedSnapshot()
 
     async def handle(event: Event, ctx: Any) -> None:
         # Branch on event type FIRST so an unknown event can't blow up
@@ -354,6 +360,7 @@ def make_handler(
         evicted += _evict_archived(state, archive_gate.archived)
 
         prior = state.get(task.id)
+        task_blockers = (await blocked_cache.get(ctx)).get(task.id, ())
 
         if event.type in _REMOVAL_EVENTS:
             # Promote to resolved — but only for tasks that would have
@@ -362,7 +369,14 @@ def make_handler(
             # appear in "done this week" queries on completion
             # (PR #21 review: terminal events must respect actionability
             # the same way live re-eval does).
-            if not would_be_actionable(task, cfg.routes, obs):
+            # A resolved task is never in the blocked set (the sweep returns
+            # OPEN not-ready tasks), so `blocked` is False here by
+            # construction. That is a deliberate semantic shift: this used to
+            # read static metadata.depends_on, so a task hidden by
+            # `include_blocked = false` stayed hidden even on completion.
+            # Once it is done it is no longer blocked, and finished work
+            # belongs in "done this week".
+            if not would_be_actionable(task, cfg.routes, obs, blocked=False):
                 ctx.logger.debug(
                     "obsidian-projection: skipping terminal event %s for "
                     "never-actionable task %s",
@@ -398,9 +412,9 @@ def make_handler(
             )
         else:
             # Open / unknown — re-evaluate actionability.
-            if is_human_actionable(task, cfg.routes, obs):
+            if is_human_actionable(task, cfg.routes, obs, blocked=bool(task_blockers)):
                 state[task.id] = _StateEntry(
-                    line=_render_line(task, cfg.routes, today_val),
+                    line=_render_line(task, cfg.routes, today_val, task_blockers),
                     status="open",
                     resolved_at=None,
                     priority=_validated_priority(task),
@@ -467,6 +481,13 @@ def make_handler(
         if it ever fires at the trailing ``sleep(0)`` the rename and
         task_sync update are both already complete and consistent.
         """
+        # Close the blocked-snapshot cycle (US8). Done at the TOP so every
+        # exit below — hash-skip early return, successful write, or a raising
+        # write — leaves the cache cold and the next cycle re-reads Lithos.
+        # Debouncing means this only runs at quiescence, after the burst's
+        # handles have already read the snapshot they share.
+        blocked_cache.invalidate()
+
         # Re-run eviction at flush time. This is the load-bearing
         # eviction for the immediate-evict path: on a terminal event,
         # ``handle`` ran the sweep at t0 — before the task-archive

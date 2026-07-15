@@ -10,8 +10,13 @@ OR claimed by a ``human_blocking = true`` route).
 Decision order (cheapest tests first):
 
 1. Operator opt-out for blocked work: if ``include_blocked = false``
-   in ``[obsidian_sync]`` and the task carries a non-empty
-   ``metadata.depends_on`` list → False.
+   in ``[obsidian_sync]`` and the caller passes ``blocked=True`` → False.
+   ``blocked`` is Lithos's authoritative answer, threaded in from the
+   projection's per-flush ``lithos_task_blocked`` sweep (US8) — so it now
+   covers gate and cycle blockers, and clears once a blocker completes.
+   It used to be read here as "declares a non-empty ``metadata.depends_on``",
+   which stayed true forever regardless of whether the deps were done.
+   Callers with no sweep in hand default to ``blocked=False``.
 2. Operator tag denylist: if any of ``task.tags`` is in
    ``cfg.exclude_tags`` → False.
 3. Open orphan task: ``task.status == "open"`` AND no configured route
@@ -55,6 +60,8 @@ def is_human_actionable(
     task: Task,
     routes: Sequence[RouteConfig],
     cfg: ObsidianSyncConfig,
+    *,
+    blocked: bool = False,
 ) -> bool:
     """Return ``True`` iff an open task should appear in the operator's view.
 
@@ -67,13 +74,15 @@ def is_human_actionable(
     """
     if task.status != "open":
         return False
-    return would_be_actionable(task, routes, cfg)
+    return would_be_actionable(task, routes, cfg, blocked=blocked)
 
 
 def would_be_actionable(
     task: Task,
     routes: Sequence[RouteConfig],
     cfg: ObsidianSyncConfig,
+    *,
+    blocked: bool = False,
 ) -> bool:
     """Return ``True`` iff the task's tags/metadata would make it
     actionable to the operator, *ignoring* its current status.
@@ -93,8 +102,7 @@ def would_be_actionable(
       events, so restart-recovery only rehydrates tasks that would have
       been on the operator's view.
     """
-    depends_on = task.metadata.get("depends_on") or []
-    if not cfg.include_blocked and depends_on:
+    if not cfg.include_blocked and blocked:
         return False
 
     task_tag_set = set(task.tags)

@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from lithos_loom.config import RouteConfig, RouteMatch
-from lithos_loom.lithos_client import Task
+from lithos_loom.lithos_client import Blocker, Task
 from lithos_loom.render import (
     dep_markers,
     due_date_str,
@@ -74,12 +74,22 @@ def test_render_line_with_priority_and_project() -> None:
     assert line == "- [ ] Review PR 🆔 lithos:abc #project/lithos-loom ⏫"
 
 
-def test_render_line_with_depends_on() -> None:
-    """Each ``depends_on`` entry renders a ``⛔ lithos:<id>`` marker."""
-    task = _task(metadata={"depends_on": ["dep1", "dep2"]})
-    line = render_line(task, routes=(), today=_TODAY)
+def test_render_line_with_blockers() -> None:
+    """Each Lithos blocker renders a ``⛔ lithos:<id>`` marker (US8)."""
+    blockers = (
+        Blocker(kind="task", message="", task_id="dep1", status="open"),
+        Blocker(kind="task", message="", task_id="dep2", status="open"),
+    )
+    line = render_line(_task(), routes=(), today=_TODAY, blockers=blockers)
     assert "⛔ lithos:dep1" in line
     assert "⛔ lithos:dep2" in line
+
+
+def test_render_line_omits_blocker_markers_when_caller_has_no_sweep() -> None:
+    """The capture CLI renders a just-created task with no blocked-set in
+    hand; it must not resurrect the old metadata.depends_on markers."""
+    task = _task(metadata={"depends_on": ["dep1"]})
+    assert "⛔" not in render_line(task, routes=(), today=_TODAY)
 
 
 def test_render_line_with_scheduled_for() -> None:
@@ -203,38 +213,64 @@ def test_validated_priority_returns_none_silently_for_unknown(
 # ── dep_markers ────────────────────────────────────────────────────────
 
 
-def test_dep_markers_empty_when_absent() -> None:
+def _blocker(task_id: str, kind: str = "task") -> Blocker:
+    return Blocker(
+        kind=kind,
+        message=f"waiting on predecessor {task_id}",
+        task_id=task_id,
+        type="blocks",
+        status="open",
+    )
+
+
+def test_dep_markers_empty_when_not_blocked() -> None:
     assert dep_markers(_task()) == []
 
 
-def test_dep_markers_renders_each_dep_id() -> None:
-    task = _task(metadata={"depends_on": ["a", "b", "c"]})
-    assert dep_markers(task) == ["⛔ lithos:a", "⛔ lithos:b", "⛔ lithos:c"]
+def test_dep_markers_ignores_metadata_depends_on() -> None:
+    """US8: the marker reflects Lithos's CURRENT blockers, not the static
+    list the task declared — that list stayed true even after a dep finished."""
+    task = _task(metadata={"depends_on": ["stale-dep"]})
+    assert dep_markers(task) == []
+
+
+def test_dep_markers_renders_each_blocker() -> None:
+    task = _task()
+    blockers = (_blocker("a"), _blocker("b"), _blocker("c"))
+    assert dep_markers(task, blockers) == [
+        "⛔ lithos:a",
+        "⛔ lithos:b",
+        "⛔ lithos:c",
+    ]
+
+
+def test_dep_markers_renders_gate_blockers() -> None:
+    """A gate blocker names a real task id, so it earns a marker — one of the
+    kinds the old metadata mirror could not see at all."""
+    assert dep_markers(_task(), (_blocker("gate-1", kind="gate"),)) == [
+        "⛔ lithos:gate-1"
+    ]
 
 
 def test_dep_markers_dedups_duplicates() -> None:
-    """First occurrence wins; duplicates are skipped."""
-    task = _task(metadata={"depends_on": ["a", "a", "b"]})
-    assert dep_markers(task) == ["⛔ lithos:a", "⛔ lithos:b"]
+    """First occurrence wins; the marker is a signal, not a count."""
+    task = _task()
+    assert dep_markers(task, (_blocker("a"), _blocker("a"), _blocker("b"))) == [
+        "⛔ lithos:a",
+        "⛔ lithos:b",
+    ]
 
 
-def test_dep_markers_skips_invalid_entries(caplog: pytest.LogCaptureFixture) -> None:
-    """Non-string / empty entries are skipped with a single warn."""
-    task = _task(metadata={"depends_on": ["good", "", 42, None]})  # type: ignore[list-item]
-    with caplog.at_level(logging.WARNING, logger="lithos_loom.render"):
-        markers = dep_markers(task)
-    assert markers == ["⛔ lithos:good"]
-    assert any("invalid entries" in r.getMessage() for r in caplog.records)
+def test_dep_markers_skips_self_referencing_cycle_blocker() -> None:
+    """A `cycle` blocker names the task itself; ⛔ points at another line's 🆔,
+    so a self-reference would be nonsense."""
+    task = _task()
+    cycle = Blocker(kind="cycle", message="dependency cycle", task_id=task.id)
+    assert dep_markers(task, (cycle,)) == []
 
 
-def test_dep_markers_returns_empty_for_non_list(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Non-list ``depends_on`` is malformed — return ``[]`` + warn."""
-    task = _task(metadata={"depends_on": "not-a-list"})
-    with caplog.at_level(logging.WARNING, logger="lithos_loom.render"):
-        assert dep_markers(task) == []
-    assert any("non-list metadata.depends_on" in r.getMessage() for r in caplog.records)
+def test_dep_markers_skips_blocker_without_a_task_id() -> None:
+    assert dep_markers(_task(), (Blocker(kind="cycle", message="cycle"),)) == []
 
 
 # ── due_date_str / parse_scheduled_for ─────────────────────────────────
