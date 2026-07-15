@@ -11,7 +11,7 @@ Shared exception hierarchy (LithosLoomError and friends).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.errors` | XS | 8 | 0 |
+| `lithos_loom.errors` | XS | 7 | 0 |
 
 ## Public API
 
@@ -20,7 +20,6 @@ Shared exception hierarchy (LithosLoomError and friends).
 - class `ConfigError` — Raised when configuration is missing or invalid.
 - class `LithosUnreachableError` — Raised when the configured Lithos server cannot be reached.
 - class `ProjectNotRegisteredError` — Raised when a task's ``metadata.project`` does not match any project entry.
-- class `DependencyCycleError` — Raised when ``metadata.depends_on`` graph contains a cycle (US-9).
 - class `PluginContractError` — Raised when a plugin's ``result.json`` violates the schema (US-3).
 - class `ClaimError` — Raised when a Lithos task claim attempt fails.
 - class `LithosClientError` — Raised when a Lithos MCP tool returns a ``{status: "error", ...}`` envelope.

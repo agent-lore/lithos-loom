@@ -354,6 +354,10 @@ codex  = "gpt-5.4"
 
 `lithos-loom validate-config` parses, typechecks, and lists projects / routes / subscriptions. `validate-config --dry-run` additionally polls Lithos and prints which routes / subscriptions would fire for each currently-open task plus any orphans (tasks no route matches) and dead config (routes / subscriptions no task currently matches). Both forms exit non-zero on invalid TOML.
 
+**Readiness in the dry-run (Epic G / US7).** The simulation reads the same server-side ready-queue the runner dispatches off (§2.2) — one `lithos_task_ready` sweep for the dispatchable frontier plus one `lithos_task_blocked` sweep for the reasons — rather than re-deriving readiness from `metadata.depends_on`, so the report cannot drift from runtime behaviour. A tag-matching task Lithos doesn't consider ready renders as `deferred (<kind>: <predecessor> (<status>))` using Lithos's own structured blocker vocabulary: **`task`** (predecessor still open — just waiting), **`gate`** (waiting on an unresolved gate), **`blocker_unsatisfiable`** (the predecessor was *cancelled* — this one needs operator intervention, not patience), or **`cycle`**. A task that is neither ready nor blocker-shaped (e.g. an `epic` / `gate` task, which is never dispatchable work) renders as `deferred (not on Lithos's ready frontier)`. Neither sweep has a per-task filter, so both are capped at `READY_QUERY_LIMIT` (500); if either comes back full the report prints a `⚠ … query limit` line, since the rows below may then be incomplete.
+
+**Orphan / dead config vs deferred.** These are *routing* questions, so they key off whether a task's tags **matched** a route — not whether it would claim right now. A deferred task is routed and waiting, so it is **not** an orphan, and a route matching only deferred tasks is **not** dead config; reporting either would send the operator to fix routing that is already correct. Deferred tasks instead get their own informational summary section (`deferred tasks (N) — routed, waiting on Lithos's ready-queue`), with the per-task reasons in the table above.
+
 `lithos-loom doctor` verifies the configured `vault_path` exists, `_lithos/` is creatable, and a probe write+read round-trip works. It probes the **Lithos task-graph extension** end to end (creates throwaway probe tasks — an `epic`, a blocker + dependent joined by a `blocks` edge, and a spawned follow-on — asserts `lithos_task_ready` / `lithos_task_blocked` honour the edge — including that a *cancelled* blocker keeps its dependent `blocker_unsatisfiable` — and that `task_type` / `lithos_task_spawn` round-trip, then cancels the probe tasks). It also reads `lithos_list(path_prefix='projects/')` and warns about TOML `[projects.<slug>]` entries with no corresponding Lithos project-context doc. The same task-graph probe gates `lithos-loom run` (see §4.1).
 
 ---
@@ -381,7 +385,7 @@ lithos-loom validate-config [-c config.toml] [--dry-run]
 ```
 
 - Plain form: parse, validate, print `OK:` summary (agent_id, lithos_url, projects, routes, subscriptions).
-- `--dry-run`: also fetch open tasks from Lithos and print routing / subscription dry-runs. Useful before introducing new routes.
+- `--dry-run`: also fetch open tasks from Lithos and print routing / subscription dry-runs. Useful before introducing new routes. Each task's route row is `✓ (claim)` (would fire), `deferred (<reason>)` (tags match but Lithos doesn't consider it ready — see §3.2 for the reason vocabulary), or `—` (no match).
 
 ### 4.3 `lithos-loom doctor`
 
