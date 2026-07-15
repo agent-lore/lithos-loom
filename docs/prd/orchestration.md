@@ -107,7 +107,7 @@ external triggers. The extension just lets several of those land smaller.
 | Gate *resolution* (observing the PR merged / CI green / human approved) | **Loom** (Lithos never polls — §5.3 of the extension) |
 | Route matching (tag → plugin), claim/renew/release, plugin subprocess + `result.json` | Loom (unchanged) |
 | Worktrees, agent invocation, work-dir lifecycle, resume/re-dispatch | Loom (unchanged) |
-| Concurrency / project-affinity / host-affinity enforcement | Loom (`parallelizable`/`priority` stay advisory until extension Phase 4) |
+| Concurrency / project-affinity / host-affinity enforcement | Loom (`priority` stays advisory until extension Phase 4) |
 | `story-develop` internals (conversational review, containers, PR delivery) | Loom (unchanged) |
 
 ## How the extension reshapes Loom
@@ -191,7 +191,7 @@ anyway) and instead builds a real graph:
 - The same applies to the **bulk `project import`** path: `task_graph.build_plan`
   already computes the parent/child + sequencing structure from indentation; it
   now emits `task_type` + `parent_task_id` + `depends_on=` on `task_create`
-  instead of `metadata.depends_on` / `metadata.parallelizable`.
+  instead of `metadata.depends_on` / `metadata.parallelizable` (US9, shipped).
 
 > **Dependency on the Lithos edit.** The extension as written treats a `blocks`
 > edge as *resolved* when the blocker is merely *not open* — so a **cancelled**
@@ -256,11 +256,15 @@ Each is independently grabbable. Findings keep the established stable prefixes
    `include_blocked` filter reflect Lithos's authoritative blocked set
    (including gate and cycle blockers), not a metadata heuristic.
 9. As the operator, I want `project import` (and `task_graph.build_plan`) to
-   create the imported tree as `epic` / `subtask` tasks with `parent_task_id`
-   and `depends_on=` (→ edges) instead of `metadata.depends_on` /
-   `metadata.parallelizable`, so that imported projects are scheduler-aware the
-   same way decomposed PRDs are, and the indentation→graph logic has one
-   representation.
+   create the imported tree as an `epic` per parent with its children carrying
+   `parent_task_id`, and `depends_on=` (→ `blocks` edges) for `[sequential]`
+   chains, instead of `metadata.depends_on` / `metadata.parallelizable`, so that
+   imported projects are scheduler-aware the same way decomposed PRDs are, and
+   the indentation→graph logic has one representation.
+   *(Shipped. Note there is no `subtask` task_type — Lithos has `task` / `epic` /
+   `gate` only, so a child is a plain `task` with a `parent_task_id`. This was
+   also a live bug fix: Lithos had begun rejecting `metadata.depends_on` with
+   `invalid_metadata_key`, so importing any doc with indented children failed.)*
 
 ### H — Human-merge gate (retire the `loom_delivered` hack)
 
@@ -497,9 +501,10 @@ plugin-runner, result-file IO, TOML config, worktree/agent/git runner helpers,
   `blocks` edges).
 - `parent_task_id` — superseded by `parent_child` edges (set via `task_create`'s
   `parent_task_id` arg, which creates the edge).
-- `parallelizable` — superseded by the structural absence of a `blocks` edge
-  (kept only as an advisory hint for Loom's concurrency policy until extension
-  Phase 4 promotes priority/parallelism to first-class).
+- `parallelizable` — **gone** (US9). Superseded by the structural absence of a
+  `blocks` edge; nothing writes it and nothing ever read it. Concurrency policy
+  is `max_concurrency` (#85) until extension Phase 4 promotes priority/
+  parallelism to first-class.
 - `host_affinity`, `review_policy_override`, `friction_count`, `cost_total_usd`
   — as in the old full PRD (A7/A3/A5/cost).
 - Gate-bearing tasks carry the extension's gate metadata (`gate_type` + per-type

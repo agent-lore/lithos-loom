@@ -19,7 +19,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 ### `lithos_loom.task_graph`
 - class `TaskCreatePlan` — One Lithos ``task_create`` call's worth of structured input.
-- def `build_plan` — Build task-create plans with dependency edges from indentation.
+- def `build_plan` — Build task-create plans with graph edges derived from indentation.
 
 ### `lithos_loom.task_line`
 - def `render_task_id` — Render the ``🆔 lithos:<id>`` stable-identifier marker.

@@ -288,22 +288,49 @@ def test_indented_children_parallel_default(tmp_path: Path) -> None:
         "- [ ] Parent\n  - [ ] Child A\n  - [ ] Child B\n",
         encoding="utf-8",
     )
-    client = _stub_client(task_create_ids=["task-A", "task-B", "task-parent"])
+    client = _stub_client(task_create_ids=["task-parent", "task-A", "task-B"])
     runner = CliRunner()
     with _patched_client(client):
         result = runner.invoke(
             project_app, ["import", str(source), "-c", str(cfg_path)]
         )
     assert result.exit_code == 0, result.stdout
-    # 3 task_create calls — children first per E4
+    # 3 task_create calls, parent FIRST — Lithos requires parent_task_id to
+    # already exist, and document order satisfies that (US9).
     calls = client.task_create.await_args_list
-    assert calls[0].kwargs["title"] == "Child A"
-    assert calls[0].kwargs["metadata"]["parallelizable"] is True
-    assert calls[1].kwargs["title"] == "Child B"
-    assert calls[1].kwargs["metadata"]["parallelizable"] is True
-    # Parent has depends_on referencing the freshly-created child ids
-    assert calls[2].kwargs["title"] == "Parent"
-    assert set(calls[2].kwargs["metadata"]["depends_on"]) == {"task-A", "task-B"}
+    assert calls[0].kwargs["title"] == "Parent"
+    assert calls[0].kwargs["task_type"] == "epic"
+    assert calls[0].kwargs["parent_task_id"] is None
+    # Children hang off the epic; parallel siblings share no blocks edge.
+    for call, title in ((calls[1], "Child A"), (calls[2], "Child B")):
+        assert call.kwargs["title"] == title
+        assert call.kwargs["task_type"] == "task"
+        assert call.kwargs["parent_task_id"] == "task-parent"
+        assert call.kwargs["depends_on"] is None
+
+
+def test_import_never_writes_rejected_graph_metadata_keys(tmp_path: Path) -> None:
+    """Lithos rejects ``metadata.depends_on`` outright (``invalid_metadata_key``:
+    "task dependencies are first-class task edges"), which broke import for any
+    doc with indented children. The graph moved to real edges — nothing may put
+    it back in metadata."""
+    cfg_path = _write_config(tmp_path)
+    source = tmp_path / "demo.md"
+    source.write_text(
+        "- [ ] Build [sequential]\n  - [ ] Step 1\n  - [ ] Step 2\n",
+        encoding="utf-8",
+    )
+    client = _stub_client(task_create_ids=["task-parent", "task-step1", "task-step2"])
+    runner = CliRunner()
+    with _patched_client(client):
+        result = runner.invoke(
+            project_app, ["import", str(source), "-c", str(cfg_path)]
+        )
+    assert result.exit_code == 0, result.stdout
+    for call in client.task_create.await_args_list:
+        assert "depends_on" not in call.kwargs["metadata"]
+        assert "blocked_on" not in call.kwargs["metadata"]
+        assert "parallelizable" not in call.kwargs["metadata"]
 
 
 # ── 4. Sequential marker override ─────────────────────────────────────
@@ -316,7 +343,7 @@ def test_sequential_marker_creates_chain(tmp_path: Path) -> None:
         "- [ ] Build [sequential]\n  - [ ] Step 1\n  - [ ] Step 2\n",
         encoding="utf-8",
     )
-    client = _stub_client(task_create_ids=["task-step1", "task-step2", "task-parent"])
+    client = _stub_client(task_create_ids=["task-parent", "task-step1", "task-step2"])
     runner = CliRunner()
     with _patched_client(client):
         result = runner.invoke(
@@ -327,16 +354,16 @@ def test_sequential_marker_creates_chain(tmp_path: Path) -> None:
     step1_call = next(c for c in calls if c.kwargs["title"] == "Step 1")
     step2_call = next(c for c in calls if c.kwargs["title"] == "Step 2")
     parent_call = next(c for c in calls if c.kwargs["title"] == "Build")
-    # Step 1: no depends_on; NOT parallelizable
-    assert "depends_on" not in step1_call.kwargs["metadata"]
-    assert "parallelizable" not in step1_call.kwargs["metadata"]
-    # Step 2: depends on Step 1; NOT parallelizable
-    assert step2_call.kwargs["metadata"]["depends_on"] == ["task-step1"]
-    # Parent depends on both children (D64 unchanged)
-    assert set(parent_call.kwargs["metadata"]["depends_on"]) == {
-        "task-step1",
-        "task-step2",
-    }
+    # The parent contains the chain but does not depend on it.
+    assert parent_call.kwargs["task_type"] == "epic"
+    assert parent_call.kwargs["depends_on"] is None
+    # Step 1: first in the chain, so no predecessor.
+    assert step1_call.kwargs["depends_on"] is None
+    # Step 2: one blocks edge back to Step 1's freshly-minted id.
+    assert step2_call.kwargs["depends_on"] == ["task-step1"]
+    # Both are children of the epic regardless of the chain.
+    assert step1_call.kwargs["parent_task_id"] == "task-parent"
+    assert step2_call.kwargs["parent_task_id"] == "task-parent"
 
 
 # ── 5. Tasks-only happy path ──────────────────────────────────────────

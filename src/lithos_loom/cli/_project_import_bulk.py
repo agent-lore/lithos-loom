@@ -20,7 +20,7 @@ from pathlib import Path
 from lithos_loom.config import LoomConfig
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import LithosClient, NoteClient, Task, TaskClient
-from lithos_loom.task_graph import TaskCreatePlan
+from lithos_loom.task_graph import TASK, TaskCreatePlan
 from lithos_loom.task_line_parser import ParsedTaskLine, ValidationError
 
 _LOG = logging.getLogger(__name__)
@@ -243,7 +243,7 @@ def render_dry_run_plan(plan: ImportPlan, *, project_existed: bool) -> str:
         else:
             lines.append(
                 f"WOULD CREATE {len(plan.plans)} tasks "
-                f"(top-level: flat; nested: depends_on parent):"
+                f"(top-level: flat; nested: children of an epic):"
             )
         for entry in _format_task_tree(plan.plans, slug=plan.slug):
             lines.append(f"  {entry}")
@@ -257,9 +257,9 @@ def render_dry_run_plan(plan: ImportPlan, *, project_existed: bool) -> str:
 def _format_task_tree(plans: list[TaskCreatePlan], *, slug: str) -> list[str]:
     """Render the task list as an indented tree for --dry-run output.
 
-    Children (anything with non-zero indent) are nested under their
-    parent for visual clarity. Each line shows description + tags +
-    priority + parallelizable flag + depends_on hint.
+    Children are nested under their parent for visual clarity. Each line
+    shows description + tags + priority + type + depends_on hint — the
+    graph :func:`create_tasks` will build.
 
     The auto-added ``#project/<slug>`` tag is included in the rendered
     tag list so the preview is a faithful reflection of what gets
@@ -275,25 +275,19 @@ def _format_task_tree(plans: list[TaskCreatePlan], *, slug: str) -> list[str]:
     top_level_count = 0
     for plan in plans:
         line = plan.line
-        if line.indent == 0:
+        parent_ln = plan.parent_line_number
+        if parent_ln is None:
             top_level_count += 1
             label = str(top_level_count)
-            parent_label[line.line_number] = label
-            counters[line.line_number] = 0
             indent_str = ""
         else:
-            # Find the containing parent (a previous plan whose
-            # line_number is in our depends_on chain — but it's easier
-            # to walk back through the plans list for the most-recent
-            # shallower indent).
-            parent_ln = _find_parent_line_number(plans, plan)
             parent_lbl = parent_label.get(parent_ln, "?")
             counters[parent_ln] = counters.get(parent_ln, 0) + 1
             child_letter = chr(ord("a") + counters[parent_ln] - 1)
             label = f"{parent_lbl}{child_letter}"
-            parent_label[line.line_number] = label
-            counters[line.line_number] = 0
-            indent_str = "  " * (line.indent and 1)
+            indent_str = "  "
+        parent_label[line.line_number] = label
+        counters.setdefault(line.line_number, 0)
 
         # Mirror create_tasks's tag composition: user tags + auto-added project tag.
         rendered_tags = list(line.tags)
@@ -301,7 +295,7 @@ def _format_task_tree(plans: list[TaskCreatePlan], *, slug: str) -> list[str]:
             rendered_tags.append(project_tag)
         tag_part = " " + " ".join(f"#{t}" for t in rendered_tags)
         priority_part = f" priority={line.priority}" if line.priority else ""
-        parallel_part = " parallelizable=true" if plan.parallelizable else ""
+        type_part = f" type={plan.task_type}" if plan.task_type != TASK else ""
         depends_part = ""
         if plan.depends_on_line_numbers:
             dep_labels = [
@@ -311,23 +305,9 @@ def _format_task_tree(plans: list[TaskCreatePlan], *, slug: str) -> list[str]:
             depends_part = f"  (depends_on=#{','.join(dep_labels)})"
 
         desc = line.description if line.description else "(empty)"
-        meta = f"{tag_part}{priority_part}{parallel_part}{depends_part}"
+        meta = f"{tag_part}{priority_part}{type_part}{depends_part}"
         out.append(f'{indent_str}{label}. "{desc}"{meta}')
     return out
-
-
-def _find_parent_line_number(plans: list[TaskCreatePlan], child: TaskCreatePlan) -> int:
-    """Return the line_number of the parent of `child`.
-
-    Mirrors the stack-walk in :func:`task_graph.build_plan` but for
-    rendering only.
-    """
-    for prev in reversed(plans):
-        if prev.line.line_number >= child.line.line_number:
-            continue
-        if prev.line.indent < child.line.indent:
-            return prev.line.line_number
-    return -1  # shouldn't happen for non-top-level lines
 
 
 # ── Typo hint for tasks-only "project not found" ───────────────────────
@@ -514,27 +494,27 @@ async def create_tasks(
 
     ``source`` is captured into the recovery command so the operator
     can copy/paste it directly.
+
+    Tasks are created in **document order**, which :mod:`task_graph`
+    guarantees is a valid topological order: Lithos requires a
+    ``parent_task_id`` / ``depends_on`` target to exist already, and a
+    parent always precedes its children (as does a sequential sibling its
+    successor). So ``line_to_id`` is always populated by the time a plan
+    references it.
     """
-    sorted_plans = _topologically_sort(plans)
     line_to_id: dict[int, str] = {}
     first_created: str | None = None
     failure: BaseException | None = None
-    n_total = len(sorted_plans)
+    n_total = len(plans)
     project_tag = f"project/{slug}"
 
     async with LithosClient(
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
-        for plan in sorted_plans:
+        for plan in plans:
             metadata: dict[str, object] = {"project": slug}
             if plan.line.priority is not None:
                 metadata["priority"] = plan.line.priority
-            if plan.depends_on_line_numbers:
-                metadata["depends_on"] = [
-                    line_to_id[ln] for ln in plan.depends_on_line_numbers
-                ]
-            if plan.parallelizable:
-                metadata["parallelizable"] = True
 
             # Auto-add the project routing tag if the source line didn't
             # already carry it. The parser strips
@@ -547,11 +527,21 @@ async def create_tasks(
             if project_tag not in tags:
                 tags.append(project_tag)
 
+            # Resolve line numbers → freshly-minted ids. Safe to do eagerly:
+            # document order guarantees these are already created, and a
+            # mid-batch failure breaks the loop before any dependent is reached.
+            parent_ln = plan.parent_line_number
+            parent_task_id = None if parent_ln is None else line_to_id[parent_ln]
+            depends_on = [line_to_id[ln] for ln in plan.depends_on_line_numbers]
+
             try:
                 task_id = await client.task_create(
                     title=plan.line.description or "(no description)",
                     tags=tags,
                     metadata=metadata,
+                    task_type=plan.task_type,
+                    parent_task_id=parent_task_id,
+                    depends_on=depends_on or None,
                 )
             except (OSError, LithosClientError) as exc:
                 failure = exc
@@ -592,36 +582,3 @@ async def create_tasks(
             n_created=len(line_to_id), n_total=n_total, underlying=failure
         )
     return len(line_to_id)
-
-
-def _topologically_sort(plans: list[TaskCreatePlan]) -> list[TaskCreatePlan]:
-    """Sort plans so all of a plan's dependencies appear before it.
-
-    E4: children before parents (parents reference child line_numbers
-    in their depends_on). Sequential siblings: each child references
-    the previous child. The graph is always a DAG when built by
-    :func:`task_graph.build_plan`.
-
-    O(n²) but n is small (typically <50 tasks per import).
-    """
-    remaining = list(plans)
-    done: set[int] = set()
-    out: list[TaskCreatePlan] = []
-    while remaining:
-        next_round: list[TaskCreatePlan] = []
-        progressed = False
-        for plan in remaining:
-            if all(dep in done for dep in plan.depends_on_line_numbers):
-                out.append(plan)
-                done.add(plan.line.line_number)
-                progressed = True
-            else:
-                next_round.append(plan)
-        if not progressed:
-            unresolved = [p.line.line_number for p in next_round]
-            raise RuntimeError(
-                f"cycle in task graph; remaining line_numbers={unresolved!r} "
-                f"(this is a bug in task_graph.build_plan — please report)"
-            )
-        remaining = next_round
-    return out

@@ -16,12 +16,15 @@ and asks Claude for structured JSON output matching the schema below.
       "brief": "<≥80-word brief: problem framing, what to build, success criteria, references>",
       "acceptance_criteria": ["<criterion 1>", "<criterion 2>", ...],
       "deps": [<1-based-index of prior story this depends on>, ...],
-      "files_hint": ["<likely file path 1>", ...],
-      "parallelizable": false
+      "files_hint": ["<likely file path 1>", ...]
     }
   ]
 }
 ```
+
+`deps` becomes ``task_create(depends_on=…)`` — one ``blocks`` edge per entry.
+Stories with no ``deps`` are parallel by construction; there is no
+``parallelizable`` field to emit, since parallelism is the absence of an edge.
 
 ## Prompt body
 
