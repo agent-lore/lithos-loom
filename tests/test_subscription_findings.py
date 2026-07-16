@@ -69,6 +69,27 @@ async def test_post_finding_then_mark_posts_then_marks() -> None:
     )
 
 
+async def test_marker_task_id_marks_a_different_task_than_the_finding() -> None:
+    """The pr-gate resolver posts [DeliveredPRClosed] on the STORY but marks the
+    GATE (the gate is what stays open and would be re-swept)."""
+    lithos = AsyncMock()
+    await post_finding_then_mark(
+        _ctx(lithos),
+        task_id="story",
+        summary="[DeliveredPRClosed] …",
+        marker={"state": "closed_unmerged"},
+        subsystem="pr-gate",
+        retry_hint="hint",
+        marker_task_id="gate",
+    )
+    lithos.finding_post.assert_awaited_once_with(
+        task_id="story", summary="[DeliveredPRClosed] …"
+    )
+    lithos.task_update.assert_awaited_once_with(
+        task_id="gate", metadata={"state": "closed_unmerged"}
+    )
+
+
 async def test_task_not_found_on_finding_still_marks() -> None:
     """post-lithos#303 a terminal task still accepts the marker, so a
     ``task_not_found`` on the finding falls through to the mark."""

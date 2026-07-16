@@ -111,6 +111,9 @@ graph TD
   Subscriptions --> State
   Subscriptions --> Tasks
   Supervisor --> Config
+  Tasks --> Errors
+  Tasks --> GitHub
+  Tasks --> LithosClient
   linkStyle 0 stroke:#999,stroke-dasharray:4
   linkStyle 1 stroke:#999,stroke-dasharray:4
   linkStyle 2 stroke:#999,stroke-dasharray:4
@@ -160,4 +163,7 @@ graph TD
   linkStyle 59 stroke:#bbb
   linkStyle 60 stroke:#bbb
   linkStyle 61 stroke:#bbb
+  linkStyle 62 stroke:#bbb
+  linkStyle 63 stroke:#bbb
+  linkStyle 64 stroke:#bbb
 ```

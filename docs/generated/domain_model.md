@@ -92,6 +92,11 @@ classDiagram
     +is_sequential_parent bool
     +is_empty bool
   }
+  class PrGateSpec {
+    +repo str
+    +pr_number int
+    +pr_url str
+  }
   class TaskCreatePlan {
     +task_type str
     +parent_line_number int | None

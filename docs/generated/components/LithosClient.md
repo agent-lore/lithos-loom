@@ -32,6 +32,6 @@ Async MCP-over-SSE client to the Lithos server (task/note CRUD, event stream, de
 ## Dependencies
 
 - Depends on: [Errors](Errors.md)
-- Used by: [Children](Children.md), [Cli](Cli.md), [Doctor](Doctor.md), [Entrypoint](Entrypoint.md), [Plugins](Plugins.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
+- Used by: [Children](Children.md), [Cli](Cli.md), [Doctor](Doctor.md), [Entrypoint](Entrypoint.md), [Plugins](Plugins.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
 
 [← all generated docs](../README.md)

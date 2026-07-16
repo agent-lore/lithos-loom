@@ -57,6 +57,7 @@ async def post_finding_then_mark(
     marker: Mapping[str, Any],
     subsystem: str,
     retry_hint: str,
+    marker_task_id: Any = None,
 ) -> None:
     """Post a one-shot prefixed finding, then write a scoped de-dup marker.
 
@@ -67,6 +68,11 @@ async def post_finding_then_mark(
     (``retry_hint``) and returns WITHOUT marking, so the whole breadcrumb retries
     next cycle. The marker write's own errors are handled by :func:`write_marker`.
     Never raises.
+
+    ``marker_task_id`` defaults to ``task_id`` (finding + marker on the same
+    task). The pr-gate resolver posts the finding on the *story* but marks the
+    *gate* — the gate is what stays open and would be re-swept — so it passes a
+    distinct marker target.
     """
     try:
         await ctx.lithos.finding_post(task_id=task_id, summary=summary)
@@ -80,4 +86,9 @@ async def post_finding_then_mark(
                 retry_hint,
             )
             return  # leave the marker unset → retry next cycle
-    await write_marker(ctx, task_id=task_id, marker=marker, subsystem=subsystem)
+    await write_marker(
+        ctx,
+        task_id=task_id if marker_task_id is None else marker_task_id,
+        marker=marker,
+        subsystem=subsystem,
+    )

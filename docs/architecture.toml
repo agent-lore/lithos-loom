@@ -62,7 +62,7 @@ Config         = ["lithos_loom.config"]
 Errors         = ["lithos_loom.errors"]
 LithosClient   = ["lithos_loom.lithos_client"]
 GitHub         = ["lithos_loom.github_client"]
-Tasks          = ["lithos_loom.task_graph", "lithos_loom.task_line_parser", "lithos_loom.task_line"]
+Tasks          = ["lithos_loom.task_graph", "lithos_loom.task_line_parser", "lithos_loom.task_line", "lithos_loom.gates"]
 State          = ["lithos_loom.cursor_store", "lithos_loom.sync_state"]
 Runners        = ["lithos_loom.runner", "lithos_loom.plugin_runner"]
 Supervisor     = ["lithos_loom.supervisor"]
@@ -85,7 +85,7 @@ Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "St
 # is deliberately NOT pinned to the exact current high-water mark. Ratchet the
 # *count* of oversized modules down via modules_over_800_lines instead.
 [budgets]
-cross_component_edges  = 62   # measured 2026-07; direction: down
+cross_component_edges  = 65   # 62->65: Epic H gates.py (Tasks) + its route-runner / develop-pr-merge / github-watcher importers; direction: down
 component_cycles       = 1    # Render <-> Subscriptions; goal: 0
 module_cycles          = 1    # agent_session <-> panel <-> rounds SCC; goal: 0
 modules_over_800_lines = 6  # 8->6 via ARCH-9 slices 1-2; direction: down
@@ -94,7 +94,7 @@ max_module_lines       = 2210 # stop-loss; lithos_client is 2195 (Epic G US3 add
                                # wire-types/parsers extraction — tracked as a follow-up;
                                # do that (not another bump) before it grows further.
 cross_module_private_refs = 8   # measured 2026-07; children._boot x3, story_develop seam constants; goal: 0
-tests_private_imports     = 97  # measured 2026-07; cli.develop helpers dominate; direction: down
+tests_private_imports     = 99  # 97->99: Epic H gate-resolver tests reach _develop_pr_merge internals; cli.develop helpers dominate; direction: down
 
 # Domain class diagram: the GitHub/task data types are the domain entities.
 # Everything else (config/settings, plugin-internal working types, eval
@@ -103,6 +103,7 @@ tests_private_imports     = 97  # measured 2026-07; cli.develop helpers dominate
 [domain]
 include_modules = [
     "lithos_loom.github_client",
+    "lithos_loom.gates",
     "lithos_loom.task_graph",
     "lithos_loom.task_line_parser",
     "lithos_loom.supervisor",

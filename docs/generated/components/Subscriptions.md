@@ -15,7 +15,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._blocked_snapshot` | XS | 1 | 0 |
-| `lithos_loom.subscriptions._develop_pr_merge` | S | 0 | 1 |
+| `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 2 |
 | `lithos_loom.subscriptions._findings` | XS | 0 | 2 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
 | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |
@@ -51,6 +51,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._develop_pr_merge`
 - def `reconcile_develop_pr` — Reconcile one open task's delivered-PR merge state.
+- def `reconcile_pr_gate` — Resolve one open ``pr`` gate against its PR's merge state.
 
 ### `lithos_loom.subscriptions._findings`
 - def `write_marker` — Write a de-dup marker via ``task_update``, swallowing ``task_not_found``.
