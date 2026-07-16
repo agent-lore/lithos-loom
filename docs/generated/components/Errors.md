@@ -27,6 +27,6 @@ Shared exception hierarchy (LithosLoomError and friends).
 ## Dependencies
 
 - Depends on: —
-- Used by: [Cli](Cli.md), [Config](Config.md), [Doctor](Doctor.md), [Entrypoint](Entrypoint.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Plugins](Plugins.md), [Runners](Runners.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
+- Used by: [Cli](Cli.md), [Config](Config.md), [Doctor](Doctor.md), [Entrypoint](Entrypoint.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Plugins](Plugins.md), [Runners](Runners.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
 
 [← all generated docs](../README.md)

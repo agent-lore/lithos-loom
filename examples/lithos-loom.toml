@@ -81,8 +81,10 @@ command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task
 max_runtime_seconds = 28800
 # completes_task = false: an APPROVED run means a reviewed branch + PR exist,
 # awaiting human merge — NOT that the task is done. The runner leaves the task
-# open (marks metadata.loom_delivered so a restart won't re-develop it);
-# completion happens on PR merge (github-linked tasks close via the watcher).
+# open and raises a first-class `pr` gate that structurally blocks it (Epic H;
+# also marks metadata.loom_delivered as a restart fallback). Completion happens
+# on PR merge — the github-watcher resolves the gate (github-linked tasks also
+# close via the issue mirror).
 completes_task = false
 
 [routes.match]
@@ -350,12 +352,18 @@ tags = ["trigger:story-develop"]
 # # interval it re-dispatches GH-linked Lithos tasks through the push
 # # handler. Set to 0 to disable.
 # pr_merge_poll_enabled = true
-# # #87: the same reconcile sweep also completes non-issue-linked tasks
-# # on PR merge. For each open task carrying metadata.develop_pr_url (and
-# # NOT github_issue_url — those close via the issue mirror), it polls the
-# # PR: merged -> task_complete; closed-unmerged or deleted -> left open
-# # with a one-shot [DeliveredPRClosed] finding. Set false to run the
-# # watcher for issue sync only.
+# # The same reconcile sweep also resolves PR delivery on merge. Two paths,
+# # same GitHub poll:
+# #   Epic H: for each open `pr` gate (task_type="gate", gate_type="pr") it
+# #   polls the PR and, on merge, completes the gated story then the gate
+# #   ([GateResolved]); closed-unmerged / deleted leaves the gate OPEN with a
+# #   one-shot [DeliveredPRClosed] on the story (never cancels — a cancelled
+# #   gate would strand the story).
+# #   #87 legacy: for each open task carrying metadata.develop_pr_url (and
+# #   NOT github_issue_url — those close via the issue mirror — and NOT
+# #   pr_gate_id — owned by the gate resolver), merged -> task_complete;
+# #   closed-unmerged / deleted -> left open with [DeliveredPRClosed].
+# # Set false to run the watcher for issue sync only.
 
 # ── story-develop host-wide defaults ──────────────────────────────────
 #

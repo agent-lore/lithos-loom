@@ -11,11 +11,20 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
+| `lithos_loom.gates` | S | 1 | 5 |
 | `lithos_loom.task_graph` | S | 1 | 1 |
 | `lithos_loom.task_line` | S | 0 | 4 |
 | `lithos_loom.task_line_parser` | S | 2 | 1 |
 
 ## Public API
+
+### `lithos_loom.gates`
+- class `PrGateSpec` — The PR a ``pr`` gate watches, read back from its metadata.
+- def `create_pr_gate` — Create a ``pr`` gate for *story_id*'s delivered PR and link it.
+- def `create_pr_gate_best_effort` — Create a ``pr`` gate for a delivered story, degrading instead of raising.
+- def `is_pr_gate` — Whether *task* is a ``pr`` gate (type + ``gate_type`` metadata).
+- def `parse_pr_gate` — Read a ``pr`` gate's watched PR out of its metadata, or ``None``.
+- def `waiter_of` — The story a gate blocks — the ``to`` of its outgoing ``waits_on_gate`` edge — or ``None`` for an orphan gate (no waiter).
 
 ### `lithos_loom.task_graph`
 - class `TaskCreatePlan` — One Lithos ``task_create`` call's worth of structured input.
@@ -34,7 +43,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 ## Dependencies
 
-- Depends on: —
+- Depends on: [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md)
 - Used by: [Cli](Cli.md), [Render](Render.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
 
 [← all generated docs](../README.md)

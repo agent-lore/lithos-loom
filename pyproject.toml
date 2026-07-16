@@ -110,6 +110,7 @@ source_modules = [
     "lithos_loom.task_graph",
     "lithos_loom.task_line_parser",
     "lithos_loom.task_line",
+    "lithos_loom.gates",
     "lithos_loom.cursor_store",
     "lithos_loom.sync_state",
     "lithos_loom.runner",

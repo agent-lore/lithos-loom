@@ -42,6 +42,7 @@ from typing import Any
 from lithos_loom.bus import Event, EventBus, Subscription
 from lithos_loom.config import RouteConfig
 from lithos_loom.errors import LithosClientError, PluginContractError
+from lithos_loom.gates import STORY_GATE_ID_KEY, create_pr_gate_best_effort
 from lithos_loom.plugin_runner import run_plugin
 
 __all__ = ["PluginRunFn", "RouteRunner"]
@@ -435,7 +436,7 @@ class RouteRunner:
                     f"plugin exceeded max runtime: {exc}",
                 )
             else:
-                succeeded = await self._apply_result(task_id, result)
+                succeeded = await self._apply_result(task_id, result, payload)
         finally:
             renew_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -468,6 +469,7 @@ class RouteRunner:
         self,
         task_id: str,
         result: Mapping[str, Any],
+        payload: Mapping[str, Any],
     ) -> bool:
         """Apply the plugin's result. Returns ``True`` iff the task succeeded."""
         status = result.get("status")
@@ -483,9 +485,10 @@ class RouteRunner:
             else:
                 # PR-producing route: success means a reviewed branch + PR
                 # exist, awaiting human merge — NOT that the task is done.
-                # Leave it open (release the claim) and mark it delivered so a
-                # restart doesn't re-develop it. Completion happens on merge.
-                await self._mark_delivered_and_release(task_id)
+                # Model the wait as a first-class `pr` gate (Epic H), release
+                # the claim, and keep the loom_delivered marker as restart
+                # safety while gates soak. Completion happens on merge.
+                await self._gate_and_release(task_id, payload, result)
             return True
         if status == "failed":
             err = result.get("error") or {}
@@ -673,24 +676,56 @@ class RouteRunner:
                 task_id,
             )
 
-    async def _mark_delivered_and_release(self, task_id: str) -> None:
-        """Leave a delivered task open for merge (``completes_task=false``).
+    async def _gate_and_release(
+        self,
+        task_id: str,
+        payload: Mapping[str, Any],
+        result: Mapping[str, Any],
+    ) -> None:
+        """Gate a delivered task on human merge, then release (``completes_task
+        =false``).
 
-        Marks ``metadata.loom_delivered`` so a restart's bootstrap won't
-        re-develop it, then releases the claim (don't hold it across a
-        potentially long wait for a human merge). The work exists on the
-        branch + PR regardless, so neither step is fatal — but a failure of
-        either has an operational consequence (a missing marker re-opens the
-        duplicate-PR-on-restart hazard; a stuck claim can block other
-        runners), so on failure we post a ``[Friction]`` finding rather than
-        only logging, making the degraded state visible in Lithos.
+        Epic H: create a ``pr`` gate from the run's ``pr_url`` so "awaiting
+        merge" is a first-class blocker, then write ``metadata.loom_delivered``
+        (restart safety while gates soak) and release the claim (don't hold it
+        across a potentially long human wait). Each step's failure is degraded,
+        not fatal — the branch + PR exist regardless — so we collect the
+        consequences and post ONE ``[Friction]`` making the degraded state
+        visible in Lithos rather than only logging.
+
+        Gate creation is best-effort: if ``pr_url`` is missing (a PR-less
+        success — for story-develop, #194 makes that impossible, but the runner
+        is plugin-agnostic) or the write fails, merge tracking falls back to the
+        legacy ``develop_pr_url`` sweep and ``loom_delivered`` alone guards
+        re-dispatch.
         """
+        problems: list[str] = []
+
+        project = (payload.get("metadata") or {}).get("project")
+        gate_id, gate_problem = await create_pr_gate_best_effort(
+            self.lithos,
+            story_id=task_id,
+            story_title=str(payload.get("title") or task_id),
+            pr_url=result.get("pr_url"),
+            project=project if isinstance(project, str) else None,
+            agent=self.agent_id,
+        )
+        if gate_problem is not None:
+            problems.append(gate_problem)
+
+        # loom_delivered stays as restart safety; pr_gate_id (when a gate was
+        # created) tells the legacy develop_pr_url sweep to stand aside so the
+        # two paths never both act on one PR.
+        story_metadata: dict[str, Any] = {"loom_delivered": True}
+        if gate_id is not None:
+            story_metadata[STORY_GATE_ID_KEY] = gate_id
+
         marked = True
         try:
             await self.lithos.task_update(
                 task_id=task_id,
                 agent=self.agent_id,
-                metadata={"loom_delivered": True},
+                metadata=story_metadata,
             )
         except Exception:
             marked = False
@@ -707,25 +742,34 @@ class RouteRunner:
             logger.exception(
                 "RouteRunner %s: task_release failed for %s", self.route.name, task_id
             )
-        if marked and released:
-            logger.info(
-                "RouteRunner %s: delivered %s — left open for human merge",
-                self.route.name,
-                task_id,
-            )
-            return
-        problems: list[str] = []
         if not marked:
-            problems.append(
-                "could not set metadata.loom_delivered — a daemon restart may "
-                "re-develop this task into a duplicate PR; merge the PR or set "
-                "the marker manually"
-            )
+            if gate_id is not None:
+                # The gate already blocks re-dispatch (a gated story is absent
+                # from the ready frontier), so the missing marker is benign —
+                # "the gate is the durable state."
+                problems.append(
+                    "could not set metadata.loom_delivered, but the pr gate "
+                    "already blocks re-dispatch"
+                )
+            else:
+                problems.append(
+                    "could not set metadata.loom_delivered and no pr gate "
+                    "exists — a daemon restart may re-develop this task into a "
+                    "duplicate PR; merge the PR or set the marker manually"
+                )
         if not released:
             problems.append(
                 "could not release the claim — it will linger until its TTL "
                 "expires, briefly blocking other runners"
             )
+        if not problems:
+            logger.info(
+                "RouteRunner %s: delivered %s — gated on merge (gate %s)",
+                self.route.name,
+                task_id,
+                gate_id,
+            )
+            return
         summary = (
             f"[Friction] route {self.route.name}: delivered task (PR raised) but "
             + "; ".join(problems)
