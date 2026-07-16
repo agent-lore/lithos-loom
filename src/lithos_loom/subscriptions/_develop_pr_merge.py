@@ -283,8 +283,12 @@ async def reconcile_pr_gate(
 
     state = _pr_merge_state(pr)
     if state == "merged":
-        await _resolve_gate_merged(gate, story_id, spec.pr_url, pr, ctx)
-        return "merged"
+        if await _resolve_gate_merged(gate, story_id, spec.pr_url, pr, ctx):
+            return "merged"
+        # A completion failed transiently; the gate is left open and retried
+        # next sweep. Report it as `error` (not `merged`) so the sweep summary
+        # doesn't count an un-landed resolution as resolved.
+        return "error"
     if state == "closed_unmerged":
         await _gate_closed(gate, story_id, spec.pr_url, "closed_unmerged", ctx)
         return "closed_unmerged"
@@ -295,8 +299,12 @@ async def reconcile_pr_gate(
 
 async def _resolve_gate_merged(
     gate: Any, story_id: str | None, pr_url: str, pr: Any, ctx: SubscriptionContext
-) -> None:
+) -> bool:
     """PR merged: complete the story, then the gate, then post ``[GateResolved]``.
+
+    Returns ``True`` when the gate is resolved (both completes landed or were
+    already terminal), ``False`` on a transient completion failure — the caller
+    surfaces that as a retry outcome rather than counting it as ``merged``.
 
     **Story-first.** Completing the gate first momentarily readies a story that
     still carries its ``trigger:*`` tag; if the story completion then failed, the
@@ -310,9 +318,9 @@ async def _resolve_gate_merged(
     if story_id is not None and not await _complete_swallowing(
         story_id, ctx, subject=f"story {story_id}"
     ):
-        return  # transient — leave gate open, retry next sweep
+        return False  # transient — leave gate open, retry next sweep
     if not await _complete_swallowing(gate.id, ctx, subject=f"gate {gate.id}"):
-        return
+        return False
     if story_id is not None:
         summary = (
             f"{GATE_RESOLVED} pr-gate: PR {pr_url} merged "
@@ -335,6 +343,7 @@ async def _resolve_gate_merged(
         pr_url,
         pr.merge_commit_sha or "no sha",
     )
+    return True
 
 
 async def _complete_swallowing(

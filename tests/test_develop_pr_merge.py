@@ -455,6 +455,33 @@ async def test_gate_merged_swallows_already_completed_story() -> None:
     assert (await _get(client, gate.id)).status == "completed"
 
 
+async def test_gate_merged_story_completion_failure_is_not_counted_resolved() -> None:
+    """A transient story-completion failure on the merged path: the gate is left
+    OPEN for the next sweep, and the outcome is `error` (not `merged`) so the
+    sweep summary never reports an un-landed resolution as resolved."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    original = client.task_complete
+
+    async def _fail_story(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == story:
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_complete = _fail_story  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    assert outcome == "error"
+    # Gate + story both still open; nothing marked → re-polled next sweep.
+    assert (await _get(client, gate.id)).status == "open"
+    assert (await _get(client, story)).status == "open"
+    assert MERGE_STATE_KEY not in (await _get(client, gate.id)).metadata
+    assert not any(f["summary"].startswith(GATE_RESOLVED) for f in client._findings)
+
+
 async def test_gate_closed_unmerged_leaves_gate_open_and_warns() -> None:
     """Closed-unmerged: the gate is LEFT OPEN (never cancelled — a cancelled
     gate is terminal and its story would be unrecoverable), a [DeliveredPRClosed]
