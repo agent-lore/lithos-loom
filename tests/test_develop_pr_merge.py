@@ -534,23 +534,27 @@ async def test_gate_already_resolved_for_this_url_is_skipped() -> None:
     github.get_pull_request.assert_not_awaited()
 
 
-async def test_gate_with_unparseable_metadata_is_marked_and_left() -> None:
+async def test_gate_with_unparseable_metadata_is_marked_then_stays_quiet() -> None:
     """A loom-side malformed gate (missing repo/number) can never resolve; mark
-    it so it isn't re-reported, but leave it open."""
+    it on the FIRST sweep, then stay silent — a re-marked/re-warned unparseable
+    gate every sweep would be persistent watcher noise."""
     client = FakeLithosClient(agent_id="a")
     gate_id = await client.task_create(
         title="bad gate",
         task_type="gate",
         metadata={"gate_type": "pr"},  # no repo / pr_number / pr_url
     )
-    gate = await client.task_get(task_id=gate_id)
     github = AsyncMock()
 
-    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
-
-    assert outcome == "unparseable"
-    github.get_pull_request.assert_not_awaited()
+    # First sweep: mark + report.
+    first = await reconcile_pr_gate(await _get(client, gate_id), github, _ctx(client))
+    assert first == "unparseable"
     assert (await _get(client, gate_id)).metadata[MERGE_STATE_KEY] == "unparseable"
+
+    # Second sweep (re-fetched with the marker): no-op, no GitHub call.
+    second = await reconcile_pr_gate(await _get(client, gate_id), github, _ctx(client))
+    assert second is None
+    github.get_pull_request.assert_not_awaited()
 
 
 async def test_orphan_gate_merged_completes_gate_without_a_finding() -> None:

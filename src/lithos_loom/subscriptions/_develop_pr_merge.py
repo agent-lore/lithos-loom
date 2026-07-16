@@ -231,6 +231,13 @@ async def reconcile_pr_gate(
         # The server validated gate_type at creation, so this is a
         # loom-side malformation (missing repo/pr_number/pr_url). It can never
         # resolve; leave it open, but mark it so we don't re-post every sweep.
+        # The url-scoped terminal-marker guard below only fires once a spec
+        # parses (it keys on spec.pr_url), so an unparseable gate needs its own
+        # skip here — otherwise it re-marks + re-warns every sweep. A later
+        # operator fix makes parse_pr_gate succeed, and the marker (no url key)
+        # won't match the guard below, so the repaired gate resolves normally.
+        if gate.metadata.get(MERGE_STATE_KEY) == "unparseable":
+            return None
         await write_marker(
             ctx,
             task_id=gate.id,
