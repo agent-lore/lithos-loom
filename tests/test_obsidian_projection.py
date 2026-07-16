@@ -98,6 +98,7 @@ def _event(
     tags: tuple[str, ...] = (),
     metadata: Mapping[str, Any] | None = None,
     claims: tuple[Mapping[str, Any], ...] = (),
+    task_type: str = "task",
 ) -> Event:
     return Event(
         type=event_type,
@@ -109,6 +110,7 @@ def _event(
             "tags": list(tags),
             "metadata": dict(metadata or {}),
             "claims": list(claims),
+            "task_type": task_type,
         },
     )
 
@@ -126,6 +128,45 @@ async def test_created_event_for_actionable_task_writes_line(tmp_path: Path) -> 
 
     content = (tmp_path / "_lithos/tasks.md").read_text()
     assert "- [ ] Review PR 🆔 lithos:abc" in content
+
+
+async def test_pr_gate_is_not_projected_as_a_checkbox(tmp_path: Path) -> None:
+    """Epic H: a `pr` gate carries no trigger tags, so the orphan rule would
+    render it as a `- [ ]` checkbox — and ticking it would complete the gate
+    and re-develop merged work. task_type flows through the payload so the
+    projection filters it out. No actionable task → no file written."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="gate-1",
+            title="Awaiting merge: US42",
+            task_type="gate",
+            metadata={"gate_type": "pr"},
+        ),
+        _ctx(),
+    )
+    assert not (tmp_path / "_lithos/tasks.md").exists()
+
+
+async def test_human_gate_is_projected_as_a_checkbox(tmp_path: Path) -> None:
+    """The counter-case: a `human` gate (PRD approval / checkpoint) IS the
+    operator's to resolve, so it must reach the vault to be ticked."""
+    cfg = _cfg(tmp_path)
+    handler = make_handler(cfg)
+    await handler(
+        _event(
+            "lithos.task.created",
+            task_id="gate-h",
+            title="Approve PRD: pipeline",
+            task_type="gate",
+            metadata={"gate_type": "human"},
+        ),
+        _ctx(),
+    )
+    content = (tmp_path / "_lithos/tasks.md").read_text()
+    assert "🆔 lithos:gate-h" in content
 
 
 async def test_created_event_for_autonomous_task_writes_nothing(

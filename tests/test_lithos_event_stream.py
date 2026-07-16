@@ -36,6 +36,9 @@ def _task(
     metadata: Mapping[str, Any] | None = None,
     claims: tuple[Mapping[str, Any], ...] = (),
     title: str = "t",
+    task_type: str = "task",
+    description: str | None = None,
+    resolved_at: datetime | None = None,
 ) -> Task:
     return Task(
         id=id_,
@@ -44,6 +47,9 @@ def _task(
         tags=tags,
         metadata=metadata or {},
         claims=claims,
+        task_type=task_type,
+        description=description,
+        resolved_at=resolved_at,
     )
 
 
@@ -261,9 +267,9 @@ async def test_bootstrap_emits_created_per_open_task() -> None:
 async def test_bootstrap_payload_matches_poller_shape() -> None:
     """Bootstrap-emitted events carry the full Task payload shape.
 
-    Same six keys the poller publishes (id, title, status, tags,
-    metadata, claims) so the RouteRunner contract is preserved across
-    the source swap.
+    The keys RouteRunner and the projection depend on (id, title, status,
+    tags, metadata, claims, resolved_at, task_type) so both contracts are
+    preserved across the source swap.
     """
     bus = EventBus()
     listener = bus.subscribe(event_types=["lithos.task.created"])
@@ -272,7 +278,7 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
             _task(
                 "abc",
                 tags=("trigger:test",),
-                metadata={"depends_on": ["x"]},
+                metadata={"k": "v"},
                 title="bootstrap task",
             )
         ],
@@ -296,10 +302,62 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
         "title": "bootstrap task",
         "status": "open",
         "tags": ["trigger:test"],
-        "metadata": {"depends_on": ["x"]},
+        "metadata": {"k": "v"},
         "claims": [],
         "resolved_at": None,
+        "task_type": "task",
     }
+
+
+async def test_bootstrap_payload_carries_task_type_for_a_gate() -> None:
+    """A bootstrapped gate publishes ``task_type="gate"`` so the projection
+    can keep it out of the operator's checkbox list (Epic H)."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created"])
+    client = _FakeClient(
+        bootstrap=[_task("g", task_type="gate", metadata={"gate_type": "pr"})]
+    )
+    source = _stream(client=client, bus=bus, aconnect=_FakeAconnect(connections=[[]]))
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    drained = _drain(listener)
+    assert drained, "bootstrap published nothing"
+    assert drained[0][1]["task_type"] == "gate"
+
+
+async def test_terminal_event_preserves_task_type_from_cached_snapshot() -> None:
+    """A `pr` gate that completes must publish ``task_type="gate"``, not the
+    "task" default. The terminal-status override used to rebuild the Task by
+    hand and drop every un-listed field — so a completing gate published as a
+    plain task and polluted the operator's "done this week" window.
+    """
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.completed"])
+    gate = _task("g", task_type="gate", metadata={"gate_type": "pr"}, title="pr gate")
+    client = _FakeClient(bootstrap=[gate], refresh_responses=[[]])
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.completed", data={"task_id": "g"}, id="evt-1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    drained = _drain(listener)
+    assert len(drained) == 1
+    _, payload = drained[0]
+    assert payload["status"] == "completed"
+    assert payload["task_type"] == "gate"
 
 
 # ── Stream translation + enrichment ─────────────────────────────────────

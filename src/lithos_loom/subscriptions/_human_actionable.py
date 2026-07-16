@@ -109,6 +109,21 @@ def would_be_actionable(
     if task_tag_set & set(cfg.exclude_tags):
         return False
 
+    # Gates are decided by type, ahead of the orphan rule. A gate carries no
+    # trigger tags, so the orphan rule below ("no route claims it → operator
+    # work") would wrongly project every gate as a `- [ ]` checkbox. For a
+    # `pr` (or `ci` / `timer` / `external_task`) gate that is actively harmful:
+    # ticking it completes the gate from the obsidian-sync child, which readies
+    # the gated story and re-develops already-merged work. Only a `human` gate
+    # — a PRD approval or checkpoint — is genuinely the operator's to resolve,
+    # and it falls through to the orphan rule (no route claims it → True).
+    #
+    # Epics are deliberately NOT filtered here: unlike a gate, ticking an epic
+    # is the *intended* manual roll-up (epic completion stays manual until the
+    # extension's Phase 4), so an epic stays projected via the orphan rule.
+    if task.task_type == "gate" and task.metadata.get("gate_type") != "human":
+        return False
+
     # A route is "claimable" only when every tag in its match block is
     # present on the task — the same all-tags semantic the bus enforces
     # against ``[[routes]]`` subscriptions. Any-overlap (set & set) would

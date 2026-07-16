@@ -604,7 +604,9 @@ def _task_from_payload(payload: Any) -> Task:
 
     The :class:`~lithos_loom.sources.lithos_event_stream.LithosEventStream`
     publishes the full Task shape (id, title, status, tags, metadata,
-    claims, resolved_at), so this is just dict-lookups, not a re-fetch.
+    claims, resolved_at, task_type), so this is just dict-lookups, not a
+    re-fetch. ``task_type`` defaults to ``task`` so a payload from a source
+    that predates Epic H still reconstructs.
     """
     return Task(
         id=str(payload["id"]),
@@ -614,6 +616,7 @@ def _task_from_payload(payload: Any) -> Task:
         metadata=dict(payload.get("metadata") or {}),
         claims=tuple(payload.get("claims") or ()),
         resolved_at=_parse_resolved_at(payload.get("resolved_at")),
+        task_type=str(payload.get("task_type") or "task"),
     )
 
 

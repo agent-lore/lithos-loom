@@ -93,6 +93,13 @@ def _task_to_payload(task: Any) -> dict[str, Any]:
     ``task.json`` (id / status / title / description / tags / metadata), so a
     resumed run develops against the task's CURRENT content, not the snapshot
     captured when it was interrupted.
+
+    Deliberately omits ``task_type``: this payload feeds only the runner's own
+    re-dispatch / resume nudges, which reach route matching (tags only) — never
+    the projection. A gate never flows here (no trigger tags → no route claims
+    it), so there is nothing for a type to disambiguate. The projection's
+    source, ``LithosEventStream._event_payload``, is where ``task_type`` is
+    carried.
     """
     return {
         "id": task.id,
