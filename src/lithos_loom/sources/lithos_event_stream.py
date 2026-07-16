@@ -12,17 +12,18 @@ Lifecycle on ``run()``:
    The server immediately starts buffering events for this subscription.
 2. **Bootstrap (first attempt only).** One ``task_list(status="open")``
    call inside the SSE context. Each returned task is published as
-   ``lithos.task.created`` with the full poller-shaped payload. This
-   provides the source-replay guarantee: subscribers can be
-   re-authoritative on restart. Running inside the SSE context closes
-   the snapshot/connect race — any state change that happens during the
-   snapshot is buffered server-side and drained in step 3 (duplicates
-   are absorbed by ``RouteRunner._processed_tasks``).
+   ``lithos.task.created`` with the full Task-shaped payload
+   (see :func:`_event_payload`). This provides the source-replay
+   guarantee: subscribers can be re-authoritative on restart. Running
+   inside the SSE context closes the snapshot/connect race — any state
+   change that happens during the snapshot is buffered server-side and
+   drained in step 3 (duplicates are absorbed by
+   ``RouteRunner._processed_tasks``).
 3. **Stream.** Iterate events, translate ``task.X`` → ``lithos.task.X``,
    enrich each slim Lithos payload (which carries only
-   ``{task_id, agent, aspect, …}``) into the full
-   ``{id, title, status, tags, metadata, claims}`` shape RouteRunner
-   expects by calling ``task_list(status="open")`` and matching by id.
+   ``{task_id, agent, aspect, …}``) into the full Task-shaped payload
+   RouteRunner + the projection expect (see :func:`_event_payload`) by
+   calling ``task_list(status="open")`` and matching by id.
    Cache the enriched task so terminal events (where the open list no
    longer contains the task) can fall back to the last-known snapshot.
    For ``task.updated`` (lithos#283) the cache is bypassed: the event
@@ -47,7 +48,7 @@ import json
 import logging
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, time, timedelta
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -577,25 +578,23 @@ def _with_terminal_status(task: Task, lithos_event_type: str) -> Task:
     terminal = _terminal_status_for(lithos_event_type)
     if terminal is None or task.status == terminal:
         return task
-    return Task(
-        id=task.id,
-        title=task.title,
-        status=terminal,
-        tags=task.tags,
-        metadata=task.metadata,
-        claims=task.claims,
-    )
+    # `replace` preserves every other field (resolved_at, description,
+    # task_type, …). Rebuilding the Task by hand — which this used to do —
+    # silently dropped whichever fields the constructor call omitted, so a
+    # completing gate lost its `task_type` and published as a plain task.
+    return replace(task, status=terminal)
 
 
 def _event_payload(task: Task) -> Mapping[str, Any]:
     """Project a :class:`Task` into the read-only event payload shape.
 
-    Mirrors :func:`lithos_loom.sources.lithos_poller._event_payload` so
-    RouteRunner (and any future bus subscriber) is unaffected by the
-    source swap. ``resolved_at`` is published as ISO 8601 so the
-    obsidian-projection handler can anchor ``✅``/``❌`` markers and
-    TTL eviction on Lithos's canonical timestamp instead of
-    receive-at time. The key matches Lithos's post-#286 column name.
+    Read by RouteRunner's tag matcher and by the obsidian-projection /
+    task-archive handlers (via ``_task_from_payload``). ``resolved_at`` is
+    published as ISO 8601 so the projection can anchor ``✅``/``❌`` markers and
+    TTL eviction on Lithos's canonical timestamp (post-#286 column name)
+    instead of receive-at time. ``task_type`` (Epic H) lets the projection
+    tell a `pr` gate — which it must not render as an operator checkbox — from
+    a real work task.
     """
     return MappingProxyType(
         {
@@ -608,5 +607,6 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
             "resolved_at": (
                 task.resolved_at.isoformat() if task.resolved_at is not None else None
             ),
+            "task_type": task.task_type,
         }
     )

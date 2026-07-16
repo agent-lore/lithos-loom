@@ -30,6 +30,7 @@ def _task(
     tags: tuple[str, ...] = (),
     metadata: Mapping[str, Any] | None = None,
     claims: tuple[Mapping[str, Any], ...] = (),
+    task_type: str = "task",
 ) -> Task:
     return Task(
         id="t1",
@@ -38,6 +39,7 @@ def _task(
         tags=tags,
         metadata=metadata or {},
         claims=claims,
+        task_type=task_type,
     )
 
 
@@ -323,3 +325,56 @@ def test_would_be_actionable_blocked_with_include_blocked_false() -> None:
     task = _task(status="completed", tags=("anything",))
     cfg = _cfg(include_blocked=False)
     assert would_be_actionable(task, routes=[], cfg=cfg, blocked=True) is False
+
+
+# ── gate task types (Epic H) ───────────────────────────────────────────
+#
+# A gate carries no trigger tags, so the orphan rule ("no route claims it →
+# operator work") would wrongly project it as a `- [ ]` checkbox. For a `pr`
+# gate that is actively harmful: ticking it completes the gate from the
+# obsidian-sync child, which readies the story and re-develops already-merged
+# work. So gate actionability is decided BY TYPE, ahead of the orphan rule.
+
+
+def test_pr_gate_is_not_actionable() -> None:
+    """A `pr` gate is resolved by the github-watcher, never the operator."""
+    gate = _task(task_type="gate", metadata={"gate_type": "pr"})
+    assert is_human_actionable(gate, routes=[], cfg=_cfg()) is False
+
+
+def test_ci_and_timer_and_external_gates_are_not_actionable() -> None:
+    """Every non-human gate is resolved by automation."""
+    for gate_type in ("ci", "timer", "external_task"):
+        gate = _task(task_type="gate", metadata={"gate_type": gate_type})
+        assert is_human_actionable(gate, routes=[], cfg=_cfg()) is False, gate_type
+
+
+def test_human_gate_is_actionable() -> None:
+    """A `human` gate is exactly the case the operator DOES resolve — a PRD
+    approval / checkpoint. It must reach the vault so it can be ticked."""
+    gate = _task(task_type="gate", metadata={"gate_type": "human"})
+    assert is_human_actionable(gate, routes=[], cfg=_cfg()) is True
+
+
+def test_gate_without_gate_type_metadata_is_not_actionable() -> None:
+    """Defensive: a gate missing its type is still not operator work (the
+    server wouldn't have created it, but never project it as a checkbox)."""
+    gate = _task(task_type="gate", metadata={})
+    assert is_human_actionable(gate, routes=[], cfg=_cfg()) is False
+
+
+def test_resolved_pr_gate_would_not_be_actionable() -> None:
+    """The path that keeps a completed `pr` gate out of the operator's
+    "done this week" TTL window: would_be_actionable is False for it, so the
+    projection never adds a resolved gate to the lingering set."""
+    gate = _task(status="completed", task_type="gate", metadata={"gate_type": "pr"})
+    assert would_be_actionable(gate, routes=[], cfg=_cfg()) is False
+
+
+def test_epic_remains_actionable_unchanged() -> None:
+    """Epics are deliberately NOT filtered here. Unlike a `pr` gate, ticking
+    an epic's checkbox is the *intended* manual roll-up (epic completion is
+    still manual — extension Phase 4), so leaving it projected is correct.
+    Pinned so a future gate-filter change doesn't silently sweep epics in."""
+    epic = _task(task_type="epic", tags=("orchestration",))
+    assert is_human_actionable(epic, routes=[], cfg=_cfg()) is True

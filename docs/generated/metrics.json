@@ -477,7 +477,7 @@
         "lines": 3101,
         "modules": 7,
         "public_symbols": 14,
-        "sloc": 2336
+        "sloc": 2332
       },
       "State": {
         "classes": 4,
@@ -493,11 +493,11 @@
         "classes": 8,
         "functions": 114,
         "largest_module": "lithos_loom.subscriptions._obsidian_projection",
-        "largest_module_lines": 785,
-        "lines": 5656,
+        "largest_module_lines": 788,
+        "lines": 5681,
         "modules": 20,
         "public_symbols": 27,
-        "sloc": 4301
+        "sloc": 4312
       },
       "Supervisor": {
         "classes": 3,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 34005,
+    "total_lines": 34030,
     "total_modules": 112,
-    "total_sloc": 27004
+    "total_sloc": 27011
   },
   "tests": {
-    "ratio": 1.59,
-    "src_lines": 34005,
-    "test_lines": 54188
+    "ratio": 1.6,
+    "src_lines": 34030,
+    "test_lines": 54342
   }
 }
