@@ -12,7 +12,7 @@
         "max_function": "lithos_loom.children.obsidian_sync._amain"
       },
       "Cli": {
-        "functions_over_10": 14,
+        "functions_over_10": 15,
         "max_complexity": 49,
         "max_function": "lithos_loom.cli.project.import_project"
       },
@@ -97,7 +97,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 71,
+    "functions_over_10": 72,
     "top_functions": [
       {
         "complexity": 92,
@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.cli.project.project_regenerate_done"
       }
     ],
-    "total_functions": 900
+    "total_functions": 907
   },
   "domain": {
     "associations": 2,
@@ -252,7 +252,7 @@
       }
     },
     "cross_component_edges": 65,
-    "cross_component_module_edges": 208,
+    "cross_component_module_edges": 211,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
@@ -350,14 +350,14 @@
         "sloc": 991
       },
       "Cli": {
-        "classes": 18,
-        "functions": 104,
+        "classes": 19,
+        "functions": 109,
         "largest_module": "lithos_loom.cli.project",
         "largest_module_lines": 1705,
-        "lines": 4533,
-        "modules": 10,
-        "public_symbols": 49,
-        "sloc": 3762
+        "lines": 4707,
+        "modules": 11,
+        "public_symbols": 53,
+        "sloc": 3910
       },
       "Config": {
         "classes": 10,
@@ -381,13 +381,13 @@
       },
       "Entrypoint": {
         "classes": 1,
-        "functions": 17,
+        "functions": 19,
         "largest_module": "lithos_loom.main",
-        "largest_module_lines": 554,
-        "lines": 560,
+        "largest_module_lines": 612,
+        "lines": 618,
         "modules": 2,
-        "public_symbols": 4,
-        "sloc": 444
+        "public_symbols": 5,
+        "sloc": 490
       },
       "Errors": {
         "classes": 7,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 34574,
-    "total_modules": 113,
-    "total_sloc": 27453
+    "total_lines": 34806,
+    "total_modules": 114,
+    "total_sloc": 27647
   },
   "tests": {
     "ratio": 1.59,
-    "src_lines": 34574,
-    "test_lines": 55066
+    "src_lines": 34806,
+    "test_lines": 55307
   }
 }

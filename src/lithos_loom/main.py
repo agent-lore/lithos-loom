@@ -27,6 +27,7 @@ import typer
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.cli import develop_app, obsidian_sync_app, project_app, task_app
+from lithos_loom.cli.gates import collect_gate_rows, render_report
 from lithos_loom.config import (
     LoomConfig,
     RouteConfig,
@@ -282,6 +283,63 @@ def show_config(
         raise typer.Exit(2)
     cfg = _load_or_exit(config)
     typer.echo(repr(cfg))
+
+
+@app.command("gates")
+def gates(
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit TOML config path (overrides LITHOS_LOOM_CONFIG).",
+    ),
+) -> None:
+    """List open PR gates and each gate's waiter health (read-only).
+
+    A ``pr`` gate models "PR raised, awaiting human merge" and blocks its story
+    by a ``waits_on_gate`` edge (Epic H). This command enumerates the open
+    gates and, for each, the story it blocks plus a one-word *health*
+    (``ok`` / ``orphan`` / ``malformed`` / ``waiter-gone`` /
+    ``waiter-resolved``) classifying the wiring the resolver depends on — so a
+    stuck gate is diagnosable without touching GitHub or mutating anything.
+
+    Non-mutating: one open-task sweep plus a per-gate edge/waiter read. Exit
+    codes: `0` on a successful listing (regardless of gate health); `1` if the
+    config can't load or Lithos is unreachable.
+    """
+    cfg = _load_or_exit(config)
+    try:
+        rows = asyncio.run(_collect_gates_async(cfg))
+    except (OSError, ExceptionGroup) as exc:
+        # LithosClient.__aenter__ surfaces a connect failure as a plain OSError
+        # or, when it happens inside a task group, an ExceptionGroup wrapping
+        # (e.g.) httpx.ConnectError — same rationale as _run_task_graph_checks_async.
+        # ExceptionGroup (not BaseExceptionGroup) so KeyboardInterrupt / SystemExit
+        # / bare CancelledError still propagate.
+        typer.echo(
+            f"lithos-loom: could not reach Lithos at "
+            f"{cfg.orchestrator.lithos_url} ({exc}); "
+            "run `lithos-loom doctor` to diagnose connectivity",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    except LithosClientError as exc:
+        typer.echo(f"lithos-loom: listing gates failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for line in render_report(rows):
+        typer.echo(line)
+
+
+async def _collect_gates_async(cfg: LoomConfig) -> list:
+    """One-shot ``LithosClient`` wrapper around :func:`collect_gate_rows`.
+
+    Mirrors the ``_create_task_async`` / ``_rows_from_lithos`` pattern: the
+    client is an async context manager, so the sync Typer command wraps it in
+    ``asyncio.run``."""
+    async with LithosClient(
+        cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
+    ) as client:
+        return await collect_gate_rows(client)
 
 
 def _load_or_exit(config: Path | None) -> LoomConfig:

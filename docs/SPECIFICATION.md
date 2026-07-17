@@ -405,6 +405,22 @@ lithos-loom config --show [-c config.toml]
 
 Prints the merged effective config. Useful for verifying config discovery picked the right file.
 
+### 4.4a `lithos-loom gates`
+
+```
+lithos-loom gates [-c config.toml]
+```
+
+Read-only inventory of open **`pr` gates** (Epic H — `task_type=gate`, `metadata.gate_type=pr`). For each open gate it prints the gate id, the watched PR (`owner/repo#number`), the story the gate blocks (its `waits_on_gate` waiter), the waiter's status, and a one-word **health** classifying the wiring the gate resolver (§4 github-watcher) depends on:
+
+- `ok` — open waiter + parseable PR metadata (awaiting merge, as intended).
+- `orphan` — no `waits_on_gate` edge, so the gate blocks nothing.
+- `malformed` — PR metadata missing/ill-typed, so `parse_pr_gate` can't read a PR to watch; the waiter stays blocked forever.
+- `waiter-gone` — the `waits_on_gate` edge points at a task that no longer exists.
+- `waiter-resolved` — the waiter is already completed/cancelled while the gate is still open.
+
+Precedence when several apply: `orphan` → `malformed` → `waiter-gone` → `waiter-resolved` → `ok`. Non-mutating (one open-task sweep plus a per-gate edge/waiter read; no GitHub round trip). Exit codes: `0` on a successful listing regardless of gate health; `1` if the config can't load or Lithos is unreachable.
+
 ### 4.5 `lithos-loom task create`
 
 ```
