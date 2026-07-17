@@ -346,6 +346,25 @@ failure), and a re-open must **not collide with an in-flight human review** (if 
 PR is in `story-review-human`, surface the CI failure to that human rather than
 pushing commits under them).
 
+**Late-arriving review comments are a second re-develop trigger — not only
+CI-red.** story-develop's delivery runs a *bounded* in-run Copilot round (wait up
+to `copilot_timeout`, then one fix round). Copilot — and other review bots or
+humans — routinely post inline comments *after* that wait expires; the run then
+delivers `INCOMPLETE`, having addressed none of them. This is the recurring
+comment-lag race of [#91] (closed, recurred live on PR #265: `[DevelopResult]`
+recorded "expected 1 comment(s), 0 arrived within 445s"). A more patient in-run
+round shrinks the window but cannot close it — the async tail is unbounded. The
+same watcher-sweep re-develop mechanism above is the catch-net: on each sweep,
+for a delivered-and-open PR, poll its review threads and, when **unresolved review
+comments exist on the delivered head with no responding commit**, re-open
+development the same way — same-branch push, cumulative budget, only-while-open-
+unmerged, and the same deferral to any in-flight human review. The in-run round
+stays the fast path; this covers what the bounded wait structurally cannot. (Under
+Epic H the delivered story is now blocked by a `pr` gate rather than only
+`loom_delivered`, so the re-open trigger ties into the gate-vs-`loom_delivered`
+mechanism decision of US11 — the loop must re-open development *without* resolving
+the `pr` gate, which means merged.)
+
 **Budget is cumulative across re-dispatches.** Clearing `loom_delivered` triggers
 a *fresh* route dispatch (new process, new `max_rounds` / cost), so per-run
 ceilings alone would let a CI-red loop reset its budget every re-open. A
@@ -543,3 +562,4 @@ Each slice is an independently grabbable tracer-bullet issue, linked back to #12
 [#127]: https://github.com/agent-lore/lithos-loom/issues/127
 [#128]: https://github.com/agent-lore/lithos-loom/issues/128
 [#87]: https://github.com/agent-lore/lithos-loom/issues/87
+[#91]: https://github.com/agent-lore/lithos-loom/issues/91
