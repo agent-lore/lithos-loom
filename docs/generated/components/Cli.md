@@ -17,6 +17,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
+| `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
 | `lithos_loom.cli.review` | S | 0 | 1 |
@@ -65,6 +66,12 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `develop_prune` — Remove the on-disk run-state dirs of **finished** story-develop runs.
 - def `develop_dump` — Print the assembled conversation log for a run (finished or in-flight).
 - def `develop_attach` — Follow a live run until it reaches a **terminal state**, printing handoffs as they land plus the current round + active agent, then a one-line outcome summary. Following keys on terminal state, not agent liveness, so it spans both the startup window before the first container and the commit / test-gate / teardown after the last agent turn, grace-polling through the window where the plugin has stopped its containers but not yet written the outcome. An **approved** verdict is not yet the end in daemon mode — PR delivery (push + Copilot round + ``result.json``) runs after the dialogue approves, shown as a distinct "delivering PR…" phase — so attach follows through it instead of exiting early. If the work dir is reaped on success before a poll observes the result, the outcome is recovered from the plugin's completion store. Read-only; ``Ctrl-C`` exits cleanly. When docker is unavailable it still follows the handoff files (active agent shows as ``—``).
+
+### `lithos_loom.cli.gates`
+- class `GateRow` — One open ``pr`` gate plus its waiter, as the listing renders it.
+- def `classify_gate` — Classify one gate + its waiter into a :class:`GateRow` (pure).
+- def `collect_gate_rows` — Enumerate open ``pr`` gates and classify each (read-only).
+- def `render_report` — Render the gate listing as aligned text lines (pure).
 
 ### `lithos_loom.cli.obsidian_sync`
 - def `show` — Print the resolved ``[obsidian_sync]`` block from the active config.
