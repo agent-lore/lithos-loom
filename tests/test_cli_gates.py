@@ -209,6 +209,25 @@ def test_gates_reports_lithos_unreachable(
     assert "could not reach Lithos" in result.output
 
 
+def test_gates_reports_unreachable_when_connect_raises_exception_group(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LithosClient.__aenter__ can wrap a connect failure (e.g. httpx.ConnectError)
+    in an ExceptionGroup when it happens inside a task group. An ExceptionGroup is
+    NOT an OSError, so catching only OSError would let it crash the CLI; the
+    command must still exit 1 with the connectivity diagnostic (the echo is the
+    biting assertion — an uncaught group would skip it)."""
+    fake = FakeLithosClient(
+        fail_connect=ExceptionGroup("connect", [OSError("connection refused")])
+    )
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["gates"])
+
+    assert result.exit_code == 1
+    assert "could not reach Lithos" in result.output
+
+
 def test_gates_reports_client_error(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

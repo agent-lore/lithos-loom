@@ -21,7 +21,7 @@ Typer CLI app entry and `python -m` bootstrap (`lithos-loom = lithos_loom.main:a
 - def `doctor` — Verify the vault is writable, Lithos speaks the task-graph extension, and project TOML entries match Lithos.
 - def `validate_config` — Typecheck the TOML; with ``--dry-run`` also simulate routing.
 - def `show_config` — Inspect the loaded configuration.
-- def `gates` — List open ``pr`` gates and each gate's waiter health (read-only).
+- def `gates` — List open PR gates and each gate's waiter health (read-only).
 
 ## Dependencies
 

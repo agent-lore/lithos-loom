@@ -310,7 +310,12 @@ def gates(
     cfg = _load_or_exit(config)
     try:
         rows = asyncio.run(_collect_gates_async(cfg))
-    except OSError as exc:
+    except (OSError, ExceptionGroup) as exc:
+        # LithosClient.__aenter__ surfaces a connect failure as a plain OSError
+        # or, when it happens inside a task group, an ExceptionGroup wrapping
+        # (e.g.) httpx.ConnectError — same rationale as _run_task_graph_checks_async.
+        # ExceptionGroup (not BaseExceptionGroup) so KeyboardInterrupt / SystemExit
+        # / bare CancelledError still propagate.
         typer.echo(
             f"lithos-loom: could not reach Lithos at "
             f"{cfg.orchestrator.lithos_url} ({exc}); "
