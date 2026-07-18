@@ -442,18 +442,21 @@ for.
 - **Risk-based auto-escalation** (§7) — the floor/escalation principle + signal
   list are fixed now; the *detector* is later. Until then, profiles are
   floor-only (manually selected). No breaking change when it lands.
-- **CI as a feedback loop** (§9) — the MVP ships the **read+surface half**:
+- **Post-delivery feedback loop** (§9) — the MVP ships the **read+surface half**:
   consume the PR's check-runs and, on CI-red, **post a `gate/ci-*` finding and
-  route to `story-review-human`**. The **autonomous half** (clear `loom_delivered`,
-  re-develop on the same PR branch, cumulative budget) is a later phase — it
-  reintroduces cold-start context, human-review races, and same-branch push
-  mechanics that warrant their own justification. The MVP **does not auto-push
-  after delivery**; the full contract is documented in §9 only to reserve the shape.
+  route to `story-review-human`**. The **autonomous half** (clear `loom_delivered`
+  / don't-resolve the `pr` gate, re-develop on the same PR branch, cumulative
+  budget) is a later phase — it reintroduces cold-start context, human-review
+  races, and same-branch push mechanics that warrant their own justification. It
+  has **two triggers**: a CI-red delivered PR **and** unresolved post-delivery
+  review comments (Copilot/bot/human) that landed after the bounded in-run Copilot
+  round (§9, the #91 comment-lag tail). The MVP **does not auto-push after
+  delivery**; the full contract is documented in §9 only to reserve the shape.
 - **Calibration outcome-correlation** (§11) — record the run metadata in the MVP;
   the outcome-signal basket + success-metric rollup come later.
 
-If the autonomous CI loop is wanted sooner it can be pulled forward — but that
-should be a deliberate choice, not the default first increment.
+If the autonomous re-develop loop is wanted sooner it can be pulled forward — but
+that should be a deliberate choice, not the default first increment.
 
 ## Consequences
 
@@ -466,8 +469,9 @@ should be a deliberate choice, not the default first increment.
   severity-blocking means a linter/SAST tool's "non-zero on any hit" convention
   can't silently turn every minor finding into a merge blocker; the severity map
   + policy decide, per check.
-- **CI failures don't strand a branch.** The lifecycle contract re-opens a
-  delivered-but-CI-red task on the same PR, with merge-race and duplicate-run
+- **Post-delivery feedback doesn't strand a branch.** The lifecycle contract
+  re-opens a delivered task on the same PR — on CI-red **or** on unresolved late
+  review comments (the #91 comment-lag tail) — with merge-race and duplicate-run
   guards reusing the existing watcher marker pattern.
 - **One honest quality signal.** Static tooling and the panel reinforce each
   other and share a finding model — but deterministic findings have their *own*
@@ -550,7 +554,7 @@ should be a deliberate choice, not the default first increment.
 | | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) — **✅ #139 (slice 1): `validate_monotonic` runs at module import over the canonical chain; non-monotonic → `MonotonicityError` (a `ConfigError`)** | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
 | 5a — CI read **(MVP)** | consume PR CI check-runs (branch-protection → declared-contexts → N/A) as a `gate/ci-*` finding; on red, surface to `story-review-human` | [#87] |
-| 5b — CI autonomous *(later)* | re-develop delivered-but-red on the **same PR**: `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87] |
+| 5b — autonomous re-develop *(later)* | re-develop a delivered PR on the **same PR**, triggered by **CI-red** *or* **unresolved post-delivery review comments** (Copilot/bot/human landing after the bounded in-run round — the #91 comment-lag tail): `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87], [#91] |
 | 5 — calibration | record review metadata **(MVP)**; outcome-signal basket + success metrics *(later)* | [#87] |
 
 Each slice is an independently grabbable tracer-bullet issue, linked back to #128.
