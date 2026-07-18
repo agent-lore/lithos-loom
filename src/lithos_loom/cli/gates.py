@@ -30,6 +30,7 @@ touching GitHub or mutating anything.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 from lithos_loom.gates import is_pr_gate, parse_pr_gate, waiter_of
@@ -38,6 +39,7 @@ from lithos_loom.lithos_client import Task, TaskClient
 __all__ = [
     "HEALTH_MALFORMED",
     "HEALTH_OK",
+    "HEALTH_ORDER",
     "HEALTH_ORPHAN",
     "HEALTH_WAITER_GONE",
     "HEALTH_WAITER_RESOLVED",
@@ -52,6 +54,17 @@ HEALTH_ORPHAN = "orphan"
 HEALTH_MALFORMED = "malformed"
 HEALTH_WAITER_GONE = "waiter-gone"
 HEALTH_WAITER_RESOLVED = "waiter-resolved"
+
+# Canonical display order for the by-health footer: the healthy state first,
+# then the needs-attention classes in the resolver's precedence order (the same
+# order §4.4a of SPECIFICATION.md lists them).
+HEALTH_ORDER = (
+    HEALTH_OK,
+    HEALTH_ORPHAN,
+    HEALTH_MALFORMED,
+    HEALTH_WAITER_GONE,
+    HEALTH_WAITER_RESOLVED,
+)
 
 
 @dataclass(frozen=True)
@@ -136,7 +149,8 @@ def render_report(rows: list[GateRow]) -> list[str]:
 
     Returns a list of lines the caller ``typer.echo``es. Empty input yields a
     single "no open pr gates" line; otherwise a header + one row per gate + a
-    summary counting healthy vs. needs-attention gates.
+    summary counting healthy vs. needs-attention gates, then a per-health
+    breakdown counting each health class present (in :data:`HEALTH_ORDER`).
     """
     if not rows:
         return ["no open pr gates"]
@@ -163,7 +177,8 @@ def render_report(rows: list[GateRow]) -> list[str]:
     lines = [_fmt(headers)]
     lines.extend(_fmt(cell) for cell in cells)
 
-    healthy = sum(1 for row in rows if row.health == HEALTH_OK)
+    counts = Counter(row.health for row in rows)
+    healthy = counts[HEALTH_OK]
     attention = len(rows) - healthy
     plural = "gate" if len(rows) == 1 else "gates"
     lines.append("")
@@ -171,4 +186,8 @@ def render_report(rows: list[GateRow]) -> list[str]:
         f"{len(rows)} open pr {plural}: {healthy} healthy, "
         f"{attention} need{'s' if attention == 1 else ''} attention"
     )
+    breakdown = ", ".join(
+        f"{counts[health]} {health}" for health in HEALTH_ORDER if counts[health]
+    )
+    lines.append(f"by health: {breakdown}")
     return lines
