@@ -419,7 +419,7 @@ Read-only inventory of open **`pr` gates** (Epic H — `task_type=gate`, `metada
 - `waiter-gone` — the `waits_on_gate` edge points at a task that no longer exists.
 - `waiter-resolved` — the waiter is already completed/cancelled while the gate is still open.
 
-Precedence when several apply: `orphan` → `malformed` → `waiter-gone` → `waiter-resolved` → `ok`. Non-mutating (one open-task sweep plus a per-gate edge/waiter read; no GitHub round trip). Exit codes: `0` on a successful listing regardless of gate health; `1` if the config can't load or Lithos is unreachable.
+Precedence when several apply: `orphan` → `malformed` → `waiter-gone` → `waiter-resolved` → `ok`. The listing closes with a two-line summary footer: a headline count (`N open pr gates: H healthy, A need attention`) and a per-health breakdown (`by health: 2 ok, 1 orphan, …`) counting each health class present, in the order `ok` → `orphan` → `malformed` → `waiter-gone` → `waiter-resolved` (zero-count classes omitted). An empty inventory prints just `no open pr gates`. Non-mutating (one open-task sweep plus a per-gate edge/waiter read; no GitHub round trip). Exit codes: `0` on a successful listing regardless of gate health; `1` if the config can't load or Lithos is unreachable.
 
 ### 4.5 `lithos-loom task create`
 
