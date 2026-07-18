@@ -155,6 +155,26 @@ def test_render_by_health_footer_omits_absent_classes() -> None:
     assert "malformed" not in footer
 
 
+def test_render_by_health_footer_orders_all_classes() -> None:
+    """Every health class present — including waiter-gone and waiter-resolved —
+    appears in the breakdown, in the canonical HEALTH_ORDER."""
+    rows = [
+        classify_gate(_gate("gate-1"), "story-1", _story("story-1")),  # ok
+        classify_gate(_gate("gate-2"), None, None),  # orphan
+        classify_gate(
+            _gate("gate-3", metadata={"gate_type": "pr"}), "story-3", _story("story-3")
+        ),  # malformed
+        classify_gate(_gate("gate-4"), "story-4", None),  # waiter-gone
+        classify_gate(
+            _gate("gate-5"), "story-5", _story("story-5", status="completed")
+        ),  # waiter-resolved
+    ]
+    footer = next(line for line in render_report(rows) if line.startswith("by health:"))
+    assert footer == (
+        "by health: 1 ok, 1 orphan, 1 malformed, 1 waiter-gone, 1 waiter-resolved"
+    )
+
+
 # ── CLI integration ────────────────────────────────────────────────────
 
 
