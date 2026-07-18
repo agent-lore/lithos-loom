@@ -346,6 +346,25 @@ failure), and a re-open must **not collide with an in-flight human review** (if 
 PR is in `story-review-human`, surface the CI failure to that human rather than
 pushing commits under them).
 
+**Late-arriving review comments are a second re-develop trigger — not only
+CI-red.** story-develop's delivery runs a *bounded* in-run Copilot round (wait up
+to `copilot_timeout`, then one fix round). Copilot — and other review bots or
+humans — routinely post inline comments *after* that wait expires; the run then
+delivers `INCOMPLETE`, having addressed none of them. This is the recurring
+comment-lag race of [#91] (closed, recurred live on PR #265: `[DevelopResult]`
+recorded "expected 1 comment(s), 0 arrived within 445s"). A more patient in-run
+round shrinks the window but cannot close it — the async tail is unbounded. The
+same watcher-sweep re-develop mechanism above is the catch-net: on each sweep,
+for a delivered-and-open PR, poll its review threads and, when **unresolved review
+comments exist on the delivered head with no responding commit**, re-open
+development the same way — same-branch push, cumulative budget, only-while-open-
+unmerged, and the same deferral to any in-flight human review. The in-run round
+stays the fast path; this covers what the bounded wait structurally cannot. (Under
+Epic H the delivered story is now blocked by a `pr` gate rather than only
+`loom_delivered`, so the re-open trigger ties into the gate-vs-`loom_delivered`
+mechanism decision of US11 — the loop must re-open development *without* resolving
+the `pr` gate, which means merged.)
+
 **Budget is cumulative across re-dispatches.** Clearing `loom_delivered` triggers
 a *fresh* route dispatch (new process, new `max_rounds` / cost), so per-run
 ceilings alone would let a CI-red loop reset its budget every re-open. A
@@ -423,18 +442,21 @@ for.
 - **Risk-based auto-escalation** (§7) — the floor/escalation principle + signal
   list are fixed now; the *detector* is later. Until then, profiles are
   floor-only (manually selected). No breaking change when it lands.
-- **CI as a feedback loop** (§9) — the MVP ships the **read+surface half**:
+- **Post-delivery feedback loop** (§9) — the MVP ships the **read+surface half**:
   consume the PR's check-runs and, on CI-red, **post a `gate/ci-*` finding and
-  route to `story-review-human`**. The **autonomous half** (clear `loom_delivered`,
-  re-develop on the same PR branch, cumulative budget) is a later phase — it
-  reintroduces cold-start context, human-review races, and same-branch push
-  mechanics that warrant their own justification. The MVP **does not auto-push
-  after delivery**; the full contract is documented in §9 only to reserve the shape.
+  route to `story-review-human`**. The **autonomous half** (clear `loom_delivered`
+  / don't-resolve the `pr` gate, re-develop on the same PR branch, cumulative
+  budget) is a later phase — it reintroduces cold-start context, human-review
+  races, and same-branch push mechanics that warrant their own justification. It
+  has **two triggers**: a CI-red delivered PR **and** unresolved post-delivery
+  review comments (Copilot/bot/human) that landed after the bounded in-run Copilot
+  round (§9, the #91 comment-lag tail). The MVP **does not auto-push after
+  delivery**; the full contract is documented in §9 only to reserve the shape.
 - **Calibration outcome-correlation** (§11) — record the run metadata in the MVP;
   the outcome-signal basket + success-metric rollup come later.
 
-If the autonomous CI loop is wanted sooner it can be pulled forward — but that
-should be a deliberate choice, not the default first increment.
+If the autonomous re-develop loop is wanted sooner it can be pulled forward — but
+that should be a deliberate choice, not the default first increment.
 
 ## Consequences
 
@@ -447,8 +469,9 @@ should be a deliberate choice, not the default first increment.
   severity-blocking means a linter/SAST tool's "non-zero on any hit" convention
   can't silently turn every minor finding into a merge blocker; the severity map
   + policy decide, per check.
-- **CI failures don't strand a branch.** The lifecycle contract re-opens a
-  delivered-but-CI-red task on the same PR, with merge-race and duplicate-run
+- **Post-delivery feedback doesn't strand a branch.** The lifecycle contract
+  re-opens a delivered task on the same PR — on CI-red **or** on unresolved late
+  review comments (the #91 comment-lag tail) — with merge-race and duplicate-run
   guards reusing the existing watcher marker pattern.
 - **One honest quality signal.** Static tooling and the panel reinforce each
   other and share a finding model — but deterministic findings have their *own*
@@ -531,7 +554,7 @@ should be a deliberate choice, not the default first increment.
 | | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) — **✅ #139 (slice 1): `validate_monotonic` runs at module import over the canonical chain; non-monotonic → `MonotonicityError` (a `ConfigError`)** | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
 | 5a — CI read **(MVP)** | consume PR CI check-runs (branch-protection → declared-contexts → N/A) as a `gate/ci-*` finding; on red, surface to `story-review-human` | [#87] |
-| 5b — CI autonomous *(later)* | re-develop delivered-but-red on the **same PR**: `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87] |
+| 5b — autonomous re-develop *(later)* | re-develop a delivered PR on the **same PR**, triggered by **CI-red** *or* **unresolved post-delivery review comments** (Copilot/bot/human landing after the bounded in-run round — the #91 comment-lag tail): `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87], [#91] |
 | 5 — calibration | record review metadata **(MVP)**; outcome-signal basket + success metrics *(later)* | [#87] |
 
 Each slice is an independently grabbable tracer-bullet issue, linked back to #128.
@@ -543,3 +566,4 @@ Each slice is an independently grabbable tracer-bullet issue, linked back to #12
 [#127]: https://github.com/agent-lore/lithos-loom/issues/127
 [#128]: https://github.com/agent-lore/lithos-loom/issues/128
 [#87]: https://github.com/agent-lore/lithos-loom/issues/87
+[#91]: https://github.com/agent-lore/lithos-loom/issues/91
