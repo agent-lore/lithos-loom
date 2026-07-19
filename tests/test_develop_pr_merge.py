@@ -12,14 +12,11 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
-import pytest
-
 from lithos_loom.errors import LithosClientError
-from lithos_loom.gates import STORY_GATE_ID_KEY, create_pr_gate
+from lithos_loom.gates import create_pr_gate
 from lithos_loom.github_client import GitHubError, PullRequest
 from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions import SubscriptionContext
@@ -28,14 +25,11 @@ from lithos_loom.subscriptions._develop_pr_merge import (
     GATE_RESOLVED,
     MERGE_STATE_KEY,
     MERGE_STATE_URL_KEY,
-    _parse_pr_url,
-    reconcile_develop_pr,
     reconcile_pr_gate,
 )
 from tests.support import FakeLithosClient
 
 _PR_URL = "https://github.com/agent-lore/lithos-loom/pull/7"
-_PR_URL_2 = "https://github.com/agent-lore/lithos-loom/pull/8"  # a replacement PR
 
 
 async def _get(client: FakeLithosClient, task_id: str) -> Task:
@@ -53,10 +47,6 @@ def _ctx(lithos: Any) -> SubscriptionContext:
     )
 
 
-def _task(metadata: dict[str, Any], *, task_id: str = "t-1") -> Any:
-    return SimpleNamespace(id=task_id, metadata=metadata)
-
-
 def _pr(*, state: str, merged: bool, sha: str | None = "abc123") -> PullRequest:
     return PullRequest(
         repo="agent-lore/lithos-loom",
@@ -66,319 +56,6 @@ def _pr(*, state: str, merged: bool, sha: str | None = "abc123") -> PullRequest:
         merged_at=datetime(2026, 6, 13, tzinfo=UTC) if merged else None,
         merge_commit_sha=sha if merged else None,
     )
-
-
-class _StatefulLithos:
-    """A fake Lithos that models post-lithos#303 semantics: ``task_update``
-    applies its additive metadata merge **even on a terminal task**. Tracks
-    ``status`` + the merged ``metadata`` so a test can assert the marker
-    actually persists end-to-end — the ``AsyncMock`` fake never modelled #303,
-    so it green-lit the merged marker even while the real write was rejected."""
-
-    def __init__(self, metadata: dict[str, Any] | None = None) -> None:
-        self.status = "open"
-        self.metadata: dict[str, Any] = dict(metadata or {})
-        self.findings: list[str] = []
-
-    async def task_complete(self, *, task_id: str) -> None:
-        if self.status != "open":
-            raise LithosClientError("task_not_found", "already terminal")
-        self.status = "completed"
-
-    async def task_update(
-        self, *, task_id: str, metadata: dict[str, Any] | None = None
-    ) -> None:
-        for key, value in (metadata or {}).items():
-            if value is None:
-                self.metadata.pop(key, None)
-            else:
-                self.metadata[key] = value
-
-    async def finding_post(self, *, task_id: str, summary: str) -> None:
-        self.findings.append(summary)
-
-
-# ── _parse_pr_url ──────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
-        (_PR_URL, ("agent-lore/lithos-loom", 7)),
-        ("https://github.com/o/r/pull/123", ("o/r", 123)),
-        ("https://github.com/o/r/issues/5", (None, None)),  # issue, not pull
-        ("https://github.com/o/r/pull/notanum", (None, None)),
-        ("https://example.com/o/r/pull/1", (None, None)),
-        ("not a url", (None, None)),
-        (None, (None, None)),
-    ],
-)
-def test_parse_pr_url(url: object, expected: tuple[str | None, int | None]) -> None:
-    assert _parse_pr_url(url) == expected
-
-
-# ── reconcile_develop_pr ───────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_merged_pr_completes_task_and_marks() -> None:
-    github = AsyncMock()
-    github.get_pull_request.return_value = _pr(state="closed", merged=True)
-    lithos = AsyncMock()
-    task = _task({"develop_pr_url": _PR_URL})
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome == "merged"
-    lithos.task_complete.assert_awaited_once_with(task_id="t-1")
-    lithos.task_update.assert_awaited_once_with(
-        task_id="t-1",
-        metadata={MERGE_STATE_KEY: "merged", MERGE_STATE_URL_KEY: _PR_URL},
-    )
-    lithos.finding_post.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_merged_pr_persists_marker_on_completed_task() -> None:
-    """#111: the ``merged`` marker must survive on the now-terminal task. Drives
-    a stateful fake (post-lithos#303: ``task_update`` applies to a terminal
-    task) end-to-end — the regression guard the lenient ``AsyncMock`` couldn't
-    be: complete-then-mark with the mark landing on a completed task."""
-    github = AsyncMock()
-    github.get_pull_request.return_value = _pr(state="closed", merged=True)
-    lithos = _StatefulLithos({"develop_pr_url": _PR_URL, "loom_delivered": True})
-    task = _task({"develop_pr_url": _PR_URL})
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome == "merged"
-    assert lithos.status == "completed"
-    assert lithos.metadata[MERGE_STATE_KEY] == "merged"
-    assert lithos.metadata[MERGE_STATE_URL_KEY] == _PR_URL
-    # the additive merge preserves pre-existing metadata
-    assert lithos.metadata["develop_pr_url"] == _PR_URL
-    assert lithos.metadata["loom_delivered"] is True
-    assert lithos.findings == []
-
-
-@pytest.mark.asyncio
-async def test_closed_unmerged_leaves_open_with_finding() -> None:
-    github = AsyncMock()
-    github.get_pull_request.return_value = _pr(state="closed", merged=False)
-    lithos = AsyncMock()
-    task = _task({"develop_pr_url": _PR_URL})
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome == "closed_unmerged"
-    lithos.task_complete.assert_not_awaited()
-    summary = lithos.finding_post.await_args.kwargs["summary"]
-    assert summary.startswith(DELIVERED_PR_CLOSED)
-    lithos.task_update.assert_awaited_once_with(
-        task_id="t-1",
-        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
-    )
-
-
-@pytest.mark.asyncio
-async def test_open_pr_is_noop() -> None:
-    github = AsyncMock()
-    github.get_pull_request.return_value = _pr(state="open", merged=False)
-    lithos = AsyncMock()
-
-    outcome = await reconcile_develop_pr(
-        _task({"develop_pr_url": _PR_URL}), github, _ctx(lithos)
-    )
-
-    assert outcome == "still_open"
-    lithos.task_complete.assert_not_awaited()
-    lithos.finding_post.assert_not_awaited()
-    lithos.task_update.assert_not_awaited()  # no marker → re-poll next sweep
-
-
-@pytest.mark.asyncio
-async def test_deleted_pr_marks_gone_with_finding() -> None:
-    github = AsyncMock()
-    github.get_pull_request.return_value = None  # 404
-    lithos = AsyncMock()
-
-    outcome = await reconcile_develop_pr(
-        _task({"develop_pr_url": _PR_URL}), github, _ctx(lithos)
-    )
-
-    assert outcome == "gone"
-    lithos.task_complete.assert_not_awaited()
-    assert DELIVERED_PR_CLOSED in lithos.finding_post.await_args.kwargs["summary"]
-    lithos.task_update.assert_awaited_once_with(
-        task_id="t-1", metadata={MERGE_STATE_KEY: "gone", MERGE_STATE_URL_KEY: _PR_URL}
-    )
-
-
-@pytest.mark.asyncio
-async def test_terminal_marker_for_same_url_skips_without_github_call() -> None:
-    """De-dup: a marker terminal for the CURRENT develop_pr_url is a skip."""
-    github = AsyncMock()
-    lithos = AsyncMock()
-    task = _task(
-        {
-            "develop_pr_url": _PR_URL,
-            MERGE_STATE_KEY: "merged",
-            MERGE_STATE_URL_KEY: _PR_URL,  # same url it resolved
-        }
-    )
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome is None
-    github.get_pull_request.assert_not_awaited()  # de-dup: no re-poll
-    lithos.task_complete.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_replacement_pr_recovers_after_abandoned_one() -> None:
-    """The natural recovery path: an old PR was abandoned (marker
-    closed_unmerged for the OLD url), the task was re-developed into a NEW PR
-    (develop_pr_url changed). The stale marker must NOT suppress the new PR —
-    it's re-evaluated and, on merge, completes."""
-    github = AsyncMock()
-    github.get_pull_request.return_value = _pr(state="closed", merged=True)
-    lithos = AsyncMock()
-    task = _task(
-        {
-            "develop_pr_url": _PR_URL_2,  # the replacement PR
-            MERGE_STATE_KEY: "closed_unmerged",
-            MERGE_STATE_URL_KEY: _PR_URL,  # stale: points at the abandoned PR
-        }
-    )
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome == "merged"
-    github.get_pull_request.assert_awaited_once_with("agent-lore/lithos-loom", 8)
-    lithos.task_complete.assert_awaited_once_with(task_id="t-1")
-    lithos.task_update.assert_awaited_once_with(
-        task_id="t-1",
-        metadata={MERGE_STATE_KEY: "merged", MERGE_STATE_URL_KEY: _PR_URL_2},
-    )
-
-
-@pytest.mark.asyncio
-async def test_replacement_pr_also_closed_reposts_for_new_url() -> None:
-    """A replacement PR that's also closed-unmerged re-posts the finding (it's a
-    different url than the recorded marker) and re-marks for the new url."""
-    github = AsyncMock()
-    github.get_pull_request.return_value = _pr(state="closed", merged=False)
-    lithos = AsyncMock()
-    task = _task(
-        {
-            "develop_pr_url": _PR_URL_2,
-            MERGE_STATE_KEY: "closed_unmerged",
-            MERGE_STATE_URL_KEY: _PR_URL,
-        }
-    )
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome == "closed_unmerged"
-    assert DELIVERED_PR_CLOSED in lithos.finding_post.await_args.kwargs["summary"]
-    lithos.task_update.assert_awaited_once_with(
-        task_id="t-1",
-        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL_2},
-    )
-
-
-@pytest.mark.asyncio
-async def test_issue_linked_task_is_skipped() -> None:
-    """Issue-linked tasks close via the existing issue mirror — don't double-handle."""
-    github = AsyncMock()
-    lithos = AsyncMock()
-    task = _task(
-        {
-            "develop_pr_url": _PR_URL,
-            "github_issue_url": "https://github.com/o/r/issues/3",
-        }
-    )
-
-    assert await reconcile_develop_pr(task, github, _ctx(lithos)) is None
-    github.get_pull_request.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_no_develop_pr_url_is_skipped() -> None:
-    github = AsyncMock()
-    assert await reconcile_develop_pr(_task({}), github, _ctx(AsyncMock())) is None
-    github.get_pull_request.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_complete_swallows_task_not_found_and_still_marks() -> None:
-    """An already-terminal task (operator completed it first) is a no-op, not crash."""
-    github = AsyncMock()
-    github.get_pull_request.return_value = _pr(state="closed", merged=True)
-    lithos = AsyncMock()
-    lithos.task_complete.side_effect = LithosClientError("task_not_found", "gone")
-    task = _task({"develop_pr_url": _PR_URL})
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome == "merged"  # no exception escaped
-    lithos.task_update.assert_awaited_once_with(
-        task_id="t-1",
-        metadata={MERGE_STATE_KEY: "merged", MERGE_STATE_URL_KEY: _PR_URL},
-    )
-
-
-@pytest.mark.asyncio
-async def test_malformed_url_frictions_and_marks_unparseable() -> None:
-    github = AsyncMock()
-    lithos = AsyncMock()
-    task = _task({"develop_pr_url": "https://github.com/o/r/pull/notanum"})
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome == "unparseable"
-    github.get_pull_request.assert_not_awaited()
-    assert "[Friction]" in lithos.finding_post.await_args.kwargs["summary"]
-    lithos.task_update.assert_awaited_once_with(
-        task_id="t-1",
-        metadata={
-            MERGE_STATE_KEY: "unparseable",
-            MERGE_STATE_URL_KEY: "https://github.com/o/r/pull/notanum",
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_transient_github_error_leaves_marker_unset() -> None:
-    """A GH 5xx/auth blip must not mark the task terminal — retry next sweep."""
-    github = AsyncMock()
-    github.get_pull_request.side_effect = GitHubError("503 server error")
-    lithos = AsyncMock()
-    task = _task({"develop_pr_url": _PR_URL})
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))  # no raise
-
-    assert outcome == "error"
-    lithos.task_complete.assert_not_awaited()
-    lithos.task_update.assert_not_awaited()  # marker unset → retried next sweep
-    lithos.finding_post.assert_not_awaited()
-
-
-# ── reconcile_develop_pr: pr_gate_id skip (Epic H soak) ────────────────
-
-
-async def test_develop_sweep_skips_a_task_owned_by_a_pr_gate() -> None:
-    """A delivered task that also carries pr_gate_id is owned by the gate
-    resolver; the legacy url sweep stands aside so the two never both act."""
-    github = AsyncMock()
-    lithos = AsyncMock()
-    task = _task({"develop_pr_url": _PR_URL, STORY_GATE_ID_KEY: "gate-1"})
-
-    outcome = await reconcile_develop_pr(task, github, _ctx(lithos))
-
-    assert outcome is None
-    github.get_pull_request.assert_not_awaited()
-    lithos.task_complete.assert_not_awaited()
 
 
 # ── reconcile_pr_gate (Epic H, US12/US13) ──────────────────────────────

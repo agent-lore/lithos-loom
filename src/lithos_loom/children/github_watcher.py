@@ -38,7 +38,6 @@ from lithos_loom.sources.lithos_note_stream import LithosNoteStream
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._develop_pr_merge import (
     is_pr_gate,
-    reconcile_develop_pr,
     reconcile_pr_gate,
 )
 from lithos_loom.subscriptions._github_issue_push import (
@@ -135,10 +134,10 @@ async def _run_reconcile_pass(
             )
 
     counts = {"open": 0, "completed": 0, "cancelled": 0}
-    # Every outcome reconcile_develop_pr can return (except None = skipped) so
-    # the sweep log surfaces deleted / unparseable / errored PRs too, not just
-    # the happy cases — visibility into why a delivered task didn't auto-close.
-    pr_counts = {
+    # Every outcome reconcile_pr_gate can return (except None = skipped) so the
+    # sweep log surfaces deleted / unparseable / errored PRs too, not just the
+    # happy cases — visibility into why a delivered story didn't auto-unblock.
+    gate_counts = {
         "merged": 0,
         "closed_unmerged": 0,
         "still_open": 0,
@@ -146,28 +145,6 @@ async def _run_reconcile_pass(
         "unparseable": 0,
         "error": 0,
     }
-
-    # `pr` gate resolution (Epic H) reuses the same outcome vocabulary.
-    gate_counts = dict.fromkeys(pr_counts, 0)
-
-    async def _pr_merge_one(task: Any) -> None:
-        """PR-merge close for a non-issue delivered-PR task (#87).
-
-        ``reconcile_develop_pr`` self-filters and never raises, but wrap it so
-        an unexpected error on one task can't abort the rest of the sweep.
-        """
-        try:
-            outcome = await reconcile_develop_pr(task, github, ctx)
-        except Exception as exc:  # defensive — the reconcile catches its own
-            logger.warning(
-                "[Friction] github-watcher: PR-merge check for task %s failed: %s: %s",
-                task.id,
-                type(exc).__name__,
-                exc,
-            )
-            return
-        if outcome in pr_counts:
-            pr_counts[outcome] += 1
 
     async def _pr_gate_one(gate: Any) -> None:
         """Resolve one open ``pr`` gate (Epic H). Same defensive wrap."""
@@ -191,15 +168,7 @@ async def _run_reconcile_pass(
             await _dispatch_one(task, "lithos.task.updated")
         elif pr_merge_enabled and is_pr_gate(task):
             await _pr_gate_one(task)
-        elif pr_merge_enabled and task.metadata.get("develop_pr_url"):
-            await _pr_merge_one(task)
 
-    pr_summary = (
-        f"{pr_counts['merged']} merged / {pr_counts['closed_unmerged']} "
-        f"closed-unmerged / {pr_counts['still_open']} still-open / "
-        f"{pr_counts['gone']} deleted / {pr_counts['unparseable']} unparseable / "
-        f"{pr_counts['error']} error"
-    )
     gate_summary = (
         f"{gate_counts['merged']} resolved / {gate_counts['closed_unmerged']} "
         f"closed-unmerged / {gate_counts['still_open']} awaiting-merge / "
@@ -210,10 +179,9 @@ async def _run_reconcile_pass(
     if resolved_window is None:
         logger.info(
             "github-watcher: reconcile sweep replayed %d open GH-linked "
-            "task(s); PR-merge: %s; pr-gates: %s; resolved-task sweep disabled "
+            "task(s); pr-gates: %s; resolved-task sweep disabled "
             "(resolved_replay_days=0)",
             counts["open"],
-            pr_summary,
             gate_summary,
         )
         return
@@ -239,11 +207,10 @@ async def _run_reconcile_pass(
 
     logger.info(
         "github-watcher: reconcile sweep replayed %d open / %d completed / "
-        "%d cancelled GH-linked task(s); PR-merge: %s; pr-gates: %s",
+        "%d cancelled GH-linked task(s); pr-gates: %s",
         counts["open"],
         counts["completed"],
         counts["cancelled"],
-        pr_summary,
         gate_summary,
     )
 

@@ -160,10 +160,10 @@ class RouteConfig:
 
     Set ``False`` for PR-producing routes (e.g. ``story-develop``) where
     success means "a reviewed branch + PR exist, awaiting human merge", not
-    "done". The runner then *releases* the claim and leaves the task open,
-    marking it ``metadata.loom_delivered`` so a later daemon restart does not
-    re-develop it. Completion happens on PR merge — for github-linked tasks via
-    the watcher close-mirror; otherwise the operator completes it (see #87).
+    "done". The runner then creates a ``pr`` gate (Epic H) that blocks the story
+    until merge and *releases* the claim; the gate keeps the story off the ready
+    frontier so a daemon restart does not re-develop it. Completion happens on
+    PR merge — the github-watcher resolves the gate (see #87, US11).
     """
 
 
@@ -229,7 +229,7 @@ class ObsidianSyncConfig:
     ``tasks_file``)."""
     awaiting_review_file: Path = field(default=DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE)
     """#113: the dedicated 'PRs awaiting review' note — open tasks carrying
-    ``metadata.loom_delivered`` + ``metadata.develop_pr_url``. Relative to
+    ``metadata.develop_pr_url`` (delivered, awaiting merge). Relative to
     ``vault_path`` (same shape as ``tasks_file``)."""
 
 
@@ -276,14 +276,14 @@ class GitHubWatcherConfig:
     to 0 to disable the sweep entirely.
     """
     pr_merge_poll_enabled: bool = True
-    """Whether the reconcile sweep also polls delivered PRs for merge (#87).
+    """Whether the reconcile sweep also resolves ``pr`` gates on merge (#87, Epic H).
 
-    When on (default), the sweep checks every open task carrying
-    ``metadata.develop_pr_url`` (and NOT ``github_issue_url`` — those close via
-    the issue mirror): a merged PR completes the task, a closed-unmerged or
-    deleted PR leaves it open with a one-shot ``[DeliveredPRClosed]`` finding.
-    Piggybacks the ``reconcile_interval_minutes`` cadence. Set ``false`` to run
-    the watcher for issue sync only without the PR-merge sweep.
+    When on (default), the sweep checks every open ``pr`` gate (``task_type=gate``,
+    ``gate_type=pr``): a merged PR completes the blocked story then the gate; a
+    closed-unmerged or deleted PR leaves the gate open with a one-shot
+    ``[DeliveredPRClosed]`` finding. Piggybacks the ``reconcile_interval_minutes``
+    cadence. Set ``false`` to run the watcher for issue sync only without the
+    gate resolver.
     """
 
 

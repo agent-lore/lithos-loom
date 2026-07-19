@@ -1326,13 +1326,13 @@ def _delivered_result() -> dict[str, Any]:
     }
 
 
-async def test_completes_task_false_creates_pr_gate_and_marks_delivered(
+async def test_completes_task_false_creates_pr_gate(
     tmp_path: Path,
 ) -> None:
-    """Epic H: a completes_task=false success must NOT complete the task — it
-    creates a `pr` gate for the delivered PR, links the story as its waiter,
-    releases the claim, and writes loom_delivered (restart safety) + pr_gate_id
-    (so the legacy url sweep stands aside)."""
+    """Epic H / US11: a completes_task=false success must NOT complete the task
+    — it creates a `pr` gate for the delivered PR, links the story as its
+    waiter, records the gate id on the story (provenance), and releases the
+    claim. No loom_delivered marker (retired in US11)."""
     bus = EventBus()
     lithos = _lithos_mock()
     lithos.task_create.return_value = "gate-1"
@@ -1365,18 +1365,20 @@ async def test_completes_task_false_creates_pr_gate_and_marks_delivered(
     assert edge.kwargs["from_task_id"] == "gate-1"
     assert edge.kwargs["to_task_id"] == "task-1"
     assert edge.kwargs["type"] == "waits_on_gate"
-    # Story marked delivered + pointed at its gate, then released.
+    # Story pointed at its gate (provenance), then released.
     assert lithos.task_update.await_args.kwargs["metadata"] == {
-        "loom_delivered": True,
         "pr_gate_id": "gate-1",
     }
     lithos.task_release.assert_awaited_once()
 
 
-async def test_completes_task_false_without_pr_url_falls_back(tmp_path: Path) -> None:
+async def test_completes_task_false_without_pr_url_posts_friction(
+    tmp_path: Path,
+) -> None:
     """A PR-less success (shouldn't happen for story-develop post-#194, but the
-    runner is plugin-agnostic) creates no gate, still marks loom_delivered, and
-    surfaces the anomaly as [Friction]."""
+    runner is plugin-agnostic) creates no gate and writes no story metadata —
+    US11 has no fallback marker — so it surfaces the anomaly as a loud
+    [Friction] and releases."""
     bus = EventBus()
     runner, lithos = _make_runner(
         bus=bus, route=_develop_route(), work_dir=tmp_path
@@ -1386,16 +1388,17 @@ async def test_completes_task_false_without_pr_url_falls_back(tmp_path: Path) ->
     await _run_for(runner)
 
     lithos.task_create.assert_not_called()
-    assert lithos.task_update.await_args.kwargs["metadata"] == {"loom_delivered": True}
+    lithos.task_update.assert_not_called()  # nothing to record without a gate
     lithos.task_release.assert_awaited_once()
     assert "no pr_url" in lithos.finding_post.await_args.kwargs["summary"]
 
 
-async def test_gate_creation_failure_falls_back_to_loom_delivered(
+async def test_gate_creation_failure_posts_loud_friction(
     tmp_path: Path,
 ) -> None:
-    """If gate creation fails, merge tracking falls back to the develop_pr_url
-    sweep: loom_delivered is still written and a [Friction] explains."""
+    """US11: with loom_delivered and the legacy sweep gone, a failed gate
+    creation has NO fallback — no story metadata is written and a loud
+    [Friction] warns the delivered story could be re-developed on restart."""
     bus = EventBus()
     lithos = _lithos_mock()
     lithos.task_create.side_effect = LithosClientError("boom", "gate create failed")
@@ -1410,29 +1413,25 @@ async def test_gate_creation_failure_falls_back_to_loom_delivered(
     await bus.publish(_evt(payload=_payload(tags=("trigger:story-develop",))))
     await _run_for(runner)
 
-    assert lithos.task_update.await_args.kwargs["metadata"] == {"loom_delivered": True}
+    lithos.task_update.assert_not_called()  # no gate → nothing to record
     lithos.task_release.assert_awaited_once()
-    assert (
-        "could not create the pr gate"
-        in lithos.finding_post.await_args.kwargs["summary"]
-    )
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert "could not create the pr gate" in summary
+    assert "re-develop" in summary  # the loud, no-fallback consequence
 
 
-async def test_delivered_task_is_skipped_not_re_developed(tmp_path: Path) -> None:
-    """A task already marked loom_delivered is skipped — the restart-safety
-    guard: bootstrap re-emits open tasks as `created`, and a delivered task
-    must not be re-claimed while its PR awaits merge."""
+async def test_delivered_gated_story_is_not_re_developed(tmp_path: Path) -> None:
+    """US11 safety property: a delivered story blocked by its `pr` gate is absent
+    from `task_ready`, so the runner's readiness check defers it — no re-claim,
+    including across the restart bootstrap that re-emits every open task as
+    `created`. The gate (via task_ready) is the sole re-dispatch guard now that
+    loom_delivered is gone; `ready_ids=()` models the gate withholding it."""
     bus = EventBus()
-    runner, lithos = _make_runner(bus=bus, route=_develop_route(), work_dir=tmp_path)
-
-    await bus.publish(
-        _evt(
-            payload=_payload(
-                tags=("trigger:story-develop",),
-                metadata={"loom_delivered": True},
-            )
-        )
+    runner, lithos = _make_runner(
+        bus=bus, route=_develop_route(), work_dir=tmp_path, ready_ids=()
     )
+
+    await bus.publish(_evt(payload=_payload(tags=("trigger:story-develop",))))
     await _run_for(runner)
 
     lithos.task_claim.assert_not_called()
@@ -1451,11 +1450,11 @@ async def test_completes_task_true_still_completes(tmp_path: Path) -> None:
     lithos.task_update.assert_not_called()
 
 
-async def test_delivered_marker_failure_posts_friction(tmp_path: Path) -> None:
-    """If marking loom_delivered fails, the risk is made visible as a [Friction]
-    finding, not just logged (Copilot #95). With a gate already created, the
-    gate blocks re-dispatch, so the finding says so rather than warning of a
-    duplicate-PR restart."""
+async def test_gate_provenance_write_failure_posts_friction(tmp_path: Path) -> None:
+    """If recording pr_gate_id on the story fails, the risk is made visible as a
+    [Friction] finding, not just logged (Copilot #95). With the gate already
+    created, it blocks re-dispatch, so the finding says the missing provenance
+    marker is benign rather than warning of a duplicate-PR restart."""
     bus = EventBus()
     lithos = _lithos_mock()
     lithos.task_create.return_value = "gate-1"
@@ -1474,22 +1473,4 @@ async def test_delivered_marker_failure_posts_friction(tmp_path: Path) -> None:
     lithos.task_release.assert_awaited_once()  # release still attempted
     summary = lithos.finding_post.await_args.kwargs["summary"]
     assert summary.startswith("[Friction]")
-    assert "loom_delivered" in summary and "gate already blocks" in summary
-
-
-async def test_completes_task_true_route_ignores_delivered_marker(
-    tmp_path: Path,
-) -> None:
-    """loom_delivered is route-specific protection for completes_task=false
-    routes. A completes_task=true route must still run an open task carrying the
-    marker — e.g. a follow-on route re-tagged onto the still-open task (#95
-    review). The guard is gated on `not completes_task`."""
-    bus = EventBus()
-    # default _make_runner route is completes_task=True
-    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
-
-    await bus.publish(_evt(payload=_payload(metadata={"loom_delivered": True})))
-    await _run_for(runner)
-
-    lithos.task_claim.assert_awaited_once()
-    lithos.task_complete.assert_awaited_once()
+    assert "pr_gate_id" in summary and "gate already blocks" in summary

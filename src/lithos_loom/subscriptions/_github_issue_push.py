@@ -331,10 +331,11 @@ async def _heal_orphan_link(
     ``github_issue_gone_url`` marker so subsequent ``task.*`` events skip the GH
     round-trip via the handler's entry check (vs. a permanent-error log per
     event forever). Scoped to ``issue_url`` — re-linking the task to a new issue
-    re-evaluates. Mirrors ``_develop_pr_merge._friction_and_mark`` / ``_mark``:
-    finding-then-mark (a crash between costs at most one duplicate finding next
-    event); best-effort, swallowing ``task_not_found`` for a genuinely-deleted
-    task and warning on anything else (leaving the marker unset → retry).
+    re-evaluates. Uses the shared finding-then-mark idiom
+    (:mod:`~lithos_loom.subscriptions._findings`): a crash between the two costs
+    at most one duplicate finding next event; best-effort, swallowing
+    ``task_not_found`` for a genuinely-deleted task and warning on anything else
+    (leaving the marker unset → retry).
     """
     if not task_id or not issue_url:
         return

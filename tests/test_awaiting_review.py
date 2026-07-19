@@ -23,7 +23,8 @@ from tests.support import FakeLithosClient, make_task
 
 _NOTE = Path("_lithos/awaiting-review.md")
 _DELIVERED = {
-    "loom_delivered": True,
+    # US11: a delivered task is identified by its develop_pr_url alone (open +
+    # PR url); the loom_delivered marker is retired.
     "develop_pr_url": "https://github.com/agent-lore/lithos/pull/363",
     "project": "lithos-core",
 }
@@ -115,13 +116,15 @@ async def test_non_delivered_task_absent(tmp_path: Path) -> None:
     assert "plain task" not in _note(tmp_path)
 
 
-async def test_delivered_without_pr_url_absent(tmp_path: Path) -> None:
+async def test_open_task_without_pr_url_absent(tmp_path: Path) -> None:
+    """An open task with no develop_pr_url is not awaiting review (US11: the PR
+    url alone is the marker, so its absence is the sole exclusion)."""
     handler, _ = make_handler(_cfg(tmp_path))
     await handler(
         _event(
             "lithos.task.created",
             task_id="t1",
-            metadata={"loom_delivered": True},  # no develop_pr_url
+            metadata={"project": "lithos-core"},  # no develop_pr_url
         ),
         _ctx(),
     )

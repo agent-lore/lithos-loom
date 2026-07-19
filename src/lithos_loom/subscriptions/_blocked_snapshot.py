@@ -12,9 +12,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from lithos_loom.lithos_client import Blocker
-from lithos_loom.subscriptions.route_runner import READY_QUERY_LIMIT
 
 __all__ = ["BlockedSnapshot"]
+
+# Page size for the per-flush ``task_blocked`` sweep — the projection's own knob,
+# deliberately decoupled from the route-runner's ready-frontier limit (US11): the
+# blocked set spans every project and is the likeliest of Loom's queries to
+# truncate, so it may need raising independently. A full page means the set was
+# truncated (see :meth:`BlockedSnapshot.get`).
+BLOCKED_QUERY_LIMIT = 500
 
 
 class BlockedSnapshot:
@@ -68,7 +74,7 @@ class BlockedSnapshot:
         if self._snapshot is not None:
             return self._snapshot
         try:
-            blocked = await ctx.lithos.task_blocked(limit=READY_QUERY_LIMIT)
+            blocked = await ctx.lithos.task_blocked(limit=BLOCKED_QUERY_LIMIT)
         except Exception:
             ctx.logger.warning(
                 "obsidian-projection: lithos_task_blocked sweep failed; treating "
@@ -76,7 +82,7 @@ class BlockedSnapshot:
                 exc_info=True,
             )
             return {}
-        if len(blocked) >= READY_QUERY_LIMIT:
+        if len(blocked) >= BLOCKED_QUERY_LIMIT:
             # See the class docstring: absence from a truncated page proves
             # nothing, so tasks past the cut render without ⛔ and slip past
             # `include_blocked = false`. That is the recoverable direction, but
@@ -85,9 +91,9 @@ class BlockedSnapshot:
                 "obsidian-projection: lithos_task_blocked returned a full "
                 "%d-task page, so the blocked set is truncated — tasks beyond it "
                 "render without ⛔ markers and are not hidden by "
-                "include_blocked=false. Raise READY_QUERY_LIMIT if a blocked set "
+                "include_blocked=false. Raise BLOCKED_QUERY_LIMIT if a blocked set "
                 "this large is expected.",
-                READY_QUERY_LIMIT,
+                BLOCKED_QUERY_LIMIT,
             )
         self._snapshot = {bt.task.id: bt.blockers for bt in blocked}
         return self._snapshot

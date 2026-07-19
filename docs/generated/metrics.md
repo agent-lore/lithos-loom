@@ -17,7 +17,7 @@ lower a budget after improving the code to lock in the gain.
 | `max_module_lines` | 2195 | 2210 | 15 |
 | `module_cycles` | 1 | 1 | 0 |
 | `modules_over_800_lines` | 6 | 6 | 0 |
-| `tests_private_imports` | 99 | 99 | 0 |
+| `tests_private_imports` | 96 | 99 | 3 |
 
 ## Import graph
 
@@ -35,7 +35,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Component | Modules | Lines | SLOC | Fan-in | Fan-out | Instability | Max complexity | Functions > 10 |
 |---|---:|---:|---:|---:|---:|---:|---|---:|
 | Bus | 1 | 198 | 160 | 4 | 0 | 0.00 | 11 (`lithos_loom.bus._matches_struct`) | 1 |
-| Children | 6 | 1317 | 991 | 0 | 7 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 2 |
+| Children | 6 | 1284 | 962 | 0 | 7 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 1 |
 | Cli | 11 | 4726 | 3925 | 2 | 8 | 0.80 | 49 (`lithos_loom.cli.project.import_project`) | 15 |
 | Config | 1 | 1040 | 871 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
@@ -50,13 +50,13 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Runners | 5 | 572 | 443 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
 | Sources | 7 | 3101 | 2332 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 20 | 5987 | 4551 | 4 | 10 | 0.71 | 13 (`lithos_loom.subscriptions._develop_pr_merge.reconcile_develop_pr`) | 9 |
+| Subscriptions | 20 | 5791 | 4387 | 4 | 10 | 0.71 | 13 (`lithos_loom.subscriptions._note_push.make_handler.handle`) | 7 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
-| Tasks | 4 | 813 | 602 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 2 |
+| Tasks | 4 | 820 | 609 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 2 |
 
 ## Size
 
-- Modules: **114**, lines: **34825**, SLOC: **27662**
+- Modules: **114**, lines: **34603**, SLOC: **27476**
 - Largest module: `lithos_loom.lithos_client` (2195 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **907**, cyclomatic > 10: **72**
+- Functions: **901**, cyclomatic > 10: **69**
 
 Top 10 most complex functions:
 
@@ -99,12 +99,12 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `lithos_loom.sources.github_issue_watcher -> lithos_loom.sources.github_watch_state._isoformat`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._resolved_at_for`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._task_from_payload`
-- Tests importing src privates: **99**
+- Tests importing src privates: **96**
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)`
-  - `tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x6)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._resolve (x4)`
+  - `tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._active_agent (x3)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._run_info (x3)`
   - `tests/test_obsidian_fs_watcher.py -> lithos_loom.sources.obsidian_fs_watcher._LINE_RE (x3)`
@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **17** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.59** (55351 test lines / 34825 source lines)
+- Test-to-source line ratio: **1.59** (54930 test lines / 34603 source lines)

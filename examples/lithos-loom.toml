@@ -81,8 +81,9 @@ command = "uv run python -m lithos_loom.plugins.story_develop --task-json {{task
 max_runtime_seconds = 28800
 # completes_task = false: an APPROVED run means a reviewed branch + PR exist,
 # awaiting human merge — NOT that the task is done. The runner leaves the task
-# open and raises a first-class `pr` gate that structurally blocks it (Epic H;
-# also marks metadata.loom_delivered as a restart fallback). Completion happens
+# open and raises a first-class `pr` gate that structurally blocks it (Epic H) —
+# the gate keeps the story off the ready frontier, so it is the sole re-dispatch
+# guard (US11 retired the metadata.loom_delivered fallback). Completion happens
 # on PR merge — the github-watcher resolves the gate (github-linked tasks also
 # close via the issue mirror).
 completes_task = false
@@ -166,7 +167,7 @@ tags = ["trigger:story-develop"]
 
 # Awaiting-review note (#113) — a dedicated _lithos/awaiting-review.md
 # listing open tasks whose story-develop PR is awaiting your review
-# (metadata.loom_delivered + develop_pr_url). Same upstream events as the
+# (open + metadata.develop_pr_url). Same upstream events as the
 # projection; needs the obsidian-sync child (below). Pairs with the
 # operator-as-reviewer GitHub notification ([story_develop].operator_github_login).
 # [[subscriptions]]

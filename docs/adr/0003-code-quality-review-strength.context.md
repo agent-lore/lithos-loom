@@ -30,7 +30,7 @@
 
 ## Open Questions
 - [ ] Risk-signal **detection engine** — principle + signal list fixed (§7); the detector is a later phase, profiles floor-only/manual until then.
-- [ ] **Autonomous re-develop loop** (clear `loom_delivered` / don't-resolve the `pr` gate, same-PR-branch push, cumulative per-PR budget → human escalation) — reserved-shape; MVP ships the read+surface half only. Two triggers: a **CI-red** delivered PR, and **unresolved post-delivery review comments** (Copilot/bot/human) that landed after the bounded in-run Copilot round — the comment-lag tail of #91 (recurred live on PR #265).
+- [ ] **Autonomous re-develop loop** (re-dispatch development on the same PR branch *without* resolving the `pr` gate — US11 Shape 1; the gate stays the sole "awaiting merge" blocker — cumulative per-PR budget → human escalation) — reserved-shape; MVP ships the read+surface half only. Two triggers: a **CI-red** delivered PR, and **unresolved post-delivery review comments** (Copilot/bot/human) that landed after the bounded in-run Copilot round — the comment-lag tail of #91 (recurred live on PRs #265/#267).
 - [ ] **Calibration outcome-correlation** (signal basket + success-metric rollup) — reserved; MVP records run metadata only.
 - [ ] Per-check **severity-mapping table** (tool levels → minor/major/critical) — ADR follow-up, reviewable/tunable.
 

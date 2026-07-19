@@ -324,27 +324,34 @@ CI at all makes the local gate final.
 
 **Lifecycle contract (reconciled with delivery).** *(This contract is documented
 in full to reserve the shape; the **MVP ships only the read+surface half** — see
-**Scope** below. The autonomous re-develop loop is a later phase.)* Today, on
-approval loom marks `loom_delivered`, releases the claim, and opens the PR; the
-watcher owns merge/close ([#87]). A delivered-but-CI-red PR is reconciled by **the
-same watcher sweep**, following loom's existing marker pattern (cf.
+**Scope** below. The autonomous re-develop loop is a later phase.)* On approval loom
+creates a **`pr` gate** (Epic H) that blocks the delivered story on human merge,
+releases the claim, and opens the PR; the watcher owns merge/close ([#87]) and
+resolves the gate on merge. *(US11 retired the old `loom_delivered` marker — the
+gate is now the sole "awaiting merge" state and the sole re-dispatch guard, via the
+runner's `task_ready` check.)* A delivered-but-CI-red PR is reconciled by **the same
+watcher sweep**, following loom's existing marker pattern (cf.
 `develop_pr_merge_state`, [#87]/[#69]):
 
-- it posts a `gate/ci-*` deterministic finding on the task and **clears
-  `loom_delivered`**, re-opening the task for development — **only while the PR is
+- it posts a `gate/ci-*` deterministic finding on the story and **re-dispatches
+  development against the existing PR branch — _without_ resolving the `pr` gate**
+  (resolving the gate means *merged*, which this is not) — **only while the PR is
   open and unmerged** (a concurrent human merge wins; the sweep no-ops);
 - re-development pushes **to the same PR branch** (append commits), so there is
-  one PR, not a fork;
+  one PR, not a fork; the `pr` gate stays open throughout and the human merge
+  resolves it normally;
 - de-duped via a **CI-state marker scoped to the head SHA**, so a given red result
   re-triggers once, and a new push re-evaluates.
 
-This keeps exactly one owner of the task at a time and prevents duplicate / raced
-runs. Two consequences the autonomous-loop slice must handle: a re-opened run is a
-**fresh dispatch with no session continuity** from the original development (the
+This keeps exactly one owner of the story at a time and prevents duplicate / raced
+runs. Two consequences the autonomous-loop slice must handle: a re-dispatched run is
+a **fresh dispatch with no session continuity** from the original development (the
 CI-fix coder starts cold, so its prompt must carry the original task + the CI
-failure), and a re-open must **not collide with an in-flight human review** (if the
-PR is in `story-review-human`, surface the CI failure to that human rather than
-pushing commits under them).
+failure), and it must **not collide with an in-flight human review** (surface the CI
+failure to that human rather than pushing commits under them). The re-dispatch
+mechanism is watcher-driven with the gate untouched — separate from the ready-queue,
+which a gated story never re-enters; a dedicated `ci` gate is reserved only for the
+distinct *wait-for-CI-as-a-blocker* case (US33 merge-stories), not this loop.
 
 **Late-arriving review comments are a second re-develop trigger — not only
 CI-red.** story-develop's delivery runs a *bounded* in-run Copilot round (wait up
@@ -360,15 +367,15 @@ comments exist on the delivered head with no responding commit**, re-open
 development the same way — same-branch push, cumulative budget, only-while-open-
 unmerged, and the same deferral to any in-flight human review. The in-run round
 stays the fast path; this covers what the bounded wait structurally cannot. (Under
-Epic H the delivered story is now blocked by a `pr` gate rather than only
-`loom_delivered`, so the re-open trigger ties into the gate-vs-`loom_delivered`
-mechanism decision of US11 — the loop must re-open development *without* resolving
-the `pr` gate, which means merged.)
+Epic H the delivered story is blocked by a `pr` gate; the loop re-dispatches
+development *without* resolving the gate — resolving means merged — exactly as the
+CI-red path above. US11 settled this: the gate is the single "awaiting merge"
+blocker and the re-dispatch never touches it.)
 
-**Budget is cumulative across re-dispatches.** Clearing `loom_delivered` triggers
-a *fresh* route dispatch (new process, new `max_rounds` / cost), so per-run
-ceilings alone would let a CI-red loop reset its budget every re-open. A
-**cumulative per-PR budget** — total rounds, total cost, and a re-open count — is
+**Budget is cumulative across re-dispatches.** Each re-dispatch is a *fresh* run
+(new process, new `max_rounds` / cost), so per-run ceilings alone would let a CI-red
+loop reset its budget every re-dispatch. A
+**cumulative per-PR budget** — total rounds, total cost, and a re-dispatch count — is
 persisted in task metadata **keyed by the PR URL / head history** and drawn down
 across dispatches. When it is exhausted, loom **stops re-developing and escalates
 to the human** (a `[Friction]` / story-review-human handoff) rather than looping.
@@ -444,8 +451,8 @@ for.
   floor-only (manually selected). No breaking change when it lands.
 - **Post-delivery feedback loop** (§9) — the MVP ships the **read+surface half**:
   consume the PR's check-runs and, on CI-red, **post a `gate/ci-*` finding and
-  route to `story-review-human`**. The **autonomous half** (clear `loom_delivered`
-  / don't-resolve the `pr` gate, re-develop on the same PR branch, cumulative
+  route to `story-review-human`**. The **autonomous half** (re-dispatch development
+  on the same PR branch _without_ resolving the `pr` gate, cumulative
   budget) is a later phase — it reintroduces cold-start context, human-review
   races, and same-branch push mechanics that warrant their own justification. It
   has **two triggers**: a CI-red delivered PR **and** unresolved post-delivery
@@ -470,9 +477,10 @@ that should be a deliberate choice, not the default first increment.
   can't silently turn every minor finding into a merge blocker; the severity map
   + policy decide, per check.
 - **Post-delivery feedback doesn't strand a branch.** The lifecycle contract
-  re-opens a delivered task on the same PR — on CI-red **or** on unresolved late
-  review comments (the #91 comment-lag tail) — with merge-race and duplicate-run
-  guards reusing the existing watcher marker pattern.
+  re-dispatches development on the same PR — on CI-red **or** on unresolved late
+  review comments (the #91 comment-lag tail) — *without* resolving the `pr` gate,
+  with merge-race and duplicate-run guards reusing the existing watcher marker
+  pattern.
 - **One honest quality signal.** Static tooling and the panel reinforce each
   other and share a finding model — but deterministic findings have their *own*
   ledger (IDs, gate-ownership, tool-closure, suppression) rather than being
@@ -554,7 +562,7 @@ that should be a deliberate choice, not the default first increment.
 | | `strength_rank` monotonicity validation at config load (higher rank ⊇ lower required checks + personas) — **✅ #139 (slice 1): `validate_monotonic` runs at module import over the canonical chain; non-monotonic → `MonotonicityError` (a `ConfigError`)** | |
 | | **risk-based auto-escalation** detector (signal list in §7) | |
 | 5a — CI read **(MVP)** | consume PR CI check-runs (branch-protection → declared-contexts → N/A) as a `gate/ci-*` finding; on red, surface to `story-review-human` | [#87] |
-| 5b — autonomous re-develop *(later)* | re-develop a delivered PR on the **same PR**, triggered by **CI-red** *or* **unresolved post-delivery review comments** (Copilot/bot/human landing after the bounded in-run round — the #91 comment-lag tail): `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87], [#91] |
+| 5b — autonomous re-develop *(later)* | re-dispatch development on the **same PR** *without* resolving its `pr` gate, triggered by **CI-red** *or* **unresolved post-delivery review comments** (Copilot/bot/human landing after the bounded in-run round — the #91 comment-lag tail): `develop_pr_url`/branch discovery, checkout, idempotent push, merge+human-review-race guards, head-SHA marker dedup, cumulative per-PR budget → human escalation | [#87], [#91] |
 | 5 — calibration | record review metadata **(MVP)**; outcome-signal basket + success metrics *(later)* | [#87] |
 
 Each slice is an independently grabbable tracer-bullet issue, linked back to #128.
