@@ -17,7 +17,7 @@ lower a budget after improving the code to lock in the gain.
 | `max_module_lines` | 2195 | 2210 | 15 |
 | `module_cycles` | 1 | 1 | 0 |
 | `modules_over_800_lines` | 6 | 6 | 0 |
-| `tests_private_imports` | 96 | 99 | 3 |
+| `tests_private_imports` | 97 | 99 | 2 |
 
 ## Import graph
 
@@ -99,12 +99,12 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `lithos_loom.sources.github_issue_watcher -> lithos_loom.sources.github_watch_state._isoformat`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._resolved_at_for`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._task_from_payload`
-- Tests importing src privates: **96**
+- Tests importing src privates: **97**
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)`
+  - `tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x5)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._resolve (x4)`
-  - `tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._active_agent (x3)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._run_info (x3)`
   - `tests/test_obsidian_fs_watcher.py -> lithos_loom.sources.obsidian_fs_watcher._LINE_RE (x3)`
@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **17** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.59** (54930 test lines / 34603 source lines)
+- Test-to-source line ratio: **1.59** (54968 test lines / 34603 source lines)

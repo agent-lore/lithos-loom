@@ -323,6 +323,44 @@ async def test_reconcile_pass_skips_gates_when_pr_poll_disabled() -> None:
     github.get_pull_request.assert_not_awaited()
 
 
+async def test_reconcile_pass_ignores_bare_develop_pr_url_task() -> None:
+    """US11: the legacy develop_pr_url story sweep is gone. A plain open task
+    carrying develop_pr_url (but not a `pr` gate) is NOT swept — no PR fetch, no
+    completion — even with pr_merge_enabled=True. Guards against silently
+    reintroducing the develop_pr_url branch."""
+    import logging
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.children.github_watcher import _run_reconcile_pass
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.subscriptions import SubscriptionContext
+
+    develop_task = Task(
+        id="task-pr",
+        title="delivered PR task",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata={"develop_pr_url": "https://github.com/o/r/pull/9"},
+        claims=(),
+    )
+    lithos = AsyncMock()
+    lithos.task_list = AsyncMock(return_value=[develop_task])
+    github = AsyncMock()
+    ctx = SubscriptionContext(
+        lithos=lithos, logger=logging.getLogger("test-bare-pr"), agent_id="a"
+    )
+    await _run_reconcile_pass(
+        lithos=lithos,
+        push_handler=AsyncMock(),
+        ctx=ctx,
+        resolved_window=None,
+        github=github,
+        pr_merge_enabled=True,
+    )
+    github.get_pull_request.assert_not_awaited()
+    lithos.task_complete.assert_not_awaited()
+
+
 # The child's configure_logging boot code moved to children/_boot.py
 # (ARCH-6); its MCP-SSE-pin behaviour is pinned once in
 # tests/test_child_boot.py.

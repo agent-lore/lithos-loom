@@ -295,10 +295,10 @@
     "cross_module_private_refs": 8,
     "tests_private_detail": [
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)",
+      "tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x5)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._resolve (x4)",
-      "tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x4)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._active_agent (x3)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._run_info (x3)",
       "tests/test_obsidian_fs_watcher.py -> lithos_loom.sources.obsidian_fs_watcher._LINE_RE (x3)",
@@ -325,7 +325,7 @@
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags"
     ],
-    "tests_private_imports": 96
+    "tests_private_imports": 97
   },
   "size": {
     "components": {
@@ -537,6 +537,6 @@
   "tests": {
     "ratio": 1.59,
     "src_lines": 34603,
-    "test_lines": 54930
+    "test_lines": 54968
   }
 }
