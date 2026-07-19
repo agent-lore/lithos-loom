@@ -1,27 +1,22 @@
-"""``develop-pr-merge`` reconcile — auto-close tasks on PR merge (#87).
+"""``pr``-gate resolver — resolve Epic H ``pr`` gates against their PR (#87, US11).
 
-When a PR-producing plugin (``story-develop``) delivers a PR and exits, the
-route uses ``completes_task = false``, so the Lithos task stays **open** with
-``metadata.develop_pr_url`` recording the PR. A GitHub-**issue**-linked task
-closes on merge via the issue close-mirror (``_github_issue_push``); a task
-created directly in Lithos (no ``github_issue_url``) has no such path.
+When a PR-producing plugin (``story-develop``) delivers a PR and exits under a
+``completes_task = false`` route, the runner creates a **`pr` gate** (see
+:mod:`lithos_loom.gates`) that blocks the delivered story until a human merges
+the PR. This module resolves those gates: called per-open-gate by the
+github-watcher child's periodic reconcile sweep (``children/github_watcher.py``,
+which enumerates open tasks and holds a ``GitHubClient``), it reads the gate's
+PR merge state from GitHub and, on merge, completes the story **then** the gate;
+on closed-unmerged / deleted it leaves the gate open with a
+``[DeliveredPRClosed]`` finding.
 
-This module polls the delivered PR's merge state and acts on the task. It is
-called per-task by the github-watcher child's periodic reconcile sweep
-(``children/github_watcher.py``), which already enumerates open tasks and holds
-a ``GitHubClient``. It keys off ``develop_pr_url`` only — **plugin-agnostic**:
-any plugin that records ``develop_pr_url`` gets merge→complete for free.
+De-dup lives in a single ``metadata.develop_pr_merge_state`` marker written on
+the GATE (mirrors ``github_state_snapshot``), scoped to the PR url it resolved
+so a dead PR isn't re-polled every sweep while a replacement PR re-evaluates.
 
-De-dup lives in a single ``metadata.develop_pr_merge_state`` marker (mirrors
-``github_state_snapshot``): once it reaches a terminal value the sweep skips the
-task, so neither completion nor a finding fires twice.
-
-This reconcile reads the delivered PR's merge state from GitHub, independent of
-the run-dir markers — a develop run's on-disk fate (``state.json`` /
-``result.json`` / ``delivery.json``) is classified by
-:mod:`plugins.story_develop.run_outcome`. Now that the classifier is a standalone
-module, this reconcile *could* consume it to correlate a PR's merge state with the
-run's recorded outcome; today it doesn't, and behaviour is unchanged.
+Until US11 this module also ran a legacy ``develop_pr_url`` *story* sweep for
+pre-gate deliveries; that sweep and the ``loom_delivered`` marker are gone — the
+gate is now the sole merge-tracking and re-dispatch path.
 """
 
 from __future__ import annotations
@@ -30,12 +25,11 @@ from typing import Any
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
-    STORY_GATE_ID_KEY,
     is_pr_gate,
     parse_pr_gate,
     waiter_of,
 )
-from lithos_loom.github_client import GitHubClient, GitHubError, parse_github_ref
+from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 
@@ -46,7 +40,6 @@ __all__ = [
     "MERGE_STATE_TERMINAL",
     "MERGE_STATE_URL_KEY",
     "is_pr_gate",
-    "reconcile_develop_pr",
     "reconcile_pr_gate",
 ]
 
@@ -59,136 +52,30 @@ DELIVERED_PR_CLOSED = "[DeliveredPRClosed]"
 # and this finding records why the story unblocked — gate type, PR, resolver.
 GATE_RESOLVED = "[GateResolved]"
 
-# Task-metadata keys carrying the de-dup marker. The marker is SCOPED to the
-# develop_pr_url it resolved (MERGE_STATE_URL_KEY): the sweep skips a task only
-# when its resolved state is terminal AND the recorded url still matches the
-# task's current develop_pr_url. So when a rejected PR is abandoned and the task
-# is re-developed into a REPLACEMENT PR, develop_pr_url changes, the recorded
-# url no longer matches, and the sweep re-evaluates the new PR — without that
-# scoping a stale marker would suppress the new PR forever.
+# Gate-metadata keys carrying the de-dup marker (written on the GATE). The marker
+# is SCOPED to the PR url it resolved (MERGE_STATE_URL_KEY): the resolver skips a
+# gate only when its resolved state is terminal AND the recorded url still
+# matches the gate's PR url. So when a rejected PR is abandoned and the story is
+# re-developed into a REPLACEMENT PR (a fresh url), the recorded url no longer
+# matches and the resolver re-evaluates the new PR — without that scoping a stale
+# marker would suppress the new PR forever.
 MERGE_STATE_KEY = "develop_pr_merge_state"
 MERGE_STATE_URL_KEY = "develop_pr_merge_url"
 
-# Marker values that mean "this develop_pr_url is resolved". A still-open PR
-# leaves the marker UNSET so the sweep re-polls next cycle.
+# Marker values that mean "this PR url is resolved". A still-open PR leaves the
+# marker UNSET so the resolver re-polls next cycle.
 MERGE_STATE_TERMINAL: frozenset[str] = frozenset(
     {"merged", "closed_unmerged", "gone", "unparseable"}
 )
-
-
-def _parse_pr_url(url: object) -> tuple[str | None, int | None]:
-    """``https://github.com/<owner>/<repo>/pull/<n>`` → ``("owner/repo", n)``.
-
-    Thin adapter over :func:`~lithos_loom.github_client.parse_github_ref` that
-    keeps this module's ``(None, None)``-on-failure tuple convention and filters
-    to PR (``pull``) refs — an issue URL returns ``(None, None)`` here.
-    """
-    ref = parse_github_ref(url)
-    if ref is None or ref.kind != "pull":
-        return None, None
-    return ref.repo, ref.number
-
-
-async def reconcile_develop_pr(
-    task: Any, github: GitHubClient, ctx: SubscriptionContext
-) -> str | None:
-    """Reconcile one open task's delivered-PR merge state.
-
-    Returns a short outcome label for the sweep's counters
-    (``merged`` / ``closed_unmerged`` / ``still_open`` / ``gone`` /
-    ``unparseable`` / ``error``), or ``None`` when the task is not a
-    develop-PR task (no ``develop_pr_url``, issue-linked, or already resolved
-    for *this same* ``develop_pr_url``). Never raises — GitHub and Lithos
-    failures are caught, logged as ``[Friction]``, and (for transient ones)
-    retried next sweep by leaving the marker unset.
-    """
-    metadata = task.metadata
-    pr_url = metadata.get("develop_pr_url")
-    if not isinstance(pr_url, str) or not pr_url:
-        return None
-    if metadata.get(STORY_GATE_ID_KEY):
-        # A `pr` gate now owns this task's merge lifecycle (Epic H); the gate
-        # resolver completes it. Stand aside so the two paths never both act on
-        # one PR. Retired with this whole sweep once gates are the sole path.
-        return None
-    if metadata.get("github_issue_url"):
-        # Issue-linked: the issue close-mirror already handles merge→complete.
-        return None
-    if (
-        metadata.get(MERGE_STATE_KEY) in MERGE_STATE_TERMINAL
-        and metadata.get(MERGE_STATE_URL_KEY) == pr_url
-    ):
-        # Already resolved THIS pr_url. A replacement PR (changed develop_pr_url)
-        # has a stale recorded url, so it falls through and gets re-evaluated.
-        return None
-
-    repo, number = _parse_pr_url(pr_url)
-    if repo is None or number is None:
-        await _friction_and_mark(
-            task,
-            ctx,
-            "unparseable",
-            pr_url,
-            f"[Friction] develop-pr-merge: task {task.id} has an unparseable "
-            f"develop_pr_url ({pr_url!r}); cannot watch it for merge",
-        )
-        return "unparseable"
-
-    try:
-        pr = await github.get_pull_request(repo, number)
-    except GitHubError as exc:
-        # Auth / rate-limit / 5xx / network — transient from the sweep's POV.
-        # Leave the marker unset so the next cycle retries (the sweep is a
-        # natural retry loop; no in-cycle backoff to trigger).
-        ctx.logger.warning(
-            "[Friction] develop-pr-merge: fetching %s#%d for task %s failed "
-            "(%s: %s); will retry next sweep",
-            repo,
-            number,
-            task.id,
-            type(exc).__name__,
-            exc,
-        )
-        return "error"
-
-    if pr is None:  # 404 — PR or repo gone (permanent, cf. #69)
-        await _friction_and_mark(
-            task,
-            ctx,
-            "gone",
-            pr_url,
-            f"{DELIVERED_PR_CLOSED} develop-pr-merge: delivered PR {pr_url} no "
-            f"longer exists (404) for task {task.id}; left open for a human",
-        )
-        return "gone"
-
-    state = _pr_merge_state(pr)
-    if state == "merged":
-        await _complete_merged(task, pr_url, pr, ctx)
-        return "merged"
-
-    if state == "closed_unmerged":
-        await _friction_and_mark(
-            task,
-            ctx,
-            "closed_unmerged",
-            pr_url,
-            f"{DELIVERED_PR_CLOSED} develop-pr-merge: delivered PR {pr_url} was "
-            f"closed without merging; task {task.id} left open for a human",
-        )
-        return "closed_unmerged"
-
-    # state == "open" — still in flight; re-poll next sweep (no marker).
-    return "still_open"
 
 
 def _pr_merge_state(pr: Any) -> str:
     """Classify a fetched (non-``None``) PR: ``merged`` / ``closed_unmerged`` /
     ``still_open``.
 
-    Shared by the story sweep and the gate resolver. The ``None`` (deleted) case
-    is handled by callers — it needs a per-subject finding — and a raised
-    ``GitHubError`` is transient; neither is a merge state.
+    Used by the gate resolver. The ``None`` (deleted) case is handled by callers
+    — it needs a per-subject finding — and a raised ``GitHubError`` is transient;
+    neither is a merge state.
     """
     if pr.merged:
         return "merged"
@@ -199,11 +86,10 @@ def _pr_merge_state(pr: Any) -> str:
 
 # ── PR-gate resolver (Epic H) ──────────────────────────────────────────
 #
-# Coexists with the develop_pr_url story sweep above during the loom_delivered
-# soak: the story sweep owns a *gate-less* delivered task (it skips a task
-# carrying ``pr_gate_id``), and this resolver owns the gate + its story. The two
-# never both act on one PR. When gates become the sole path (US11), the story
-# sweep and its markers are deleted and this remains.
+# The sole merge-tracking path since US11 (the legacy develop_pr_url story sweep
+# and the loom_delivered marker are gone): the runner creates a `pr` gate per
+# delivery, and this resolver owns the gate + its story — on merge it completes
+# the story then the gate.
 
 
 async def reconcile_pr_gate(
@@ -410,81 +296,4 @@ async def _gate_closed(
         subsystem="pr-gate",
         retry_hint="will retry next sweep",
         marker_task_id=gate.id,
-    )
-
-
-# ── Lithos side-effects (idempotent; swallow task_not_found) ───────────
-
-
-async def _complete_merged(
-    task: Any, pr_url: str, pr: Any, ctx: SubscriptionContext
-) -> None:
-    """Complete the task on PR merge, then write the ``merged`` marker.
-
-    Order is complete-first: a completion failure leaves the marker unset so the
-    next sweep retries the whole reconcile, rather than a marked-but-uncompleted
-    task being skipped forever. The marker write then lands on the now-terminal
-    task — Lithos accepts ``task_update`` on a terminal task (lithos#303, fixed
-    2026-06-19); ``task_complete`` itself stays idempotent (``task_not_found``
-    for an already-terminal task is swallowed). The one residual gap — a crash
-    *strictly between* the complete and the mark — loses the marker permanently
-    (the completed task leaves the open set, so it is never re-swept), but that
-    is benign: the merged marker is observability-only, since merged-path de-dup
-    is the open-set exclusion, not the marker.
-    """
-    try:
-        await ctx.lithos.task_complete(task_id=task.id)
-    except LithosClientError as exc:
-        if exc.code == "task_not_found":
-            ctx.logger.info(
-                "develop-pr-merge: task %s already terminal; marking merged",
-                task.id,
-            )
-        else:
-            ctx.logger.warning(
-                "[Friction] develop-pr-merge: completing task %s on PR merge "
-                "failed (%s); will retry next sweep",
-                task.id,
-                exc,
-            )
-            return  # leave the marker unset → retry next sweep
-    ctx.logger.info(
-        "develop-pr-merge: completed task %s on PR merge %s (%s)",
-        task.id,
-        pr_url,
-        pr.merge_commit_sha or "no sha",
-    )
-    await _mark(task, ctx, "merged", pr_url)
-
-
-async def _friction_and_mark(
-    task: Any, ctx: SubscriptionContext, marker: str, pr_url: str, summary: str
-) -> None:
-    """Post a one-shot finding, then write this module's (state, url) marker.
-
-    Builds the develop-pr-merge marker dict and delegates the finding-then-mark
-    idiom to :func:`~lithos_loom.subscriptions._findings.post_finding_then_mark`
-    (shared with ``_github_issue_push``).
-    """
-    await post_finding_then_mark(
-        ctx,
-        task_id=task.id,
-        summary=summary,
-        marker={MERGE_STATE_KEY: marker, MERGE_STATE_URL_KEY: pr_url},
-        subsystem="develop-pr-merge",
-        retry_hint="will retry next sweep",
-    )
-
-
-async def _mark(task: Any, ctx: SubscriptionContext, state: str, pr_url: str) -> None:
-    """Write the de-dup marker (state + the url it resolved), no finding.
-
-    The finding-less path (merged → mark ``merged``); delegates to the shared
-    :func:`~lithos_loom.subscriptions._findings.write_marker`.
-    """
-    await write_marker(
-        ctx,
-        task_id=task.id,
-        marker={MERGE_STATE_KEY: state, MERGE_STATE_URL_KEY: pr_url},
-        subsystem="develop-pr-merge",
     )

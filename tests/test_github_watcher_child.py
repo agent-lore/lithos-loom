@@ -233,58 +233,10 @@ async def test_reconcile_pass_skips_terminal_scan_when_window_disabled() -> None
     assert handler_calls == ["lithos.task.updated"]
 
 
-async def test_reconcile_pass_polls_develop_pr_tasks_when_enabled() -> None:
-    """#87: the sweep checks open non-issue tasks carrying develop_pr_url and
-    completes them when the PR has merged."""
-    import logging
-    from unittest.mock import AsyncMock
-
-    from lithos_loom.children.github_watcher import _run_reconcile_pass
-    from lithos_loom.github_client import PullRequest
-    from lithos_loom.lithos_client import Task
-    from lithos_loom.subscriptions import SubscriptionContext
-
-    develop_task = Task(
-        id="task-pr",
-        title="PR task",
-        status="open",
-        tags=("trigger:story-develop",),
-        metadata={"develop_pr_url": "https://github.com/o/r/pull/9"},
-        claims=(),
-    )
-    lithos = AsyncMock()
-    lithos.task_list = AsyncMock(return_value=[develop_task])
-    github = AsyncMock()
-    github.get_pull_request = AsyncMock(
-        return_value=PullRequest(
-            repo="o/r",
-            number=9,
-            state="closed",
-            merged=True,
-            merged_at=None,
-            merge_commit_sha="sha9",
-        )
-    )
-    ctx = SubscriptionContext(
-        lithos=lithos, logger=logging.getLogger("test-pr"), agent_id="a"
-    )
-    await _run_reconcile_pass(
-        lithos=lithos,
-        push_handler=AsyncMock(),
-        ctx=ctx,
-        resolved_window=None,
-        github=github,
-        pr_merge_enabled=True,
-    )
-    github.get_pull_request.assert_awaited_once_with("o/r", 9)
-    lithos.task_complete.assert_awaited_once_with(task_id="task-pr")
-
-
 async def test_reconcile_pass_resolves_open_pr_gates_when_enabled() -> None:
     """Epic H: the sweep enumerates open `pr` gates and resolves them — here a
-    merged PR completes the gate. Routing correctness (the gate branch fires,
-    the develop_pr_url sweep isn't confused); resolution detail lives in
-    test_develop_pr_merge.py."""
+    merged PR completes the gate. Routing correctness (the gate branch fires);
+    resolution detail lives in test_develop_pr_merge.py."""
     import logging
     from unittest.mock import AsyncMock
 
@@ -371,8 +323,11 @@ async def test_reconcile_pass_skips_gates_when_pr_poll_disabled() -> None:
     github.get_pull_request.assert_not_awaited()
 
 
-async def test_reconcile_pass_skips_pr_poll_when_disabled() -> None:
-    """pr_merge_poll_enabled=false runs the watcher for issue sync only."""
+async def test_reconcile_pass_ignores_bare_develop_pr_url_task() -> None:
+    """US11: the legacy develop_pr_url story sweep is gone. A plain open task
+    carrying develop_pr_url (but not a `pr` gate) is NOT swept — no PR fetch, no
+    completion — even with pr_merge_enabled=True. Guards against silently
+    reintroducing the develop_pr_url branch."""
     import logging
     from unittest.mock import AsyncMock
 
@@ -382,9 +337,9 @@ async def test_reconcile_pass_skips_pr_poll_when_disabled() -> None:
 
     develop_task = Task(
         id="task-pr",
-        title="PR task",
+        title="delivered PR task",
         status="open",
-        tags=(),
+        tags=("trigger:story-develop",),
         metadata={"develop_pr_url": "https://github.com/o/r/pull/9"},
         claims=(),
     )
@@ -392,7 +347,7 @@ async def test_reconcile_pass_skips_pr_poll_when_disabled() -> None:
     lithos.task_list = AsyncMock(return_value=[develop_task])
     github = AsyncMock()
     ctx = SubscriptionContext(
-        lithos=lithos, logger=logging.getLogger("test-pr"), agent_id="a"
+        lithos=lithos, logger=logging.getLogger("test-bare-pr"), agent_id="a"
     )
     await _run_reconcile_pass(
         lithos=lithos,
@@ -400,9 +355,10 @@ async def test_reconcile_pass_skips_pr_poll_when_disabled() -> None:
         ctx=ctx,
         resolved_window=None,
         github=github,
-        pr_merge_enabled=False,
+        pr_merge_enabled=True,
     )
     github.get_pull_request.assert_not_awaited()
+    lithos.task_complete.assert_not_awaited()
 
 
 # The child's configure_logging boot code moved to children/_boot.py

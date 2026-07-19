@@ -4,7 +4,8 @@ A **`pr` gate** models "PR raised, awaiting human merge" as a first-class
 Lithos task (``task_type="gate"``, ``metadata.gate_type="pr"``) joined to the
 story by a ``waits_on_gate`` edge. The story is then *structurally* blocked
 until the gate is resolved — the github-watcher completes the gate on merge —
-replacing the ``metadata.loom_delivered`` flag only the runner understood.
+replacing the ``metadata.loom_delivered`` flag the runner previously used
+(retired in US11: the gate is now the sole "awaiting merge" state).
 
 This module is the single home for the gate's shape: its creation, and the
 metadata/edge reads the resolver needs. Gates are created via ``task_create``
@@ -46,13 +47,14 @@ WAITS_ON_GATE = "waits_on_gate"
 """Edge type joining a gate (from) to its blocked waiter (to)."""
 
 STORY_GATE_ID_KEY = "pr_gate_id"
-"""Story-side marker: the id of the ``pr`` gate now owning this task's
+"""Story-side provenance marker: the id of the ``pr`` gate owning this task's
 merge→complete lifecycle.
 
-Its *presence* is how the legacy ``develop_pr_url`` merge sweep knows to stand
-aside — a gated story is completed by the gate resolver, not the url sweep, so
-the two never both act on one PR. Retired together with that sweep and the
-``loom_delivered`` marker once gates are the sole path (US11)."""
+The gate + its ``waits_on_gate`` edge are the authoritative state; this is the
+inverse link recorded on the story so an operator can see which gate withholds
+it without walking edges. (Before US11 its *presence* also told the legacy
+``develop_pr_url`` sweep to stand aside; that sweep and ``loom_delivered`` are
+now gone, so this is provenance only.)"""
 
 
 @dataclass(frozen=True)
@@ -135,15 +137,19 @@ async def create_pr_gate_best_effort(
 
     Best-effort by design: a delivered branch + PR exist regardless of whether
     the gate lands, so a missing / non-string / malformed *pr_url*, or a failed
-    write, must not fail delivery — merge tracking then falls back to the legacy
-    ``develop_pr_url`` sweep and ``loom_delivered`` alone guards re-dispatch.
-    This holds the "why a gate couldn't be created" classification so the caller
-    keeps only the release + friction orchestration.
+    write, must not fail delivery. But the gate is now the *sole* merge-tracking
+    and re-dispatch guard (US11 retired ``loom_delivered`` and the legacy
+    ``develop_pr_url`` sweep), so a failure has no fallback: the *problem* string
+    says so loudly and the caller surfaces it as ``[Friction]``. This holds the
+    "why a gate couldn't be created" classification so the caller keeps only the
+    release + friction orchestration.
     """
     if not (isinstance(pr_url, str) and pr_url):
         return None, (
-            "plugin reported success with no pr_url — no pr gate created; "
-            "merge tracking falls back to the develop_pr_url sweep"
+            "plugin reported success with no pr_url — no pr gate created; this "
+            "delivered story has no merge-tracking gate and a daemon restart "
+            "could re-develop it into a duplicate PR. Merge the PR or create a "
+            "gate manually"
         )
     try:
         gate_id = await create_pr_gate(
@@ -157,8 +163,9 @@ async def create_pr_gate_best_effort(
     except (ValueError, OSError, LithosClientError):
         logger.exception("creating pr gate for story %s failed", story_id)
         return None, (
-            "could not create the pr gate — merge tracking falls back "
-            "to the develop_pr_url sweep"
+            "could not create the pr gate — this delivered story has no "
+            "merge-tracking gate and a daemon restart could re-develop it into "
+            "a duplicate PR. Merge the PR or create a gate manually"
         )
     logger.info("created pr gate %s for story %s", gate_id, story_id)
     return gate_id, None

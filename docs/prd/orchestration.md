@@ -271,7 +271,13 @@ Each is independently grabbable. Findings keep the established stable prefixes
    doc with indented children was failing at the first parent. See §3 above for
    the type vocabulary this settled.)*
 
-### H — Human-merge gate (retire the `loom_delivered` hack)
+### H — Human-merge gate (retire the `loom_delivered` hack) — ✅ SHIPPED
+
+> US10–US13 shipped (PRs #261/#262/#263 + the US11 removal PR). US11 deleted the
+> `loom_delivered` marker + guard and the legacy `develop_pr_url` merge sweep; a
+> delivered story's `pr` gate is now the sole "awaiting merge" state and the sole
+> re-dispatch guard (via the runner's `lithos_task_ready` check). The user
+> stories below are kept as the design record.
 
 10. As the operator, I want `story-develop`, on approval + PR delivery, to
     create a `pr` gate task (`gate_type=pr`, `metadata={repo, pr_number,

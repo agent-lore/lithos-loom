@@ -1,10 +1,12 @@
 """``obsidian-awaiting-review`` subscription handler (#113).
 
 Maintains a dedicated vault note listing open tasks whose PR awaits the
-operator's review — those carrying ``metadata.loom_delivered`` +
-``metadata.develop_pr_url`` (set by ``story-develop`` delivery under a
-``completes_task = false`` route). The operator already lives in Obsidian; this
-is a consolidated, always-current pull surface alongside the main task list.
+operator's review — those carrying ``metadata.develop_pr_url`` (set by
+``story-develop`` delivery under a ``completes_task = false`` route). Since US11
+the delivered story is blocked by its ``pr`` gate rather than flagged
+``loom_delivered``, so the PR url alone (on an open task) is the marker. The
+operator already lives in Obsidian; this is a consolidated, always-current pull
+surface alongside the main task list.
 
 Read-only projection: the note is regenerated from in-memory state on each
 relevant event and is never round-tripped by the fs watcher, so — unlike the
@@ -118,12 +120,7 @@ def make_handler(cfg: LoomConfig) -> tuple[Any, Any]:
         (status != "open") or one missing the delivery markers is removed."""
         pr_url = metadata.get("develop_pr_url")
         # isinstance check lives in the `if` so pyright narrows pr_url to str.
-        if (
-            status == "open"
-            and bool(metadata.get("loom_delivered"))
-            and isinstance(pr_url, str)
-            and pr_url
-        ):
+        if status == "open" and isinstance(pr_url, str) and pr_url:
             project = metadata.get("project")
             delivered[task_id] = _Entry(
                 title=title or task_id,

@@ -6,7 +6,7 @@
 and then write a url-scoped metadata marker so the breadcrumb fires once. That
 finding-then-mark idiom now lives once in ``subscriptions/_findings.py``; these
 tests pin the extracted behaviour directly (the callers' own tests exercise it
-end-to-end through ``reconcile_develop_pr`` / the push handler).
+end-to-end through ``reconcile_pr_gate`` / the push handler).
 """
 
 from __future__ import annotations
