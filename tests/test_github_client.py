@@ -928,11 +928,55 @@ def test_parse_pull_request_includes_refs_title_body() -> None:
 
 def test_parse_pull_request_tolerates_missing_ref_fields() -> None:
     """A minimal row (the merge-watcher's older test shape) still parses — the new
-    ref/title/body fields default to empty rather than KeyError-ing."""
+    ref/title/body/repo fields default to empty rather than KeyError-ing."""
     pr = _parse_pull_request(
         {"number": 7, "state": "closed", "merged": True, "merged_at": None}, repo=_REPO
     )
     assert pr.head_sha == "" and pr.base_ref == "" and pr.title == "" and pr.body == ""
+    assert pr.head_repo == "" and pr.base_repo == ""
+
+
+def test_parse_pull_request_captures_head_and_base_repos() -> None:
+    """head/base repo full-names distinguish a fork PR (they differ) from a
+    same-repo PR — review_resolve reads these to flag forks for converge."""
+    pr = _parse_pull_request(
+        {
+            "number": 9,
+            "state": "open",
+            "merged": False,
+            "merged_at": None,
+            "head": {
+                "sha": "h" * 40,
+                "ref": "feature",
+                "repo": {"full_name": "fork/lithos-loom"},
+            },
+            "base": {
+                "sha": "b" * 40,
+                "ref": "main",
+                "repo": {"full_name": "agent-lore/lithos-loom"},
+            },
+        },
+        repo=_REPO,
+    )
+    assert pr.head_repo == "fork/lithos-loom"
+    assert pr.base_repo == "agent-lore/lithos-loom"
+
+
+def test_parse_pull_request_tolerates_null_head_repo() -> None:
+    """A deleted fork leaves ``head.repo`` null; that must parse to an empty
+    head_repo (converge then can't confirm same-repo → the push guard backstops)."""
+    pr = _parse_pull_request(
+        {
+            "number": 9,
+            "state": "open",
+            "merged": False,
+            "merged_at": None,
+            "head": {"sha": "h" * 40, "ref": "feature", "repo": None},
+            "base": {"ref": "main", "repo": {"full_name": "agent-lore/lithos-loom"}},
+        },
+        repo=_REPO,
+    )
+    assert pr.head_repo == "" and pr.base_repo == "agent-lore/lithos-loom"
 
 
 @pytest.mark.asyncio

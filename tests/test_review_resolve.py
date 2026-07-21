@@ -83,7 +83,7 @@ def test_unknown_ref_raises(tmp_git_repo: Path) -> None:
 # --- PR form (gh stubbed) ----------------------------------------------------
 
 
-def _stub_pr(number: str) -> PullRequest:
+def _stub_pr(number: str, *, head_repo: str = "agent-lore/lithos-loom") -> PullRequest:
     return PullRequest(
         repo="agent-lore/lithos-loom",
         number=int(number),
@@ -93,7 +93,9 @@ def _stub_pr(number: str) -> PullRequest:
         merge_commit_sha=None,
         head_sha="h" * 40,
         base_ref="main",
-        head_ref="contributor:feature",
+        head_ref="feature",
+        head_repo=head_repo,
+        base_repo="agent-lore/lithos-loom",
         title="Add a thing",
         body="This PR adds a thing.\n\n## Acceptance\n- it works",
     )
@@ -130,8 +132,30 @@ def test_resolves_pr_number(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     assert "adds a thing" in change.body
     assert change.title == "Add a thing"
     assert "142" in change.head_ref
+    # the raw pushable branch + fork flag drive converge's push epilogue
+    assert change.head_branch == "feature"
+    assert change.is_fork is False
     # the PR head was fetched so the commit is local
     assert fetches_for(stub_gh.fetches, "142")
+
+
+def test_resolve_pr_flags_fork_when_head_repo_differs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A PR whose head lives on a fork (head repo != base repo) is flagged so
+    converge can refuse to push to it under origin credentials."""
+    monkeypatch.setattr(
+        review_resolve,
+        "_gh_pr_view",
+        lambda repo, n: _stub_pr(n, head_repo="contributor/lithos-loom"),
+    )
+    monkeypatch.setattr(review_resolve, "_git_fetch", lambda repo, *refs: None)
+    monkeypatch.setattr(review_resolve, "_merge_base", lambda repo, a, b: "m" * 40)
+
+    change = review_resolve.resolve_change(tmp_path, "#142")
+
+    assert change.is_fork is True
+    assert change.head_branch == "feature"
 
 
 def test_resolves_bare_digits_as_pr(stub_gh: SimpleNamespace, tmp_path: Path) -> None:

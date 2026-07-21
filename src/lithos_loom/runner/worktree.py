@@ -36,7 +36,29 @@ def create(
     """Create a per-task worktree off *base_branch* and return its path.
 
     A fresh branch ``{slug(name)}-{8hex}`` is created at *base_branch*. The
-    worktree directory is placed under *parent* (default ``repo.parent``).
+    worktree directory is placed under *parent* (default ``repo.parent``). This
+    is the special case of :func:`create_on_branch` where the start point is a
+    base branch.
+    """
+    return create_on_branch(repo, base_branch, name, parent=parent)
+
+
+def create_on_branch(
+    repo: Path,
+    start_point: str,
+    name: str,
+    *,
+    parent: Path | None = None,
+) -> Path:
+    """Create a worktree on a **fresh committable branch at** *start_point*.
+
+    A new branch ``{slug(name)}-{8hex}`` is created positioned at the commit-ish
+    *start_point* (a base branch, or a PR head sha) and checked out — so a coder
+    can commit onto it and it can be pushed. This is the committable counterpart
+    of :func:`create_at` (detached HEAD, no branch) that the converge loop uses
+    to fix a PR in place; :func:`create` is the case where *start_point* is a
+    base branch. The worktree directory is placed under *parent* (default
+    ``repo.parent``).
     """
     base_dir = parent if parent is not None else repo.parent
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -50,15 +72,15 @@ def create(
         raise RuntimeError("could not find a free worktree path after 5 attempts")
 
     result = subprocess.run(
-        ["git", "worktree", "add", "-b", branch, str(path), base_branch],
+        ["git", "worktree", "add", "-b", branch, str(path), start_point],
         cwd=repo,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"git worktree add failed (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
+            f"git worktree add -b {branch} {start_point} failed "
+            f"(exit {result.returncode}): {result.stderr.strip()}"
         )
     return path
 

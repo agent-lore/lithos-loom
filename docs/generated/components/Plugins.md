@@ -38,7 +38,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.lithos_io` | S | 2 | 3 |
 | `lithos_loom.plugins.story_develop.panel` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_develop.pr_delivery` | L | 2 | 19 |
+| `lithos_loom.plugins.story_develop.pr_delivery` | L | 4 | 20 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | S | 0 | 1 |
@@ -218,6 +218,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `comments_to_handoff_text` — Render Copilot's inline comments as a synthetic review handoff.
 - def `reply_body` — The per-thread reply: fix reference, held-back notice, or pushback.
 - def `push_branch` — Host-side push of the worktree branch to origin. Raises on failure.
+- class `ForkPushUnsupported` — The PR's head ref is not on ``origin`` (a fork PR), so converge cannot push to it under origin credentials (v1). The operator converges + fixes locally with ``--no-push``, or re-runs against a same-repo PR.
+- class `MergeRaceDetected` — The PR head ref advanced on the remote since converge resolved it, so a push would not be a fast-forward. Converge stops rather than ``--force`` (which would clobber the concurrent commit); the operator re-runs to pick up the new tip.
+- def `push_to_pr_ref` — Fast-forward push *local_branch* onto the PR's head ref *remote_ref*.
 - def `create_pr` — Open the PR; returns its URL. Raises on failure.
 - def `pr_number_from_url` — Extract the PR number from a canonical GitHub PR URL; raise if it can't.
 - def `request_copilot` — Request the Copilot reviewer; False (logged) on failure — non-fatal.

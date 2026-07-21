@@ -14,8 +14,8 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | XS | 0 | 6 |
-| `lithos_loom.runner.worktree` | S | 0 | 4 |
+| `lithos_loom.runner.git` | S | 0 | 7 |
+| `lithos_loom.runner.worktree` | S | 0 | 5 |
 
 ## Public API
 
@@ -35,10 +35,12 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `has_uncommitted_changes` — Return True if *worktree* has staged or unstaged changes.
 - def `commit_all` — Stage all changes (minus *exclude* pathspecs) and commit if any remain.
 - def `apply_patch` — Apply the unified diff at *patch_path* to *worktree*'s working tree (#193).
+- def `log_between` — Return the commit log for ``base..head`` (subject + body), oldest first.
 - def `diff_stat` — Return ``git diff --stat base_sha..HEAD`` — the cumulative change so far.
 
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.
+- def `create_on_branch` — Create a worktree on a **fresh committable branch at** *start_point*.
 - def `create_at` — Create a worktree with HEAD **detached at an existing commit** *ref*.
 - def `git_common_dir` — Absolute path to the shared git dir for the worktree at *path*.
 - def `remove` — Remove a worktree. Refuses a dirty tree unless *force* is True.

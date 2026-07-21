@@ -180,6 +180,11 @@ class PullRequest:
     They default to empty so a minimal row (e.g. a list-endpoint slice or an
     older test fixture) still parses; the single-PR endpoint always populates
     them in practice.
+
+    ``head_repo`` / ``base_repo`` are the head/base repo full-names
+    (``owner/name``); when they differ the PR head lives on a **fork**, which
+    converge (``review_resolve``) reads to refuse pushing to a fork branch under
+    origin credentials.
     """
 
     repo: str
@@ -193,6 +198,8 @@ class PullRequest:
     head_ref: str = ""
     title: str = ""
     body: str = ""
+    head_repo: str = ""
+    base_repo: str = ""
 
 
 @dataclass(frozen=True)
@@ -278,6 +285,8 @@ def _parse_pull_request(row: dict[str, Any], *, repo: str) -> PullRequest:
         head_ref=str(head.get("ref") or ""),
         title=str(row.get("title") or ""),
         body=str(row.get("body") or ""),
+        head_repo=str((head.get("repo") or {}).get("full_name") or ""),
+        base_repo=str((base.get("repo") or {}).get("full_name") or ""),
     )
 
 

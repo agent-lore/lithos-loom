@@ -124,6 +124,23 @@ def test_apply_patch_raises_on_conflict(tmp_git_repo: Path, tmp_path: Path) -> N
         git.apply_patch(tmp_git_repo, patch_file)
 
 
+def test_log_between_lists_commit_messages(tmp_git_repo: Path) -> None:
+    # Feeds the converge cold-start prompt's {commit_log} so a fixer picking up a
+    # PR it did not author sees the original author's narration.
+    base = git.base_sha(tmp_git_repo)
+    _commit(tmp_git_repo, "a.txt", "a")
+    _commit(tmp_git_repo, "b.txt", "b")
+    log = git.log_between(tmp_git_repo, base)
+    assert "add a.txt" in log and "add b.txt" in log
+    # oldest first (matches commits_since order)
+    assert log.index("add a.txt") < log.index("add b.txt")
+
+
+def test_log_between_empty_without_commits(tmp_git_repo: Path) -> None:
+    base = git.base_sha(tmp_git_repo)
+    assert git.log_between(tmp_git_repo, base) == ""  # base == HEAD
+
+
 def test_raises_on_bad_repo(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         git.base_sha(tmp_path)  # not a git repo

@@ -46,6 +46,8 @@ classDiagram
     +head_ref str
     +title str
     +body str
+    +head_repo str
+    +base_repo str
   }
   class PullRequestReview {
     +author str
