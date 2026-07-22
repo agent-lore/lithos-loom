@@ -1970,3 +1970,82 @@ def test_candidate_stage_reruns_on_a_new_committed_sha(
     # candidate re-ran on BOTH committed trees (a boolean guard would skip round 2).
     assert [r for r, _ in candidate_calls] == [1, 2]
     assert candidate_calls[0][1] != candidate_calls[1][1]  # distinct gated_sha
+
+
+# --- converge entry: parameterized loop on an existing PR branch --------------
+
+
+def test_converge_entry_seeds_round_one_and_reuses_loop(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """converge enters develop() on an EXISTING PR branch via LoopEntry: round-1
+    coder gets the cold-start CONVERGE prompt seeded from the intake review, the
+    worktree is a committable branch at the PR head, base is the PR merge-base,
+    and the round loop is reused verbatim (approves on the fixed head)."""
+    from lithos_loom.plugins.story_develop.develop import LoopEntry
+    from lithos_loom.plugins.story_develop.panel import ReviewOutcome
+    from lithos_loom.runner import git, worktree
+
+    # a PR head on top of the base commit
+    base = git.base_sha(config.repo)
+    (config.repo / "pr.txt").write_text("pr change\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=config.repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "the PR commit"],
+        cwd=config.repo,
+        check=True,
+        capture_output=True,
+    )
+    head = git.base_sha(config.repo)
+
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+
+    intake = [
+        ReviewOutcome(
+            reviewer="correctness",
+            status="FINDINGS",
+            passed=False,
+            max_severity="major",
+            findings=[],
+        )
+    ]
+    entry = LoopEntry(
+        worktree_factory=lambda cfg: worktree.create_on_branch(
+            cfg.repo, head, cfg.description, parent=cfg.worktree_parent
+        ),
+        base_override=base,
+        intake_reviews=intake,
+        intake_check_set=None,
+    )
+
+    result = develop_mod.develop(config, entry=entry)
+
+    assert result.status == "approved"
+    # base is the PR merge-base (the override), NOT the worktree HEAD
+    assert result.base_sha == base
+    # round-1 coder got the CONVERGE cold-start prompt (not coder_init), resume=False
+    assert state["coder_calls"][0] == (1, False)
+    prompt0 = " ".join(state["coder_prompts"][0].split())  # robust to line-wrapping
+    assert "did not author" in prompt0  # converge cold-start, not coder_init/coder_fix
+    # the worktree is a committable real branch at the PR head, not detached
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=result.worktree,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch != "HEAD"
+
+
+def test_develop_without_entry_uses_fresh_worktree_off_base(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: entry=None is byte-for-byte the story-develop path —
+    round-1 coder gets coder_init (implement the task), not the converge prompt."""
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert "did not author" not in state["coder_prompts"][0]
+    assert "Add a greeting file" in state["coder_prompts"][0]  # coder_init description

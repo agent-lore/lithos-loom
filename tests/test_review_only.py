@@ -194,3 +194,37 @@ def test_handoff_mountpoint_created_before_containers_start(
     config = _config(tmp_path)
     review_only.review_change(config, _CHANGE)
     assert harness["handoff_at_start"] is True
+
+
+# --- _review_head extraction (converge intake reuse) --------------------------
+
+
+def test_review_head_returns_raw_panel_and_check_set(
+    harness: dict, tmp_path: Path
+) -> None:
+    """The extracted _review_head returns the RAW panel + check-set (not the
+    collapsed ReviewReport) — converge seeds its round-1 coder from
+    panel.round_reviews and shows the intake gate in the fix prompt. review_change
+    consolidates the same pieces, so its existing tests pin behaviour-preservation.
+    """
+    config = _config(tmp_path)
+    harness["panel_script"]["correctness"] = {"status": "FINDINGS", "passed": False}
+
+    intake = review_only._review_head(config, _CHANGE)
+
+    assert intake.panel is not None
+    assert {o.reviewer for o in intake.panel.round_reviews} == {
+        "correctness",
+        "security",
+    }
+    assert intake.check_set is not None and len(intake.check_set.results) == 1
+    # the same pieces consolidate into the report review_change would return
+    report = review_only._build_report(
+        config,
+        _CHANGE,
+        intake.reviewers,
+        intake.panel,
+        intake.check_set,
+        intake.gate_ledger,
+    )
+    assert report.blocking is True

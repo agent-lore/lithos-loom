@@ -19,6 +19,7 @@ harness (#183) drives: it returns structured findings for an arbitrary change.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from ...runner import worktree
 from . import containers, engines
@@ -33,7 +34,7 @@ from .check_set import CheckSetResult
 from .config import HANDOFF_MOUNT_NAME, DevelopConfig, is_valid_reviewer_name
 from .gate_findings import GateLedger
 from .handoff import seed_handoff_dir
-from .panel import ReviewerState, run_panel_round
+from .panel import PanelRoundResult, ReviewerState, run_panel_round
 from .review_report import (
     GateCheckReport,
     ReviewerReport,
@@ -53,6 +54,22 @@ _REVIEW_ONLY_CODER_SUMMARY = (
 )
 
 
+@dataclass(frozen=True)
+class IntakeResult:
+    """The raw pieces of one review pass at a change head.
+
+    :func:`review_change` consolidates them into a :class:`ReviewReport`; the
+    converge loop seeds its round-1 coder from ``panel.round_reviews`` and shows
+    ``check_set`` in the fix prompt, so it needs the raw outcomes the report
+    would otherwise discard.
+    """
+
+    reviewers: list[ReviewerState]
+    panel: PanelRoundResult | None
+    check_set: CheckSetResult | None
+    gate_ledger: GateLedger
+
+
 def review_change(
     config: DevelopConfig,
     change: ResolvedChange,
@@ -66,6 +83,35 @@ def review_change(
     profile's check-set once, runs each reviewer once (round 1), and returns the
     consolidated :class:`ReviewReport`. The worktree + reviewer containers are
     torn down on exit unless *keep_worktree* is set.
+    """
+    intake = _review_head(
+        config, change, reviewer_timeout=reviewer_timeout, keep_worktree=keep_worktree
+    )
+    return _build_report(
+        config,
+        change,
+        intake.reviewers,
+        intake.panel,
+        intake.check_set,
+        intake.gate_ledger,
+    )
+
+
+def _review_head(
+    config: DevelopConfig,
+    change: ResolvedChange,
+    *,
+    reviewer_timeout: int = 3600,
+    keep_worktree: bool = False,
+) -> IntakeResult:
+    """Run the panel + gate once at the change head and return the RAW pieces.
+
+    The shared intake driven by both :func:`review_change` (which consolidates
+    the pieces into a :class:`ReviewReport`) and the converge loop (which seeds
+    its round-1 coder from ``panel.round_reviews`` and the intake ``check_set``).
+    Materialises a read-only worktree at ``change.head_sha``, runs the profile's
+    check-set once and the reviewer panel once (round 1, no coder), and tears the
+    worktree + reviewer containers down unless *keep_worktree*.
     """
     specs = config.effective_reviewers
     for spec in specs:
@@ -148,7 +194,9 @@ def review_change(
             except RuntimeError:
                 logger.warning("review-only %s: worktree cleanup failed", config.run_id)
 
-    return _build_report(config, change, reviewers, panel, check_set, gate_ledger)
+    return IntakeResult(
+        reviewers=reviewers, panel=panel, check_set=check_set, gate_ledger=gate_ledger
+    )
 
 
 def _build_report(

@@ -21,7 +21,9 @@ from lithos_loom.plugins.story_develop.panel import (
 )
 
 
-@pytest.mark.parametrize("name", ["coder_init.md", "coder_fix.md"])
+@pytest.mark.parametrize(
+    "name", ["coder_init.md", "coder_fix.md", "converge_coder_init.md"]
+)
 def test_coder_prompt_forbids_background_and_defers_tests(name: str) -> None:
     text = load_prompt(name).lower()
     # single non-interactive turn + no background-and-wait
@@ -29,6 +31,27 @@ def test_coder_prompt_forbids_background_and_defers_tests(name: str) -> None:
     assert "never background" in text
     # the objective gate covers tests, so the coder needn't run the full suite
     assert "objective test gate" in text
+
+
+def test_converge_prompt_carries_intent_transfer_and_slots() -> None:
+    # The converge cold-start prompt fixes a PR the coder did NOT author, so it
+    # must steer intent reconstruction (read the PR + commit log + code first),
+    # keep the dispute escape, and expose the render slots converge fills.
+    raw = load_prompt("converge_coder_init.md")
+    text = " ".join(raw.lower().split())
+    assert "did not author" in text
+    assert "commit history" in text or "commit log" in text
+    assert "dispute" in text
+    # do not redesign — satisfy the author's intent
+    assert "do not redesign" in text or "not redesign" in text
+    for slot in (
+        "{acceptance_criteria}",
+        "{commit_log}",
+        "{findings}",
+        "{gate_summary}",
+        "{handoff_file}",
+    ):
+        assert slot in raw
 
 
 def test_coder_init_drops_run_the_suite_instruction() -> None:

@@ -63,7 +63,7 @@ from .panel import (
     findings_by_severity,
     run_panel_round,
 )
-from .rounds import CycleExit, RoundContext, Services, run_round
+from .rounds import CycleExit, LoopEntry, RoundContext, Services, run_round
 from .test_gate import GateResult
 
 logger = logging.getLogger(__name__)
@@ -287,12 +287,19 @@ def develop(
     *,
     coder_timeout: int = 3600,
     reviewer_timeout: int = 3600,
+    entry: LoopEntry | None = None,
 ) -> DevelopResult:
     """Run the develop loop and return a result.
 
     The worktree, per-run state, and conversation log are preserved on exit
     (approved, max_rounds, failed, or interrupted) for inspection; only the
     containers are torn down.
+
+    *entry* (converge / ADR 0003 §9 Shape 1) enters the loop on an EXISTING PR
+    branch instead of a fresh worktree off ``config.base_branch``: it supplies
+    the committable worktree factory, the diff base (the PR merge-base), and the
+    intake review that seeds round 1's cold-start coder. ``entry=None`` is the
+    story-develop path, unchanged.
     """
     specs = config.effective_reviewers
     if not engines.is_supported(config.coder):
@@ -337,14 +344,20 @@ def develop(
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     handoff.seed_handoff_dir(config.handoff_dir)
 
-    wt = worktree.create(
-        config.repo,
-        config.base_branch,
-        config.description,
-        parent=config.worktree_parent,
+    wt = (
+        entry.worktree_factory(config)
+        if entry is not None
+        else worktree.create(
+            config.repo,
+            config.base_branch,
+            config.description,
+            parent=config.worktree_parent,
+        )
     )
     branch = wt.name
-    base = git.base_sha(wt)
+    # converge diffs/reviews against the PR merge-base, not the worktree HEAD
+    # (which, entered at the PR head, would show an empty diff).
+    base = entry.base_override if entry is not None else git.base_sha(wt)
     logger.info("story-develop %s: worktree %s (branch %s)", config.run_id, wt, branch)
 
     coder_name, coder_cmd = agent_session.build_run_cmd(
@@ -414,6 +427,8 @@ def develop(
         coder_summary=_coder_summary,
         record_coder_disputes=_record_coder_disputes,
         coder_handoff_nudge=_coder_handoff_nudge,
+        intake_reviews=entry.intake_reviews if entry is not None else None,
+        intake_check_set=entry.intake_check_set if entry is not None else None,
     )
 
     # The default outcome is "max_rounds" — the exit the loop lands on when it
