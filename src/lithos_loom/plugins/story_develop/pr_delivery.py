@@ -227,6 +227,72 @@ def push_branch(wt: Path, branch: str) -> None:
         raise RuntimeError(f"git push failed: {proc.stderr.strip()}")
 
 
+class ForkPushUnsupported(RuntimeError):
+    """The PR's head ref is not on ``origin`` (a fork PR), so converge cannot push
+    to it under origin credentials (v1). The operator converges + fixes locally
+    with ``--no-push``, or re-runs against a same-repo PR."""
+
+
+class MergeRaceDetected(RuntimeError):
+    """The PR head ref advanced on the remote since converge resolved it, so a push
+    would not be a fast-forward. Converge stops rather than ``--force`` (which
+    would clobber the concurrent commit); the operator re-runs to pick up the
+    new tip."""
+
+
+def push_to_pr_ref(
+    wt: Path,
+    local_branch: str,
+    remote_ref: str,
+    *,
+    expected_remote_sha: str,
+) -> str:
+    """Fast-forward push *local_branch* onto the PR's head ref *remote_ref*.
+
+    Converge commits onto a fresh local branch positioned at the PR head, so its
+    commits are a strict superset of *expected_remote_sha* and a plain push is a
+    fast-forward whenever the remote is unchanged. Before pushing we re-read the
+    remote ref:
+
+    * absent on ``origin`` → the head is on a fork → :class:`ForkPushUnsupported`;
+    * tip ≠ *expected_remote_sha* → someone pushed meanwhile →
+      :class:`MergeRaceDetected` (never ``--force`` — that would rewrite the
+      contributor's history).
+
+    Returns the pushed local ``HEAD`` sha. Raises :class:`RuntimeError` on any
+    other push failure.
+    """
+    ls = _run(
+        ["git", "ls-remote", "--heads", "origin", remote_ref], cwd=wt, timeout=120
+    )
+    if ls.returncode != 0:
+        raise RuntimeError(
+            f"git ls-remote origin {remote_ref} failed: {ls.stderr.strip()}"
+        )
+    line = ls.stdout.strip()
+    if not line:
+        raise ForkPushUnsupported(
+            f"PR head ref {remote_ref!r} is not on origin (fork PR?); "
+            "cannot push under origin credentials"
+        )
+    remote_sha = line.split()[0]
+    if remote_sha != expected_remote_sha:
+        raise MergeRaceDetected(
+            f"PR head ref {remote_ref!r} advanced remotely "
+            f"({remote_sha[:10]} != expected {expected_remote_sha[:10]}); "
+            "re-run converge"
+        )
+    head = _run(["git", "rev-parse", "HEAD"], cwd=wt, timeout=120)
+    if head.returncode != 0:
+        raise RuntimeError(f"git rev-parse HEAD failed: {head.stderr.strip()}")
+    proc = _run(
+        ["git", "push", "origin", f"{local_branch}:{remote_ref}"], cwd=wt, timeout=300
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git push to {remote_ref} failed: {proc.stderr.strip()}")
+    return head.stdout.strip()
+
+
 def create_pr(wt: Path, *, branch: str, base: str, title: str, body: str) -> str:
     """Open the PR; returns its URL. Raises on failure."""
     proc = _run(

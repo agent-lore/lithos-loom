@@ -33,6 +33,11 @@ class ResolvedChange:
     ``title`` / ``body`` carry the PR's title and description when the spec was a
     PR (empty for a bare range / branch) — the body is the default
     acceptance-criteria source for a PR review.
+
+    ``head_branch`` is the PR's raw pushable branch name (empty for a range /
+    branch spec); ``is_fork`` is set when the PR head lives on a fork. converge
+    reads both to push fixes back to the PR branch, and to refuse a fork PR it
+    cannot push to under origin credentials.
     """
 
     base_sha: str
@@ -40,6 +45,8 @@ class ResolvedChange:
     head_ref: str
     title: str = ""
     body: str = ""
+    head_branch: str = ""
+    is_fork: bool = False
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -148,4 +155,6 @@ def _resolve_pr(
         head_ref=f"#{number} ({pr.head_ref})".strip(),
         title=pr.title,
         body=pr.body,
+        head_branch=pr.head_ref,
+        is_fork=bool(pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo),
     )

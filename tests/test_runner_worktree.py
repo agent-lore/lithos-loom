@@ -130,3 +130,49 @@ def test_create_at_is_unique(tmp_git_repo: Path, tmp_path: Path) -> None:
 def test_create_at_rejects_unknown_ref(tmp_git_repo: Path, tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         worktree.create_at(tmp_git_repo, "deadbeef" * 5, "task", parent=tmp_path / "w")
+
+
+# --- create_on_branch: a committable branch AT an existing commit (converge) --
+
+
+def test_create_on_branch_makes_committable_branch_at_commit(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """Converge materialises a committable local branch AT the PR head so the
+    fixer can commit onto it and it can be pushed back — unlike ``create_at``
+    (detached, no branch) and ``create`` (branched off a base)."""
+    first = _sha(tmp_git_repo, "HEAD")
+    _add_commit(tmp_git_repo, "later.txt", "later\n")
+
+    wt = worktree.create_on_branch(
+        tmp_git_repo, first, "converge pr 1", parent=tmp_path / "w"
+    )
+
+    assert wt.is_dir()
+    # a real branch (named after the dir), NOT detached HEAD
+    assert _branch_of(wt) == wt.name
+    assert wt.name.startswith("converge-pr-1-")
+    # positioned at the requested commit — the later file is absent
+    assert _sha(wt, "HEAD") == first
+    assert not (wt / "later.txt").exists()
+    # and it is committable: a commit lands on the branch
+    (wt / "fix.txt").write_text("fix\n")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "fix"], cwd=wt, check=True)
+    assert _sha(wt, "HEAD") != first
+
+
+def test_create_on_branch_is_unique(tmp_git_repo: Path, tmp_path: Path) -> None:
+    head = _sha(tmp_git_repo, "HEAD")
+    a = worktree.create_on_branch(tmp_git_repo, head, "task", parent=tmp_path / "w")
+    b = worktree.create_on_branch(tmp_git_repo, head, "task", parent=tmp_path / "w")
+    assert a != b
+
+
+def test_create_on_branch_rejects_unknown_ref(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(RuntimeError):
+        worktree.create_on_branch(
+            tmp_git_repo, "deadbeef" * 5, "task", parent=tmp_path / "w"
+        )

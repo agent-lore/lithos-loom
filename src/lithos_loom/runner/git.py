@@ -81,6 +81,16 @@ def apply_patch(worktree: Path, patch_path: Path) -> None:
     _git(worktree, "apply", str(patch_path))
 
 
+def log_between(worktree: Path, base: str, head: str = "HEAD") -> str:
+    """Return the commit log for ``base..head`` (subject + body), oldest first.
+
+    Feeds the converge cold-start prompt's ``{commit_log}`` slot so a fixer that
+    did not author the PR sees the original author's narration of what was built
+    and why. Empty string when *base* is already *head* (no commits in range).
+    """
+    return _git(worktree, "log", "--reverse", "--format=%h %s%n%b", f"{base}..{head}")
+
+
 def diff_stat(worktree: Path, base_sha: str) -> str:
     """Return ``git diff --stat base_sha..HEAD`` — the cumulative change so far.
 

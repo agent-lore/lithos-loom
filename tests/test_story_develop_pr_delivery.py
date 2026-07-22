@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1083,3 +1084,80 @@ def test_deliver_guarded_records_failure_and_returns_reason(
     assert error is not None and "gh pr create failed" in error
     marker = json.loads((config.run_dir / "delivery.json").read_text(encoding="utf-8"))
     assert marker["failed"] is True
+
+
+# --- push_to_pr_ref: guarded fast-forward push to a PR head ref (converge) -----
+
+
+def _fake_run(ls_stdout: str, *, push_rc: int = 0, head_sha: str = "l" * 40) -> Any:
+    """A fake ``pr_delivery._run`` dispatching by git subcommand + a call log."""
+    calls: list[list[str]] = []
+
+    def run(args: list[str], *, cwd: Path, timeout: int = 120) -> Any:
+        calls.append(args)
+        if args[:2] == ["git", "ls-remote"]:
+            return subprocess.CompletedProcess(args, 0, stdout=ls_stdout, stderr="")
+        if args[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout=head_sha + "\n", stderr=""
+            )
+        if args[:2] == ["git", "push"]:
+            return subprocess.CompletedProcess(
+                args, push_rc, stdout="", stderr="rejected" if push_rc else ""
+            )
+        raise AssertionError(f"unexpected git call: {args}")
+
+    run.calls = calls  # type: ignore[attr-defined]
+    return run
+
+
+def test_push_to_pr_ref_fast_forwards_when_remote_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _fake_run("e" * 40 + "\trefs/heads/feature\n")
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    pushed = pr_delivery.push_to_pr_ref(
+        Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+    )
+    assert pushed == "l" * 40
+    push = next(c for c in run.calls if c[:2] == ["git", "push"])
+    # plain fast-forward src:dst refspec — never --force
+    assert push == ["git", "push", "origin", "converge-abc:feature"]
+    assert "--force" not in push and "-f" not in push
+
+
+def test_push_to_pr_ref_raises_fork_when_ref_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _fake_run("")  # ls-remote finds nothing → head lives on a fork
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(pr_delivery.ForkPushUnsupported):
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed
+
+
+def test_push_to_pr_ref_raises_merge_race_when_remote_advanced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _fake_run("z" * 40 + "\trefs/heads/feature\n")  # remote moved
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(pr_delivery.MergeRaceDetected):
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    # never pushed, and never with --force (would clobber the concurrent commit)
+    assert not any(c[:2] == ["git", "push"] for c in run.calls)
+    assert not any("--force" in c or "-f" in c for c in run.calls)
+
+
+def test_push_to_pr_ref_raises_on_push_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _fake_run("e" * 40 + "\trefs/heads/feature\n", push_rc=1)
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(RuntimeError):
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
