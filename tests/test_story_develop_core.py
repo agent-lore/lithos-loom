@@ -2066,14 +2066,17 @@ def test_converge_entry_seeds_round_one_and_reuses_loop(
     assert "leaks a file handle" in prompt0  # intake finding (render_panel_findings)
     assert "the PR commit" in prompt0  # PR commit log (git.log_between base..head)
     assert "2 failed" in prompt0  # intake gate summary (render_check_summary)
-    # the worktree is a committable real branch at the PR head, not detached
+    # the worktree is a committable real branch at the PR head, not detached.
+    # check=True so a failed rev-parse raises instead of yielding "" (which would
+    # still satisfy `!= "HEAD"` and false-pass the detachment check).
     branch = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=result.worktree,
         capture_output=True,
         text=True,
+        check=True,
     ).stdout.strip()
-    assert branch != "HEAD"
+    assert branch and branch != "HEAD"
 
 
 def test_develop_without_entry_uses_fresh_worktree_off_base(
