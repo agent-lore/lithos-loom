@@ -68,8 +68,8 @@ def _dev_result(
         commits=["c1", "c2", "c3"],  # spans the PR's ORIGINAL + fixer commits
         rounds=2,
         handoff_present=True,
-        coder_cost_usd=0.0,
-        review_cost_usd=0.0,
+        coder_cost_usd=0.6,  # nonzero loop spend so total_cost = intake + loop
+        review_cost_usd=0.4,
         message=f"loop ended {status}",
     )
 
@@ -317,6 +317,33 @@ def test_intake_exhausting_the_budget_stops_before_the_loop(
     assert result.intake_cost_usd == 6.0
 
 
+def test_already_clean_intake_exhausting_budget_is_failed_not_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A CLEAN intake that alone meets --max-cost is `failed`, not `already_clean`
+    — the budget is checked before the clean/blocking split so a clean intake
+    can't bypass the whole-command budget contract (finding #2)."""
+    captured = _install(monkeypatch, blocking=False, intake_cost=6.0)
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=5.0)
+    result = converge_pr(config, _change())
+    assert result.status == "failed"
+    assert not result.succeeded
+    assert "entry" not in captured
+    assert result.intake_cost_usd == 6.0
+
+
+def test_converge_pr_rejects_invalid_numeric_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """converge_pr validates its numeric bounds at the API boundary (not only the
+    CLI), so a future daemon caller fails fast instead of spending on intake."""
+    _install(monkeypatch, blocking=True)
+    with pytest.raises(ValueError, match="max_cost_usd"):
+        converge_pr(dataclasses.replace(_config(tmp_path), max_cost_usd=0.0), _change())
+    with pytest.raises(ValueError, match="max_rounds"):
+        converge_pr(dataclasses.replace(_config(tmp_path), max_rounds=0), _change())
+
+
 def test_unlimited_budget_leaves_the_loop_ceiling_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -344,6 +371,6 @@ def test_converge_result_json_round_trips_the_documented_shape(
         "pushed": True,
         "pushed_sha": "p" * 40,
         "intake_cost_usd": 1.5,
-        "total_cost_usd": 1.5,
+        "total_cost_usd": 2.5,  # 1.5 intake + 1.0 loop (0.6 coder + 0.4 review)
         "message": "converged and pushed to feature",
     }

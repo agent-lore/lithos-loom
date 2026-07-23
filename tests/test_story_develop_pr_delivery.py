@@ -1095,8 +1095,13 @@ def _fake_run(
     push_rc: int = 0,
     head_sha: str = "l" * 40,
     push_stderr: str = "",
+    ancestor_rc: int = 0,
 ) -> Any:
-    """A fake ``pr_delivery._run`` dispatching by git subcommand + a call log."""
+    """A fake ``pr_delivery._run`` dispatching by git subcommand + a call log.
+
+    ``ancestor_rc`` is the exit code of the ``merge-base --is-ancestor`` guard
+    (0 = the local branch descends from the expected head, the normal case).
+    """
     calls: list[list[str]] = []
 
     def run(args: list[str], *, cwd: Path, timeout: int = 120) -> Any:
@@ -1107,6 +1112,8 @@ def _fake_run(
             return subprocess.CompletedProcess(
                 args, 0, stdout=head_sha + "\n", stderr=""
             )
+        if args[:2] == ["git", "merge-base"]:
+            return subprocess.CompletedProcess(args, ancestor_rc, stdout="", stderr="")
         if args[:2] == ["git", "push"]:
             return subprocess.CompletedProcess(
                 args, push_rc, stdout="", stderr=push_stderr
@@ -1127,8 +1134,15 @@ def test_push_to_pr_ref_fast_forwards_when_remote_unchanged(
     )
     assert pushed == "l" * 40
     push = next(c for c in run.calls if c[:2] == ["git", "push"])
-    # plain fast-forward src:dst refspec — never --force
-    assert push == ["git", "push", "origin", "converge-abc:feature"]
+    # an atomic lease pinned to the expected head + the src:dst refspec — a
+    # guarded fast-forward, NOT a blind --force / -f.
+    assert push == [
+        "git",
+        "push",
+        "--force-with-lease=feature:" + "e" * 40,
+        "origin",
+        "converge-abc:feature",
+    ]
     assert "--force" not in push and "-f" not in push
 
 
@@ -1218,3 +1232,44 @@ def test_push_to_pr_ref_hook_rejection_is_not_a_merge_race(
             Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
         )
     assert not isinstance(excinfo.value, pr_delivery.MergeRaceDetected)
+
+
+def test_push_to_pr_ref_lease_rejection_is_merge_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ls-remote pre-check passed (ref at expected), but the remote then changed
+    # (deleted / advanced / force-rewound) before the leased push, which git
+    # rejects with "stale info". That atomic-CAS failure is the race the lease
+    # exists to catch → merge_race, never a silent recreate/overwrite (finding #1).
+    run = _fake_run(
+        "e" * 40 + "\trefs/heads/feature\n",
+        push_rc=1,
+        push_stderr=(
+            " ! [rejected] converge-abc -> feature (stale info)\n"
+            "error: failed to push some refs to 'origin'"
+        ),
+    )
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(pr_delivery.MergeRaceDetected):
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    # the lease is pinned to the expected head, and never a blind --force
+    push = next(c for c in run.calls if c[:2] == ["git", "push"])
+    assert "--force-with-lease=feature:" + "e" * 40 in push
+    assert "--force" not in push and "-f" not in push
+
+
+def test_push_to_pr_ref_non_descendant_local_is_rejected_without_pushing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # append-only guard: if the local branch does NOT descend from the expected
+    # head (a rewrite, not an append), refuse BEFORE pushing so the leased update
+    # can only ever fast-forward — never rewind the contributor's history.
+    run = _fake_run("e" * 40 + "\trefs/heads/feature\n", ancestor_rc=1)
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(pr_delivery.MergeRaceDetected):
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed

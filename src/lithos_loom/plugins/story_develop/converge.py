@@ -134,8 +134,18 @@ def converge_pr(
 
     See the module docstring for the three-stage flow. Returns a
     :class:`ConvergeResult`; never raises for the expected terminal states
-    (fork / merge-race / unapproved) — they are reported via ``status``.
+    (fork / merge-race / unapproved) — they are reported via ``status``. Raises
+    :class:`ValueError` only for an invalid numeric config (a caller error).
     """
+    # Validate the numeric bounds at this reusable-API boundary, not only in the
+    # CLI: a future daemon caller that passes max_cost_usd <= 0 or max_rounds < 1
+    # must fail fast here rather than spend on intake and surface the error deep in
+    # develop() (or, worse, run an unbounded loop).
+    if config.max_cost_usd is not None and config.max_cost_usd <= 0:
+        raise ValueError(f"max_cost_usd must be > 0, got {config.max_cost_usd}")
+    if config.max_rounds < 1:
+        raise ValueError(f"max_rounds must be >= 1, got {config.max_rounds}")
+
     # Fork guard, pre-loop: loom pushes fixes under origin credentials, so a PR
     # whose head lives on a fork can never be pushed back. Refuse before spending
     # any reviewer/coder containers on a run we could not deliver.
@@ -177,6 +187,26 @@ def converge_pr(
             message="intake review did not complete (interrupted / invalid panel) "
             "— cannot seed the fix loop",
         )
+    # Whole-command budget: the intake spend alone must not meet the ceiling. If
+    # it does, stop with `failed` REGARDLESS of whether the intake was clean or
+    # blocking — checked BEFORE the already-clean return so a clean intake can't
+    # bypass the budget contract (finding #2). (The intake is one atomic review
+    # pass and can't be sub-bounded; --max-cost then bounds only the fix loop.)
+    if config.max_cost_usd is not None and intake_cost >= config.max_cost_usd:
+        logger.info(
+            "converge %s: intake spend $%.2f exhausted --max-cost $%.2f",
+            config.run_id,
+            intake_cost,
+            config.max_cost_usd,
+        )
+        return ConvergeResult(
+            status="failed",
+            change=change,
+            intake_cost_usd=intake_cost,
+            message=f"intake review spent ${intake_cost:.2f}, meeting the --max-cost "
+            f"${config.max_cost_usd:.2f} ceiling before the fix loop",
+        )
+
     if not intake.blocking:
         logger.info(
             "converge %s: %s intake already clean", config.run_id, change.head_ref
@@ -189,26 +219,13 @@ def converge_pr(
         )
 
     # Carry the intake spend into the loop budget so --max-cost bounds the WHOLE
-    # command, not just the loop (finding #3). If intake already exhausted the
-    # ceiling, stop before building a coder.
+    # command, not just the loop. The exhaustion check above guarantees the
+    # remainder is > 0 here.
     loop_config = config
     if config.max_cost_usd is not None:
-        remaining = config.max_cost_usd - intake_cost
-        if remaining <= 0:
-            logger.info(
-                "converge %s: intake spend $%.2f exhausted --max-cost $%.2f",
-                config.run_id,
-                intake_cost,
-                config.max_cost_usd,
-            )
-            return ConvergeResult(
-                status="failed",
-                change=change,
-                intake_cost_usd=intake_cost,
-                message=f"intake review spent ${intake_cost:.2f}, exhausting the "
-                f"--max-cost ${config.max_cost_usd:.2f} ceiling before the fix loop",
-            )
-        loop_config = dataclasses.replace(config, max_cost_usd=remaining)
+        loop_config = dataclasses.replace(
+            config, max_cost_usd=config.max_cost_usd - intake_cost
+        )
 
     # --- fix loop: enter develop() on the PR branch, seeded from the intake ---
     logger.info(
