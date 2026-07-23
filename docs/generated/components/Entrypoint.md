@@ -31,5 +31,6 @@ Typer CLI app entry and `python -m` bootstrap (`lithos-loom = lithos_loom.main:a
 ## ADRs
 
 - [ADR 0007 — Subscription handlers are hand-wired, not discovered](../../adr/0007-subscription-registration-hand-wired.md)
+- [ADR 0009 — On-demand PR review-convergence loop (`develop converge`)](../../adr/0009-converge-pr-loop.md)
 
 [← all generated docs](../README.md)

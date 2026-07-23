@@ -54,6 +54,26 @@ _REVIEW_ONLY_CODER_SUMMARY = (
 )
 
 
+def intake_blocks(
+    panel: PanelRoundResult | None,
+    check_set: CheckSetResult | None,
+    gate_ledger: GateLedger,
+) -> bool:
+    """Whether one intake pass blocks approval — the single blocking rule.
+
+    Blocks when the panel is **incomplete** (never ran / interrupted / hit an
+    invalid reviewer), when **any reviewer did not pass**, or when the
+    deterministic **floor blocks** (:func:`gate_floor_blocks`). Used by both
+    :func:`_build_report` (review-only's report) and :attr:`IntakeResult.blocking`
+    (converge's already-clean short-circuit), so the two can never diverge.
+    """
+    incomplete = (
+        panel is None or panel.interrupted or panel.invalid_reviewer is not None
+    )
+    reviewers_pass = panel is not None and all(r.passed for r in panel.round_reviews)
+    return incomplete or not reviewers_pass or gate_floor_blocks(check_set, gate_ledger)
+
+
 @dataclass(frozen=True)
 class IntakeResult:
     """The raw pieces of one review pass at a change head.
@@ -61,13 +81,19 @@ class IntakeResult:
     :func:`review_change` consolidates them into a :class:`ReviewReport`; the
     converge loop seeds its round-1 coder from ``panel.round_reviews`` and shows
     ``check_set`` in the fix prompt, so it needs the raw outcomes the report
-    would otherwise discard.
+    would otherwise discard, and reads :attr:`blocking` for its already-clean
+    short-circuit.
     """
 
     reviewers: list[ReviewerState]
     panel: PanelRoundResult | None
     check_set: CheckSetResult | None
     gate_ledger: GateLedger
+
+    @property
+    def blocking(self) -> bool:
+        """Whether this intake blocks — the same rule the review report applies."""
+        return intake_blocks(self.panel, self.check_set, self.gate_ledger)
 
 
 def review_change(
@@ -84,7 +110,7 @@ def review_change(
     consolidated :class:`ReviewReport`. The worktree + reviewer containers are
     torn down on exit unless *keep_worktree* is set.
     """
-    intake = _review_head(
+    intake = review_head(
         config, change, reviewer_timeout=reviewer_timeout, keep_worktree=keep_worktree
     )
     return _build_report(
@@ -97,7 +123,7 @@ def review_change(
     )
 
 
-def _review_head(
+def review_head(
     config: DevelopConfig,
     change: ResolvedChange,
     *,
@@ -203,7 +229,7 @@ def _build_report(
     config: DevelopConfig,
     change: ResolvedChange,
     reviewers: list[ReviewerState],
-    panel,
+    panel: PanelRoundResult | None,
     check_set: CheckSetResult | None,
     gate_ledger: GateLedger,
 ) -> ReviewReport:
@@ -248,13 +274,7 @@ def _build_report(
             for r in check_set.results
         ]
 
-    incomplete = (
-        panel is None or panel.interrupted or panel.invalid_reviewer is not None
-    )
-    reviewers_pass = panel is not None and all(r.passed for r in panel.round_reviews)
-    blocking = (
-        incomplete or not reviewers_pass or gate_floor_blocks(check_set, gate_ledger)
-    )
+    blocking = intake_blocks(panel, check_set, gate_ledger)
 
     return ReviewReport(
         head_ref=change.head_ref or change.head_sha[:12],

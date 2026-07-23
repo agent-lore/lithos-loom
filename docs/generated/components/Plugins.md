@@ -25,6 +25,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | M | 2 | 8 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
+| `lithos_loom.plugins.story_develop.converge` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
 | `lithos_loom.plugins.story_develop.develop` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
@@ -41,7 +42,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 4 | 20 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
-| `lithos_loom.plugins.story_develop.review_only` | S | 1 | 1 |
+| `lithos_loom.plugins.story_develop.review_only` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | M | 4 | 11 |
@@ -115,6 +116,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `start_container` — Run ``docker run -d`` and return the container id (stdout).
 - def `exec_turn` — Run ``docker exec`` for one turn with stdin closed (no 3s stdin wait).
 - def `stop_container` — Force-remove the container; never raises (teardown must be best-effort).
+
+### `lithos_loom.plugins.story_develop.converge`
+- class `ConvergeResult` — Outcome of a :func:`converge_pr` run.
+- def `converge_pr` — Run the review-convergence loop against an existing PR *change*.
 
 ### `lithos_loom.plugins.story_develop.daemon_io`
 - def `read_task_payload` — Parse the runner's ``task.json`` into a :class:`TaskContext`.
@@ -246,8 +251,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_profile` — Resolve the selected Review Profile (ADR §2).
 
 ### `lithos_loom.plugins.story_develop.review_only`
+- def `intake_blocks` — Whether one intake pass blocks approval — the single blocking rule.
 - class `IntakeResult` — The raw pieces of one review pass at a change head.
 - def `review_change` — Run the panel + deterministic gate against an existing *change*.
+- def `review_head` — Run the panel + gate once at the change head and return the RAW pieces.
 
 ### `lithos_loom.plugins.story_develop.review_report`
 - class `ReviewFinding` — One finding a reviewer raised against the change.
@@ -322,5 +329,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - [ADR 0004 — Review-only mode: run the panel + gate on an existing change](../../adr/0004-review-only-mode.md)
 - [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
 - [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
+- [ADR 0009 — On-demand PR review-convergence loop (`develop converge`)](../../adr/0009-converge-pr-loop.md)
 
 [← all generated docs](../README.md)

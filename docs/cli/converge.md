@@ -1,0 +1,78 @@
+# `lithos-loom develop converge` — reference
+
+Converge an **existing PR** to review-green. converge runs the story-develop reviewer **panel + deterministic gate** against a PR, and if that blocks, runs a **coder fix loop on the PR branch** — implement→review→fix rounds until the panel LGTMs **and** the gate floor is clean — then **fast-forward-pushes** the fixed branch back to the PR head, ready for the human merge gate.
+
+```
+lithos-loom develop converge <pr> [flags]
+```
+
+This automates the operator's manual chore — take a review, hand it to the coder, tell the panel to look again, iterate until every reviewer is satisfied — as one command. It realises [ADR 0003](../adr/0003-code-quality-review-strength.md) §9 "Shape 1" (re-dispatch development on the PR branch without resolving the `pr` gate) as the on-demand / human-triggered variant. See [ADR 0009](../adr/0009-converge-pr-loop.md) and [`SPECIFICATION.md`](../SPECIFICATION.md) §4.15a.
+
+converge does **not** re-implement the develop loop: it runs an intake review (the same primitive `develop review` runs), then calls `develop()` with a `LoopEntry` override so the coder/panel/gate/dispute/stall/termination sequencing is **single-sourced** with story-develop. Round 1 is a cold-start turn that reconstructs the PR author's intent before changing anything.
+
+---
+
+## TL;DR
+
+```bash
+# Converge a PR with the standard panel, then push the fixed branch
+lithos-loom develop converge #142
+
+# Thorough panel, codex as the coder, cap the loop at 4 rounds
+lithos-loom develop converge #142 --profile thorough --coder codex --max-rounds 4
+
+# Converge locally without pushing (inspect first)
+lithos-loom develop converge #142 --no-push
+
+# Supply the intent explicitly (overrides the PR body) and save the JSON summary
+lithos-loom develop converge #142 --ac "the leak must close the handle on error" --json /tmp/c.json
+```
+
+---
+
+## What it does
+
+1. **Resolves the PR** to a `base..head` pair, the pushable head branch, and a fork flag (via the typed GitHub client — the same seam `develop review` uses). A **fork PR** is refused here, *before* any container runs: loom pushes under origin credentials and cannot push to a fork.
+2. **Intake review.** Runs the resolved profile's deterministic gate + the reviewer panel once at the PR head. If it does **not** block → `already_clean`: no coder is built, nothing is pushed, exit 0. (This is the cheapest path for the common re-check.)
+3. **Fix loop.** If the intake blocks, enters `develop()` on a committable worktree at the PR head (base = the PR merge-base), seeded from the intake findings + the PR's own commit log. Round 1's coder is a **cold-start** turn: *"you are picking up a PR you did not author — read the acceptance criteria, the commit history, and the code to reconstruct intent, then address the findings to satisfy that intent; dispute (don't silently comply with) a finding that undoes a deliberate decision."* Rounds ≥2 are the normal `coder_fix` path. Termination is `develop()`'s own — `approved` / `disputed` / `stalled` / `cost_exceeded` / `max_rounds`.
+4. **Push epilogue.** On **approval** (and unless `--no-push`), fast-forward-pushes the fixed branch onto the PR head ref — **never `--force`** (converge only appends commits atop the fetched head). If the PR head advanced remotely mid-run, the push is refused as a `merge_race` rather than forced.
+
+## Local panel only (v1)
+
+converge converges against loom's **in-container codex/claude panel + check-floor** — fast, local, no GitHub round-trip. It does **not** yet ingest the GitHub review bots' comments (github-code-quality / Copilot); that is a deferred slice. The intake reviewers are **cold** by design (no coder-summary to anchor on); only the fixer is given the PR's intent.
+
+## Acceptance criteria (the reviewer's + fixer's brief)
+
+Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--ac` / `--ac-file` is rejected — a reviewer with no criteria is near-useless. converge requires a PR, so a bare range / branch is rejected up front (use `develop review` for a read-only review of an arbitrary range).
+
+## Flags
+
+| Flag | Meaning |
+|------|---------|
+| `<pr>` | The PR to converge (positional): `#142` / `142` / a PR URL. A range / branch is rejected. |
+| `-p`, `--profile` | Review profile — selects the persona panel + check-set (default `standard`). |
+| `--reviewer NAME` | Override the panel personas (repeatable). |
+| `--ac TEXT` | Acceptance criteria text. |
+| `--ac-file PATH` | Read acceptance criteria from a file (wins over `--ac`). |
+| `--base REF` | Override the diff base (default: the PR merge-base). |
+| `--coder claude\|codex` | Coder engine for the fix turns (default: the config's coder). |
+| `--max-rounds N` | Cap the implement→review→fix rounds. |
+| `--max-cost USD` | Stop once total agent spend exceeds this. |
+| `--no-push` | Converge locally but do not push to the PR branch. |
+| `--repo PATH` | Repository to converge in (default: current directory). |
+| `--json PATH` | Write the structured JSON summary. |
+| `-c`, `--config` | Host config path. |
+
+## Output
+
+- **Markdown** to stdout: the status line, the message, the round + fixer-commit count, and (on a push) the pushed sha → PR branch.
+- **JSON** (`--json`): a stable object — `status`, `head_ref`, `head_branch`, `base_sha`, `head_sha`, `rounds`, `develop_status`, `fixer_commits` (only the coder's commits, PR head → HEAD — **not** the PR's original commits), `pushed`, `pushed_sha`, `message`.
+- **Exit code** by status: `already_clean` / `converged` → **0**; `not_converged` / `merge_race` / `failed` → **1**; `fork_unsupported` → **2**.
+
+## v1 limit — dispute-all round 1
+
+If round 1's coder disputes *every* finding and commits nothing, the deterministic gate still runs on the unchanged head. Such a round converges only if the head was already gate-green. This is rare (the coder is told to fix, not dispute-all) and acceptable for v1.
+
+## Requirements
+
+Host-only, like a develop run: `docker` + the agent CLIs (`claude` / `codex`) + `gh` (for PR resolution and the push). Not part of the hermetic `make check`.
