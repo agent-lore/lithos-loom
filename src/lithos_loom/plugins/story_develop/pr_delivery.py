@@ -289,7 +289,19 @@ def push_to_pr_ref(
         ["git", "push", "origin", f"{local_branch}:{remote_ref}"], cwd=wt, timeout=300
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"git push to {remote_ref} failed: {proc.stderr.strip()}")
+        # The ls-remote check above is TOCTOU: the remote can advance between it
+        # and this push. Git rejects the now-non-fast-forward push — classify that
+        # as a merge race (same outcome as the pre-check) rather than a generic
+        # failure, so a concurrent push is never force-resolved and the caller
+        # gets its documented ``merge_race`` contract. Other failures
+        # (auth / network) stay RuntimeError.
+        stderr = proc.stderr.strip()
+        if "rejected" in stderr.lower() or "fast-forward" in stderr.lower():
+            raise MergeRaceDetected(
+                f"push to {remote_ref!r} rejected as non-fast-forward "
+                f"(the head advanced remotely mid-push); re-run converge: {stderr}"
+            )
+        raise RuntimeError(f"git push to {remote_ref} failed: {stderr}")
     return head.stdout.strip()
 
 

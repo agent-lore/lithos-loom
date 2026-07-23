@@ -12,6 +12,8 @@ commit count is measured against the PR head, not the merge-base.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +22,7 @@ import pytest
 from lithos_loom.plugins.story_develop import converge as converge_mod
 from lithos_loom.plugins.story_develop import review_only
 from lithos_loom.plugins.story_develop.config import DevelopConfig
-from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
+from lithos_loom.plugins.story_develop.converge import converge_pr
 from lithos_loom.plugins.story_develop.develop import DevelopResult
 from lithos_loom.plugins.story_develop.pr_delivery import (
     ForkPushUnsupported,
@@ -71,34 +73,45 @@ def _dev_result(
     )
 
 
+_UNSET = object()
+
+
 def _install(
     monkeypatch: pytest.MonkeyPatch,
     *,
     blocking: bool,
-    panel: object | None = SimpleNamespace(round_reviews=["outcome"]),
+    incomplete: bool = False,
+    panel: object = _UNSET,
     check_set: object | None = "check-set-sentinel",
+    intake_cost: float = 0.0,
 ) -> dict:
     """Stub the collaborators converge wires together; capture their calls."""
     captured: dict = {}
 
-    # IntakeResult.blocking is a property on the real thing; the stub carries it
-    # as a plain attribute so the converge branch under test is what we control.
+    if panel is _UNSET:
+        panel = SimpleNamespace(round_reviews=["outcome"], cost=intake_cost)
+    # IntakeResult.blocking / .incomplete are properties on the real thing; the
+    # stub carries them as plain attributes so the converge branch under test is
+    # what we control (the properties themselves are tested in test_review_only).
     intake = SimpleNamespace(
         reviewers=["reviewer-state"],
         panel=panel,
         check_set=check_set,
         gate_ledger="ledger",
         blocking=blocking,
+        incomplete=incomplete,
     )
 
     def fake_review_head(config, change, *, reviewer_timeout=3600, keep_worktree=False):
         captured["intake_ran"] = True
+        captured["intake_config"] = config
         return intake
 
     monkeypatch.setattr(review_only, "review_head", fake_review_head)
 
     def fake_develop(config, *, coder_timeout=3600, reviewer_timeout=3600, entry=None):
         captured["entry"] = entry
+        captured["loop_config"] = config
         wt = config.work_dir / "wt"
         wt.mkdir(parents=True, exist_ok=True)
         return _dev_result(wt, status=captured.get("develop_status", "approved"))
@@ -153,7 +166,7 @@ def test_blocking_intake_seeds_loop_and_pushes_on_approval(
     """A blocking intake enters develop() via a LoopEntry seeded from the intake
     (base = merge-base, reviews = panel.round_reviews, the intake check-set), and
     on approval fast-forward-pushes the fixed branch to the PR head ref."""
-    panel = SimpleNamespace(round_reviews=["seed-outcome"])
+    panel = SimpleNamespace(round_reviews=["seed-outcome"], cost=0.0)
     captured = _install(monkeypatch, blocking=True, panel=panel, check_set="cs")
     result = converge_pr(_config(tmp_path), _change())
 
@@ -244,26 +257,92 @@ def test_fork_push_raised_post_loop_is_surfaced(
     assert not result.succeeded
 
 
-def test_intake_panel_missing_is_a_failure_not_a_crash(
+def test_incomplete_intake_is_failed_not_seeded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A blocking intake whose panel never ran (crash / interrupted before any
-    reviewer) can't seed the loop — surface it rather than crash on
-    panel.round_reviews."""
-    captured = _install(monkeypatch, blocking=True, panel=None)
+    """An incomplete intake panel (interrupted / invalid / absent) has no
+    trustworthy review to seed the loop — converge stops with `failed` rather
+    than fixing against a partial/absent review (finding #2)."""
+    captured = _install(monkeypatch, blocking=True, incomplete=True, intake_cost=0.4)
     result = converge_pr(_config(tmp_path), _change())
     assert result.status == "failed"
+    assert not result.succeeded
     assert "entry" not in captured  # never entered the loop
+    assert result.intake_cost_usd == 0.4  # the intake spend is still reported
 
 
-def test_converge_result_json_is_serialisable(
+# --- artifact isolation (finding #1) -----------------------------------------
+
+
+def test_intake_runs_under_a_distinct_run_id_from_the_loop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _install(monkeypatch, blocking=True)
+    """Intake and the fix loop must NOT share a run_id — their round-1 handoff /
+    gate-export dirs (all run_id-derived) would otherwise collide, letting the
+    PR-head export / stale reviewer handoff bleed into the fixed-tree gate + panel
+    (finding #1)."""
+    captured = _install(monkeypatch, blocking=True)
+    config = _config(tmp_path)
+    converge_pr(config, _change())
+    intake_run_id = captured["intake_config"].run_id
+    loop_run_id = captured["loop_config"].run_id
+    assert intake_run_id != loop_run_id
+    assert intake_run_id == f"{config.run_id}-intake"
+    assert loop_run_id == config.run_id  # the loop keeps the caller's run_id
+
+
+# --- --max-cost covers the whole command (finding #3) ------------------------
+
+
+def test_intake_cost_is_carried_into_the_loop_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """--max-cost bounds the WHOLE command: the loop's ceiling is reduced by the
+    intake spend, so total spend can't exceed the operator's declared budget."""
+    captured = _install(monkeypatch, blocking=True, intake_cost=2.0)
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=10.0)
+    converge_pr(config, _change())
+    assert captured["loop_config"].max_cost_usd == 8.0  # 10 - 2 intake
+
+
+def test_intake_exhausting_the_budget_stops_before_the_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True, intake_cost=6.0)
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=5.0)
+    result = converge_pr(config, _change())
+    assert result.status == "failed"
+    assert "entry" not in captured  # never built a coder
+    assert result.intake_cost_usd == 6.0
+
+
+def test_unlimited_budget_leaves_the_loop_ceiling_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True, intake_cost=3.0)
+    converge_pr(_config(tmp_path), _change())  # max_cost_usd defaults to None
+    assert captured["loop_config"].max_cost_usd is None
+
+
+def test_converge_result_json_round_trips_the_documented_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, blocking=True, intake_cost=1.5)
     result = converge_pr(_config(tmp_path), _change())
-    data = result.to_json()
-    assert data["status"] == "converged"
-    assert data["head_branch"] == "feature"
-    assert data["fixer_commits"] == 1
-    assert data["pushed"] is True
-    assert isinstance(ConvergeResult, type)
+    # actually serialise (the old test never called json.dumps) and pin the shape
+    data = json.loads(json.dumps(result.to_json()))
+    assert data == {
+        "status": "converged",
+        "head_ref": "#142 (feature)",
+        "head_branch": "feature",
+        "base_sha": _BASE,
+        "head_sha": _HEAD,
+        "rounds": 2,
+        "develop_status": "approved",
+        "fixer_commits": 1,
+        "pushed": True,
+        "pushed_sha": "p" * 40,
+        "intake_cost_usd": 1.5,
+        "total_cost_usd": 1.5,
+        "message": "converged and pushed to feature",
+    }

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,8 +61,15 @@ def export_tree(worktree: Path, sha: str, dest: Path) -> None:
     """Export the tree of *sha* into *dest* (``git archive | tar -x``).
 
     Exports exactly the committed content — no ``.git``, no untracked files —
-    so the gate cannot be influenced by uncommitted worktree state.
+    so the gate cannot be influenced by uncommitted worktree state. The
+    destination is **recreated empty** first: ``tar -x`` overlays files but never
+    deletes, so a leftover from a prior export into the same *dest* (e.g. a file
+    the new *sha* deleted) would otherwise survive and the gate would test a
+    mixture of two trees. Emptying makes the export match its "exactly the
+    committed content" contract regardless of what was there before.
     """
+    if dest.exists():
+        shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     archive = subprocess.run(
         ["git", "archive", sha],

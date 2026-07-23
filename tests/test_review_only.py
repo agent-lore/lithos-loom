@@ -231,3 +231,32 @@ def test_review_head_returns_raw_panel_and_check_set(
     # IntakeResult.blocking (converge's short-circuit) applies the SAME rule the
     # report does — they can never diverge (both call intake_blocks).
     assert intake.blocking is report.blocking
+
+
+def _panel(
+    *, interrupted: bool = False, invalid: str | None = None
+) -> PanelRoundResult:
+    return PanelRoundResult(
+        round_reviews=[
+            ReviewOutcome(
+                reviewer="correctness",
+                status="LGTM",
+                passed=True,
+                max_severity=None,
+                findings=[],
+            )
+        ],
+        cost=0.0,
+        interrupted=interrupted,
+        resume_after=None,
+        invalid_reviewer=invalid,
+    )
+
+
+def test_panel_incomplete_flags_absent_interrupted_and_invalid() -> None:
+    # converge maps an incomplete intake to `failed` (nothing to seed the loop);
+    # review-only folds it into a blocking report. Both read this one predicate.
+    assert review_only.panel_incomplete(None) is True  # never ran
+    assert review_only.panel_incomplete(_panel(interrupted=True)) is True
+    assert review_only.panel_incomplete(_panel(invalid="correctness")) is True
+    assert review_only.panel_incomplete(_panel()) is False  # complete, usable

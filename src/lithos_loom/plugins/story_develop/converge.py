@@ -29,8 +29,10 @@ panel + check-floor, not the GitHub review bots (a deferred slice).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from ...runner import git, worktree
 from . import review_only
@@ -42,6 +44,17 @@ from .rounds import LoopEntry
 
 logger = logging.getLogger(__name__)
 
+# The converge verdict. A closed set so a new status can't be added in one place
+# (render / exit code / tests) and silently missed in another (finding #5).
+ConvergeStatus = Literal[
+    "already_clean",
+    "converged",
+    "not_converged",
+    "fork_unsupported",
+    "merge_race",
+    "failed",
+]
+
 
 @dataclass(frozen=True)
 class ConvergeResult:
@@ -50,16 +63,18 @@ class ConvergeResult:
     ``status`` is the operator-facing verdict and drives the CLI exit code:
 
     * ``already_clean`` — the intake did not block; no coder ran, nothing pushed.
+      Reports on the PR **snapshot resolved before intake** (not a live re-check).
     * ``converged`` — the loop approved; the fixed branch was pushed (unless
       ``no_push``).
     * ``not_converged`` — the loop stopped without approval (``max_rounds`` /
-      ``disputed`` / ``stalled`` / ``cost_exceeded`` / ``failed``); the fixes are
-      left in the local worktree, nothing pushed.
+      ``disputed`` / ``stalled`` / ``cost_exceeded``); the fixes are left in the
+      local worktree, nothing pushed.
     * ``fork_unsupported`` — the PR head is on a fork loom cannot push to.
     * ``merge_race`` — the PR head advanced remotely mid-run; converge refuses to
       ``--force`` over the contributor's history. Re-run to pick up the new tip.
-    * ``failed`` — the intake review could not be produced (panel crash), so
-      there was nothing to seed the loop from.
+    * ``failed`` — the intake review was **incomplete** (interrupted / invalid /
+      absent panel), or the intake spend already exhausted ``--max-cost`` — there
+      was no trustworthy review to seed the fix loop from.
 
     ``fixer_commits`` counts only the coder's commits (PR head → HEAD), NOT
     ``develop_result.commits`` — converge enters at the PR head with the base set
@@ -67,18 +82,25 @@ class ConvergeResult:
     commits (the PR-3 reporting gotcha).
     """
 
-    status: str
+    status: ConvergeStatus
     change: ResolvedChange
     develop_result: DevelopResult | None = None
     fixer_commits: tuple[str, ...] = ()
     pushed: bool = False
     pushed_sha: str = ""
+    intake_cost_usd: float = 0.0
     message: str = ""
 
     @property
     def succeeded(self) -> bool:
         """True when the PR is ready for the human merge gate (nothing left to do)."""
         return self.status in ("already_clean", "converged")
+
+    @property
+    def total_cost_usd(self) -> float:
+        """Whole-command agent spend: the intake review plus the fix loop."""
+        loop = self.develop_result.total_cost_usd if self.develop_result else 0.0
+        return self.intake_cost_usd + loop
 
     def to_json(self) -> dict:
         """Structured summary for ``--json`` / machine consumption."""
@@ -94,6 +116,8 @@ class ConvergeResult:
             "fixer_commits": len(self.fixer_commits),
             "pushed": self.pushed,
             "pushed_sha": self.pushed_sha or None,
+            "intake_cost_usd": round(self.intake_cost_usd, 4),
+            "total_cost_usd": round(self.total_cost_usd, 4),
             "message": self.message,
         }
 
@@ -126,7 +150,33 @@ def converge_pr(
         )
 
     # --- intake: one panel + gate pass at the PR head ---
-    intake = review_only.review_head(config, change, reviewer_timeout=reviewer_timeout)
+    # Run intake under a DISTINCT run_id so its round-1 artifacts (handoff dir,
+    # gate export at gate_dir/round_01/tree, container names — all run_id-derived)
+    # never collide with the fix loop's own round 1. `export_tree` overlays and
+    # `seed_handoff_dir` doesn't clear, so a shared run_id would let intake's head
+    # export / stale reviewer handoff bleed into the fixed-tree gate + panel
+    # (finding #1). The in-memory intake seed (reviews + check-set) carries over
+    # regardless of run_id.
+    intake_config = dataclasses.replace(config, run_id=f"{config.run_id}-intake")
+    intake = review_only.review_head(
+        intake_config, change, reviewer_timeout=reviewer_timeout
+    )
+    intake_cost = intake.panel.cost if intake.panel is not None else 0.0
+
+    if intake.incomplete:
+        # The panel produced no usable review (interrupted / invalid / absent).
+        # There is nothing trustworthy to seed the fix loop from — surface it as a
+        # failure rather than fixing against a partial/absent review (finding #2).
+        logger.info(
+            "converge %s: %s intake did not complete", config.run_id, change.head_ref
+        )
+        return ConvergeResult(
+            status="failed",
+            change=change,
+            intake_cost_usd=intake_cost,
+            message="intake review did not complete (interrupted / invalid panel) "
+            "— cannot seed the fix loop",
+        )
     if not intake.blocking:
         logger.info(
             "converge %s: %s intake already clean", config.run_id, change.head_ref
@@ -134,17 +184,31 @@ def converge_pr(
         return ConvergeResult(
             status="already_clean",
             change=change,
+            intake_cost_usd=intake_cost,
             message="intake review is already clean — nothing to converge",
         )
-    if intake.panel is None:
-        # Blocking because the intake panel produced no review at all (a crash /
-        # interrupt before any reviewer ran): there is nothing to seed the
-        # cold-start coder from. Surface it rather than crash on round_reviews.
-        return ConvergeResult(
-            status="failed",
-            change=change,
-            message="intake review did not complete — cannot seed the fix loop",
-        )
+
+    # Carry the intake spend into the loop budget so --max-cost bounds the WHOLE
+    # command, not just the loop (finding #3). If intake already exhausted the
+    # ceiling, stop before building a coder.
+    loop_config = config
+    if config.max_cost_usd is not None:
+        remaining = config.max_cost_usd - intake_cost
+        if remaining <= 0:
+            logger.info(
+                "converge %s: intake spend $%.2f exhausted --max-cost $%.2f",
+                config.run_id,
+                intake_cost,
+                config.max_cost_usd,
+            )
+            return ConvergeResult(
+                status="failed",
+                change=change,
+                intake_cost_usd=intake_cost,
+                message=f"intake review spent ${intake_cost:.2f}, exhausting the "
+                f"--max-cost ${config.max_cost_usd:.2f} ceiling before the fix loop",
+            )
+        loop_config = dataclasses.replace(config, max_cost_usd=remaining)
 
     # --- fix loop: enter develop() on the PR branch, seeded from the intake ---
     logger.info(
@@ -152,6 +216,7 @@ def converge_pr(
         config.run_id,
         change.head_ref,
     )
+    assert intake.panel is not None  # narrowed by the `intake.incomplete` guard
     entry = LoopEntry(
         worktree_factory=lambda cfg: worktree.create_on_branch(
             cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent
@@ -161,7 +226,7 @@ def converge_pr(
         intake_check_set=intake.check_set,
     )
     result = develop(
-        config,
+        loop_config,
         coder_timeout=coder_timeout,
         reviewer_timeout=reviewer_timeout,
         entry=entry,
@@ -177,6 +242,7 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
+            intake_cost_usd=intake_cost,
             message=result.message,
         )
 
@@ -187,7 +253,7 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
-            pushed=False,
+            intake_cost_usd=intake_cost,
             message="converged — push skipped (--no-push)",
         )
     try:
@@ -203,6 +269,7 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
+            intake_cost_usd=intake_cost,
             message=str(exc),
         )
     except ForkPushUnsupported as exc:  # defensive — forks are guarded pre-loop
@@ -211,6 +278,7 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
+            intake_cost_usd=intake_cost,
             message=str(exc),
         )
     logger.info(
@@ -226,5 +294,6 @@ def converge_pr(
         fixer_commits=fixer_commits,
         pushed=True,
         pushed_sha=pushed_sha,
+        intake_cost_usd=intake_cost,
         message=f"converged and pushed to {change.head_branch}",
     )

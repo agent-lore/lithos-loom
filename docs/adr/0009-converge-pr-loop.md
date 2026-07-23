@@ -99,6 +99,29 @@ into a "review-first round 1" is a deferred optimization, not v1.
   the fixer's. The converge summary counts only the fixer's commits
   (`git.commits_since(head_sha)`); mechanics are unaffected (the push anchors on
   the PR head sha, not the commit list).
+- **Intake artifact isolation.** The intake pass and the fix loop share nothing
+  on disk: intake runs under a distinct `run_id` (`<run_id>-intake`) so their
+  round-1 handoff dirs, gate tree exports (`gate_dir/round_01/tree`) and
+  container names — all `run_id`-derived — cannot collide. `export_tree` also
+  recreates its destination empty (it overlays via `tar -x` but never deletes),
+  a defense-in-depth belt so a re-export into a shared dir can't leave a deleted
+  file behind. Without this the intake's PR-head export or a stale reviewer
+  handoff could bleed into the fixed-tree gate / panel and approve un-reviewed
+  fixes.
+- **Whole-command budget.** `--max-cost` bounds intake **plus** loop: the intake
+  spend is carried into the loop's ceiling, and an intake that alone exhausts the
+  budget stops before a coder is built. `--max-cost`/`--max-rounds` are validated
+  before any container work.
+- **Incomplete intake is `failed`, exceptions propagate.** An interrupted /
+  invalid / absent intake panel yields no trustworthy review, so converge stops
+  with `failed` rather than seeding the loop from a partial review. An
+  *unexpected* exception while producing the intake is deliberately **not**
+  caught — a traceback is the honest signal for an internal fault; `failed` is
+  reserved for the expected incomplete/budget cases.
+- **`already_clean` is a snapshot verdict.** It reports on the PR revision
+  resolved before intake, not a live re-check of the remote head. It is
+  non-mutating (no push), so a remote advance during intake is a report-freshness
+  question, not a safety one; a live re-check would only introduce its own race.
 - **v1 limit:** a round-1 coder that disputes every finding and commits nothing
   is gated on the unchanged head — it converges only if the head was already
   gate-green. Rare and acceptable; documented in the CLI reference.

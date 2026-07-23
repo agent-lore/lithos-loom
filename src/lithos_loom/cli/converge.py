@@ -72,7 +72,10 @@ def converge_command(
         None, "--max-rounds", help="Cap the implement→review→fix rounds."
     ),
     max_cost: float | None = typer.Option(
-        None, "--max-cost", help="Stop once total agent spend (USD) exceeds this."
+        None,
+        "--max-cost",
+        help="Stop once total agent spend (USD) — intake review + fix loop — "
+        "exceeds this.",
     ),
     no_push: bool = typer.Option(
         False, "--no-push", help="Converge locally but do not push to the PR branch."
@@ -96,6 +99,12 @@ def converge_command(
         raise typer.BadParameter(
             f"unsupported coder {coder!r}: expected {engines.supported_tools_phrase()}"
         )
+    # Validate the numeric bounds before any container work — a nonsensical
+    # ceiling / round cap must fail fast, not after spending on the intake review.
+    if max_cost is not None and max_cost <= 0:
+        raise typer.BadParameter("--max-cost must be greater than 0")
+    if max_rounds is not None and max_rounds < 1:
+        raise typer.BadParameter("--max-rounds must be at least 1")
 
     repo = repo or Path.cwd()
     host = load_config(config)

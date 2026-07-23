@@ -54,6 +54,20 @@ _REVIEW_ONLY_CODER_SUMMARY = (
 )
 
 
+def panel_incomplete(panel: PanelRoundResult | None) -> bool:
+    """Whether the panel produced no usable review this pass.
+
+    True when it never ran (``None``), was **interrupted** (usage limit), or hit
+    an **invalid reviewer**. review-only folds this into a blocking report;
+    converge treats it as a hard **failure** — there is no trustworthy review to
+    seed the fix loop from, so fixing against a partial/absent panel would be
+    worse than stopping. (Note ``review_head`` *raises* on an exception rather
+    than returning ``panel=None``, so in practice this catches the
+    interrupted / invalid cases; ``None`` is the defensive floor.)
+    """
+    return panel is None or panel.interrupted or panel.invalid_reviewer is not None
+
+
 def intake_blocks(
     panel: PanelRoundResult | None,
     check_set: CheckSetResult | None,
@@ -61,17 +75,18 @@ def intake_blocks(
 ) -> bool:
     """Whether one intake pass blocks approval — the single blocking rule.
 
-    Blocks when the panel is **incomplete** (never ran / interrupted / hit an
-    invalid reviewer), when **any reviewer did not pass**, or when the
-    deterministic **floor blocks** (:func:`gate_floor_blocks`). Used by both
-    :func:`_build_report` (review-only's report) and :attr:`IntakeResult.blocking`
-    (converge's already-clean short-circuit), so the two can never diverge.
+    Blocks when the panel is **incomplete** (:func:`panel_incomplete`), when
+    **any reviewer did not pass**, or when the deterministic **floor blocks**
+    (:func:`gate_floor_blocks`). Used by both :func:`_build_report` (review-only's
+    report) and :attr:`IntakeResult.blocking` (converge's already-clean
+    short-circuit), so the two can never diverge.
     """
-    incomplete = (
-        panel is None or panel.interrupted or panel.invalid_reviewer is not None
-    )
     reviewers_pass = panel is not None and all(r.passed for r in panel.round_reviews)
-    return incomplete or not reviewers_pass or gate_floor_blocks(check_set, gate_ledger)
+    return (
+        panel_incomplete(panel)
+        or not reviewers_pass
+        or gate_floor_blocks(check_set, gate_ledger)
+    )
 
 
 @dataclass(frozen=True)
@@ -89,6 +104,11 @@ class IntakeResult:
     panel: PanelRoundResult | None
     check_set: CheckSetResult | None
     gate_ledger: GateLedger
+
+    @property
+    def incomplete(self) -> bool:
+        """Whether the panel produced no usable review (:func:`panel_incomplete`)."""
+        return panel_incomplete(self.panel)
 
     @property
     def blocking(self) -> bool:

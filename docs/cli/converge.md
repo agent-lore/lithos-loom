@@ -33,9 +33,9 @@ lithos-loom develop converge #142 --ac "the leak must close the handle on error"
 ## What it does
 
 1. **Resolves the PR** to a `base..head` pair, the pushable head branch, and a fork flag (via the typed GitHub client — the same seam `develop review` uses). A **fork PR** is refused here, *before* any container runs: loom pushes under origin credentials and cannot push to a fork.
-2. **Intake review.** Runs the resolved profile's deterministic gate + the reviewer panel once at the PR head. If it does **not** block → `already_clean`: no coder is built, nothing is pushed, exit 0. (This is the cheapest path for the common re-check.)
+2. **Intake review.** Runs the resolved profile's deterministic gate + the reviewer panel once at the PR head, under a **distinct `run_id`** (`<run_id>-intake`) so its round-1 artifacts never collide with the fix loop's. If the panel is **incomplete** (interrupted / invalid) → `failed` (nothing trustworthy to seed the loop from). If it does **not** block → `already_clean`: no coder is built, nothing is pushed, exit 0 — this reports on the PR *snapshot resolved before intake*, not a live re-check, and is the cheapest path for the common re-check.
 3. **Fix loop.** If the intake blocks, enters `develop()` on a committable worktree at the PR head (base = the PR merge-base), seeded from the intake findings + the PR's own commit log. Round 1's coder is a **cold-start** turn: *"you are picking up a PR you did not author — read the acceptance criteria, the commit history, and the code to reconstruct intent, then address the findings to satisfy that intent; dispute (don't silently comply with) a finding that undoes a deliberate decision."* Rounds ≥2 are the normal `coder_fix` path. Termination is `develop()`'s own — `approved` / `disputed` / `stalled` / `cost_exceeded` / `max_rounds`.
-4. **Push epilogue.** On **approval** (and unless `--no-push`), fast-forward-pushes the fixed branch onto the PR head ref — **never `--force`** (converge only appends commits atop the fetched head). If the PR head advanced remotely mid-run, the push is refused as a `merge_race` rather than forced.
+4. **Push epilogue.** On **approval** (and unless `--no-push`), fast-forward-pushes the fixed branch onto the PR head ref — **never `--force`** (converge only appends commits atop the fetched head). If the PR head advanced remotely mid-run — caught either by the pre-push `ls-remote` check or by a non-fast-forward push rejection (the TOCTOU window between them) — the push is refused as a `merge_race` rather than forced.
 
 ## Local panel only (v1)
 
@@ -56,8 +56,8 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 | `--ac-file PATH` | Read acceptance criteria from a file (wins over `--ac`). |
 | `--base REF` | Override the diff base (default: the PR merge-base). |
 | `--coder claude\|codex` | Coder engine for the fix turns (default: the config's coder). |
-| `--max-rounds N` | Cap the implement→review→fix rounds. |
-| `--max-cost USD` | Stop once total agent spend exceeds this. |
+| `--max-rounds N` | Cap the implement→review→fix rounds (validated `≥ 1`). |
+| `--max-cost USD` | Stop once **total** agent spend — intake review + fix loop — exceeds this (validated `> 0`). |
 | `--no-push` | Converge locally but do not push to the PR branch. |
 | `--repo PATH` | Repository to converge in (default: current directory). |
 | `--json PATH` | Write the structured JSON summary. |
@@ -66,8 +66,10 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 ## Output
 
 - **Markdown** to stdout: the status line, the message, the round + fixer-commit count, and (on a push) the pushed sha → PR branch.
-- **JSON** (`--json`): a stable object — `status`, `head_ref`, `head_branch`, `base_sha`, `head_sha`, `rounds`, `develop_status`, `fixer_commits` (only the coder's commits, PR head → HEAD — **not** the PR's original commits), `pushed`, `pushed_sha`, `message`.
-- **Exit code** by status: `already_clean` / `converged` → **0**; `not_converged` / `merge_race` / `failed` → **1**; `fork_unsupported` → **2**.
+- **JSON** (`--json`): a stable object — `status`, `head_ref`, `head_branch`, `base_sha`, `head_sha`, `rounds`, `develop_status`, `fixer_commits` (only the coder's commits, PR head → HEAD — **not** the PR's original commits), `pushed`, `pushed_sha`, `intake_cost_usd`, `total_cost_usd`, `message`.
+- **Statuses / exit codes:** `already_clean` (intake didn't block; reports the *pre-intake snapshot*) and `converged` → **0**; `not_converged` (loop stopped unapproved), `merge_race` (PR head advanced remotely), and `failed` (incomplete intake panel, or intake spend exhausted `--max-cost`) → **1**; `fork_unsupported` → **2**.
+
+> **Intake exceptions propagate.** An *unexpected* error while producing the intake review (e.g. a container crash, a bad config) is raised, not silently mapped to `failed` — a traceback is the honest signal for an internal fault. `failed` is reserved for the *expected* incomplete-review and budget-exhausted cases.
 
 ## v1 limit — dispute-all round 1
 

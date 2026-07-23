@@ -113,6 +113,25 @@ def test_unsupported_coder_fails_closed(stubs: dict) -> None:
     assert "config" not in stubs
 
 
+def test_non_positive_max_cost_fails_closed(stubs: dict) -> None:
+    # validated before any container work — a nonsensical ceiling must fail fast
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--max-cost", "0"]
+    )
+    assert result.exit_code != 0
+    assert "max-cost" in result.output.lower()
+    assert "config" not in stubs  # never entered the orchestrator
+
+
+def test_max_rounds_below_one_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--max-rounds", "0"]
+    )
+    assert result.exit_code != 0
+    assert "max-rounds" in result.output.lower()
+    assert "config" not in stubs
+
+
 def test_unknown_profile_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app, ["converge", "#142", "--ac", "x", "--profile", "thorogh"]

@@ -1089,7 +1089,13 @@ def test_deliver_guarded_records_failure_and_returns_reason(
 # --- push_to_pr_ref: guarded fast-forward push to a PR head ref (converge) -----
 
 
-def _fake_run(ls_stdout: str, *, push_rc: int = 0, head_sha: str = "l" * 40) -> Any:
+def _fake_run(
+    ls_stdout: str,
+    *,
+    push_rc: int = 0,
+    head_sha: str = "l" * 40,
+    push_stderr: str = "",
+) -> Any:
     """A fake ``pr_delivery._run`` dispatching by git subcommand + a call log."""
     calls: list[list[str]] = []
 
@@ -1103,7 +1109,7 @@ def _fake_run(ls_stdout: str, *, push_rc: int = 0, head_sha: str = "l" * 40) -> 
             )
         if args[:2] == ["git", "push"]:
             return subprocess.CompletedProcess(
-                args, push_rc, stdout="", stderr="rejected" if push_rc else ""
+                args, push_rc, stdout="", stderr=push_stderr
             )
         raise AssertionError(f"unexpected git call: {args}")
 
@@ -1155,9 +1161,37 @@ def test_push_to_pr_ref_raises_merge_race_when_remote_advanced(
 def test_push_to_pr_ref_raises_on_push_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run = _fake_run("e" * 40 + "\trefs/heads/feature\n", push_rc=1)
+    # a non-race failure (auth) stays a generic RuntimeError, NOT a merge race
+    run = _fake_run(
+        "e" * 40 + "\trefs/heads/feature\n",
+        push_rc=1,
+        push_stderr="fatal: Authentication failed for 'https://github.com/o/r'",
+    )
     monkeypatch.setattr(pr_delivery, "_run", run)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         pr_delivery.push_to_pr_ref(
             Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
         )
+    assert not isinstance(excinfo.value, pr_delivery.MergeRaceDetected)
+
+
+def test_push_to_pr_ref_maps_non_fast_forward_push_to_merge_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # TOCTOU: ls-remote matched, but the remote advanced before the push, which
+    # git rejects as non-fast-forward. That must surface as merge_race (the same
+    # outcome as the pre-check), never a force-push or a generic crash (finding #4).
+    run = _fake_run(
+        "e" * 40 + "\trefs/heads/feature\n",
+        push_rc=1,
+        push_stderr=(
+            " ! [rejected]        converge-abc -> feature (non-fast-forward)\n"
+            "error: failed to push some refs to 'origin'"
+        ),
+    )
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(pr_delivery.MergeRaceDetected):
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    assert not any("--force" in c or "-f" in c for c in run.calls)

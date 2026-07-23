@@ -42,7 +42,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 4 | 20 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
-| `lithos_loom.plugins.story_develop.review_only` | S | 1 | 3 |
+| `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | M | 4 | 11 |
@@ -251,6 +251,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_profile` — Resolve the selected Review Profile (ADR §2).
 
 ### `lithos_loom.plugins.story_develop.review_only`
+- def `panel_incomplete` — Whether the panel produced no usable review this pass.
 - def `intake_blocks` — Whether one intake pass blocks approval — the single blocking rule.
 - class `IntakeResult` — The raw pieces of one review pass at a change head.
 - def `review_change` — Run the panel + deterministic gate against an existing *change*.
