@@ -247,28 +247,33 @@ def push_to_pr_ref(
     *,
     expected_remote_sha: str,
 ) -> str:
-    """Fast-forward push *local_branch* onto the PR's head ref *remote_ref*.
+    """Push the reviewed worktree ``HEAD`` onto the PR's head ref *remote_ref*.
 
-    Converge commits onto a fresh local branch positioned at the PR head, so its
-    commits are a strict superset of *expected_remote_sha*. The invariant is
-    stronger than "never do a non-fast-forward": push **only if the PR head is
-    still exactly** *expected_remote_sha*. Two guards enforce that:
+    Converge commits onto a fresh local branch at the PR head, so ``HEAD`` is a
+    strict superset of *expected_remote_sha*. The invariant is stronger than
+    "never do a non-fast-forward": push **only if the PR head is still exactly**
+    *expected_remote_sha*, and push **exactly the reviewed HEAD**. Every guard
+    operates on the SAME resolved ``HEAD`` sha so the checked and pushed objects
+    can never disagree:
 
-    * an **atomic lease** — ``--force-with-lease=<ref>:<expected_sha>`` performs
-      the update only if ``origin``'s ref is *currently* at *expected_remote_sha*,
-      so a branch deleted / advanced / rewound between the pre-check and the push
-      is **rejected** (→ :class:`MergeRaceDetected`) instead of being silently
-      recreated or overwritten (a plain push would fast-forward over a rewind and
-      recreate a deleted ref);
-    * an **append-only ancestry check** — the local HEAD must descend from
-      *expected_remote_sha*, so the leased update can only ever *add* commits, never
-      rewrite history. Together these are a guarded fast-forward, not a blind
-      ``--force``.
+    * *local_branch* is required to resolve to ``HEAD`` — the caller names the
+      branch it believes it is delivering, and we refuse if that is not the
+      reviewed/gated commit (else a non-descendant *local_branch* could force the
+      PR branch backward even with a matching lease);
+    * an **append-only ancestry check** — the reviewed ``HEAD`` must descend from
+      *expected_remote_sha*, so the leased update can only *add* commits;
+    * an **atomic lease** — ``--force-with-lease=refs/heads/<ref>:<expected_sha>``
+      updates only if ``origin``'s ref is *currently* at *expected_remote_sha*, so
+      a branch deleted / advanced / rewound between the pre-check and the push is
+      **rejected** (→ :class:`MergeRaceDetected`) instead of being silently
+      recreated or overwritten. Together a guarded fast-forward — never a blind
+      ``--force`` / history rewrite.
 
     A fast ``ls-remote`` pre-check still classifies a fork (ref absent on
     ``origin`` → :class:`ForkPushUnsupported`) and an already-advanced head before
-    spending on the push. Returns the pushed local ``HEAD`` sha; raises
-    :class:`RuntimeError` on any other (auth / hook / network) push failure.
+    spending on the push. Returns the exact ``HEAD`` sha pushed; raises
+    :class:`RuntimeError` on a caller/contract error or any other (auth / hook /
+    network) push failure.
     """
     ls = _run(
         ["git", "ls-remote", "--heads", "origin", remote_ref], cwd=wt, timeout=120
@@ -290,33 +295,55 @@ def push_to_pr_ref(
             f"({remote_sha[:10]} != expected {expected_remote_sha[:10]}); "
             "re-run converge"
         )
+    # Resolve the ONE exact object we push — the reviewed + gated worktree HEAD —
+    # and enforce every guard on THAT sha, so the ancestry check and the push can
+    # never disagree about which commit lands on the PR branch.
     head = _run(["git", "rev-parse", "HEAD"], cwd=wt, timeout=120)
     if head.returncode != 0:
         raise RuntimeError(f"git rev-parse HEAD failed: {head.stderr.strip()}")
-    # Append-only guard: the local branch must descend from the expected head, so
-    # the leased push below can only fast-forward (never rewind the contributor's
-    # history). In normal converge use this always holds (the worktree was cut AT
-    # expected_remote_sha); a failure means the head changed under converge.
+    head_sha = head.stdout.strip()
+
+    # Contract: the caller's named branch must BE the reviewed HEAD. Otherwise we
+    # would push a different object than the one reviewed/gated — and a
+    # non-descendant local_branch could force the PR branch backward even though
+    # the lease matches and HEAD descends from expected. Refuse rather than push
+    # the wrong commit.
+    lb = _run(["git", "rev-parse", "--verify", local_branch], cwd=wt, timeout=120)
+    if lb.returncode != 0:
+        raise RuntimeError(f"git rev-parse {local_branch} failed: {lb.stderr.strip()}")
+    if lb.stdout.strip() != head_sha:
+        raise RuntimeError(
+            f"local branch {local_branch!r} ({lb.stdout.strip()[:10]}) is not the "
+            f"reviewed HEAD ({head_sha[:10]}); refusing to push a different commit"
+        )
+
+    # Append-only guard on the EXACT object being pushed: the reviewed HEAD must
+    # descend from the expected head, so the leased update can only fast-forward
+    # (never rewind the contributor's history). In normal converge use this always
+    # holds (the worktree was cut AT expected_remote_sha).
     anc = _run(
-        ["git", "merge-base", "--is-ancestor", expected_remote_sha, "HEAD"],
+        ["git", "merge-base", "--is-ancestor", expected_remote_sha, head_sha],
         cwd=wt,
         timeout=120,
     )
     if anc.returncode != 0:
         raise MergeRaceDetected(
-            f"local branch no longer descends from the expected head "
-            f"{expected_remote_sha[:10]} (it changed under converge); re-run converge"
+            f"reviewed HEAD {head_sha[:10]} does not descend from the expected "
+            f"head {expected_remote_sha[:10]} (it changed under converge); "
+            "re-run converge"
         )
     # Atomic compare-and-swap: the lease pins origin's ref to expected_remote_sha,
-    # closing the ls-remote→push TOCTOU window. A deleted / advanced / rewound ref
-    # is rejected ("stale info") rather than silently recreated or overwritten.
+    # closing the ls-remote→push TOCTOU window; we push the exact reviewed sha to
+    # the fully-qualified branch ref. A deleted / advanced / rewound ref is
+    # rejected ("stale info") rather than silently recreated or overwritten.
+    dst = f"refs/heads/{remote_ref}"
     proc = _run(
         [
             "git",
             "push",
-            f"--force-with-lease={remote_ref}:{expected_remote_sha}",
+            f"--force-with-lease={dst}:{expected_remote_sha}",
             "origin",
-            f"{local_branch}:{remote_ref}",
+            f"{head_sha}:{dst}",
         ],
         cwd=wt,
         timeout=300,
@@ -335,7 +362,7 @@ def push_to_pr_ref(
                 f"(expected {expected_remote_sha[:10]}); re-run converge: {stderr}"
             )
         raise RuntimeError(f"git push to {remote_ref} failed: {stderr}")
-    return head.stdout.strip()
+    return head_sha  # the exact sha pushed (== the reviewed HEAD)
 
 
 def create_pr(wt: Path, *, branch: str, base: str, title: str, body: str) -> str:

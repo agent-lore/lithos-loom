@@ -344,6 +344,22 @@ def test_converge_pr_rejects_invalid_numeric_config(
         converge_pr(dataclasses.replace(_config(tmp_path), max_rounds=0), _change())
 
 
+def test_max_cost_is_soft_an_approved_result_over_ceiling_is_delivered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """--max-cost is a SOFT phase-boundary ceiling, not a hard cap: an approved
+    result whose total spend exceeds it is still converged + pushed (approval wins
+    over a cost overrun, as in the develop loop) — finding #2. Here intake $4.5 +
+    loop $1.0 = $5.5 > the $5 ceiling, yet the run is delivered."""
+    captured = _install(monkeypatch, blocking=True, intake_cost=4.5)
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=5.0)
+    result = converge_pr(config, _change())
+    assert result.status == "converged"
+    assert result.pushed is True
+    assert result.total_cost_usd > 5.0  # exceeded the ceiling but still delivered
+    assert "push" in captured
+
+
 def test_unlimited_budget_leaves_the_loop_ceiling_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

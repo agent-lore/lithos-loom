@@ -225,7 +225,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `push_branch` — Host-side push of the worktree branch to origin. Raises on failure.
 - class `ForkPushUnsupported` — The PR's head ref is not on ``origin`` (a fork PR), so converge cannot push to it under origin credentials (v1). The operator converges + fixes locally with ``--no-push``, or re-runs against a same-repo PR.
 - class `MergeRaceDetected` — The PR head ref advanced on the remote since converge resolved it, so a push would not be a fast-forward. Converge stops rather than ``--force`` (which would clobber the concurrent commit); the operator re-runs to pick up the new tip.
-- def `push_to_pr_ref` — Fast-forward push *local_branch* onto the PR's head ref *remote_ref*.
+- def `push_to_pr_ref` — Push the reviewed worktree ``HEAD`` onto the PR's head ref *remote_ref*.
 - def `create_pr` — Open the PR; returns its URL. Raises on failure.
 - def `pr_number_from_url` — Extract the PR number from a canonical GitHub PR URL; raise if it can't.
 - def `request_copilot` — Request the Copilot reviewer; False (logged) on failure — non-fatal.

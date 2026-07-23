@@ -1094,14 +1094,18 @@ def _fake_run(
     *,
     push_rc: int = 0,
     head_sha: str = "l" * 40,
+    branch_sha: str | None = None,
     push_stderr: str = "",
     ancestor_rc: int = 0,
 ) -> Any:
     """A fake ``pr_delivery._run`` dispatching by git subcommand + a call log.
 
-    ``ancestor_rc`` is the exit code of the ``merge-base --is-ancestor`` guard
-    (0 = the local branch descends from the expected head, the normal case).
+    ``rev-parse HEAD`` resolves to *head_sha*; ``rev-parse --verify <branch>``
+    resolves to *branch_sha* (default == *head_sha*, i.e. the caller's branch IS
+    the reviewed HEAD). ``ancestor_rc`` is the ``merge-base --is-ancestor`` exit
+    code (0 = HEAD descends from the expected head, the normal case).
     """
+    branch_sha = head_sha if branch_sha is None else branch_sha
     calls: list[list[str]] = []
 
     def run(args: list[str], *, cwd: Path, timeout: int = 120) -> Any:
@@ -1109,9 +1113,8 @@ def _fake_run(
         if args[:2] == ["git", "ls-remote"]:
             return subprocess.CompletedProcess(args, 0, stdout=ls_stdout, stderr="")
         if args[:2] == ["git", "rev-parse"]:
-            return subprocess.CompletedProcess(
-                args, 0, stdout=head_sha + "\n", stderr=""
-            )
+            sha = head_sha if args[-1] == "HEAD" else branch_sha
+            return subprocess.CompletedProcess(args, 0, stdout=sha + "\n", stderr="")
         if args[:2] == ["git", "merge-base"]:
             return subprocess.CompletedProcess(args, ancestor_rc, stdout="", stderr="")
         if args[:2] == ["git", "push"]:
@@ -1132,18 +1135,40 @@ def test_push_to_pr_ref_fast_forwards_when_remote_unchanged(
     pushed = pr_delivery.push_to_pr_ref(
         Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
     )
-    assert pushed == "l" * 40
+    assert pushed == "l" * 40  # the exact reviewed HEAD sha
     push = next(c for c in run.calls if c[:2] == ["git", "push"])
-    # an atomic lease pinned to the expected head + the src:dst refspec — a
-    # guarded fast-forward, NOT a blind --force / -f.
+    # push the exact HEAD sha to the fully-qualified ref, leased to the expected
+    # head — a guarded fast-forward, NOT a blind --force / -f.
     assert push == [
         "git",
         "push",
-        "--force-with-lease=feature:" + "e" * 40,
+        "--force-with-lease=refs/heads/feature:" + "e" * 40,
         "origin",
-        "converge-abc:feature",
+        "l" * 40 + ":refs/heads/feature",
     ]
     assert "--force" not in push and "-f" not in push
+
+
+def test_push_to_pr_ref_refuses_when_local_branch_is_not_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the source-ref safety boundary: local_branch must BE the reviewed HEAD.
+    # A divergent branch (points elsewhere) is refused BEFORE pushing, so a
+    # non-descendant local_branch can never force the PR branch backward even
+    # though HEAD descends from expected and the lease matches (finding: checked
+    # vs pushed object mismatch). Not a merge race — a caller/contract error.
+    run = _fake_run(
+        "e" * 40 + "\trefs/heads/feature\n",
+        head_sha="l" * 40,
+        branch_sha="d" * 40,  # local_branch resolves to a DIFFERENT commit
+    )
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(RuntimeError) as excinfo:
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    assert not isinstance(excinfo.value, pr_delivery.MergeRaceDetected)
+    assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed
 
 
 def test_push_to_pr_ref_raises_fork_when_ref_absent(
@@ -1256,7 +1281,7 @@ def test_push_to_pr_ref_lease_rejection_is_merge_race(
         )
     # the lease is pinned to the expected head, and never a blind --force
     push = next(c for c in run.calls if c[:2] == ["git", "push"])
-    assert "--force-with-lease=feature:" + "e" * 40 in push
+    assert "--force-with-lease=refs/heads/feature:" + "e" * 40 in push
     assert "--force" not in push and "-f" not in push
 
 
@@ -1273,3 +1298,80 @@ def test_push_to_pr_ref_non_descendant_local_is_rejected_without_pushing(
             Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
         )
     assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed
+
+
+# --- push_to_pr_ref against a REAL local bare remote (finding: checked vs -----
+# --- pushed object). Mocked _run can't exercise the actual git push semantics. -
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _sha(cwd: Path, ref: str = "HEAD") -> str:
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _remote_sha(bare: Path, ref: str) -> str:
+    out = subprocess.run(
+        ["git", "ls-remote", str(bare), f"refs/heads/{ref}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return out.split()[0] if out else ""
+
+
+def _seed_pr_repo(tmp_path: Path) -> tuple[Path, Path, str, str, str]:
+    """A bare 'origin' with `feature` at H (parent G), and a work repo whose HEAD
+    is a descendant of H on branch `converge-x`. Returns (wt, bare, G, H, fixed)."""
+    bare = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(bare)],
+        check=True,
+        capture_output=True,
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "init", "-b", "main", str(wt)], check=True, capture_output=True
+    )
+    _git(wt, "config", "user.email", "t@t")
+    _git(wt, "config", "user.name", "t")
+    _git(wt, "remote", "add", "origin", str(bare))
+    (wt / "a.txt").write_text("G\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-m", "G")
+    g = _sha(wt)
+    (wt / "a.txt").write_text("H\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-m", "H")
+    h = _sha(wt)
+    _git(wt, "push", "origin", "HEAD:refs/heads/feature")  # feature at H
+    _git(wt, "checkout", "-b", "converge-x")
+    (wt / "b.txt").write_text("fix\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-m", "fix")
+    return wt, bare, g, h, _sha(wt)
+
+
+def test_push_to_pr_ref_pushes_reviewed_head_real_git(tmp_path: Path) -> None:
+    wt, bare, _g, h, fixed = _seed_pr_repo(tmp_path)
+    pushed = pr_delivery.push_to_pr_ref(
+        wt, "converge-x", "feature", expected_remote_sha=h
+    )
+    assert pushed == fixed  # returns the EXACT pushed sha (the reviewed HEAD)
+    assert _remote_sha(bare, "feature") == fixed  # remote fast-forwarded to HEAD
+
+
+def test_push_to_pr_ref_refuses_non_head_branch_real_git(tmp_path: Path) -> None:
+    # a divergent local_branch pointing at an OLDER commit (G, an ancestor of the
+    # remote's H) must NOT force the PR branch backward. The pre-fix code pushed
+    # local_branch, so `stale`->feature would have rewound feature from H to G;
+    # the fix pushes the reviewed HEAD and refuses a branch that isn't HEAD.
+    wt, bare, g, h, _fixed = _seed_pr_repo(tmp_path)
+    _git(wt, "branch", "stale", g)  # 'stale' at G, older than HEAD (and than H)
+    with pytest.raises(RuntimeError):
+        pr_delivery.push_to_pr_ref(wt, "stale", "feature", expected_remote_sha=h)
+    assert _remote_sha(bare, "feature") == h  # remote UNCHANGED — never rewound

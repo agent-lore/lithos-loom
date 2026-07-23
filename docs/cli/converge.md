@@ -57,7 +57,7 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 | `--base REF` | Override the diff base (default: the PR merge-base). |
 | `--coder claude\|codex` | Coder engine for the fix turns (default: the config's coder). |
 | `--max-rounds N` | Cap the implement→review→fix rounds (validated `≥ 1`). |
-| `--max-cost USD` | Stop once **total** agent spend — intake review + fix loop — exceeds this (validated `> 0`). |
+| `--max-cost USD` | **Soft** phase-boundary ceiling on whole-command spend (intake + loop): converge stops before the next phase once recorded spend reaches it (validated `> 0`). Not a hard cap — an in-flight turn may overshoot and a same-round approval is delivered even if it crossed the ceiling. |
 | `--no-push` | Converge locally but do not push to the PR branch. |
 | `--repo PATH` | Repository to converge in (default: current directory). |
 | `--json PATH` | Write the structured JSON summary. |
