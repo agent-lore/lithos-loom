@@ -147,6 +147,12 @@ class RoundContext:
     coder_summary: Callable[[DevelopConfig, int], str]
     record_coder_disputes: Callable[[DevelopConfig, list[ReviewerState], int], None]
     coder_handoff_nudge: Callable[[int], str]
+    # --- converge entry (both None on the story-develop path) ---
+    # When set (converge / ADR 0003 §9 Shape 1), round 1 is a cold-start fix of an
+    # existing PR: the coder gets converge_coder_init.md seeded from the intake
+    # review + the PR's own commit log instead of coder_init.md. See LoopEntry.
+    intake_reviews: list[ReviewOutcome] | None = None
+    intake_check_set: CheckSetResult | None = None
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -161,6 +167,27 @@ class RoundContext:
     rounds_completed: int = 0
 
 
+@dataclass(frozen=True)
+class LoopEntry:
+    """Overrides that let ``develop()`` enter its loop on an EXISTING PR branch
+    instead of cutting a fresh worktree off a base (converge / ADR 0003 §9
+    "Shape 1").
+
+    ``worktree_factory`` builds the committable worktree — converge positions a
+    fresh local branch at the PR head so the coder's commits land on it and can
+    be pushed back. ``base_override`` is the PR's merge-base (the review + gate
+    diff base, not the worktree HEAD). ``intake_reviews`` / ``intake_check_set``
+    seed round 1's cold-start coder from the intake review of the PR (there is no
+    prior coder session to resume — converge is a fresh process). The default
+    ``entry=None`` on ``develop()`` is the story-develop path, unchanged.
+    """
+
+    worktree_factory: Callable[[DevelopConfig], Path]
+    base_override: str
+    intake_reviews: list[ReviewOutcome]
+    intake_check_set: CheckSetResult | None
+
+
 def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Build the coder prompt, run its (limit-paused) turn, salvage a missing
     handoff once (#114), and gate the round on a clean turn + a written handoff.
@@ -170,20 +197,40 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """
     config = ctx.config
     if round_no == 1:
-        # T8: an EXPLICIT acceptance criteria (flag / task metadata) gets its own
-        # section; when it merely falls back to the description, repeating it
-        # would be noise.
-        ac_section = (
-            f"\n## Acceptance criteria\n\n{config.acceptance_criteria}\n"
-            if config.acceptance_criteria
-            else ""
-        )
-        coder_prompt = render_prompt(
-            handoff.load_prompt("coder_init.md"),
-            description=config.description,
-            acceptance_criteria_section=ac_section,
-            handoff_file=handoff.coder_handoff_name(1),
-        )
+        if ctx.intake_reviews is not None:
+            # converge (ADR 0003 §9 Shape 1): round 1 is a cold-start FIX of an
+            # existing PR the coder did NOT author. Seed the turn with the intake
+            # review + the PR's own commit log (base..head) so it reconstructs
+            # intent before changing anything. Still resume=False — this is the
+            # process's first coder turn, so it maps onto develop()'s existing
+            # round-1 (no session to resume), differing only in the prompt.
+            coder_prompt = render_prompt(
+                handoff.load_prompt("converge_coder_init.md"),
+                acceptance_criteria=config.effective_acceptance_criteria,
+                commit_log=(
+                    git.log_between(ctx.wt, ctx.base) or "(no commits in range)"
+                ),
+                findings=ctx.render_panel_findings(ctx.intake_reviews),
+                gate_summary=render_check_summary(
+                    ctx.intake_check_set, for_coder=True, gate_ledger=ctx.gate_ledger
+                ),
+                handoff_file=handoff.coder_handoff_name(1),
+            )
+        else:
+            # T8: an EXPLICIT acceptance criteria (flag / task metadata) gets its
+            # own section; when it merely falls back to the description, repeating
+            # it would be noise.
+            ac_section = (
+                f"\n## Acceptance criteria\n\n{config.acceptance_criteria}\n"
+                if config.acceptance_criteria
+                else ""
+            )
+            coder_prompt = render_prompt(
+                handoff.load_prompt("coder_init.md"),
+                description=config.description,
+                acceptance_criteria_section=ac_section,
+                handoff_file=handoff.coder_handoff_name(1),
+            )
         coder_resume = False
     else:
         assert ctx.final_reviews  # set by the prior round's reviews

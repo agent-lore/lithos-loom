@@ -1970,3 +1970,122 @@ def test_candidate_stage_reruns_on_a_new_committed_sha(
     # candidate re-ran on BOTH committed trees (a boolean guard would skip round 2).
     assert [r for r, _ in candidate_calls] == [1, 2]
     assert candidate_calls[0][1] != candidate_calls[1][1]  # distinct gated_sha
+
+
+# --- converge entry: parameterized loop on an existing PR branch --------------
+
+
+def test_converge_entry_seeds_round_one_and_reuses_loop(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """converge enters develop() on an EXISTING PR branch via LoopEntry: round-1
+    coder gets the cold-start CONVERGE prompt seeded from the intake review, the
+    worktree is a committable branch at the PR head, base is the PR merge-base,
+    and the round loop is reused verbatim (approves on the fixed head)."""
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
+    from lithos_loom.plugins.story_develop.develop import LoopEntry
+    from lithos_loom.plugins.story_develop.handoff import Finding
+    from lithos_loom.plugins.story_develop.panel import ReviewOutcome
+    from lithos_loom.plugins.story_develop.test_gate import GateResult
+    from lithos_loom.runner import git, worktree
+
+    # a PR head on top of the base commit
+    base = git.base_sha(config.repo)
+    (config.repo / "pr.txt").write_text("pr change\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=config.repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "the PR commit"],
+        cwd=config.repo,
+        check=True,
+        capture_output=True,
+    )
+    head = git.base_sha(config.repo)
+
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+
+    # A concrete intake review (one finding) + a failing intake gate, so the test
+    # proves the seed DATA is rendered — not merely that the template is selected.
+    intake = [
+        ReviewOutcome(
+            reviewer="correctness",
+            status="FINDINGS",
+            passed=False,
+            max_severity="major",
+            findings=[
+                Finding(
+                    finding_id="f-001",
+                    severity="major",
+                    status="open",
+                    files=["helper.py:12"],
+                    rationale="the helper leaks a file handle on error",
+                )
+            ],
+        )
+    ]
+    intake_check_set = CheckSetResult(
+        results=(
+            CheckResult(
+                check=Check(
+                    name="lint", command="ruff check", state="required", stage="fast"
+                ),
+                execution_outcome="ran",
+                gate=GateResult(
+                    command="ruff check",
+                    exit_code=1,
+                    passed=False,
+                    output_tail="2 failed, 10 passed",
+                ),
+            ),
+        )
+    )
+    entry = LoopEntry(
+        worktree_factory=lambda cfg: worktree.create_on_branch(
+            cfg.repo, head, cfg.description, parent=cfg.worktree_parent
+        ),
+        base_override=base,
+        intake_reviews=intake,
+        intake_check_set=intake_check_set,
+    )
+
+    result = develop_mod.develop(config, entry=entry)
+
+    assert result.status == "approved"
+    # base is the PR merge-base (the override), NOT the worktree HEAD
+    assert result.base_sha == base
+    # round-1 coder got the CONVERGE cold-start prompt (not coder_init), resume=False
+    assert state["coder_calls"][0] == (1, False)
+    prompt0 = " ".join(state["coder_prompts"][0].split())  # robust to line-wrapping
+    assert "did not author" in prompt0  # converge cold-start, not coder_init/coder_fix
+    # the load-bearing seed data is actually wired in, not just the template:
+    assert "leaks a file handle" in prompt0  # intake finding (render_panel_findings)
+    assert "the PR commit" in prompt0  # PR commit log (git.log_between base..head)
+    assert "2 failed" in prompt0  # intake gate summary (render_check_summary)
+    # the worktree is a committable real branch at the PR head, not detached.
+    # check=True so a failed rev-parse raises instead of yielding "" (which would
+    # still satisfy `!= "HEAD"` and false-pass the detachment check).
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=result.worktree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert branch and branch != "HEAD"
+
+
+def test_develop_without_entry_uses_fresh_worktree_off_base(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: entry=None is byte-for-byte the story-develop path —
+    round-1 coder gets coder_init (implement the task), not the converge prompt."""
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+    result = develop_mod.develop(config)
+    assert result.status == "approved"
+    assert "did not author" not in state["coder_prompts"][0]
+    assert "Add a greeting file" in state["coder_prompts"][0]  # coder_init description

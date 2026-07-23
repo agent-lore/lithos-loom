@@ -41,10 +41,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 4 | 20 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
-| `lithos_loom.plugins.story_develop.review_only` | S | 0 | 1 |
+| `lithos_loom.plugins.story_develop.review_only` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | M | 3 | 11 |
+| `lithos_loom.plugins.story_develop.rounds` | M | 4 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
@@ -246,6 +246,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_profile` — Resolve the selected Review Profile (ADR §2).
 
 ### `lithos_loom.plugins.story_develop.review_only`
+- class `IntakeResult` — The raw pieces of one review pass at a change head.
 - def `review_change` — Run the panel + deterministic gate against an existing *change*.
 
 ### `lithos_loom.plugins.story_develop.review_report`
@@ -262,6 +263,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4).
 - class `CycleExit` — A terminal outcome of the develop loop.
 - class `RoundContext` — The explicit successor of ``develop()``'s locals bag (ARCH-1.S6).
+- class `LoopEntry` — Overrides that let ``develop()`` enter its loop on an EXISTING PR branch instead of cutting a fresh worktree off a base (converge / ADR 0003 §9 "Shape 1").
 - def `coder_phase` — Build the coder prompt, run its (limit-paused) turn, salvage a missing handoff once (#114), and gate the round on a clean turn + a written handoff.
 - def `dispute_phase` — T7: record the coder's dispute marks from its handoff (round >= 2).
 - def `commit_round` — Commit a round's work as one commit, excluding the handoff dir.
