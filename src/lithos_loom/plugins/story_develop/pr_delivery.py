@@ -290,13 +290,16 @@ def push_to_pr_ref(
     )
     if proc.returncode != 0:
         # The ls-remote check above is TOCTOU: the remote can advance between it
-        # and this push. Git rejects the now-non-fast-forward push — classify that
-        # as a merge race (same outcome as the pre-check) rather than a generic
-        # failure, so a concurrent push is never force-resolved and the caller
-        # gets its documented ``merge_race`` contract. Other failures
-        # (auth / network) stay RuntimeError.
+        # and this push. Git rejects the now-non-fast-forward push — classify ONLY
+        # that as a merge race (same outcome as the pre-check), so a concurrent
+        # push is never force-resolved and the caller gets its ``merge_race``
+        # contract. Match the specific non-fast-forward / stale-tip reason codes,
+        # NOT a bare "rejected": a hook / branch-protection / permission rejection
+        # also says "rejected" but re-running converge won't help — those (and
+        # auth / network failures) stay a generic RuntimeError.
         stderr = proc.stderr.strip()
-        if "rejected" in stderr.lower() or "fast-forward" in stderr.lower():
+        low = stderr.lower()
+        if "fast-forward" in low or "fetch first" in low:
             raise MergeRaceDetected(
                 f"push to {remote_ref!r} rejected as non-fast-forward "
                 f"(the head advanced remotely mid-push); re-run converge: {stderr}"

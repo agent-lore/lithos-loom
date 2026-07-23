@@ -1195,3 +1195,26 @@ def test_push_to_pr_ref_maps_non_fast_forward_push_to_merge_race(
             Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
         )
     assert not any("--force" in c or "-f" in c for c in run.calls)
+
+
+def test_push_to_pr_ref_hook_rejection_is_not_a_merge_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a branch-protection / pre-receive hook rejection also says "rejected" but
+    # is NOT a non-fast-forward race — re-running converge won't help, so it must
+    # stay a generic RuntimeError, not a merge_race (Copilot #272).
+    run = _fake_run(
+        "e" * 40 + "\trefs/heads/feature\n",
+        push_rc=1,
+        push_stderr=(
+            " ! [remote rejected] converge-abc -> feature "
+            "(protected branch hook declined)\n"
+            "error: failed to push some refs to 'origin'"
+        ),
+    )
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(RuntimeError) as excinfo:
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    assert not isinstance(excinfo.value, pr_delivery.MergeRaceDetected)

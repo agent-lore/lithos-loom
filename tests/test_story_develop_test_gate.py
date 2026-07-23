@@ -222,6 +222,30 @@ def test_export_tree_reexport_into_same_dest_drops_deleted_files(
     assert not (dest / "gone.py").exists()  # the deleted file must NOT survive
 
 
+def test_export_tree_replaces_a_stray_file_at_dest(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # a stray FILE where the tree dir belongs must not crash the export
+    # (rmtree would raise NotADirectoryError) — it is unlinked and replaced
+    # (Copilot #272).
+    (tmp_git_repo / "src.py").write_text("hi\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add"], cwd=tmp_git_repo, check=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    dest = tmp_path / "tree"
+    dest.write_text("i am a file, not a dir\n")  # stray file at the dest path
+    export_tree(tmp_git_repo, sha, dest)
+    assert dest.is_dir()
+    assert (dest / "src.py").read_text() == "hi\n"
+
+
 # --- #132: full_output retained for parsing, output_tail still capped ----------
 
 

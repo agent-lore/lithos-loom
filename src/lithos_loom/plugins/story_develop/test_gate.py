@@ -68,7 +68,12 @@ def export_tree(worktree: Path, sha: str, dest: Path) -> None:
     mixture of two trees. Emptying makes the export match its "exactly the
     committed content" contract regardless of what was there before.
     """
-    if dest.exists():
+    # Recreate the destination empty. A real dir is removed wholesale; a stray
+    # file / symlink where the tree dir belongs is unlinked (rmtree would raise
+    # NotADirectoryError on it).
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.is_dir():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     archive = subprocess.run(

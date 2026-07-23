@@ -1,12 +1,13 @@
 """Tests for the converge orchestrator (`converge_pr`) — converge PR 3/3.
 
 `converge_pr` wires three already-tested pieces together: the review intake
-(`review_only._review_head` + `_build_report`), the parameterized develop loop
-(`develop(entry=LoopEntry(...))`, PR 2), and the guarded fast-forward push
+(`review_only.review_head` + `IntakeResult.blocking`), the parameterized develop
+loop (`develop(entry=LoopEntry(...))`, PR 2), and the guarded fast-forward push
 (`push_to_pr_ref`, PR 1). These tests stub all three at the converge boundary
 and assert the WIRING: the already-clean short-circuit (no coder, no push), the
-LoopEntry seeded from the intake, the push-only-on-approval epilogue, the
-fork/merge-race refusals, and — the PR-3 reporting gotcha — that the fixer's
+incomplete-intake failure, the LoopEntry seeded from the intake, the intake
+run_id isolation, the whole-command budget, the push-only-on-approval epilogue,
+the fork/merge-race refusals, and — the PR-3 reporting gotcha — that the fixer's
 commit count is measured against the PR head, not the merge-base.
 """
 

@@ -22,6 +22,12 @@ from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
 
 runner = CliRunner()
 
+# Force a wide console for invocations that assert on Typer's Rich error panel.
+# With COLUMNS unset (as in CI) Rich renders at its detected fallback width,
+# which folds a long flag like `--max-cost` across lines and breaks a raw
+# substring match. Pinning the width keeps the panel on one line everywhere.
+_WIDE = {"COLUMNS": "200"}
+
 
 @pytest.fixture
 def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
@@ -82,7 +88,9 @@ def test_pr_body_is_default_ac(stubs: dict) -> None:
 def test_non_pr_spec_is_rejected(stubs: dict) -> None:
     # a range / branch has no pushable head branch — converge pushes to a PR.
     stubs["head_branch"] = ""
-    result = runner.invoke(develop_app, ["converge", "abc..def", "--ac", "x"])
+    result = runner.invoke(
+        develop_app, ["converge", "abc..def", "--ac", "x"], env=_WIDE
+    )
     assert result.exit_code != 0
     assert "requires a pr" in result.output.lower()
     assert "config" not in stubs  # never entered the orchestrator
@@ -106,7 +114,7 @@ def test_coder_and_max_rounds_override_config(stubs: dict) -> None:
 
 def test_unsupported_coder_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
-        develop_app, ["converge", "#142", "--ac", "x", "--coder", "gpt5"]
+        develop_app, ["converge", "#142", "--ac", "x", "--coder", "gpt5"], env=_WIDE
     )
     assert result.exit_code != 0
     assert "unsupported coder" in result.output.lower()
@@ -116,16 +124,16 @@ def test_unsupported_coder_fails_closed(stubs: dict) -> None:
 def test_non_positive_max_cost_fails_closed(stubs: dict) -> None:
     # validated before any container work — a nonsensical ceiling must fail fast
     result = runner.invoke(
-        develop_app, ["converge", "#142", "--ac", "x", "--max-cost", "0"]
+        develop_app, ["converge", "#142", "--ac", "x", "--max-cost", "0"], env=_WIDE
     )
     assert result.exit_code != 0
-    assert "max-cost" in result.output.lower()
+    assert "max-cost" in result.output.lower()  # names the offending flag
     assert "config" not in stubs  # never entered the orchestrator
 
 
 def test_max_rounds_below_one_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
-        develop_app, ["converge", "#142", "--ac", "x", "--max-rounds", "0"]
+        develop_app, ["converge", "#142", "--ac", "x", "--max-rounds", "0"], env=_WIDE
     )
     assert result.exit_code != 0
     assert "max-rounds" in result.output.lower()
@@ -134,7 +142,9 @@ def test_max_rounds_below_one_fails_closed(stubs: dict) -> None:
 
 def test_unknown_profile_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
-        develop_app, ["converge", "#142", "--ac", "x", "--profile", "thorogh"]
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--profile", "thorogh"],
+        env=_WIDE,
     )
     assert result.exit_code != 0
     assert "unknown profile" in result.output.lower()
