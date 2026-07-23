@@ -1982,8 +1982,15 @@ def test_converge_entry_seeds_round_one_and_reuses_loop(
     coder gets the cold-start CONVERGE prompt seeded from the intake review, the
     worktree is a committable branch at the PR head, base is the PR merge-base,
     and the round loop is reused verbatim (approves on the fixed head)."""
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
     from lithos_loom.plugins.story_develop.develop import LoopEntry
+    from lithos_loom.plugins.story_develop.handoff import Finding
     from lithos_loom.plugins.story_develop.panel import ReviewOutcome
+    from lithos_loom.plugins.story_develop.test_gate import GateResult
     from lithos_loom.runner import git, worktree
 
     # a PR head on top of the base commit
@@ -2002,22 +2009,48 @@ def test_converge_entry_seeds_round_one_and_reuses_loop(
 
     state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
 
+    # A concrete intake review (one finding) + a failing intake gate, so the test
+    # proves the seed DATA is rendered — not merely that the template is selected.
     intake = [
         ReviewOutcome(
             reviewer="correctness",
             status="FINDINGS",
             passed=False,
             max_severity="major",
-            findings=[],
+            findings=[
+                Finding(
+                    finding_id="f-001",
+                    severity="major",
+                    status="open",
+                    files=["helper.py:12"],
+                    rationale="the helper leaks a file handle on error",
+                )
+            ],
         )
     ]
+    intake_check_set = CheckSetResult(
+        results=(
+            CheckResult(
+                check=Check(
+                    name="lint", command="ruff check", state="required", stage="fast"
+                ),
+                execution_outcome="ran",
+                gate=GateResult(
+                    command="ruff check",
+                    exit_code=1,
+                    passed=False,
+                    output_tail="2 failed, 10 passed",
+                ),
+            ),
+        )
+    )
     entry = LoopEntry(
         worktree_factory=lambda cfg: worktree.create_on_branch(
             cfg.repo, head, cfg.description, parent=cfg.worktree_parent
         ),
         base_override=base,
         intake_reviews=intake,
-        intake_check_set=None,
+        intake_check_set=intake_check_set,
     )
 
     result = develop_mod.develop(config, entry=entry)
@@ -2029,6 +2062,10 @@ def test_converge_entry_seeds_round_one_and_reuses_loop(
     assert state["coder_calls"][0] == (1, False)
     prompt0 = " ".join(state["coder_prompts"][0].split())  # robust to line-wrapping
     assert "did not author" in prompt0  # converge cold-start, not coder_init/coder_fix
+    # the load-bearing seed data is actually wired in, not just the template:
+    assert "leaks a file handle" in prompt0  # intake finding (render_panel_findings)
+    assert "the PR commit" in prompt0  # PR commit log (git.log_between base..head)
+    assert "2 failed" in prompt0  # intake gate summary (render_check_summary)
     # the worktree is a committable real branch at the PR head, not detached
     branch = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
