@@ -20,8 +20,9 @@ adding no new loop of its own (ADR 0004 §1 — the fix loop is single-sourced):
    (converge PR 2). The loop's own ``approved`` / ``disputed`` / ``stalled`` /
    ``cost_exceeded`` / ``max_rounds`` termination is reused verbatim.
 3. **Push epilogue** — on approval, :func:`push_to_pr_ref` fast-forwards the
-   fixed branch onto the PR head ref (never ``--force``); a fork PR is refused
-   *pre-loop* and a mid-run remote advance surfaces as ``merge_race``.
+   reviewed HEAD onto the PR head ref under an atomic lease (never a blind
+   ``--force`` / history rewrite); a fork PR is refused *pre-loop* and a mid-run
+   remote advance surfaces as ``merge_race``.
 
 v1 is local-panel-only: it converges against loom's in-container codex/claude
 panel + check-floor, not the GitHub review bots (a deferred slice).
@@ -145,6 +146,15 @@ def converge_pr(
         raise ValueError(f"max_cost_usd must be > 0, got {config.max_cost_usd}")
     if config.max_rounds < 1:
         raise ValueError(f"max_rounds must be >= 1, got {config.max_rounds}")
+    # Same fail-fast rationale for the change itself: converge delivers to a PR
+    # head branch. A range/branch-resolved change (no pushable branch) would
+    # spend the whole intake + loop and then die in the push epilogue with a
+    # misleading fork error from an ls-remote on an empty ref.
+    if not change.head_branch:
+        raise ValueError(
+            f"change {change.head_ref!r} has no pushable head branch "
+            "(not a PR?); converge requires a PR"
+        )
 
     # Fork guard, pre-loop: loom pushes fixes under origin credentials, so a PR
     # whose head lives on a fork can never be pushed back. Refuse before spending

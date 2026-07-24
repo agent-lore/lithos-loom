@@ -1183,6 +1183,42 @@ def test_push_to_pr_ref_raises_fork_when_ref_absent(
     assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed
 
 
+def test_push_to_pr_ref_reads_exact_ref_among_suffix_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # git ls-remote treats a bare name as a tail pattern: `feature` also matches
+    # refs/heads/a/feature, and output is ref-name-sorted so the collision comes
+    # FIRST. The pre-fix code took the first line's sha → a permanent false
+    # merge_race on a valid PR. The lookup must key on the exact fully-qualified
+    # ref name, not line order.
+    run = _fake_run(
+        "z" * 40 + "\trefs/heads/a/feature\n" + "e" * 40 + "\trefs/heads/feature\n"
+    )
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    pushed = pr_delivery.push_to_pr_ref(
+        Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+    )
+    assert pushed == "l" * 40
+    # and the preflight queries the fully-qualified ref, same as the lease/push
+    ls = next(c for c in run.calls if c[:2] == ["git", "ls-remote"])
+    assert ls[-1] == "refs/heads/feature"
+
+
+def test_push_to_pr_ref_fork_when_only_a_suffix_collision_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the PR ref itself is absent; only a suffix-colliding branch matched the
+    # pattern. That is a fork (ref not on origin), NOT a merge race against the
+    # wrong branch's sha.
+    run = _fake_run("z" * 40 + "\trefs/heads/a/feature\n")
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(pr_delivery.ForkPushUnsupported):
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed
+
+
 def test_push_to_pr_ref_raises_merge_race_when_remote_advanced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1363,6 +1399,23 @@ def test_push_to_pr_ref_pushes_reviewed_head_real_git(tmp_path: Path) -> None:
     )
     assert pushed == fixed  # returns the EXACT pushed sha (the reviewed HEAD)
     assert _remote_sha(bare, "feature") == fixed  # remote fast-forwarded to HEAD
+
+
+def test_push_to_pr_ref_ignores_suffix_colliding_remote_branch_real_git(
+    tmp_path: Path,
+) -> None:
+    # ls-remote pattern semantics: `feature` also matches refs/heads/a/feature,
+    # which SORTS FIRST. The pre-fix code read the first returned sha → a false,
+    # unresolvable merge_race for a valid PR whenever such a branch exists. Only
+    # refs/heads/feature may govern the push; a/feature must be left untouched.
+    wt, bare, g, h, fixed = _seed_pr_repo(tmp_path)
+    _git(wt, "push", "origin", f"{g}:refs/heads/a/feature")  # collider at G ≠ H
+    pushed = pr_delivery.push_to_pr_ref(
+        wt, "converge-x", "feature", expected_remote_sha=h
+    )
+    assert pushed == fixed
+    assert _remote_sha(bare, "feature") == fixed  # the real PR branch advanced
+    assert _remote_sha(bare, "a/feature") == g  # the collider is untouched
 
 
 def test_push_to_pr_ref_refuses_non_head_branch_real_git(tmp_path: Path) -> None:

@@ -344,6 +344,18 @@ def test_converge_pr_rejects_invalid_numeric_config(
         converge_pr(dataclasses.replace(_config(tmp_path), max_rounds=0), _change())
 
 
+def test_converge_pr_rejects_change_without_a_pushable_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same fail-fast boundary for the change itself: a range/branch-resolved
+    change (no head branch to push to) must be refused BEFORE spending on intake,
+    not die post-loop with a misleading fork error on an empty ref."""
+    stubs = _install(monkeypatch, blocking=True)
+    with pytest.raises(ValueError, match="pushable head branch"):
+        converge_pr(_config(tmp_path), _change(head_branch=""))
+    assert "intake_config" not in stubs  # refused before any review spend
+
+
 def test_max_cost_is_soft_an_approved_result_over_ceiling_is_delivered(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

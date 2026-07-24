@@ -271,24 +271,33 @@ def push_to_pr_ref(
 
     A fast ``ls-remote`` pre-check still classifies a fork (ref absent on
     ``origin`` → :class:`ForkPushUnsupported`) and an already-advanced head before
-    spending on the push. Returns the exact ``HEAD`` sha pushed; raises
+    spending on the push. The pre-check queries the same fully-qualified
+    ``refs/heads/<remote_ref>`` the lease and push name, and matches the returned
+    ref name exactly — ``ls-remote`` patterns tail-match, so a bare branch name
+    would also match an unrelated ``a/<remote_ref>``. Returns the exact ``HEAD``
+    sha pushed; raises
     :class:`RuntimeError` on a caller/contract error or any other (auth / hook /
     network) push failure.
     """
-    ls = _run(
-        ["git", "ls-remote", "--heads", "origin", remote_ref], cwd=wt, timeout=120
-    )
+    # The lease, the push, and the preflight must all name the SAME exact ref.
+    # ls-remote treats its argument as a tail *pattern* — `feature` also matches
+    # refs/heads/a/feature (which sorts first) — so query the fully-qualified ref
+    # and key the lookup on the exact ref name, never on line order.
+    dst = f"refs/heads/{remote_ref}"
+    ls = _run(["git", "ls-remote", "--heads", "origin", dst], cwd=wt, timeout=120)
     if ls.returncode != 0:
-        raise RuntimeError(
-            f"git ls-remote origin {remote_ref} failed: {ls.stderr.strip()}"
-        )
-    line = ls.stdout.strip()
-    if not line:
+        raise RuntimeError(f"git ls-remote origin {dst} failed: {ls.stderr.strip()}")
+    remote_sha = ""
+    for line in ls.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == dst:
+            remote_sha = parts[0]
+            break
+    if not remote_sha:
         raise ForkPushUnsupported(
             f"PR head ref {remote_ref!r} is not on origin (fork PR?); "
             "cannot push under origin credentials"
         )
-    remote_sha = line.split()[0]
     if remote_sha != expected_remote_sha:
         raise MergeRaceDetected(
             f"PR head ref {remote_ref!r} advanced remotely "
@@ -336,7 +345,6 @@ def push_to_pr_ref(
     # closing the ls-remote→push TOCTOU window; we push the exact reviewed sha to
     # the fully-qualified branch ref. A deleted / advanced / rewound ref is
     # rejected ("stale info") rather than silently recreated or overwritten.
-    dst = f"refs/heads/{remote_ref}"
     proc = _run(
         [
             "git",
