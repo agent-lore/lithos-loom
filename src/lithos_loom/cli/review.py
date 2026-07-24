@@ -41,7 +41,7 @@ def review_command(
         "-p",
         help="Review profile (selects panel + check-set).",
     ),
-    reviewer: list[str] = typer.Option(
+    reviewer: list[str] | None = typer.Option(
         None, "--reviewer", help="Override the panel personas (repeatable)."
     ),
     acceptance: str | None = typer.Option(

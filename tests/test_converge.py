@@ -342,6 +342,14 @@ def test_converge_pr_rejects_invalid_numeric_config(
         converge_pr(dataclasses.replace(_config(tmp_path), max_cost_usd=0.0), _change())
     with pytest.raises(ValueError, match="max_rounds"):
         converge_pr(dataclasses.replace(_config(tmp_path), max_rounds=0), _change())
+    # NaN compares False against everything (`nan <= 0` AND every later budget
+    # comparison), so it would silently behave as an unlimited ceiling rendered
+    # as $nan; inf is equally nonsensical. Both must fail fast (Copilot #272).
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="max_cost_usd"):
+            converge_pr(
+                dataclasses.replace(_config(tmp_path), max_cost_usd=bad), _change()
+            )
 
 
 def test_converge_pr_rejects_change_without_a_pushable_branch(

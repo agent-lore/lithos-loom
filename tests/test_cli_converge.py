@@ -129,6 +129,18 @@ def test_non_positive_max_cost_fails_closed(stubs: dict) -> None:
     assert "config" not in stubs  # never entered the orchestrator
 
 
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+def test_non_finite_max_cost_fails_closed(stubs: dict, bad: str) -> None:
+    # NaN compares False against everything, so a plain `<= 0` check would let
+    # `--max-cost nan` through as an effectively-unlimited budget rendered as
+    # $nan (Copilot #272). Non-finite ceilings are nonsense — fail closed.
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--max-cost", bad]
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_max_rounds_below_one_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app, ["converge", "#142", "--ac", "x", "--max-rounds", "0"]

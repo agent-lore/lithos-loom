@@ -17,6 +17,7 @@ reused verbatim (no second implementation).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import typer
@@ -53,7 +54,7 @@ def converge_command(
         "-p",
         help="Review profile (selects panel + check-set).",
     ),
-    reviewer: list[str] = typer.Option(
+    reviewer: list[str] | None = typer.Option(
         None, "--reviewer", help="Override the panel personas (repeatable)."
     ),
     acceptance: str | None = typer.Option(
@@ -101,8 +102,10 @@ def converge_command(
         )
     # Validate the numeric bounds before any container work — a nonsensical
     # ceiling / round cap must fail fast, not after spending on the intake review.
-    if max_cost is not None and max_cost <= 0:
-        raise typer.BadParameter("--max-cost must be greater than 0")
+    # NaN compares False against everything, so `<= 0` alone would let
+    # `--max-cost nan` through as an effectively-unlimited budget.
+    if max_cost is not None and (not math.isfinite(max_cost) or max_cost <= 0):
+        raise typer.BadParameter("--max-cost must be a finite value greater than 0")
     if max_rounds is not None and max_rounds < 1:
         raise typer.BadParameter("--max-rounds must be at least 1")
 

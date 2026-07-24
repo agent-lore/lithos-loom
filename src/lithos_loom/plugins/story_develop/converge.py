@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -142,8 +143,15 @@ def converge_pr(
     # CLI: a future daemon caller that passes max_cost_usd <= 0 or max_rounds < 1
     # must fail fast here rather than spend on intake and surface the error deep in
     # develop() (or, worse, run an unbounded loop).
-    if config.max_cost_usd is not None and config.max_cost_usd <= 0:
-        raise ValueError(f"max_cost_usd must be > 0, got {config.max_cost_usd}")
+    # NaN compares False against everything — `<= 0` here AND every later budget
+    # comparison — so a NaN ceiling would silently behave as unlimited; reject
+    # non-finite values outright.
+    if config.max_cost_usd is not None and (
+        not math.isfinite(config.max_cost_usd) or config.max_cost_usd <= 0
+    ):
+        raise ValueError(
+            f"max_cost_usd must be finite and > 0, got {config.max_cost_usd}"
+        )
     if config.max_rounds < 1:
         raise ValueError(f"max_rounds must be >= 1, got {config.max_rounds}")
     # Same fail-fast rationale for the change itself: converge delivers to a PR

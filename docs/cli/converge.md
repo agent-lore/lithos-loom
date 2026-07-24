@@ -57,7 +57,7 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 | `--base REF` | Override the diff base (default: the PR merge-base). |
 | `--coder claude\|codex` | Coder engine for the fix turns (default: the config's coder). |
 | `--max-rounds N` | Cap the implement→review→fix rounds (validated `≥ 1`). |
-| `--max-cost USD` | **Soft** phase-boundary ceiling on whole-command spend (intake + loop): converge stops before the next phase once recorded spend reaches it (validated `> 0`). Not a hard cap — an in-flight turn may overshoot and a same-round approval is delivered even if it crossed the ceiling. |
+| `--max-cost USD` | **Soft** phase-boundary ceiling on whole-command spend (intake + loop): converge stops before the next phase once recorded spend reaches it (validated finite and `> 0`). Not a hard cap — an in-flight turn may overshoot and a same-round approval is delivered even if it crossed the ceiling. |
 | `--no-push` | Converge locally but do not push to the PR branch. |
 | `--repo PATH` | Repository to converge in (default: current directory). |
 | `--json PATH` | Write the structured JSON summary. |
@@ -65,7 +65,7 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 
 ## Output
 
-- **Markdown** to stdout: the status line, the message, the round + fixer-commit count, and (on a push) the pushed sha → PR branch.
+- **Plain-text summary** to stdout: the status line, the message, the round + fixer-commit count, and (on a push) the pushed sha → PR branch.
 - **JSON** (`--json`): a stable object — `status`, `head_ref`, `head_branch`, `base_sha`, `head_sha`, `rounds`, `develop_status`, `fixer_commits` (only the coder's commits, PR head → HEAD — **not** the PR's original commits), `pushed`, `pushed_sha`, `intake_cost_usd`, `total_cost_usd`, `message`.
 - **Statuses / exit codes:** `already_clean` (intake didn't block; reports the *pre-intake snapshot*) and `converged` → **0**; `not_converged` (loop stopped unapproved), `merge_race` (PR head advanced remotely), and `failed` (incomplete intake panel, or intake spend exhausted `--max-cost`) → **1**; `fork_unsupported` → **2**.
 
