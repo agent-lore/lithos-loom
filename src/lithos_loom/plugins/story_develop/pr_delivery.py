@@ -335,11 +335,19 @@ def push_to_pr_ref(
         cwd=wt,
         timeout=120,
     )
-    if anc.returncode != 0:
+    # --is-ancestor exits 1 for "not an ancestor" and 128 for a fatal error (bad
+    # object, repo corruption) — only rc 1 is the race; "re-run converge" would
+    # be misleading guidance for a broken repo.
+    if anc.returncode == 1:
         raise MergeRaceDetected(
             f"reviewed HEAD {head_sha[:10]} does not descend from the expected "
             f"head {expected_remote_sha[:10]} (it changed under converge); "
             "re-run converge"
+        )
+    if anc.returncode != 0:
+        raise RuntimeError(
+            f"git merge-base --is-ancestor failed (rc {anc.returncode}): "
+            f"{anc.stderr.strip()}"
         )
     # Atomic compare-and-swap: the lease pins origin's ref to expected_remote_sha,
     # closing the ls-remote→push TOCTOU window; we push the exact reviewed sha to

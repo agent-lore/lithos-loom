@@ -1336,6 +1336,23 @@ def test_push_to_pr_ref_non_descendant_local_is_rejected_without_pushing(
     assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed
 
 
+def test_push_to_pr_ref_ancestry_check_fatal_error_is_not_a_merge_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # merge-base --is-ancestor exits 1 for "not an ancestor" but 128 for a fatal
+    # error (bad object name, repo corruption). Only rc 1 is the race; a fatal
+    # error must surface as a generic RuntimeError — "re-run converge" would be
+    # misleading guidance for a broken repo (Copilot #272).
+    run = _fake_run("e" * 40 + "\trefs/heads/feature\n", ancestor_rc=128)
+    monkeypatch.setattr(pr_delivery, "_run", run)
+    with pytest.raises(RuntimeError) as excinfo:
+        pr_delivery.push_to_pr_ref(
+            Path("/wt"), "converge-abc", "feature", expected_remote_sha="e" * 40
+        )
+    assert not isinstance(excinfo.value, pr_delivery.MergeRaceDetected)
+    assert not any(c[:2] == ["git", "push"] for c in run.calls)  # never pushed
+
+
 # --- push_to_pr_ref against a REAL local bare remote (finding: checked vs -----
 # --- pushed object). Mocked _run can't exercise the actual git push semantics. -
 
