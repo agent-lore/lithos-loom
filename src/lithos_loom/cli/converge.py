@@ -75,8 +75,9 @@ def converge_command(
     max_cost: float | None = typer.Option(
         None,
         "--max-cost",
-        help="Stop once total agent spend (USD) — intake review + fix loop — "
-        "exceeds this.",
+        help="Soft phase-boundary ceiling on total agent spend (USD) — intake "
+        "review + fix loop. In-flight turns may overshoot, and a same-round "
+        "approval is still delivered.",
     ),
     no_push: bool = typer.Option(
         False, "--no-push", help="Converge locally but do not push to the PR branch."

@@ -137,7 +137,9 @@ def converge_pr(
     See the module docstring for the three-stage flow. Returns a
     :class:`ConvergeResult`; never raises for the expected terminal states
     (fork / merge-race / unapproved) — they are reported via ``status``. Raises
-    :class:`ValueError` only for an invalid numeric config (a caller error).
+    :class:`ValueError` only for a caller error: an invalid numeric config
+    (non-finite / non-positive ``max_cost_usd``, ``max_rounds < 1``) or a
+    *change* with no pushable head branch (not a PR).
     """
     # Validate the numeric bounds at this reusable-API boundary, not only in the
     # CLI: a future daemon caller that passes max_cost_usd <= 0 or max_rounds < 1
