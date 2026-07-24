@@ -41,7 +41,7 @@ def review_command(
         "-p",
         help="Review profile (selects panel + check-set).",
     ),
-    reviewer: list[str] = typer.Option(
+    reviewer: list[str] | None = typer.Option(
         None, "--reviewer", help="Override the panel personas (repeatable)."
     ),
     acceptance: str | None = typer.Option(
@@ -78,7 +78,7 @@ def review_command(
 
     resolved = resolve_change(repo, change, base_branch="main", base_override=base)
 
-    criteria = _acceptance_criteria(acceptance, acceptance_file, resolved.body)
+    criteria = resolve_acceptance_criteria(acceptance, acceptance_file, resolved.body)
     if not criteria:
         typer.secho(
             "error: no acceptance criteria for the review — pass --ac / --ac-file "
@@ -88,7 +88,7 @@ def review_command(
         )
         raise typer.Exit(2)
 
-    reviewers = _reviewers(profile, reviewer)
+    reviewers = resolve_reviewers(profile, reviewer)
 
     develop_config = DevelopConfig(
         repo=repo,
@@ -110,7 +110,7 @@ def review_command(
     raise typer.Exit(1 if report.blocking else 0)
 
 
-def _acceptance_criteria(
+def resolve_acceptance_criteria(
     acceptance: str | None, acceptance_file: Path | None, pr_body: str
 ) -> str:
     """Acceptance criteria precedence: ``--ac-file`` > ``--ac`` > PR body."""
@@ -121,7 +121,9 @@ def _acceptance_criteria(
     return pr_body.strip()
 
 
-def _reviewers(profile: str, reviewer: list[str] | None) -> tuple[ReviewerSpec, ...]:
+def resolve_reviewers(
+    profile: str, reviewer: list[str] | None
+) -> tuple[ReviewerSpec, ...]:
     """Explicit ``--reviewer`` names win; otherwise the profile's persona panel.
 
     A ``--reviewer NAME`` resolves to its **canonical persona** (#137 — engine,

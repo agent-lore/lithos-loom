@@ -179,6 +179,73 @@ def test_export_tree_bad_sha_raises(tmp_git_repo: Path, tmp_path: Path) -> None:
         export_tree(tmp_git_repo, "0" * 40, tmp_path / "tree")
 
 
+def test_export_tree_reexport_into_same_dest_drops_deleted_files(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # Two commits into the SAME dest: the second deletes a file the first added.
+    # tar -x overlays but never deletes, so without emptying the dest the stale
+    # file would survive and the gate would test a mixture of two trees (finding
+    # #1). export_tree must recreate the dest empty so it matches its "exactly the
+    # committed content" contract.
+    (tmp_git_repo / "keep.py").write_text("keep\n")
+    (tmp_git_repo / "gone.py").write_text("delete me\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "add both"], cwd=tmp_git_repo, check=True
+    )
+    first = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    (tmp_git_repo / "gone.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "delete gone.py"], cwd=tmp_git_repo, check=True
+    )
+    second = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    dest = tmp_path / "tree"
+    export_tree(tmp_git_repo, first, dest)  # first export leaves gone.py in dest
+    assert (dest / "gone.py").exists()
+    export_tree(tmp_git_repo, second, dest)  # re-export the fixed tree
+    assert (dest / "keep.py").read_text() == "keep\n"
+    assert not (dest / "gone.py").exists()  # the deleted file must NOT survive
+
+
+def test_export_tree_replaces_a_stray_file_at_dest(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # a stray FILE where the tree dir belongs must not crash the export
+    # (rmtree would raise NotADirectoryError) — it is unlinked and replaced
+    # (Copilot #272).
+    (tmp_git_repo / "src.py").write_text("hi\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add"], cwd=tmp_git_repo, check=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    dest = tmp_path / "tree"
+    dest.write_text("i am a file, not a dir\n")  # stray file at the dest path
+    export_tree(tmp_git_repo, sha, dest)
+    assert dest.is_dir()
+    assert (dest / "src.py").read_text() == "hi\n"
+
+
 # --- #132: full_output retained for parsing, output_tail still capped ----------
 
 

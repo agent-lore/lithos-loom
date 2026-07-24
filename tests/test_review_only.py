@@ -196,13 +196,13 @@ def test_handoff_mountpoint_created_before_containers_start(
     assert harness["handoff_at_start"] is True
 
 
-# --- _review_head extraction (converge intake reuse) --------------------------
+# --- review_head extraction (converge intake reuse) ---------------------------
 
 
 def test_review_head_returns_raw_panel_and_check_set(
     harness: dict, tmp_path: Path
 ) -> None:
-    """The extracted _review_head returns the RAW panel + check-set (not the
+    """The extracted review_head returns the RAW panel + check-set (not the
     collapsed ReviewReport) — converge seeds its round-1 coder from
     panel.round_reviews and shows the intake gate in the fix prompt. review_change
     consolidates the same pieces, so its existing tests pin behaviour-preservation.
@@ -210,7 +210,7 @@ def test_review_head_returns_raw_panel_and_check_set(
     config = _config(tmp_path)
     harness["panel_script"]["correctness"] = {"status": "FINDINGS", "passed": False}
 
-    intake = review_only._review_head(config, _CHANGE)
+    intake = review_only.review_head(config, _CHANGE)
 
     assert intake.panel is not None
     assert {o.reviewer for o in intake.panel.round_reviews} == {
@@ -228,3 +228,35 @@ def test_review_head_returns_raw_panel_and_check_set(
         intake.gate_ledger,
     )
     assert report.blocking is True
+    # IntakeResult.blocking (converge's short-circuit) applies the SAME rule the
+    # report does — they can never diverge (both call intake_blocks).
+    assert intake.blocking is report.blocking
+
+
+def _panel(
+    *, interrupted: bool = False, invalid: str | None = None
+) -> PanelRoundResult:
+    return PanelRoundResult(
+        round_reviews=[
+            ReviewOutcome(
+                reviewer="correctness",
+                status="LGTM",
+                passed=True,
+                max_severity=None,
+                findings=[],
+            )
+        ],
+        cost=0.0,
+        interrupted=interrupted,
+        resume_after=None,
+        invalid_reviewer=invalid,
+    )
+
+
+def test_panel_incomplete_flags_absent_interrupted_and_invalid() -> None:
+    # converge maps an incomplete intake to `failed` (nothing to seed the loop);
+    # review-only folds it into a blocking report. Both read this one predicate.
+    assert review_only.panel_incomplete(None) is True  # never ran
+    assert review_only.panel_incomplete(_panel(interrupted=True)) is True
+    assert review_only.panel_incomplete(_panel(invalid="correctness")) is True
+    assert review_only.panel_incomplete(_panel()) is False  # complete, usable

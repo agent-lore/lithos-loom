@@ -64,6 +64,13 @@ from lithos_loom.cli.review import review_command  # noqa: E402
 
 develop_app.command("review")(review_command)
 
+# `develop converge` (converge / ADR 0003 §9 Shape 1): loop panel + gate + coder
+# fixes on an existing PR until review-green, then push. Like `review`, it is a
+# mutating action registered in the `develop` namespace; impl in `cli/converge.py`.
+from lithos_loom.cli.converge import converge_command  # noqa: E402
+
+develop_app.command("converge")(converge_command)
+
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
 # Active-agent label when docker is unavailable: we can't tell which (if any)
