@@ -110,6 +110,30 @@ def test_coder_and_max_rounds_override_config(stubs: dict) -> None:
     assert stubs["config"].max_rounds == 3
 
 
+def test_test_timeout_overrides_config(stubs: dict) -> None:
+    # A repo whose non-integration suite exceeds the 900s default can never
+    # converge without this escape hatch (issue #275). Thread it into the config.
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--test-timeout", "3600"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].test_timeout == 3600
+
+
+def test_test_timeout_defaults_to_900(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].test_timeout == 900
+
+
+def test_non_positive_test_timeout_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--test-timeout", "0"]
+    )
+    assert result.exit_code == 2  # click UsageError (BadParameter)
+    assert "config" not in stubs  # never entered the orchestrator
+
+
 def test_unsupported_coder_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app, ["converge", "#142", "--ac", "x", "--coder", "gpt5"]

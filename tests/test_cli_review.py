@@ -120,6 +120,30 @@ def test_reviewer_override_and_profile(stubs: dict) -> None:
     assert specs[0].system_prompt  # the correctness focus brief is baked in
 
 
+def test_test_timeout_overrides_config(stubs: dict) -> None:
+    # A repo whose non-integration suite exceeds the 900s default needs this
+    # escape hatch for the gate floor to run to completion (issue #275).
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--test-timeout", "2400"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].test_timeout == 2400
+
+
+def test_test_timeout_defaults_to_900(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["review", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].test_timeout == 900
+
+
+def test_non_positive_test_timeout_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--test-timeout", "0"]
+    )
+    assert result.exit_code == 2  # click UsageError (BadParameter)
+    assert "config" not in stubs
+
+
 def test_unknown_profile_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app, ["review", "#142", "--ac", "x", "--profile", "thorogh"]

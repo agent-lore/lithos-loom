@@ -576,7 +576,7 @@ Live `docker exec` transcript streaming (watch the agent think token-by-token) i
 ```
 lithos-loom develop review <pr|range|branch>
     [-p|--profile standard] [--reviewer NAME ...]
-    [--ac TEXT | --ac-file PATH] [--base REF]
+    [--ac TEXT | --ac-file PATH] [--base REF] [--test-timeout N]
     [--repo PATH] [--json PATH] [--keep-worktree] [-c config.toml]
 ```
 
@@ -599,7 +599,7 @@ Needs `docker` + the agent CLIs (`claude`/`codex`) + `gh` on the host, like a de
 lithos-loom develop converge <pr>
     [-p|--profile standard] [--reviewer NAME ...]
     [--ac TEXT | --ac-file PATH] [--base REF] [--coder claude|codex]
-    [--max-rounds N] [--max-cost USD] [--no-push]
+    [--max-rounds N] [--max-cost USD] [--test-timeout N] [--no-push]
     [--repo PATH] [--json PATH] [-c config.toml]
 ```
 
@@ -610,6 +610,7 @@ Converges an **existing PR** to review-green: it runs the reviewer panel + deter
 - **v1 is local-panel-only.** It converges against loom's in-container codex/claude panel + check-floor, **not** the GitHub review bots (github-code-quality / Copilot) — that ingestion is a deferred slice.
 - **PR only.** converge pushes fixes to the PR head branch, so it requires a **PR** argument (`#142` / `142` / PR URL); a bare range / branch is rejected (use `develop review` for a read-only review of an arbitrary range). A **fork PR** is refused *pre-loop* (loom cannot push under origin credentials). Acceptance-criteria precedence and panel/profile selection are `develop review`'s, reused verbatim.
 - **Budget.** `--max-cost` is a **soft, phase-boundary ceiling on the whole command**, not a hard monetary cap. The intake review's spend is carried into the loop's remaining ceiling, so converge stops *before starting further phases* once recorded spend reaches the threshold: if the intake spend alone meets it, converge stops with `failed` — **regardless of whether the intake was clean or blocking** (a clean intake does not bypass the budget). It is **not** a guaranteed maximum: the intake is one atomic review pass that may already overshoot before it is checked; an in-flight coder/reviewer turn can cross the remaining ceiling atomically; a same-round **approval takes precedence** over a cost overrun (as in the develop loop), so an approved-and-pushed result's `total_cost_usd` can exceed `--max-cost`; and engines that don't report USD contribute `$0`. `--max-cost`/`--max-rounds` are validated (finite and `> 0` / `≥ 1`) both at the CLI and at the `converge_pr` API boundary (a `ValueError` for a bad caller config).
+- **Gate timeout.** `--test-timeout` (default 900s, validated `≥ 1`) caps one gate check container — the `test` check, the other check-set checks, and autoformat. A repo whose non-integration suite exceeds the default must raise it: otherwise the `test` check times out **every round** (including at intake), the gate floor never clears even with green reviewers, and converge **stalls** rather than converging. The same flag exists on `develop review` (there a timed-out floor makes the report blocking) and mirrors the daemon's `--test-timeout`.
 - **Push epilogue.** The fixed branch is pushed **only on approval**, and the guarantee is stronger than "never a non-fast-forward": push **only if the PR head is still exactly the resolved head**. An **atomic lease** (`git push --force-with-lease=<ref>:<expected_sha>`) plus a local **append-only ancestry check** enforce that, so a head **deleted**, **advanced**, or **force-rewound** between the pre-check and the push is refused (`merge_race`) — never silently recreated or overwritten — while a successful update is still a pure fast-forward (not a blind `--force`). `--no-push` converges locally and skips the push. A fork ref (absent on `origin`) is refused; auth / hook / branch-protection failures stay generic errors, not `merge_race`.
 - **Outcome / exit code.** `already_clean` (intake didn't block — no coder ran, nothing pushed; reports on the PR **snapshot resolved before intake**, not a live re-check) and `converged` exit **0**; `not_converged` (the loop stopped without approval — `max_rounds` / `disputed` / `stalled` / `cost_exceeded`), `merge_race`, and `failed` (the intake was **incomplete** — interrupted / invalid / absent panel — or its spend exhausted `--max-cost`) exit **1**; a fork refusal exits **2**. `--json PATH` writes the structured summary (`status`, `head_branch`, `rounds`, `fixer_commits`, `pushed`, `intake_cost_usd`, `total_cost_usd`, …). The reported `fixer_commits` counts only the coder's commits (PR head → HEAD), not the PR's original commits.
 - **v1 limit.** If round 1's coder disputes every finding and commits nothing, the deterministic gate still runs on the unchanged head — a round that adds no commit converges only if the head was already gate-green. This is rare (the coder is told to fix, not dispute-all) and acceptable for v1.

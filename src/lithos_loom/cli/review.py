@@ -18,7 +18,11 @@ from pathlib import Path
 import typer
 
 from lithos_loom.config import load_config
-from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
+from lithos_loom.plugins.story_develop.config import (
+    DEFAULT_TEST_TIMEOUT,
+    DevelopConfig,
+    ReviewerSpec,
+)
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
 from lithos_loom.plugins.story_develop.personas import canonical_personas
 from lithos_loom.plugins.story_develop.profiles import (
@@ -53,6 +57,13 @@ def review_command(
     base: str | None = typer.Option(
         None, "--base", help="Override the base ref (default: merge-base with main)."
     ),
+    test_timeout: int = typer.Option(
+        DEFAULT_TEST_TIMEOUT,
+        "--test-timeout",
+        help="Max seconds for one gate check run (the test check, other check-set "
+        "checks, and autoformat). Raise it for a repo whose suite exceeds the "
+        "default — otherwise the gate floor times out and blocks the report.",
+    ),
     repo: Path | None = typer.Option(
         None, "--repo", help="Repository to review in (default: current directory)."
     ),
@@ -73,6 +84,8 @@ def review_command(
         get_profile(profile)
     except UnknownProfileError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if test_timeout < 1:
+        raise typer.BadParameter("--test-timeout must be at least 1 second")
     repo = repo or Path.cwd()
     host = load_config(config)
 
@@ -98,6 +111,7 @@ def review_command(
         review_profile=profile,
         reviewers=reviewers,
         base_branch=base or "main",
+        test_timeout=test_timeout,
     )
 
     report = review_change(develop_config, resolved, keep_worktree=keep_worktree)
