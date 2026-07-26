@@ -25,7 +25,7 @@ import typer
 from lithos_loom.cli.review import resolve_acceptance_criteria, resolve_reviewers
 from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop import engines
-from lithos_loom.plugins.story_develop.config import DevelopConfig
+from lithos_loom.plugins.story_develop.config import DEFAULT_TEST_TIMEOUT, DevelopConfig
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
 from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_profile
 from lithos_loom.plugins.story_develop.review_resolve import resolve_change
@@ -79,6 +79,13 @@ def converge_command(
         "review + fix loop. In-flight turns may overshoot, and a same-round "
         "approval is still delivered.",
     ),
+    test_timeout: int = typer.Option(
+        DEFAULT_TEST_TIMEOUT,
+        "--test-timeout",
+        help="Max seconds for one gate check run (the test check, other check-set "
+        "checks, and autoformat). Raise it for a repo whose suite exceeds the "
+        "default — otherwise the gate floor can never clear and converge stalls.",
+    ),
     no_push: bool = typer.Option(
         False, "--no-push", help="Converge locally but do not push to the PR branch."
     ),
@@ -107,6 +114,8 @@ def converge_command(
     # `--max-cost nan` through as an effectively-unlimited budget.
     if max_cost is not None and (not math.isfinite(max_cost) or max_cost <= 0):
         raise typer.BadParameter("--max-cost must be a finite value greater than 0")
+    if test_timeout < 1:
+        raise typer.BadParameter("--test-timeout must be at least 1 second")
     if max_rounds is not None and max_rounds < 1:
         raise typer.BadParameter("--max-rounds must be at least 1")
 
@@ -151,6 +160,7 @@ def converge_command(
         reviewers=reviewers,
         base_branch=base or "main",
         max_cost_usd=max_cost,
+        test_timeout=test_timeout,
         **overrides,
     )
 

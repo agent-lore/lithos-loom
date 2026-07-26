@@ -53,6 +53,7 @@ The panel needs the change's *intent*. Precedence: `--ac-file` > `--ac` > the **
 | `--ac TEXT` | Acceptance criteria text. |
 | `--ac-file PATH` | Read acceptance criteria from a file (wins over `--ac`). |
 | `--base REF` | Override the base ref (default: merge-base with `main`). |
+| `--test-timeout N` | Max seconds for one gate check run — the `test` check, other check-set checks, and autoformat (default 900, validated `≥ 1`). Raise it for a repo whose non-integration suite exceeds the default; otherwise the gate floor times out and the report blocks. |
 | `--repo PATH` | Repository to review in (default: current directory). |
 | `--json PATH` | Write the structured JSON report (the #183 harness contract). |
 | `--keep-worktree` | Keep the review worktree for inspection. |

@@ -58,6 +58,7 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 | `--coder claude\|codex` | Coder engine for the fix turns (default: the config's coder). |
 | `--max-rounds N` | Cap the implement→review→fix rounds (validated `≥ 1`). |
 | `--max-cost USD` | **Soft** phase-boundary ceiling on whole-command spend (intake + loop): converge stops before the next phase once recorded spend reaches it (validated finite and `> 0`). Not a hard cap — an in-flight turn may overshoot and a same-round approval is delivered even if it crossed the ceiling. |
+| `--test-timeout N` | Max seconds for one gate check run — the `test` check, other check-set checks, and autoformat (default 900, validated `≥ 1`). Raise it for a repo whose non-integration suite exceeds the default; otherwise the gate floor never clears and converge **stalls** with green reviewers. |
 | `--no-push` | Converge locally but do not push to the PR branch. |
 | `--repo PATH` | Repository to converge in (default: current directory). |
 | `--json PATH` | Write the structured JSON summary. |
