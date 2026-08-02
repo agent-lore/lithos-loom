@@ -158,6 +158,16 @@ def test_check_command_defaults_to_empty(stubs: dict) -> None:
     assert stubs["config"].check_commands == {}
 
 
+def test_test_command_threads_through(stubs: dict) -> None:
+    # #273 review finding 3: --test-command is the dedicated `test`-check surface the
+    # --check-command help/error points to — it must exist and reach the config.
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--test-command", "make test"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].test_command == "make test"
+
+
 def test_malformed_check_command_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app,

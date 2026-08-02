@@ -218,6 +218,19 @@ def test_floor_required_no_adapter_check_reads_raw_exit() -> None:
     assert check_runner.gate_floor_blocks(green, None) is False
 
 
+def test_floor_raw_exit_override_reads_raw_exit_not_ledger() -> None:
+    # #273: a verbatim override (raw_exit) whose command begins with an adapter tool
+    # (ruff) reads its RAW exit code end-to-end — even a stale MAJOR `lint` ledger
+    # finding is ignored, because the operator ran their own command (human output),
+    # not the JSON adapter form. Green passes despite the ledger; red blocks.
+    override = Check("lint", "ruff check src/", "required", raw_exit=True)
+    red = CheckSetResult((CheckResult(override, "ran", _red()),))
+    green = CheckSetResult((CheckResult(override, "ran", _green()),))
+    led = _ledger_with("lint", severity="major")
+    assert check_runner.gate_floor_blocks(red, led) is True
+    assert check_runner.gate_floor_blocks(green, led) is False
+
+
 def test_floor_uv_wrapped_adapter_reads_ledger_via_command_tool() -> None:
     # #165: a required `uv run pip-audit` check exits GREEN this round, but the ledger
     # carries a MAJOR `dep-audit` finding. The floor must resolve the REAL adapter tool
@@ -449,7 +462,32 @@ def test_check_command_override_beats_catalog_and_is_not_uv_wrapped(
     by = {c.name: c for c in checks}
     assert by["typecheck"].command == "make typecheck"  # override, verbatim
     assert by["typecheck"].state == "required"  # profile state preserved
+    assert by["typecheck"].raw_exit is True  # reads raw exit, no adapter path
     assert by["lint"].command.startswith("ruff check")  # non-overridden: canonical
+    assert by["lint"].raw_exit is False  # ... and still adapter-backed
+
+
+def test_check_command_override_of_adapter_tool_runs_verbatim_raw_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #273 review finding 1: an override whose command BEGINS with an adapter tool
+    # (ruff) must run VERBATIM — no `--output-format=json --exit-zero` appended — and
+    # carry raw_exit=True. Machine-ifying it would break the documented "verbatim"
+    # contract and could clash with the repo's own flags / shell composition.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"lint": "ruff check src/"},
+    )
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    assert by["lint"].command == "ruff check src/"  # verbatim — NO adapter flags
+    assert "--output-format" not in by["lint"].command
+    assert "--exit-zero" not in by["lint"].command
+    assert by["lint"].raw_exit is True
 
 
 def test_check_command_override_is_emitted_even_when_its_tool_is_absent(

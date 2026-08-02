@@ -22,7 +22,7 @@ from lithos_loom.plugins.story_develop.config import (
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
     ReviewerSpec,
-    parse_check_commands,
+    parse_check_command_pairs,
 )
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
 from lithos_loom.plugins.story_develop.personas import canonical_personas
@@ -66,6 +66,13 @@ def review_command(
         "verbatim instead of the catalog default (which can over-scope). "
         "Overridable: lint / typecheck / sast / dep-audit / coverage / semgrep "
         "(the `test` check uses --test-command).",
+    ),
+    test_command: str | None = typer.Option(
+        None,
+        "--test-command",
+        help="Command for the `test` gate check (overrides auto-detection). The `test` "
+        "check has bespoke detection, so it takes this dedicated flag rather than "
+        "--check-command.",
     ),
     test_timeout: int = typer.Option(
         DEFAULT_TEST_TIMEOUT,
@@ -122,6 +129,7 @@ def review_command(
         review_profile=profile,
         reviewers=reviewers,
         base_branch=base or "main",
+        test_command=test_command,
         test_timeout=test_timeout,
         check_commands=check_commands,
     )
@@ -179,24 +187,12 @@ def resolve_check_commands(check_command: list[str] | None) -> dict[str, str]:
     """Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}``
     map (#273). Shared by ``review`` and ``converge``.
 
-    Each item is split on the first ``=`` (so a command may itself contain ``=``);
-    a missing ``=`` fails closed. The assembled map is validated through
-    :func:`config.parse_check_commands` so the CLI and project-metadata surfaces
-    reject the same garbage (unknown / non-overridable check, empty command)
-    identically. A malformed value raises :class:`typer.BadParameter` (exit 2) before
-    any container work.
+    Delegates to the framework-neutral :func:`config.parse_check_command_pairs` (also
+    used by the ``__main__`` route flag), surfacing any :class:`ValueError` as a
+    :class:`typer.BadParameter` (exit 2) before any container work — so the CLI and the
+    project-metadata surface reject the same garbage identically.
     """
-    if not check_command:
-        return {}
-    raw: dict[str, str] = {}
-    for item in check_command:
-        name, sep, command = item.partition("=")
-        if not sep:
-            raise typer.BadParameter(
-                f"--check-command must be NAME=COMMAND (got {item!r})"
-            )
-        raw[name.strip()] = command
     try:
-        return parse_check_commands(raw, where="--check-command")
+        return parse_check_command_pairs(check_command, where="--check-command")
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

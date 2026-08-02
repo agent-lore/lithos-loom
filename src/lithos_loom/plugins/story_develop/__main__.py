@@ -61,7 +61,7 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
     load_develop_config,
-    parse_check_commands,
+    parse_check_command_pairs,
     parse_effort,
     parse_model,
 )
@@ -92,22 +92,6 @@ from .lithos_io import (
 )
 from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver_guarded
 from .profiles import resolve_profile
-
-
-def _check_commands_from_args(raw: list[str] | None) -> dict[str, str]:
-    """Parse repeatable ``--check-command NAME=COMMAND`` route flags into a
-    ``{check: command}`` map (#273), validated through the shared
-    :func:`config.parse_check_commands`. Split on the first ``=`` (a command may
-    contain ``=``); a missing ``=`` or bad check name raises :class:`ValueError`."""
-    if not raw:
-        return {}
-    pairs: dict[str, str] = {}
-    for item in raw:
-        name, sep, command = item.partition("=")
-        if not sep:
-            raise ValueError(f"--check-command must be NAME=COMMAND (got {item!r})")
-        pairs[name.strip()] = command
-    return parse_check_commands(pairs, where="--check-command")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -417,6 +401,30 @@ def _daemon_main(args: argparse.Namespace) -> int:
         return EXIT_SUCCEEDED
 
     started_at = datetime.now(UTC)
+
+    # #273: parse the route-level --check-command AFTER the idempotency replay above (a
+    # completed record must replay without ANY config resolution — #273 review finding
+    # 2). The task id is known now, so a malformed route override is reported as a
+    # config failure through a schema-valid result.json, not a bare pre-replay exit.
+    try:
+        route_check_commands = parse_check_command_pairs(
+            args.check_command, where="--check-command"
+        )
+    except ValueError as exc:
+        write_result_atomically(
+            result_file,
+            {
+                "schema_version": 1,
+                "task_id": ctx.task_id,
+                "status": "failed",
+                "exit_code": EXIT_BAD_INPUT,
+                "started_at": started_at.isoformat(timespec="seconds"),
+                "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "error": {"category": "config", "message": str(exc)},
+            },
+        )
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_BAD_INPUT
     settings = resolve_project_settings(args.lithos_url, ctx.metadata)
     # Review Profile (#139/#140): resolve the name (task > project > host > builtin),
     # then — when no reviewers were explicitly selected — substitute the profile's
@@ -484,8 +492,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
             else args.test_command
         ),
         # #273: project-context develop_check_commands wins; the route-level
-        # --check-command flag is the fallback when metadata declares none.
-        check_commands=settings.check_commands or args.check_commands,
+        # --check-command flag is the all-or-nothing fallback when metadata declares
+        # none (mirrors how --test-command sits under develop_test_command).
+        check_commands=settings.check_commands or route_check_commands,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
@@ -608,15 +617,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
 
-    # #273: parse --check-command once for both dispatch paths (fail closed on a bad
-    # NAME=COMMAND / unknown check before any run work). Stash the resolved map on args.
-    try:
-        args.check_commands = _check_commands_from_args(args.check_command)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
     # --- daemon mode (T10): dispatch before any standalone validation -----
+    # NB: --check-command is parsed *inside* each path (daemon: after the idempotency
+    # replay; standalone: with the other arg validation) — NOT here — so a malformed
+    # route override can never defeat a completed record's replay (#273 review).
     if args.task_json is not None:
         return _daemon_main(args)
     if args.result_file is not None:
@@ -828,6 +832,16 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --max-cost-usd must be > 0", file=sys.stderr)
         return 2
 
+    # #273: validate --check-command on the standalone path (no idempotency replay here,
+    # so a fail-fast exit is correct — unlike daemon mode, which validates post-replay).
+    try:
+        check_commands = parse_check_command_pairs(
+            args.check_command, where="--check-command"
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     repo = args.repo.expanduser().resolve()
     if not (repo / ".git").exists():
         print(f"error: {repo} is not a git repository", file=sys.stderr)
@@ -853,7 +867,7 @@ def main(argv: list[str] | None = None) -> int:
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,
         test_command=args.test_command,
-        check_commands=args.check_commands,
+        check_commands=check_commands,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,

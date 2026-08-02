@@ -199,30 +199,29 @@ def _build_profile_checks(
     stage_by_name: dict[str, Stage] = {pc.name: pc.stage for pc in profile.checks}
     default_stage: Stage = "fast"
     out: list[Check] = []
-    # #273: a check the repo overrides with its own command is built DIRECTLY from that
-    # command — trusted as-is (no uv-wrap, no tool-probe, no catalog lookup — exactly
-    # like `test_command`) — and beats catalog discovery. This is the fix for a
-    # canonical command that over-scopes vs the repo's real policy (bare `uv run
-    # pyright` scanning a test tree full of pre-existing type debt vs the repo's scoped
-    # `make typecheck`). The override still applies only where the canonical check
-    # applies to a detected ecosystem (an override for an N/A check is inert). Only the
-    # non-overridden remainder go through the two-pass catalog resolution below.
+    # #273: a check the repo overrides with its own command runs that command VERBATIM
+    # — trusted as-is (no uv-wrap, no tool-probe, no catalog lookup, and **not**
+    # machine-ified — exactly like `test_command`) — and beats catalog discovery. This
+    # is the fix for a canonical command that over-scopes vs the repo's real policy
+    # (bare `uv run pyright` scanning a test tree full of pre-existing type debt vs the
+    # repo's scoped `make typecheck`). `raw_exit=True` makes the check read its raw exit
+    # code end-to-end (the ledger-apply + floor both skip the adapter path), so an
+    # override whose command *begins* with an adapter tool (`ruff …`) is still run
+    # exactly as written — no JSON/exit-zero flags appended to the operator's string —
+    # at the cost of opting that check out of structured findings. The override applies
+    # only where the canonical check applies to a detected ecosystem (an override for an
+    # N/A check is inert). Only the non-overridden remainder go through catalog
+    # resolution below.
     overridden = [d for d in all_desired if d.name in config.check_commands]
     desired = [d for d in all_desired if d.name not in config.check_commands]
     for d in overridden:
-        command = config.check_commands[d.name]
-        # Machine-ify only when the override's tool has an adapter (a `ruff …` override
-        # still feeds the finding ledger); a `make …` override resolves to no adapter
-        # and stays verbatim. command_tool sees past a `uv run` prefix / pipe as usual.
-        machine = gate_adapters.machine_command(
-            gate_adapters.command_tool(command), command
-        )
         out.append(
             Check(
                 name=d.name,
-                command=machine,
+                command=config.check_commands[d.name],
                 state=d.state,
                 stage=stage_by_name.get(d.name, default_stage),
+                raw_exit=True,
             )
         )
     # Pass 1: enumerate candidate commands (every tool assumed present) so the image
@@ -309,7 +308,14 @@ def check_result_blocks(
     # detected — `command_tool` is "" for an empty command, so a reorder can never
     # hit ``"".split()[0]``.
     tool = gate_adapters.command_tool(r.check.command)
-    if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
+    # #273: a verbatim override (raw_exit) reads its raw exit code even when its command
+    # begins with an adapter tool — the operator ran their own command, not the JSON
+    # adapter form, so there is no finding ledger to read; skip straight to raw exit.
+    if (
+        not r.check.raw_exit
+        and gate_ledger is not None
+        and tool in gate_adapters.SUPPORTED_TOOLS
+    ):
         if any(f.check == r.check.name for f in gate_ledger.blocking(threshold)):
             return True
         # Floor-liveness (#167): an adapter exits clean via `--exit-zero` / a clean
@@ -442,7 +448,14 @@ def run_check_set(
             # the build (#166) and floor sites — a bare `split()[0]` would see `uv`
             # and skip the ledger, so dep-audit findings would never be structured.
             tool = gate_adapters.command_tool(check.command)
-            if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
+            # #273: a verbatim override (raw_exit) is never parsed into the ledger — it
+            # ran the operator's exact command, not the adapter's JSON form, so its
+            # human output would not parse; its raw exit code is authoritative instead.
+            if (
+                not check.raw_exit
+                and gate_ledger is not None
+                and tool in gate_adapters.SUPPORTED_TOOLS
+            ):
                 gate_ledger.apply_round(
                     check.name,
                     gate_adapters.parse_findings(check.name, tool, gate.full_output),

@@ -72,6 +72,14 @@ class Check:
     command: str
     state: CheckState
     stage: Stage = "fast"
+    # #273: a repo-declared per-check command override runs VERBATIM — its verdict is
+    # its raw exit code, never routed through a finding adapter, even when its command
+    # begins with an adapter tool (`ruff` / `bandit` / `pip-audit`). Set for override
+    # checks so both the ledger-apply (:func:`check_runner.run_check_set`) and the floor
+    # (:func:`check_runner.check_result_blocks`) skip the adapter path and read the raw
+    # exit — the operator's exact command is run and its exit code is authoritative
+    # (no JSON/exit-zero flags appended, matching the `test_command` contract).
+    raw_exit: bool = False
 
 
 @dataclass(frozen=True)

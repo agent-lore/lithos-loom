@@ -183,6 +183,16 @@ def test_check_command_defaults_to_empty(stubs: dict) -> None:
     assert stubs["config"].check_commands == {}
 
 
+def test_test_command_threads_through(stubs: dict) -> None:
+    # #273 review finding 3: the `test` check's command has a dedicated flag here (the
+    # help/error text points to it), so it must actually exist and reach the config.
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--test-command", "make test"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].test_command == "make test"
+
+
 def test_malformed_check_command_fails_closed(stubs: dict) -> None:
     # no `=` → not a NAME=COMMAND pair → fail closed before any container work.
     result = runner.invoke(

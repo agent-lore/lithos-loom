@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -215,6 +216,30 @@ def parse_check_commands(value: object, *, where: str) -> dict[str, str]:
             )
         out[key] = command.strip()
     return out
+
+
+def parse_check_command_pairs(
+    items: Sequence[str] | None, *, where: str
+) -> dict[str, str]:
+    """Parse repeatable CLI ``NAME=COMMAND`` items into a validated override map (#273).
+
+    The CLI form of :func:`parse_check_commands`: each item is split on the **first**
+    ``=`` (so a command may itself contain ``=``); a missing ``=`` raises. The assembled
+    ``{name: command}`` map is then validated by :func:`parse_check_commands`, so the
+    CLI (`develop` / `review` / `converge`) and the project-metadata surface reject the
+    same garbage identically. Shared by ``cli/review.resolve_check_commands`` (which
+    wraps the :class:`ValueError` as a Typer error) and the ``__main__`` route flag.
+    Raises :class:`ValueError`.
+    """
+    if not items:
+        return {}
+    pairs: dict[str, str] = {}
+    for item in items:
+        name, sep, command = item.partition("=")
+        if not sep:
+            raise ValueError(f"{where}: must be NAME=COMMAND (got {item!r})")
+        pairs[name.strip()] = command
+    return parse_check_commands(pairs, where=where)
 
 
 def parse_bool_setting(value: object, *, where: str) -> bool | None:

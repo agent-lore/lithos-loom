@@ -79,6 +79,13 @@ def converge_command(
         "extra fix rounds). Overridable: lint / typecheck / sast / dep-audit / "
         "coverage / semgrep (the `test` check uses --test-command).",
     ),
+    test_command: str | None = typer.Option(
+        None,
+        "--test-command",
+        help="Command for the `test` gate check (overrides auto-detection). The `test` "
+        "check has bespoke detection, so it takes this dedicated flag rather than "
+        "--check-command.",
+    ),
     coder: str | None = typer.Option(
         None, "--coder", help="Coder engine for the fix turns (claude / codex)."
     ),
@@ -174,6 +181,7 @@ def converge_command(
         reviewers=reviewers,
         base_branch=base or "main",
         max_cost_usd=max_cost,
+        test_command=test_command,
         test_timeout=test_timeout,
         check_commands=check_commands,
         **overrides,
