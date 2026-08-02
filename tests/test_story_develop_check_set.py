@@ -425,6 +425,75 @@ def test_no_detected_command_yields_empty_set(
     assert build_check_set(_config(tmp_path, test_gate=True), tmp_path) == ()
 
 
+# --- per-check command override (#273) ----------------------------------------
+
+
+def test_check_command_override_beats_catalog_and_is_not_uv_wrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #273: a repo-declared per-check command runs VERBATIM (like test_command) — not
+    # the catalog canonical, and NOT uv-wrapped even on a uv repo. This is the fix for
+    # the pyright-over-scope gate wall: `typecheck = "make typecheck"` (the repo's own
+    # scoped command) instead of a bare `uv run pyright` that scans the whole tree.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "uv run pytest"
+    )
+    (tmp_path / "uv.lock").write_text("")
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"typecheck": "make typecheck"},
+    )
+    checks = build_check_set(cfg, tmp_path)
+    by = {c.name: c for c in checks}
+    assert by["typecheck"].command == "make typecheck"  # override, verbatim
+    assert by["typecheck"].state == "required"  # profile state preserved
+    assert by["lint"].command.startswith("ruff check")  # non-overridden: canonical
+
+
+def test_check_command_override_is_emitted_even_when_its_tool_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The override is trusted-as-is (no tool-probe), exactly like test_command — so a
+    # `make typecheck` override is emitted regardless of whether `make` probes present
+    # (a bad command surfaces when the gate container runs it, not here).
+    _python(monkeypatch, present=("ruff", "bandit"))  # no `make`, no `uv`
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"typecheck": "make typecheck"},
+    )
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    assert by["typecheck"].command == "make typecheck"
+
+
+def test_check_command_override_ignored_when_check_not_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `typecheck` has no Rust analogue → declared N/A → an override for it is inert
+    # (no phantom check materialises for an ecosystem the catalog doesn't map).
+    monkeypatch.setattr(
+        check_runner.detection, "detect_ecosystems", lambda wt: ("rust",)
+    )
+    monkeypatch.setattr(
+        check_runner.test_gate, "probe_tools", lambda image, tools: list(tools)
+    )
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "cargo test"
+    )
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"typecheck": "make typecheck"},
+    )
+    checks = build_check_set(cfg, tmp_path)
+    assert all(c.name != "typecheck" for c in checks)
+
+
 # --- render_check_summary: feed the gate to coder + reviewer prompts (#136) ---
 
 

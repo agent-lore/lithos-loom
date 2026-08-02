@@ -152,6 +152,71 @@ def parse_test_command(value: object, *, where: str) -> str | None:
     return value.strip()
 
 
+# Canonical deterministic-check names a repo may reference. Kept a LITERAL here
+# because config must not import :mod:`check_catalog` — that would cycle (config →
+# profiles → check_set → test_gate → config, and check_catalog → check_set). A guard
+# test (`test_canonical_check_names_matches_catalog`) pins it equal to
+# ``{m.name for m in check_catalog.CANONICAL_CHECKS}`` so the two can't drift.
+CANONICAL_CHECK_NAMES: frozenset[str] = frozenset(
+    {"format", "lint", "typecheck", "test", "sast", "dep-audit", "coverage", "semgrep"}
+)
+# Checks whose gate command a repo may override via ``check_commands`` (#273).
+# ``test`` is excluded — its command has bespoke detection/selection semantics,
+# overridden via ``test_command`` / ``--test-command``; ``format`` is excluded — it is
+# not run as a standalone gate check (the live pass is the autoformat write-mode pass),
+# so a command override would be inert.
+OVERRIDABLE_CHECK_NAMES: frozenset[str] = CANONICAL_CHECK_NAMES - {"test", "format"}
+
+
+def parse_check_commands(value: object, *, where: str) -> dict[str, str]:
+    """Validate a per-check command override map (#273), or ``{}`` when absent.
+
+    A table of ``{check_name: command}`` letting a repo declare its OWN command for a
+    deterministic check (e.g. ``{"typecheck": "make typecheck"}``) instead of the
+    catalog's canonical tool — the fix for a canonical command that over-scopes vs the
+    repo's real policy (bare ``uv run pyright`` scanning a test tree full of
+    pre-existing type debt). Each command is **trusted as-is** by the gate (no parsing,
+    no tool-probe, no ``uv run`` wrap — exactly like :func:`parse_test_command`), so the
+    only validation is a non-empty string; a bad command surfaces when the gate
+    container runs it. Keys must be **overridable** check names
+    (:data:`OVERRIDABLE_CHECK_NAMES`) — ``test`` / ``format`` and unknown names are
+    rejected loudly rather than silently no-opping. Shared by the project-metadata
+    loader and the CLI so both surfaces reject the same garbage identically. Raises
+    :class:`ValueError`.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"{where}: check command overrides must be a table of "
+            f"{{check_name = command}} (got {value!r})"
+        )
+    out: dict[str, str] = {}
+    for key, command in value.items():
+        if key == "test":
+            raise ValueError(
+                f"{where}: the `test` check's command is set via test_command / "
+                "--test-command, not check_commands (it has bespoke detection)"
+            )
+        if key == "format":
+            raise ValueError(
+                f"{where}: `format` is not run as a standalone gate check (the "
+                "autoformat write-mode pass handles it); a command override is inert"
+            )
+        if key not in OVERRIDABLE_CHECK_NAMES:
+            raise ValueError(
+                f"{where}: unknown check {key!r} "
+                f"(overridable: {', '.join(sorted(OVERRIDABLE_CHECK_NAMES))})"
+            )
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(
+                f"{where}: command for check {key!r} must be a non-empty string "
+                f"(got {command!r})"
+            )
+        out[key] = command.strip()
+    return out
+
+
 def parse_bool_setting(value: object, *, where: str) -> bool | None:
     """Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 
@@ -318,6 +383,14 @@ class DevelopConfig:
     # in throwaway containers; the default set is the single `test` check.
     test_gate: bool = True  # #131/ADR §10: scopes the `test` check (False = exclude it)
     test_command: str | None = None  # explicit `test`-check command; beats detection
+    # #273: per-check command overrides — {check_name: command}. A repo declares its
+    # OWN command for a deterministic check (e.g. {"typecheck": "make typecheck"})
+    # instead of the catalog's canonical tool, which can over-scope vs the repo's real
+    # policy (bare `uv run pyright` scanning a test tree full of pre-existing type
+    # debt). Trusted as-is (no uv-wrap, no tool-probe — like `test_command`); beats
+    # catalog discovery. Keys are OVERRIDABLE_CHECK_NAMES (test/format excluded — test
+    # uses `test_command`, format is the autoformat pass, not a standalone gate check).
+    check_commands: dict[str, str] = field(default_factory=dict)
     # #140: the `test` check's blocking is the resolved profile's ProfileCheck("test",
     # ...) state — the single source of truth (the legacy `block_on_red` knob is gone).
     test_timeout: int = DEFAULT_TEST_TIMEOUT

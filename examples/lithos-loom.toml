@@ -66,6 +66,13 @@ name = "story-develop"
 # (Python/Node/Rust/Go); a code repo whose ecosystem expects tests but has no
 # runnable command is "expected-but-absent" and a required gate blocks rather
 # than silently passing — a markerless/docs-only repo declares it N/A (#133).
+# Non-test gate checks (lint/typecheck/sast/dep-audit/coverage/semgrep) take a
+# repo-declared command via develop_check_commands (a {check = command} table,
+# task.metadata.develop_check_commands merges per-key), run verbatim like
+# develop_test_command — e.g. develop_check_commands = { typecheck = "make
+# typecheck" } to use the repo's scoped command instead of a bare `uv run
+# pyright` that over-scopes a test tree full of pre-existing type debt (#273).
+# The --check-command NAME=CMD route flag is the fallback when metadata pins none.
 # On Python repos with ruff present, an informational `lint` check also runs and
 # its findings are structured into a stable gate/<check>-NNN ledger surfaced to
 # the panel + [DevelopResult] (non-blocking; #132).

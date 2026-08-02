@@ -21,7 +21,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
-| `lithos_loom.cli.review` | S | 0 | 3 |
+| `lithos_loom.cli.review` | S | 0 | 4 |
 | `lithos_loom.cli.task` | M | 1 | 1 |
 
 ## Public API
@@ -99,6 +99,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `review_command` — Run the reviewer panel + deterministic gate against an existing change.
 - def `resolve_acceptance_criteria` — Acceptance criteria precedence: ``--ac-file`` > ``--ac`` > PR body.
 - def `resolve_reviewers` — Explicit ``--reviewer`` names win; otherwise the profile's persona panel.
+- def `resolve_check_commands` — Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}`` map (#273). Shared by ``review`` and ``converge``.
 
 ### `lithos_loom.cli.task`
 - class `UnknownProjectError` — `--project` matched neither a Lithos project-context doc nor a local `[projects]` entry. Carries the offending slug + the sorted set of known slugs so the CLI can render a helpful exit-2 message.

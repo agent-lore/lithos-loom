@@ -53,6 +53,7 @@ The panel needs the change's *intent*. Precedence: `--ac-file` > `--ac` > the **
 | `--ac TEXT` | Acceptance criteria text. |
 | `--ac-file PATH` | Read acceptance criteria from a file (wins over `--ac`). |
 | `--base REF` | Override the base ref (default: merge-base with `main`). |
+| `--check-command NAME=CMD` | Override a gate check's command (repeatable), e.g. `--check-command typecheck='make typecheck'`. Runs the repo's own command **verbatim** (no `uv`-wrap, no tool-probe) instead of the catalog default — the fix for a canonical command that over-scopes vs the repo's real policy (bare `uv run pyright` scanning a test tree full of pre-existing type debt). Overridable: `lint` / `typecheck` / `sast` / `dep-audit` / `coverage` / `semgrep` (the `test` check uses `--test-command`; `format` is the autoformat pass). An unknown / non-overridable check fails closed. |
 | `--test-timeout N` | Max seconds for one gate check run — the `test` check, other check-set checks, and autoformat (default 900, validated `≥ 1`). Raise it for a repo whose non-integration suite exceeds the default; otherwise the gate floor times out and the report blocks. |
 | `--repo PATH` | Repository to review in (default: current directory). |
 | `--json PATH` | Write the structured JSON report (the #183 harness contract). |

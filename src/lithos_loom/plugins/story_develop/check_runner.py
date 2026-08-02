@@ -37,6 +37,7 @@ from .check_set import (
     CheckResult,
     CheckSetResult,
     CheckState,
+    Stage,
     classify_execution,
 )
 from .config import DEFAULT_BLOCK_THRESHOLD, DevelopConfig
@@ -189,12 +190,41 @@ def _build_profile_checks(
     # default profile degrades gracefully, rather than letting `resolve_check_set` raise
     # `CheckApplicabilityError` (its error is reserved for a hand-curated desired set
     # that explicitly requires an unsupported check, #133 AC3).
-    desired = [
+    all_desired = [
         check_catalog.DesiredCheck(pc.name, pc.state)
         for pc in profile.checks
         if pc.name not in ("test", "format")
         and check_catalog.applies(pc.name, ecosystems)
     ]
+    stage_by_name: dict[str, Stage] = {pc.name: pc.stage for pc in profile.checks}
+    default_stage: Stage = "fast"
+    out: list[Check] = []
+    # #273: a check the repo overrides with its own command is built DIRECTLY from that
+    # command — trusted as-is (no uv-wrap, no tool-probe, no catalog lookup — exactly
+    # like `test_command`) — and beats catalog discovery. This is the fix for a
+    # canonical command that over-scopes vs the repo's real policy (bare `uv run
+    # pyright` scanning a test tree full of pre-existing type debt vs the repo's scoped
+    # `make typecheck`). The override still applies only where the canonical check
+    # applies to a detected ecosystem (an override for an N/A check is inert). Only the
+    # non-overridden remainder go through the two-pass catalog resolution below.
+    overridden = [d for d in all_desired if d.name in config.check_commands]
+    desired = [d for d in all_desired if d.name not in config.check_commands]
+    for d in overridden:
+        command = config.check_commands[d.name]
+        # Machine-ify only when the override's tool has an adapter (a `ruff …` override
+        # still feeds the finding ledger); a `make …` override resolves to no adapter
+        # and stays verbatim. command_tool sees past a `uv run` prefix / pipe as usual.
+        machine = gate_adapters.machine_command(
+            gate_adapters.command_tool(command), command
+        )
+        out.append(
+            Check(
+                name=d.name,
+                command=machine,
+                state=d.state,
+                stage=stage_by_name.get(d.name, default_stage),
+            )
+        )
     # Pass 1: enumerate candidate commands (every tool assumed present) so the image
     # can be probed once for the tools this profile would run.
     candidates = check_catalog.resolve_check_set(
@@ -214,8 +244,6 @@ def _build_profile_checks(
         tool_available=lambda t: t in available,
         uv_managed=uv_managed,
     )
-    stage_by_name = {pc.name: pc.stage for pc in profile.checks}
-    out: list[Check] = []
     for c in resolved:
         stage = stage_by_name.get(c.name.split(".")[0], "fast")
         if c.command:

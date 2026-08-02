@@ -22,7 +22,11 @@ from pathlib import Path
 
 import typer
 
-from lithos_loom.cli.review import resolve_acceptance_criteria, resolve_reviewers
+from lithos_loom.cli.review import (
+    resolve_acceptance_criteria,
+    resolve_check_commands,
+    resolve_reviewers,
+)
 from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop import engines
 from lithos_loom.plugins.story_develop.config import DEFAULT_TEST_TIMEOUT, DevelopConfig
@@ -65,6 +69,15 @@ def converge_command(
     ),
     base: str | None = typer.Option(
         None, "--base", help="Override the diff base (default: the PR merge-base)."
+    ),
+    check_command: list[str] | None = typer.Option(
+        None,
+        "--check-command",
+        help="Override a gate check's command as NAME=COMMAND (repeatable), e.g. "
+        "--check-command typecheck='make typecheck'. Runs the repo's own command "
+        "verbatim instead of the catalog default (which can over-scope and force "
+        "extra fix rounds). Overridable: lint / typecheck / sast / dep-audit / "
+        "coverage / semgrep (the `test` check uses --test-command).",
     ),
     coder: str | None = typer.Option(
         None, "--coder", help="Coder engine for the fix turns (claude / codex)."
@@ -118,6 +131,7 @@ def converge_command(
         raise typer.BadParameter("--test-timeout must be at least 1 second")
     if max_rounds is not None and max_rounds < 1:
         raise typer.BadParameter("--max-rounds must be at least 1")
+    check_commands = resolve_check_commands(check_command)
 
     repo = repo or Path.cwd()
     host = load_config(config)
@@ -161,6 +175,7 @@ def converge_command(
         base_branch=base or "main",
         max_cost_usd=max_cost,
         test_timeout=test_timeout,
+        check_commands=check_commands,
         **overrides,
     )
 

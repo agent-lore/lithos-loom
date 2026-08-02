@@ -22,6 +22,7 @@ from lithos_loom.plugins.story_develop.config import (
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
     ReviewerSpec,
+    parse_check_commands,
 )
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
 from lithos_loom.plugins.story_develop.personas import canonical_personas
@@ -57,6 +58,15 @@ def review_command(
     base: str | None = typer.Option(
         None, "--base", help="Override the base ref (default: merge-base with main)."
     ),
+    check_command: list[str] | None = typer.Option(
+        None,
+        "--check-command",
+        help="Override a gate check's command as NAME=COMMAND (repeatable), e.g. "
+        "--check-command typecheck='make typecheck'. Runs the repo's own command "
+        "verbatim instead of the catalog default (which can over-scope). "
+        "Overridable: lint / typecheck / sast / dep-audit / coverage / semgrep "
+        "(the `test` check uses --test-command).",
+    ),
     test_timeout: int = typer.Option(
         DEFAULT_TEST_TIMEOUT,
         "--test-timeout",
@@ -86,6 +96,7 @@ def review_command(
         raise typer.BadParameter(str(exc)) from exc
     if test_timeout < 1:
         raise typer.BadParameter("--test-timeout must be at least 1 second")
+    check_commands = resolve_check_commands(check_command)
     repo = repo or Path.cwd()
     host = load_config(config)
 
@@ -112,6 +123,7 @@ def review_command(
         reviewers=reviewers,
         base_branch=base or "main",
         test_timeout=test_timeout,
+        check_commands=check_commands,
     )
 
     report = review_change(develop_config, resolved, keep_worktree=keep_worktree)
@@ -161,3 +173,30 @@ def resolve_reviewers(
         return tuple(specs)
     panel = profile_panel(profile, [])
     return panel if panel is not None else ()
+
+
+def resolve_check_commands(check_command: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}``
+    map (#273). Shared by ``review`` and ``converge``.
+
+    Each item is split on the first ``=`` (so a command may itself contain ``=``);
+    a missing ``=`` fails closed. The assembled map is validated through
+    :func:`config.parse_check_commands` so the CLI and project-metadata surfaces
+    reject the same garbage (unknown / non-overridable check, empty command)
+    identically. A malformed value raises :class:`typer.BadParameter` (exit 2) before
+    any container work.
+    """
+    if not check_command:
+        return {}
+    raw: dict[str, str] = {}
+    for item in check_command:
+        name, sep, command = item.partition("=")
+        if not sep:
+            raise typer.BadParameter(
+                f"--check-command must be NAME=COMMAND (got {item!r})"
+            )
+        raw[name.strip()] = command
+    try:
+        return parse_check_commands(raw, where="--check-command")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc

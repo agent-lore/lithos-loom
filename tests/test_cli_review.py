@@ -154,6 +154,54 @@ def test_unknown_profile_fails_closed(stubs: dict) -> None:
     assert "config" not in stubs
 
 
+def test_check_command_override_threads_through(stubs: dict) -> None:
+    # #273: repeatable `--check-command NAME=CMD` reaches config.check_commands so a
+    # repo's own scoped command (e.g. `make typecheck`) beats the catalog canonical.
+    result = runner.invoke(
+        develop_app,
+        [
+            "review",
+            "#142",
+            "--ac",
+            "x",
+            "--check-command",
+            "typecheck=make typecheck",
+            "--check-command",
+            "lint=make lint",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].check_commands == {
+        "typecheck": "make typecheck",
+        "lint": "make lint",
+    }
+
+
+def test_check_command_defaults_to_empty(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["review", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].check_commands == {}
+
+
+def test_malformed_check_command_fails_closed(stubs: dict) -> None:
+    # no `=` → not a NAME=COMMAND pair → fail closed before any container work.
+    result = runner.invoke(
+        develop_app,
+        ["review", "#142", "--ac", "x", "--check-command", "make typecheck"],
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
+def test_unknown_check_command_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        ["review", "#142", "--ac", "x", "--check-command", "typcheck=make typecheck"],
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_unknown_reviewer_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app, ["review", "#142", "--ac", "x", "--reviewer", "corectness"]

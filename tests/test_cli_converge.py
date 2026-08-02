@@ -134,6 +134,48 @@ def test_non_positive_test_timeout_fails_closed(stubs: dict) -> None:
     assert "config" not in stubs  # never entered the orchestrator
 
 
+def test_check_command_override_threads_through(stubs: dict) -> None:
+    # #273: repeatable `--check-command NAME=CMD` reaches config.check_commands so a
+    # slow-suite / over-scoping repo can point a check at its own command.
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--ac",
+            "x",
+            "--check-command",
+            "typecheck=make typecheck",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].check_commands == {"typecheck": "make typecheck"}
+
+
+def test_check_command_defaults_to_empty(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].check_commands == {}
+
+
+def test_malformed_check_command_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--check-command", "make typecheck"],
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
+def test_unknown_check_command_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--check-command", "typcheck=x"],
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_unsupported_coder_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app, ["converge", "#142", "--ac", "x", "--coder", "gpt5"]

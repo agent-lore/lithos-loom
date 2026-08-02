@@ -61,6 +61,7 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
     load_develop_config,
+    parse_check_commands,
     parse_effort,
     parse_model,
 )
@@ -91,6 +92,22 @@ from .lithos_io import (
 )
 from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver_guarded
 from .profiles import resolve_profile
+
+
+def _check_commands_from_args(raw: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--check-command NAME=COMMAND`` route flags into a
+    ``{check: command}`` map (#273), validated through the shared
+    :func:`config.parse_check_commands`. Split on the first ``=`` (a command may
+    contain ``=``); a missing ``=`` or bad check name raises :class:`ValueError`."""
+    if not raw:
+        return {}
+    pairs: dict[str, str] = {}
+    for item in raw:
+        name, sep, command = item.partition("=")
+        if not sep:
+            raise ValueError(f"--check-command must be NAME=COMMAND (got {item!r})")
+        pairs[name.strip()] = command
+    return parse_check_commands(pairs, where="--check-command")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -257,6 +274,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--test-command",
         default=None,
         help="Test command for the gate (overrides auto-detection)",
+    )
+    p.add_argument(
+        "--check-command",
+        action="append",
+        default=None,
+        metavar="NAME=COMMAND",
+        help="Override a gate check's command (#273; repeatable), e.g. "
+        "--check-command typecheck='make typecheck'. Runs the repo's own command "
+        "verbatim instead of the catalog default. Project-context "
+        "develop_check_commands metadata wins over this route-level flag.",
     )
     p.add_argument(
         "--review-profile",
@@ -456,6 +483,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
             if settings.test_command is not None
             else args.test_command
         ),
+        # #273: project-context develop_check_commands wins; the route-level
+        # --check-command flag is the fallback when metadata declares none.
+        check_commands=settings.check_commands or args.check_commands,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
@@ -577,6 +607,14 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+
+    # #273: parse --check-command once for both dispatch paths (fail closed on a bad
+    # NAME=COMMAND / unknown check before any run work). Stash the resolved map on args.
+    try:
+        args.check_commands = _check_commands_from_args(args.check_command)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     # --- daemon mode (T10): dispatch before any standalone validation -----
     if args.task_json is not None:
@@ -815,6 +853,7 @@ def main(argv: list[str] | None = None) -> int:
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,
         test_command=args.test_command,
+        check_commands=args.check_commands,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,

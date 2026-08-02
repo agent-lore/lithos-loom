@@ -22,12 +22,13 @@ built-in default), a bad **task** override is ``"; keeping project default"``.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .config import (
     DEFAULT_CODER_TOOL,
     parse_bool_setting,
+    parse_check_commands,
     parse_effort,
     parse_image,
     parse_model,
@@ -60,6 +61,9 @@ class ScalarSettings:
     test_command: str | None = None
     test_gate: bool | None = None
     review_profile_project: str | None = None
+    # #273: per-check command overrides ({check_name: command}), project-then-task
+    # merged per-key. Empty when neither layer declares any.
+    check_commands: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_or_friction(
@@ -242,6 +246,36 @@ def _resolve_max_cost(meta: Mapping[str, Any], frictions: list[str]) -> float | 
     return float(max_cost) if max_cost is not None else None
 
 
+def _resolve_check_commands(
+    meta: Mapping[str, Any], task_metadata: Mapping[str, Any], frictions: list[str]
+) -> dict[str, str]:
+    """Per-check command overrides (#273): project ``develop_check_commands`` table,
+    then a per-task table **merged per-key** on top (a task re-points one check while
+    the project's other overrides survive). A bad value at either layer degrades to a
+    ``[Friction]`` and keeps the other layer's map — the two-suffix contract every
+    scalar field shares. Returns ``{}`` when neither layer declares any."""
+    result: dict[str, str] = _parse_or_friction(
+        parse_check_commands,
+        meta.get("develop_check_commands"),
+        where="develop_check_commands",
+        suffix="; ignoring",
+        frictions=frictions,
+        fallback={},
+    )
+    if task_metadata.get("develop_check_commands") is not None:
+        task_map = _parse_or_friction(
+            parse_check_commands,
+            task_metadata["develop_check_commands"],
+            where="task metadata.develop_check_commands",
+            suffix="; keeping project default",
+            frictions=frictions,
+            fallback=None,
+        )
+        if task_map is not None:
+            result = {**result, **task_map}
+    return result
+
+
 def _resolve_review_profile_project(
     meta: Mapping[str, Any], frictions: list[str]
 ) -> str | None:
@@ -284,6 +318,10 @@ def resolve_scalar_settings(
     max_rounds = _resolve_max_rounds(meta, frictions)
     max_cost_usd = _resolve_max_cost(meta, frictions)
     review_profile_project = _resolve_review_profile_project(meta, frictions)
+    # #273: appended LAST so the pinned friction prefix (coder, image, test_command,
+    # test_gate, block_on_red, fallback_chain, max_rounds, max_cost, review_profile) is
+    # unchanged — a new field's frictions must not reorder the existing contract.
+    check_commands = _resolve_check_commands(meta, task_metadata, frictions)
     return ScalarSettings(
         coder=coder,
         coder_model=coder_model,
@@ -295,4 +333,5 @@ def resolve_scalar_settings(
         max_rounds=max_rounds,
         max_cost_usd=max_cost_usd,
         review_profile_project=review_profile_project,
+        check_commands=check_commands,
     )

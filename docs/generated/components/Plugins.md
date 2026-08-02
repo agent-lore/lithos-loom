@@ -23,7 +23,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 8 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | M | 2 | 8 |
+| `lithos_loom.plugins.story_develop.config` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
@@ -47,7 +47,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | M | 4 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
-| `lithos_loom.plugins.story_develop.settings_resolver` | S | 1 | 1 |
+| `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
 | `lithos_loom.plugins.story_develop.turns` | XS | 0 | 1 |
 
@@ -104,6 +104,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `parse_model` — Validate + normalise a ``model`` value: a non-empty string, or ``None``.
 - def `parse_image` — Validate + normalise a sandbox container ``image`` value, or ``None``.
 - def `parse_test_command` — Validate + normalise a gate ``test_command`` override, or ``None``.
+- def `parse_check_commands` — Validate a per-check command override map (#273), or ``{}`` when absent.
 - def `parse_bool_setting` — Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 - def `parse_effort` — Validate + normalise a reasoning-effort level, or ``None``.
 - def `parse_reviewer_entry` — Validate one reviewer mapping into a :class:`ReviewerSpec`.
