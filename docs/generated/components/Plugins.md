@@ -21,9 +21,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
-| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 8 |
+| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | M | 2 | 10 |
+| `lithos_loom.plugins.story_develop.config` | M | 2 | 12 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
@@ -82,11 +82,13 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_check_set` — Resolve a *desired* check-set into concrete checks for *ecosystems*.
 
 ### `lithos_loom.plugins.story_develop.check_runner`
+- def `effective_check_state` — The check's blocking state after operator overrides (#273 slice 2).
 - def `build_check_set` — The Review-Profile-selected check-set for this run (#140, ADR §3/§4).
 - def `merge_check_sets` — Append *extra*'s results to *base* (the approval-candidate merge, #140).
 - def `check_result_blocks` — Whether a single **required** check holds approval (#140, ADR §4/§5).
 - def `gate_floor_blocks` — Whether the deterministic floor blocks approval (#140, ADR §4/§5).
 - def `run_check_set` — Run an ordered check-set against one round commit.
+- def `reconcile_off_check_states` — Retire any persisted findings for checks the operator has turned **off** (#273 slice 2 / #280 review).
 - def `load_gate_ledger` — The run's deterministic-finding ledger (#132) — reloaded from disk on a resume (a re-dispatched run reuses ``gate_dir``), else a fresh ledger.
 - def `persist_gate_ledger` — Write the gate ledger so closure survives across rounds + a resume. Best-effort: a write failure must not fail the run.
 - def `run_delivery_test_gate` — The *delivery* regression gate: run ONLY the ``test`` check on a fix commit.
@@ -106,6 +108,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `parse_test_command` — Validate + normalise a gate ``test_command`` override, or ``None``.
 - def `parse_check_commands` — Validate a per-check command override map (#273), or ``{}`` when absent.
 - def `parse_check_command_pairs` — Parse repeatable CLI ``NAME=COMMAND`` items into a validated override map (#273).
+- def `parse_check_states` — Validate a per-check state-override map (#273 slice 2), or ``{}`` when absent.
+- def `parse_check_state_pairs` — Parse repeatable CLI ``NAME=STATE`` items into a validated state map (#273).
 - def `parse_bool_setting` — Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 - def `parse_effort` — Validate + normalise a reasoning-effort level, or ``None``.
 - def `parse_reviewer_entry` — Validate one reviewer mapping into a :class:`ReviewerSpec`.

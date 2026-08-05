@@ -393,6 +393,11 @@ def develop(
     formatters = autoformat.resolve_formatters(config, wt)
     # #132: one gate ledger per run; survives resume.
     gate_ledger = check_runner.load_gate_ledger(config)
+    # #273 slice 2 / #280 review: on a resume where an adapter-backed check flipped to
+    # `off`, its findings persisted from the prior config must be retired — an off check
+    # is dropped from the set, so run_check_set never closes them. Reconcile + persist.
+    if check_runner.reconcile_off_check_states(config, gate_ledger):
+        check_runner.persist_gate_ledger(config, gate_ledger)
     budget = agent_session.PauseBudget(config.max_pause_minutes * 60)
 
     # RoundContext is the explicit successor of this function's locals bag (S6).

@@ -178,6 +178,24 @@ def test_whitespace_test_command_fails_closed(stubs: dict) -> None:
     assert "config" not in stubs
 
 
+def test_check_state_override_threads_through(stubs: dict) -> None:
+    # #273 slice 2: --check-state NAME=STATE reaches config.check_states.
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--check-state", "sast=off"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].check_states == {"sast": "off"}
+
+
+def test_bad_check_state_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--check-state", "sast=advisory"],
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_malformed_check_command_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app,

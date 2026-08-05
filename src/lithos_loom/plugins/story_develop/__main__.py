@@ -43,9 +43,11 @@ import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from ...plugin_runner import write_result_atomically
-from . import engines
+from . import check_runner, engines
+from .check_set import CheckState
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     DEFAULT_CODER_TIMEOUT,
@@ -62,6 +64,7 @@ from .config import (
     is_valid_reviewer_name,
     load_develop_config,
     parse_check_command_pairs,
+    parse_check_state_pairs,
     parse_effort,
     parse_model,
     parse_test_command,
@@ -271,6 +274,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "develop_check_commands metadata wins over this route-level flag.",
     )
     p.add_argument(
+        "--check-state",
+        action="append",
+        default=None,
+        metavar="NAME=STATE",
+        help="Override a gate check's blocking state (#273; repeatable): "
+        "required | informational | off, e.g. --check-state sast=off. `off` drops "
+        "the check (generalizes --no-test-gate). Project-context develop_check_states "
+        "metadata wins over this route-level flag.",
+    )
+    p.add_argument(
         "--review-profile",
         default=None,
         help="Review Profile (#139): minimal | standard | thorough (or a custom "
@@ -413,6 +426,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
         route_check_commands = parse_check_command_pairs(
             args.check_command, where="--check-command"
         )
+        route_check_states = parse_check_state_pairs(
+            args.check_state, where="--check-state"
+        )
         route_test_command = parse_test_command(
             args.test_command, where="--test-command"
         )
@@ -501,6 +517,8 @@ def _daemon_main(args: argparse.Namespace) -> int:
         # --check-command flag is the all-or-nothing fallback when metadata declares
         # none (mirrors how --test-command sits under develop_test_command).
         check_commands=settings.check_commands or route_check_commands,
+        # #273 slice 2: same all-or-nothing fallback for the per-check state overrides.
+        check_states=settings.check_states or route_check_states,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
@@ -846,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
         check_commands = parse_check_command_pairs(
             args.check_command, where="--check-command"
         )
+        check_states = parse_check_state_pairs(args.check_state, where="--check-state")
         test_command = parse_test_command(args.test_command, where="--test-command")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -877,6 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         test_gate=not args.no_test_gate,
         test_command=test_command,
         check_commands=check_commands,
+        check_states=check_states,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
@@ -908,10 +928,20 @@ def main(argv: list[str] | None = None) -> int:
         )
     if result.test_gate is not None:
         g = result.test_gate
-        # #140: the `test` check blocks iff the resolved profile declares it required.
-        test_required = any(
-            pc.name == "test" and pc.state == "required"
-            for pc in profile_resolution.profile.checks
+        # #140/#273 slice 2: the `test` check blocks iff its EFFECTIVE state is
+        # required — the same precedence (check_states → legacy test_gate → profile)
+        # the check-set is built from, via the shared helper. Reading the raw profile
+        # state would wrongly print "BLOCKS approval" for `--check-state
+        # test=informational` while the floor lets a red test pass (#280 review).
+        test_profile_state = next(
+            (pc.state for pc in profile_resolution.profile.checks if pc.name == "test"),
+            "required",
+        )
+        test_required = (
+            check_runner.effective_check_state(
+                config, "test", cast(CheckState, test_profile_state)
+            )
+            == "required"
         )
         blocking = " — BLOCKS approval" if (not g.passed and test_required) else ""
         print(f"  gate:     {g.verdict} (`{g.command}`, exit {g.exit_code}){blocking}")

@@ -270,6 +270,40 @@ def test_check_commands_bad_task_override_keeps_project() -> None:
     assert frictions[0].endswith("; keeping project default")
 
 
+# --- per-check state overrides (#273 slice 2) ─────────────────────────────
+
+
+def test_check_states_project_and_task_merge_per_key() -> None:
+    settings, frictions = _resolve(
+        {"develop_check_states": {"sast": "required", "lint": "off"}},
+        {"develop_check_states": {"sast": "off"}},
+    )
+    assert settings.check_states == {"sast": "off", "lint": "off"}  # per-key merge
+    assert frictions == ()
+
+
+def test_check_states_default_empty_no_friction() -> None:
+    settings, frictions = _resolve()
+    assert settings.check_states == {}
+    assert frictions == ()
+
+
+def test_check_states_bad_project_value_frictions_and_empties() -> None:
+    settings, frictions = _resolve({"develop_check_states": {"sast": "advisory"}})
+    assert settings.check_states == {}
+    assert len(frictions) == 1
+    assert frictions[0].endswith("; ignoring")
+
+
+def test_check_states_non_scalar_value_frictions_not_crash() -> None:
+    # #280 review finding 1: an unhashable state (a list from TOML/JSON metadata) must
+    # degrade to a [Friction], not crash the resolver with a TypeError (untrusted cfg).
+    settings, frictions = _resolve({"develop_check_states": {"sast": ["off"]}})
+    assert settings.check_states == {}
+    assert len(frictions) == 1
+    assert frictions[0].endswith("; ignoring")
+
+
 # ── friction ORDER (must match the original resolve_project_settings) ──
 
 

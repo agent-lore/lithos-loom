@@ -1317,6 +1317,25 @@ def test_daemon_check_commands_metadata_threads_into_config(
     assert captured["config"].check_commands == {"typecheck": "make typecheck"}
 
 
+def test_daemon_check_states_metadata_threads_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 slice 2: develop_check_states resolved from project metadata reaches
+    DevelopConfig.check_states on the daemon path."""
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {
+        "settings": ProjectDevelopSettings(check_states={"sast": "off"})
+    }
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path)
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].check_states == {"sast": "off"}
+
+
 def test_daemon_invalid_check_command_does_not_defeat_idempotency_replay(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

@@ -253,6 +253,123 @@ def test_main_rejects_malformed_check_command(tmp_git_repo: Path, capsys) -> Non
     assert "NAME=COMMAND" in capsys.readouterr().err
 
 
+def test_main_threads_check_states_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 slice 2: standalone --check-state (repeatable) → config.check_states."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "do a thing",
+            "--check-state",
+            "sast=off",
+        ]
+    )
+    assert rc == 0
+    assert captured["config"].check_states == {"sast": "off"}
+
+
+def _approved_with_red_test(tmp_path: Path):
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.test_gate import GateResult
+
+    return DevelopResult(
+        status="approved",
+        run_id="r1",
+        worktree=tmp_path,
+        branch="b",
+        base_sha="0" * 40,
+        commits=["c"],
+        rounds=1,
+        handoff_present=True,
+        coder_cost_usd=0.0,
+        review_cost_usd=0.0,
+        message="m",
+        test_gate=GateResult(
+            command="pytest", exit_code=1, passed=False, output_tail="boom"
+        ),
+    )
+
+
+def test_main_standalone_informational_red_test_does_not_print_blocks(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # #280 review finding 3: with --check-state test=informational a RED test does NOT
+    # block the floor, so the CLI summary must not print "BLOCKS approval" (it read the
+    # raw profile state before, wrongly claiming a block on an approved run).
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    monkeypatch.setattr(
+        main_mod, "develop", lambda config, **kw: _approved_with_red_test(tmp_path)
+    )
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--check-state",
+            "test=informational",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "RED" in out  # the gate verdict is still surfaced
+    assert "BLOCKS approval" not in out  # ... but it does not claim to block
+
+
+def test_main_standalone_required_red_test_prints_blocks(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # The default `standard` profile keeps `test` required, so a red test DOES block.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    monkeypatch.setattr(
+        main_mod, "develop", lambda config, **kw: _approved_with_red_test(tmp_path)
+    )
+    main_mod.main(["--repo", str(tmp_git_repo), "--description", "x"])
+    assert "BLOCKS approval" in capsys.readouterr().out
+
+
+def test_main_rejects_bad_check_state(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--check-state",
+            "sast=advisory",
+        ]
+    )
+    assert rc == 2
+    assert "must be one of" in capsys.readouterr().err
+
+
 def test_main_rejects_whitespace_test_command(tmp_git_repo: Path, capsys) -> None:
     # #278 review finding 2: a blank --test-command would false-green the required test
     # check (reaches `sh -c`, exits 0 without running tests). Reject it up front.
