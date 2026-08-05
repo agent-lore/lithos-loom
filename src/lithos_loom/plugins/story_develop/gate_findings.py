@@ -143,6 +143,25 @@ class GateLedger:
     def open_findings(self) -> list[GateFinding]:
         return [e.finding for e in self._entries.values() if e.finding.is_open]
 
+    def retire_check_family(self, base: str, round_no: int) -> None:
+        """Close (``fixed``) every open finding for check *base* **and** its
+        polyglot-qualified ``<base>.<ecosystem>`` variants (#278).
+
+        A raw per-check override (#273) is a single aggregate command emitted under
+        the bare check name (e.g. ``lint``), but a prior structured round on a polyglot
+        repo records findings under qualified names (``lint.python`` / ``lint.node``).
+        The override supersedes every ecosystem side, so all of them must be retired;
+        :meth:`apply_round` alone closes only the exact check name. Matches ``base``
+        itself and any check starting with ``base + "."`` (the literal dot avoids
+        matching a sibling like ``test-quality`` for ``test``)."""
+        checks = {base} | {
+            f.check
+            for f in self.open_findings()
+            if f.check == base or f.check.startswith(f"{base}.")
+        }
+        for check in checks:
+            self.apply_round(check, [], round_no)
+
     def blocking(self, threshold: str) -> list[GateFinding]:
         return [
             e.finding for e in self._entries.values() if e.finding.blocks(threshold)

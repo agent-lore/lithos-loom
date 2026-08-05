@@ -22,10 +22,18 @@ from pathlib import Path
 
 import typer
 
-from lithos_loom.cli.review import resolve_acceptance_criteria, resolve_reviewers
+from lithos_loom.cli.review import (
+    resolve_acceptance_criteria,
+    resolve_check_commands,
+    resolve_reviewers,
+)
 from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop import engines
-from lithos_loom.plugins.story_develop.config import DEFAULT_TEST_TIMEOUT, DevelopConfig
+from lithos_loom.plugins.story_develop.config import (
+    DEFAULT_TEST_TIMEOUT,
+    DevelopConfig,
+    parse_test_command,
+)
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
 from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_profile
 from lithos_loom.plugins.story_develop.review_resolve import resolve_change
@@ -65,6 +73,22 @@ def converge_command(
     ),
     base: str | None = typer.Option(
         None, "--base", help="Override the diff base (default: the PR merge-base)."
+    ),
+    check_command: list[str] | None = typer.Option(
+        None,
+        "--check-command",
+        help="Override a gate check's command as NAME=COMMAND (repeatable), e.g. "
+        "--check-command typecheck='make typecheck'. Runs the repo's own command "
+        "verbatim instead of the catalog default (which can over-scope and force "
+        "extra fix rounds). Overridable: lint / typecheck / sast / dep-audit / "
+        "coverage / semgrep (the `test` check uses --test-command).",
+    ),
+    test_command: str | None = typer.Option(
+        None,
+        "--test-command",
+        help="Command for the `test` gate check (overrides auto-detection). The `test` "
+        "check has bespoke detection, so it takes this dedicated flag rather than "
+        "--check-command.",
     ),
     coder: str | None = typer.Option(
         None, "--coder", help="Coder engine for the fix turns (claude / codex)."
@@ -118,6 +142,14 @@ def converge_command(
         raise typer.BadParameter("--test-timeout must be at least 1 second")
     if max_rounds is not None and max_rounds < 1:
         raise typer.BadParameter("--max-rounds must be at least 1")
+    check_commands = resolve_check_commands(check_command)
+    # Validate --test-command through the shared normaliser: a blank / whitespace-only
+    # value would otherwise reach `sh -c` unmodified, do no work, exit 0, and
+    # false-green the required `test` check without running tests (#278 review).
+    try:
+        test_command = parse_test_command(test_command, where="--test-command")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     repo = repo or Path.cwd()
     host = load_config(config)
@@ -160,7 +192,9 @@ def converge_command(
         reviewers=reviewers,
         base_branch=base or "main",
         max_cost_usd=max_cost,
+        test_command=test_command,
         test_timeout=test_timeout,
+        check_commands=check_commands,
         **overrides,
     )
 

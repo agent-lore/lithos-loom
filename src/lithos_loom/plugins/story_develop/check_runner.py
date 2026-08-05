@@ -37,6 +37,7 @@ from .check_set import (
     CheckResult,
     CheckSetResult,
     CheckState,
+    Stage,
     classify_execution,
 )
 from .config import DEFAULT_BLOCK_THRESHOLD, DevelopConfig
@@ -189,12 +190,40 @@ def _build_profile_checks(
     # default profile degrades gracefully, rather than letting `resolve_check_set` raise
     # `CheckApplicabilityError` (its error is reserved for a hand-curated desired set
     # that explicitly requires an unsupported check, #133 AC3).
-    desired = [
+    all_desired = [
         check_catalog.DesiredCheck(pc.name, pc.state)
         for pc in profile.checks
         if pc.name not in ("test", "format")
         and check_catalog.applies(pc.name, ecosystems)
     ]
+    stage_by_name: dict[str, Stage] = {pc.name: pc.stage for pc in profile.checks}
+    default_stage: Stage = "fast"
+    out: list[Check] = []
+    # #273: a check the repo overrides with its own command runs that command VERBATIM
+    # — trusted as-is (no uv-wrap, no tool-probe, no catalog lookup, and **not**
+    # machine-ified — exactly like `test_command`) — and beats catalog discovery. This
+    # is the fix for a canonical command that over-scopes vs the repo's real policy
+    # (bare `uv run pyright` scanning a test tree full of pre-existing type debt vs the
+    # repo's scoped `make typecheck`). `raw_exit=True` makes the check read its raw exit
+    # code end-to-end (the ledger-apply + floor both skip the adapter path), so an
+    # override whose command *begins* with an adapter tool (`ruff …`) is still run
+    # exactly as written — no JSON/exit-zero flags appended to the operator's string —
+    # at the cost of opting that check out of structured findings. The override applies
+    # only where the canonical check applies to a detected ecosystem (an override for an
+    # N/A check is inert). Only the non-overridden remainder go through catalog
+    # resolution below.
+    overridden = [d for d in all_desired if d.name in config.check_commands]
+    desired = [d for d in all_desired if d.name not in config.check_commands]
+    for d in overridden:
+        out.append(
+            Check(
+                name=d.name,
+                command=config.check_commands[d.name],
+                state=d.state,
+                stage=stage_by_name.get(d.name, default_stage),
+                raw_exit=True,
+            )
+        )
     # Pass 1: enumerate candidate commands (every tool assumed present) so the image
     # can be probed once for the tools this profile would run.
     candidates = check_catalog.resolve_check_set(
@@ -214,8 +243,6 @@ def _build_profile_checks(
         tool_available=lambda t: t in available,
         uv_managed=uv_managed,
     )
-    stage_by_name = {pc.name: pc.stage for pc in profile.checks}
-    out: list[Check] = []
     for c in resolved:
         stage = stage_by_name.get(c.name.split(".")[0], "fast")
         if c.command:
@@ -281,7 +308,14 @@ def check_result_blocks(
     # detected — `command_tool` is "" for an empty command, so a reorder can never
     # hit ``"".split()[0]``.
     tool = gate_adapters.command_tool(r.check.command)
-    if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
+    # #273: a verbatim override (raw_exit) reads its raw exit code even when its command
+    # begins with an adapter tool — the operator ran their own command, not the JSON
+    # adapter form, so there is no finding ledger to read; skip straight to raw exit.
+    if (
+        not r.check.raw_exit
+        and gate_ledger is not None
+        and tool in gate_adapters.SUPPORTED_TOOLS
+    ):
         if any(f.check == r.check.name for f in gate_ledger.blocking(threshold)):
             return True
         # Floor-liveness (#167): an adapter exits clean via `--exit-zero` / a clean
@@ -407,19 +441,34 @@ def run_check_set(
             gate = None
         _write_check_output(round_dir, check, gate)
         if gate is not None:
-            # #132: structure a finding-producing check's output into the ledger,
-            # then drop the full output so it never propagates into the result.
-            # Resolve the real adapter tool past a `uv run` prefix or a pipeline
-            # producer (#167: `uv export … | pip-audit …` → pip-audit), exactly like
-            # the build (#166) and floor sites — a bare `split()[0]` would see `uv`
-            # and skip the ledger, so dep-audit findings would never be structured.
             tool = gate_adapters.command_tool(check.command)
-            if gate_ledger is not None and tool in gate_adapters.SUPPORTED_TOOLS:
-                gate_ledger.apply_round(
-                    check.name,
-                    gate_adapters.parse_findings(check.name, tool, gate.full_output),
-                    round_no,
-                )
+            if gate_ledger is not None:
+                if check.raw_exit:
+                    # #273: a verbatim override (raw_exit) has no structured
+                    # findings — it ran the operator's command, not the adapter's
+                    # JSON form. Retire the whole check FAMILY (bare name +
+                    # polyglot-qualified `<name>.<eco>`, #278) so any findings a
+                    # PRIOR adapter-backed round left open for this check (on a
+                    # resume where it flipped to a raw override) stop surfacing as
+                    # authoritative in the coder / reviewer prompts +
+                    # ``[DevelopResult]`` (all read ``open_findings``) — matching the
+                    # floor, which reads the raw exit for a raw check.
+                    gate_ledger.retire_check_family(check.name, round_no)
+                elif tool in gate_adapters.SUPPORTED_TOOLS:
+                    # #132: structure a finding-producing check's output into the
+                    # ledger, then drop the full output so it never propagates into
+                    # the result. Resolve the real adapter tool past a `uv run` prefix
+                    # or a pipeline producer (#167: `uv export … | pip-audit …` →
+                    # pip-audit), like the build (#166) + floor sites — a bare
+                    # `split()[0]` sees `uv` and skips the ledger, so dep-audit
+                    # findings would never be structured.
+                    gate_ledger.apply_round(
+                        check.name,
+                        gate_adapters.parse_findings(
+                            check.name, tool, gate.full_output
+                        ),
+                        round_no,
+                    )
             gate = replace(gate, full_output="")
             logger.info(
                 "story-develop %s: round %d %s check %s (`%s`, exit %d)",

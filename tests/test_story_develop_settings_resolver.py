@@ -224,6 +224,52 @@ def test_block_on_red_deprecation_friction() -> None:
     assert frictions[0].startswith("develop_block_on_red is removed and ignored")
 
 
+# ── per-check command overrides (#273) ─────────────────────────────────
+
+
+def test_check_commands_project_layer() -> None:
+    settings, frictions = _resolve(
+        {"develop_check_commands": {"typecheck": "make typecheck"}}
+    )
+    assert settings.check_commands == {"typecheck": "make typecheck"}
+    assert frictions == ()
+
+
+def test_check_commands_default_empty_no_friction() -> None:
+    settings, frictions = _resolve()
+    assert settings.check_commands == {}
+    assert frictions == ()
+
+
+def test_check_commands_task_merges_over_project_per_key() -> None:
+    # A task override merges PER-KEY onto the project map (not wholesale replace): the
+    # task re-points typecheck, the project's lint override survives.
+    settings, frictions = _resolve(
+        {"develop_check_commands": {"typecheck": "make tc", "lint": "make lint"}},
+        {"develop_check_commands": {"typecheck": "make tc2"}},
+    )
+    assert settings.check_commands == {"typecheck": "make tc2", "lint": "make lint"}
+    assert frictions == ()
+
+
+def test_check_commands_bad_project_value_frictions_and_empties() -> None:
+    settings, frictions = _resolve({"develop_check_commands": {"typcheck": "x"}})
+    assert settings.check_commands == {}
+    assert len(frictions) == 1
+    assert frictions[0].startswith("develop_check_commands: unknown check 'typcheck'")
+    assert frictions[0].endswith("; ignoring")
+
+
+def test_check_commands_bad_task_override_keeps_project() -> None:
+    settings, frictions = _resolve(
+        {"develop_check_commands": {"lint": "make lint"}},
+        {"develop_check_commands": "notatable"},
+    )
+    assert settings.check_commands == {"lint": "make lint"}  # project kept
+    assert len(frictions) == 1
+    assert frictions[0].endswith("; keeping project default")
+
+
 # ── friction ORDER (must match the original resolve_project_settings) ──
 
 

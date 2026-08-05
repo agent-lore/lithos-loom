@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -140,6 +140,10 @@ class ProjectDevelopSettings:
     # blocking is the review profile's, not a separate knob — `block_on_red` removed.)
     test_command: str | None = None
     test_gate: bool | None = None
+    # #273: per-check command overrides ({check_name: command}) resolved from
+    # ``develop_check_commands`` (project) + a per-task table merged per-key. Empty
+    # when neither layer declares any. Threaded onto ``DevelopConfig.check_commands``.
+    check_commands: dict[str, str] = field(default_factory=dict)
     # Review Profile (#139). ``review_profile_project`` is the project-layer name
     # (context-doc ``develop_review_profile``); :func:`apply_review_profile` then
     # resolves task > project > host > builtin into ``review_profile`` (the
@@ -304,6 +308,7 @@ def resolve_project_settings(
         image=scalars.image,
         test_command=scalars.test_command,
         test_gate=scalars.test_gate,
+        check_commands=scalars.check_commands,
         review_profile_project=scalars.review_profile_project,
         frictions=tuple(frictions),
     )

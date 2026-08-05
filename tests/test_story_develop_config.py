@@ -11,9 +11,12 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop.config import (
+    CANONICAL_CHECK_NAMES,
+    OVERRIDABLE_CHECK_NAMES,
     DevelopConfig,
     ReviewerSpec,
     load_develop_config,
+    parse_check_commands,
     parse_effort,
     parse_image,
     parse_model,
@@ -167,6 +170,62 @@ def test_parse_image_strips_surrounding_whitespace() -> None:
 def test_parse_image_rejects_bad(bad: object) -> None:
     with pytest.raises(ValueError, match="image must be a non-empty string"):
         parse_image(bad, where="x")
+
+
+# --- parse_check_commands (#273: per-check command override) -----------------
+
+
+def test_parse_check_commands_none_is_empty() -> None:
+    assert parse_check_commands(None, where="x") == {}
+
+
+def test_parse_check_commands_accepts_and_strips() -> None:
+    got = parse_check_commands(
+        {"typecheck": "  make typecheck  ", "lint": "make lint"}, where="x"
+    )
+    assert got == {"typecheck": "make typecheck", "lint": "make lint"}
+
+
+def test_parse_check_commands_rejects_non_table() -> None:
+    with pytest.raises(ValueError, match="must be a table"):
+        parse_check_commands("make typecheck", where="x")
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, [], None])
+def test_parse_check_commands_rejects_empty_or_nonstring_command(bad: object) -> None:
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        parse_check_commands({"typecheck": bad}, where="x")
+
+
+def test_parse_check_commands_rejects_unknown_check() -> None:
+    with pytest.raises(ValueError, match="unknown check"):
+        parse_check_commands({"typcheck": "make typecheck"}, where="x")
+
+
+def test_parse_check_commands_rejects_test_key_steers_to_test_command() -> None:
+    # `test` has bespoke detection/selection — steer to test_command, never shadow it.
+    with pytest.raises(ValueError, match="test_command"):
+        parse_check_commands({"test": "make test"}, where="x")
+
+
+def test_parse_check_commands_rejects_format_key_as_inert() -> None:
+    # `format` is not a standalone gate check (autoformat handles it) → override inert.
+    with pytest.raises(ValueError, match="format"):
+        parse_check_commands({"format": "ruff format"}, where="x")
+
+
+def test_canonical_check_names_matches_catalog() -> None:
+    # config keeps a LITERAL name-set (importing check_catalog would cycle:
+    # config → profiles → check_set → test_gate → config); pin it to the catalog.
+    from lithos_loom.plugins.story_develop.check_catalog import CANONICAL_CHECKS
+
+    assert {m.name for m in CANONICAL_CHECKS} == CANONICAL_CHECK_NAMES
+    assert CANONICAL_CHECK_NAMES - {"test", "format"} == OVERRIDABLE_CHECK_NAMES
+
+
+def test_develop_config_check_commands_defaults_empty(tmp_path: Path) -> None:
+    cfg = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
+    assert cfg.check_commands == {}
 
 
 # --- codex agent config (#94) -----------------------------------------------

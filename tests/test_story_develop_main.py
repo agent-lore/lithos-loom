@@ -176,6 +176,100 @@ def test_main_threads_model_and_effort_into_config(
         assert spec.model == "sonnet" and spec.effort == "high"
 
 
+def test_main_threads_check_commands_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273: standalone --check-command (repeatable) lands on config.check_commands."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "do a thing",
+            "--check-command",
+            "typecheck=make typecheck",
+            "--check-command",
+            "lint=make lint",
+        ]
+    )
+    assert rc == 0
+    assert captured["config"].check_commands == {
+        "typecheck": "make typecheck",
+        "lint": "make lint",
+    }
+
+
+def test_main_rejects_unknown_check_command(tmp_git_repo: Path, capsys) -> None:
+    # #273: a bad --check-command fails fast on the standalone path (no idempotency
+    # replay here), before any config build / develop() run.
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--check-command",
+            "typcheck=make typecheck",
+        ]
+    )
+    assert rc == 2
+    assert "unknown check" in capsys.readouterr().err
+
+
+def test_main_rejects_malformed_check_command(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--check-command",
+            "make typecheck",  # no '='
+        ]
+    )
+    assert rc == 2
+    assert "NAME=COMMAND" in capsys.readouterr().err
+
+
+def test_main_rejects_whitespace_test_command(tmp_git_repo: Path, capsys) -> None:
+    # #278 review finding 2: a blank --test-command would false-green the required test
+    # check (reaches `sh -c`, exits 0 without running tests). Reject it up front.
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--test-command",
+            "   ",
+        ]
+    )
+    assert rc == 2
+    assert "test_command must be a non-empty string" in capsys.readouterr().err
+
+
 def test_main_standalone_halts_on_unknown_review_profile(
     tmp_git_repo: Path, monkeypatch, capsys
 ) -> None:

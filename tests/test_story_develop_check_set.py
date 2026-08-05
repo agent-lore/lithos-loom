@@ -218,6 +218,70 @@ def test_floor_required_no_adapter_check_reads_raw_exit() -> None:
     assert check_runner.gate_floor_blocks(green, None) is False
 
 
+def test_floor_raw_exit_override_reads_raw_exit_not_ledger() -> None:
+    # #273: a verbatim override (raw_exit) whose command begins with an adapter tool
+    # (ruff) reads its RAW exit code end-to-end — even a stale MAJOR `lint` ledger
+    # finding is ignored, because the operator ran their own command (human output),
+    # not the JSON adapter form. Green passes despite the ledger; red blocks.
+    override = Check("lint", "ruff check src/", "required", raw_exit=True)
+    red = CheckSetResult((CheckResult(override, "ran", _red()),))
+    green = CheckSetResult((CheckResult(override, "ran", _green()),))
+    led = _ledger_with("lint", severity="major")
+    assert check_runner.gate_floor_blocks(red, led) is True
+    assert check_runner.gate_floor_blocks(green, led) is False
+
+
+def test_run_check_set_raw_override_retires_stale_ledger_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #278 review finding 1: on a resume where `lint` flipped from adapter-backed to a
+    # raw override, a raw run must RETIRE (close ``fixed``) the stale open findings a
+    # prior round left in the ledger — so they stop surfacing as authoritative in the
+    # coder / reviewer prompts + [DevelopResult] (all read ``open_findings``), not just
+    # be ignored by the floor.
+    from lithos_loom.plugins.story_develop import containers, test_gate
+
+    monkeypatch.setattr(test_gate, "export_tree", lambda wt, sha, dest: None)
+    monkeypatch.setattr(containers, "container_name", lambda run_id, suffix: "c")
+    monkeypatch.setattr(test_gate, "build_gate_command", lambda **kw: ["true"])
+    monkeypatch.setattr(test_gate, "run_gate_container", lambda *a, **k: _green())
+    monkeypatch.setattr(check_runner, "_write_check_output", lambda *a, **k: None)
+
+    # A polyglot repo records qualified `lint.python` / `lint.node` findings; a raw
+    # override is emitted under the bare `lint`, so the retire must cover the FAMILY.
+    led = GateLedger()
+    for name in ("lint", "lint.python", "lint.node"):
+        led.apply_round(
+            name,
+            [
+                GateFinding(
+                    check=name,
+                    tool="ruff",
+                    rule="E501",
+                    severity="major",
+                    message="m",
+                    file="a.py",
+                    line=1,
+                )
+            ],
+            1,
+        )
+    assert {f.check for f in led.open_findings()} == {
+        "lint",
+        "lint.python",
+        "lint.node",
+    }
+
+    raw = Check("lint", "ruff check src/", "required", raw_exit=True)
+    check_runner.run_check_set(_config(tmp_path), tmp_path, "sha", 2, (raw,), led)
+
+    # retired: NO open lint-family findings remain, so nothing authoritative surfaces.
+    assert [f for f in led.open_findings() if f.check.split(".")[0] == "lint"] == []
+    # ... and render_check_summary (what the coder/reviewers see) shows none either.
+    cs = CheckSetResult((CheckResult(raw, "ran", _green()),))
+    assert "gate/lint" not in render_check_summary(cs, for_coder=True, gate_ledger=led)
+
+
 def test_floor_uv_wrapped_adapter_reads_ledger_via_command_tool() -> None:
     # #165: a required `uv run pip-audit` check exits GREEN this round, but the ledger
     # carries a MAJOR `dep-audit` finding. The floor must resolve the REAL adapter tool
@@ -423,6 +487,100 @@ def test_no_detected_command_yields_empty_set(
 ) -> None:
     monkeypatch.setattr(check_runner, "_resolve_test_command", lambda config, wt: None)
     assert build_check_set(_config(tmp_path, test_gate=True), tmp_path) == ()
+
+
+# --- per-check command override (#273) ----------------------------------------
+
+
+def test_check_command_override_beats_catalog_and_is_not_uv_wrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #273: a repo-declared per-check command runs VERBATIM (like test_command) — not
+    # the catalog canonical, and NOT uv-wrapped even on a uv repo. This is the fix for
+    # the pyright-over-scope gate wall: `typecheck = "make typecheck"` (the repo's own
+    # scoped command) instead of a bare `uv run pyright` that scans the whole tree.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "uv run pytest"
+    )
+    (tmp_path / "uv.lock").write_text("")
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"typecheck": "make typecheck"},
+    )
+    checks = build_check_set(cfg, tmp_path)
+    by = {c.name: c for c in checks}
+    assert by["typecheck"].command == "make typecheck"  # override, verbatim
+    assert by["typecheck"].state == "required"  # profile state preserved
+    assert by["typecheck"].raw_exit is True  # reads raw exit, no adapter path
+    assert by["lint"].command.startswith("ruff check")  # non-overridden: canonical
+    assert by["lint"].raw_exit is False  # ... and still adapter-backed
+
+
+def test_check_command_override_of_adapter_tool_runs_verbatim_raw_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #273 review finding 1: an override whose command BEGINS with an adapter tool
+    # (ruff) must run VERBATIM — no `--output-format=json --exit-zero` appended — and
+    # carry raw_exit=True. Machine-ifying it would break the documented "verbatim"
+    # contract and could clash with the repo's own flags / shell composition.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"lint": "ruff check src/"},
+    )
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    assert by["lint"].command == "ruff check src/"  # verbatim — NO adapter flags
+    assert "--output-format" not in by["lint"].command
+    assert "--exit-zero" not in by["lint"].command
+    assert by["lint"].raw_exit is True
+
+
+def test_check_command_override_is_emitted_even_when_its_tool_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The override is trusted-as-is (no tool-probe), exactly like test_command — so a
+    # `make typecheck` override is emitted regardless of whether `make` probes present
+    # (a bad command surfaces when the gate container runs it, not here).
+    _python(monkeypatch, present=("ruff", "bandit"))  # no `make`, no `uv`
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"typecheck": "make typecheck"},
+    )
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    assert by["typecheck"].command == "make typecheck"
+
+
+def test_check_command_override_ignored_when_check_not_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `typecheck` has no Rust analogue → declared N/A → an override for it is inert
+    # (no phantom check materialises for an ecosystem the catalog doesn't map).
+    monkeypatch.setattr(
+        check_runner.detection, "detect_ecosystems", lambda wt: ("rust",)
+    )
+    monkeypatch.setattr(
+        check_runner.test_gate, "probe_tools", lambda image, tools: list(tools)
+    )
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "cargo test"
+    )
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        check_commands={"typecheck": "make typecheck"},
+    )
+    checks = build_check_set(cfg, tmp_path)
+    assert all(c.name != "typecheck" for c in checks)
 
 
 # --- render_check_summary: feed the gate to coder + reviewer prompts (#136) ---

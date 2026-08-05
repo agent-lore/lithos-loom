@@ -22,6 +22,8 @@ from lithos_loom.plugins.story_develop.config import (
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
     ReviewerSpec,
+    parse_check_command_pairs,
+    parse_test_command,
 )
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
 from lithos_loom.plugins.story_develop.personas import canonical_personas
@@ -57,6 +59,22 @@ def review_command(
     base: str | None = typer.Option(
         None, "--base", help="Override the base ref (default: merge-base with main)."
     ),
+    check_command: list[str] | None = typer.Option(
+        None,
+        "--check-command",
+        help="Override a gate check's command as NAME=COMMAND (repeatable), e.g. "
+        "--check-command typecheck='make typecheck'. Runs the repo's own command "
+        "verbatim instead of the catalog default (which can over-scope). "
+        "Overridable: lint / typecheck / sast / dep-audit / coverage / semgrep "
+        "(the `test` check uses --test-command).",
+    ),
+    test_command: str | None = typer.Option(
+        None,
+        "--test-command",
+        help="Command for the `test` gate check (overrides auto-detection). The `test` "
+        "check has bespoke detection, so it takes this dedicated flag rather than "
+        "--check-command.",
+    ),
     test_timeout: int = typer.Option(
         DEFAULT_TEST_TIMEOUT,
         "--test-timeout",
@@ -86,6 +104,14 @@ def review_command(
         raise typer.BadParameter(str(exc)) from exc
     if test_timeout < 1:
         raise typer.BadParameter("--test-timeout must be at least 1 second")
+    check_commands = resolve_check_commands(check_command)
+    # Validate --test-command through the shared normaliser: a blank / whitespace-only
+    # value would otherwise reach `sh -c` unmodified, do no work, exit 0, and
+    # false-green the required `test` check without running tests (#278 review).
+    try:
+        test_command = parse_test_command(test_command, where="--test-command")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     repo = repo or Path.cwd()
     host = load_config(config)
 
@@ -111,7 +137,9 @@ def review_command(
         review_profile=profile,
         reviewers=reviewers,
         base_branch=base or "main",
+        test_command=test_command,
         test_timeout=test_timeout,
+        check_commands=check_commands,
     )
 
     report = review_change(develop_config, resolved, keep_worktree=keep_worktree)
@@ -161,3 +189,18 @@ def resolve_reviewers(
         return tuple(specs)
     panel = profile_panel(profile, [])
     return panel if panel is not None else ()
+
+
+def resolve_check_commands(check_command: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}``
+    map (#273). Shared by ``review`` and ``converge``.
+
+    Delegates to the framework-neutral :func:`config.parse_check_command_pairs` (also
+    used by the ``__main__`` route flag), surfacing any :class:`ValueError` as a
+    :class:`typer.BadParameter` (exit 2) before any container work — so the CLI and the
+    project-metadata surface reject the same garbage identically.
+    """
+    try:
+        return parse_check_command_pairs(check_command, where="--check-command")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc

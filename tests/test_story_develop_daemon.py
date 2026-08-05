@@ -1271,6 +1271,108 @@ def test_daemon_mode_rejects_standalone_task_flags(
     assert "--description" in capsys.readouterr().err
 
 
+def _stub_daemon_run(monkeypatch, tmp_path: Path, captured: dict) -> None:
+    """Wire the minimal daemon collaborators so main() reaches the config build +
+    fake develop() without touching Lithos / Docker."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: captured.get("settings", ProjectDevelopSettings()),
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a, **k: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **k: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+
+
+def test_daemon_check_commands_metadata_threads_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273: develop_check_commands resolved from project metadata (ProjectDevelop-
+    Settings.check_commands) reaches DevelopConfig.check_commands on the daemon path."""
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {
+        "settings": ProjectDevelopSettings(
+            check_commands={"typecheck": "make typecheck"}
+        )
+    }
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path)
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].check_commands == {"typecheck": "make typecheck"}
+
+
+def test_daemon_invalid_check_command_does_not_defeat_idempotency_replay(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 review finding 2: a completed idempotency record replays BEFORE any
+    route --check-command validation, so a malformed route override can't strand a
+    task that already ran. main() must replay (exit 0, prior result.json) and never
+    resolve config / run develop()."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    prior = {"schema_version": 1, "task_id": "t-1", "status": "approved"}
+    monkeypatch.setattr(
+        main_mod, "lookup_completed", lambda key, expected_task_id: prior
+    )
+
+    def _boom_develop(*a, **k):
+        raise AssertionError("develop must not run when a completed record replays")
+
+    def _boom_settings(*a, **k):
+        raise AssertionError("config must not resolve before idempotency replay")
+
+    monkeypatch.setattr(main_mod, "develop", _boom_develop)
+    monkeypatch.setattr(main_mod, "resolve_project_settings", _boom_settings)
+
+    argv, result_file = _daemon_args(
+        tmp_git_repo, tmp_path, "--check-command", "typcheck=bogus"
+    )
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert json.loads(result_file.read_text(encoding="utf-8")) == prior
+
+
+def test_daemon_invalid_check_command_reports_config_error_when_no_prior(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273: with no prior record, a malformed route --check-command is reported as a
+    schema-valid `config` failure (task id known post-replay), not a bare exit."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    monkeypatch.setattr(
+        main_mod, "lookup_completed", lambda key, expected_task_id: None
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("develop must not run on a config rejection")
+
+    monkeypatch.setattr(main_mod, "develop", _boom)
+
+    argv, result_file = _daemon_args(
+        tmp_git_repo, tmp_path, "--check-command", "typcheck=bogus"
+    )
+    assert main_mod.main(argv) == EXIT_BAD_INPUT
+    payload = json.loads(result_file.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["error"]["category"] == "config"
+    assert payload["task_id"] == "t-1"
+
+
 def test_daemon_mode_requires_result_file_and_work_dir(
     tmp_git_repo: Path, tmp_path: Path, capsys
 ) -> None:
