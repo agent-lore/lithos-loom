@@ -93,6 +93,30 @@ def test_vanished_finding_is_closed_fixed_by_rerun() -> None:
     assert led.open_findings() == []
 
 
+def test_retire_check_family_closes_bare_and_qualified() -> None:
+    # #278: a raw `lint` override supersedes a polyglot repo's qualified
+    # `lint.python` / `lint.node` structured findings — retiring the family must close
+    # the bare name AND every `lint.*` variant (apply_round alone closes only exact).
+    led = GateLedger()
+    led.apply_round("lint", [_gf("lint", "E501")], 1)
+    led.apply_round("lint.python", [_gf("lint.python", "E502")], 1)
+    led.apply_round("lint.node", [_gf("lint.node", "no-unused")], 1)
+    # a sibling check whose name merely shares the prefix (no literal dot) is untouched
+    led.apply_round("lint-extra", [_gf("lint-extra", "X1")], 1)
+    led.apply_round("test", [_gf("test", "T1")], 1)
+
+    led.retire_check_family("lint", 2)
+
+    open_checks = {f.check for f in led.open_findings()}
+    assert open_checks == {"lint-extra", "test"}  # only the family retired
+
+
+def test_retire_check_family_noop_when_nothing_open() -> None:
+    led = GateLedger()
+    led.retire_check_family("lint", 1)  # must not raise on an empty ledger
+    assert led.open_findings() == []
+
+
 def test_closure_is_scoped_to_the_check_that_ran() -> None:
     led = GateLedger()
     led.apply_round("sast", [_gf("sast", "B602")], 1)

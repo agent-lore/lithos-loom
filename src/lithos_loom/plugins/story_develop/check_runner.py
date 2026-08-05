@@ -446,13 +446,14 @@ def run_check_set(
                 if check.raw_exit:
                     # #273: a verbatim override (raw_exit) has no structured
                     # findings — it ran the operator's command, not the adapter's
-                    # JSON form. An EMPTY apply_round closes (``fixed``) any findings
-                    # a PRIOR adapter-backed round left open for this check (on a
-                    # resume where it flipped to a raw override), so they stop
-                    # surfacing as authoritative in the coder / reviewer prompts +
+                    # JSON form. Retire the whole check FAMILY (bare name +
+                    # polyglot-qualified `<name>.<eco>`, #278) so any findings a
+                    # PRIOR adapter-backed round left open for this check (on a
+                    # resume where it flipped to a raw override) stop surfacing as
+                    # authoritative in the coder / reviewer prompts +
                     # ``[DevelopResult]`` (all read ``open_findings``) — matching the
                     # floor, which reads the raw exit for a raw check.
-                    gate_ledger.apply_round(check.name, [], round_no)
+                    gate_ledger.retire_check_family(check.name, round_no)
                 elif tool in gate_adapters.SUPPORTED_TOOLS:
                     # #132: structure a finding-producing check's output into the
                     # ledger, then drop the full output so it never propagates into

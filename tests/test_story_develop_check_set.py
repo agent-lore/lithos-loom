@@ -247,14 +247,36 @@ def test_run_check_set_raw_override_retires_stale_ledger_findings(
     monkeypatch.setattr(test_gate, "run_gate_container", lambda *a, **k: _green())
     monkeypatch.setattr(check_runner, "_write_check_output", lambda *a, **k: None)
 
-    led = _ledger_with("lint", severity="major")
-    assert any(f.check == "lint" for f in led.open_findings())  # stale finding present
+    # A polyglot repo records qualified `lint.python` / `lint.node` findings; a raw
+    # override is emitted under the bare `lint`, so the retire must cover the FAMILY.
+    led = GateLedger()
+    for name in ("lint", "lint.python", "lint.node"):
+        led.apply_round(
+            name,
+            [
+                GateFinding(
+                    check=name,
+                    tool="ruff",
+                    rule="E501",
+                    severity="major",
+                    message="m",
+                    file="a.py",
+                    line=1,
+                )
+            ],
+            1,
+        )
+    assert {f.check for f in led.open_findings()} == {
+        "lint",
+        "lint.python",
+        "lint.node",
+    }
 
     raw = Check("lint", "ruff check src/", "required", raw_exit=True)
     check_runner.run_check_set(_config(tmp_path), tmp_path, "sha", 2, (raw,), led)
 
-    # retired: no open `lint` findings remain, so nothing authoritative is surfaced.
-    assert [f for f in led.open_findings() if f.check == "lint"] == []
+    # retired: NO open lint-family findings remain, so nothing authoritative surfaces.
+    assert [f for f in led.open_findings() if f.check.split(".")[0] == "lint"] == []
     # ... and render_check_summary (what the coder/reviewers see) shows none either.
     cs = CheckSetResult((CheckResult(raw, "ran", _green()),))
     assert "gate/lint" not in render_check_summary(cs, for_coder=True, gate_ledger=led)
