@@ -43,9 +43,11 @@ import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from ...plugin_runner import write_result_atomically
-from . import engines
+from . import check_runner, engines
+from .check_set import CheckState
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
     DEFAULT_CODER_TIMEOUT,
@@ -926,10 +928,20 @@ def main(argv: list[str] | None = None) -> int:
         )
     if result.test_gate is not None:
         g = result.test_gate
-        # #140: the `test` check blocks iff the resolved profile declares it required.
-        test_required = any(
-            pc.name == "test" and pc.state == "required"
-            for pc in profile_resolution.profile.checks
+        # #140/#273 slice 2: the `test` check blocks iff its EFFECTIVE state is
+        # required — the same precedence (check_states → legacy test_gate → profile)
+        # the check-set is built from, via the shared helper. Reading the raw profile
+        # state would wrongly print "BLOCKS approval" for `--check-state
+        # test=informational` while the floor lets a red test pass (#280 review).
+        test_profile_state = next(
+            (pc.state for pc in profile_resolution.profile.checks if pc.name == "test"),
+            "required",
+        )
+        test_required = (
+            check_runner.effective_check_state(
+                config, "test", cast(CheckState, test_profile_state)
+            )
+            == "required"
         )
         blocking = " — BLOCKS approval" if (not g.passed and test_required) else ""
         print(f"  gate:     {g.verdict} (`{g.command}`, exit {g.exit_code}){blocking}")

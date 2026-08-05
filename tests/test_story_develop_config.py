@@ -258,6 +258,14 @@ def test_parse_check_states_rejects_bad_state_value() -> None:
         parse_check_states({"sast": "advisory"}, where="x")
 
 
+@pytest.mark.parametrize("bad", [["off"], {"a": 1}, 3, None])
+def test_parse_check_states_rejects_non_string_value(bad: object) -> None:
+    # #280 review finding 1: a non-scalar (unhashable) state must raise ValueError, not
+    # a TypeError from `state not in <frozenset>` (only ValueError is caught upstream).
+    with pytest.raises(ValueError, match="must be one of"):
+        parse_check_states({"sast": bad}, where="x")
+
+
 def test_parse_check_states_rejects_unknown_check() -> None:
     with pytest.raises(ValueError, match="unknown check"):
         parse_check_states({"typcheck": "off"}, where="x")

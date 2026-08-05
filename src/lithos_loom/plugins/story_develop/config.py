@@ -286,7 +286,11 @@ def parse_check_states(value: object, *, where: str) -> dict[str, str]:
                 f"{where}: unknown check {key!r} "
                 f"(stateable: {', '.join(sorted(STATEABLE_CHECK_NAMES))})"
             )
-        if state not in CHECK_STATE_OVERRIDES:
+        # isinstance FIRST: a non-scalar state (a list / table from TOML or JSON
+        # metadata) is unhashable, so a bare ``state not in CHECK_STATE_OVERRIDES``
+        # would raise TypeError and escape the resolver's ValueError-only friction
+        # catch — violating its "never raises" contract (#280 review).
+        if not isinstance(state, str) or state not in CHECK_STATE_OVERRIDES:
             raise ValueError(
                 f"{where}: state for check {key!r} must be one of "
                 f"{', '.join(sorted(CHECK_STATE_OVERRIDES))} (got {state!r})"

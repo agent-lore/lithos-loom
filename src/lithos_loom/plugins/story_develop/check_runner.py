@@ -82,12 +82,12 @@ def _resolve_test_command(config: DevelopConfig, wt: Path) -> str | None:
     return chosen
 
 
-_EffectiveState = Literal["required", "informational", "off"]
+EffectiveState = Literal["required", "informational", "off"]
 
 
-def _effective_check_state(
+def effective_check_state(
     config: DevelopConfig, name: str, profile_state: CheckState
-) -> _EffectiveState:
+) -> EffectiveState:
     """The check's blocking state after operator overrides (#273 slice 2).
 
     Precedence: an explicit ``config.check_states[name]`` wins; otherwise, for the
@@ -100,12 +100,12 @@ def _effective_check_state(
     """
     override = config.check_states.get(name)
     if override is not None:
-        return cast(_EffectiveState, override)
+        return cast(EffectiveState, override)
     if name == "test" and not config.test_gate:
         return "off"
     # A profile only declares required / informational for a real gate check, both of
     # which are valid effective states.
-    return cast(_EffectiveState, profile_state)
+    return cast(EffectiveState, profile_state)
 
 
 def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
@@ -140,7 +140,7 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     # the compiler / test run IS the type check (there is no separate `typecheck`
     # check), so turning the `test` check off silently removes type checking too. Warn
     # loudly rather than let it pass unnoticed.
-    if _effective_check_state(config, "test", "required") == "off" and any(
+    if effective_check_state(config, "test", "required") == "off" and any(
         e in ("rust", "go") for e in ecosystems
     ):
         logger.warning(
@@ -161,7 +161,7 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
         if pc.name == "test":
             # #273 slice 2: apply the effective state (check_states / legacy test_gate);
             # `off` drops the test check, mirroring the old `test_gate=false` behaviour.
-            state = _effective_check_state(config, "test", pc.state)
+            state = effective_check_state(config, "test", pc.state)
             if state != "off":
                 checks.extend(_build_test_check(config, state, ecosystems, wt))
         else:
@@ -178,7 +178,7 @@ def _build_test_check(
     """The ``test`` check, with its **effective** ``state`` (#127/#159/#273, ADR §4).
 
     ``state`` is the effective blocking state resolved by
-    :func:`_effective_check_state` (``check_states["test"]`` / the legacy
+    :func:`effective_check_state` (``check_states["test"]`` / the legacy
     ``test_gate=false`` / the profile default) — the caller has already dropped the
     check when that resolves to ``off`` (the old ``test_gate=false`` escape hatch, now a
     special case of the per-check 3-state). Its blocking is that ``state``: ``required``
@@ -244,7 +244,7 @@ def _build_profile_checks(
             pc.name, ecosystems
         ):
             continue
-        eff_state = _effective_check_state(config, pc.name, pc.state)
+        eff_state = effective_check_state(config, pc.name, pc.state)
         if eff_state == "off":
             continue
         # eff_state is now `required` | `informational` — both valid CheckStates.
@@ -540,6 +540,31 @@ def run_check_set(
     return CheckSetResult(results=tuple(results))
 
 
+def reconcile_off_check_states(config: DevelopConfig, gate_ledger: GateLedger) -> bool:
+    """Retire any persisted findings for checks the operator has turned **off**
+    (#273 slice 2 / #280 review).
+
+    An ``off`` check is removed from the built check-set, so :func:`run_check_set`
+    never runs it and thus never retires its findings. On a **resume** where an
+    adapter-backed check (``lint`` / ``sast`` / ``dep-audit``) flipped to ``off``, its
+    prior open findings would otherwise linger in the reloaded ledger and surface in the
+    coder / reviewer prompts + ``[DevelopResult]`` (all read ``open_findings``) — the
+    exact leak #278 closed for the adapter→raw-command transition. Called once at ledger
+    load; retires the whole check **family** (bare + polyglot ``<name>.<eco>``). The
+    ``test`` check carries no adapter findings, so its retire is a harmless no-op.
+    Returns ``True`` when anything was retired (the caller re-persists the ledger).
+    """
+    off = {name for name, state in config.check_states.items() if state == "off"}
+    if not config.test_gate:
+        off.add("test")
+    if not off:
+        return False
+    before = len(gate_ledger.open_findings())
+    for name in off:
+        gate_ledger.retire_check_family(name, 0)  # round 0 = a pre-round reconciliation
+    return len(gate_ledger.open_findings()) != before
+
+
 def _gate_ledger_path(config: DevelopConfig) -> Path:
     return config.gate_dir / "gate_ledger.json"
 
@@ -596,9 +621,17 @@ def run_delivery_test_gate(
     skip (or accidentally rewire) the delivery gate. No dedicated ADR records this
     policy; the required/informational check-state model it rests on is ADR 0003 §4.
 
+    #273 slice 2 interaction — the two ways to relax the ``test`` check differ here on
+    purpose: ``check_states={"test": "informational"}`` keeps the check in the built
+    set, so delivery STILL reads its raw verdict and holds a RED fix (the divergence
+    above), whereas ``check_states={"test": "off"}`` (≡ the legacy ``test_gate=false``)
+    DROPS the check entirely, so delivery has nothing to run and returns ``None`` — no
+    red-fix hold. So ``informational`` weakens the *develop floor* but not delivery's
+    regression safety; ``off`` opts out of both.
+
     Returns the ``test`` check's :class:`GateResult`, or ``None`` when no ``test``
-    check is runnable (``develop_test_gate=false`` / no command / absent) or the
-    tree export errored.
+    check is runnable (``test`` state ``off`` / ``develop_test_gate=false`` / no command
+    / absent) or the tree export errored.
     """
     checks = tuple(c for c in build_check_set(config, wt) if c.name == "test")
     if not checks:

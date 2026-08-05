@@ -295,6 +295,15 @@ def test_check_states_bad_project_value_frictions_and_empties() -> None:
     assert frictions[0].endswith("; ignoring")
 
 
+def test_check_states_non_scalar_value_frictions_not_crash() -> None:
+    # #280 review finding 1: an unhashable state (a list from TOML/JSON metadata) must
+    # degrade to a [Friction], not crash the resolver with a TypeError (untrusted cfg).
+    settings, frictions = _resolve({"develop_check_states": {"sast": ["off"]}})
+    assert settings.check_states == {}
+    assert len(frictions) == 1
+    assert frictions[0].endswith("; ignoring")
+
+
 # ── friction ORDER (must match the original resolve_project_settings) ──
 
 
