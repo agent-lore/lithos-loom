@@ -73,6 +73,11 @@ name = "story-develop"
 # typecheck" } to use the repo's scoped command instead of a bare `uv run
 # pyright` that over-scopes a test tree full of pre-existing type debt (#273).
 # The --check-command NAME=CMD route flag is the fallback when metadata pins none.
+# A check's blocking STATE is develop_check_states = { <check> = required |
+# informational | off } (task.metadata.develop_check_states merges per-key); `off`
+# drops the check cleanly (generalizes develop_test_gate = false, i.e. { test = "off" }),
+# `required`/`informational` override the review profile's declared state (#273 slice 2).
+# The --check-state NAME=STATE route flag is the fallback when metadata pins none.
 # On Python repos with ruff present, an informational `lint` check also runs and
 # its findings are structured into a stable gate/<check>-NNN ledger surfaced to
 # the panel + [DevelopResult] (non-blocking; #132).

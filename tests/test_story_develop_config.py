@@ -13,10 +13,13 @@ import pytest
 from lithos_loom.plugins.story_develop.config import (
     CANONICAL_CHECK_NAMES,
     OVERRIDABLE_CHECK_NAMES,
+    STATEABLE_CHECK_NAMES,
     DevelopConfig,
     ReviewerSpec,
     load_develop_config,
     parse_check_commands,
+    parse_check_state_pairs,
+    parse_check_states,
     parse_effort,
     parse_image,
     parse_model,
@@ -226,6 +229,64 @@ def test_canonical_check_names_matches_catalog() -> None:
 def test_develop_config_check_commands_defaults_empty(tmp_path: Path) -> None:
     cfg = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
     assert cfg.check_commands == {}
+
+
+# --- parse_check_states (#273 slice 2: per-check 3-state) ---------------------
+
+
+def test_parse_check_states_none_is_empty() -> None:
+    assert parse_check_states(None, where="x") == {}
+
+
+def test_parse_check_states_accepts_valid() -> None:
+    got = parse_check_states({"sast": "required", "test": "off"}, where="x")
+    assert got == {"sast": "required", "test": "off"}
+
+
+def test_parse_check_states_allows_test_key() -> None:
+    # `test` IS stateable — off generalizes the legacy test_gate=false escape hatch.
+    assert parse_check_states({"test": "off"}, where="x") == {"test": "off"}
+
+
+def test_parse_check_states_rejects_non_table() -> None:
+    with pytest.raises(ValueError, match="must be a table"):
+        parse_check_states("required", where="x")
+
+
+def test_parse_check_states_rejects_bad_state_value() -> None:
+    with pytest.raises(ValueError, match="must be one of"):
+        parse_check_states({"sast": "advisory"}, where="x")
+
+
+def test_parse_check_states_rejects_unknown_check() -> None:
+    with pytest.raises(ValueError, match="unknown check"):
+        parse_check_states({"typcheck": "off"}, where="x")
+
+
+def test_parse_check_states_rejects_format_key_as_inert() -> None:
+    with pytest.raises(ValueError, match="format"):
+        parse_check_states({"format": "off"}, where="x")
+
+
+def test_stateable_check_names_is_canonical_minus_format() -> None:
+    assert CANONICAL_CHECK_NAMES - {"format"} == STATEABLE_CHECK_NAMES
+
+
+def test_parse_check_state_pairs_cli() -> None:
+    assert parse_check_state_pairs(["sast=off", "lint=informational"], where="x") == {
+        "sast": "off",
+        "lint": "informational",
+    }
+
+
+def test_parse_check_state_pairs_rejects_missing_equals() -> None:
+    with pytest.raises(ValueError, match="NAME=STATE"):
+        parse_check_state_pairs(["sast off"], where="x")
+
+
+def test_develop_config_check_states_defaults_empty(tmp_path: Path) -> None:
+    cfg = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
+    assert cfg.check_states == {}
 
 
 # --- codex agent config (#94) -----------------------------------------------

@@ -144,6 +144,9 @@ class ProjectDevelopSettings:
     # ``develop_check_commands`` (project) + a per-task table merged per-key. Empty
     # when neither layer declares any. Threaded onto ``DevelopConfig.check_commands``.
     check_commands: dict[str, str] = field(default_factory=dict)
+    # #273 slice 2: per-check state overrides ({check_name: required|informational|off})
+    # from ``develop_check_states`` (project) + a per-task table merged per-key.
+    check_states: dict[str, str] = field(default_factory=dict)
     # Review Profile (#139). ``review_profile_project`` is the project-layer name
     # (context-doc ``develop_review_profile``); :func:`apply_review_profile` then
     # resolves task > project > host > builtin into ``review_profile`` (the
@@ -309,6 +312,7 @@ def resolve_project_settings(
         test_command=scalars.test_command,
         test_gate=scalars.test_gate,
         check_commands=scalars.check_commands,
+        check_states=scalars.check_states,
         review_profile_project=scalars.review_profile_project,
         frictions=tuple(frictions),
     )

@@ -25,6 +25,7 @@ import typer
 from lithos_loom.cli.review import (
     resolve_acceptance_criteria,
     resolve_check_commands,
+    resolve_check_states,
     resolve_reviewers,
 )
 from lithos_loom.config import load_config
@@ -82,6 +83,14 @@ def converge_command(
         "verbatim instead of the catalog default (which can over-scope and force "
         "extra fix rounds). Overridable: lint / typecheck / sast / dep-audit / "
         "coverage / semgrep (the `test` check uses --test-command).",
+    ),
+    check_state: list[str] | None = typer.Option(
+        None,
+        "--check-state",
+        help="Override a gate check's blocking state as NAME=STATE (repeatable): "
+        "required | informational | off, e.g. --check-state sast=off. `off` drops "
+        "the check cleanly. Stateable: lint / typecheck / test / sast / dep-audit / "
+        "coverage / semgrep.",
     ),
     test_command: str | None = typer.Option(
         None,
@@ -143,6 +152,7 @@ def converge_command(
     if max_rounds is not None and max_rounds < 1:
         raise typer.BadParameter("--max-rounds must be at least 1")
     check_commands = resolve_check_commands(check_command)
+    check_states = resolve_check_states(check_state)
     # Validate --test-command through the shared normaliser: a blank / whitespace-only
     # value would otherwise reach `sh -c` unmodified, do no work, exit 0, and
     # false-green the required `test` check without running tests (#278 review).
@@ -195,6 +205,7 @@ def converge_command(
         test_command=test_command,
         test_timeout=test_timeout,
         check_commands=check_commands,
+        check_states=check_states,
         **overrides,
     )
 

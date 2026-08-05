@@ -29,6 +29,7 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal, cast
 
 from ...runner import detection
 from . import check_catalog, containers, gate_adapters, profiles, test_gate
@@ -81,6 +82,32 @@ def _resolve_test_command(config: DevelopConfig, wt: Path) -> str | None:
     return chosen
 
 
+_EffectiveState = Literal["required", "informational", "off"]
+
+
+def _effective_check_state(
+    config: DevelopConfig, name: str, profile_state: CheckState
+) -> _EffectiveState:
+    """The check's blocking state after operator overrides (#273 slice 2).
+
+    Precedence: an explicit ``config.check_states[name]`` wins; otherwise, for the
+    ``test`` check, the legacy ``test_gate=false`` is honoured as ``off`` (back-compat
+    sugar for ``check_states={"test": "off"}``); else the profile's declared state.
+    Returns ``required`` / ``informational`` / ``off`` — ``off`` means the caller drops
+    the check (runs nothing, records nothing), distinct from a tool-absent required
+    check (which still blocks). Values are validated at parse time
+    (:func:`config.parse_check_states`), so the cast is safe.
+    """
+    override = config.check_states.get(name)
+    if override is not None:
+        return cast(_EffectiveState, override)
+    if name == "test" and not config.test_gate:
+        return "off"
+    # A profile only declares required / informational for a real gate check, both of
+    # which are valid effective states.
+    return cast(_EffectiveState, profile_state)
+
+
 def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     """The Review-Profile-selected check-set for this run (#140, ADR §3/§4).
 
@@ -109,6 +136,20 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     """
     profile = profiles.get_profile(config.review_profile)
     ecosystems = detection.detect_ecosystems(wt)
+    # #273 slice 2 coupling guard (ADR/#273 Refinement 3): on a compiled-language repo
+    # the compiler / test run IS the type check (there is no separate `typecheck`
+    # check), so turning the `test` check off silently removes type checking too. Warn
+    # loudly rather than let it pass unnoticed.
+    if _effective_check_state(config, "test", "required") == "off" and any(
+        e in ("rust", "go") for e in ecosystems
+    ):
+        logger.warning(
+            "story-develop %s: the `test` check is off on a compiled-language repo "
+            "(%s) — the compiler / test run is the type check there, so type errors "
+            "will no longer be caught by the gate",
+            config.run_id,
+            ", ".join(ecosystems),
+        )
     # Group the resolved profile checks back by bare name (a polyglot check is emitted
     # once per ecosystem as ``<check>.<ecosystem>``), so they can be slotted into
     # profile order alongside the specially-built ``test`` check.
@@ -118,7 +159,11 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
     checks: list[Check] = []
     for pc in profile.checks:
         if pc.name == "test":
-            checks.extend(_build_test_check(config, pc.state, ecosystems, wt))
+            # #273 slice 2: apply the effective state (check_states / legacy test_gate);
+            # `off` drops the test check, mirroring the old `test_gate=false` behaviour.
+            state = _effective_check_state(config, "test", pc.state)
+            if state != "off":
+                checks.extend(_build_test_check(config, state, ecosystems, wt))
         else:
             checks.extend(by_name.get(pc.name, []))
     return tuple(checks)
@@ -130,20 +175,19 @@ def _build_test_check(
     ecosystems: Sequence[detection.Ecosystem],
     wt: Path,
 ) -> list[Check]:
-    """The ``test`` check, with ``state`` from the resolved profile's
-    ``ProfileCheck("test", ...)`` (#127/#159, ADR §4/§10).
+    """The ``test`` check, with its **effective** ``state`` (#127/#159/#273, ADR §4).
 
-    ``develop_test_gate=false`` excludes it entirely (a test escape hatch, never a
-    whole-gate kill switch — the rest of the profile set still runs). Its blocking is
-    the profile's ``state`` — ``required`` (a RED run blocks + feeds the coder) vs
-    ``informational`` (recorded, non-blocking) — the single source of truth, like every
-    other check (the legacy ``block_on_red`` knob is removed; the floor governs).
-    #133/ADR §4: when no command is runnable but the detected ecosystem expects tests, a
-    *required* test check is an **expected-but-absent** blocking placeholder (empty
-    command; the runner records it ``absent``), not a silent skip.
+    ``state`` is the effective blocking state resolved by
+    :func:`_effective_check_state` (``check_states["test"]`` / the legacy
+    ``test_gate=false`` / the profile default) — the caller has already dropped the
+    check when that resolves to ``off`` (the old ``test_gate=false`` escape hatch, now a
+    special case of the per-check 3-state). Its blocking is that ``state``: ``required``
+    (a RED run blocks + feeds the coder) vs ``informational`` (recorded, non-blocking),
+    the single source of truth, like every other check. #133/ADR §4: when no command is
+    runnable but the detected ecosystem expects tests, a *required* test check is an
+    **expected-but-absent** blocking placeholder (empty command; the runner records it
+    ``absent``), not a silent skip.
     """
-    if not config.test_gate:
-        return []
     command = _resolve_test_command(config, wt)
     if command is not None:
         return [Check(name="test", command=command, state=state)]
@@ -190,12 +234,21 @@ def _build_profile_checks(
     # default profile degrades gracefully, rather than letting `resolve_check_set` raise
     # `CheckApplicabilityError` (its error is reserved for a hand-curated desired set
     # that explicitly requires an unsupported check, #133 AC3).
-    all_desired = [
-        check_catalog.DesiredCheck(pc.name, pc.state)
-        for pc in profile.checks
-        if pc.name not in ("test", "format")
-        and check_catalog.applies(pc.name, ecosystems)
-    ]
+    # #273 slice 2: each check runs at its EFFECTIVE state (check_states override →
+    # legacy → profile). ``off`` drops it entirely — a clean skip (nothing runs, nothing
+    # records), distinct from a required tool-absent check (an expected-but-absent
+    # blocking placeholder). ``required`` / ``informational`` become the check's state.
+    all_desired: list[check_catalog.DesiredCheck] = []
+    for pc in profile.checks:
+        if pc.name in ("test", "format") or not check_catalog.applies(
+            pc.name, ecosystems
+        ):
+            continue
+        eff_state = _effective_check_state(config, pc.name, pc.state)
+        if eff_state == "off":
+            continue
+        # eff_state is now `required` | `informational` — both valid CheckStates.
+        all_desired.append(check_catalog.DesiredCheck(pc.name, eff_state))
     stage_by_name: dict[str, Stage] = {pc.name: pc.stage for pc in profile.checks}
     default_stage: Stage = "fast"
     out: list[Check] = []

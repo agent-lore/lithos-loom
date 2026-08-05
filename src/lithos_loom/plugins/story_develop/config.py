@@ -242,6 +242,81 @@ def parse_check_command_pairs(
     return parse_check_commands(pairs, where=where)
 
 
+# The per-check blocking states a repo may set via ``check_states`` (#273 slice 2).
+# ``off`` is not a :data:`~.check_set.CheckState` — it is a directive to DROP the check
+# cleanly (skip it, run nothing, record nothing), kept distinct from a *required* check
+# whose tool is expected-but-absent (which still blocks loudly). ``required`` /
+# ``informational`` override the profile's declared state for that check.
+CHECK_STATE_OVERRIDES: frozenset[str] = frozenset({"required", "informational", "off"})
+# Checks whose blocking state a repo may override via ``check_states``. ``format`` is
+# excluded — it is the autoformat write-mode pass, not a standalone gate check, so a
+# state override would be inert. ``test`` IS stateable: ``off`` generalizes the legacy
+# ``test_gate = false`` escape hatch (which stays as back-compat sugar).
+STATEABLE_CHECK_NAMES: frozenset[str] = CANONICAL_CHECK_NAMES - {"format"}
+
+
+def parse_check_states(value: object, *, where: str) -> dict[str, str]:
+    """Validate a per-check state-override map (#273 slice 2), or ``{}`` when absent.
+
+    A table of ``{check_name: state}`` where *state* is one of
+    :data:`CHECK_STATE_OVERRIDES` (``required`` / ``informational`` / ``off``) — a repo
+    dials a gate check's blocking role or turns it off entirely, generalizing the
+    ``test_gate`` boolean to every check. ``off`` **drops** the check cleanly (distinct
+    from a tool-absent required check, which still blocks). Keys must be
+    :data:`STATEABLE_CHECK_NAMES` — ``format`` and unknown names are rejected loudly.
+    Shared by the project-metadata loader and the CLI so both reject the same garbage
+    identically. Raises :class:`ValueError`.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"{where}: check state overrides must be a table of "
+            f"{{check_name = state}} (got {value!r})"
+        )
+    out: dict[str, str] = {}
+    for key, state in value.items():
+        if key == "format":
+            raise ValueError(
+                f"{where}: `format` is not run as a standalone gate check (the "
+                "autoformat write-mode pass handles it); a state override is inert"
+            )
+        if key not in STATEABLE_CHECK_NAMES:
+            raise ValueError(
+                f"{where}: unknown check {key!r} "
+                f"(stateable: {', '.join(sorted(STATEABLE_CHECK_NAMES))})"
+            )
+        if state not in CHECK_STATE_OVERRIDES:
+            raise ValueError(
+                f"{where}: state for check {key!r} must be one of "
+                f"{', '.join(sorted(CHECK_STATE_OVERRIDES))} (got {state!r})"
+            )
+        out[key] = state
+    return out
+
+
+def parse_check_state_pairs(
+    items: Sequence[str] | None, *, where: str
+) -> dict[str, str]:
+    """Parse repeatable CLI ``NAME=STATE`` items into a validated state map (#273).
+
+    The CLI form of :func:`parse_check_states`: each item is split on the first ``=``;
+    a missing ``=`` raises. The assembled map is validated by :func:`parse_check_states`
+    so the CLI and project-metadata surfaces reject the same garbage. Shared by
+    ``cli/review.resolve_check_states`` and the ``__main__`` route flag. Raises
+    :class:`ValueError`.
+    """
+    if not items:
+        return {}
+    pairs: dict[str, str] = {}
+    for item in items:
+        name, sep, state = item.partition("=")
+        if not sep:
+            raise ValueError(f"{where}: must be NAME=STATE (got {item!r})")
+        pairs[name.strip()] = state.strip()
+    return parse_check_states(pairs, where=where)
+
+
 def parse_bool_setting(value: object, *, where: str) -> bool | None:
     """Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 
@@ -416,6 +491,12 @@ class DevelopConfig:
     # catalog discovery. Keys are OVERRIDABLE_CHECK_NAMES (test/format excluded — test
     # uses `test_command`, format is the autoformat pass, not a standalone gate check).
     check_commands: dict[str, str] = field(default_factory=dict)
+    # #273 slice 2: per-check blocking-state overrides — {check_name: required |
+    # informational | off}. Generalizes `test_gate` (test_gate=false ≡
+    # {"test": "off"}); `off` drops the check cleanly (distinct from a required check
+    # whose tool is expected-but-absent, which still blocks). `check_states["test"]`
+    # wins over `test_gate`. Keys are STATEABLE_CHECK_NAMES (format excluded).
+    check_states: dict[str, str] = field(default_factory=dict)
     # #140: the `test` check's blocking is the resolved profile's ProfileCheck("test",
     # ...) state — the single source of truth (the legacy `block_on_red` knob is gone).
     test_timeout: int = DEFAULT_TEST_TIMEOUT

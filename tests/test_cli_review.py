@@ -203,6 +203,39 @@ def test_whitespace_test_command_fails_closed(stubs: dict) -> None:
     assert "config" not in stubs
 
 
+def test_check_state_override_threads_through(stubs: dict) -> None:
+    # #273 slice 2: repeatable --check-state NAME=STATE reaches config.check_states.
+    result = runner.invoke(
+        develop_app,
+        [
+            "review",
+            "#142",
+            "--ac",
+            "x",
+            "--check-state",
+            "sast=off",
+            "--check-state",
+            "lint=required",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].check_states == {"sast": "off", "lint": "required"}
+
+
+def test_check_state_defaults_to_empty(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["review", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].check_states == {}
+
+
+def test_bad_check_state_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--check-state", "sast=advisory"]
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_malformed_check_command_fails_closed(stubs: dict) -> None:
     # no `=` → not a NAME=COMMAND pair → fail closed before any container work.
     result = runner.invoke(

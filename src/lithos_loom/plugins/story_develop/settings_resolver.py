@@ -29,6 +29,7 @@ from .config import (
     DEFAULT_CODER_TOOL,
     parse_bool_setting,
     parse_check_commands,
+    parse_check_states,
     parse_effort,
     parse_image,
     parse_model,
@@ -64,6 +65,9 @@ class ScalarSettings:
     # #273: per-check command overrides ({check_name: command}), project-then-task
     # merged per-key. Empty when neither layer declares any.
     check_commands: dict[str, str] = field(default_factory=dict)
+    # #273 slice 2: per-check state overrides ({check_name: required|informational|off})
+    # from develop_check_states, project-then-task merged per-key. Empty when unset.
+    check_states: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_or_friction(
@@ -246,27 +250,33 @@ def _resolve_max_cost(meta: Mapping[str, Any], frictions: list[str]) -> float | 
     return float(max_cost) if max_cost is not None else None
 
 
-def _resolve_check_commands(
-    meta: Mapping[str, Any], task_metadata: Mapping[str, Any], frictions: list[str]
+def _resolve_merged_map(
+    meta: Mapping[str, Any],
+    task_metadata: Mapping[str, Any],
+    frictions: list[str],
+    *,
+    key: str,
+    parser: Parser,
 ) -> dict[str, str]:
-    """Per-check command overrides (#273): project ``develop_check_commands`` table,
-    then a per-task table **merged per-key** on top (a task re-points one check while
-    the project's other overrides survive). A bad value at either layer degrades to a
-    ``[Friction]`` and keeps the other layer's map — the two-suffix contract every
-    scalar field shares. Returns ``{}`` when neither layer declares any."""
+    """A per-key-merged ``develop_*`` **table** setting: the project table, then a
+    per-task table merged per-key on top (a task re-points one entry while the project's
+    others survive). A bad value at either layer degrades to a ``[Friction]`` and keeps
+    the other layer's map — the two-suffix contract every scalar field shares. Returns
+    ``{}`` when neither layer declares any. Shared by ``check_commands`` (#273) and
+    ``check_states`` (#273 slice 2)."""
     result: dict[str, str] = _parse_or_friction(
-        parse_check_commands,
-        meta.get("develop_check_commands"),
-        where="develop_check_commands",
+        parser,
+        meta.get(key),
+        where=key,
         suffix="; ignoring",
         frictions=frictions,
         fallback={},
     )
-    if task_metadata.get("develop_check_commands") is not None:
+    if task_metadata.get(key) is not None:
         task_map = _parse_or_friction(
-            parse_check_commands,
-            task_metadata["develop_check_commands"],
-            where="task metadata.develop_check_commands",
+            parser,
+            task_metadata[key],
+            where=f"task metadata.{key}",
             suffix="; keeping project default",
             frictions=frictions,
             fallback=None,
@@ -321,7 +331,21 @@ def resolve_scalar_settings(
     # #273: appended LAST so the pinned friction prefix (coder, image, test_command,
     # test_gate, block_on_red, fallback_chain, max_rounds, max_cost, review_profile) is
     # unchanged — a new field's frictions must not reorder the existing contract.
-    check_commands = _resolve_check_commands(meta, task_metadata, frictions)
+    # check_commands (#273) then check_states (#273 slice 2), in that order.
+    check_commands = _resolve_merged_map(
+        meta,
+        task_metadata,
+        frictions,
+        key="develop_check_commands",
+        parser=parse_check_commands,
+    )
+    check_states = _resolve_merged_map(
+        meta,
+        task_metadata,
+        frictions,
+        key="develop_check_states",
+        parser=parse_check_states,
+    )
     return ScalarSettings(
         coder=coder,
         coder_model=coder_model,
@@ -334,4 +358,5 @@ def resolve_scalar_settings(
         max_cost_usd=max_cost_usd,
         review_profile_project=review_profile_project,
         check_commands=check_commands,
+        check_states=check_states,
     )

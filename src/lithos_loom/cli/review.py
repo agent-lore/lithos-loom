@@ -23,6 +23,7 @@ from lithos_loom.plugins.story_develop.config import (
     DevelopConfig,
     ReviewerSpec,
     parse_check_command_pairs,
+    parse_check_state_pairs,
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
@@ -68,6 +69,14 @@ def review_command(
         "Overridable: lint / typecheck / sast / dep-audit / coverage / semgrep "
         "(the `test` check uses --test-command).",
     ),
+    check_state: list[str] | None = typer.Option(
+        None,
+        "--check-state",
+        help="Override a gate check's blocking state as NAME=STATE (repeatable): "
+        "required | informational | off, e.g. --check-state sast=off. `off` drops "
+        "the check cleanly. Stateable: lint / typecheck / test / sast / dep-audit / "
+        "coverage / semgrep.",
+    ),
     test_command: str | None = typer.Option(
         None,
         "--test-command",
@@ -105,6 +114,7 @@ def review_command(
     if test_timeout < 1:
         raise typer.BadParameter("--test-timeout must be at least 1 second")
     check_commands = resolve_check_commands(check_command)
+    check_states = resolve_check_states(check_state)
     # Validate --test-command through the shared normaliser: a blank / whitespace-only
     # value would otherwise reach `sh -c` unmodified, do no work, exit 0, and
     # false-green the required `test` check without running tests (#278 review).
@@ -140,6 +150,7 @@ def review_command(
         test_command=test_command,
         test_timeout=test_timeout,
         check_commands=check_commands,
+        check_states=check_states,
     )
 
     report = review_change(develop_config, resolved, keep_worktree=keep_worktree)
@@ -202,5 +213,19 @@ def resolve_check_commands(check_command: list[str] | None) -> dict[str, str]:
     """
     try:
         return parse_check_command_pairs(check_command, where="--check-command")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def resolve_check_states(check_state: list[str] | None) -> dict[str, str]:
+    """Parse repeatable ``--check-state NAME=STATE`` into a ``{check: state}`` map
+    (#273 slice 2). Shared by ``review`` and ``converge``.
+
+    Delegates to :func:`config.parse_check_state_pairs` (also used by the ``__main__``
+    route flag), surfacing any :class:`ValueError` as a :class:`typer.BadParameter`
+    (exit 2) — so the CLI and the project-metadata surface reject the same garbage.
+    """
+    try:
+        return parse_check_state_pairs(check_state, where="--check-state")
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

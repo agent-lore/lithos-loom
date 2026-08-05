@@ -253,6 +253,61 @@ def test_main_rejects_malformed_check_command(tmp_git_repo: Path, capsys) -> Non
     assert "NAME=COMMAND" in capsys.readouterr().err
 
 
+def test_main_threads_check_states_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 slice 2: standalone --check-state (repeatable) → config.check_states."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "do a thing",
+            "--check-state",
+            "sast=off",
+        ]
+    )
+    assert rc == 0
+    assert captured["config"].check_states == {"sast": "off"}
+
+
+def test_main_rejects_bad_check_state(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--check-state",
+            "sast=advisory",
+        ]
+    )
+    assert rc == 2
+    assert "must be one of" in capsys.readouterr().err
+
+
 def test_main_rejects_whitespace_test_command(tmp_git_repo: Path, capsys) -> None:
     # #278 review finding 2: a blank --test-command would false-green the required test
     # check (reaches `sh -c`, exits 0 without running tests). Reject it up front.

@@ -560,6 +560,110 @@ def test_check_command_override_is_emitted_even_when_its_tool_is_absent(
     assert by["typecheck"].command == "make typecheck"
 
 
+# --- per-check 3-state overrides (#273 slice 2) -------------------------------
+
+
+def test_check_state_off_drops_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #273 slice 2: check_states={"lint": "off"} drops `lint` cleanly (runs nothing,
+    # records nothing) — a clean skip, distinct from a tool-absent blocking placeholder.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(tmp_path, review_profile="standard", check_states={"lint": "off"})
+    names = {c.name for c in build_check_set(cfg, tmp_path)}
+    assert "lint" not in names
+    assert "typecheck" in names  # other checks untouched
+
+
+def test_check_state_promotes_informational_to_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `sast` is informational on `standard`; check_states={"sast": "required"} makes it
+    # block. A state override keeps the check's command (still adapter-based).
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(
+        tmp_path, review_profile="standard", check_states={"sast": "required"}
+    )
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    assert by["sast"].state == "required"
+
+
+def test_check_state_demotes_required_to_informational(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(
+        tmp_path, review_profile="standard", check_states={"lint": "informational"}
+    )
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    assert by["lint"].state == "informational"
+
+
+def test_check_state_test_off_equals_test_gate_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # check_states={"test": "off"} drops the test check — the generalized form of the
+    # legacy test_gate=false escape hatch — while the rest of the set survives.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(tmp_path, review_profile="standard", check_states={"test": "off"})
+    names = {c.name for c in build_check_set(cfg, tmp_path)}
+    assert "test" not in names
+    assert "typecheck" in names  # not a whole-gate kill switch
+
+
+def test_check_states_test_wins_over_legacy_test_gate_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An explicit check_states["test"] beats the legacy test_gate bool: test_gate=False
+    # would drop it, but check_states={"test": "required"} re-enables it.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(
+        tmp_path,
+        review_profile="standard",
+        test_gate=False,
+        check_states={"test": "required"},
+    )
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    assert by["test"].state == "required"  # explicit state wins over test_gate=False
+
+
+def test_test_off_on_compiled_lang_repo_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Coupling guard (#273 Refinement 3): on rust/go the compiler / test run IS the
+    # type check, so turning `test` off silently drops type checking — warn loudly.
+    import logging
+
+    monkeypatch.setattr(
+        check_runner.detection, "detect_ecosystems", lambda wt: ("rust",)
+    )
+    monkeypatch.setattr(
+        check_runner.test_gate, "probe_tools", lambda image, tools: list(tools)
+    )
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "cargo test"
+    )
+    cfg = _config(tmp_path, review_profile="standard", check_states={"test": "off"})
+    with caplog.at_level(logging.WARNING):
+        build_check_set(cfg, tmp_path)
+    assert "compiled-language" in caplog.text
+
+
 def test_check_command_override_ignored_when_check_not_applicable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

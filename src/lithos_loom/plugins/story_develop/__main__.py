@@ -62,6 +62,7 @@ from .config import (
     is_valid_reviewer_name,
     load_develop_config,
     parse_check_command_pairs,
+    parse_check_state_pairs,
     parse_effort,
     parse_model,
     parse_test_command,
@@ -271,6 +272,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "develop_check_commands metadata wins over this route-level flag.",
     )
     p.add_argument(
+        "--check-state",
+        action="append",
+        default=None,
+        metavar="NAME=STATE",
+        help="Override a gate check's blocking state (#273; repeatable): "
+        "required | informational | off, e.g. --check-state sast=off. `off` drops "
+        "the check (generalizes --no-test-gate). Project-context develop_check_states "
+        "metadata wins over this route-level flag.",
+    )
+    p.add_argument(
         "--review-profile",
         default=None,
         help="Review Profile (#139): minimal | standard | thorough (or a custom "
@@ -413,6 +424,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
         route_check_commands = parse_check_command_pairs(
             args.check_command, where="--check-command"
         )
+        route_check_states = parse_check_state_pairs(
+            args.check_state, where="--check-state"
+        )
         route_test_command = parse_test_command(
             args.test_command, where="--test-command"
         )
@@ -501,6 +515,8 @@ def _daemon_main(args: argparse.Namespace) -> int:
         # --check-command flag is the all-or-nothing fallback when metadata declares
         # none (mirrors how --test-command sits under develop_test_command).
         check_commands=settings.check_commands or route_check_commands,
+        # #273 slice 2: same all-or-nothing fallback for the per-check state overrides.
+        check_states=settings.check_states or route_check_states,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
@@ -846,6 +862,7 @@ def main(argv: list[str] | None = None) -> int:
         check_commands = parse_check_command_pairs(
             args.check_command, where="--check-command"
         )
+        check_states = parse_check_state_pairs(args.check_state, where="--check-state")
         test_command = parse_test_command(args.test_command, where="--test-command")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -877,6 +894,7 @@ def main(argv: list[str] | None = None) -> int:
         test_gate=not args.no_test_gate,
         test_command=test_command,
         check_commands=check_commands,
+        check_states=check_states,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
