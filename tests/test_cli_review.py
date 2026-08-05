@@ -193,6 +193,16 @@ def test_test_command_threads_through(stubs: dict) -> None:
     assert stubs["config"].test_command == "make test"
 
 
+def test_whitespace_test_command_fails_closed(stubs: dict) -> None:
+    # #278 review finding 2: a blank / whitespace --test-command would otherwise reach
+    # `sh -c`, do no work, exit 0, and false-green the required test check. Reject it.
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--test-command", "   "]
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_malformed_check_command_fails_closed(stubs: dict) -> None:
     # no `=` → not a NAME=COMMAND pair → fail closed before any container work.
     result = runner.invoke(

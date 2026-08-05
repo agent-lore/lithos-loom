@@ -168,6 +168,16 @@ def test_test_command_threads_through(stubs: dict) -> None:
     assert stubs["config"].test_command == "make test"
 
 
+def test_whitespace_test_command_fails_closed(stubs: dict) -> None:
+    # #278 review finding 2: a blank / whitespace --test-command would false-green the
+    # required test check (reaches `sh -c`, does nothing, exits 0). Reject it up front.
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--test-command", "   "]
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_malformed_check_command_fails_closed(stubs: dict) -> None:
     result = runner.invoke(
         develop_app,

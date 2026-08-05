@@ -64,6 +64,7 @@ from .config import (
     parse_check_command_pairs,
     parse_effort,
     parse_model,
+    parse_test_command,
 )
 from .daemon_io import (
     EXIT_BAD_INPUT,
@@ -406,9 +407,14 @@ def _daemon_main(args: argparse.Namespace) -> int:
     # completed record must replay without ANY config resolution — #273 review finding
     # 2). The task id is known now, so a malformed route override is reported as a
     # config failure through a schema-valid result.json, not a bare pre-replay exit.
+    # --test-command is normalised through the same validator the metadata path uses, so
+    # a blank / whitespace route value can't false-green the test check (#278 review).
     try:
         route_check_commands = parse_check_command_pairs(
             args.check_command, where="--check-command"
+        )
+        route_test_command = parse_test_command(
+            args.test_command, where="--test-command"
         )
     except ValueError as exc:
         write_result_atomically(
@@ -489,7 +495,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         test_command=(
             settings.test_command
             if settings.test_command is not None
-            else args.test_command
+            else route_test_command
         ),
         # #273: project-context develop_check_commands wins; the route-level
         # --check-command flag is the all-or-nothing fallback when metadata declares
@@ -834,10 +840,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # #273: validate --check-command on the standalone path (no idempotency replay here,
     # so a fail-fast exit is correct — unlike daemon mode, which validates post-replay).
+    # --test-command goes through the same validator the metadata path uses, so a
+    # blank / whitespace value can't false-green the required test check (#278 review).
     try:
         check_commands = parse_check_command_pairs(
             args.check_command, where="--check-command"
         )
+        test_command = parse_test_command(args.test_command, where="--test-command")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -866,7 +875,7 @@ def main(argv: list[str] | None = None) -> int:
         review_profile=profile_resolution.profile.name,
         max_rounds=args.max_rounds,
         test_gate=not args.no_test_gate,
-        test_command=args.test_command,
+        test_command=test_command,
         check_commands=check_commands,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,

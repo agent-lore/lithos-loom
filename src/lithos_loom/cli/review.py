@@ -23,6 +23,7 @@ from lithos_loom.plugins.story_develop.config import (
     DevelopConfig,
     ReviewerSpec,
     parse_check_command_pairs,
+    parse_test_command,
 )
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
 from lithos_loom.plugins.story_develop.personas import canonical_personas
@@ -104,6 +105,13 @@ def review_command(
     if test_timeout < 1:
         raise typer.BadParameter("--test-timeout must be at least 1 second")
     check_commands = resolve_check_commands(check_command)
+    # Validate --test-command through the shared normaliser: a blank / whitespace-only
+    # value would otherwise reach `sh -c` unmodified, do no work, exit 0, and
+    # false-green the required `test` check without running tests (#278 review).
+    try:
+        test_command = parse_test_command(test_command, where="--test-command")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     repo = repo or Path.cwd()
     host = load_config(config)
 

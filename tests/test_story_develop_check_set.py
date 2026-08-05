@@ -231,6 +231,35 @@ def test_floor_raw_exit_override_reads_raw_exit_not_ledger() -> None:
     assert check_runner.gate_floor_blocks(green, led) is False
 
 
+def test_run_check_set_raw_override_retires_stale_ledger_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #278 review finding 1: on a resume where `lint` flipped from adapter-backed to a
+    # raw override, a raw run must RETIRE (close ``fixed``) the stale open findings a
+    # prior round left in the ledger — so they stop surfacing as authoritative in the
+    # coder / reviewer prompts + [DevelopResult] (all read ``open_findings``), not just
+    # be ignored by the floor.
+    from lithos_loom.plugins.story_develop import containers, test_gate
+
+    monkeypatch.setattr(test_gate, "export_tree", lambda wt, sha, dest: None)
+    monkeypatch.setattr(containers, "container_name", lambda run_id, suffix: "c")
+    monkeypatch.setattr(test_gate, "build_gate_command", lambda **kw: ["true"])
+    monkeypatch.setattr(test_gate, "run_gate_container", lambda *a, **k: _green())
+    monkeypatch.setattr(check_runner, "_write_check_output", lambda *a, **k: None)
+
+    led = _ledger_with("lint", severity="major")
+    assert any(f.check == "lint" for f in led.open_findings())  # stale finding present
+
+    raw = Check("lint", "ruff check src/", "required", raw_exit=True)
+    check_runner.run_check_set(_config(tmp_path), tmp_path, "sha", 2, (raw,), led)
+
+    # retired: no open `lint` findings remain, so nothing authoritative is surfaced.
+    assert [f for f in led.open_findings() if f.check == "lint"] == []
+    # ... and render_check_summary (what the coder/reviewers see) shows none either.
+    cs = CheckSetResult((CheckResult(raw, "ran", _green()),))
+    assert "gate/lint" not in render_check_summary(cs, for_coder=True, gate_ledger=led)
+
+
 def test_floor_uv_wrapped_adapter_reads_ledger_via_command_tool() -> None:
     # #165: a required `uv run pip-audit` check exits GREEN this round, but the ledger
     # carries a MAJOR `dep-audit` finding. The floor must resolve the REAL adapter tool

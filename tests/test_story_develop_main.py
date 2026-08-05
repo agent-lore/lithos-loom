@@ -253,6 +253,23 @@ def test_main_rejects_malformed_check_command(tmp_git_repo: Path, capsys) -> Non
     assert "NAME=COMMAND" in capsys.readouterr().err
 
 
+def test_main_rejects_whitespace_test_command(tmp_git_repo: Path, capsys) -> None:
+    # #278 review finding 2: a blank --test-command would false-green the required test
+    # check (reaches `sh -c`, exits 0 without running tests). Reject it up front.
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--test-command",
+            "   ",
+        ]
+    )
+    assert rc == 2
+    assert "test_command must be a non-empty string" in capsys.readouterr().err
+
+
 def test_main_standalone_halts_on_unknown_review_profile(
     tmp_git_repo: Path, monkeypatch, capsys
 ) -> None:

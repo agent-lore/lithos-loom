@@ -441,26 +441,33 @@ def run_check_set(
             gate = None
         _write_check_output(round_dir, check, gate)
         if gate is not None:
-            # #132: structure a finding-producing check's output into the ledger,
-            # then drop the full output so it never propagates into the result.
-            # Resolve the real adapter tool past a `uv run` prefix or a pipeline
-            # producer (#167: `uv export … | pip-audit …` → pip-audit), exactly like
-            # the build (#166) and floor sites — a bare `split()[0]` would see `uv`
-            # and skip the ledger, so dep-audit findings would never be structured.
             tool = gate_adapters.command_tool(check.command)
-            # #273: a verbatim override (raw_exit) is never parsed into the ledger — it
-            # ran the operator's exact command, not the adapter's JSON form, so its
-            # human output would not parse; its raw exit code is authoritative instead.
-            if (
-                not check.raw_exit
-                and gate_ledger is not None
-                and tool in gate_adapters.SUPPORTED_TOOLS
-            ):
-                gate_ledger.apply_round(
-                    check.name,
-                    gate_adapters.parse_findings(check.name, tool, gate.full_output),
-                    round_no,
-                )
+            if gate_ledger is not None:
+                if check.raw_exit:
+                    # #273: a verbatim override (raw_exit) has no structured
+                    # findings — it ran the operator's command, not the adapter's
+                    # JSON form. An EMPTY apply_round closes (``fixed``) any findings
+                    # a PRIOR adapter-backed round left open for this check (on a
+                    # resume where it flipped to a raw override), so they stop
+                    # surfacing as authoritative in the coder / reviewer prompts +
+                    # ``[DevelopResult]`` (all read ``open_findings``) — matching the
+                    # floor, which reads the raw exit for a raw check.
+                    gate_ledger.apply_round(check.name, [], round_no)
+                elif tool in gate_adapters.SUPPORTED_TOOLS:
+                    # #132: structure a finding-producing check's output into the
+                    # ledger, then drop the full output so it never propagates into
+                    # the result. Resolve the real adapter tool past a `uv run` prefix
+                    # or a pipeline producer (#167: `uv export … | pip-audit …` →
+                    # pip-audit), like the build (#166) + floor sites — a bare
+                    # `split()[0]` sees `uv` and skips the ledger, so dep-audit
+                    # findings would never be structured.
+                    gate_ledger.apply_round(
+                        check.name,
+                        gate_adapters.parse_findings(
+                            check.name, tool, gate.full_output
+                        ),
+                        round_no,
+                    )
             gate = replace(gate, full_output="")
             logger.info(
                 "story-develop %s: round %d %s check %s (`%s`, exit %d)",
