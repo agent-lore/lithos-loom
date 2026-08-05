@@ -355,6 +355,48 @@ def test_main_standalone_required_red_test_prints_blocks(
     assert "BLOCKS approval" in capsys.readouterr().out
 
 
+def test_main_threads_parity_command_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 slice 3: standalone --parity-command lands on config.parity_command."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _approved_with_red_test(tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "do a thing",
+            "--parity-command",
+            "make check",
+        ]
+    )
+    assert rc == 0
+    assert captured["config"].parity_command == "make check"
+
+
+def test_main_rejects_whitespace_parity_command(tmp_git_repo: Path, capsys) -> None:
+    rc = main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--parity-command",
+            "   ",
+        ]
+    )
+    assert rc == 2
+    assert "parity_command must be a non-empty string" in capsys.readouterr().err
+
+
 def test_main_rejects_bad_check_state(tmp_git_repo: Path, capsys) -> None:
     rc = main(
         [

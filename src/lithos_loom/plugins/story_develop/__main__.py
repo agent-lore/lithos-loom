@@ -67,6 +67,7 @@ from .config import (
     parse_check_state_pairs,
     parse_effort,
     parse_model,
+    parse_parity_command,
     parse_test_command,
 )
 from .daemon_io import (
@@ -284,6 +285,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "metadata wins over this route-level flag.",
     )
     p.add_argument(
+        "--parity-command",
+        default=None,
+        metavar="CMD",
+        help="The repo's aggregate verification command (#273; e.g. 'make check'), run "
+        "once on the approval candidate as a required `repo-parity` gate check so the "
+        "pushed tree passes whatever CI enforces beyond the structured check-set. "
+        "Project-context develop_parity_command metadata wins over this flag.",
+    )
+    p.add_argument(
         "--review-profile",
         default=None,
         help="Review Profile (#139): minimal | standard | thorough (or a custom "
@@ -432,6 +442,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
         route_test_command = parse_test_command(
             args.test_command, where="--test-command"
         )
+        route_parity_command = parse_parity_command(
+            args.parity_command, where="--parity-command"
+        )
     except ValueError as exc:
         write_result_atomically(
             result_file,
@@ -519,6 +532,13 @@ def _daemon_main(args: argparse.Namespace) -> int:
         check_commands=settings.check_commands or route_check_commands,
         # #273 slice 2: same all-or-nothing fallback for the per-check state overrides.
         check_states=settings.check_states or route_check_states,
+        # #273 slice 3: project-context develop_parity_command wins; the route flag is
+        # the fallback (mirrors --test-command under develop_test_command).
+        parity_command=(
+            settings.parity_command
+            if settings.parity_command is not None
+            else route_parity_command
+        ),
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
@@ -866,6 +886,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         check_states = parse_check_state_pairs(args.check_state, where="--check-state")
         test_command = parse_test_command(args.test_command, where="--test-command")
+        parity_command = parse_parity_command(
+            args.parity_command, where="--parity-command"
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -897,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
         test_command=test_command,
         check_commands=check_commands,
         check_states=check_states,
+        parity_command=parity_command,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,

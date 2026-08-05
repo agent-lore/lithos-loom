@@ -321,6 +321,26 @@ def parse_check_state_pairs(
     return parse_check_states(pairs, where=where)
 
 
+def parse_parity_command(value: object, *, where: str) -> str | None:
+    """Validate a ``parity_command`` override (#273 slice 3), or ``None``.
+
+    Mirrors :func:`parse_test_command`: a non-empty string (stripped) or ``None`` (no
+    parity check). The parity command is the repo's **aggregate** verification command
+    (e.g. ``make check``) run once on the approval candidate as a required
+    ``repo-parity`` gate check — trusted as-is (no parsing, no tool-probe), so the only
+    validation is non-empty-string; a bad command surfaces when the gate container runs
+    it. Shared by the project-metadata loader, the per-task override, and the CLI so
+    every surface rejects the same garbage identically. Raises :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{where}: parity_command must be a non-empty string (got {value!r})"
+        )
+    return value.strip()
+
+
 def parse_bool_setting(value: object, *, where: str) -> bool | None:
     """Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 
@@ -501,6 +521,15 @@ class DevelopConfig:
     # whose tool is expected-but-absent, which still blocks). `check_states["test"]`
     # wins over `test_gate`. Keys are STATEABLE_CHECK_NAMES (format excluded).
     check_states: dict[str, str] = field(default_factory=dict)
+    # #273 slice 3: the repo's AGGREGATE verification command (e.g. "make check"), run
+    # once on the approval candidate as a required `repo-parity` gate check (raw exit,
+    # blocks on non-zero). Trusted as-is (like test_command). This closes "gate-green ≠
+    # repo-CI-green" — a repo whose CI runs checks beyond the profile's structured set
+    # (diagram-drift, codegen freshness, docs lint, …) points this at a `make check`
+    # that is a superset of CI, so the pushed tree passes whatever CI enforces. For an
+    # ecosystem the per-check catalog doesn't model (e.g. C/C++) it is the PRIMARY gate.
+    # None = no parity check.
+    parity_command: str | None = None
     # #140: the `test` check's blocking is the resolved profile's ProfileCheck("test",
     # ...) state — the single source of truth (the legacy `block_on_red` knob is gone).
     test_timeout: int = DEFAULT_TEST_TIMEOUT

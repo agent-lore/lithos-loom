@@ -33,6 +33,7 @@ from lithos_loom.plugins.story_develop import engines
 from lithos_loom.plugins.story_develop.config import (
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
+    parse_parity_command,
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
@@ -99,6 +100,14 @@ def converge_command(
         "check has bespoke detection, so it takes this dedicated flag rather than "
         "--check-command.",
     ),
+    parity_command: str | None = typer.Option(
+        None,
+        "--parity-command",
+        help="The repo's aggregate verification command (e.g. 'make check'), run once "
+        "as a required `repo-parity` gate check so the converged tree passes what CI "
+        "enforces beyond the structured check-set (diagram drift, codegen, docs lint). "
+        "Primary gate for ecosystems the catalog doesn't model (C/C++).",
+    ),
     coder: str | None = typer.Option(
         None, "--coder", help="Coder engine for the fix turns (claude / codex)."
     ),
@@ -158,6 +167,7 @@ def converge_command(
     # false-green the required `test` check without running tests (#278 review).
     try:
         test_command = parse_test_command(test_command, where="--test-command")
+        parity_command = parse_parity_command(parity_command, where="--parity-command")
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -206,6 +216,7 @@ def converge_command(
         test_timeout=test_timeout,
         check_commands=check_commands,
         check_states=check_states,
+        parity_command=parity_command,
         **overrides,
     )
 

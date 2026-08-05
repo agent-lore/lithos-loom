@@ -78,6 +78,12 @@ name = "story-develop"
 # drops the check cleanly (generalizes develop_test_gate = false, i.e. { test = "off" }),
 # `required`/`informational` override the review profile's declared state (#273 slice 2).
 # The --check-state NAME=STATE route flag is the fallback when metadata pins none.
+# develop_parity_command = "make check" adds a required `repo-parity` gate check that
+# runs the repo's AGGREGATE verification command once on the approval candidate, so the
+# pushed tree passes whatever CI enforces beyond the structured check-set (diagram
+# drift, codegen freshness, docs lint, …). Runs regardless of ecosystem — the primary
+# gate for a repo the catalog can't model (C/C++). Explicit opt-in; --parity-command is
+# the route-level fallback. See docs/adr/0010-aggregate-repo-parity-check.md (#273 sl3).
 # On Python repos with ruff present, an informational `lint` check also runs and
 # its findings are structured into a stable gate/<check>-NNN ledger surfaced to
 # the panel + [DevelopResult] (non-blocking; #132).

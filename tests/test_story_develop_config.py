@@ -23,6 +23,7 @@ from lithos_loom.plugins.story_develop.config import (
     parse_effort,
     parse_image,
     parse_model,
+    parse_parity_command,
 )
 
 
@@ -295,6 +296,28 @@ def test_parse_check_state_pairs_rejects_missing_equals() -> None:
 def test_develop_config_check_states_defaults_empty(tmp_path: Path) -> None:
     cfg = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
     assert cfg.check_states == {}
+
+
+# --- parse_parity_command (#273 slice 3: aggregate repo-parity check) ---------
+
+
+def test_parse_parity_command_none_passes_through() -> None:
+    assert parse_parity_command(None, where="x") is None
+
+
+def test_parse_parity_command_strips() -> None:
+    assert parse_parity_command("  make check  ", where="x") == "make check"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, []])
+def test_parse_parity_command_rejects_bad(bad: object) -> None:
+    with pytest.raises(ValueError, match="parity_command must be a non-empty string"):
+        parse_parity_command(bad, where="x")
+
+
+def test_develop_config_parity_command_defaults_none(tmp_path: Path) -> None:
+    cfg = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
+    assert cfg.parity_command is None
 
 
 # --- codex agent config (#94) -----------------------------------------------

@@ -304,6 +304,33 @@ def test_check_states_non_scalar_value_frictions_not_crash() -> None:
     assert frictions[0].endswith("; ignoring")
 
 
+# --- aggregate repo-parity command (#273 slice 3) ─────────────────────────
+
+
+def test_parity_command_project_then_task() -> None:
+    # A scalar develop_parity_command: project value, task override wins.
+    project, _ = _resolve({"develop_parity_command": "make check"})
+    assert project.parity_command == "make check"
+    both, _ = _resolve(
+        {"develop_parity_command": "make check"},
+        {"develop_parity_command": "make ci"},
+    )
+    assert both.parity_command == "make ci"
+
+
+def test_parity_command_default_none_no_friction() -> None:
+    settings, frictions = _resolve()
+    assert settings.parity_command is None
+    assert frictions == ()
+
+
+def test_parity_command_bad_value_frictions_and_keeps_none() -> None:
+    settings, frictions = _resolve({"develop_parity_command": ""})
+    assert settings.parity_command is None
+    assert len(frictions) == 1
+    assert frictions[0].endswith("; ignoring")
+
+
 # ── friction ORDER (must match the original resolve_project_settings) ──
 
 

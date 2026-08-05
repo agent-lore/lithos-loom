@@ -236,6 +236,23 @@ def test_bad_check_state_fails_closed(stubs: dict) -> None:
     assert "config" not in stubs
 
 
+def test_parity_command_threads_through(stubs: dict) -> None:
+    # #273 slice 3: --parity-command reaches config.parity_command.
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--parity-command", "make check"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].parity_command == "make check"
+
+
+def test_whitespace_parity_command_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--parity-command", "   "]
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
 def test_malformed_check_command_fails_closed(stubs: dict) -> None:
     # no `=` → not a NAME=COMMAND pair → fail closed before any container work.
     result = runner.invoke(

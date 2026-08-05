@@ -33,6 +33,7 @@ from .config import (
     parse_effort,
     parse_image,
     parse_model,
+    parse_parity_command,
     parse_test_command,
 )
 
@@ -68,6 +69,9 @@ class ScalarSettings:
     # #273 slice 2: per-check state overrides ({check_name: required|informational|off})
     # from develop_check_states, project-then-task merged per-key. Empty when unset.
     check_states: dict[str, str] = field(default_factory=dict)
+    # #273 slice 3: the aggregate repo-parity command (e.g. "make check"), project-then-
+    # task. None = no parity check.
+    parity_command: str | None = None
 
 
 def _parse_or_friction(
@@ -346,6 +350,16 @@ def resolve_scalar_settings(
         key="develop_check_states",
         parser=parse_check_states,
     )
+    # #273 slice 3: a scalar project-then-task field, resolved AFTER the dict maps so
+    # the pinned friction order is unchanged (appended last).
+    parity_command = _resolve_project_then_task(
+        _ProjectThenTaskField(
+            "parity_command", "develop_parity_command", parse_parity_command
+        ),
+        meta,
+        task_metadata,
+        frictions,
+    )
     return ScalarSettings(
         coder=coder,
         coder_model=coder_model,
@@ -359,4 +373,5 @@ def resolve_scalar_settings(
         review_profile_project=review_profile_project,
         check_commands=check_commands,
         check_states=check_states,
+        parity_command=parity_command,
     )
