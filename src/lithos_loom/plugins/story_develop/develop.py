@@ -75,8 +75,10 @@ class BlockingCheckOutcome:
     that produced no ledger finding — captured so a final-round failure is named in
     the run result instead of only living in the round's output artifact (#273).
 
-    ``output`` is the check's on-disk output artifact path (the full tail lives
-    there); ``output_tail`` is the bounded inline view for the run message.
+    ``name`` / ``command`` / ``verdict`` are what the run message, ``[DevelopResult]``
+    finding, and standalone summary render. ``output_tail`` carries the check's
+    bounded output tail for callers that want it (the full output lives in the
+    round's ``output_<name>.txt`` artifact); it is not rendered inline today.
     """
 
     name: str

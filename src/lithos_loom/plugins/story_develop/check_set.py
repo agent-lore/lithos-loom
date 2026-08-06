@@ -142,11 +142,12 @@ class CheckSetResult:
         and per-check command overrides (#273).
 
         These deliberately bypass the finding adapter (``raw_exit``), so they leave
-        **no** ledger finding and are not the ``test`` check (which has its own
-        :attr:`test_gate` view). Without this, a red raw-exit check on the final
-        round vanishes from ``DevelopResult`` — the operator sees "max_rounds; last
-        reviews pass" with no hint that (e.g.) ``repo-parity`` blocked (#273 slice 3
-        review). The epilogue names them in the run result from this list.
+        **no** ledger finding. The ``test`` check is never built ``raw_exit`` (it has
+        its own :attr:`test_gate` view), so it is naturally absent here — the filter
+        keys on ``raw_exit`` alone, not the check name. Without this, a red raw-exit
+        check on the final round vanishes from ``DevelopResult`` — the operator sees
+        "max_rounds; last reviews pass" with no hint that (e.g.) ``repo-parity``
+        blocked (#273 slice 3 review). The epilogue names them in the run result.
         """
         return tuple(r for r in self.results if r.check.raw_exit and not r.passed)
 
