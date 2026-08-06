@@ -560,6 +560,63 @@ def test_check_command_override_is_emitted_even_when_its_tool_is_absent(
     assert by["typecheck"].command == "make typecheck"
 
 
+# --- aggregate repo-parity check (#273 slice 3) -------------------------------
+
+
+def test_parity_command_appends_required_candidate_raw_exit_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #273 slice 3: parity_command appends a `repo-parity` check — required, CANDIDATE
+    # stage (cost), raw_exit (its raw command decides, no adapter), verbatim command.
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(tmp_path, review_profile="standard", parity_command="make check")
+    by = {c.name: c for c in build_check_set(cfg, tmp_path)}
+    p = by[check_runner.PARITY_CHECK_NAME]
+    assert p.command == "make check"  # verbatim
+    assert p.state == "required"
+    assert p.stage == "candidate"
+    assert p.raw_exit is True
+
+
+def test_no_parity_command_no_parity_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _python(monkeypatch, present=("uv", "ruff", "bandit"))
+    monkeypatch.setattr(
+        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
+    )
+    cfg = _config(tmp_path, review_profile="standard")
+    names = {c.name for c in build_check_set(cfg, tmp_path)}
+    assert check_runner.PARITY_CHECK_NAME not in names
+
+
+def test_parity_check_runs_on_markerless_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The C/C++ case: no known ecosystem → every structured check is N/A and there is no
+    # test command, so the gate would be empty — the parity command is then the PRIMARY
+    # (and only) gate. It must still be emitted.
+    monkeypatch.setattr(check_runner.detection, "detect_ecosystems", lambda wt: ())
+    monkeypatch.setattr(check_runner, "_resolve_test_command", lambda config, wt: None)
+    cfg = _config(tmp_path, review_profile="standard", parity_command="make check")
+    checks = build_check_set(cfg, tmp_path)
+    assert [c.name for c in checks] == [check_runner.PARITY_CHECK_NAME]
+
+
+def test_floor_required_parity_check_reads_raw_exit() -> None:
+    # repo-parity is raw_exit → the floor reads its raw exit code (no adapter / ledger).
+    parity = Check(
+        check_runner.PARITY_CHECK_NAME, "make check", "required", raw_exit=True
+    )
+    red = CheckSetResult((CheckResult(parity, "ran", _red()),))
+    green = CheckSetResult((CheckResult(parity, "ran", _green()),))
+    assert check_runner.gate_floor_blocks(red, None) is True
+    assert check_runner.gate_floor_blocks(green, None) is False
+
+
 # --- per-check 3-state overrides (#273 slice 2) -------------------------------
 
 
@@ -854,6 +911,42 @@ def test_required_absent_check_blocks_the_whole_set() -> None:
     cs = CheckSetResult((CheckResult(Check("test", "", "required"), "absent", None),))
     assert cs.blocking_passed is False
     assert cs.aggregate_verdict is None  # no check produced a verdict
+
+
+def test_failing_raw_checks_surfaces_only_red_raw_exit_checks() -> None:
+    # #273: a red raw-exit check (repo-parity / command override) leaves no ledger
+    # finding, so failing_raw_checks is how the epilogue names it. A green raw check,
+    # a red adapter (non-raw) check, and the test check are all excluded.
+    cs = CheckSetResult(
+        (
+            CheckResult(Check("test", "pytest", "required"), "ran", _red()),
+            CheckResult(Check("lint", "ruff", "required"), "ran", _red()),
+            CheckResult(
+                Check("repo-parity", "make check", "required", "candidate", True),
+                "ran",
+                _red(),
+            ),
+            CheckResult(
+                Check("typecheck", "make tc", "required", "fast", True), "ran", _green()
+            ),
+        )
+    )
+    raw = cs.failing_raw_checks
+    assert [r.check.name for r in raw] == ["repo-parity"]
+    assert raw[0].gate is not None and raw[0].gate.verdict == "RED"
+
+
+def test_failing_raw_checks_empty_when_raw_check_green() -> None:
+    cs = CheckSetResult(
+        (
+            CheckResult(
+                Check("repo-parity", "make check", "required", "candidate", True),
+                "ran",
+                _green(),
+            ),
+        )
+    )
+    assert cs.failing_raw_checks == ()
 
 
 def test_summary_coder_surfaces_expected_but_absent_required_check() -> None:

@@ -70,6 +70,24 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class BlockingCheckOutcome:
+    """A blocking raw-exit gate check (repo-parity / a per-check command override)
+    that produced no ledger finding — captured so a final-round failure is named in
+    the run result instead of only living in the round's output artifact (#273).
+
+    ``name`` / ``command`` / ``verdict`` are what the run message, ``[DevelopResult]``
+    finding, and standalone summary render. ``output_tail`` carries the check's
+    bounded output tail for callers that want it (the full output lives in the
+    round's ``output_<name>.txt`` artifact); it is not rendered inline today.
+    """
+
+    name: str
+    command: str
+    verdict: str  # "RED" | "TIMEOUT"
+    output_tail: str = ""
+
+
+@dataclass(frozen=True)
 class DevelopResult:
     """Outcome of a ``develop()`` run."""
 
@@ -93,6 +111,10 @@ class DevelopResult:
     test_gate: GateResult | None = None  # the latest round's gate (T4)
     # the latest round's open deterministic gate findings (#132)
     gate_findings: tuple[GateFinding, ...] = ()
+    # blocking raw-exit checks (repo-parity / command overrides) at exit (#273):
+    # they leave no ledger finding and aren't the test gate, so they'd otherwise
+    # vanish from the operator-visible outcome. Named in the run message + finding.
+    blocking_checks: tuple[BlockingCheckOutcome, ...] = ()
     conversation_log: Path | None = None
     # the resolved Review Profile this run ran under (#139/ADR 0003 §11): part
     # of the per-run review-metadata record correlated against outcome signals
@@ -471,6 +493,7 @@ def develop(
     coder_cost = ctx.coder_cost
     review_cost = ctx.review_cost
     gate = ctx.gate
+    final_check_set = ctx.check_set
     final_reviews = ctx.final_reviews
     coder_session = ctx.coder_session
     rounds_completed = ctx.rounds_completed
@@ -493,8 +516,25 @@ def develop(
             )
         return " ".join(bits)
 
+    # Raw-exit checks (repo-parity / command overrides) that blocked at exit: they
+    # produce no ledger finding and aren't the test gate, so name them explicitly
+    # here or a final-round parity-only failure is invisible in the outcome (#273).
+    blocking_checks = tuple(
+        BlockingCheckOutcome(
+            name=r.check.name,
+            command=r.check.command,
+            verdict=r.gate.verdict if r.gate is not None else "RED",
+            output_tail=r.gate.output_tail if r.gate is not None else "",
+        )
+        for r in (final_check_set.failing_raw_checks if final_check_set else ())
+    )
+
     total = coder_cost + review_cost
     gate_part = f"; test gate {gate.verdict} (`{gate.command}`)" if gate else ""
+    if blocking_checks:
+        gate_part += "; blocking gate checks: " + ", ".join(
+            f"{c.name} {c.verdict} (`{c.command}`)" for c in blocking_checks
+        )
     if status == "approved":
         message = (
             f"approved by {_reviews_part(final_reviews)} in {rounds_completed} "
@@ -581,6 +621,7 @@ def develop(
         coder_session=coder_session,
         test_gate=gate,
         gate_findings=tuple(gate_ledger.open_findings()),
+        blocking_checks=blocking_checks,
         conversation_log=log_path,
         review_profile=config.review_profile,
         resume_after=resume_after,

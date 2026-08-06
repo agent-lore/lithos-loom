@@ -442,6 +442,47 @@ def test_max_rounds_stops_unapproved(
     assert "max_rounds" in result.message
 
 
+def test_final_round_parity_failure_named_in_result(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # #273 review: reviewers LGTM but the candidate-stage repo-parity check goes red
+    # on the only round. Parity is raw-exit (no ledger finding) and not the test
+    # gate, so without DevelopResult.blocking_checks the failure would vanish from
+    # the outcome ("max_rounds; last reviews pass"). Assert it is named.
+    cfg = DevelopConfig(
+        repo=config.repo,
+        description=config.description,
+        work_dir=config.work_dir,
+        claude_config_dir=config.claude_config_dir,
+        parity_command="make check",
+        max_rounds=1,
+    )
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
+
+    def name_aware_gate(gate_cmd, *, name, command, timeout) -> GateResult:
+        # Everything green except the parity command — isolate parity as the sole
+        # blocker. `name` is the container name; key on the command instead.
+        red = command == "make check"
+        return GateResult(
+            command=command,
+            exit_code=1 if red else 0,
+            passed=not red,
+            output_tail="make: *** [check] Error 1" if red else "ok",
+        )
+
+    monkeypatch.setattr(test_gate_mod, "run_gate_container", name_aware_gate)
+
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "max_rounds"
+    assert result.succeeded is False
+    # The blocking parity check is named in the structured field + the run message.
+    assert [c.name for c in result.blocking_checks] == ["repo-parity"]
+    assert result.blocking_checks[0].verdict == "RED"
+    assert "repo-parity" in result.message
+    assert "make check" in result.message
+
+
 def test_state_json_failure_reason_none_for_max_rounds(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

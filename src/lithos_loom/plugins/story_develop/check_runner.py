@@ -47,6 +47,12 @@ from .test_gate import GateResult
 
 logger = logging.getLogger(__name__)
 
+# #273 slice 3: the stable name of the aggregate repo-parity gate check (`make check`
+# and the like). Not a per-ecosystem catalog check — an extra candidate-stage check
+# appended when ``config.parity_command`` is set. A distinct, greppable check name so
+# its gate output / findings are attributable.
+PARITY_CHECK_NAME = "repo-parity"
+
 
 def _resolve_test_command(config: DevelopConfig, wt: Path) -> str | None:
     """Pick the command the ``test`` check will run, or ``None`` when none is
@@ -166,6 +172,22 @@ def build_check_set(config: DevelopConfig, wt: Path) -> tuple[Check, ...]:
                 checks.extend(_build_test_check(config, state, ecosystems, wt))
         else:
             checks.extend(by_name.get(pc.name, []))
+    # #273 slice 3: the repo-parity aggregate check, appended last at CANDIDATE stage
+    # (cost — once on the approval candidate, not every round). Runs the repo's own
+    # aggregate command (`config.parity_command`, e.g. `make check`) VERBATIM and reads
+    # its raw exit (`raw_exit` — no adapter, blocks on non-zero, raw output tail to the
+    # coder). It runs regardless of detected ecosystems, so it is the PRIMARY gate for a
+    # repo the per-check catalog can't model (C/C++). None → no parity check.
+    if config.parity_command:
+        checks.append(
+            Check(
+                name=PARITY_CHECK_NAME,
+                command=config.parity_command,
+                state="required",
+                stage="candidate",
+                raw_exit=True,
+            )
+        )
     return tuple(checks)
 
 

@@ -23,11 +23,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | M | 2 | 12 |
+| `lithos_loom.plugins.story_develop.config` | M | 2 | 13 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
-| `lithos_loom.plugins.story_develop.develop` | M | 1 | 1 |
+| `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -110,6 +110,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `parse_check_command_pairs` — Parse repeatable CLI ``NAME=COMMAND`` items into a validated override map (#273).
 - def `parse_check_states` — Validate a per-check state-override map (#273 slice 2), or ``{}`` when absent.
 - def `parse_check_state_pairs` — Parse repeatable CLI ``NAME=STATE`` items into a validated state map (#273).
+- def `parse_parity_command` — Validate a ``parity_command`` override (#273 slice 3), or ``None``.
 - def `parse_bool_setting` — Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 - def `parse_effort` — Validate + normalise a reasoning-effort level, or ``None``.
 - def `parse_reviewer_entry` — Validate one reviewer mapping into a :class:`ReviewerSpec`.
@@ -143,6 +144,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `build_result_payload` — Map a :class:`DevelopResult` onto the result.json contract.
 
 ### `lithos_loom.plugins.story_develop.develop`
+- class `BlockingCheckOutcome` — A blocking raw-exit gate check (repo-parity / a per-check command override) that produced no ledger finding — captured so a final-round failure is named in the run result instead of only living in the round's output artifact (#273).
 - class `DevelopResult` — Outcome of a ``develop()`` run.
 - def `develop` — Run the develop loop and return a result.
 
