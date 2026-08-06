@@ -1355,6 +1355,56 @@ def test_daemon_parity_command_metadata_threads_into_config(
     assert captured["config"].parity_command == "make check"
 
 
+def test_daemon_parity_command_route_flag_is_fallback(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 slice 3: with no develop_parity_command metadata, the route-level
+    --parity-command flag is the fallback (a per-route policy floor)."""
+    captured: dict[str, Any] = {}  # default settings → parity_command None
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--parity-command", "make ci")
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].parity_command == "make ci"
+
+
+def test_daemon_parity_command_metadata_replaces_route(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 slice 3 review (Finding 2): project/task metadata REPLACES the route
+    --parity-command when it resolves to a command. See ADR 0010 "Precedence and
+    disabling"."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {
+        "settings": ProjectDevelopSettings(parity_command="make check")
+    }
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--parity-command", "make ci")
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].parity_command == "make check"
+
+
+def test_daemon_parity_command_metadata_none_cannot_disable_route(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#273 slice 3 review (Finding 2): metadata that resolves to None (absent /
+    blank / rejected) CANNOT suppress the route --parity-command — the route command
+    still applies. There is deliberately no "null suppresses the route default"
+    escape (uniform scalar precedence). See ADR 0010 "Precedence and disabling"."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {"settings": ProjectDevelopSettings(parity_command=None)}
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--parity-command", "make ci")
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].parity_command == "make ci"
+
+
 def test_daemon_invalid_check_command_does_not_defeat_idempotency_replay(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

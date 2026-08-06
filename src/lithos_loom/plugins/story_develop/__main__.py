@@ -533,7 +533,10 @@ def _daemon_main(args: argparse.Namespace) -> int:
         # #273 slice 2: same all-or-nothing fallback for the per-check state overrides.
         check_states=settings.check_states or route_check_states,
         # #273 slice 3: project-context develop_parity_command wins; the route flag is
-        # the fallback (mirrors --test-command under develop_test_command).
+        # the fallback (mirrors --test-command under develop_test_command). Uniform
+        # scalar precedence — metadata may REPLACE the route command but not disable it
+        # (None/absent = inherit); a route --parity-command is a per-route policy floor
+        # applied to every project it serves. See ADR 0010 "Precedence and disabling".
         parity_command=(
             settings.parity_command
             if settings.parity_command is not None
@@ -969,6 +972,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         blocking = " — BLOCKS approval" if (not g.passed and test_required) else ""
         print(f"  gate:     {g.verdict} (`{g.command}`, exit {g.exit_code}){blocking}")
+    for c in result.blocking_checks:
+        # Raw-exit checks (repo-parity / command overrides) that blocked at exit
+        # (#273): they leave no ledger finding + aren't the test gate, so a
+        # final-round parity-only failure would otherwise be invisible here.
+        print(f"  gate:     {c.verdict} (`{c.command}`) — {c.name} BLOCKS approval")
     if result.conversation_log is not None:
         print(f"  log:      {result.conversation_log}")
     print(f"  cost:     ${result.total_cost_usd:.4f}")

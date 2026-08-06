@@ -27,7 +27,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
-| `lithos_loom.plugins.story_develop.develop` | M | 1 | 1 |
+| `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -144,6 +144,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `build_result_payload` — Map a :class:`DevelopResult` onto the result.json contract.
 
 ### `lithos_loom.plugins.story_develop.develop`
+- class `BlockingCheckOutcome` — A blocking raw-exit gate check (repo-parity / a per-check command override) that produced no ledger finding — captured so a final-round failure is named in the run result instead of only living in the round's output artifact (#273).
 - class `DevelopResult` — Outcome of a ``develop()`` run.
 - def `develop` — Run the develop loop and return a result.
 

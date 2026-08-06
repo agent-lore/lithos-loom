@@ -355,6 +355,52 @@ def test_main_standalone_required_red_test_prints_blocks(
     assert "BLOCKS approval" in capsys.readouterr().out
 
 
+def test_main_standalone_names_blocking_parity_check(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # #273 review finding 1: a raw-exit repo-parity failure leaves no ledger finding
+    # + isn't the test gate, so the standalone summary must name it (from
+    # DevelopResult.blocking_checks) — else a parity-only block is invisible.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import (
+        BlockingCheckOutcome,
+        DevelopResult,
+    )
+
+    result = DevelopResult(
+        status="max_rounds",
+        run_id="r1",
+        worktree=tmp_path,
+        branch="b",
+        base_sha="0" * 40,
+        commits=["c"],
+        rounds=1,
+        handoff_present=True,
+        coder_cost_usd=0.0,
+        review_cost_usd=0.0,
+        message="NOT approved (max_rounds)",
+        blocking_checks=(
+            BlockingCheckOutcome(
+                name="repo-parity", command="make check", verdict="RED"
+            ),
+        ),
+    )
+    monkeypatch.setattr(main_mod, "develop", lambda config, **kw: result)
+    main_mod.main(
+        [
+            "--repo",
+            str(tmp_git_repo),
+            "--description",
+            "x",
+            "--parity-command",
+            "make check",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "repo-parity BLOCKS approval" in out
+    assert "make check" in out
+
+
 def test_main_threads_parity_command_into_config(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

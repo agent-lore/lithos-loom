@@ -137,6 +137,20 @@ class CheckSetResult:
         return all(r.passed for r in self.results)
 
     @property
+    def failing_raw_checks(self) -> tuple[CheckResult, ...]:
+        """Blocking checks whose verdict is a raw exit code — the repo-parity check
+        and per-check command overrides (#273).
+
+        These deliberately bypass the finding adapter (``raw_exit``), so they leave
+        **no** ledger finding and are not the ``test`` check (which has its own
+        :attr:`test_gate` view). Without this, a red raw-exit check on the final
+        round vanishes from ``DevelopResult`` — the operator sees "max_rounds; last
+        reviews pass" with no hint that (e.g.) ``repo-parity`` blocked (#273 slice 3
+        review). The epilogue names them in the run result from this list.
+        """
+        return tuple(r for r in self.results if r.check.raw_exit and not r.passed)
+
+    @property
     def aggregate_verdict(self) -> str | None:
         """The worst verdict across checks that produced one, or ``None`` when none
         ran. Feeds the run summary / PR body. For the ``{test}`` set this is exactly

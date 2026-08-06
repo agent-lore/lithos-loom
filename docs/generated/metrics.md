@@ -44,7 +44,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Evals | 9 | 975 | 785 | 1 | 2 | 0.67 | 18 (`lithos_loom.evals.review.harness.run_case`) | 2 |
 | GitHub | 1 | 796 | 616 | 5 | 1 | 0.17 | 14 (`lithos_loom.github_client._parse_pull_request`) | 1 |
 | LithosClient | 1 | 2195 | 1841 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
-| Plugins | 39 | 11968 | 9550 | 2 | 5 | 0.71 | 93 (`lithos_loom.plugins.story_develop.__main__.main`) | 24 |
+| Plugins | 39 | 12035 | 9596 | 2 | 5 | 0.71 | 94 (`lithos_loom.plugins.story_develop.__main__.main`) | 24 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 5 | 604 | 469 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
@@ -56,7 +56,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **116**, lines: **36263**, SLOC: **28758**
+- Modules: **116**, lines: **36330**, SLOC: **28804**
 - Largest module: `lithos_loom.lithos_client` (2195 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -68,16 +68,16 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **926**, cyclomatic > 10: **74**
+- Functions: **927**, cyclomatic > 10: **74**
 
 Top 10 most complex functions:
 
 | Complexity | Function |
 |---:|---|
-| 93 | `lithos_loom.plugins.story_develop.__main__.main` |
+| 94 | `lithos_loom.plugins.story_develop.__main__.main` |
 | 49 | `lithos_loom.cli.project.import_project` |
 | 44 | `lithos_loom.children.obsidian_sync._amain` |
-| 36 | `lithos_loom.plugins.story_develop.develop.develop` |
+| 42 | `lithos_loom.plugins.story_develop.develop.develop` |
 | 30 | `lithos_loom.main._print_dry_run_report` |
 | 30 | `lithos_loom.plugins.story_develop.__main__._daemon_main` |
 | 28 | `lithos_loom.config._parse_obsidian_sync` |
@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **17** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.59** (57695 test lines / 36263 source lines)
+- Test-to-source line ratio: **1.59** (57892 test lines / 36330 source lines)

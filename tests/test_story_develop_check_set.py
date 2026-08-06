@@ -913,6 +913,42 @@ def test_required_absent_check_blocks_the_whole_set() -> None:
     assert cs.aggregate_verdict is None  # no check produced a verdict
 
 
+def test_failing_raw_checks_surfaces_only_red_raw_exit_checks() -> None:
+    # #273: a red raw-exit check (repo-parity / command override) leaves no ledger
+    # finding, so failing_raw_checks is how the epilogue names it. A green raw check,
+    # a red adapter (non-raw) check, and the test check are all excluded.
+    cs = CheckSetResult(
+        (
+            CheckResult(Check("test", "pytest", "required"), "ran", _red()),
+            CheckResult(Check("lint", "ruff", "required"), "ran", _red()),
+            CheckResult(
+                Check("repo-parity", "make check", "required", "candidate", True),
+                "ran",
+                _red(),
+            ),
+            CheckResult(
+                Check("typecheck", "make tc", "required", "fast", True), "ran", _green()
+            ),
+        )
+    )
+    raw = cs.failing_raw_checks
+    assert [r.check.name for r in raw] == ["repo-parity"]
+    assert raw[0].gate is not None and raw[0].gate.verdict == "RED"
+
+
+def test_failing_raw_checks_empty_when_raw_check_green() -> None:
+    cs = CheckSetResult(
+        (
+            CheckResult(
+                Check("repo-parity", "make check", "required", "candidate", True),
+                "ran",
+                _green(),
+            ),
+        )
+    )
+    assert cs.failing_raw_checks == ()
+
+
 def test_summary_coder_surfaces_expected_but_absent_required_check() -> None:
     cs = _cs(CheckResult(Check("test", "", "required"), "absent", None))
     out = render_check_summary(cs, for_coder=True)

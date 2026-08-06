@@ -69,3 +69,24 @@ superset of what CI runs.**
   (it is a pre-approval candidate check).
 - Parity is not part of the per-check 3-state (`check_states`) — to disable it, unset
   `parity_command`; when set it is always a required candidate check.
+- A failing raw-exit parity check leaves no ledger finding, so the epilogue names it
+  explicitly in the run message + the `[DevelopResult]` finding + the standalone summary
+  (via `DevelopResult.blocking_checks`) — otherwise a final-round parity-only failure
+  (reviewers pass, parity red) would be invisible in the operator-visible outcome and
+  survive only as the round's `output_repo-parity.txt` artifact.
+
+## Precedence and disabling
+
+`parity_command` resolves with the standard project → task → route precedence shared by
+every scalar `develop_*` field (`develop_test_command`, `develop_image`, …): task
+metadata beats project metadata beats the route-level `--parity-command` flag. A layer
+may **replace** a lower layer's command but **cannot disable** it — metadata `None` /
+absent means "inherit", and a blank string is rejected, so there is deliberately no
+"set to null to suppress the route default" escape. This is a uniform property of the
+scalar resolver, not a parity-specific choice; special-casing parity to honour an
+explicit-null disable would be a surprising asymmetry across the `develop_*` surface.
+The consequence an operator must know: **a route-level `--parity-command` is a per-route
+policy floor — every project that route serves runs it.** If a repo served by that route
+has no suitable aggregate target, scope the parity flag to a narrower route rather than
+expecting a project to opt out. (A cross-cutting presence-aware "disable a lower default"
+mechanism, if ever wanted, belongs to all scalar fields at once — out of scope here.)

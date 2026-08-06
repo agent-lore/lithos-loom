@@ -220,6 +220,30 @@ def test_post_results_includes_deterministic_findings(
     assert "gate/lint-001 (major): E501 [a.py] line too long" in body
 
 
+def test_post_results_names_blocking_raw_checks(
+    fake_client: FakeLithosClient,
+) -> None:
+    # #273 review: a raw-exit repo-parity failure leaves no ledger finding, so the
+    # [DevelopResult] finding must name it from DevelopResult.blocking_checks.
+    from lithos_loom.plugins.story_develop.develop import BlockingCheckOutcome
+
+    result = _result(
+        status="max_rounds",
+        blocking_checks=(
+            BlockingCheckOutcome(
+                name="repo-parity",
+                command="make check",
+                verdict="RED",
+                output_tail="make: *** [check] Error 1",
+            ),
+        ),
+    )
+    lithos_io.post_results("http://x", "task-1", result)
+    body = fake_client.findings[0]["summary"]
+    assert "blocking gate checks:" in body
+    assert "repo-parity: RED (`make check`)" in body
+
+
 def test_post_results_with_delivery_corrects_cost_and_reports_round(
     fake_client: FakeLithosClient,
 ) -> None:

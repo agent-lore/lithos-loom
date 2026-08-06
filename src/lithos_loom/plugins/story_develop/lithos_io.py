@@ -129,6 +129,12 @@ def _result_summary(result: DevelopResult) -> str:
             "",
             f"test gate: {result.test_gate.verdict} (`{result.test_gate.command}`)",
         ]
+    if result.blocking_checks:
+        # Raw-exit checks (repo-parity / command overrides) that blocked at exit
+        # (#273) — they leave no ledger finding, so name them here explicitly.
+        lines += ["", "blocking gate checks:"]
+        for c in result.blocking_checks:
+            lines.append(f"- {c.name}: {c.verdict} (`{c.command}`)")
     if result.gate_findings:
         det_lines: list[str] = []
         for f in result.gate_findings:
