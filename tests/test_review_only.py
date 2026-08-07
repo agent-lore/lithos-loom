@@ -83,17 +83,31 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     )
     monkeypatch.setattr(review_only, "seed_handoff_dir", lambda d: None)
 
-    # one required lint check that passes
+    # one required lint check that passes; tests can override the built set (the
+    # #282 candidate-split test adds a candidate-staged check alongside it)
     check = Check(name="lint", command="ruff check", state="required", stage="fast")
-    gate = GateResult(command="ruff check", exit_code=0, passed=True, output_tail="ok")
+    state["build_checks"] = (check,)
 
     def fake_build_check_set(config, wt):
-        return (check,)
+        return state["build_checks"]
 
     def fake_run_check_set(config, wt, sha, round_no, checks, gate_ledger=None):
         state["gate_calls"].append({"sha": sha, "round_no": round_no})
+        # per-call stage record for the #282 fast/candidate split assertion
+        state.setdefault("gate_check_stages", []).append(
+            [(c.name, c.stage) for c in checks]
+        )
         return CheckSetResult(
-            results=(CheckResult(check=check, execution_outcome="ran", gate=gate),)
+            results=tuple(
+                CheckResult(
+                    check=c,
+                    execution_outcome="ran",
+                    gate=GateResult(
+                        command=c.command, exit_code=0, passed=True, output_tail="ok"
+                    ),
+                )
+                for c in checks
+            )
         )
 
     monkeypatch.setattr(review_only, "build_check_set", fake_build_check_set)
@@ -144,6 +158,65 @@ def test_gate_runs_once_on_head_sha(harness: dict, tmp_path: Path) -> None:
     config = _config(tmp_path)
     review_only.review_change(config, _CHANGE)
     assert harness["gate_calls"] == [{"sha": "h" * 40, "round_no": 1}]
+
+
+def test_candidate_checks_run_in_second_pass_on_fresh_export(
+    harness: dict, tmp_path: Path
+) -> None:
+    # #282: run_check_set exports the tree ONCE per call and mounts it RW into
+    # every check in sequence, so a candidate check (repo-parity) sharing the
+    # fast checks' call would see a tree the `test` check already mutated
+    # (guardrail suites regenerate docs/generated) — masking exactly the drift
+    # parity exists to catch. review_head must mirror develop's split
+    # (rounds.fast_gate_phase / approval_phase): fast checks first, then a
+    # SECOND run_check_set call — its own pristine export — for candidate ones.
+    fast = Check(name="lint", command="ruff check", state="required", stage="fast")
+    parity = Check(
+        name="repo-parity",
+        command="make check",
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+    harness["build_checks"] = (fast, parity)
+    config = _config(tmp_path)
+
+    intake = review_only.review_head(config, _CHANGE)
+
+    # two calls, partitioned by stage — the second call's fresh export is what
+    # un-masks parity (export_tree recreates the tree dir from the archive)
+    assert harness["gate_check_stages"] == [
+        [("lint", "fast")],
+        [("repo-parity", "candidate")],
+    ]
+    assert harness["gate_calls"] == [
+        {"sha": "h" * 40, "round_no": 1},
+        {"sha": "h" * 40, "round_no": 1},
+    ]
+    # the intake check_set is the MERGE of both passes (fast then candidate),
+    # so the report / converge fix prompt / floor see every check
+    assert intake.check_set is not None
+    assert [r.check.name for r in intake.check_set.results] == ["lint", "repo-parity"]
+
+
+def test_candidate_only_check_set_still_runs(harness: dict, tmp_path: Path) -> None:
+    # Degenerate split: nothing fast, one candidate check — the candidate pass
+    # must run on its own and its result stand as the whole check_set.
+    parity = Check(
+        name="repo-parity",
+        command="make check",
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+    harness["build_checks"] = (parity,)
+    config = _config(tmp_path)
+
+    intake = review_only.review_head(config, _CHANGE)
+
+    assert harness["gate_check_stages"] == [[("repo-parity", "candidate")]]
+    assert intake.check_set is not None
+    assert [r.check.name for r in intake.check_set.results] == ["repo-parity"]
 
 
 def test_findings_flow_into_report_and_block(harness: dict, tmp_path: Path) -> None:

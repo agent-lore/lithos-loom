@@ -434,10 +434,10 @@
         "functions": 326,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1074,
-        "lines": 12038,
+        "lines": 12057,
         "modules": 39,
         "public_symbols": 204,
-        "sloc": 9599
+        "sloc": 9607
       },
       "ProjectContext": {
         "classes": 0,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 36333,
+    "total_lines": 36352,
     "total_modules": 116,
-    "total_sloc": 28807
+    "total_sloc": 28815
   },
   "tests": {
     "ratio": 1.59,
-    "src_lines": 36333,
-    "test_lines": 57892
+    "src_lines": 36352,
+    "test_lines": 57965
   }
 }
