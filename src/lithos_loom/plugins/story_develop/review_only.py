@@ -28,7 +28,6 @@ from .check_runner import (
     build_check_set,
     check_result_blocks,
     gate_floor_blocks,
-    merge_check_sets,
     run_check_set,
 )
 from .check_set import CheckSetResult
@@ -157,9 +156,8 @@ def review_head(
     the pieces into a :class:`ReviewReport`) and the converge loop (which seeds
     its round-1 coder from ``panel.round_reviews`` and the intake ``check_set``).
     Materialises a read-only worktree at ``change.head_sha``, runs the profile's
-    check-set once (fast checks, then candidate-staged checks on a fresh export —
-    #282) and the reviewer panel once (round 1, no coder), and tears the worktree
-    + reviewer containers down unless *keep_worktree*.
+    check-set once and the reviewer panel once (round 1, no coder), and tears the
+    worktree + reviewer containers down unless *keep_worktree*.
     """
     specs = config.effective_reviewers
     for spec in specs:
@@ -213,31 +211,14 @@ def review_head(
     panel = None
     try:
         checks = build_check_set(config, wt)
-        fast_checks = tuple(c for c in checks if c.stage == "fast")
-        candidate_checks = tuple(c for c in checks if c.stage == "candidate")
         for rstate in reviewers:
             containers.start_container(rstate.run_cmd)
         # Gate first so the panel prompt carries the deterministic summary, then
         # one reviewer round — the SAME primitive develop() drives.
-        #
-        # #282: fast and candidate checks run as SEPARATE run_check_set calls,
-        # mirroring develop's split (rounds.fast_gate_phase / approval_phase).
-        # Each call exports its own tree, and checks mount that tree RW — so a
-        # single combined call would hand candidate checks (repo-parity) a tree
-        # the `test` check already mutated (guardrail suites regenerate
-        # docs/generated as a side effect), silently masking exactly the drift
-        # parity exists to catch. The second call's fresh export restores the
-        # pristine committed tree. Unlike develop, BOTH passes run
-        # unconditionally — review-only always evaluated the full set.
-        if fast_checks:
+        if checks:
             check_set = run_check_set(
-                config, wt, change.head_sha, 1, fast_checks, gate_ledger
+                config, wt, change.head_sha, 1, checks, gate_ledger
             )
-        if candidate_checks:
-            candidate_set = run_check_set(
-                config, wt, change.head_sha, 1, candidate_checks, gate_ledger
-            )
-            check_set = merge_check_sets(check_set, candidate_set)
         panel = run_panel_round(
             config,
             reviewers,

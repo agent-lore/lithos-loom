@@ -451,11 +451,20 @@ def run_check_set(
 ) -> CheckSetResult | None:
     """Run an ordered check-set against one round commit.
 
-    The committed tree is exported **once**; each check then runs in its own
-    throwaway container (no shell-chaining — each keeps its own verdict).
+    The committed tree is exported **fresh for every check** (#282): each check
+    runs in its own throwaway container (no shell-chaining — each keeps its own
+    verdict), but the tree mounts read-write, so without per-check re-export a
+    check that mutates it (a test suite regenerating ``docs/generated``, a
+    ``coverage`` pytest run) would leak that state into the NEXT check's input —
+    order-dependent verdicts, and in the worst case a false-green ``repo-parity``
+    judging an already-regenerated tree instead of the committed one. Re-export
+    makes every check's result order-independent. The cost is one
+    ``git archive | tar`` per check plus a per-check venv re-sync (cheap: the
+    ``uv`` cache mount persists across checks and rounds).
+
     Infra errors skip rather than fail the run (the gate is an independent
-    check, not a dependency): an export failure returns ``None`` for the whole
-    set, and a per-check run failure yields a ``CheckResult`` with
+    check, not a dependency): a cache-dir failure returns ``None`` for the whole
+    set, and a per-check export/run failure yields a ``CheckResult`` with
     ``execution_outcome="errored"`` and ``gate=None``. Returns ``None`` when
     there are no checks.
 
@@ -468,12 +477,11 @@ def run_check_set(
         return None
     round_dir = config.gate_dir / f"round_{round_no:02d}"
     try:
-        test_gate.export_tree(wt, sha, round_dir / "tree")
         cache = config.gate_dir / "cache"
         cache.mkdir(parents=True, exist_ok=True)
-    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         logger.warning(
-            "story-develop %s: round %d gate export errored (skipping): %s",
+            "story-develop %s: round %d gate cache dir errored (skipping): %s",
             config.run_id,
             round_no,
             exc,
@@ -495,6 +503,10 @@ def run_check_set(
             config.run_id, f"gate-{check.name}-r{round_no}"
         )
         try:
+            # #282: fresh export per check — export_tree recreates the dest
+            # empty, discarding any mutation (or untracked droppings) the
+            # previous check left behind.
+            test_gate.export_tree(wt, sha, round_dir / "tree")
             gate_cmd = test_gate.build_gate_command(
                 name=name,
                 image=config.image,
