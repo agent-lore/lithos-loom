@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import containers, engines
-from lithos_loom.plugins.story_develop.config import CONTAINER_NOFILE_ULIMIT
+from lithos_loom.plugins.story_develop.config import (
+    CONTAINER_NOFILE_ULIMIT,
+    CONTAINER_SHM_SIZE,
+)
 
 
 def _exec_cmd(
@@ -59,6 +62,7 @@ def test_run_command_hardened_profile_and_mounts() -> None:
     assert cmd[cmd.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges:true" in cmd
     assert cmd[cmd.index("--ulimit") + 1] == f"nofile={CONTAINER_NOFILE_ULIMIT}"  # #117
+    assert cmd[cmd.index("--shm-size") + 1] == CONTAINER_SHM_SIZE  # browser e2e
     # worktree RW, handoff dir OUTSIDE the worktree, config dir, single auth file
     assert "/work/run/worktree/branch:/workspace" in cmd
     assert "/work/run/handoff:/workspace/.handoff" in cmd

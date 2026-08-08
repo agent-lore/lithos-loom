@@ -43,6 +43,13 @@ DEFAULT_IMAGE = "ralph-sandbox:latest"
 # observed need (failure begins right at 1024) and stays under typical
 # docker-daemon hard caps for portability. Passed as ``--ulimit nofile=soft:hard``.
 CONTAINER_NOFILE_ULIMIT = "65536:65536"
+
+# /dev/shm for gate/agent/autoformat containers. Docker's 64MB default is too
+# small for headless-browser e2e workloads (chromium crashes under page-heavy
+# runs — playwright's docker guidance); a bounded size keeps the sandbox
+# hardened (no ipc=host). Applied uniformly so every container the plugin
+# launches has the same resource contract.
+CONTAINER_SHM_SIZE = "1g"
 WORKSPACE_MOUNT = "/workspace"
 # The handoff dir is bind-mounted at ``<workspace>/.handoff``; this is also the
 # mountpoint dir name that must exist in a READ-ONLY worktree before its

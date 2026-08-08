@@ -24,7 +24,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import CONTAINER_NOFILE_ULIMIT, WORKSPACE_MOUNT
+from .config import CONTAINER_NOFILE_ULIMIT, CONTAINER_SHM_SIZE, WORKSPACE_MOUNT
 
 # Mounted into the gate container so uv/npm package downloads are shared
 # between rounds of the same run (each container is still throwaway).
@@ -154,6 +154,8 @@ def build_gate_command(
         "no-new-privileges:true",
         "--ulimit",
         f"nofile={CONTAINER_NOFILE_ULIMIT}",
+        "--shm-size",
+        CONTAINER_SHM_SIZE,
         "-v",
         f"{tree}:{WORKSPACE_MOUNT}",
         "-v",

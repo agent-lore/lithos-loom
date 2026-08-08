@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import test_gate as test_gate_mod
-from lithos_loom.plugins.story_develop.config import CONTAINER_NOFILE_ULIMIT
+from lithos_loom.plugins.story_develop.config import (
+    CONTAINER_NOFILE_ULIMIT,
+    CONTAINER_SHM_SIZE,
+)
 from lithos_loom.plugins.story_develop.test_gate import (
     GateResult,
     build_gate_command,
@@ -77,6 +80,7 @@ def test_gate_command_shape(tmp_path: Path) -> None:
     # hardened profile + no agent config mounts (agent-free by construction)
     assert "ALL" in cmd and "no-new-privileges:true" in cmd
     assert cmd[cmd.index("--ulimit") + 1] == f"nofile={CONTAINER_NOFILE_ULIMIT}"  # #117
+    assert cmd[cmd.index("--shm-size") + 1] == CONTAINER_SHM_SIZE  # browser e2e
     assert not any("claude_config" in str(a) for a in cmd)
 
 
