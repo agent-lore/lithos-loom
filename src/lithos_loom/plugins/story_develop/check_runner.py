@@ -463,7 +463,9 @@ def run_check_set(
     lands in a **never-reused** per-check directory, so establishing a fresh tree
     never depends on deleting the previous check's (which a check can render
     undeletable — a mode-000 directory, other-UID files from a custom image);
-    the previous tree is cleaned up best-effort afterwards. This makes every
+    each tree is cleaned up best-effort afterwards (a retained one is logged —
+    it can no longer affect correctness, but it is repo-plus-venv of disk).
+    This makes every
     check's verdict independent of earlier checks' **workspace-tree** mutations
     (the persistent tool-cache mount is deliberately shared across checks and
     rounds — that is what makes the per-check venv re-sync cheap).
@@ -516,7 +518,7 @@ def run_check_set(
         # non-blocking infra error — skipped-as-satisfied, another false-green
         # route. The nonce also keeps a resume's re-run of the same check name
         # apart from a poisoned earlier attempt.
-        tree = round_dir / f"tree-{check.name}-{uuid.uuid4().hex[:8]}"
+        tree = round_dir / f"tree-{check.name}-{uuid.uuid4().hex}"
         try:
             # #282: fresh export per check — this check's input is the committed
             # tree, never a predecessor's mutations or untracked droppings.
@@ -542,8 +544,23 @@ def run_check_set(
             gate = None
         finally:
             # Best-effort: an undeletable tree just stays on disk — it is never
-            # mounted again, so it cannot affect any later check.
-            shutil.rmtree(tree, ignore_errors=True)
+            # mounted again, so it cannot affect any later check — but loom is a
+            # long-running daemon, so a retained export (repo + venv, per check)
+            # is logged loudly rather than leaking silently.
+            try:
+                shutil.rmtree(tree)
+            except FileNotFoundError:
+                pass  # export failed before creating the dir
+            except OSError as exc:
+                logger.warning(
+                    "story-develop %s: round %d %s export dir not cleaned "
+                    "(retained at %s): %s",
+                    config.run_id,
+                    round_no,
+                    check.name,
+                    tree,
+                    exc,
+                )
         _write_check_output(round_dir, check, gate)
         if gate is not None:
             tool = gate_adapters.command_tool(check.command)

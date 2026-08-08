@@ -1411,7 +1411,10 @@ def test_each_check_sees_the_committed_tree_regardless_of_order(
 
 
 def test_undeletable_prior_tree_cannot_skip_a_later_check(
-    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_git_repo: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # #284 re-review: with ONE reused export path, establishing the next check's
     # tree began with rmtree of the previous check's — a check leaving
@@ -1447,6 +1450,9 @@ def test_undeletable_prior_tree_cannot_skip_a_later_check(
         assert by["coverage"].passed is True
         assert by["repo-parity"].execution_outcome == "ran"  # NOT errored/skipped
         assert by["repo-parity"].passed is True
+        # the undeletable tree is retained, and retained trees are logged (a
+        # long-running daemon must not leak repo+venv sized dirs silently)
+        assert "export dir not cleaned" in caplog.text
     finally:
         # the mode-000 dir survives best-effort cleanup; make it deletable so
         # pytest's tmp_path retention can reap this test dir later
