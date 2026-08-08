@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import autoformat, test_gate
-from lithos_loom.plugins.story_develop.config import DevelopConfig
+from lithos_loom.plugins.story_develop.config import CONTAINER_SHM_SIZE, DevelopConfig
 from lithos_loom.plugins.story_develop.test_gate import GateResult
 
 
@@ -69,6 +69,7 @@ def test_build_format_command_is_network_isolated_and_uses_the_export(
     # The hardened profile is preserved.
     assert "--cap-drop" in cmd and "ALL" in cmd
     assert "no-new-privileges:true" in cmd
+    assert cmd[cmd.index("--shm-size") + 1] == CONTAINER_SHM_SIZE
     # It mounts the ISOLATED export at /workspace, never the live worktree.
     assert f"{export}:/workspace" in cmd
     assert cmd[-1] == "ruff format" and cmd[-3] == "img:1"

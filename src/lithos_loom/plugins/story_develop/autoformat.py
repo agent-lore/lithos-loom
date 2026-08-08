@@ -40,6 +40,7 @@ from ...runner import detection, git
 from . import check_catalog, containers, test_gate
 from .config import (
     CONTAINER_NOFILE_ULIMIT,
+    CONTAINER_SHM_SIZE,
     HANDOFF_DIRNAME,
     WORKSPACE_MOUNT,
     DevelopConfig,
@@ -86,6 +87,8 @@ def build_format_command(
         "no-new-privileges:true",
         "--ulimit",
         f"nofile={CONTAINER_NOFILE_ULIMIT}",
+        "--shm-size",
+        CONTAINER_SHM_SIZE,
         "-v",
         f"{tree}:{WORKSPACE_MOUNT}",
         "-v",

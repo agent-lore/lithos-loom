@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .config import (
     CONTAINER_NOFILE_ULIMIT,
+    CONTAINER_SHM_SIZE,
     HANDOFF_MOUNT_NAME,
     WORKSPACE_MOUNT,
 )
@@ -92,6 +93,8 @@ def build_run_command(
         "no-new-privileges:true",
         "--ulimit",
         f"nofile={CONTAINER_NOFILE_ULIMIT}",
+        "--shm-size",
+        CONTAINER_SHM_SIZE,
         "-v",
         workspace_mount,
         "-v",

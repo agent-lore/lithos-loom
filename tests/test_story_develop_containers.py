@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import containers, engines
-from lithos_loom.plugins.story_develop.config import CONTAINER_NOFILE_ULIMIT
+from lithos_loom.plugins.story_develop.config import (
+    CONTAINER_NOFILE_ULIMIT,
+    CONTAINER_SHM_SIZE,
+)
 
 
 def _exec_cmd(
@@ -51,6 +54,12 @@ def _run_cmd(**over) -> list[str]:
     return containers.build_run_command(**kwargs)
 
 
+def test_container_shm_size_is_one_gigabyte() -> None:
+    """The shared-memory policy is specifically 1g (chromium needs well over
+    Docker's 64m default) — propagation tests alone would pass with any value."""
+    assert CONTAINER_SHM_SIZE == "1g"
+
+
 def test_run_command_hardened_profile_and_mounts() -> None:
     cmd = _run_cmd()
     assert cmd[:3] == ["docker", "run", "-d"]
@@ -59,6 +68,7 @@ def test_run_command_hardened_profile_and_mounts() -> None:
     assert cmd[cmd.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges:true" in cmd
     assert cmd[cmd.index("--ulimit") + 1] == f"nofile={CONTAINER_NOFILE_ULIMIT}"  # #117
+    assert cmd[cmd.index("--shm-size") + 1] == CONTAINER_SHM_SIZE  # browser e2e
     # worktree RW, handoff dir OUTSIDE the worktree, config dir, single auth file
     assert "/work/run/worktree/branch:/workspace" in cmd
     assert "/work/run/handoff:/workspace/.handoff" in cmd
