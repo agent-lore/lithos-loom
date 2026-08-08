@@ -54,6 +54,12 @@ def _run_cmd(**over) -> list[str]:
     return containers.build_run_command(**kwargs)
 
 
+def test_container_shm_size_is_one_gigabyte() -> None:
+    """The shared-memory policy is specifically 1g (chromium needs well over
+    Docker's 64m default) — propagation tests alone would pass with any value."""
+    assert CONTAINER_SHM_SIZE == "1g"
+
+
 def test_run_command_hardened_profile_and_mounts() -> None:
     cmd = _run_cmd()
     assert cmd[:3] == ["docker", "run", "-d"]

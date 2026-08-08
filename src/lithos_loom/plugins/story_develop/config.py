@@ -44,11 +44,13 @@ DEFAULT_IMAGE = "ralph-sandbox:latest"
 # docker-daemon hard caps for portability. Passed as ``--ulimit nofile=soft:hard``.
 CONTAINER_NOFILE_ULIMIT = "65536:65536"
 
-# /dev/shm for gate/agent/autoformat containers. Docker's 64MB default is too
-# small for headless-browser e2e workloads (chromium crashes under page-heavy
-# runs — playwright's docker guidance); a bounded size keeps the sandbox
-# hardened (no ipc=host). Applied uniformly so every container the plugin
-# launches has the same resource contract.
+# /dev/shm for the plugin's WORKLOAD containers (gate, agent, autoformat).
+# Docker's 64MB default is too small for headless-browser e2e workloads
+# (chromium crashes under page-heavy runs — playwright's docker guidance); a
+# bounded tmpfs capacity (not preallocated memory) keeps the sandbox hardened
+# (no ipc=host). Deliberately a fixed host policy, not per-project config. The
+# short-lived tool-probe container (`command -v` only) is intentionally
+# outside this contract — it runs no workload.
 CONTAINER_SHM_SIZE = "1g"
 WORKSPACE_MOUNT = "/workspace"
 # The handoff dir is bind-mounted at ``<workspace>/.handoff``; this is also the
