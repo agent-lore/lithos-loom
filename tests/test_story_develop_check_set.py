@@ -7,6 +7,7 @@ is exercised via the existing ``test_gate`` seam in the core orchestration tests
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1266,3 +1267,233 @@ def test_gate_ledger_persists_and_reloads(tmp_path: Path) -> None:
     assert check_runner._gate_ledger_path(cfg).is_file()
     reloaded = check_runner.load_gate_ledger(cfg)
     assert [f.finding_id for f in reloaded.all_findings()] == ["gate/lint-001"]
+
+
+# --- #282: per-check pristine exports (order-independent verdicts) -------------
+#
+# Exercised through the REAL ``export_tree`` path against a real git repo; only
+# the container boundary is replaced (commands run on the host inside the
+# exported tree), so a mutating command actually mutates and a later check
+# actually observes whatever tree the runner hands it.
+
+
+def _committed_sha(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def _commit_stale_artifact(repo: Path) -> str:
+    """Commit a STALE generated artifact (regeneration would produce 'fresh')."""
+    gen = repo / "docs" / "generated"
+    gen.mkdir(parents=True)
+    (gen / "metrics.json").write_text("stale\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "stale generated artifact"],
+        cwd=repo,
+        check=True,
+    )
+    return _committed_sha(repo)
+
+
+def _host_exec_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run each check's command on the HOST inside its exported tree.
+
+    The tree path is captured from ``build_gate_command`` per check — the runner
+    exports into a never-reused per-check directory (#282 re-review), so there
+    is no fixed path to point at.
+    """
+    seen: dict = {}
+
+    def build(**kw):
+        seen["tree"] = kw["tree"]
+        return ["sh"]
+
+    monkeypatch.setattr(check_runner.test_gate, "build_gate_command", build)
+
+    def run(gate_cmd, *, name, command, timeout):
+        proc = subprocess.run(
+            ["sh", "-c", command], cwd=seen["tree"], capture_output=True, text=True
+        )
+        return GateResult(
+            command=command,
+            exit_code=proc.returncode,
+            passed=proc.returncode == 0,
+            output_tail=(proc.stdout + proc.stderr)[-400:],
+        )
+
+    monkeypatch.setattr(check_runner.test_gate, "run_gate_container", run)
+
+
+_REGEN = "printf 'fresh\\n' > docs/generated/metrics.json"
+
+
+def test_mutating_check_cannot_contaminate_a_later_checks_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # #282 regression. A coverage-style check regenerates the committed-but-STALE
+    # artifact as a side effect; the later repo-parity check does its own
+    # regenerate-and-compare. Sharing one RW export, parity's baseline would
+    # already be fresh — a false GREEN on real drift (observed live: thorough's
+    # candidate batch, and `converge` returning already_clean on a CI-red PR).
+    # Per-check re-export hands parity the committed tree, so parity goes RED.
+    sha = _commit_stale_artifact(tmp_git_repo)
+    cfg = _config(tmp_path)
+    _host_exec_gate(monkeypatch)
+
+    mutator = Check(
+        name="coverage",
+        command=_REGEN,
+        state="informational",
+        stage="candidate",
+        raw_exit=True,
+    )
+    parity = Check(
+        name="repo-parity",
+        command=(
+            f"B=$(cat docs/generated/metrics.json) && {_REGEN} && "
+            f'[ "$B" = "$(cat docs/generated/metrics.json)" ]'
+        ),
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+    led = GateLedger()
+
+    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (mutator, parity), led)
+
+    assert cs is not None
+    by = {r.check.name: r for r in cs.results}
+    assert by["coverage"].passed is True  # the mutator itself ran green
+    assert by["repo-parity"].passed is False  # drift detected on the pristine tree
+    assert check_runner.gate_floor_blocks(cs, led) is True
+
+
+def test_each_check_sees_the_committed_tree_regardless_of_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # The general order-independence property: neither a tracked-file mutation
+    # nor an untracked dropping from an earlier check is visible to a later one.
+    sha = _commit_stale_artifact(tmp_git_repo)
+    cfg = _config(tmp_path)
+    _host_exec_gate(monkeypatch)
+
+    first = Check(
+        name="sast",
+        command=f"touch POISON.txt && {_REGEN}",
+        state="informational",
+        stage="fast",
+        raw_exit=True,
+    )
+    second = Check(
+        name="lint",
+        command=(
+            '[ ! -e POISON.txt ] && [ "$(cat docs/generated/metrics.json)" = stale ]'
+        ),
+        state="required",
+        stage="fast",
+        raw_exit=True,
+    )
+
+    cs = check_runner.run_check_set(
+        cfg, tmp_git_repo, sha, 1, (first, second), GateLedger()
+    )
+
+    assert cs is not None
+    by = {r.check.name: r for r in cs.results}
+    assert by["sast"].passed is True
+    assert by["lint"].passed is True  # saw committed content, no droppings
+
+
+def test_undeletable_prior_tree_cannot_skip_a_later_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_git_repo: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # #284 re-review: with ONE reused export path, establishing the next check's
+    # tree began with rmtree of the previous check's — a check leaving
+    # undeletable state (mode-000 dir; other-UID files from a custom image)
+    # made that raise, and the next REQUIRED check was recorded as a
+    # non-blocking infra error: skipped-as-satisfied. Never-reused per-check
+    # dirs mean no prior tree is ever deleted on the establish path, so the
+    # required check still runs.
+    sha = _commit_stale_artifact(tmp_git_repo)
+    cfg = _config(tmp_path)
+    _host_exec_gate(monkeypatch)
+
+    saboteur = Check(
+        name="coverage",
+        command="mkdir locked && chmod 000 locked",
+        state="informational",
+        stage="candidate",
+        raw_exit=True,
+    )
+    parity = Check(
+        name="repo-parity",
+        command='[ "$(cat docs/generated/metrics.json)" = stale ]',
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+    try:
+        cs = check_runner.run_check_set(
+            cfg, tmp_git_repo, sha, 1, (saboteur, parity), GateLedger()
+        )
+        assert cs is not None
+        by = {r.check.name: r for r in cs.results}
+        assert by["coverage"].passed is True
+        assert by["repo-parity"].execution_outcome == "ran"  # NOT errored/skipped
+        assert by["repo-parity"].passed is True
+        # the undeletable tree is retained, and retained trees are logged (a
+        # long-running daemon must not leak repo+venv sized dirs silently)
+        assert "export dir not cleaned" in caplog.text
+    finally:
+        # the mode-000 dir survives best-effort cleanup; make it deletable so
+        # pytest's tmp_path retention can reap this test dir later
+        subprocess.run(["chmod", "-R", "u+rwX", str(cfg.gate_dir)], check=False)
+
+
+def test_export_failure_records_errored_but_later_checks_still_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # The per-check export-failure semantics (#282): one check's export failing
+    # records THAT check errored (gate=None) and the loop continues — the next
+    # check still exports and runs.
+    sha = _commit_stale_artifact(tmp_git_repo)
+    cfg = _config(tmp_path)
+    real_export = check_runner.test_gate.export_tree
+    _host_exec_gate(monkeypatch)
+
+    calls = {"n": 0}
+
+    def flaky_export(wt, sha_, dest):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("git archive failed")
+        real_export(wt, sha_, dest)
+
+    monkeypatch.setattr(check_runner.test_gate, "export_tree", flaky_export)
+
+    first = Check(
+        name="lint", command="true", state="required", stage="fast", raw_exit=True
+    )
+    second = Check(
+        name="typecheck", command="true", state="required", stage="fast", raw_exit=True
+    )
+
+    cs = check_runner.run_check_set(
+        cfg, tmp_git_repo, sha, 1, (first, second), GateLedger()
+    )
+
+    assert cs is not None
+    by = {r.check.name: r for r in cs.results}
+    assert by["lint"].execution_outcome == "errored"
+    assert by["lint"].gate is None
+    assert by["typecheck"].execution_outcome == "ran"
+    assert by["typecheck"].passed is True
