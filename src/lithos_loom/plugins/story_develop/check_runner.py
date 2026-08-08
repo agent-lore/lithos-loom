@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
+import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -457,10 +459,14 @@ def run_check_set(
     check that mutates it (a test suite regenerating ``docs/generated``, a
     ``coverage`` pytest run) would leak that state into the NEXT check's input —
     order-dependent verdicts, and in the worst case a false-green ``repo-parity``
-    judging an already-regenerated tree instead of the committed one. Re-export
-    makes every check's result order-independent. The cost is one
-    ``git archive | tar`` per check plus a per-check venv re-sync (cheap: the
-    ``uv`` cache mount persists across checks and rounds).
+    judging an already-regenerated tree instead of the committed one. Each export
+    lands in a **never-reused** per-check directory, so establishing a fresh tree
+    never depends on deleting the previous check's (which a check can render
+    undeletable — a mode-000 directory, other-UID files from a custom image);
+    the previous tree is cleaned up best-effort afterwards. This makes every
+    check's verdict independent of earlier checks' **workspace-tree** mutations
+    (the persistent tool-cache mount is deliberately shared across checks and
+    rounds — that is what makes the per-check venv re-sync cheap).
 
     Infra errors skip rather than fail the run (the gate is an independent
     check, not a dependency): a cache-dir failure returns ``None`` for the whole
@@ -502,15 +508,23 @@ def run_check_set(
         name = containers.container_name(
             config.run_id, f"gate-{check.name}-r{round_no}"
         )
+        # #282 re-review: a NEVER-REUSED export dir per check. Establishing this
+        # check's pristine tree must not depend on deleting the previous check's
+        # (a check can leave undeletable state — a mode-000 directory, files
+        # from a custom image running as another UID); with one shared path,
+        # that rmtree failure recorded the NEXT required check as a
+        # non-blocking infra error — skipped-as-satisfied, another false-green
+        # route. The nonce also keeps a resume's re-run of the same check name
+        # apart from a poisoned earlier attempt.
+        tree = round_dir / f"tree-{check.name}-{uuid.uuid4().hex[:8]}"
         try:
-            # #282: fresh export per check — export_tree recreates the dest
-            # empty, discarding any mutation (or untracked droppings) the
-            # previous check left behind.
-            test_gate.export_tree(wt, sha, round_dir / "tree")
+            # #282: fresh export per check — this check's input is the committed
+            # tree, never a predecessor's mutations or untracked droppings.
+            test_gate.export_tree(wt, sha, tree)
             gate_cmd = test_gate.build_gate_command(
                 name=name,
                 image=config.image,
-                tree=round_dir / "tree",
+                tree=tree,
                 cache_dir=cache,
                 command=check.command,
             )
@@ -526,6 +540,10 @@ def run_check_set(
                 exc,
             )
             gate = None
+        finally:
+            # Best-effort: an undeletable tree just stays on disk — it is never
+            # mounted again, so it cannot affect any later check.
+            shutil.rmtree(tree, ignore_errors=True)
         _write_check_output(round_dir, check, gate)
         if gate is not None:
             tool = gate_adapters.command_tool(check.command)
