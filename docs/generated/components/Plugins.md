@@ -20,10 +20,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
+| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 1 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | M | 2 | 13 |
+| `lithos_loom.plugins.story_develop.config` | M | 2 | 14 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
@@ -73,6 +74,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_formatters` — The runnable write-mode formatter commands for *wt*, probed once for the run.
 - def `run_format_pass` — Format the coder's commit in isolation and commit any change separately.
 
+### `lithos_loom.plugins.story_develop.check_artifacts`
+- def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).
+
 ### `lithos_loom.plugins.story_develop.check_catalog`
 - class `CheckMapping` — One canonical check's command per ecosystem.
 - class `DesiredCheck` — What a profile (or the default) *asks for* — the input to resolution.
@@ -105,6 +109,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `ReviewerSpec` — One named reviewer: its persona, strictness, and tooling (T6).
 - def `parse_model` — Validate + normalise a ``model`` value: a non-empty string, or ``None``.
 - def `parse_image` — Validate + normalise a sandbox container ``image`` value, or ``None``.
+- def `parse_artifacts_path` — Validate a repo-relative check-artifacts directory, or ``None``.
 - def `parse_test_command` — Validate + normalise a gate ``test_command`` override, or ``None``.
 - def `parse_check_commands` — Validate a per-check command override map (#273), or ``{}`` when absent.
 - def `parse_check_command_pairs` — Parse repeatable CLI ``NAME=COMMAND`` items into a validated override map (#273).

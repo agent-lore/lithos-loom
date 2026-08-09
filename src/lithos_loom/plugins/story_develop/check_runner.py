@@ -34,7 +34,14 @@ from pathlib import Path
 from typing import Literal, cast
 
 from ...runner import detection
-from . import check_catalog, containers, gate_adapters, profiles, test_gate
+from . import (
+    check_artifacts,
+    check_catalog,
+    containers,
+    gate_adapters,
+    profiles,
+    test_gate,
+)
 from .check_set import (
     Check,
     CheckResult,
@@ -543,6 +550,7 @@ def run_check_set(
             )
             gate = None
         finally:
+            check_artifacts.collect_check_artifacts(config, tree, round_no, check.name)
             # Best-effort: an undeletable tree just stays on disk — it is never
             # mounted again, so it cannot affect any later check — but loom is a
             # long-running daemon, so a retained export (repo + venv, per check)

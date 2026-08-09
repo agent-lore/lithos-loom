@@ -48,6 +48,7 @@ def build_run_command(
     skills_dir: Path | None = None,
     read_only_worktree: bool = False,
     git_common_dir: Path | None = None,
+    artifacts_dir: Path | None = None,
 ) -> list[str]:
     """Build the ``docker run`` argv for a long-lived idle agent container.
 
@@ -63,6 +64,12 @@ def build_run_command(
     * the worktree at ``/workspace`` (RW, or RO for reviewers);
     * *handoff_dir* at ``/workspace/.handoff`` (RW) — a separate dir outside the
       worktree, so the worktree stays git-clean;
+    * *artifacts_dir* at ``/workspace/.handoff/artifacts`` (**RO**) when
+      provided (#283) — collected gate-check artifacts (e2e screenshots). A
+      nested mount shadowing any same-named path in the RW handoff: the host
+      collector is the only writer, so an agent can neither forge artifacts
+      nor plant a symlink destination for the host-privileged copy (PR #289
+      review);
     * *config_dir* (per-run) at *config_mount* (RW, holds the transcript) —
       ``/claude_config`` exported as ``CLAUDE_CONFIG_DIR`` for claude,
       ``/codex_home`` exported as ``CODEX_HOME`` for codex (#94);
@@ -99,6 +106,13 @@ def build_run_command(
         workspace_mount,
         "-v",
         f"{handoff_dir}:{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}",
+    ]
+    if artifacts_dir is not None:
+        cmd += [
+            "-v",
+            f"{artifacts_dir}:{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}/artifacts:ro",
+        ]
+    cmd += [
         "-v",
         f"{config_dir}:{config_mount}",
     ]

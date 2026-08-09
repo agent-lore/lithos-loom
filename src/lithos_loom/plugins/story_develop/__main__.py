@@ -557,6 +557,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         # wins; the route-level --image flag (default DEFAULT_IMAGE) is the
         # fallback when metadata pins nothing.
         image=settings.image or args.image,
+        artifacts_path=settings.artifacts_path,
         base_branch=args.branch,
         notify_github_login=load_operator_github_login(),
     )

@@ -54,12 +54,16 @@ def build_run_cmd(
     ``AGENTS.md``). ``build_run_command`` stays engine-blind.
     """
     name = containers.container_name(config.run_id, agent)
+    # #283: the artifacts dir must exist at container-create time for the RO
+    # bind mount; contents appear as the host collector publishes snapshots.
+    config.artifacts_dir.mkdir(parents=True, exist_ok=True)
     cmd = containers.build_run_command(
         name=name,
         image=config.image,
         worktree=wt,
         config_dir=config_dir,
         handoff_dir=config.handoff_dir,
+        artifacts_dir=config.artifacts_dir,
         config_mount=engine.config_mount,
         config_env_var=engine.config_env_var,
         auth_source_dir=engine.auth_source_dir(config),

@@ -27,6 +27,7 @@ from typing import Any
 
 from .config import (
     DEFAULT_CODER_TOOL,
+    parse_artifacts_path,
     parse_bool_setting,
     parse_check_commands,
     parse_check_states,
@@ -60,6 +61,7 @@ class ScalarSettings:
     max_rounds: int | None = None
     max_cost_usd: float | None = None
     image: str | None = None
+    artifacts_path: str | None = None
     test_command: str | None = None
     test_gate: bool | None = None
     review_profile_project: str | None = None
@@ -110,6 +112,9 @@ class _ProjectThenTaskField:
 # :func:`_resolve_coder` (which reuses the same :func:`_parse_or_friction` atom).
 _PROJECT_THEN_TASK_FIELDS: tuple[_ProjectThenTaskField, ...] = (
     _ProjectThenTaskField("image", "develop_image", parse_image),
+    _ProjectThenTaskField(
+        "artifacts_path", "develop_artifacts_path", parse_artifacts_path
+    ),
     _ProjectThenTaskField("test_command", "develop_test_command", parse_test_command),
     _ProjectThenTaskField("test_gate", "develop_test_gate", parse_bool_setting),
 )
@@ -365,6 +370,7 @@ def resolve_scalar_settings(
         coder_model=coder_model,
         coder_effort=coder_effort,
         image=scalars["image"],
+        artifacts_path=scalars["artifacts_path"],
         test_command=scalars["test_command"],
         test_gate=scalars["test_gate"],
         fallback_chain=fallback_chain,
