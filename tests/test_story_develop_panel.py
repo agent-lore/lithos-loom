@@ -81,6 +81,7 @@ def _install_reviewer_stub(
         timeout,
         base,
         review_file=None,
+        reseed_prompt_override=None,
     ):
         name = rstate.spec.name
         calls.append(
@@ -302,3 +303,156 @@ def test_run_panel_round_routes_the_reviewer_turn_through_injected_services(
     assert [c["container"] for c in calls] == ["cid-correctness"]
     assert result.round_reviews[0].status == "invalid"
     assert result.cost == pytest.approx(0.03)
+
+
+# --- artifact pass: the artifact handoff controls the verdict (#291 re-review)
+
+
+_ART_LGTM = "## Status: LGTM\n## Summary\nCode looked fine earlier.\n"
+_ART_FINDINGS = (
+    "## Status: FINDINGS\n## Summary\nVisual breakage.\n## Findings\n"
+    "- finding_id:\n  severity: major\n  status: open\n"
+    '  files: ["note-320.png"]\n  rationale: layout overflows at 320\n'
+)
+
+
+def _live_services(run_turn) -> Services:
+    return Services(
+        run_turn=run_turn,
+        sleep=lambda s: None,
+        start_container=lambda cmd: "cid",
+        stop_container=lambda cid: None,
+        run_check_set=lambda *a, **k: None,
+    )
+
+
+def _ok_turn(session_id: str) -> TurnResult:
+    return TurnResult(
+        exit_code=0,
+        succeeded=True,
+        session_id=session_id,
+        result_text="done",
+        cost_usd=0.01,
+        raw={},
+        stderr="",
+    )
+
+
+def _limited_turn() -> TurnResult:
+    return TurnResult(
+        exit_code=1,
+        succeeded=False,
+        session_id="",
+        result_text="Claude AI usage limit reached|1750000000",
+        cost_usd=0.001,
+        raw={"is_error": True},
+        stderr="",
+    )
+
+
+def test_artifact_pass_verdict_comes_from_the_artifact_handoff(
+    tmp_path: Path,
+) -> None:
+    """#291 re-review (High): the round's regular handoff already holds a valid
+    LGTM; the artifact pass writes FINDINGS to ITS OWN file. The outcome must
+    carry the artifact verdict — reading the stale LGTM silently approved
+    unreviewed screenshots. Runs the REAL reviewer-turn machinery (only
+    ``Services.run_turn`` is faked)."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (
+        config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+    ).write_text(_ART_LGTM)
+    shots = config.artifacts_dir / "round_01" / "repo-parity"
+    shots.mkdir(parents=True)
+    (shots / "note-320.png").write_text("png")
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        (
+            config.handoff_dir
+            / handoff_mod.reviewer_handoff_name(1, "correctness_artifacts")
+        ).write_text(_ART_FINDINGS)
+        return _ok_turn(session_id)
+
+    result = panel_mod.run_panel_round(
+        config,
+        [_reviewer("correctness", tmp_path)],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+        artifact_pass=True,
+    )
+
+    out = result.round_reviews[0]
+    assert out.status == "FINDINGS"
+    assert out.passed is False
+    assert out.findings and "320" in out.findings[0].rationale
+
+
+def test_artifact_pass_survives_usage_limit_tool_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#291 re-review (Medium): a usage-limited artifact reviewer switching
+    engines must still be told to inspect the rendered pages — and its artifact
+    handoff must control the result."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (
+        config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+    ).write_text(_ART_LGTM)
+    shots = config.artifacts_dir / "round_01" / "repo-parity"
+    shots.mkdir(parents=True)
+    (shots / "note-320.png").write_text("png")
+
+    rstate = _ReviewerState(
+        ReviewerSpec(name="correctness", fallback_chain=("codex",)),
+        "cid-correctness",
+        [],
+        tmp_path,
+    )
+    monkeypatch.setattr(panel_mod.containers, "stop_container", lambda c: None)
+    monkeypatch.setattr(panel_mod.containers, "start_container", lambda cmd: "cid2")
+    monkeypatch.setattr(panel_mod, "build_run_cmd", lambda *a, **k: ("cid2", ["cmd"]))
+
+    prompts: list[str] = []
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _limited_turn()
+        (
+            config.handoff_dir
+            / handoff_mod.reviewer_handoff_name(1, "correctness_artifacts")
+        ).write_text(_ART_FINDINGS)
+        return _ok_turn(session_id)
+
+    result = panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+        artifact_pass=True,
+    )
+
+    # the replacement's prompt still carries the artifact listing + visual brief
+    assert "/workspace/.handoff/artifacts/round_01/repo-parity" in prompts[1]
+    assert "note-320.png" in prompts[1]
+    out = result.round_reviews[0]
+    assert out.status == "FINDINGS" and out.passed is False

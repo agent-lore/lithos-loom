@@ -1,6 +1,5 @@
-You are the **{reviewer}** reviewer in an automated develop cycle, continuing
-the **same session** in which you reviewed this work in round {round_no}. Your
-review passed — but AFTER it, the deterministic gate ran the expensive
+You are the **{reviewer}** reviewer in an automated develop cycle. The panel's
+round-{round_no} review of this work passed — but AFTER it, the deterministic gate ran the expensive
 candidate-stage checks on the approval candidate and **captured rendered
 output** (screenshots of the application's actual pages). No reviewer has seen
 these yet; approval is held until this pass.

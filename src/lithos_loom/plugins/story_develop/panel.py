@@ -346,6 +346,7 @@ def _run_reviewer_with_reaction(
     timeout: int,
     base: str,
     review_file: str | None = None,
+    reseed_prompt_override: str | None = None,
 ) -> tuple[ReviewOutcome, float, bool, datetime | None]:
     """One reviewer's round, with the T5 usage-limit reaction wrapped around it.
 
@@ -372,6 +373,11 @@ def _run_reviewer_with_reaction(
         model=rstate.spec.model,
         effort=rstate.spec.effort,
         validate=rstate.ledger.check,
+        # PR #291 re-review (High): the override MUST reach the initial turn
+        # too — reading the round's stale regular LGTM here while the reviewer
+        # wrote its visual verdict to the artifact file silently defeated the
+        # whole hold.
+        review_file=review_file,
     )
     cost = review.cost_usd
 
@@ -414,7 +420,12 @@ def _run_reviewer_with_reaction(
                 read_only=True,
             )
             containers.start_container(rstate.run_cmd)
-            reseed_prompt = render_prompt(
+            # PR #291 re-review (Medium): an artifact pass's replacement
+            # reviewer must still be told to inspect the rendered pages — the
+            # generic reseed has no artifact listing, so a fresh engine could
+            # LGTM off the code alone. The artifact prompt is self-contained,
+            # so the caller passes it as the reseed override.
+            reseed_prompt = reseed_prompt_override or render_prompt(
                 handoff.load_prompt("reviewer_reseed.md"),
                 reviewer=name,
                 reviewer_brief=_reviewer_brief(rstate.spec),
@@ -613,6 +624,7 @@ def run_panel_round(
                 timeout=reviewer_timeout,
                 base=base,
                 review_file=review_file_override,
+                reseed_prompt_override=(review_prompt if artifact_pass else None),
             )
         )
         cost += rev_cost
