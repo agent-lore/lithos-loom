@@ -35,6 +35,7 @@ module globals. That also keeps the ``develop_mod``-level ``monkeypatch`` target
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -56,7 +57,7 @@ from . import (
 from .check_set import Check, CheckSetResult, render_check_summary
 from .config import HANDOFF_DIRNAME, DevelopConfig
 from .gate_findings import GateLedger
-from .handoff import render_prompt
+from .handoff import max_severity, render_prompt
 from .test_gate import GateResult
 from .turns import TurnResult
 
@@ -194,6 +195,39 @@ class LoopEntry:
     base_override: str
     intake_reviews: list[ReviewOutcome]
     intake_check_set: CheckSetResult | None
+
+
+def _combine_review_outcomes(
+    regular: list[ReviewOutcome], artifact: list[ReviewOutcome]
+) -> list[ReviewOutcome]:
+    """Merge a reviewer's regular verdict with its artifact-pass verdict.
+
+    #291 round 4: a specialized pass must never REPLACE the round's full
+    assessment — the regular review's findings are retained, the pass's new
+    visual findings append, ``passed`` is the conjunction of both verdicts, and
+    status / max_severity re-derive from the combined findings. A reviewer the
+    pass never reached (interrupted panel) keeps its regular outcome.
+    """
+    by_name = {o.reviewer: o for o in artifact}
+    combined: list[ReviewOutcome] = []
+    for reg in regular:
+        art = by_name.get(reg.reviewer)
+        if art is None:
+            combined.append(reg)
+            continue
+        findings = list(reg.findings) + list(art.findings)
+        severities = [f.severity for f in findings]
+        combined.append(
+            dataclasses.replace(
+                reg,
+                status="LGTM" if not findings else "FINDINGS",
+                passed=reg.passed and art.passed,
+                max_severity=max_severity(severities),
+                findings=findings,
+                cost_usd=reg.cost_usd + art.cost_usd,
+            )
+        )
+    return combined
 
 
 def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
@@ -591,7 +625,11 @@ def _artifact_review_pass(
         artifact_pass=True,
     )
     ctx.review_cost += panel.cost
-    ctx.final_reviews = panel.round_reviews
+    # #291 round 4: COMBINE each reviewer's regular and artifact outcomes —
+    # replacing final_reviews with the pass's outcomes made the regular
+    # review's surviving non-blocking findings vanish from DevelopResult /
+    # state.json metadata (the ledger kept them; the structured outcome lied).
+    ctx.final_reviews = _combine_review_outcomes(ctx.final_reviews, panel.round_reviews)
     if panel.interrupted:
         return CycleExit(
             status="interrupted",

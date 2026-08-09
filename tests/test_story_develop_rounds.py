@@ -105,8 +105,22 @@ def _passed(reviewer: str = "correctness") -> ReviewOutcome:
 
 
 def _failed_outcome(reviewer: str = "correctness") -> ReviewOutcome:
+    from lithos_loom.plugins.story_develop.handoff import Finding
+
     return ReviewOutcome(
-        reviewer=reviewer, status="FINDINGS", passed=False, max_severity="major"
+        reviewer=reviewer,
+        status="FINDINGS",
+        passed=False,
+        max_severity="major",
+        findings=[
+            Finding(
+                finding_id="f-101",
+                severity="major",
+                status="open",
+                files=["note-320.png"],
+                rationale="overflow",
+            )
+        ],
     )
 
 
@@ -235,3 +249,73 @@ def test_unchanged_artifacts_do_not_retrigger_the_pass(tmp_path: Path) -> None:
 
     assert len(panel_calls) == 1  # no second pass
     assert exit_ is not None and exit_.status == "approved"
+
+
+def test_combined_outcome_keeps_regular_findings_through_artifact_lgtm(
+    tmp_path: Path,
+) -> None:
+    """#291 round 4: replacing final_reviews with the artifact pass's outcomes
+    made the regular review's surviving non-blocking findings vanish from the
+    structured result (DevelopResult / state.json metadata) even though the
+    ledger kept them. The combined outcome must retain them."""
+    from lithos_loom.plugins.story_develop.handoff import Finding
+
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=True)
+    minor = Finding(
+        finding_id="f-001",
+        severity="minor",
+        status="open",
+        files=["style.css:1"],
+        rationale="nit",
+    )
+    ctx.final_reviews = [
+        ReviewOutcome(
+            reviewer="correctness",
+            status="FINDINGS",
+            passed=True,  # minor is below the major threshold
+            max_severity="minor",
+            findings=[minor],
+        )
+    ]
+
+    exit_ = rounds_mod.approval_phase(ctx, 1)
+
+    assert exit_ is not None and exit_.status == "approved"
+    assert len(panel_calls) == 1
+    out = ctx.final_reviews[0]
+    assert out.passed is True
+    assert [f.finding_id for f in out.findings] == ["f-001"]  # minor SURVIVES
+    assert out.max_severity == "minor"
+    assert out.status == "FINDINGS"  # findings exist, even though approved
+
+
+def test_combined_outcome_appends_visual_findings_and_blocks(
+    tmp_path: Path,
+) -> None:
+    from lithos_loom.plugins.story_develop.handoff import Finding
+
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=False)
+    minor = Finding(
+        finding_id="f-001",
+        severity="minor",
+        status="open",
+        files=["style.css:1"],
+        rationale="nit",
+    )
+    ctx.final_reviews = [
+        ReviewOutcome(
+            reviewer="correctness",
+            status="FINDINGS",
+            passed=True,
+            max_severity="minor",
+            findings=[minor],
+        )
+    ]
+
+    exit_ = rounds_mod.approval_phase(ctx, 1)
+
+    assert exit_ is None  # visual findings hold approval
+    out = ctx.final_reviews[0]
+    assert out.passed is False  # conjunction of verdicts
+    assert len(out.findings) == 2  # minor retained + visual appended
+    assert out.max_severity == "major"
