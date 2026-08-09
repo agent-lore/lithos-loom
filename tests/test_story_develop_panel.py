@@ -70,11 +70,27 @@ def _install_reviewer_stub(
     script = script or {}
 
     def fake(
-        config, budget, rstate, *, services, round_no, resume, prompt, timeout, base
+        config,
+        budget,
+        rstate,
+        *,
+        services,
+        round_no,
+        resume,
+        prompt,
+        timeout,
+        base,
+        review_file=None,
     ):
         name = rstate.spec.name
         calls.append(
-            {"name": name, "round_no": round_no, "resume": resume, "prompt": prompt}
+            {
+                "name": name,
+                "round_no": round_no,
+                "resume": resume,
+                "prompt": prompt,
+                "review_file": review_file,
+            }
         )
         spec = script.get(name, {})
         findings = spec.get("findings", [])

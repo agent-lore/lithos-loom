@@ -44,7 +44,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...runner import git
-from . import autoformat, check_runner, containers, engines, handoff, turns
+from . import (
+    autoformat,
+    check_artifacts,
+    check_runner,
+    containers,
+    engines,
+    handoff,
+    turns,
+)
 from .check_set import Check, CheckSetResult, render_check_summary
 from .config import HANDOFF_DIRNAME, DevelopConfig
 from .gate_findings import GateLedger
@@ -489,11 +497,11 @@ def approval_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """
     config = ctx.config
     if all(r.passed for r in ctx.final_reviews):
-        # #140/ADR §4: the approval candidate — run the expensive candidate-staged
-        # checks once on this tree before sealing approval. A *required* candidate
-        # (e.g. thorough's dep-audit) blocks via gate_floor_blocks below, so its
-        # findings merge into check_set + the ledger + the [DevelopResult] and, when
-        # it blocks, hold approval so a later round surfaces them. Dedup on the sha.
+        # #283 (PR #291 review): the panel ran BEFORE the candidate checks, so
+        # anything they collect (e2e screenshots) would otherwise seal unseen.
+        # Snapshot the artifacts view the panel saw; if the candidate run
+        # changes it, approval is held for one panel-only artifact pass below.
+        artifacts_seen_by_panel = check_artifacts.render_artifacts_note(config)
         if (
             ctx.candidate_checks
             and ctx.gated_sha is not None
@@ -522,7 +530,80 @@ def approval_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 round_no,
             )
         else:
+            exit_ = _artifact_review_pass(ctx, round_no, artifacts_seen_by_panel)
+            if exit_ is not None:
+                return exit_
+            if not all(r.passed for r in ctx.final_reviews):
+                # the artifact pass filed findings — the normal fix loop
+                # continues; the coder answers them next round.
+                return None
             return CycleExit(status="approved", failure_reason="", resume_after=None)
+    return None
+
+
+def _artifact_review_pass(
+    ctx: RoundContext, round_no: int, artifacts_seen_by_panel: str
+) -> CycleExit | None:
+    """Hold approval until a reviewer has seen candidate-collected artifacts.
+
+    #283 / PR #291 review (High): candidate-stage checks run AFTER the panel and
+    a green candidate sealed immediately — so on the success path the rendered-
+    page screenshots lens's parity ``make e2e`` collects were never reviewed.
+    When this round's candidate run changed the artifacts view (vs what the
+    panel's prompts contained), run ONE panel-only pass (``artifact_pass=True``:
+    the ``reviewer_artifacts.md`` prompt, resumed sessions, its own handoff
+    files) before sealing. The tree is unchanged — the pass costs one reviewer
+    turn each, never re-runs checks, and cannot loop: a pass that LGTMs seals
+    this round; a pass that files findings feeds the ordinary fix loop, whose
+    next candidate sha re-triggers collection afresh.
+
+    Updates ``ctx.final_reviews`` (the pass IS the panel's final word this
+    round) and mirrors ``panel_phase``'s interrupted/invalid exits.
+    """
+    config = ctx.config
+    artifacts_now = check_artifacts.render_artifacts_note(config)
+    if not artifacts_now or artifacts_now == artifacts_seen_by_panel:
+        return None
+    logger.info(
+        "story-develop %s: round %d candidate checks collected new artifacts; "
+        "holding approval for an artifact-review panel pass",
+        config.run_id,
+        round_no,
+    )
+    panel = ctx.run_panel_round(
+        config,
+        ctx.reviewers,
+        wt=ctx.wt,
+        base=ctx.base,
+        round_no=round_no,
+        check_set=ctx.check_set,
+        gate_ledger=ctx.gate_ledger,
+        budget=ctx.budget,
+        reviewer_timeout=ctx.reviewer_timeout,
+        coder_summary="",
+        services=ctx.services,
+        artifact_pass=True,
+    )
+    ctx.review_cost += panel.cost
+    ctx.final_reviews = panel.round_reviews
+    if panel.interrupted:
+        return CycleExit(
+            status="interrupted",
+            failure_reason=(
+                f"round {round_no}: reviewer usage-limited during the "
+                "artifact-review pass; pause budget exhausted"
+            ),
+            resume_after=panel.resume_after,
+        )
+    if panel.invalid_reviewer is not None:
+        return CycleExit(
+            status="failed",
+            failure_reason=(
+                f"round {round_no}: reviewer [{panel.invalid_reviewer}] handoff "
+                "invalid during the artifact-review pass"
+            ),
+            resume_after=None,
+        )
     return None
 
 

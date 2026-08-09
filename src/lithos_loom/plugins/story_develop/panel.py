@@ -188,6 +188,7 @@ def _review_turn(
     model: str | None = None,
     effort: str | None = None,
     validate: Callable[[ReviewHandoff], str | None] | None = None,
+    review_file: str | None = None,
 ) -> tuple[ReviewOutcome, TurnResult | None, str]:
     """Run one reviewer turn against an already-running reviewer container.
 
@@ -205,7 +206,9 @@ def _review_turn(
     one for claude, the tool-minted ``thread_id`` for codex (#94). The turn runs
     through *services* (ARCH-1.S4) so the loop is testable with fakes.
     """
-    review_file = handoff.reviewer_handoff_name(round_no, reviewer)
+    # #283 artifact pass: an explicit override targets the pass's own handoff
+    # file so it never clobbers this round's regular review.
+    review_file = review_file or handoff.reviewer_handoff_name(round_no, reviewer)
     review_path = config.handoff_dir / review_file
 
     def _read_checked() -> tuple[ReviewHandoff | None, str | None]:
@@ -342,6 +345,7 @@ def _run_reviewer_with_reaction(
     prompt: str,
     timeout: int,
     base: str,
+    review_file: str | None = None,
 ) -> tuple[ReviewOutcome, float, bool, datetime | None]:
     """One reviewer's round, with the T5 usage-limit reaction wrapped around it.
 
@@ -422,7 +426,10 @@ def _run_reviewer_with_reaction(
                     rstate.outcome.findings if rstate.outcome else []
                 ),
                 prior_review=_prior_review_text(config, round_no, name),
-                review_file=handoff.reviewer_handoff_name(round_no, name),
+                review_file=(
+                    review_file
+                    or handoff.reviewer_handoff_name(round_no, name)
+                ),
             )
             review, rev_failed, rstate.session = _review_turn(
                 config,
@@ -439,6 +446,7 @@ def _run_reviewer_with_reaction(
                 model=rstate.spec.model,
                 effort=rstate.spec.effort,
                 validate=rstate.ledger.check,
+                review_file=review_file,
             )
             cost += review.cost_usd
             continue
@@ -482,6 +490,7 @@ def _run_reviewer_with_reaction(
             model=rstate.spec.model,
             effort=rstate.spec.effort,
             validate=rstate.ledger.check,
+            review_file=review_file,
         )
         cost += review.cost_usd
 
@@ -504,6 +513,7 @@ def run_panel_round(
     reviewer_timeout: int,
     coder_summary: str,
     services: Services | None = None,
+    artifact_pass: bool = False,
 ) -> PanelRoundResult:
     """Drive the reviewer panel for a single round — the one shared primitive.
 
@@ -523,6 +533,8 @@ def run_panel_round(
     the first interrupted or invalid reviewer.
     """
     resolved = services if services is not None else Services.live()
+    # #283 slice 2: computed once per panel invocation, not per reviewer.
+    artifacts_note_value = check_artifacts.render_artifacts_note(config)
     round_reviews: list[ReviewOutcome] = []
     cost = 0.0
     interrupted = False
@@ -530,7 +542,30 @@ def run_panel_round(
     invalid_reviewer: str | None = None
     for rstate in reviewers:
         name = rstate.spec.name
-        if round_no == 1:
+        review_file_override: str | None = None
+        if artifact_pass:
+            # #283 (PR #291 review): a panel-only pass shown the artifacts the
+            # candidate checks collected AFTER this round's regular review —
+            # its own handoff file, so the round's review is never clobbered.
+            review_file_override = handoff.reviewer_handoff_name(
+                round_no, f"{name}_artifacts"
+            )
+            review_prompt = render_prompt(
+                handoff.load_prompt("reviewer_artifacts.md"),
+                reviewer=name,
+                reviewer_brief=_reviewer_brief(rstate.spec),
+                round_no=str(round_no),
+                acceptance_criteria=config.effective_acceptance_criteria,
+                base_sha=base[:12],
+                artifacts_note=artifacts_note_value,
+                gate_summary=render_check_summary(
+                    check_set, for_coder=False, gate_ledger=gate_ledger
+                ),
+                severity_calibration=SEVERITY_CALIBRATION,
+                review_file=review_file_override,
+            )
+            review_resume = True
+        elif round_no == 1:
             review_prompt = render_prompt(
                 handoff.load_prompt("reviewer_round.md"),
                 reviewer=name,
@@ -542,7 +577,7 @@ def run_panel_round(
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
-                artifacts_note=check_artifacts.render_artifacts_note(config),
+                artifacts_note=artifacts_note_value,
                 severity_calibration=SEVERITY_CALIBRATION,
                 review_file=handoff.reviewer_handoff_name(1, name),
             )
@@ -561,7 +596,7 @@ def run_panel_round(
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
-                artifacts_note=check_artifacts.render_artifacts_note(config),
+                artifacts_note=artifacts_note_value,
                 severity_calibration=SEVERITY_CALIBRATION,
                 review_file=handoff.reviewer_handoff_name(round_no, name),
             )
@@ -578,6 +613,7 @@ def run_panel_round(
                 prompt=review_prompt,
                 timeout=reviewer_timeout,
                 base=base,
+                review_file=review_file_override,
             )
         )
         cost += rev_cost
