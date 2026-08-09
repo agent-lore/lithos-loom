@@ -300,3 +300,83 @@ def test_symlink_one_comprehensive_finding_catches_both() -> None:
         _symlink_report(_READ_ONLY_RATIONALE + "; also " + _WRITE_ONLY_RATIONALE),
     )
     assert score.caught is True
+
+
+# ── shipped lens33 case: the two confidence failure modes score separately ──
+# (#293 review finding 1 — same partial-catch semantics as 289-symlink). The
+# negative test also pins finding 2: an unrelated confidence-adjacent finding
+# on the same file must not structurally match either expected.
+
+_CONFIDENCE_FILE = "src/lithos_lens/knowledge_metadata.py"
+
+_RANGE_ONLY_RATIONALE = (
+    "_format_confidence formats any finite numeric, so confidence values "
+    "outside the documented 0..1 range render misleading chips like 200%"
+)
+_CRASH_ONLY_RATIONALE = (
+    "confidence: .nan passes the isinstance guard and round() blows up with "
+    "ValueError inside template rendering, crashing the whole note page"
+)
+_UNRELATED_RATIONALE = (
+    "the confidence chip has insufficient colour contrast against the "
+    "surface background and should meet WCAG AA"
+)
+
+
+def _confidence_case() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "lens33-confidence-crash")
+
+
+def _confidence_report(*rationales: str) -> dict:
+    return {
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS",
+                "findings": [
+                    _finding("major", [_CONFIDENCE_FILE], r, fid=f"f-{i:03d}")
+                    for i, r in enumerate(rationales, start=1)
+                ],
+            }
+        ]
+    }
+
+
+def test_confidence_case_has_two_expected_defects() -> None:
+    assert len(_confidence_case().expected) == 2
+
+
+def test_confidence_range_only_finding_is_a_partial_miss() -> None:
+    score = score_run(_confidence_case(), _confidence_report(_RANGE_ONLY_RATIONALE))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [True, False]
+
+
+def test_confidence_crash_only_finding_is_a_partial_miss() -> None:
+    score = score_run(_confidence_case(), _confidence_report(_CRASH_ONLY_RATIONALE))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [False, True]
+
+
+def test_confidence_both_forms_as_separate_findings_is_caught() -> None:
+    score = score_run(
+        _confidence_case(),
+        _confidence_report(_RANGE_ONLY_RATIONALE, _CRASH_ONLY_RATIONALE),
+    )
+    assert score.caught is True
+
+
+def test_confidence_one_comprehensive_finding_catches_both() -> None:
+    score = score_run(
+        _confidence_case(),
+        _confidence_report(_RANGE_ONLY_RATIONALE + "; also " + _CRASH_ONLY_RATIONALE),
+    )
+    assert score.caught is True
+
+
+def test_confidence_unrelated_finding_matches_neither_expected() -> None:
+    # No generic "confidence" keyword: a same-file finding about something else
+    # entirely must not count in --no-judge mode (#293 review finding 2).
+    score = score_run(_confidence_case(), _confidence_report(_UNRELATED_RATIONALE))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [False, False]
