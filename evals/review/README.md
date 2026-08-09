@@ -108,6 +108,16 @@ mechanism = "prose describing the defect (the LLM-judge keys on this)"
 known-good); a patch file must exist in the case dir (fail-closed at load). See
 `cases/194-delivery-failure-status/` for a worked example.
 
+### Cross-repo cases (escapes from customer projects)
+
+`repo` resolves relative to the loom checkout's cwd, so a case can target a
+sibling customer checkout — e.g. `repo = "../lithos-lens"` for the lens escapes.
+This leans on the same host-only assumption the eval already makes (docker, agent
+CLIs): the sibling checkout must exist and contain the case's `base` commit
+(a `main` ancestor of that repo). Patch form keeps the seeded defect
+self-contained in the case dir, so nothing in the customer repo needs tags or
+kept-alive commits.
+
 ### Sha form (when history already isolates the defect)
 
 ```toml

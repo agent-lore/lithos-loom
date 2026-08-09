@@ -1,0 +1,41 @@
+[case]
+id = "289-symlink-artifacts"
+description = """
+PR #289 round-1 escape (external review, Critical): gate artifact collection —
+a HOST-privileged copy of a directory out of each check's tree export into the
+run handoff. The parser rejects textual absolute paths and '..', and the PR
+claimed "traversal-safe" — but the copy itself followed symlinks in BOTH
+directions: a repo/check-planted symlink inside the artifacts dir let the host
+collector read outside the export, and because the destination lived in the
+AGENT-WRITABLE handoff, an agent could pre-plant a symlink at the predictable
+round/check path and redirect the host-privileged write onto host files (shell
+config, credentials). Both directions were reproduced by the reviewer.
+
+FULL-FEATURE diff as originally pushed (base = pre-#289 main 78b650a; patch =
+slice 1 at its first-push head 156a4a9). The security persona's target: textual
+path validation is not filesystem-boundary enforcement, and host-side writes
+into agent-writable directories cross the container trust boundary. Fixed in
+#289 (host-controlled artifacts dir + RO nested mount + followlinks=False walk).
+"""
+repo = "."
+base = "78b650a2ad649848978e1c47ec70633aff92d301"
+head_patch = "feature-with-defect.patch"
+personas = ["security"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_loom/plugins/story_develop/check_runner.py"
+keywords = ["symlink", "handoff", "copytree", "escape", "host"]
+min_severity = "critical"
+mechanism = """
+_collect_check_artifacts runs on the HOST and copies from the check's tree
+export (repo/check-controlled content) into the handoff dir (mounted read-write
+into agent containers) using is_dir()/shutil.copytree with default
+symlink-following. Two escapes: (1) a symlink inside the artifacts dir makes
+the host collector read files outside the export; (2) an agent can pre-create
+the predictable destination path (or a parent) as a symlink in the RW handoff,
+and dest.mkdir(exist_ok=True) + copytree(dirs_exist_ok=True) write through it
+onto arbitrary host-user-writable files. The textual absolute/'..' parser
+validation does not constrain either direction.
+"""

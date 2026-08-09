@@ -1,0 +1,909 @@
+diff --git a/docs/SPECIFICATION.md b/docs/SPECIFICATION.md
+index 1a46115..28fcd09 100644
+--- a/docs/SPECIFICATION.md
++++ b/docs/SPECIFICATION.md
+@@ -721,7 +721,7 @@ uv run python -m lithos_loom.plugins.story_develop \
+ - `--repo` takes the runner's `{{repo}}` token (§5.1), resolved per task from `[projects.<slug>].repo` keyed by `metadata.project` — so one route serves every registered project. (An absolute path also works if you want a route pinned to one checkout.)
+ - The task (title, body, `metadata.acceptance_criteria`) comes from `task.json`; `--description` / `--task-id` / `--no-lithos` / `--complete-on-approval` / `--reviewer` / `--develop-config` are rejected in daemon mode.
+ - **Idempotency short-circuit (US-18).** `--idempotency-key KEY` dedups a daemon run (default: the task id from `task.json`). The first run under a key that ends `succeeded` records its `result.json` in a host-persistent store; a later run under the same key **replays that recorded payload verbatim and exits 0 without re-running** — no second agent loop, no second PR (checked before config resolution, the agent loop, and PR delivery). A record short-circuits only when it passes **all three** gates: (1) it claims success (`status == "succeeded"` **and** `exit_code == 0`); (2) it validates against the full `result.json` schema (`docs/result-schema.json`) — a record missing required fields like `schema_version` / `task_id`, or otherwise off-contract, is rejected even when it claims success, since replaying it would hand the runner an invalid result; (3) its `task_id` matches the task being run — so a reused key (or a tampered store) never replays one task's result into another's. A failed, interrupted, or malformed record is ignored so the task stays retriable (and only a succeeded run is ever recorded, so a failed/interrupted run leaves no marker). The recorder keys off the **explicit** `--idempotency-key` when given, not the task id. Store: one `<sha256(key)>.json` file per key under `$LITHOS_LOOM_IDEMPOTENCY_DIR`, else `$XDG_STATE_HOME/lithos-loom/story-develop/idempotency`, else `~/.local/state/lithos-loom/story-develop/idempotency` — on disk (not the per-task `work_dir`, which the runner overwrites each dispatch) so the short-circuit survives invocations and daemon restarts. The store is bounded: each write prunes it back to the newest `LITHOS_LOOM_IDEMPOTENCY_MAX_RECORDS` (default 10000) records, and evicting an old record just means a later dispatch under that key re-runs. **Trust boundary:** the store is plain JSON at operator-home privilege with no cryptographic integrity — write access to that directory is a trust boundary (the `task_id` binding blocks cross-task replay, but a local process that can write the dir can suppress/redirect a single named task's development). *Out of scope (follow-ups):* in-flight concurrent dedup (locking, while a first run is still going); uniform application across all plugins via the plugin SDK (US-14); the A2A-race path (US-37).
+-- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?, model?, effort?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool?, model?, effort?}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`, `develop_image` (the sandbox container image for **every** agent + the test gate, e.g. `"ghcr.io/acme/dev:2026-06"`; default `ralph-sandbox:latest`), `develop_test_command` (test-gate command, **trusted as-is** — no auto-detection or tool-probe), `develop_check_commands` (a `{check = command}` table letting the repo declare its OWN command for a **non-test** gate check — `lint` / `typecheck` / `sast` / `dep-audit` / `coverage` / `semgrep` — run **verbatim** (no `uv`-wrap, no tool-probe, like `develop_test_command`) instead of the catalog canonical; the fix for a canonical command that over-scopes vs the repo's real policy, e.g. `{ typecheck = "make typecheck" }` where a bare `uv run pyright` would scan a test tree full of pre-existing type debt — #273; a task table merges per-key on top; `test` / `format` keys and unknown checks are rejected loudly), `develop_test_gate` (bool; `false` excludes the **`test` check only** from the per-round check-set — it is a *test* escape hatch, not a whole-gate kill switch, so the deterministic `lint` floor still runs — #131/#132/ADR 0003 §10; **generalized by `develop_check_states` — `test_gate=false` ≡ `{ test = "off" }`**), `develop_check_states` (a `{check = state}` table setting a **non-format** gate check's blocking role — `required` / `informational` / `off` — #273 slice 2; `off` **drops** the check cleanly, distinct from a required-but-tool-absent check that still blocks; `required`/`informational` override the profile's declared state; `check_states["test"]` wins over `develop_test_gate`; a task table merges per-key; `format` and unknown checks are rejected loudly), `develop_artifacts_path` (a repo-relative directory — e.g. lens's `e2e/artifacts` — that gate checks may write reviewable artifacts into; when set, the check runner snapshots that dir out of each check's isolated tree export **before** the export is deleted, unconditionally on the check's verdict — a RED e2e run's screenshots are precisely what a reviewer needs to see. Snapshots land in a **host-controlled** per-run artifacts dir (never the agent-writable handoff) at `round_NN/<check>/`, exposed to agent containers via a **read-only** nested mount at `.handoff/artifacts` — so agents can read but never forge or redirect them. The host-side copy **never follows symlinks** (the artifacts root must be a real directory resolving inside the export; only regular files are copied, anything else is skipped and counted) and each collection is an **exact snapshot**: files stage in a temp dir published over any prior `round_NN/<check>` (rmtree + rename — a brief missing-destination window, acceptable for the sequential panel workflow), stale files from an earlier execution never merge in, an execution that produced nothing **retires** the prior snapshot, a traversal error fails the whole collection rather than publishing a partial one, and a **failed** collection leaves the prior snapshot untouched (its state is unknown, not "no artifacts"). Absolute paths, `..` traversal, and `.` (the repo root) are rejected at parse; collection is best-effort and never blocks the check or its cleanup — #283 slice 1), `develop_parity_command` (the repo's **aggregate** verification command, e.g. `"make check"`, run once on the approval candidate as a required `repo-parity` gate check — #273 slice 3 / [ADR 0010](adr/0010-aggregate-repo-parity-check.md); trusted as-is / raw exit; closes "gate-green ≠ CI-green" and is the primary gate for an ecosystem the catalog can't model (C/C++); None → no parity check); `develop_review_profile` (the selected Review Profile name — #139; **also governs whether the `test` check blocks** — all canonical profiles declare it required, so a red test gate blocks by default. The legacy `develop_block_on_red` key is **removed** as of #140 — a lingering key is inert and emits a one-shot deprecation `[Friction]`). Per-task override: `task.metadata.reviewers` (names from the pool); `task.metadata.develop_model` / `task.metadata.develop_effort` (override the **coder's** model / reasoning effort for that one task — reviewer models stay project policy); `task.metadata.develop_image` (override the project's sandbox image for that one task — e.g. a task needing a heavier toolchain); `task.metadata.develop_test_command` / `develop_test_gate` (override the test gate for that one task); `task.metadata.develop_check_commands` (per-task per-check command overrides, merged per-key over the project table — #273); `task.metadata.develop_check_states` (per-task per-check state overrides — required/informational/off — merged per-key — #273 slice 2); `task.metadata.develop_parity_command` (per-task aggregate repo-parity command override — #273 slice 3); `task.metadata.develop_artifacts_path` (per-task gate-artifacts dir override — #283); `task.metadata.develop_review_profile` (the per-task Review Profile — highest precedence, #139). With **no explicit reviewer selection** — no slug, no doc, no `develop_default_reviewers` / `task.metadata.reviewers`, or a populated pool without a default selection (pool membership does not auto-run) — the run's panel comes from the **resolved Review Profile** (#140 slice 2): the default `standard` yields its correctness + security personas, `thorough` all five (#137), and gate-only `minimal` keeps the built-in single `code-quality` reviewer + a `[Friction]` until the overrides slice wires a true zero-reviewer panel (the deterministic floor itself shipped in #140's floor slice). The one case that still degrades to the built-in single `code-quality` reviewer + a `[Friction]` is an **explicit** selection that resolves to **no known reviewers** (a name matching neither the pool nor a canonical persona) — a typo must not silently escalate to the profile panel. An explicit selection that *does* resolve wins outright.
++- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?, model?, effort?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool?, model?, effort?}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`, `develop_image` (the sandbox container image for **every** agent + the test gate, e.g. `"ghcr.io/acme/dev:2026-06"`; default `ralph-sandbox:latest`), `develop_test_command` (test-gate command, **trusted as-is** — no auto-detection or tool-probe), `develop_check_commands` (a `{check = command}` table letting the repo declare its OWN command for a **non-test** gate check — `lint` / `typecheck` / `sast` / `dep-audit` / `coverage` / `semgrep` — run **verbatim** (no `uv`-wrap, no tool-probe, like `develop_test_command`) instead of the catalog canonical; the fix for a canonical command that over-scopes vs the repo's real policy, e.g. `{ typecheck = "make typecheck" }` where a bare `uv run pyright` would scan a test tree full of pre-existing type debt — #273; a task table merges per-key on top; `test` / `format` keys and unknown checks are rejected loudly), `develop_test_gate` (bool; `false` excludes the **`test` check only** from the per-round check-set — it is a *test* escape hatch, not a whole-gate kill switch, so the deterministic `lint` floor still runs — #131/#132/ADR 0003 §10; **generalized by `develop_check_states` — `test_gate=false` ≡ `{ test = "off" }`**), `develop_check_states` (a `{check = state}` table setting a **non-format** gate check's blocking role — `required` / `informational` / `off` — #273 slice 2; `off` **drops** the check cleanly, distinct from a required-but-tool-absent check that still blocks; `required`/`informational` override the profile's declared state; `check_states["test"]` wins over `develop_test_gate`; a task table merges per-key; `format` and unknown checks are rejected loudly), `develop_artifacts_path` (a repo-relative directory — e.g. lens's `e2e/artifacts` — that gate checks may write reviewable artifacts into; when set, the check runner snapshots that dir out of each check's isolated tree export **before** the export is deleted, unconditionally on the check's verdict — a RED e2e run's screenshots are precisely what a reviewer needs to see. Snapshots land in a **host-controlled** per-run artifacts dir (never the agent-writable handoff) at `round_NN/<check>/`, exposed to agent containers via a **read-only** nested mount at `.handoff/artifacts` — so agents can read but never forge or redirect them. The host-side copy **never follows symlinks** (the artifacts root must be a real directory resolving inside the export; only regular files are copied, anything else is skipped and counted) and each collection is an **exact snapshot**: files stage in a temp dir published over any prior `round_NN/<check>` (rmtree + rename — a brief missing-destination window, acceptable for the sequential panel workflow), stale files from an earlier execution never merge in, an execution that produced nothing **retires** the prior snapshot, a traversal error fails the whole collection rather than publishing a partial one, and a **failed** collection leaves the prior snapshot untouched (its state is unknown, not "no artifacts"). Absolute paths, `..` traversal, and `.` (the repo root) are rejected at parse; collection is best-effort and never blocks the check or its cleanup — #283 slice 1. **Slice 2:** both reviewer prompts (round-one and re-review, shared by develop / review-only / converge via the single panel primitive) carry a rendered-page artifacts section enumerating every collected `round_NN/<check>` with its in-container path and check-relative file paths — rounds newest-first, per-dir listings capped, plus a total listed-file budget with older dirs collapsing to count-only lines — instructing personas to open and evaluate the images alongside the diff. Because candidate-stage checks run **after** each round's panel, approval additionally **holds for a panel-only artifact-review pass** whenever the sealing round's candidate run changed the collected-artifacts view: each reviewer gets `reviewer_artifacts.md` (resumed session, its own `round_NN_review_<name>_artifacts.md` handoff file) instructing it to open the images and verdict them; LGTM seals, findings feed the ordinary fix loop — so a green candidate can never deliver screenshots no reviewer looked at. Review-only runs its checks before the panel and needs no pass; converge's fix loop reuses the same approval phase and is covered), `develop_parity_command` (the repo's **aggregate** verification command, e.g. `"make check"`, run once on the approval candidate as a required `repo-parity` gate check — #273 slice 3 / [ADR 0010](adr/0010-aggregate-repo-parity-check.md); trusted as-is / raw exit; closes "gate-green ≠ CI-green" and is the primary gate for an ecosystem the catalog can't model (C/C++); None → no parity check); `develop_review_profile` (the selected Review Profile name — #139; **also governs whether the `test` check blocks** — all canonical profiles declare it required, so a red test gate blocks by default. The legacy `develop_block_on_red` key is **removed** as of #140 — a lingering key is inert and emits a one-shot deprecation `[Friction]`). Per-task override: `task.metadata.reviewers` (names from the pool); `task.metadata.develop_model` / `task.metadata.develop_effort` (override the **coder's** model / reasoning effort for that one task — reviewer models stay project policy); `task.metadata.develop_image` (override the project's sandbox image for that one task — e.g. a task needing a heavier toolchain); `task.metadata.develop_test_command` / `develop_test_gate` (override the test gate for that one task); `task.metadata.develop_check_commands` (per-task per-check command overrides, merged per-key over the project table — #273); `task.metadata.develop_check_states` (per-task per-check state overrides — required/informational/off — merged per-key — #273 slice 2); `task.metadata.develop_parity_command` (per-task aggregate repo-parity command override — #273 slice 3); `task.metadata.develop_artifacts_path` (per-task gate-artifacts dir override — #283); `task.metadata.develop_review_profile` (the per-task Review Profile — highest precedence, #139). With **no explicit reviewer selection** — no slug, no doc, no `develop_default_reviewers` / `task.metadata.reviewers`, or a populated pool without a default selection (pool membership does not auto-run) — the run's panel comes from the **resolved Review Profile** (#140 slice 2): the default `standard` yields its correctness + security personas, `thorough` all five (#137), and gate-only `minimal` keeps the built-in single `code-quality` reviewer + a `[Friction]` until the overrides slice wires a true zero-reviewer panel (the deterministic floor itself shipped in #140's floor slice). The one case that still degrades to the built-in single `code-quality` reviewer + a `[Friction]` is an **explicit** selection that resolves to **no known reviewers** (a name matching neither the pool nor a canonical persona) — a typo must not silently escalate to the profile panel. An explicit selection that *does* resolve wins outright.
+ - **Model + reasoning effort (#93).** `model` (e.g. `"opus"`, `"sonnet"`, or a full id) and `effort` (a reasoning-effort **level**: `low` / `medium` / `high` / `xhigh` / `max`) are configurable per agent: project-wide on `develop_coder` and per-reviewer in the `develop_reviewers` pool; per-task on the coder via `task.metadata.develop_model` / `develop_effort`. `effort` is **not** a token budget (`MAX_THINKING_TOKENS` is legacy and ignored by current adaptive-reasoning models) and there is **no universal cross-tool effort vocabulary** — Loom adopts **Claude's `--effort` levels as canonical**; each wired tool maps the canonical level onto its own mechanism. Codex (#94) has no effort flag — depth follows the model choice, so `effort` is **ignored for codex agents** (`model` is still honoured via `codex -m`); a not-yet-wired OpenCode would use `--variant high/max/minimal`. Both default to **the agent's default** (no `--model`, no `--effort`) — the plugin deliberately does not hard-pin a model string, so an agent upgrade is picked up without a code release. Standalone flags: `--coder-model` / `--coder-effort` and `--reviewer-model` / `--reviewer-effort` (the latter apply to every `--reviewer`; per-reviewer values need `--develop-config`). In daemon mode the standalone `--coder-model` / `--coder-effort` flags act as a route-level fallback that project/task metadata overrides. Below all of these, daemon-mode runs consult one final layer: a **host-wide, per-tool default model** in the loom TOML's `[story_develop].default_models` table (§3.1), keyed by each agent's resolved `tool` (`claude` / `codex`) — the lowest-priority `model` source, just above the agent CLI's own default. It is per-tool, not per-role, so a heterogeneous panel (#94) gives a codex reviewer and a claude coder each the default for their own tool; a tool with no configured default leaves that agent on its CLI default. There is no global-default counterpart for `effort`. Invalid-value handling differs by surface: **standalone CLI** flags **error** (non-zero exit) on bad input (empty/whitespace model, or an off-canonical effort level); **project/task metadata and the daemon-mode CLI fallback** drop an invalid value with a `[Friction]` finding and continue — daemon-mode config resolution never fails the run (so the effort flags are validated by `parse_effort`, not argparse `choices`, which would otherwise reject a bad route fallback at parse time). A malformed route fallback is surfaced with friction **even when metadata already supplies that field** (so a route-config typo isn't silently masked); the valid fallback value is *applied* only where metadata left the field unset.
+ - **Container shared memory.** Every **workload** container the plugin launches — deterministic-gate checks, per-turn agent containers, and the isolated auto-format pass — runs with `--shm-size 1g`: Docker's 64MB `/dev/shm` default crashes chromium under page-heavy headless-browser e2e workloads (a `make e2e` parity step, or agents driving playwright). `1g` is a tmpfs **capacity limit**, not preallocated memory, and `--ipc=host` stays disabled (hardening preserved). This is a fixed host policy (`CONTAINER_SHM_SIZE`), not per-project config; the short-lived tool-probe container (`command -v` only) is deliberately outside the contract — it runs no workload. Operators sizing a host: a `thorough` run can hold a coder + several reviewer/check containers concurrently, each with this ceiling.
+ - **Agent tools (#94).** Each agent's `tool` is `claude` or `codex`, declarable independently per coder (`develop_coder.tool` / `--coder`) and per reviewer (`develop_reviewers[].tool`), so a heterogeneous panel (e.g. `code-quality = codex`, `security = claude`) and an engine-switching `fallback_chain` both work. Codex runs as `codex exec --json --dangerously-bypass-approvals-and-sandbox` (first turn) / `codex exec resume <thread_id> …` (later turns) inside the same hardened per-turn container model (ADR 0002). Two codex specifics: (1) the session handle is **minted by the tool** — the `thread_id` from the first turn's `thread.started` `--json` event is captured and reused for resumes (claude's is a caller-supplied uuid); (2) the per-run config/transcript dir is `CODEX_HOME` (under the work-dir, never `/tmp`) with a single `auth.json` bind-mounted from `~/.codex`, and codex has no skills concept (it honours the worktree `AGENTS.md`). **Cost gap:** codex reports token usage, not USD, so codex turns contribute `0.0` to the `max_cost_usd` ceiling — for codex agents the ceiling is unenforced (a run stays bounded by `max_rounds` + per-turn timeout); a token→USD pricing map is a follow-up. When `max_cost_usd` is set **and** any participating tool (coder, a reviewer, or a reachable `fallback_chain` entry) can't meter USD, story-develop logs a one-time startup WARNING naming exactly those tools — so an operator who set a ceiling learns it only bounds the USD-reporting participants. The message is **capability-driven** off the Engine adapter's `meters_cost_usd` (ARCH-2/E4/#102), so a future non-metering engine is named automatically without a code edit; the ceiling checks themselves are untouched. Codex usage-limit *strings* are not yet captured (feasibility-gate G4), so a codex limit currently classifies as a generic `agent_error` rather than `usage_limited` — an engine `fallback_chain` still switches *to* codex on a claude limit, but switching *off* codex on a codex limit awaits the captured strings.
+diff --git a/docs/generated/components/Plugins.md b/docs/generated/components/Plugins.md
+index 7a6b10d..0080010 100644
+--- a/docs/generated/components/Plugins.md
++++ b/docs/generated/components/Plugins.md
+@@ -20,7 +20,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
+ | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
+ | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
+ | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
+-| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 1 |
++| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 2 |
+ | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
+ | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
+ | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
+@@ -76,6 +76,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
+ 
+ ### `lithos_loom.plugins.story_develop.check_artifacts`
+ - def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).
++- def `render_artifacts_note` — The reviewer-prompt section enumerating collected artifacts (#283 s2).
+ 
+ ### `lithos_loom.plugins.story_develop.check_catalog`
+ - class `CheckMapping` — One canonical check's command per ecosystem.
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index 5246750..c9a5dd9 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -52,7 +52,7 @@
+         "max_function": "lithos_loom.lithos_client._parse_note"
+       },
+       "Plugins": {
+-        "functions_over_10": 25,
++        "functions_over_10": 27,
+         "max_complexity": 94,
+         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
+       },
+@@ -97,7 +97,7 @@
+         "max_function": "lithos_loom.task_graph.build_plan"
+       }
+     },
+-    "functions_over_10": 75,
++    "functions_over_10": 77,
+     "top_functions": [
+       {
+         "complexity": 94,
+@@ -140,7 +140,7 @@
+         "qualname": "lithos_loom.cli.project.project_regenerate_done"
+       }
+     ],
+-    "total_functions": 932
++    "total_functions": 934
+   },
+   "domain": {
+     "associations": 2,
+@@ -431,13 +431,13 @@
+       },
+       "Plugins": {
+         "classes": 55,
+-        "functions": 331,
++        "functions": 333,
+         "largest_module": "lithos_loom.plugins.story_develop.__main__",
+         "largest_module_lines": 1075,
+-        "lines": 12325,
++        "lines": 12511,
+         "modules": 40,
+-        "public_symbols": 206,
+-        "sloc": 9834
++        "public_symbols": 207,
++        "sloc": 9996
+       },
+       "ProjectContext": {
+         "classes": 0,
+@@ -530,13 +530,13 @@
+       "lithos_loom.plugins.story_develop.__main__",
+       "lithos_loom.plugins.story_develop.pr_delivery"
+     ],
+-    "total_lines": 36620,
++    "total_lines": 36806,
+     "total_modules": 117,
+-    "total_sloc": 29042
++    "total_sloc": 29204
+   },
+   "tests": {
+     "ratio": 1.6,
+-    "src_lines": 36620,
+-    "test_lines": 58527
++    "src_lines": 36806,
++    "test_lines": 58812
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 8896b0e..e06a010 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -44,7 +44,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Evals | 9 | 975 | 785 | 1 | 2 | 0.67 | 18 (`lithos_loom.evals.review.harness.run_case`) | 2 |
+ | GitHub | 1 | 796 | 616 | 5 | 1 | 0.17 | 14 (`lithos_loom.github_client._parse_pull_request`) | 1 |
+ | LithosClient | 1 | 2195 | 1841 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
+-| Plugins | 40 | 12325 | 9834 | 2 | 5 | 0.71 | 94 (`lithos_loom.plugins.story_develop.__main__.main`) | 25 |
++| Plugins | 40 | 12511 | 9996 | 2 | 5 | 0.71 | 94 (`lithos_loom.plugins.story_develop.__main__.main`) | 27 |
+ | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
+ | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
+ | Runners | 5 | 604 | 469 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
+@@ -56,7 +56,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ 
+ ## Size
+ 
+-- Modules: **117**, lines: **36620**, SLOC: **29042**
++- Modules: **117**, lines: **36806**, SLOC: **29204**
+ - Largest module: `lithos_loom.lithos_client` (2195 lines)
+ - Modules over 800 lines: **6**
+   - `lithos_loom.cli.develop`
+@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ 
+ ## Complexity
+ 
+-- Functions: **932**, cyclomatic > 10: **75**
++- Functions: **934**, cyclomatic > 10: **77**
+ 
+ Top 10 most complex functions:
+ 
+@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
+ ## Domain & tests
+ 
+ - Domain models: **17** (2 associations, 0 without docstrings)
+-- Test-to-source line ratio: **1.60** (58527 test lines / 36620 source lines)
++- Test-to-source line ratio: **1.60** (58812 test lines / 36806 source lines)
+diff --git a/src/lithos_loom/plugins/story_develop/check_artifacts.py b/src/lithos_loom/plugins/story_develop/check_artifacts.py
+index 5d849e9..d435f6d 100644
+--- a/src/lithos_loom/plugins/story_develop/check_artifacts.py
++++ b/src/lithos_loom/plugins/story_develop/check_artifacts.py
+@@ -16,7 +16,7 @@ import shutil
+ import uuid
+ from pathlib import Path
+ 
+-from .config import DevelopConfig
++from .config import HANDOFF_MOUNT_NAME, WORKSPACE_MOUNT, DevelopConfig
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -136,3 +136,71 @@ def _retire_prior(dest: Path) -> None:
+     execution's snapshot posing as current (PR #289 round 2)."""
+     if dest.exists():
+         shutil.rmtree(dest)
++
++
++# How many filenames to spell out per check dir in the reviewer note; the rest
++# collapse to "+N more" (a 4-page x 4-width screenshot matrix is 16 files —
++# enumerable, but a long suite must not drown the prompt).
++_NOTE_FILES_PER_CHECK = 12
++# Total listed-file budget across ALL rounds/checks (PR #291 review): per-check
++# caps alone let many rounds x checks grow every reviewer prompt unboundedly.
++# Spent newest-round-first — the current round's rendering is what approval
++# hinges on; older dirs beyond the budget stay enumerated as count-only lines.
++_NOTE_TOTAL_FILE_BUDGET = 36
++
++
++def render_artifacts_note(config: DevelopConfig) -> str:
++    """The reviewer-prompt section enumerating collected artifacts (#283 s2).
++
++    Empty string when nothing was collected (the template slot renders blank).
++    Paths are the IN-CONTAINER view — ``/workspace/.handoff/artifacts/…`` (the
++    read-only mount) — because the reader is an agent inside the container,
++    not the host. Nested files keep their check-relative paths (openable as
++    listed, and duplicate basenames stay distinguishable). Rounds are listed
++    newest first; a total listed-file budget applies across the whole note,
++    with per-dir listings additionally capped — dirs beyond the budget render
++    as count-only lines so nothing is silently hidden.
++    """
++    root = config.artifacts_dir
++    if not root.is_dir():
++        return ""
++    lines: list[str] = []
++    remaining = _NOTE_TOTAL_FILE_BUDGET
++    for round_dir in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
++        for check_dir in sorted(p for p in round_dir.iterdir() if p.is_dir()):
++            files = sorted(
++                p.relative_to(check_dir).as_posix()
++                for p in check_dir.rglob("*")
++                if p.is_file()
++            )
++            if not files:
++                continue
++            mount = (
++                f"{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}/artifacts/"
++                f"{round_dir.name}/{check_dir.name}"
++            )
++            cap = min(_NOTE_FILES_PER_CHECK, remaining)
++            shown = files[:cap]
++            remaining -= len(shown)
++            if shown:
++                extra = len(files) - len(shown)
++                listing = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
++                lines.append(f"- `{mount}/` — {len(files)} file(s): {listing}")
++            else:
++                lines.append(
++                    f"- `{mount}/` — {len(files)} file(s) "
++                    "(listing omitted — prompt budget; older round)"
++                )
++    if not lines:
++        return ""
++    return (
++        "## Rendered-page artifacts\n"
++        "\n"
++        "Gate checks captured rendered output from this run — screenshots of "
++        "the application's actual pages. **Open and look at these image files** "
++        "(they are readable in-container at the paths below) and evaluate the "
++        "rendered result alongside the diff: layout and hierarchy at each "
++        "width, interaction and degraded states, obvious visual breakage. "
++        "Artifacts from a RED e2e check show the failing state.\n"
++        "\n" + "\n".join(lines) + "\n"
++    )
+diff --git a/src/lithos_loom/plugins/story_develop/panel.py b/src/lithos_loom/plugins/story_develop/panel.py
+index 10ec6d8..8ea26e7 100644
+--- a/src/lithos_loom/plugins/story_develop/panel.py
++++ b/src/lithos_loom/plugins/story_develop/panel.py
+@@ -32,7 +32,7 @@ from datetime import datetime
+ from pathlib import Path
+ 
+ from ...runner import git
+-from . import containers, engines, handoff, limits
++from . import check_artifacts, containers, engines, handoff, limits
+ from .agent_session import (
+     _CONTINUATION_PROMPT,
+     PauseBudget,
+@@ -188,6 +188,7 @@ def _review_turn(
+     model: str | None = None,
+     effort: str | None = None,
+     validate: Callable[[ReviewHandoff], str | None] | None = None,
++    review_file: str | None = None,
+ ) -> tuple[ReviewOutcome, TurnResult | None, str]:
+     """Run one reviewer turn against an already-running reviewer container.
+ 
+@@ -205,7 +206,9 @@ def _review_turn(
+     one for claude, the tool-minted ``thread_id`` for codex (#94). The turn runs
+     through *services* (ARCH-1.S4) so the loop is testable with fakes.
+     """
+-    review_file = handoff.reviewer_handoff_name(round_no, reviewer)
++    # #283 artifact pass: an explicit override targets the pass's own handoff
++    # file so it never clobbers this round's regular review.
++    review_file = review_file or handoff.reviewer_handoff_name(round_no, reviewer)
+     review_path = config.handoff_dir / review_file
+ 
+     def _read_checked() -> tuple[ReviewHandoff | None, str | None]:
+@@ -342,6 +345,7 @@ def _run_reviewer_with_reaction(
+     prompt: str,
+     timeout: int,
+     base: str,
++    review_file: str | None = None,
+ ) -> tuple[ReviewOutcome, float, bool, datetime | None]:
+     """One reviewer's round, with the T5 usage-limit reaction wrapped around it.
+ 
+@@ -422,7 +426,9 @@ def _run_reviewer_with_reaction(
+                     rstate.outcome.findings if rstate.outcome else []
+                 ),
+                 prior_review=_prior_review_text(config, round_no, name),
+-                review_file=handoff.reviewer_handoff_name(round_no, name),
++                review_file=(
++                    review_file or handoff.reviewer_handoff_name(round_no, name)
++                ),
+             )
+             review, rev_failed, rstate.session = _review_turn(
+                 config,
+@@ -439,6 +445,7 @@ def _run_reviewer_with_reaction(
+                 model=rstate.spec.model,
+                 effort=rstate.spec.effort,
+                 validate=rstate.ledger.check,
++                review_file=review_file,
+             )
+             cost += review.cost_usd
+             continue
+@@ -482,6 +489,7 @@ def _run_reviewer_with_reaction(
+             model=rstate.spec.model,
+             effort=rstate.spec.effort,
+             validate=rstate.ledger.check,
++            review_file=review_file,
+         )
+         cost += review.cost_usd
+ 
+@@ -504,6 +512,7 @@ def run_panel_round(
+     reviewer_timeout: int,
+     coder_summary: str,
+     services: Services | None = None,
++    artifact_pass: bool = False,
+ ) -> PanelRoundResult:
+     """Drive the reviewer panel for a single round — the one shared primitive.
+ 
+@@ -523,6 +532,8 @@ def run_panel_round(
+     the first interrupted or invalid reviewer.
+     """
+     resolved = services if services is not None else Services.live()
++    # #283 slice 2: computed once per panel invocation, not per reviewer.
++    artifacts_note_value = check_artifacts.render_artifacts_note(config)
+     round_reviews: list[ReviewOutcome] = []
+     cost = 0.0
+     interrupted = False
+@@ -530,7 +541,30 @@ def run_panel_round(
+     invalid_reviewer: str | None = None
+     for rstate in reviewers:
+         name = rstate.spec.name
+-        if round_no == 1:
++        review_file_override: str | None = None
++        if artifact_pass:
++            # #283 (PR #291 review): a panel-only pass shown the artifacts the
++            # candidate checks collected AFTER this round's regular review —
++            # its own handoff file, so the round's review is never clobbered.
++            review_file_override = handoff.reviewer_handoff_name(
++                round_no, f"{name}_artifacts"
++            )
++            review_prompt = render_prompt(
++                handoff.load_prompt("reviewer_artifacts.md"),
++                reviewer=name,
++                reviewer_brief=_reviewer_brief(rstate.spec),
++                round_no=str(round_no),
++                acceptance_criteria=config.effective_acceptance_criteria,
++                base_sha=base[:12],
++                artifacts_note=artifacts_note_value,
++                gate_summary=render_check_summary(
++                    check_set, for_coder=False, gate_ledger=gate_ledger
++                ),
++                severity_calibration=SEVERITY_CALIBRATION,
++                review_file=review_file_override,
++            )
++            review_resume = True
++        elif round_no == 1:
+             review_prompt = render_prompt(
+                 handoff.load_prompt("reviewer_round.md"),
+                 reviewer=name,
+@@ -542,6 +576,7 @@ def run_panel_round(
+                 gate_summary=render_check_summary(
+                     check_set, for_coder=False, gate_ledger=gate_ledger
+                 ),
++                artifacts_note=artifacts_note_value,
+                 severity_calibration=SEVERITY_CALIBRATION,
+                 review_file=handoff.reviewer_handoff_name(1, name),
+             )
+@@ -560,6 +595,7 @@ def run_panel_round(
+                 gate_summary=render_check_summary(
+                     check_set, for_coder=False, gate_ledger=gate_ledger
+                 ),
++                artifacts_note=artifacts_note_value,
+                 severity_calibration=SEVERITY_CALIBRATION,
+                 review_file=handoff.reviewer_handoff_name(round_no, name),
+             )
+@@ -576,6 +612,7 @@ def run_panel_round(
+                 prompt=review_prompt,
+                 timeout=reviewer_timeout,
+                 base=base,
++                review_file=review_file_override,
+             )
+         )
+         cost += rev_cost
+diff --git a/src/lithos_loom/plugins/story_develop/prompts/reviewer_artifacts.md b/src/lithos_loom/plugins/story_develop/prompts/reviewer_artifacts.md
+new file mode 100644
+index 0000000..5bb38ba
+--- /dev/null
++++ b/src/lithos_loom/plugins/story_develop/prompts/reviewer_artifacts.md
+@@ -0,0 +1,49 @@
++You are the **{reviewer}** reviewer in an automated develop cycle, continuing
++the **same session** in which you reviewed this work in round {round_no}. Your
++review passed — but AFTER it, the deterministic gate ran the expensive
++candidate-stage checks on the approval candidate and **captured rendered
++output** (screenshots of the application's actual pages). No reviewer has seen
++these yet; approval is held until this pass.
++{reviewer_brief}
++## Acceptance criteria
++
++{acceptance_criteria}
++
++{gate_summary}
++
++{artifacts_note}
++
++{severity_calibration}
++
++## Your job
++
++This is a **visual verification pass** — the code has not changed since your
++review (`git -C /workspace diff {base_sha}..HEAD` is the same change you
++approved). Do not re-litigate the diff.
++
++1. **Open and look at every artifact listed above** (Read the image files at
++   the listed in-container paths). For each rendered page, judge what a user
++   would actually see:
++   - layout and visual hierarchy at each captured width — nothing overflowing,
++     overlapping, clipped, or unreadable;
++   - the states the acceptance criteria promise (populated, empty, error /
++     degraded) rendering as specified;
++   - obvious visual breakage: missing styling, raw markup, broken images,
++     placeholder text that should not ship.
++2. Weigh what you see against the acceptance criteria. A criterion that the
++   code appears to implement but the rendered page visibly fails is an **unmet
++   acceptance criterion** — record it as a finding.
++3. Write your verdict to `/workspace/.handoff/{review_file}` using the format
++   in `/workspace/.handoff/FORMAT.md`:
++   - **Rendered pages look right** → `## Status: LGTM` with a one-paragraph
++     `## Summary` of what you inspected.
++   - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a
++     `## Findings` block, each finding with `severity:` (critical | major |
++     minor), `status: open`, `files:` (name the artifact file(s) showing the
++     problem plus the source file you believe is responsible), and
++     `rationale:`.
++
++Record **every** visual issue as a structured finding with an honest severity —
++the orchestrator applies the project's threshold to decide what blocks. Do not
++modify any files. Do not commit. Be specific: name the artifact file and what
++is wrong in it.
+diff --git a/src/lithos_loom/plugins/story_develop/prompts/reviewer_rereview.md b/src/lithos_loom/plugins/story_develop/prompts/reviewer_rereview.md
+index 06dc4e4..688aeb7 100644
+--- a/src/lithos_loom/plugins/story_develop/prompts/reviewer_rereview.md
++++ b/src/lithos_loom/plugins/story_develop/prompts/reviewer_rereview.md
+@@ -24,6 +24,8 @@ changed — and any points it disputes.
+ 
+ {gate_summary}
+ 
++{artifacts_note}
++
+ {severity_calibration}
+ 
+ ## Your job
+diff --git a/src/lithos_loom/plugins/story_develop/prompts/reviewer_round.md b/src/lithos_loom/plugins/story_develop/prompts/reviewer_round.md
+index bbc0a09..6e60917 100644
+--- a/src/lithos_loom/plugins/story_develop/prompts/reviewer_round.md
++++ b/src/lithos_loom/plugins/story_develop/prompts/reviewer_round.md
+@@ -19,6 +19,8 @@ acceptance criteria below.
+ 
+ {gate_summary}
+ 
++{artifacts_note}
++
+ {severity_calibration}
+ 
+ ## Your job
+diff --git a/src/lithos_loom/plugins/story_develop/rounds.py b/src/lithos_loom/plugins/story_develop/rounds.py
+index e823bfa..787cc48 100644
+--- a/src/lithos_loom/plugins/story_develop/rounds.py
++++ b/src/lithos_loom/plugins/story_develop/rounds.py
+@@ -44,7 +44,15 @@ from pathlib import Path
+ from typing import TYPE_CHECKING
+ 
+ from ...runner import git
+-from . import autoformat, check_runner, containers, engines, handoff, turns
++from . import (
++    autoformat,
++    check_artifacts,
++    check_runner,
++    containers,
++    engines,
++    handoff,
++    turns,
++)
+ from .check_set import Check, CheckSetResult, render_check_summary
+ from .config import HANDOFF_DIRNAME, DevelopConfig
+ from .gate_findings import GateLedger
+@@ -489,11 +497,11 @@ def approval_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
+     """
+     config = ctx.config
+     if all(r.passed for r in ctx.final_reviews):
+-        # #140/ADR §4: the approval candidate — run the expensive candidate-staged
+-        # checks once on this tree before sealing approval. A *required* candidate
+-        # (e.g. thorough's dep-audit) blocks via gate_floor_blocks below, so its
+-        # findings merge into check_set + the ledger + the [DevelopResult] and, when
+-        # it blocks, hold approval so a later round surfaces them. Dedup on the sha.
++        # #283 (PR #291 review): the panel ran BEFORE the candidate checks, so
++        # anything they collect (e2e screenshots) would otherwise seal unseen.
++        # Snapshot the artifacts view the panel saw; if the candidate run
++        # changes it, approval is held for one panel-only artifact pass below.
++        artifacts_seen_by_panel = check_artifacts.render_artifacts_note(config)
+         if (
+             ctx.candidate_checks
+             and ctx.gated_sha is not None
+@@ -522,10 +530,83 @@ def approval_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
+                 round_no,
+             )
+         else:
++            exit_ = _artifact_review_pass(ctx, round_no, artifacts_seen_by_panel)
++            if exit_ is not None:
++                return exit_
++            if not all(r.passed for r in ctx.final_reviews):
++                # the artifact pass filed findings — the normal fix loop
++                # continues; the coder answers them next round.
++                return None
+             return CycleExit(status="approved", failure_reason="", resume_after=None)
+     return None
+ 
+ 
++def _artifact_review_pass(
++    ctx: RoundContext, round_no: int, artifacts_seen_by_panel: str
++) -> CycleExit | None:
++    """Hold approval until a reviewer has seen candidate-collected artifacts.
++
++    #283 / PR #291 review (High): candidate-stage checks run AFTER the panel and
++    a green candidate sealed immediately — so on the success path the rendered-
++    page screenshots lens's parity ``make e2e`` collects were never reviewed.
++    When this round's candidate run changed the artifacts view (vs what the
++    panel's prompts contained), run ONE panel-only pass (``artifact_pass=True``:
++    the ``reviewer_artifacts.md`` prompt, resumed sessions, its own handoff
++    files) before sealing. The tree is unchanged — the pass costs one reviewer
++    turn each, never re-runs checks, and cannot loop: a pass that LGTMs seals
++    this round; a pass that files findings feeds the ordinary fix loop, whose
++    next candidate sha re-triggers collection afresh.
++
++    Updates ``ctx.final_reviews`` (the pass IS the panel's final word this
++    round) and mirrors ``panel_phase``'s interrupted/invalid exits.
++    """
++    config = ctx.config
++    artifacts_now = check_artifacts.render_artifacts_note(config)
++    if not artifacts_now or artifacts_now == artifacts_seen_by_panel:
++        return None
++    logger.info(
++        "story-develop %s: round %d candidate checks collected new artifacts; "
++        "holding approval for an artifact-review panel pass",
++        config.run_id,
++        round_no,
++    )
++    panel = ctx.run_panel_round(
++        config,
++        ctx.reviewers,
++        wt=ctx.wt,
++        base=ctx.base,
++        round_no=round_no,
++        check_set=ctx.check_set,
++        gate_ledger=ctx.gate_ledger,
++        budget=ctx.budget,
++        reviewer_timeout=ctx.reviewer_timeout,
++        coder_summary="",
++        services=ctx.services,
++        artifact_pass=True,
++    )
++    ctx.review_cost += panel.cost
++    ctx.final_reviews = panel.round_reviews
++    if panel.interrupted:
++        return CycleExit(
++            status="interrupted",
++            failure_reason=(
++                f"round {round_no}: reviewer usage-limited during the "
++                "artifact-review pass; pause budget exhausted"
++            ),
++            resume_after=panel.resume_after,
++        )
++    if panel.invalid_reviewer is not None:
++        return CycleExit(
++            status="failed",
++            failure_reason=(
++                f"round {round_no}: reviewer [{panel.invalid_reviewer}] handoff "
++                "invalid during the artifact-review pass"
++            ),
++            resume_after=None,
++        )
++    return None
++
++
+ def deadlock_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
+     """T7 dispute escalation: a coder-disputed finding the reviewer kept blocking
+     for 2 consecutive rounds stops the run with a human breadcrumb rather than
+diff --git a/tests/test_story_develop_check_set.py b/tests/test_story_develop_check_set.py
+index c5bcbd2..6bca674 100644
+--- a/tests/test_story_develop_check_set.py
++++ b/tests/test_story_develop_check_set.py
+@@ -1817,3 +1817,85 @@ def test_unreadable_nested_dir_fails_collection_and_keeps_prior_snapshot(
+     # nothing partial published; the prior snapshot survives a FAILED pass
+     assert (prior / "previous-good.png").read_text() == "prior"
+     assert not (prior / "top.png").exists()
++
++
++# --- artifacts note for the reviewer prompt (#283 slice 2) --------------------
++
++
++def test_render_artifacts_note_empty_when_nothing_collected(tmp_path: Path) -> None:
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    assert check_runner.check_artifacts.render_artifacts_note(cfg) == ""
++
++
++def test_render_artifacts_note_lists_in_container_paths(tmp_path: Path) -> None:
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    shots = cfg.artifacts_dir / "round_01" / "repo-parity"
++    shots.mkdir(parents=True)
++    for name in ("note-320.png", "note-768.png", "dashboard-320.png"):
++        (shots / name).write_text("png")
++
++    note = check_runner.check_artifacts.render_artifacts_note(cfg)
++
++    # reviewers work in-container: the note must use the mounted path, not the
++    # host path
++    assert "/workspace/.handoff/artifacts/round_01/repo-parity" in note
++    assert str(cfg.artifacts_dir) not in note
++    assert "dashboard-320.png" in note and "note-768.png" in note
++    # guidance so a diff-reading persona knows these are for LOOKING at
++    assert "screenshot" in note.lower() or "rendered" in note.lower()
++
++
++def test_render_artifacts_note_caps_long_listings(tmp_path: Path) -> None:
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    shots = cfg.artifacts_dir / "round_02" / "repo-parity"
++    shots.mkdir(parents=True)
++    for i in range(30):
++        (shots / f"shot-{i:02d}.png").write_text("png")
++
++    note = check_runner.check_artifacts.render_artifacts_note(cfg)
++
++    assert "shot-00.png" in note
++    assert "shot-29.png" not in note
++    assert "more" in note  # "+N more" marker
++    assert "30 file" in note
++
++
++def test_render_artifacts_note_preserves_nested_relative_paths(tmp_path: Path) -> None:
++    # PR #291 review (finding 2): the collector preserves nested dirs, so the
++    # note must list openable relative paths — `screens/home/320.png`, not a
++    # bare `320.png` that is neither openable nor unique.
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    base = cfg.artifacts_dir / "round_01" / "repo-parity"
++    (base / "screens" / "home").mkdir(parents=True)
++    (base / "screens" / "detail").mkdir(parents=True)
++    (base / "screens" / "home" / "320.png").write_text("a")
++    (base / "screens" / "detail" / "320.png").write_text("b")
++
++    note = check_runner.check_artifacts.render_artifacts_note(cfg)
++
++    assert "screens/home/320.png" in note
++    assert "screens/detail/320.png" in note
++
++
++def test_render_artifacts_note_bounds_total_size_favoring_newest_rounds(
++    tmp_path: Path,
++) -> None:
++    # PR #291 review (finding 3): the per-check cap alone lets many rounds x
++    # checks grow the prompt unboundedly. A TOTAL listed-file budget applies,
++    # spent newest-round-first; older dirs beyond it collapse to a count line.
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    for rnd in (1, 2, 3, 4, 5):
++        d = cfg.artifacts_dir / f"round_{rnd:02d}" / "repo-parity"
++        d.mkdir(parents=True)
++        for i in range(12):
++            (d / f"r{rnd}-shot-{i:02d}.png").write_text("png")
++
++    note = check_runner.check_artifacts.render_artifacts_note(cfg)
++
++    # newest round fully listed; oldest collapsed to a count-only line
++    assert "r5-shot-00.png" in note
++    assert "r1-shot-00.png" not in note
++    assert "round_01/repo-parity" in note  # still enumerated, count only
++    assert "listing omitted" in note
++    listed = note.count(".png")
++    assert listed <= 36
+diff --git a/tests/test_story_develop_panel.py b/tests/test_story_develop_panel.py
+index f2ae73a..cccd2ca 100644
+--- a/tests/test_story_develop_panel.py
++++ b/tests/test_story_develop_panel.py
+@@ -70,11 +70,27 @@ def _install_reviewer_stub(
+     script = script or {}
+ 
+     def fake(
+-        config, budget, rstate, *, services, round_no, resume, prompt, timeout, base
++        config,
++        budget,
++        rstate,
++        *,
++        services,
++        round_no,
++        resume,
++        prompt,
++        timeout,
++        base,
++        review_file=None,
+     ):
+         name = rstate.spec.name
+         calls.append(
+-            {"name": name, "round_no": round_no, "resume": resume, "prompt": prompt}
++            {
++                "name": name,
++                "round_no": round_no,
++                "resume": resume,
++                "prompt": prompt,
++                "review_file": review_file,
++            }
+         )
+         spec = script.get(name, {})
+         findings = spec.get("findings", [])
+@@ -129,6 +145,27 @@ def test_round_one_runs_each_reviewer_fresh(
+     assert result.cost == pytest.approx(0.04)
+ 
+ 
++def test_collected_artifacts_reach_the_reviewer_prompt(
++    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
++) -> None:
++    # #283 slice 2: when the gate collected rendered-page artifacts, both the
++    # round-1 and re-review prompts must tell the reviewer where to look —
++    # using the in-container mount path.
++    config = _config(tmp_path)
++    shots = config.artifacts_dir / "round_01" / "repo-parity"
++    shots.mkdir(parents=True)
++    (shots / "note-320.png").write_text("png")
++    reviewers = [_reviewer("correctness", tmp_path)]
++    calls = _install_reviewer_stub(monkeypatch)
++
++    _run(config, reviewers, round_no=1)
++    _run(config, reviewers, round_no=2)
++
++    for call in calls:
++        assert "/workspace/.handoff/artifacts/round_01/repo-parity" in call["prompt"]
++        assert "note-320.png" in call["prompt"]
++
++
+ def test_round_two_resumes_with_rereview_prompt(
+     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+ ) -> None:
+diff --git a/tests/test_story_develop_prompts.py b/tests/test_story_develop_prompts.py
+index 01ecad2..dbd96ea 100644
+--- a/tests/test_story_develop_prompts.py
++++ b/tests/test_story_develop_prompts.py
+@@ -152,3 +152,11 @@ def test_reviewer_brief_adds_focus_discipline_when_a_focus_is_set() -> None:
+ def test_reviewer_brief_is_empty_for_the_generalist_default() -> None:
+     # The zero-config code-quality reviewer has no focus; its prompt is unchanged.
+     assert _reviewer_brief(ReviewerSpec(name="code-quality")) == ""
++
++
++def test_reviewer_templates_carry_the_artifacts_note_slot() -> None:
++    # #283 slice 2: collected gate artifacts (rendered-page screenshots) are
++    # enumerated into BOTH reviewer prompts — round one and re-review — so a
++    # panel evaluating a web UI sees pages, not just the diff.
++    assert "{artifacts_note}" in load_prompt("reviewer_round.md")
++    assert "{artifacts_note}" in load_prompt("reviewer_rereview.md")
+diff --git a/tests/test_story_develop_rounds.py b/tests/test_story_develop_rounds.py
+index f82373a..67caf11 100644
+--- a/tests/test_story_develop_rounds.py
++++ b/tests/test_story_develop_rounds.py
+@@ -13,7 +13,23 @@ from __future__ import annotations
+ import subprocess
+ from pathlib import Path
+ 
+-from lithos_loom.plugins.story_develop.config import HANDOFF_DIRNAME
++import pytest
++
++from lithos_loom.plugins.story_develop import engines as _engines
++from lithos_loom.plugins.story_develop import rounds as rounds_mod
++from lithos_loom.plugins.story_develop.agent_session import PauseBudget
++from lithos_loom.plugins.story_develop.check_set import Check, CheckSetResult
++from lithos_loom.plugins.story_develop.config import (
++    HANDOFF_DIRNAME,
++    DevelopConfig,
++    ReviewerSpec,
++)
++from lithos_loom.plugins.story_develop.gate_findings import GateLedger
++from lithos_loom.plugins.story_develop.panel import (
++    PanelRoundResult,
++    ReviewerState,
++    ReviewOutcome,
++)
+ from lithos_loom.plugins.story_develop.rounds import commit_round
+ 
+ 
+@@ -77,3 +93,145 @@ def test_handoff_dirname_matches_the_legacy_delivery_literal() -> None:
+     # commit_round(exclude=[HANDOFF_DIRNAME]); pin the constant to the value the
+     # literal carried so the drift-fix stays behaviour-preserving.
+     assert HANDOFF_DIRNAME == ".handoff"
++
++
++# --- artifact-review pass holds approval (#283 / PR #291 review) --------------
++
++
++def _passed(reviewer: str = "correctness") -> ReviewOutcome:
++    return ReviewOutcome(
++        reviewer=reviewer, status="LGTM", passed=True, max_severity=None
++    )
++
++
++def _failed_outcome(reviewer: str = "correctness") -> ReviewOutcome:
++    return ReviewOutcome(
++        reviewer=reviewer, status="FINDINGS", passed=False, max_severity="major"
++    )
++
++
++def _artifact_ctx(tmp_path: Path, *, collects: bool, panel_passes: bool) -> tuple:
++    """A minimal RoundContext aimed at approval_phase: reviews already passed,
++    one candidate check whose (stubbed) run publishes an artifact when
++    *collects*, and a run_panel_round stub scripted by *panel_passes*."""
++    config = DevelopConfig(
++        repo=tmp_path / "repo",
++        description="x",
++        work_dir=tmp_path / "run",
++        artifacts_path="e2e/artifacts",
++    )
++    panel_calls: list[dict] = []
++
++    def fake_run_check_set(cfg, wt, sha, round_no, checks, ledger):
++        if collects:
++            shots = cfg.artifacts_dir / f"round_{round_no:02d}" / "repo-parity"
++            shots.mkdir(parents=True, exist_ok=True)
++            (shots / "note-320.png").write_text("png")
++        return CheckSetResult(())
++
++    def fake_run_panel_round(cfg, reviewers, **kw):
++        panel_calls.append(kw)
++        outcome = _passed() if panel_passes else _failed_outcome()
++        return PanelRoundResult(
++            round_reviews=[outcome],
++            cost=0.02,
++            interrupted=False,
++            resume_after=None,
++            invalid_reviewer=None,
++        )
++
++    services = rounds_mod.Services(
++        run_turn=lambda **kw: (_ for _ in ()).throw(AssertionError("no turns")),
++        sleep=lambda s: None,
++        start_container=lambda cmd: "cid",
++        stop_container=lambda cid: None,
++        run_check_set=fake_run_check_set,
++    )
++    spec = ReviewerSpec(name="correctness", tool="claude")
++    rstate = ReviewerState(spec, "container", ["cmd"], tmp_path)
++    ctx = rounds_mod.RoundContext(
++        config=config,
++        wt=tmp_path / "repo",
++        base="0" * 40,
++        names=["correctness"],
++        services=services,
++        reviewers=[rstate],
++        coder_container="coder",
++        coder_engine=_engines.get_engine("claude"),
++        coder_timeout=60,
++        reviewer_timeout=60,
++        fast_checks=(),
++        candidate_checks=(
++            Check(
++                name="repo-parity",
++                command="make e2e",
++                state="required",
++                stage="candidate",
++                raw_exit=True,
++            ),
++        ),
++        formatters=[],
++        gate_ledger=GateLedger(),
++        budget=PauseBudget(0),
++        coder_session="s",
++        turn_with_limit_pauses=lambda **kw: None,  # type: ignore[arg-type]
++        run_panel_round=fake_run_panel_round,
++        resume_after_from=lambda t: None,  # type: ignore[arg-type]
++        render_panel_findings=lambda r: "",
++        coder_summary=lambda c, r: "",
++        record_coder_disputes=lambda c, r, n: None,
++        coder_handoff_nudge=lambda r: "",
++    )
++    ctx.final_reviews = [_passed()]
++    ctx.gated_sha = "a" * 40
++    return ctx, panel_calls
++
++
++def test_approval_held_for_artifact_pass_then_sealed(tmp_path: Path) -> None:
++    # PR #291 review (High): candidate checks collect screenshots AFTER the
++    # panel; sealing without a reviewer seeing them defeats #283. The pass runs
++    # (artifact_pass=True), LGTMs, and only then does approval seal.
++    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=True)
++
++    exit_ = rounds_mod.approval_phase(ctx, 1)
++
++    assert [c.get("artifact_pass") for c in panel_calls] == [True]
++    assert exit_ is not None and exit_.status == "approved"
++    assert ctx.review_cost == pytest.approx(0.02)
++
++
++def test_artifact_pass_findings_hold_approval_and_continue(tmp_path: Path) -> None:
++    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=False)
++
++    exit_ = rounds_mod.approval_phase(ctx, 1)
++
++    assert len(panel_calls) == 1
++    assert exit_ is None  # loop continues; the coder answers the findings
++    assert ctx.final_reviews and ctx.final_reviews[0].passed is False
++
++
++def test_no_new_artifacts_seals_without_extra_pass(tmp_path: Path) -> None:
++    ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
++
++    exit_ = rounds_mod.approval_phase(ctx, 1)
++
++    assert panel_calls == []
++    assert exit_ is not None and exit_.status == "approved"
++
++
++def test_unchanged_artifacts_do_not_retrigger_the_pass(tmp_path: Path) -> None:
++    # The no-loop property: after a findings pass, the NEXT approval attempt on
++    # the SAME sha (candidate dedup skips the re-run, artifacts unchanged)
++    # seals without a second artifact pass.
++    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=True)
++    first = rounds_mod.approval_phase(ctx, 1)
++    assert first is not None and first.status == "approved"
++    assert len(panel_calls) == 1
++
++    # next round: panel passed again (its prompt now includes the artifacts),
++    # same gated sha -> candidate skipped -> artifacts view unchanged
++    ctx.final_reviews = [_passed()]
++    exit_ = rounds_mod.approval_phase(ctx, 2)
++
++    assert len(panel_calls) == 1  # no second pass
++    assert exit_ is not None and exit_.status == "approved"
