@@ -1502,14 +1502,14 @@ def test_export_failure_records_errored_but_later_checks_still_run(
 # --- gate artifact collection (#283 slice 1) ----------------------------------
 
 
-def test_check_artifacts_are_collected_into_the_handoff_before_tree_cleanup(
+def test_check_artifacts_are_collected_before_tree_cleanup(
     monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
 ) -> None:
     # #283: the per-check tree export is deleted after the check runs (#284
     # isolation), so anything a check renders there — e2e screenshots — is
     # destroyed before any reviewer could see it. With ``artifacts_path`` set,
-    # the runner rescues that directory into the handoff area (the only per-run
-    # dir mounted into agent containers) before cleanup.
+    # the runner snapshots that directory into the host-controlled artifacts
+    # dir (agents see it read-only at .handoff/artifacts) before cleanup.
     sha = _committed_sha(tmp_git_repo)
     cfg = _config(tmp_path, artifacts_path="e2e/artifacts")
     _host_exec_gate(monkeypatch)
@@ -1527,7 +1527,7 @@ def test_check_artifacts_are_collected_into_the_handoff_before_tree_cleanup(
     cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (parity,), GateLedger())
 
     assert cs is not None and cs.results[0].passed is True
-    dest = cfg.handoff_dir / "artifacts" / "round_01" / "repo-parity" / "note-320.png"
+    dest = cfg.artifacts_dir / "round_01" / "repo-parity" / "note-320.png"
     assert dest.read_text() == "png-bytes"
     # cleanup still happened — no export trees left behind
     round_dir = cfg.gate_dir / "round_01"
@@ -1557,7 +1557,7 @@ def test_red_check_artifacts_are_still_collected(
     cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 2, (parity,), GateLedger())
 
     assert cs is not None and cs.results[0].passed is False
-    dest = cfg.handoff_dir / "artifacts" / "round_02" / "repo-parity" / "x.png"
+    dest = cfg.artifacts_dir / "round_02" / "repo-parity" / "x.png"
     assert dest.read_text() == "broken-page"
 
 
@@ -1579,7 +1579,7 @@ def test_no_artifacts_path_means_no_collection(
     cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
 
     assert cs is not None
-    assert not (cfg.handoff_dir / "artifacts").exists()
+    assert not cfg.artifacts_dir.exists()
 
 
 def test_absent_or_empty_artifacts_dir_collects_nothing(
@@ -1598,4 +1598,126 @@ def test_absent_or_empty_artifacts_dir_collects_nothing(
     cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (lint,), GateLedger())
 
     assert cs is not None
-    assert not (cfg.handoff_dir / "artifacts").exists()
+    assert not cfg.artifacts_dir.exists()
+
+
+def test_source_symlinks_are_never_followed(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # PR #289 review, critical: the collector runs on the HOST as the loom
+    # user; a committed or check-created symlink inside the artifacts dir must
+    # not let it read outside the exported tree. Regular files still collect.
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("host-only")
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+
+    check = Check(
+        name="repo-parity",
+        command=(
+            "mkdir -p e2e/artifacts && printf ok > e2e/artifacts/real.png"
+            f" && ln -s {secret} e2e/artifacts/leak.txt"
+        ),
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+
+    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
+
+    assert cs is not None
+    dest = cfg.artifacts_dir / "round_01" / "repo-parity"
+    assert (dest / "real.png").read_text() == "ok"
+    assert not (dest / "leak.txt").exists()
+    assert not list(dest.rglob("*host-secret*"))
+
+
+def test_symlinked_artifacts_root_collects_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # The artifacts dir itself being a symlink must not redirect the collector
+    # outside the export.
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "smuggled.png").write_text("outside")
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+
+    check = Check(
+        name="repo-parity",
+        command=f"mkdir -p e2e && ln -s {outside} e2e/artifacts",
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+
+    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
+
+    assert cs is not None
+    assert not (cfg.artifacts_dir / "round_01").exists()
+
+
+def test_collection_is_an_exact_snapshot_not_a_merge(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # PR #289 review: a stale file from an earlier execution of the same
+    # round+check must not survive into the new snapshot.
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+    stale = cfg.artifacts_dir / "round_01" / "repo-parity"
+    stale.mkdir(parents=True)
+    (stale / "stale-old-shot.png").write_text("old")
+
+    check = Check(
+        name="repo-parity",
+        command="mkdir -p e2e/artifacts && printf new > e2e/artifacts/fresh.png",
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+
+    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
+
+    assert cs is not None
+    dest = cfg.artifacts_dir / "round_01" / "repo-parity"
+    assert (dest / "fresh.png").read_text() == "new"
+    assert not (dest / "stale-old-shot.png").exists()
+
+
+def test_collection_failure_is_logged_never_fatal_and_cleanup_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_git_repo: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+
+    def boom(*a: object, **kw: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(check_runner.check_artifacts.shutil, "copy2", boom)
+
+    check = Check(
+        name="repo-parity",
+        command="mkdir -p e2e/artifacts && printf x > e2e/artifacts/a.png",
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+
+    with caplog.at_level("WARNING"):
+        cs = check_runner.run_check_set(
+            cfg, tmp_git_repo, sha, 1, (check,), GateLedger()
+        )
+
+    assert cs is not None and cs.results[0].passed is True
+    assert "artifact collection failed" in caplog.text
+    # no partial snapshot published, and the export tree is still cleaned up
+    assert not (cfg.artifacts_dir / "round_01" / "repo-parity").exists()
+    round_dir = cfg.gate_dir / "round_01"
+    assert not [p for p in round_dir.iterdir() if p.name.startswith("tree-")]

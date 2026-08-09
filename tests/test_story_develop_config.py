@@ -186,6 +186,12 @@ def test_parse_artifacts_path_rejects_escaping_paths(escapes: str) -> None:
         parse_artifacts_path(escapes, where="x")
 
 
+def test_parse_artifacts_path_rejects_repo_root() -> None:
+    # "." would snapshot the entire exported repo for every check.
+    with pytest.raises(ValueError, match="must name a subdirectory"):
+        parse_artifacts_path(".", where="x")
+
+
 def test_parse_image_none_passes_through() -> None:
     assert parse_image(None, where="x") is None
 

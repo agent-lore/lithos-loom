@@ -34,7 +34,14 @@ from pathlib import Path
 from typing import Literal, cast
 
 from ...runner import detection
-from . import check_catalog, containers, gate_adapters, profiles, test_gate
+from . import (
+    check_artifacts,
+    check_catalog,
+    containers,
+    gate_adapters,
+    profiles,
+    test_gate,
+)
 from .check_set import (
     Check,
     CheckResult,
@@ -443,47 +450,6 @@ def _write_check_output(round_dir: Path, check: Check, gate: GateResult | None) 
     )
 
 
-def _collect_check_artifacts(
-    config: DevelopConfig, tree: Path, round_no: int, check_name: str
-) -> None:
-    """Rescue a check's artifacts dir from its doomed tree export (#283).
-
-    The per-check export is deleted right after the check runs (#282
-    isolation), destroying anything the check rendered there — e.g. the e2e
-    screenshots a repo-parity ``make e2e`` writes. When the project declares
-    ``develop_artifacts_path``, copy that dir into the run handoff (the only
-    per-run dir mounted into agent containers) under
-    ``artifacts/round_NN/<check>/`` so reviewers can see it. Unconditional on
-    the check's verdict — a RED e2e run's screenshots are exactly what a
-    reviewer needs. Best-effort: a collection failure is logged, never fatal,
-    and never blocks the tree cleanup that follows.
-    """
-    if not config.artifacts_path:
-        return
-    src = tree / config.artifacts_path
-    try:
-        if not src.is_dir() or not any(src.iterdir()):
-            return
-        dest = config.handoff_dir / "artifacts" / f"round_{round_no:02d}" / check_name
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src, dest, dirs_exist_ok=True)
-        logger.info(
-            "story-develop %s: round %d %s artifacts collected to %s",
-            config.run_id,
-            round_no,
-            check_name,
-            dest,
-        )
-    except OSError as exc:
-        logger.warning(
-            "story-develop %s: round %d %s artifact collection failed (continuing): %s",
-            config.run_id,
-            round_no,
-            check_name,
-            exc,
-        )
-
-
 def run_check_set(
     config: DevelopConfig,
     wt: Path,
@@ -584,7 +550,7 @@ def run_check_set(
             )
             gate = None
         finally:
-            _collect_check_artifacts(config, tree, round_no, check.name)
+            check_artifacts.collect_check_artifacts(config, tree, round_no, check.name)
             # Best-effort: an undeletable tree just stays on disk — it is never
             # mounted again, so it cannot affect any later check — but loom is a
             # long-running daemon, so a retained export (repo + venv, per check)

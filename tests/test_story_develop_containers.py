@@ -60,6 +60,28 @@ def test_container_shm_size_is_one_gigabyte() -> None:
     assert CONTAINER_SHM_SIZE == "1g"
 
 
+def test_artifacts_dir_mounts_read_only_nested_under_handoff() -> None:
+    """#283: collected artifacts are host-written and agent-READ-ONLY — the
+    nested mount shadows any same-named path an agent creates in the RW
+    handoff, closing the planted-symlink destination route (PR #289)."""
+    cmd = containers.build_run_command(
+        name="c",
+        image="img",
+        worktree=Path("/w"),
+        config_dir=Path("/cfg"),
+        handoff_dir=Path("/h"),
+        config_mount="/claude_config",
+        config_env_var="CLAUDE_CONFIG_DIR",
+        auth_source_dir=Path("/auth"),
+        auth_files=(),
+        artifacts_dir=Path("/run/artifacts"),
+    )
+    assert "/run/artifacts:/workspace/.handoff/artifacts:ro" in cmd
+    # ordering: docker applies nested binds by target depth, but the RW handoff
+    # mount must still be present alongside
+    assert "/h:/workspace/.handoff" in cmd
+
+
 def test_run_command_hardened_profile_and_mounts() -> None:
     cmd = _run_cmd()
     assert cmd[:3] == ["docker", "run", "-d"]

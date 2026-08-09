@@ -20,6 +20,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
+| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 1 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
@@ -72,6 +73,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `build_format_command` — Build the one-shot ``docker run`` argv for one formatter run.
 - def `resolve_formatters` — The runnable write-mode formatter commands for *wt*, probed once for the run.
 - def `run_format_pass` — Format the coder's commit in isolation and commit any change separately.
+
+### `lithos_loom.plugins.story_develop.check_artifacts`
+- def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).
 
 ### `lithos_loom.plugins.story_develop.check_catalog`
 - class `CheckMapping` — One canonical check's command per ecosystem.

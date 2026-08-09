@@ -159,10 +159,17 @@ def parse_artifacts_path(value: object, *, where: str) -> str | None:
             f"{where}: artifacts path must be a non-empty string (got {value!r})"
         )
     text = value.strip()
-    if PurePosixPath(text).is_absolute() or ".." in PurePosixPath(text).parts:
+    parts = PurePosixPath(text).parts
+    if PurePosixPath(text).is_absolute() or ".." in parts:
         raise ValueError(
             f"{where}: artifacts path must be repo-relative without '..' "
             f"(got {value!r})"
+        )
+    if not parts or parts == (".",):
+        # "." would snapshot the ENTIRE exported repo per check — reject.
+        raise ValueError(
+            f"{where}: artifacts path must name a subdirectory, not the repo "
+            f"root (got {value!r})"
         )
     return text
 
@@ -655,6 +662,19 @@ class DevelopConfig:
     def gate_dir(self) -> Path:
         """Per-run root for test-gate state (exported trees, output, cache)."""
         return self.run_dir / "test_gate"
+
+    @property
+    def artifacts_dir(self) -> Path:
+        """Per-run HOST-CONTROLLED root for collected check artifacts (#283).
+
+        Deliberately a sibling of ``handoff_dir``, not inside it: the handoff
+        is mounted read-write into agent containers, so an agent could plant a
+        symlink at a predictable destination and redirect a host-privileged
+        copy (PR #289 review, critical). This dir is written only by the host
+        collector and exposed to agents via a separate READ-ONLY mount at
+        ``.handoff/artifacts`` in-container.
+        """
+        return self.run_dir / "artifacts"
 
     @property
     def failures_dir(self) -> Path:
