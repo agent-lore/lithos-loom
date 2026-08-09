@@ -216,7 +216,9 @@ def _combine_review_outcomes(
             combined.append(reg)
             continue
         findings = list(reg.findings) + list(art.findings)
-        severities = [f.severity for f in findings]
+        # open findings only — max_severity mirrors ReviewOutcome's normal
+        # derivation; a resolved major must not headline the final outcome.
+        severities = [f.severity for f in findings if f.is_open]
         combined.append(
             dataclasses.replace(
                 reg,

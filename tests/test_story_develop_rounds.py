@@ -319,3 +319,34 @@ def test_combined_outcome_appends_visual_findings_and_blocks(
     assert out.passed is False  # conjunction of verdicts
     assert len(out.findings) == 2  # minor retained + visual appended
     assert out.max_severity == "major"
+
+
+def test_combined_max_severity_ignores_resolved_findings(tmp_path: Path) -> None:
+    """#291 round 5 (low): a FIXED major from the regular review + visual LGTM
+    must not headline max_severity=major on an approved outcome."""
+    from lithos_loom.plugins.story_develop.handoff import Finding
+
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=True)
+    fixed_major = Finding(
+        finding_id="f-001",
+        severity="major",
+        status="fixed",
+        files=["a.py:1"],
+        rationale="was fixed in round 2",
+    )
+    ctx.final_reviews = [
+        ReviewOutcome(
+            reviewer="correctness",
+            status="FINDINGS",
+            passed=True,
+            max_severity=None,
+            findings=[fixed_major],
+        )
+    ]
+
+    exit_ = rounds_mod.approval_phase(ctx, 1)
+
+    assert exit_ is not None and exit_.status == "approved"
+    out = ctx.final_reviews[0]
+    assert out.max_severity is None  # no OPEN findings
+    assert [f.finding_id for f in out.findings] == ["f-001"]  # still recorded
