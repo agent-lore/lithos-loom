@@ -99,6 +99,23 @@ def test_task_overrides_project_for_image_command_gate() -> None:
     assert settings.test_gate is False
 
 
+def test_task_overrides_project_for_artifacts_path() -> None:
+    settings, _ = _resolve(
+        {"develop_artifacts_path": "e2e/artifacts"},
+        {"develop_artifacts_path": "out/shots"},
+    )
+    assert settings.artifacts_path == "out/shots"
+
+
+def test_bad_artifacts_path_frictions_and_keeps_default() -> None:
+    settings, frictions = _resolve({"develop_artifacts_path": "../escape"})
+    assert settings.artifacts_path is None
+    assert frictions == (
+        "develop_artifacts_path: artifacts path must be repo-relative without "
+        "'..' (got '../escape'); ignoring",
+    )
+
+
 # ── the two-suffix friction contract ──────────────────────────────────
 
 

@@ -23,7 +23,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | M | 2 | 13 |
+| `lithos_loom.plugins.story_develop.config` | M | 2 | 14 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
@@ -105,6 +105,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `ReviewerSpec` — One named reviewer: its persona, strictness, and tooling (T6).
 - def `parse_model` — Validate + normalise a ``model`` value: a non-empty string, or ``None``.
 - def `parse_image` — Validate + normalise a sandbox container ``image`` value, or ``None``.
+- def `parse_artifacts_path` — Validate a repo-relative check-artifacts directory, or ``None``.
 - def `parse_test_command` — Validate + normalise a gate ``test_command`` override, or ``None``.
 - def `parse_check_commands` — Validate a per-check command override map (#273), or ``{}`` when absent.
 - def `parse_check_command_pairs` — Parse repeatable CLI ``NAME=COMMAND`` items into a validated override map (#273).

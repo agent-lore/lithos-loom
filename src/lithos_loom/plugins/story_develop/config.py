@@ -11,7 +11,7 @@ import re
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # A reviewer name becomes a Docker container name, a host dir, and a handoff
 # filename, so it must be a safe slug (lowercase alphanumerics + hyphens,
@@ -140,6 +140,31 @@ def parse_image(value: object, *, where: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{where}: image must be a non-empty string (got {value!r})")
     return value.strip()
+
+
+def parse_artifacts_path(value: object, *, where: str) -> str | None:
+    """Validate a repo-relative check-artifacts directory, or ``None``.
+
+    #283 slice 1: the directory (relative to the repo root) that gate checks
+    may write reviewable artifacts into — e.g. lens's ``e2e/artifacts``
+    screenshot dir. The check runner copies it from each check's isolated tree
+    export into the run's handoff area before the export is deleted. The path
+    is joined onto the export tree, so it must stay inside it: absolute paths
+    and ``..`` traversal are rejected. Raises :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{where}: artifacts path must be a non-empty string (got {value!r})"
+        )
+    text = value.strip()
+    if PurePosixPath(text).is_absolute() or ".." in PurePosixPath(text).parts:
+        raise ValueError(
+            f"{where}: artifacts path must be repo-relative without '..' "
+            f"(got {value!r})"
+        )
+    return text
 
 
 def parse_test_command(value: object, *, where: str) -> str | None:
@@ -502,6 +527,10 @@ class DevelopConfig:
     coder_model: str | None = None
     coder_effort: str | None = None
     image: str = DEFAULT_IMAGE
+    # #283 slice 1: repo-relative dir whose contents each gate check's isolated
+    # tree export contributes to the run handoff (``develop_artifacts_path``,
+    # project-then-task). ``None`` = no collection.
+    artifacts_path: str | None = None
     base_branch: str = "main"
     # Single-reviewer convenience fields (the T2-era surface; still the
     # default path). T6: `reviewers` holds full multi-reviewer specs and,

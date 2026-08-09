@@ -17,6 +17,7 @@ from lithos_loom.plugins.story_develop.config import (
     DevelopConfig,
     ReviewerSpec,
     load_develop_config,
+    parse_artifacts_path,
     parse_check_commands,
     parse_check_state_pairs,
     parse_check_states,
@@ -160,6 +161,29 @@ def test_parse_effort_rejects_bad(bad: object) -> None:
 )
 def test_parse_image_accepts_non_empty_strings(good: str) -> None:
     assert parse_image(good, where="x") == good
+
+
+@pytest.mark.parametrize("good", ["e2e/artifacts", "artifacts", "out/shots "])
+def test_parse_artifacts_path_accepts_repo_relative_dirs(good: str) -> None:
+    assert parse_artifacts_path(good, where="x") == good.strip()
+
+
+def test_parse_artifacts_path_none_passes_through() -> None:
+    assert parse_artifacts_path(None, where="x") is None
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, []])
+def test_parse_artifacts_path_rejects_non_strings(bad: object) -> None:
+    with pytest.raises(ValueError, match="artifacts path must be a non-empty string"):
+        parse_artifacts_path(bad, where="x")
+
+
+@pytest.mark.parametrize("escapes", ["/abs/path", "../outside", "a/../../b", "a/.."])
+def test_parse_artifacts_path_rejects_escaping_paths(escapes: str) -> None:
+    # The path is joined onto the check's tree export — it must not be able to
+    # point the collector at anything outside it.
+    with pytest.raises(ValueError, match="repo-relative without"):
+        parse_artifacts_path(escapes, where="x")
 
 
 def test_parse_image_none_passes_through() -> None:

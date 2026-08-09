@@ -134,6 +134,8 @@ class ProjectDevelopSettings:
     # per-task override (``task.metadata.develop_image``). ``None`` = "inherit
     # the route-level ``--image`` flag / the built-in default".
     image: str | None = None
+    # #283: repo-relative gate-artifacts dir (``develop_artifacts_path``).
+    artifacts_path: str | None = None
     # Per-project test-gate overrides (#127), each ``None`` = "inherit the
     # route-level flag" (``--test-command`` / ``--no-test-gate``).
     # ``test_command`` is trusted as-is by the gate. (#140: the `test` check's
@@ -312,6 +314,7 @@ def resolve_project_settings(
         max_rounds=scalars.max_rounds,
         max_cost_usd=scalars.max_cost_usd,
         image=scalars.image,
+        artifacts_path=scalars.artifacts_path,
         test_command=scalars.test_command,
         test_gate=scalars.test_gate,
         check_commands=scalars.check_commands,
