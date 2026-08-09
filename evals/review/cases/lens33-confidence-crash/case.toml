@@ -15,6 +15,13 @@ Copilot flagged the misleading-percentage form post-delivery; the fix round
 exposed the page-crash form. Fixed in lens 87c9560 (range guard: not
 0 <= value <= 1 -> no chip; comparison semantics reject NaN for free).
 
+The two symptom forms are INDEPENDENTLY REMEDIABLE — math.isfinite() alone
+prevents the crash but still renders "200%", and a `< 0 or > 1` check alone
+rejects finite out-of-range values while NaN sails through (both comparisons
+are False) — so they are two [[expected]] defects, same partial-catch
+semantics as 289-symlink-artifacts: a finding naming only one form is a
+partial catch; one comprehensive finding covering both satisfies both.
+
 CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
 diff as the panel approved it (base = lens main a429e8e post-K1-S2; patch =
 delivered head 1d190ba, pre-fix).
@@ -29,17 +36,28 @@ acceptance_criteria_file = "ac.md"
 
 [[expected]]
 file = "src/lithos_lens/knowledge_metadata.py"
-keywords = ["confidence", "out-of-range", "out of range", "nan", "inf", "round(", "0..1", "unvalidated"]
+keywords = ["out-of-range", "out of range", "outside the documented", "misleading", "200%"]
+min_severity = "minor"
+mechanism = """
+RANGE form (misleading rendering): _format_confidence documents confidence as
+a 0..1 fraction but formats any finite numeric with round(value * 100) — a
+FINITE value outside the documented range (confidence: 2, confidence: -0.5 in
+untrusted agent-written frontmatter) renders a misleading chip ("200%",
+"-50%") instead of following the module's malformed-input no-chip convention.
+A finiteness-only guard (math.isfinite) does NOT fix this form — the finding
+must identify that finite out-of-range values render nonsense.
+"""
+
+[[expected]]
+file = "src/lithos_lens/knowledge_metadata.py"
+keywords = ["nan", ".inf", "infinit", "non-finite", "crash", "overflow"]
 min_severity = "major"
 mechanism = """
-_format_confidence accepts any int/float and formats it as a percentage with
-round(value * 100): it never validates the documented 0..1 range or finiteness.
-Frontmatter is untrusted agent-written input, so (1) out-of-range numerics
-render misleading chips ("200%", "-50%") instead of following the module's
-malformed-input no-chip convention, and (2) NaN / infinity pass the isinstance
-type guard and make round() raise ValueError / OverflowError inside template
-rendering — a single malformed frontmatter value crashes the entire /note/{id}
-page. The finding must identify the missing range/finiteness validation on the
-confidence value (either symptom form counts: misleading percentage rendering
-or the render-crash).
+NON-FINITE form (render crash): NaN / infinity pass the isinstance(int, float)
+type guard, and round(value * 100) then raises (ValueError on NaN,
+OverflowError on inf) inside template rendering — one malformed frontmatter
+value (`confidence: .nan`) crashes the ENTIRE /note/{id} page. An ordinary
+range comparison (`value < 0 or value > 1`) does NOT fix this form — both
+comparisons are False for NaN — so the finding must identify the non-finite
+crash specifically, not just out-of-range rendering.
 """
