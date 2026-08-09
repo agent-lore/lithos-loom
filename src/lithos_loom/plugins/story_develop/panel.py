@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ...runner import git
-from . import containers, engines, handoff, limits
+from . import check_artifacts, containers, engines, handoff, limits
 from .agent_session import (
     _CONTINUATION_PROMPT,
     PauseBudget,
@@ -542,6 +542,7 @@ def run_panel_round(
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
+                artifacts_note=check_artifacts.render_artifacts_note(config),
                 severity_calibration=SEVERITY_CALIBRATION,
                 review_file=handoff.reviewer_handoff_name(1, name),
             )
@@ -560,6 +561,7 @@ def run_panel_round(
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
+                artifacts_note=check_artifacts.render_artifacts_note(config),
                 severity_calibration=SEVERITY_CALIBRATION,
                 review_file=handoff.reviewer_handoff_name(round_no, name),
             )

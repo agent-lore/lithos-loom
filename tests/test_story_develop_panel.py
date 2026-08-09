@@ -129,6 +129,27 @@ def test_round_one_runs_each_reviewer_fresh(
     assert result.cost == pytest.approx(0.04)
 
 
+def test_collected_artifacts_reach_the_reviewer_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #283 slice 2: when the gate collected rendered-page artifacts, both the
+    # round-1 and re-review prompts must tell the reviewer where to look —
+    # using the in-container mount path.
+    config = _config(tmp_path)
+    shots = config.artifacts_dir / "round_01" / "repo-parity"
+    shots.mkdir(parents=True)
+    (shots / "note-320.png").write_text("png")
+    reviewers = [_reviewer("correctness", tmp_path)]
+    calls = _install_reviewer_stub(monkeypatch)
+
+    _run(config, reviewers, round_no=1)
+    _run(config, reviewers, round_no=2)
+
+    for call in calls:
+        assert "/workspace/.handoff/artifacts/round_01/repo-parity" in call["prompt"]
+        assert "note-320.png" in call["prompt"]
+
+
 def test_round_two_resumes_with_rereview_prompt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

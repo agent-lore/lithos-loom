@@ -16,7 +16,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from .config import DevelopConfig
+from .config import HANDOFF_MOUNT_NAME, WORKSPACE_MOUNT, DevelopConfig
 
 logger = logging.getLogger(__name__)
 
@@ -136,3 +136,51 @@ def _retire_prior(dest: Path) -> None:
     execution's snapshot posing as current (PR #289 round 2)."""
     if dest.exists():
         shutil.rmtree(dest)
+
+
+# How many filenames to spell out per check dir in the reviewer note; the rest
+# collapse to "+N more" (a 4-page x 4-width screenshot matrix is 16 files —
+# enumerable, but a long suite must not drown the prompt).
+_NOTE_FILES_PER_CHECK = 12
+
+
+def render_artifacts_note(config: DevelopConfig) -> str:
+    """The reviewer-prompt section enumerating collected artifacts (#283 s2).
+
+    Empty string when nothing was collected (the template slot renders blank).
+    Paths are the IN-CONTAINER view — ``/workspace/.handoff/artifacts/…`` (the
+    read-only mount) — because the reader is an agent inside the container,
+    not the host. Lists every collected round (a re-review can compare an
+    earlier round's rendering against the fix), deterministically ordered,
+    with per-dir file listings capped at :data:`_NOTE_FILES_PER_CHECK`.
+    """
+    root = config.artifacts_dir
+    if not root.is_dir():
+        return ""
+    lines: list[str] = []
+    for round_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for check_dir in sorted(p for p in round_dir.iterdir() if p.is_dir()):
+            files = sorted(p.name for p in check_dir.rglob("*") if p.is_file())
+            if not files:
+                continue
+            mount = (
+                f"{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}/artifacts/"
+                f"{round_dir.name}/{check_dir.name}"
+            )
+            shown = files[:_NOTE_FILES_PER_CHECK]
+            extra = len(files) - len(shown)
+            listing = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
+            lines.append(f"- `{mount}/` — {len(files)} file(s): {listing}")
+    if not lines:
+        return ""
+    return (
+        "## Rendered-page artifacts\n"
+        "\n"
+        "Gate checks captured rendered output from this run — screenshots of "
+        "the application's actual pages. **Open and look at these image files** "
+        "(they are readable in-container at the paths below) and evaluate the "
+        "rendered result alongside the diff: layout and hierarchy at each "
+        "width, interaction and degraded states, obvious visual breakage. "
+        "Artifacts from a RED e2e check show the failing state.\n"
+        "\n" + "\n".join(lines) + "\n"
+    )
