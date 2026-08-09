@@ -1,0 +1,62 @@
+[case]
+id = "lens27-screenshot-ac"
+description = """
+lens PR #27 escape (coordinator AC-audit caught it; loom standard panel LGTM'd
+in 2 rounds and again post-rebase): the e2e-harness story's acceptance criteria
+explicitly require "screenshots at 320/768/1024/1440 written to an artifacts
+dir" — named as THE contract point for loom's downstream visual-review flow —
+and the delivered suite captures no screenshots at all (playwright trace
+on-first-retry only). The smoke suite is real and green, CI is green: an
+unmet-acceptance-criterion escape, the exact per-criterion AC->evidence mapping
+the reviewer prompts demand (map each criterion to the code path AND test that
+satisfies it; a criterion without evidence is a finding EVEN when everything
+present is good).
+
+FULL-FEATURE diff as it stood after the Copilot round + rebase (base = lens
+main 8393481 post-K1-S4; patch = head 43ccbdf — the direct parent of the
+screenshot fix 13bf0df, i.e. the latest screenshots-absent head; no cleaner
+head exists because the round-3 hermeticity fixes landed AFTER screenshots).
+This is a TRIMMED-AC replay (ac_provenance = "trimmed"): the PATCH is the
+authentic historical diff, but the fixture ac.md is edited from the historical
+task body so the screenshot criterion is the SINGLE unmet criterion at this
+head. Trims, each because 43ccbdf does not satisfy the original wording and
+none is the measured escape: the a11y-informational clause and the named
+HTMX/graph interactions are dropped; "renders with no console errors" is
+weakened to "renders from the seeded fixtures" (the suite asserts rendering,
+not console silence); "every top-level route" is replaced by the enumerated
+surfaces the suite actually visits — dashboard, task-detail, knowledge-note,
+missing-note — because the app also serves a findings page the suite never
+opens; the "pin the 1.62.x line" dependency wording is weakened
+to gate-image compatibility (the delivered suite declares npm @playwright/test
+^1.62.0 with no lockfile at this head — a floor, not a pin — and is npm, not
+the Python package the original task text assumed); hermeticity wording that
+only the later round-3 fixes satisfied is omitted. Reviewer findings against
+other criteria are fixture noise, not signal — this case measures screenshot-AC
+detection amid met-criteria distractors, not a faithful replay of the full
+historical review context.
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. Fixed in
+lens 13bf0df (16-capture spec + artifact existence assertions + documented
+e2e/artifacts/<page>-<width>.png contract).
+"""
+ac_provenance = "trimmed"
+repo = "../lithos-lens"
+base = "8393481402b30b142cf352e591e5d0f126832371"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "Makefile"
+keywords = ["screenshot", "artifacts", "320", "1440", "unmet"]
+min_severity = "major"
+mechanism = """
+The acceptance criteria require the playwright smoke suite to write screenshots
+at viewport widths 320/768/1024/1440 into an artifacts directory — explicitly
+called out as the contract point a downstream visual-review consumer picks up.
+The delivered change implements the fake-Lithos app mode, the smoke tests, and
+the make target, but captures NO screenshots anywhere: no screenshot spec, no
+artifacts directory, only playwright's trace-on-first-retry. The criterion has
+no implementing code path and no test — an unmet acceptance criterion that must
+be recorded as a finding regardless of the quality of what IS present.
+"""

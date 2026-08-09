@@ -11,6 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: test_shipped_patch_cases_materialise applies each
+          # shipped eval case's patch at its pinned base commit — a shallow
+          # clone would silently skip that guard for same-repo cases.
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v4
         with:

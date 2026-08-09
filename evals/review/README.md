@@ -91,6 +91,7 @@ head_patch = "reintroduce-defect.patch"   # applied to base -> the buggy head
 personas = ["correctness"]                # validated at load (a typo fails closed)
 profile = "standard"                      # selects the check-set; validated at load
 acceptance_criteria_file = "ac.md"
+ac_provenance = "replay"                  # what ac.md IS — see below
 
 # Optional clean pair for the false-positive measurement — its own patch (an
 # independent clean change), or a sha (`head` / `base`), or omit for catch-only.
@@ -107,6 +108,55 @@ mechanism = "prose describing the defect (the LLM-judge keys on this)"
 `load_case` enforces **exactly one** of `head` / `head_patch` (and likewise for the
 known-good); a patch file must exist in the case dir (fail-closed at load). See
 `cases/194-delivery-failure-status/` for a worked example.
+
+### AC provenance — say what the criteria ARE
+
+A case's *patch* should always be the authentic historical diff, but its `ac.md`
+may not be the authentic review input, and that changes what a catch/miss on the
+case measures. Declare it with `ac_provenance`:
+
+- **`replay`** — ac.md is the authentic criteria the original review context had
+  (e.g. the real Lithos task body).
+- **`trimmed`** — an authentic source edited to isolate the measured escape; the
+  case `description` must document **every** trim and why (each trimmed clause
+  is one the head genuinely didn't satisfy, so leaving it in would let a
+  reviewer be scored a miss while reporting a real unmet criterion). Findings
+  against trimmed-away criteria are fixture noise, not signal.
+- **`synthetic`** — written for the fixture, typically because no authentic AC
+  existed (e.g. a hand-developed PR that never went through a panel).
+
+Unknown values fail at load. The loader keeps the field optional (a case dir
+mid-authoring outside the shipped set may omit it), but **every shipped case
+must declare it** — gate-enforced with no allowlist, so a future case can't
+silently regress to undocumented provenance. All pre-2026-08 cases are
+`synthetic`: they replay escapes from hand-developed loom PRs that never had a
+panel AC, with problem statements written for the fixture.
+
+### Cross-repo cases (escapes from customer projects)
+
+`repo` resolves relative to the loom checkout's cwd, so a case can target a
+sibling customer checkout — e.g. `repo = "../lithos-lens"` for the lens escapes.
+This leans on the same host-only assumption the eval already makes (docker, agent
+CLIs): the sibling checkout must exist and contain the case's `base` commit
+(a `main` ancestor of that repo). Patch form keeps the seeded defect
+self-contained in the case dir, so nothing in the customer repo needs tags or
+kept-alive commits.
+
+### Preflight: patches are materialised in the gate
+
+`test_shipped_patch_cases_materialise` (tests/test_eval_review_patch.py) applies
+every shipped patch case at its pinned base as part of `make check`, so a
+drifted patch or missing base fails the gate rather than the paid live run. It
+skips — with a reason — wherever it *can't* run for real: no `.git` (the
+in-sandbox gate tree), a shallow clone missing the base (loom CI checks out with
+`fetch-depth: 0` so same-repo cases do run there), or an absent sibling checkout
+for cross-repo cases. Before a paid eval run on a new host, preflight with:
+
+```bash
+uv run pytest tests/test_eval_review_patch.py -k shipped -v
+```
+
+and treat any SKIPPED cross-repo case as "this host can't run that case".
 
 ### Sha form (when history already isolates the defect)
 

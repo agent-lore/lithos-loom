@@ -264,3 +264,42 @@ def test_seed_180_is_a_clean_mirror() -> None:
     expected = case.expected[0]
     assert expected.file == "src/lithos_loom/cli/develop.py"
     assert expected.min_severity == "critical"
+
+
+# ── ac_provenance: replay vs trimmed vs synthetic fixture AC (#292 review) ──
+# A case's ac.md may be the authentic input the original review context had
+# ("replay"), an authentic source edited to isolate the measured escape
+# ("trimmed"), or written for the fixture ("synthetic"). Declaring it keeps the
+# benchmark honest about what a catch/miss on the case measures.
+
+
+def test_ac_provenance_loads_when_declared(tmp_path: Path) -> None:
+    toml = _SEED_TOML.replace('id = "180', 'ac_provenance = "trimmed"\nid = "180')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    assert load_case(case_dir).ac_provenance == "trimmed"
+
+
+def test_ac_provenance_defaults_to_none(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_SEED_TOML)
+    assert load_case(case_dir).ac_provenance is None
+
+
+def test_ac_provenance_rejects_unknown_value(tmp_path: Path) -> None:
+    toml = _SEED_TOML.replace('id = "180', 'ac_provenance = "authentic"\nid = "180')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="ac_provenance"):
+        load_case(case_dir)
+
+
+def test_every_shipped_case_declares_ac_provenance() -> None:
+    # EVERY shipped case must say what its AC is — no ID allowlist, so a future
+    # case can't silently regress to undocumented provenance. (The loader keeps
+    # the field optional only for cases mid-authoring outside the shipped set.)
+    for case_dir in _shipped_case_dirs():
+        case = load_case(case_dir)
+        assert case.ac_provenance is not None, (
+            f"{case.id}: declare ac_provenance (replay | trimmed | synthetic)"
+        )

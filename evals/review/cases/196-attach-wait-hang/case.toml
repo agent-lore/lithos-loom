@@ -12,6 +12,7 @@ PATCH-BASED case (#193): `base` is the hardened `main`; `head_patch` removes the
 completion-store escape from `_wait_for_run`, re-introducing the forever-hang ->
 catch. Catch-only (no FP pair). JUDGE-SCORED (the default).
 """
+ac_provenance = "synthetic"
 repo = "."
 base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
 head_patch = "reintroduce-defect.patch"

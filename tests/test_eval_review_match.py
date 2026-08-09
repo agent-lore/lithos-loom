@@ -6,7 +6,9 @@ LLM-judge fallback is injected as a callable so these tests never call an agent.
 
 from __future__ import annotations
 
-from lithos_loom.evals.review.case import Case, Expected
+from pathlib import Path
+
+from lithos_loom.evals.review.case import Case, Expected, load_case
 from lithos_loom.evals.review.match import (
     _structured_match,
     match_expected,
@@ -228,3 +230,73 @@ def test_score_run_sets_incomplete() -> None:
         ).incomplete
         is False
     )
+
+
+# ── shipped 289-symlink case: two directions, partial catches must not score ──
+# as full catches (#292 review finding 2). Uses the REAL shipped fixture so the
+# keyword sets stay honest: a representative single-direction finding matches
+# exactly its own [[expected]] under the structured matcher.
+
+_SHIPPED_CASES_DIR = Path(__file__).resolve().parents[1] / "evals" / "review" / "cases"
+
+_READ_ONLY_RATIONALE = (
+    "shutil.copytree in check_runner.py follows symlinks, so a symlink planted "
+    "in the artifacts dir makes the host collector read files from outside the "
+    "export into the handoff"
+)
+_WRITE_ONLY_RATIONALE = (
+    "the destination in check_runner.py is agent-writable: an agent can "
+    "pre-create the predictable round/check path as a symlink and the host "
+    "writes through it onto arbitrary host files"
+)
+_SYMLINK_FILE = "src/lithos_loom/plugins/story_develop/check_runner.py"
+
+
+def _symlink_case() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "289-symlink-artifacts")
+
+
+def _symlink_report(*rationales: str) -> dict:
+    return {
+        "reviewers": [
+            {
+                "name": "security",
+                "status": "FINDINGS",
+                "findings": [
+                    _finding("critical", [_SYMLINK_FILE], r, fid=f"f-{i:03d}")
+                    for i, r in enumerate(rationales, start=1)
+                ],
+            }
+        ]
+    }
+
+
+def test_symlink_case_has_two_expected_defects() -> None:
+    assert len(_symlink_case().expected) == 2
+
+
+def test_symlink_read_only_finding_is_a_partial_miss() -> None:
+    score = score_run(_symlink_case(), _symlink_report(_READ_ONLY_RATIONALE))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [True, False]
+
+
+def test_symlink_write_only_finding_is_a_partial_miss() -> None:
+    score = score_run(_symlink_case(), _symlink_report(_WRITE_ONLY_RATIONALE))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [False, True]
+
+
+def test_symlink_both_directions_as_separate_findings_is_caught() -> None:
+    score = score_run(
+        _symlink_case(), _symlink_report(_READ_ONLY_RATIONALE, _WRITE_ONLY_RATIONALE)
+    )
+    assert score.caught is True
+
+
+def test_symlink_one_comprehensive_finding_catches_both() -> None:
+    score = score_run(
+        _symlink_case(),
+        _symlink_report(_READ_ONLY_RATIONALE + "; also " + _WRITE_ONLY_RATIONALE),
+    )
+    assert score.caught is True

@@ -16,6 +16,7 @@ Catch-only. JUDGE-SCORED (the default). First benchmark case OUTSIDE the
 attach/delivery lifecycle (the `prune` subsystem) — diversifies the seeded-defect
 coverage off `cli/develop.py`'s attach path.
 """
+ac_provenance = "synthetic"
 repo = "."
 base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
 head_patch = "reintroduce-defect.patch"

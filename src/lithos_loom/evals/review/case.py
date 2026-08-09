@@ -18,6 +18,17 @@ from ...plugins.story_develop.profiles import UnknownProfileError, get_profile
 
 _SEVERITIES = ("critical", "major", "minor")
 
+# What a case's ac.md IS relative to the escape it replays (#292 review):
+#   "replay"    — the authentic criteria the original review context had;
+#   "trimmed"   — an authentic source edited to isolate the measured escape
+#                 (the description must document every trim);
+#   "synthetic" — written for the fixture (no authentic AC existed, e.g. a
+#                 hand-developed PR that never went through a panel).
+# Declaring it keeps the benchmark honest about what a catch/miss measures.
+# The loader treats it as optional (mid-authoring), but the shipped-case gate
+# test requires it on every case under evals/review/cases/.
+_AC_PROVENANCES = ("replay", "trimmed", "synthetic")
+
 
 @dataclass(frozen=True)
 class Expected:
@@ -61,6 +72,8 @@ class Case:
     head_patch: str | None = None
     known_good_head_patch: str | None = None
     case_dir: Path | None = None
+    # See _AC_PROVENANCES; None = undeclared (allowed only mid-authoring).
+    ac_provenance: str | None = None
 
 
 def load_case(case_dir: Path) -> Case:
@@ -129,6 +142,13 @@ def load_case(case_dir: Path) -> Case:
         kg_head, kg_head_patch = "", None
     known_good_base = known_good.get("base")
 
+    ac_provenance = case.get("ac_provenance")
+    if ac_provenance is not None and ac_provenance not in _AC_PROVENANCES:
+        raise ValueError(
+            f"case {case.get('id')}: ac_provenance must be one of "
+            f"{_AC_PROVENANCES} (got {ac_provenance!r})"
+        )
+
     return Case(
         id=str(case["id"]),
         description=str(case.get("description", "")),
@@ -144,6 +164,7 @@ def load_case(case_dir: Path) -> Case:
         head_patch=head_patch,
         known_good_head_patch=kg_head_patch,
         case_dir=case_dir,
+        ac_provenance=str(ac_provenance) if ac_provenance else None,
     )
 
 

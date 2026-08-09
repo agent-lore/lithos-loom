@@ -1,0 +1,44 @@
+[case]
+id = "lens22-markdown-prewrap"
+description = """
+lens PR #22 escape (external review, Medium x2; loom standard panel LGTM'd in 2
+rounds): K1-S1 switches the note body from a plaintext <pre> to server-rendered
+markdown HTML in a <div class="markdown-body"> — but lens.css's .markdown-body
+rule keeps 'white-space: pre-wrap' from its <pre> days, so CommonMark soft
+breaks (single newlines inside a paragraph) render as visual line breaks in the
+browser and inter-block whitespace shifts spacing. HTML-string tests cannot see
+it: the escape is in how the browser DISPLAYS the emitted HTML. The coding
+agent also invented an undocumented 200k-char render cap (silent truncation on
+the canonical document page) — a secondary catch, not required by this case.
+
+FULL-FEATURE diff as delivered by the pipeline (base = lens main dd8c78a
+pre-K1-S1; patch = the run's delivered head a253fe3). CROSS-REPO case: repo
+points at the sibling lithos-lens checkout (the eval is host-only by design —
+same assumption as docker + agent CLIs). The reviewer must trace the change
+against unchanged code it interacts with (the stylesheet the changed template
+class still hits) — the cross-file lifecycle discipline the panel prompts
+demand. Caught by the codex external backstop; fixed in lens 734e5ef.
+"""
+ac_provenance = "replay"
+repo = "../lithos-lens"
+base = "dd8c78a80aadedf66915082638f426062b40035b"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_lens/static/lens.css"
+keywords = ["pre-wrap", "white-space", "markdown-body", "soft"]
+min_severity = "major"
+mechanism = """
+note.html changes the note body from <pre class="markdown-body"> (plaintext) to
+<div class="markdown-body"> containing rendered markdown HTML, but the
+stylesheet's .markdown-body rule — untouched by the change — still applies
+'white-space: pre-wrap'. Rendered HTML must use normal whitespace collapsing:
+with pre-wrap, CommonMark soft line breaks (a single newline inside one
+paragraph, emitted verbatim in the HTML) display as hard line breaks, and
+whitespace between generated block elements produces unintended spacing. The
+regression is browser-level: every HTML-string test passes while every rendered
+note displays wrong line-break semantics.
+"""

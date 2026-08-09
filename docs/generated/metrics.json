@@ -39,7 +39,7 @@
       "Evals": {
         "functions_over_10": 2,
         "max_complexity": 18,
-        "max_function": "lithos_loom.evals.review.harness.run_case"
+        "max_function": "lithos_loom.evals.review.case.load_case"
       },
       "GitHub": {
         "functions_over_10": 1,
@@ -402,12 +402,12 @@
       "Evals": {
         "classes": 5,
         "functions": 31,
-        "largest_module": "lithos_loom.evals.review.harness",
-        "largest_module_lines": 200,
-        "lines": 975,
+        "largest_module": "lithos_loom.evals.review.case",
+        "largest_module_lines": 218,
+        "lines": 996,
         "modules": 9,
         "public_symbols": 15,
-        "sloc": 785
+        "sloc": 794
       },
       "GitHub": {
         "classes": 12,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 36922,
+    "total_lines": 36943,
     "total_modules": 117,
-    "total_sloc": 29288
+    "total_sloc": 29297
   },
   "tests": {
-    "ratio": 1.6,
-    "src_lines": 36922,
-    "test_lines": 59238
+    "ratio": 1.61,
+    "src_lines": 36943,
+    "test_lines": 59410
   }
 }

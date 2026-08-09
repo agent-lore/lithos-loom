@@ -1,0 +1,1489 @@
+diff --git a/Makefile b/Makefile
+index be1cb68..e706483 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,5 @@
+-.PHONY: install fmt lint typecheck test check diagrams metrics-history metrics-diff docker-build \
++.PHONY: install fmt lint typecheck test check diagrams metrics-history metrics-diff \
++	run-fake e2e docker-build \
+ 	docker-up-dev docker-up-prod docker-down-dev docker-down-prod
+ 
+ install:
+@@ -37,6 +38,18 @@ metrics-diff:
+ 	git show $(or $(BASE),origin/main):docs/generated/metrics.json > $$tmp 2>/dev/null || echo '{}' > $$tmp; \
+ 	uv run python scripts/metrics_diff.py $$tmp docs/generated/metrics.json
+ 
++# Run the app in fake-Lithos app mode: the real UI served against in-memory
++# fixtures, no Lithos server required. Open http://127.0.0.1:8000/tasks
++# (override the port with LENS_PORT).
++run-fake:
++	LITHOS_LENS_FAKE_LITHOS=1 LITHOS_LENS_CONFIG=lithos-lens.example.toml uv run lithos-lens
++
++# Playwright end-to-end smoke suite (see e2e/). Installs Node deps + Chromium,
++# then drives the app in fake-Lithos mode. Not part of `make test`/CI's pytest
++# gate — it needs Node and a browser.
++e2e:
++	cd e2e && npm install && npm run install-browsers && npm test
++
+ docker-build:
+ 	docker build -t lithos-lens:dev -f docker/Dockerfile .
+ 
+diff --git a/docs/architecture.toml b/docs/architecture.toml
+index d889680..dbb5e56 100644
+--- a/docs/architecture.toml
++++ b/docs/architecture.toml
+@@ -29,7 +29,7 @@ Entrypoint   = "Command-line entry point for the Lithos Lens web app (`python -m
+ Web          = "FastAPI application factory serving the server-rendered dashboard UI (Jinja2 templates + static assets)."
+ State        = "Application state and startup/shutdown orchestration (AppState, HealthSnapshot)."
+ Events       = "Shared Lithos event subscription and browser fan-out over SSE (LensEvent, EventHub)."
+-LithosClient = "MCP-over-SSE client to the Lithos server — health probing, agent registration, and tool calls."
++LithosClient = "Lithos server clients — the real MCP-over-SSE client (health, registration, tool calls) plus the in-memory fake that backs fake-Lithos app mode."
+ Config       = "Configuration and environment loading from lithos-lens.toml with env overrides."
+ Tasks        = "Tasks-dashboard data loading and normalization (task/claim/finding records + view models)."
+ TaskGraph    = "Task-graph transport records and normalizers (blocked-task rows + edges from the Lithos 0.4 graph reads)."
+@@ -43,7 +43,7 @@ Entrypoint   = ["lithos_lens.main", "lithos_lens.__main__"]
+ Web          = ["lithos_lens.web"]
+ State        = ["lithos_lens.state"]
+ Events       = ["lithos_lens.events"]
+-LithosClient = ["lithos_lens.lithos_client"]
++LithosClient = ["lithos_lens.lithos_client", "lithos_lens.fake_lithos"]
+ Config       = ["lithos_lens.config"]
+ Tasks        = ["lithos_lens.tasks"]
+ TaskGraph    = ["lithos_lens.task_graph"]
+diff --git a/docs/generated/components/Entrypoint.md b/docs/generated/components/Entrypoint.md
+index ff69dbb..06120c4 100644
+--- a/docs/generated/components/Entrypoint.md
++++ b/docs/generated/components/Entrypoint.md
+@@ -12,11 +12,12 @@ Command-line entry point for the Lithos Lens web app (`python -m lithos_lens`).
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+ | `lithos_lens.__main__` | XS | 0 | 0 |
+-| `lithos_lens.main` | XS | 0 | 2 |
++| `lithos_lens.main` | XS | 0 | 3 |
+ 
+ ## Public API
+ 
+ ### `lithos_lens.main`
++- def `resolve_port` — Return the port to bind, honoring the ``LENS_PORT`` env override.
+ - def `main` — Load config and run the ASGI server.
+ - def `create_app_from_config` — Uvicorn factory used by :func:`main`.
+ 
+diff --git a/docs/generated/components/LithosClient.md b/docs/generated/components/LithosClient.md
+index 5eac053..d36116e 100644
+--- a/docs/generated/components/LithosClient.md
++++ b/docs/generated/components/LithosClient.md
+@@ -3,7 +3,7 @@
+ 
+ # LithosClient
+ 
+-MCP-over-SSE client to the Lithos server — health probing, agent registration, and tool calls.
++Lithos server clients — the real MCP-over-SSE client (health, registration, tool calls) plus the in-memory fake that backs fake-Lithos app mode.
+ 
+ **Tier:** Core
+ 
+@@ -11,10 +11,15 @@ MCP-over-SSE client to the Lithos server — health probing, agent registration,
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
++| `lithos_lens.fake_lithos` | M | 1 | 1 |
+ | `lithos_lens.lithos_client` | M | 4 | 0 |
+ 
+ ## Public API
+ 
++### `lithos_lens.fake_lithos`
++- def `fake_lithos_enabled` — Return whether the fake-Lithos app mode is switched on via the environment.
++- class `FakeLithosClient` — A protocol-complete Lithos client backed by static in-memory fixtures.
++
+ ### `lithos_lens.lithos_client`
+ - class `LithosClientProtocol` — Subset of Lithos operations required by the common core.
+ - class `RegistrationResult`
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index 11ebd91..e6e73d3 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -8,8 +8,8 @@
+       },
+       "Entrypoint": {
+         "functions_over_10": 0,
+-        "max_complexity": 2,
+-        "max_function": "lithos_lens.main.main"
++        "max_complexity": 4,
++        "max_function": "lithos_lens.main.resolve_port"
+       },
+       "Errors": {
+         "functions_over_10": 0,
+@@ -27,9 +27,9 @@
+         "max_function": "lithos_lens.knowledge._normalize_edges"
+       },
+       "LithosClient": {
+-        "functions_over_10": 0,
+-        "max_complexity": 7,
+-        "max_function": "lithos_lens.lithos_client.LithosClient.list_tasks"
++        "functions_over_10": 1,
++        "max_complexity": 16,
++        "max_function": "lithos_lens.fake_lithos.FakeLithosClient.list_tasks"
+       },
+       "Logging": {
+         "functions_over_10": 0,
+@@ -57,12 +57,12 @@
+         "max_function": "lithos_lens.telemetry.install_request_middleware.lens_request"
+       },
+       "Web": {
+-        "functions_over_10": 0,
+-        "max_complexity": 8,
++        "functions_over_10": 1,
++        "max_complexity": 11,
+         "max_function": "lithos_lens.web.create_app.note"
+       }
+     },
+-    "functions_over_10": 7,
++    "functions_over_10": 9,
+     "top_functions": [
+       {
+         "complexity": 24,
+@@ -76,6 +76,10 @@
+         "complexity": 20,
+         "qualname": "lithos_lens.tasks.load_dashboard"
+       },
++      {
++        "complexity": 16,
++        "qualname": "lithos_lens.fake_lithos.FakeLithosClient.list_tasks"
++      },
+       {
+         "complexity": 12,
+         "qualname": "lithos_lens.tasks._matches_filters"
+@@ -93,19 +97,15 @@
+         "qualname": "lithos_lens.tasks.normalize_task_status"
+       },
+       {
+-        "complexity": 10,
+-        "qualname": "lithos_lens.events.parse_lithos_sse_frame"
++        "complexity": 11,
++        "qualname": "lithos_lens.web.create_app.note"
+       },
+       {
+         "complexity": 10,
+-        "qualname": "lithos_lens.tasks.parse_filters"
+-      },
+-      {
+-        "complexity": 9,
+-        "qualname": "lithos_lens.config._optional_status_groups"
++        "qualname": "lithos_lens.events.parse_lithos_sse_frame"
+       }
+     ],
+-    "total_functions": 152
++    "total_functions": 175
+   },
+   "domain": {
+     "associations": 25,
+@@ -177,7 +177,7 @@
+       }
+     },
+     "cross_component_edges": 24,
+-    "cross_component_module_edges": 24,
++    "cross_component_module_edges": 29,
+     "longest_component_chain": 5,
+     "module_cycle_count": 0,
+     "module_cycles": [],
+@@ -217,13 +217,13 @@
+       },
+       "Entrypoint": {
+         "classes": 0,
+-        "functions": 2,
++        "functions": 3,
+         "largest_module": "lithos_lens.main",
+-        "largest_module_lines": 44,
+-        "lines": 50,
++        "largest_module_lines": 68,
++        "lines": 74,
+         "modules": 2,
+-        "public_symbols": 2,
+-        "sloc": 32
++        "public_symbols": 3,
++        "sloc": 52
+       },
+       "Errors": {
+         "classes": 2,
+@@ -256,14 +256,14 @@
+         "sloc": 325
+       },
+       "LithosClient": {
+-        "classes": 4,
+-        "functions": 41,
++        "classes": 5,
++        "functions": 62,
+         "largest_module": "lithos_lens.lithos_client",
+         "largest_module_lines": 569,
+-        "lines": 569,
+-        "modules": 1,
+-        "public_symbols": 4,
+-        "sloc": 475
++        "lines": 1024,
++        "modules": 2,
++        "public_symbols": 6,
++        "sloc": 867
+       },
+       "Logging": {
+         "classes": 1,
+@@ -317,25 +317,25 @@
+       },
+       "Web": {
+         "classes": 0,
+-        "functions": 15,
++        "functions": 16,
+         "largest_module": "lithos_lens.web",
+-        "largest_module_lines": 304,
+-        "lines": 304,
++        "largest_module_lines": 340,
++        "lines": 340,
+         "modules": 1,
+         "public_symbols": 5,
+-        "sloc": 273
++        "sloc": 299
+       }
+     },
+     "max_module": "lithos_lens.config",
+     "max_module_lines": 725,
+     "modules_over_800": [],
+-    "total_lines": 3196,
+-    "total_modules": 14,
+-    "total_sloc": 2640
++    "total_lines": 3711,
++    "total_modules": 15,
++    "total_sloc": 3078
+   },
+   "tests": {
+-    "ratio": 1.63,
+-    "src_lines": 3196,
+-    "test_lines": 5199
++    "ratio": 1.48,
++    "src_lines": 3711,
++    "test_lines": 5477
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 3f0270c..e09eb55 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -21,7 +21,7 @@ lower a budget after improving the code to lock in the gain.
+ 
+ ## Import graph
+ 
+-- Cross-component edges: **24** (24 module-level)
++- Cross-component edges: **24** (29 module-level)
+ - Component cycles: none
+ - Module cycles: none
+ - Tier-skipping edges (Entrypoints → Foundation): 7 (Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> Logging, Web -> Config, Web -> Knowledge, Web -> Tasks, Web -> Telemetry)
+@@ -35,27 +35,27 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Component | Modules | Lines | SLOC | Fan-in | Fan-out | Instability | Max complexity | Functions > 10 |
+ |---|---:|---:|---:|---:|---:|---:|---|---:|
+ | Config | 1 | 725 | 617 | 7 | 2 | 0.22 | 24 (`lithos_lens.config._apply_env_overrides`) | 1 |
+-| Entrypoint | 2 | 50 | 32 | 0 | 4 | 1.00 | 2 (`lithos_lens.main.main`) | 0 |
++| Entrypoint | 2 | 74 | 52 | 0 | 4 | 1.00 | 4 (`lithos_lens.main.resolve_port`) | 0 |
+ | Errors | 1 | 15 | 9 | 2 | 0 | 0.00 | - | 0 |
+ | Events | 1 | 208 | 180 | 1 | 1 | 0.50 | 10 (`lithos_lens.events.parse_lithos_sse_frame`) | 0 |
+ | Knowledge | 1 | 411 | 325 | 2 | 1 | 0.33 | 11 (`lithos_lens.knowledge._normalize_edges`) | 1 |
+-| LithosClient | 1 | 569 | 475 | 2 | 4 | 0.67 | 7 (`lithos_lens.lithos_client.LithosClient.list_tasks`) | 0 |
++| LithosClient | 2 | 1024 | 867 | 2 | 4 | 0.67 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 1 |
+ | Logging | 1 | 60 | 48 | 1 | 1 | 0.50 | 5 (`lithos_lens.logging.JsonFormatter.format`) | 0 |
+ | State | 1 | 63 | 50 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.refresh_health`) | 0 |
+ | TaskGraph | 1 | 119 | 88 | 1 | 1 | 0.50 | 8 (`lithos_lens.task_graph.normalize_edge`) | 0 |
+ | Tasks | 1 | 640 | 521 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
+ | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
+-| Web | 1 | 304 | 273 | 1 | 6 | 0.86 | 8 (`lithos_lens.web.create_app.note`) | 0 |
++| Web | 1 | 340 | 299 | 1 | 6 | 0.86 | 11 (`lithos_lens.web.create_app.note`) | 1 |
+ 
+ ## Size
+ 
+-- Modules: **14**, lines: **3196**, SLOC: **2640**
++- Modules: **15**, lines: **3711**, SLOC: **3078**
+ - Largest module: `lithos_lens.config` (725 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **152**, cyclomatic > 10: **7**
++- Functions: **175**, cyclomatic > 10: **9**
+ 
+ Top 10 most complex functions:
+ 
+@@ -64,13 +64,13 @@ Top 10 most complex functions:
+ | 24 | `lithos_lens.config._apply_env_overrides` |
+ | 23 | `lithos_lens.tasks.normalize_task` |
+ | 20 | `lithos_lens.tasks.load_dashboard` |
++| 16 | `lithos_lens.fake_lithos.FakeLithosClient.list_tasks` |
+ | 12 | `lithos_lens.tasks._matches_filters` |
+ | 11 | `lithos_lens.knowledge._normalize_edges` |
+ | 11 | `lithos_lens.tasks._enrich_open_tasks` |
+ | 11 | `lithos_lens.tasks.normalize_task_status` |
++| 11 | `lithos_lens.web.create_app.note` |
+ | 10 | `lithos_lens.events.parse_lithos_sse_frame` |
+-| 10 | `lithos_lens.tasks.parse_filters` |
+-| 9 | `lithos_lens.config._optional_status_groups` |
+ 
+ ## Seams
+ 
+@@ -83,4 +83,4 @@ Private-name reaches across module seams. Both counts can be pinned as
+ ## Domain & tests
+ 
+ - Domain models: **24** (25 associations, 16 without docstrings)
+-- Test-to-source line ratio: **1.63** (5199 test lines / 3196 source lines)
++- Test-to-source line ratio: **1.48** (5477 test lines / 3711 source lines)
+diff --git a/e2e/.gitignore b/e2e/.gitignore
+new file mode 100644
+index 0000000..bf6ab8e
+--- /dev/null
++++ b/e2e/.gitignore
+@@ -0,0 +1,6 @@
++node_modules/
++package-lock.json
++test-results/
++playwright-report/
++blob-report/
++playwright/.cache/
+diff --git a/e2e/README.md b/e2e/README.md
+new file mode 100644
+index 0000000..98c4718
+--- /dev/null
++++ b/e2e/README.md
+@@ -0,0 +1,52 @@
++# End-to-end smoke suite
++
++A [Playwright](https://playwright.dev/) smoke suite that drives Lithos Lens in
++**fake-Lithos app mode** — the real application, served against the in-memory
++fixtures in [`src/lithos_lens/fake_lithos.py`](../src/lithos_lens/fake_lithos.py),
++with no Lithos MCP server behind it.
++
++This suite lives outside the Python test tree on purpose: it needs Node, the
++`@playwright/test` runner, and a browser, none of which the `uv run pytest`
++gate provides. The Python side of the harness (that the app boots in fake mode
++and every surface renders) is covered fast and browserless by
++[`tests/test_fake_lithos.py`](../tests/test_fake_lithos.py).
++
++## Run it
++
++From the repo root:
++
++```sh
++make e2e
++```
++
++That installs the Node deps, downloads Chromium, and runs the suite. Or, from
++this directory:
++
++```sh
++npm install
++npm run install-browsers   # playwright install --with-deps chromium (falls back to a
++                           # browser-only install when sudo can't run non-interactively)
++npm test
++```
++
++Playwright's `webServer` (see [`playwright.config.ts`](./playwright.config.ts))
++boots the app itself with:
++
++```sh
++LITHOS_LENS_FAKE_LITHOS=1 LITHOS_LENS_CONFIG=lithos-lens.example.toml \
++  LENS_PORT=8123 uv run lithos-lens
++```
++
++so you do not need to start a server yourself.
++
++## Fake-Lithos app mode
++
++Set `LITHOS_LENS_FAKE_LITHOS=1` (any of `1/true/yes/on`) and the application
++factory swaps the real MCP client for
++[`FakeLithosClient`](../src/lithos_lens/fake_lithos.py). To drive it by hand:
++
++```sh
++make run-fake        # LITHOS_LENS_FAKE_LITHOS=1 ... uv run lithos-lens
++```
++
++then open <http://127.0.0.1:8000/tasks>. Override the port with `LENS_PORT`.
+diff --git a/e2e/package.json b/e2e/package.json
+new file mode 100644
+index 0000000..b6e3eb6
+--- /dev/null
++++ b/e2e/package.json
+@@ -0,0 +1,15 @@
++{
++  "name": "lithos-lens-e2e",
++  "version": "0.0.0",
++  "private": true,
++  "description": "Playwright smoke suite driving Lithos Lens in fake-Lithos app mode.",
++  "scripts": {
++    "test": "playwright test",
++    "test:headed": "playwright test --headed",
++    "report": "playwright show-report",
++    "install-browsers": "playwright install --with-deps chromium || playwright install chromium"
++  },
++  "devDependencies": {
++    "@playwright/test": "^1.62.0"
++  }
++}
+diff --git a/e2e/playwright.config.ts b/e2e/playwright.config.ts
+new file mode 100644
+index 0000000..fc02499
+--- /dev/null
++++ b/e2e/playwright.config.ts
+@@ -0,0 +1,48 @@
++import { defineConfig, devices } from "@playwright/test";
++
++/**
++ * Playwright smoke suite for Lithos Lens.
++ *
++ * The `webServer` below boots the real application in **fake-Lithos app mode**
++ * (`LITHOS_LENS_FAKE_LITHOS=1`), so the whole server-rendered UI is driven end
++ * to end against the in-memory fixtures in `src/lithos_lens/fake_lithos.py` —
++ * no Lithos MCP server required. `LITHOS_LENS_CONFIG` points at the checked-in
++ * example config so discovery never depends on the developer's machine.
++ *
++ * Run with `make e2e` (installs deps + Chromium), or from this directory:
++ *   npm install && npm run install-browsers && npm test
++ */
++
++const PORT = Number(process.env.LENS_E2E_PORT ?? 8123);
++const BASE_URL = `http://127.0.0.1:${PORT}`;
++
++export default defineConfig({
++  testDir: "./tests",
++  fullyParallel: true,
++  forbidOnly: !!process.env.CI,
++  retries: process.env.CI ? 1 : 0,
++  reporter: process.env.CI ? "list" : [["list"], ["html", { open: "never" }]],
++  use: {
++    baseURL: BASE_URL,
++    trace: "on-first-retry",
++  },
++  projects: [
++    {
++      name: "chromium",
++      use: { ...devices["Desktop Chrome"] },
++    },
++  ],
++  webServer: {
++    // `uv run --directory ..` launches the packaged `lithos-lens` entry point
++    // from the repo root regardless of Playwright's own cwd.
++    command: "uv run --directory .. lithos-lens",
++    url: BASE_URL,
++    reuseExistingServer: !process.env.CI,
++    timeout: 120_000,
++    env: {
++      LITHOS_LENS_FAKE_LITHOS: "1",
++      LITHOS_LENS_CONFIG: "lithos-lens.example.toml",
++      LENS_PORT: String(PORT),
++    },
++  },
++});
+diff --git a/e2e/tests/smoke.spec.ts b/e2e/tests/smoke.spec.ts
+new file mode 100644
+index 0000000..1daf4ee
+--- /dev/null
++++ b/e2e/tests/smoke.spec.ts
+@@ -0,0 +1,92 @@
++import { test, expect } from "@playwright/test";
++
++/**
++ * Smoke suite: the app boots in fake-Lithos mode and every top-level
++ * server-rendered surface renders from the in-memory fixtures. These are
++ * deliberately shallow — they prove the pages come up and are wired, not the
++ * detailed view logic (that is covered by the Python unit suite).
++ */
++
++test("health endpoint reports Lithos ok", async ({ request }) => {
++  const response = await request.get("/health");
++  expect(response.ok()).toBeTruthy();
++  const body = await response.json();
++  expect(body.lithos).toBe("ok");
++});
++
++test("dashboard renders the task board with fixture rows", async ({ page }) => {
++  await page.goto("/tasks?since=2026-08-01");
++
++  await expect(page.getByRole("heading", { level: 1, name: "Tasks" })).toBeVisible();
++
++  // The open group and its flagship fixture task are present.
++  await expect(page.locator('[data-task-group="open"]')).toBeVisible();
++  await expect(
++    page.locator('[data-task-row][data-task-id="influx-ingest-cutover"]'),
++  ).toBeVisible();
++  await expect(
++    page.getByRole("link", { name: "Cut over Influx ingest path" }),
++  ).toBeVisible();
++
++  // At least one task row rendered overall.
++  expect(await page.locator("[data-task-row]").count()).toBeGreaterThan(0);
++});
++
++test("clicking a task opens its detail page", async ({ page }) => {
++  await page.goto("/tasks?since=2026-08-01");
++
++  await page.getByRole("link", { name: "Cut over Influx ingest path" }).click();
++
++  await expect(page).toHaveURL(/\/tasks\/influx-ingest-cutover/);
++  await expect(
++    page.locator('[data-task-detail="influx-ingest-cutover"]'),
++  ).toBeVisible();
++  // The claimed fixture surfaces its active claim on the detail page. The
++  // agent appears in both the summary line and the claims list, so scope to
++  // the first match rather than tripping strict mode.
++  await expect(page.getByText("worker-a").first()).toBeVisible();
++});
++
++test("knowledge note renders server-side markdown", async ({ page }) => {
++  await page.goto("/note/note-influx-plan");
++
++  // Since K1-S1 the body is rendered markdown, so the fixture's `# Influx
++  // migration plan` yields a second h1 inside .markdown-body — scope the
++  // page-title assertion to the article header instead of tripping strict
++  // mode on the duplicate.
++  await expect(
++    page.locator("article header").getByRole("heading", { name: "Influx migration plan" }),
++  ).toBeVisible();
++  // And the markdown really rendered (list items, not a plaintext <pre>).
++  await expect(
++    page.locator(".markdown-body").getByRole("listitem").first(),
++  ).toContainText("Stage 1: dual-write");
++});
++
++test("knowledge note renders the related panel with edge badges", async ({ page }) => {
++  // K1-S4: the note page carries a related <aside> fed by one lithos_related
++  // call; the fixtures give the plan note a link, an unresolved contradicts
++  // edge, and an unresolved provenance stub.
++  await page.goto("/note/note-influx-plan");
++
++  const panel = page.getByRole("complementary", { name: "Related notes" });
++  await expect(panel).toBeVisible();
++  await expect(
++    panel.getByRole("link", { name: "Influx rollback route" }).first(),
++  ).toBeVisible();
++  await expect(panel.locator(".edge-direction")).toHaveText("incoming");
++  await expect(panel.locator(".edge-conflict")).toHaveText("conflict: unresolved");
++});
++
++test("missing knowledge note shows the not-found banner", async ({ page }) => {
++  // The fixture finding "finding-orphan" links knowledge_id=missing-note;
++  // opening it must hit the real doc_not_found path, not a generic failure.
++  await page.goto("/note/missing-note");
++
++  await expect(page.getByText("Document not found.")).toBeVisible();
++});
++
++test("live-updates status banner is present on the dashboard", async ({ page }) => {
++  await page.goto("/tasks?since=2026-08-01");
++  await expect(page.locator("[data-live-status]")).toBeVisible();
++});
+diff --git a/pyproject.toml b/pyproject.toml
+index 81c7821..a88c01a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -71,6 +71,7 @@ source_modules = [
+ forbidden_modules = [
+     "lithos_lens.events",
+     "lithos_lens.lithos_client",
++    "lithos_lens.fake_lithos",
+     "lithos_lens.state",
+     "lithos_lens.web",
+     "lithos_lens.main",
+@@ -83,6 +84,7 @@ type = "forbidden"
+ source_modules = [
+     "lithos_lens.events",
+     "lithos_lens.lithos_client",
++    "lithos_lens.fake_lithos",
+     "lithos_lens.state",
+ ]
+ forbidden_modules = [
+@@ -93,3 +95,11 @@ forbidden_modules = [
+ 
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
++
++[tool.bandit]
++# B101 (assert_used) fires on every pytest assertion, and the whole test tree —
++# including the tests/guardrail "diagrams as tests" kit — is built on `assert`.
++# Exclude the test/e2e trees rather than pepper hundreds of test asserts with
++# per-line `# nosec`; application code under src/ is still scanned (see the
++# inline `# nosec B104` in main.py). Run with `bandit -c pyproject.toml -r .`.
++exclude_dirs = ["tests", "e2e", ".venv"]
+diff --git a/src/lithos_lens/fake_lithos.py b/src/lithos_lens/fake_lithos.py
+new file mode 100644
+index 0000000..0ae0935
+--- /dev/null
++++ b/src/lithos_lens/fake_lithos.py
+@@ -0,0 +1,455 @@
++"""In-memory fake Lithos client for the e2e / demo "fake-Lithos app mode".
++
++The real :class:`~lithos_lens.lithos_client.LithosClient` needs a live Lithos
++MCP-over-SSE server to answer any tool call. That makes the shipped UI awkward
++to drive from an end-to-end browser suite (or to demo offline): there is no
++Lithos to point it at.
++
++:class:`FakeLithosClient` satisfies the same
++:class:`~lithos_lens.lithos_client.LithosClientProtocol` with a fixed,
++deterministic set of in-memory fixtures — enough tasks, claims, findings,
++notes, and graph edges for every server-rendered surface to light up. When the
++``LITHOS_LENS_FAKE_LITHOS`` environment variable is truthy the application
++factory (:func:`lithos_lens.web.create_app`) wires this client in instead of the
++real one, so ``uv run lithos-lens`` boots a fully browsable app with no Lithos
++behind it. The Playwright smoke suite under ``e2e/`` drives exactly that mode.
++
++The fixtures deliberately live next to the shipped code (not under ``tests/``)
++because this is a real, launchable application mode, not a test double that only
++the unit suite can see.
++"""
++
++from __future__ import annotations
++
++import os
++from dataclasses import replace
++from typing import Any
++
++from lithos_lens.config import LithosConfig
++from lithos_lens.knowledge import RelatedNeighborhood, RelatedRef
++from lithos_lens.lithos_client import LithosHealth, LithosToolError
++from lithos_lens.task_graph import BlockedTaskRecord, BlockerRecord, EdgeRecord
++from lithos_lens.tasks import (
++    AgentRecord,
++    ClaimRecord,
++    FindingRecord,
++    NoteRecord,
++    TaskRecord,
++    TaskStatusRecord,
++)
++
++__all__ = ["FakeLithosClient", "fake_lithos_enabled"]
++
++_TRUTHY = {"1", "true", "yes", "on"}
++
++
++def _in_scope(task: TaskRecord, project: str | None, tags: list[str] | None) -> bool:
++    """Whether ``task`` satisfies a scoped frontier read's project/tag filters.
++
++    Mirrors how the real Lithos scopes ``lithos_task_ready`` /
++    ``lithos_task_blocked``: ``project`` matches the app-wide ``project:<name>``
++    tag convention, and every entry in ``tags`` must be present. ``None``/empty
++    filters match everything.
++    """
++    if project and f"project:{project}" not in task.tags:
++        return False
++    return not tags or all(tag in task.tags for tag in tags)
++
++
++def fake_lithos_enabled() -> bool:
++    """Return whether the fake-Lithos app mode is switched on via the environment.
++
++    Reads ``LITHOS_LENS_FAKE_LITHOS``. Any of ``1/true/yes/on`` (case- and
++    whitespace-insensitive) enables it; anything else — including unset — leaves
++    the app on the real :class:`~lithos_lens.lithos_client.LithosClient`.
++    """
++    return os.environ.get("LITHOS_LENS_FAKE_LITHOS", "").strip().lower() in _TRUTHY
++
++
++class FakeLithosClient:
++    """A protocol-complete Lithos client backed by static in-memory fixtures.
++
++    Every method is a pure lookup over the fixture set below; nothing touches
++    the network. ``health()`` always reports ``"ok"`` so the whole dashboard
++    renders. The constructor accepts a :class:`LithosConfig` purely so it is
++    drop-in swappable for :class:`LithosClient` in the app factory — the config
++    is otherwise unused.
++    """
++
++    def __init__(self, config: LithosConfig | None = None) -> None:
++        self._config = config
++        self.closed = False
++
++        # Findings on the flagship claimed task link to these notes so the
++        # knowledge surface (/note/<id>) renders in fake mode too.
++        self.notes: dict[str, NoteRecord] = {
++            "note-influx-plan": NoteRecord(
++                id="note-influx-plan",
++                title="Influx migration plan",
++                content=(
++                    "# Influx migration plan\n\n"
++                    "Cut over the ingest path first, then backfill. See "
++                    "[[note-influx-rollback]] for the abort route.\n\n"
++                    "- Stage 1: dual-write\n"
++                    "- Stage 2: read swap\n"
++                    "- Stage 3: decommission\n"
++                ),
++                tags=("project:influx", "kind:plan"),
++            ),
++            "note-influx-rollback": NoteRecord(
++                id="note-influx-rollback",
++                title="Influx rollback route",
++                content=(
++                    "# Influx rollback route\n\n"
++                    "If read swap regresses, flip the feature gate and keep "
++                    "dual-writing.\n"
++                ),
++                tags=("project:influx", "kind:runbook"),
++            ),
++        }
++
++        # Related-panel (K1-S4) neighborhood fixtures over the two notes.
++        self.related_neighborhoods: dict[str, RelatedNeighborhood] = {
++            "note-influx-plan": RelatedNeighborhood(
++                links=(
++                    RelatedRef(
++                        id="note-influx-rollback", title="Influx rollback route"
++                    ),
++                ),
++                unresolved=("drafts/influx-capacity.md",),
++                edges=(
++                    RelatedRef(
++                        id="note-influx-rollback",
++                        edge_type="contradicts",
++                        weight=0.8,
++                        direction="incoming",
++                        conflict_state="unresolved",
++                    ),
++                ),
++            ),
++            "note-influx-rollback": RelatedNeighborhood(
++                backlinks=(
++                    RelatedRef(id="note-influx-plan", title="Influx migration plan"),
++                ),
++                edges=(
++                    RelatedRef(
++                        id="note-influx-plan",
++                        edge_type="contradicts",
++                        weight=0.8,
++                        direction="outgoing",
++                        conflict_state="unresolved",
++                    ),
++                ),
++            ),
++        }
++
++        self.tasks: list[TaskRecord] = [
++            TaskRecord(
++                id="influx-ingest-cutover",
++                title="Cut over Influx ingest path",
++                description="Dual-write, then swap reads onto the new store.",
++                status="open",
++                created_by="planner",
++                created_at="2026-08-06T09:00:00+00:00",
++                tags=("project:influx", "area:data"),
++            ),
++            TaskRecord(
++                id="influx-backfill",
++                title="Backfill historical Influx series",
++                description="Replay the archive once the cutover is stable.",
++                status="open",
++                created_by="planner",
++                created_at="2026-08-05T09:00:00+00:00",
++                tags=("project:influx", "area:data"),
++            ),
++            TaskRecord(
++                id="influx-dashboards",
++                title="Rebuild Influx operator dashboards",
++                status="open",
++                created_by="planner",
++                created_at="2026-08-04T09:00:00+00:00",
++                tags=("project:influx", "area:observability"),
++            ),
++            TaskRecord(
++                id="lens-graph-view",
++                title="Ship graph-native operator view",
++                description="Rebuild the dashboard on the ready/blocked frontier.",
++                status="open",
++                created_by="planner",
++                created_at="2026-08-03T09:00:00+00:00",
++                tags=("project:lithos-lens", "milestone:t1"),
++            ),
++            TaskRecord(
++                id="influx-ingest-old",
++                title="Retire legacy Influx ingest shim",
++                status="open",
++                created_by="planner",
++                created_at="2025-11-01T09:00:00+00:00",
++                tags=("project:influx",),
++            ),
++            TaskRecord(
++                id="lens-note-view",
++                title="Land knowledge note view",
++                status="completed",
++                outcome="Shipped in 0.3.0.",
++                created_by="worker-a",
++                created_at="2026-07-28T09:00:00+00:00",
++                resolved_at="2026-08-02T17:00:00+00:00",
++                tags=("project:lithos-lens", "milestone:k1"),
++            ),
++            TaskRecord(
++                id="influx-spike",
++                title="Spike Influx client options",
++                status="cancelled",
++                outcome="Superseded by the cutover plan.",
++                created_by="worker-b",
++                created_at="2026-07-20T09:00:00+00:00",
++                resolved_at="2026-07-30T12:00:00+00:00",
++                tags=("project:influx",),
++            ),
++        ]
++
++        # Graph oracle: Lens never re-derives readiness, so the fixtures are the
++        # source of truth. `influx-ingest-cutover` is the ready, claimed, in-flight
++        # task (the only one carrying claims), so it must sit on the ready frontier
++        # too; `influx-dashboards` / `lens-graph-view` are ready and unclaimed;
++        # `influx-backfill` is blocked on the cutover.
++        self.ready_ids: set[str] = {
++            "influx-ingest-cutover",
++            "influx-dashboards",
++            "lens-graph-view",
++        }
++        self.blocked: dict[str, tuple[BlockerRecord, ...]] = {
++            "influx-backfill": (
++                BlockerRecord(
++                    kind="task",
++                    task_id="influx-ingest-cutover",
++                    type="blocks",
++                    status="open",
++                    message="Waiting on the ingest cutover to land.",
++                ),
++            ),
++        }
++        self.edges: dict[str, list[EdgeRecord]] = {
++            "influx-ingest-cutover": [
++                EdgeRecord(
++                    from_task_id="influx-ingest-cutover",
++                    to_task_id="influx-backfill",
++                    type="blocks",
++                    direction="outgoing",
++                ),
++            ],
++            "influx-backfill": [
++                EdgeRecord(
++                    from_task_id="influx-ingest-cutover",
++                    to_task_id="influx-backfill",
++                    type="blocks",
++                    direction="incoming",
++                ),
++            ],
++        }
++        self.children: dict[str, list[str]] = {}
++
++    # ── lifecycle ──────────────────────────────────────────────────────
++
++    async def startup(self) -> None:
++        return None
++
++    async def health(self) -> LithosHealth:
++        return "ok"
++
++    async def register_agent(self) -> bool:
++        return True
++
++    async def close(self) -> None:
++        self.closed = True
++
++    # ── reads ──────────────────────────────────────────────────────────
++
++    async def list_tasks(
++        self,
++        *,
++        agent: str | None = None,
++        status: str | None = None,
++        tags: list[str] | None = None,
++        since: str | None = None,
++        with_claims: bool = False,
++    ) -> list[TaskRecord]:
++        rows = [task for task in self.tasks if status is None or task.status == status]
++        if agent:
++            rows = [task for task in rows if task.created_by == agent]
++        if tags:
++            rows = [task for task in rows if all(tag in task.tags for tag in tags)]
++        if since:
++            rows = [task for task in rows if task.created_at[:10] >= since[:10]]
++        if with_claims:
++            rows = [replace(task, claims=self._claims_for(task.id)) for task in rows]
++        return rows
++
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]:
++        rows = [
++            task
++            for task in self.tasks
++            if task.id in self.ready_ids
++            and task.status == "open"
++            and _in_scope(task, project, tags)
++        ]
++        if with_claims:
++            rows = [replace(task, claims=self._claims_for(task.id)) for task in rows]
++        return rows[:limit] if limit is not None else rows
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]:
++        rows = [
++            BlockedTaskRecord(task=task, blockers=self.blocked[task.id])
++            for task in self.tasks
++            if task.id in self.blocked
++            and task.status == "open"
++            and _in_scope(task, project, tags)
++        ]
++        return rows[:limit] if limit is not None else rows
++
++    async def task_get(self, task_id: str) -> TaskRecord:
++        task = self._by_id(task_id)
++        if task is None:
++            # Mirror the concrete client: a missing task is an error envelope
++            # (code=task_not_found), surfaced as a coded LithosToolError.
++            raise LithosToolError(f"Task '{task_id}' not found.", code="task_not_found")
++        return task
++
++    async def task_children(
++        self,
++        task_id: str,
++        *,
++        recursive: bool = False,
++        include_closed: bool = False,
++    ) -> list[TaskRecord]:
++        child_ids = list(self.children.get(task_id, []))
++        if recursive:
++            queue = list(child_ids)
++            while queue:
++                for cid in self.children.get(queue.pop(), []):
++                    if cid not in child_ids:
++                        child_ids.append(cid)
++                        queue.append(cid)
++        rows = [task for cid in child_ids if (task := self._by_id(cid)) is not None]
++        if not include_closed:
++            rows = [task for task in rows if task.status == "open"]
++        return rows
++
++    async def task_edge_list(
++        self,
++        task_id: str,
++        *,
++        direction: str = "both",
++        types: list[str] | None = None,
++    ) -> list[EdgeRecord]:
++        rows = list(self.edges.get(task_id, []))
++        if direction != "both":
++            rows = [edge for edge in rows if edge.direction == direction]
++        if types:
++            rows = [edge for edge in rows if edge.type in types]
++        return rows
++
++    async def task_status(self, task_id: str) -> TaskStatusRecord | None:
++        task = self._by_id(task_id)
++        if task is None:
++            return None
++        return TaskStatusRecord(
++            id=task.id,
++            title=task.title,
++            status=task.status,
++            claims=self._claims_for(task_id),
++        )
++
++    async def list_findings(
++        self, task_id: str, *, since: str | None = None
++    ) -> list[FindingRecord]:
++        if task_id != "influx-ingest-cutover":
++            return []
++        return [
++            FindingRecord(
++                id="finding-plan",
++                task_id=task_id,
++                agent="worker-a",
++                summary="Dual-write path validated against the archive.",
++                knowledge_id="note-influx-plan",
++                created_at="2026-08-06T11:30:00+00:00",
++            ),
++            FindingRecord(
++                id="finding-orphan",
++                task_id=task_id,
++                agent="worker-b",
++                summary="Read swap needs a rollback gate.",
++                knowledge_id="missing-note",
++                created_at="2026-08-06T12:15:00+00:00",
++            ),
++        ]
++
++    async def stats(self) -> dict[str, Any]:
++        return {"open_claims": 1, "agents": 3}
++
++    async def list_agents(self) -> list[AgentRecord]:
++        return [
++            AgentRecord(id="planner", name="Planner"),
++            AgentRecord(id="worker-a", name="Worker A"),
++            AgentRecord(id="worker-b", name="Worker B"),
++        ]
++
++    async def read_note(
++        self, knowledge_id: str, *, max_length: int | None = None
++    ) -> NoteRecord | None:
++        if knowledge_id not in self.notes:
++            # Parity with the concrete client: upstream lithos_read answers a
++            # missing doc with an error envelope code "doc_not_found", which
++            # LithosClient raises as a coded LithosToolError. The note route
++            # maps that code to its not-found banner.
++            raise LithosToolError(
++                f"Document not found: {knowledge_id}", code="doc_not_found"
++            )
++        note = self.notes[knowledge_id]
++        if max_length is not None:
++            # Mirror upstream truncation (used by the related-panel title
++            # fan-out's cheap max_length=1 reads) without mutating the fixture.
++            note = replace(note, content=note.content[:max_length])
++        return note
++
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood:
++        """Neighborhood fixtures so the K1-S4 related panel lights up.
++
++        The two shipped notes reference each other: the plan wiki-links the
++        rollback route (outgoing link / incoming back-link) and the rollback
++        route carries an unresolved ``contradicts`` edge against the plan, so
++        the panel's direction badges and conflict label all render in fake
++        mode. Unknown ids get an empty neighborhood (an empty graph read, not
++        an error — mirroring lithos_related for a note with no relations).
++        """
++        return self.related_neighborhoods.get(knowledge_id, RelatedNeighborhood())
++
++    # ── helpers ────────────────────────────────────────────────────────
++
++    def _by_id(self, task_id: str) -> TaskRecord | None:
++        return next((task for task in self.tasks if task.id == task_id), None)
++
++    def _claims_for(self, task_id: str) -> tuple[ClaimRecord, ...]:
++        if task_id == "influx-ingest-cutover":
++            return (
++                ClaimRecord(
++                    agent="worker-a",
++                    aspect="implementation",
++                    expires_at="2026-08-08T18:00:00+00:00",
++                ),
++            )
++        return ()
+diff --git a/src/lithos_lens/main.py b/src/lithos_lens/main.py
+index 965b358..6f60945 100644
+--- a/src/lithos_lens/main.py
++++ b/src/lithos_lens/main.py
+@@ -2,20 +2,44 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ import sys
+ 
+ import uvicorn
+ 
+ from lithos_lens.config import load_config
+-from lithos_lens.errors import LithosLensError
++from lithos_lens.errors import ConfigError, LithosLensError
+ from lithos_lens.logging import configure_logging
+ 
++DEFAULT_PORT = 8000
++
++
++def resolve_port() -> int:
++    """Return the port to bind, honoring the ``LENS_PORT`` env override.
++
++    Defaults to :data:`DEFAULT_PORT`. Exposed so the e2e harness (and anyone
++    running fake-Lithos app mode) can bind a non-default port to avoid a
++    collision without editing config. An out-of-range or non-integer value is a
++    :class:`ConfigError`.
++    """
++    raw = os.environ.get("LENS_PORT", "").strip()
++    if not raw:
++        return DEFAULT_PORT
++    try:
++        port = int(raw)
++    except ValueError as exc:
++        raise ConfigError(f"LENS_PORT must be an integer, got {raw!r}") from exc
++    if not 1 <= port <= 65535:
++        raise ConfigError(f"LENS_PORT must be in 1..65535, got {port}")
++    return port
++
+ 
+ def main() -> None:
+     """Load config and run the ASGI server."""
+ 
+     try:
+         config = load_config()
++        port = resolve_port()
+     except LithosLensError as exc:
+         print(f"lithos-lens: {exc}", file=sys.stderr)
+         sys.exit(1)
+@@ -28,7 +52,7 @@ def main() -> None:
+         "lithos_lens.main:create_app_from_config",
+         factory=True,
+         host="0.0.0.0",  # nosec B104
+-        port=8000,
++        port=port,
+         log_config=None,
+     )
+ 
+diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
+index fa27bc1..c3ff6c2 100644
+--- a/src/lithos_lens/web.py
++++ b/src/lithos_lens/web.py
+@@ -15,8 +15,13 @@ from fastapi.staticfiles import StaticFiles
+ from fastapi.templating import Jinja2Templates
+ 
+ from lithos_lens.config import LithosLensConfig
++from lithos_lens.fake_lithos import FakeLithosClient, fake_lithos_enabled
+ from lithos_lens.knowledge import load_related_panel, render_markdown
+-from lithos_lens.lithos_client import LithosClient, LithosClientProtocol
++from lithos_lens.lithos_client import (
++    LithosClient,
++    LithosClientProtocol,
++    LithosToolError,
++)
+ from lithos_lens.state import AppState
+ from lithos_lens.tasks import (
+     default_since,
+@@ -37,6 +42,28 @@ logger = logging.getLogger(__name__)
+ LithosClientFactory = Callable[[LithosLensConfig], LithosClientProtocol]
+ 
+ 
++def _default_lithos_client(config: LithosLensConfig) -> LithosClientProtocol:
++    """Pick the real client, or the in-memory fake when fake-Lithos mode is on.
++
++    ``LITHOS_LENS_FAKE_LITHOS=1`` boots the app against
++    :class:`~lithos_lens.fake_lithos.FakeLithosClient` so the whole UI is
++    browsable with no Lithos server behind it (used by the ``e2e/`` Playwright
++    smoke suite and for offline demos).
++    """
++    if fake_lithos_enabled():
++        # Loud on purpose: fake mode fabricates task/note data and pins /health
++        # to "ok", so a real Lithos outage would report healthy. Never enable it
++        # against a real deployment; the warning makes an accidental/leaked flag
++        # visible in the logs rather than silently masking a backend.
++        logger.warning(
++            "fake-Lithos app mode is ENABLED (LITHOS_LENS_FAKE_LITHOS): serving "
++            "in-memory demo fixtures and reporting health as ok — do NOT use "
++            "against a real Lithos deployment; it masks backend outages."
++        )
++        return FakeLithosClient(config.lithos)
++    return LithosClient(config.lithos)
++
++
+ def create_app(
+     config: LithosLensConfig,
+     *,
+@@ -44,7 +71,7 @@ def create_app(
+ ) -> FastAPI:
+     """Create the Lithos Lens ASGI app."""
+ 
+-    factory = lithos_client_factory or (lambda cfg: LithosClient(cfg.lithos))
++    factory = lithos_client_factory or _default_lithos_client
+     state = AppState(config, factory(config))
+     templates = Jinja2Templates(directory=TEMPLATE_DIR)
+     templates.env.filters["format_tag"] = format_tag
+@@ -176,11 +203,20 @@ def create_app(
+         if snapshot.lithos != "ok":
+             error = "Lithos is offline or degraded. The note cannot be loaded."
+         else:
++            not_found = False
+             try:
+                 note_record = await state.lithos_client.read_note(knowledge_id)
++            except LithosToolError as exc:
++                # Lithos answers a missing document with a coded error envelope
++                # (doc_not_found) rather than an empty success, so this — not
++                # the None fallback below — is the production not-found path.
++                if exc.code == "doc_not_found":
++                    not_found = True
++                else:
++                    error = "Could not load this document from Lithos."
+             except Exception:
+                 error = "Could not load this document from Lithos."
+-            if note_record is None and not error:
++            if not_found or (note_record is None and not error):
+                 error = "Document not found."
+             if note_record is not None:
+                 related = await load_related_panel(
+diff --git a/tests/test_fake_lithos.py b/tests/test_fake_lithos.py
+new file mode 100644
+index 0000000..953b573
+--- /dev/null
++++ b/tests/test_fake_lithos.py
+@@ -0,0 +1,278 @@
++"""Fake-Lithos app mode: the launchable, server-backed fixture client.
++
++These cover the seam the ``e2e/`` Playwright smoke suite depends on — that the
++real application factory can boot a fully browsable app with no Lithos server
++behind it — without needing a browser. The Playwright suite itself lives under
++``e2e/`` and runs out of band (``make e2e``); here we prove the Python side.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++from fastapi.testclient import TestClient
++
++from lithos_lens.config import load_config
++from lithos_lens.errors import ConfigError
++from lithos_lens.fake_lithos import FakeLithosClient, fake_lithos_enabled
++from lithos_lens.knowledge import RelatedNeighborhood
++from lithos_lens.lithos_client import LithosClient, LithosToolError
++from lithos_lens.main import DEFAULT_PORT, resolve_port
++from lithos_lens.web import create_app
++
++
++@pytest.mark.parametrize(
++    ("value", "expected"),
++    [
++        ("1", True),
++        ("true", True),
++        ("YES", True),
++        (" on ", True),
++        ("0", False),
++        ("false", False),
++        ("", False),
++        ("maybe", False),
++    ],
++)
++def test_fake_lithos_enabled_reads_env(
++    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
++) -> None:
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", value)
++    assert fake_lithos_enabled() is expected
++
++
++def test_fake_lithos_enabled_defaults_off_when_unset(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.delenv("LITHOS_LENS_FAKE_LITHOS", raising=False)
++    assert fake_lithos_enabled() is False
++
++
++def test_create_app_uses_real_client_without_env(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.delenv("LITHOS_LENS_FAKE_LITHOS", raising=False)
++    app = create_app(load_config(lithos_lens_config_env))
++    # No lifespan/startup here so we never touch the network — just the wiring.
++    assert isinstance(app.state.lens.lithos_client, LithosClient)
++
++
++def test_create_app_uses_fake_client_when_env_enabled(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    app = create_app(load_config(lithos_lens_config_env))
++    assert isinstance(app.state.lens.lithos_client, FakeLithosClient)
++
++
++def test_fake_mode_health_is_ok(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    app = create_app(load_config(lithos_lens_config_env))
++    with TestClient(app) as client:
++        response = client.get("/health")
++    assert response.status_code == 200
++    assert response.json()["lithos"] == "ok"
++
++
++def test_fake_mode_dashboard_renders_fixture_tasks(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    app = create_app(load_config(lithos_lens_config_env))
++    with TestClient(app) as client:
++        response = client.get("/tasks?since=2026-08-01")
++    assert response.status_code == 200
++    body = response.text
++    assert "Cut over Influx ingest path" in body
++    assert 'data-task-row data-task-id="influx-ingest-cutover"' in body
++    # A completed and a cancelled fixture so all three groups have content.
++    assert 'data-task-group="completed"' in body
++
++
++def test_fake_mode_task_detail_renders(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    app = create_app(load_config(lithos_lens_config_env))
++    with TestClient(app) as client:
++        response = client.get("/tasks/influx-ingest-cutover")
++    assert response.status_code == 200
++    assert 'data-task-detail="influx-ingest-cutover"' in response.text
++    # The claimed fixture surfaces an active claim on the detail page.
++    assert "worker-a" in response.text
++
++
++def test_fake_mode_note_renders(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    app = create_app(load_config(lithos_lens_config_env))
++    with TestClient(app) as client:
++        response = client.get("/note/note-influx-plan")
++    assert response.status_code == 200
++    assert "Influx migration plan" in response.text
++
++
++def test_fake_mode_missing_note_renders_not_found_banner(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """The fixture finding 'finding-orphan' links knowledge_id='missing-note';
++    opening it must exercise the intended not-found path (the 'Document not
++    found.' banner), not the generic load-failure banner."""
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    app = create_app(load_config(lithos_lens_config_env))
++    with TestClient(app) as client:
++        response = client.get("/note/missing-note")
++    assert response.status_code == 200
++    assert "Document not found." in response.text
++    assert "Could not load this document from Lithos." not in response.text
++
++
++def test_fake_mode_note_renders_related_panel(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """K1-S4 note pages carry the related <aside>; the fake supplies a small
++    neighborhood so the panel (and its direction/conflict badges) light up in
++    fake mode / e2e instead of rendering empty."""
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    app = create_app(load_config(lithos_lens_config_env))
++    with TestClient(app) as client:
++        response = client.get("/note/note-influx-plan")
++    assert response.status_code == 200
++    assert 'aria-label="Related notes"' in response.text
++    assert "Influx rollback route" in response.text
++    assert 'edge-direction">incoming' in response.text
++    assert "conflict: unresolved" in response.text
++
++
++@pytest.mark.anyio
++async def test_fake_client_read_note_missing_raises_doc_not_found() -> None:
++    """Parity with the concrete client: upstream lithos_read answers a missing
++    doc with an error envelope code 'doc_not_found', which LithosClient raises
++    as a coded LithosToolError — the fake must speak the same contract."""
++    client = FakeLithosClient()
++    with pytest.raises(LithosToolError) as excinfo:
++        await client.read_note("missing-note")
++    assert excinfo.value.code == "doc_not_found"
++
++
++@pytest.mark.anyio
++async def test_fake_client_read_note_honors_max_length() -> None:
++    client = FakeLithosClient()
++    note = await client.read_note("note-influx-plan", max_length=1)
++    assert note is not None
++    assert len(note.content) == 1
++    # Truncation must not mutate the stored fixture.
++    full = await client.read_note("note-influx-plan")
++    assert full is not None and len(full.content) > 1
++
++
++@pytest.mark.anyio
++async def test_fake_client_related_returns_neighborhood_for_fixture_note() -> None:
++    client = FakeLithosClient()
++    neighborhood = await client.related("note-influx-plan")
++    assert any(ref.id == "note-influx-rollback" for ref in neighborhood.links)
++    assert any(
++        ref.conflict_state == "unresolved" and ref.direction == "incoming"
++        for ref in neighborhood.edges
++    )
++    # Unknown note ids have no neighborhood, mirroring an empty graph read.
++    empty = await client.related("missing-note")
++    assert empty == RelatedNeighborhood()
++
++
++def test_resolve_port_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.delenv("LENS_PORT", raising=False)
++    assert resolve_port() == DEFAULT_PORT
++
++
++def test_resolve_port_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.setenv("LENS_PORT", "8123")
++    assert resolve_port() == 8123
++
++
++@pytest.mark.parametrize("bad", ["0", "70000", "-1", "notaport"])
++def test_resolve_port_rejects_invalid(
++    monkeypatch: pytest.MonkeyPatch, bad: str
++) -> None:
++    monkeypatch.setenv("LENS_PORT", bad)
++    with pytest.raises(ConfigError):
++        resolve_port()
++
++
++@pytest.mark.anyio
++async def test_fake_client_task_get_missing_raises_coded_error() -> None:
++    client = FakeLithosClient()
++    with pytest.raises(LithosToolError) as excinfo:
++        await client.task_get("does-not-exist")
++    assert excinfo.value.code == "task_not_found"
++
++
++@pytest.mark.anyio
++async def test_fake_client_ready_frontier_includes_the_claimed_task() -> None:
++    """The advertised 'ready, claimed, in-flight' fixture must be on the frontier."""
++    client = FakeLithosClient()
++    ready = await client.task_ready(with_claims=True)
++    by_id = {task.id: task for task in ready}
++    assert "influx-ingest-cutover" in by_id
++    # It is the one carrying claims, so with_claims must surface them.
++    claimed = by_id["influx-ingest-cutover"]
++    assert claimed.claims is not None and len(claimed.claims) == 1
++    assert claimed.claims[0].agent == "worker-a"
++
++
++@pytest.mark.anyio
++async def test_fake_client_task_ready_scoped_by_project_and_tags() -> None:
++    client = FakeLithosClient()
++
++    all_ids = {t.id for t in await client.task_ready()}
++    assert all_ids == {"influx-ingest-cutover", "influx-dashboards", "lens-graph-view"}
++
++    influx = {t.id for t in await client.task_ready(project="influx")}
++    assert influx == {"influx-ingest-cutover", "influx-dashboards"}
++
++    observability = {t.id for t in await client.task_ready(tags=["area:observability"])}
++    assert observability == {"influx-dashboards"}
++
++    assert await client.task_ready(project="missing") == []
++
++
++@pytest.mark.anyio
++async def test_fake_client_task_blocked_scoped_by_project_and_tags() -> None:
++    client = FakeLithosClient()
++
++    assert [b.task.id for b in await client.task_blocked()] == ["influx-backfill"]
++    assert [b.task.id for b in await client.task_blocked(tags=["area:data"])] == [
++        "influx-backfill"
++    ]
++    # influx-backfill lacks these, so a scoped read must exclude it.
++    assert await client.task_blocked(tags=["area:observability"]) == []
++    assert await client.task_blocked(project="lithos-lens") == []
++
++
++def test_fake_mode_logs_loud_warning_when_engaged(
++    lithos_lens_config_env: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    monkeypatch.setenv("LITHOS_LENS_FAKE_LITHOS", "1")
++    with caplog.at_level("WARNING", logger="lithos_lens.web"):
++        create_app(load_config(lithos_lens_config_env))
++    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
++    assert any("fake-Lithos app mode is ENABLED" in r.message for r in warnings)
++
++
++def test_no_warning_when_fake_mode_off(
++    lithos_lens_config_env: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    monkeypatch.delenv("LITHOS_LENS_FAKE_LITHOS", raising=False)
++    with caplog.at_level("WARNING", logger="lithos_lens.web"):
++        create_app(load_config(lithos_lens_config_env))
++    assert not [
++        r for r in caplog.records if "fake-Lithos app mode is ENABLED" in r.getMessage()
++    ]

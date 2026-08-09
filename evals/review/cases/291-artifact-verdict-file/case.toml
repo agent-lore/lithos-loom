@@ -1,0 +1,42 @@
+[case]
+id = "291-artifact-verdict-file"
+description = """
+PR #291 round-2 escape (external review, High): the artifact-review pass — the
+panel-only pass that holds approval until a reviewer has looked at candidate-
+collected screenshots — threads a review_file override so the pass writes its
+visual verdict to its own handoff file. The override reaches the retry and
+reseed calls but NOT the initial _review_turn, so the pass PARSES the round's
+stale regular LGTM while the visual FINDINGS sit unread in the artifact file:
+approval seals having technically run the pass but ignored its verdict. The
+in-PR tests all stubbed _run_reviewer_with_reaction — exactly the seam that
+drops the parameter — so the suite was green.
+
+This is the FULL-FEATURE diff as originally pushed (base = pre-#291 main
+da14441; the patch is the #283 slice-2 feature at its round-1-review head
+17e0eca): the defect hides inside a realistic ~900-line feature change, exactly
+the review situation the escape occurred in. Caught by the codex external
+backstop reading the data flow write-site -> read-site; fixed in #291 (initial
+call forwards the override + non-stubbed conflicting-verdicts test).
+"""
+ac_provenance = "synthetic"
+repo = "."
+base = "da1444137352555fa025dfc90687e5e083ae16b4"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_loom/plugins/story_develop/panel.py"
+keywords = ["review_file", "artifact", "initial", "stale", "LGTM"]
+min_severity = "major"
+mechanism = """
+run_panel_round(artifact_pass=True) computes an artifact-specific review_file
+(round_NN_review_<name>_artifacts.md) and the artifact prompt tells the reviewer
+to write its verdict THERE — but _run_reviewer_with_reaction does not forward
+review_file into the INITIAL _review_turn call (only into the retry/reseed
+calls), so _review_turn defaults to the regular round handoff, which already
+holds the earlier panel's LGTM. The pass therefore reads a stale approving
+verdict regardless of what the visual reviewer wrote, and approval can seal
+without the screenshots' assessment ever being consumed.
+"""
