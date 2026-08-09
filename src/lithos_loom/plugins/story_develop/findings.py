@@ -94,6 +94,47 @@ class FindingLedger:
 
     # --- mutations ----------------------------------------------------------
 
+    def apply_artifact_review(
+        self, parsed: ReviewHandoff, round_no: int
+    ) -> list[Finding]:
+        """Commit an artifact-pass review ADDITIVELY (#291 re-review round 3).
+
+        The artifact pass is a specialized visual verdict, explicitly told not
+        to re-litigate the diff — so its LGTM must NOT close the code review's
+        open findings, and its handoff is not required to account for them.
+        Every finding it reports is appended as NEW (fresh ledger id — any id
+        the handoff carries is ignored rather than mutating an existing code
+        finding); existing entries are untouched either way.
+        """
+        if parsed.is_lgtm:
+            return []
+        canonical: list[Finding] = []
+        for f in parsed.findings:
+            fid = f"f-{self._next:03d}"
+            self._next += 1
+            entry = LedgerEntry(
+                finding_id=fid,
+                reviewer=self.reviewer,
+                severity=f.severity,
+                status=f.status,
+                files=f.files,
+                rationale=f.rationale,
+                first_round=round_no,
+                last_updated_round=round_no,
+            )
+            self.entries[fid] = entry
+            canonical.append(
+                Finding(
+                    finding_id=entry.finding_id,
+                    severity=entry.severity,
+                    status=entry.status,
+                    files=entry.files,
+                    rationale=entry.rationale,
+                    coder_response=entry.coder_response,
+                )
+            )
+        return canonical
+
     def apply_review(self, parsed: ReviewHandoff, round_no: int) -> list[Finding]:
         """Commit a (checked) review into the ledger; returns canonical findings.
 

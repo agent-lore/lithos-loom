@@ -82,6 +82,7 @@ def _install_reviewer_stub(
         base,
         review_file=None,
         reseed_prompt_override=None,
+        skip_lifecycle_validation=False,
     ):
         name = rstate.spec.name
         calls.append(
@@ -456,3 +457,126 @@ def test_artifact_pass_survives_usage_limit_tool_switch(
     assert "note-320.png" in prompts[1]
     out = result.round_reviews[0]
     assert out.status == "FINDINGS" and out.passed is False
+
+
+_ART_NEW_MAJOR = (
+    "## Status: FINDINGS\n## Summary\nVisual breakage.\n## Findings\n"
+    "- finding_id:\n  severity: major\n  status: open\n"
+    '  files: ["note-320.png"]\n  rationale: overflow at 320\n'
+)
+
+
+def _seed_minor_finding(rstate) -> str:
+    """Populate the reviewer ledger like a passing-with-minor code review."""
+    from lithos_loom.plugins.story_develop.handoff import ReviewHandoff
+
+    applied = rstate.ledger.apply_review(
+        ReviewHandoff(
+            status="FINDINGS",
+            summary="",
+            findings=[
+                Finding(
+                    finding_id="",
+                    severity="minor",
+                    status="open",
+                    files=["style.css:1"],
+                    rationale="nit",
+                )
+            ],
+        ),
+        1,
+    )
+    return applied[0].finding_id
+
+
+def test_artifact_lgtm_preserves_unrelated_code_findings(tmp_path: Path) -> None:
+    """#291 round 3 (Medium): the artifact pass shares the reviewer's ledger;
+    full-review LGTM semantics silently ACCEPTED the code review's open minor
+    finding. Additive semantics: the visual LGTM approves, the code finding
+    stays recorded and open."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    shots = config.artifacts_dir / "round_01" / "repo-parity"
+    shots.mkdir(parents=True)
+    (shots / "note-320.png").write_text("png")
+    rstate = _reviewer("correctness", tmp_path)
+    fid = _seed_minor_finding(rstate)
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        (
+            config.handoff_dir
+            / handoff_mod.reviewer_handoff_name(1, "correctness_artifacts")
+        ).write_text("## Status: LGTM\n## Summary\nPages look right.\n")
+        return _ok_turn(session_id)
+
+    result = panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+        artifact_pass=True,
+    )
+
+    assert result.round_reviews[0].passed is True  # visual verdict approves
+    entry = rstate.ledger.entries[fid]
+    assert entry.status == "open"  # the code finding SURVIVES, still recorded
+
+
+def test_artifact_findings_append_without_invalid_handoff_retry(
+    tmp_path: Path,
+) -> None:
+    """#291 round 3: a new visual finding while an earlier minor stays open
+    must neither trip the open-id accounting validation (the artifact prompt
+    never listed those ids) nor mutate the existing entry."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    shots = config.artifacts_dir / "round_01" / "repo-parity"
+    shots.mkdir(parents=True)
+    (shots / "note-320.png").write_text("png")
+    rstate = _reviewer("correctness", tmp_path)
+    fid = _seed_minor_finding(rstate)
+
+    calls = {"n": 0}
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        calls["n"] += 1
+        (
+            config.handoff_dir
+            / handoff_mod.reviewer_handoff_name(1, "correctness_artifacts")
+        ).write_text(_ART_NEW_MAJOR)
+        return _ok_turn(session_id)
+
+    result = panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+        artifact_pass=True,
+    )
+
+    assert calls["n"] == 1  # no invalid-handoff correction retry
+    out = result.round_reviews[0]
+    assert out.status == "FINDINGS" and out.passed is False  # approval held
+    assert rstate.ledger.entries[fid].status == "open"  # untouched
+    assert rstate.ledger.entries[fid].severity == "minor"
+    new_ids = [k for k in rstate.ledger.entries if k != fid]
+    assert len(new_ids) == 1  # the visual finding appended as NEW
+    assert rstate.ledger.entries[new_ids[0]].severity == "major"

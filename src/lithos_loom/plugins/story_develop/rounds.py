@@ -242,9 +242,15 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         coder_resume = False
     else:
         assert ctx.final_reviews  # set by the prior round's reviews
-        review_files = ", ".join(
-            f"`{handoff.reviewer_handoff_name(round_no - 1, n)}`" for n in ctx.names
-        )
+        # #291: when an artifact pass drove the continuation, its handoff is
+        # the authoritative write-up — reference it alongside the regular one.
+        ref_names: list[str] = []
+        for n in ctx.names:
+            ref_names.append(handoff.reviewer_handoff_name(round_no - 1, n))
+            art = handoff.reviewer_handoff_name(round_no - 1, f"{n}_artifacts")
+            if (ctx.config.handoff_dir / art).is_file():
+                ref_names.append(art)
+        review_files = ", ".join(f"`{n}`" for n in ref_names)
         coder_prompt = render_prompt(
             handoff.load_prompt("coder_fix.md"),
             round_no=str(round_no),
