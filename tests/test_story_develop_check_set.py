@@ -1721,3 +1721,99 @@ def test_collection_failure_is_logged_never_fatal_and_cleanup_still_runs(
     assert not (cfg.artifacts_dir / "round_01" / "repo-parity").exists()
     round_dir = cfg.gate_dir / "round_01"
     assert not [p for p in round_dir.iterdir() if p.name.startswith("tree-")]
+
+
+def test_empty_rerun_retires_the_prior_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # PR #289 round 2: a rerun whose artifacts dir is EMPTY (or absent — the
+    # check failed before rendering anything) must not leave reviewers looking
+    # at the previous execution's screenshots as if they were current.
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+    stale = cfg.artifacts_dir / "round_01" / "repo-parity"
+    stale.mkdir(parents=True)
+    (stale / "old.png").write_text("old")
+
+    empty_producer = Check(
+        name="repo-parity",
+        command="mkdir -p e2e/artifacts",
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+    cs = check_runner.run_check_set(
+        cfg, tmp_git_repo, sha, 1, (empty_producer,), GateLedger()
+    )
+    assert cs is not None
+    assert not stale.exists()
+
+
+def test_missing_root_rerun_also_retires_the_prior_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+    stale = cfg.artifacts_dir / "round_01" / "repo-parity"
+    stale.mkdir(parents=True)
+    (stale / "old.png").write_text("old")
+
+    no_artifacts = Check(
+        name="repo-parity",
+        command="true",
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+    cs = check_runner.run_check_set(
+        cfg, tmp_git_repo, sha, 1, (no_artifacts,), GateLedger()
+    )
+    assert cs is not None
+    assert not stale.exists()
+
+
+def test_unreadable_nested_dir_fails_collection_and_keeps_prior_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_git_repo: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # PR #289 round 2: os.walk silently skipped unreadable dirs, publishing a
+    # PARTIAL snapshot logged as success. A traversal error must fail the
+    # collection (nothing published); a failed collection leaves the prior
+    # snapshot untouched — its state is unknown, not "no artifacts".
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+    prior = cfg.artifacts_dir / "round_01" / "repo-parity"
+    prior.mkdir(parents=True)
+    (prior / "previous-good.png").write_text("prior")
+
+    check = Check(
+        name="repo-parity",
+        command=(
+            "mkdir -p e2e/artifacts/locked && printf top > e2e/artifacts/top.png"
+            " && printf hidden > e2e/artifacts/locked/nested.png"
+            " && chmod 000 e2e/artifacts/locked"
+        ),
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+    try:
+        with caplog.at_level("WARNING"):
+            cs = check_runner.run_check_set(
+                cfg, tmp_git_repo, sha, 1, (check,), GateLedger()
+            )
+    finally:
+        import subprocess as _sp
+
+        _sp.run(["chmod", "-R", "u+rwX", str(cfg.gate_dir)], capture_output=True)
+
+    assert cs is not None
+    assert "artifact collection failed" in caplog.text
+    # nothing partial published; the prior snapshot survives a FAILED pass
+    assert (prior / "previous-good.png").read_text() == "prior"
+    assert not (prior / "top.png").exists()

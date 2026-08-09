@@ -2,9 +2,9 @@
 
 Rescues a check's rendered artifacts (e.g. e2e screenshots) from its doomed
 per-check tree export into the run's host-controlled artifacts dir, as an
-exact, symlink-free, atomic snapshot. See :func:`collect_check_artifacts` for
-the threat model — the export's contents and the handoff are both untrusted,
-so the host-privileged copy neither follows symlinks nor writes anywhere an
+exact, symlink-free snapshot. See :func:`collect_check_artifacts` for the
+threat model — the export's contents and the handoff are both untrusted, so
+the host-privileged copy neither follows symlinks nor writes anywhere an
 agent container can reach read-write.
 """
 
@@ -19,6 +19,13 @@ from pathlib import Path
 from .config import DevelopConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_walk_error(exc: OSError) -> None:
+    """``os.walk`` swallows traversal errors by default — an unreadable nested
+    dir would silently publish a PARTIAL snapshot logged as success (PR #289
+    round 2). Raising routes it to the failure path: nothing published."""
+    raise exc
 
 
 def collect_check_artifacts(
@@ -38,18 +45,28 @@ def collect_check_artifacts(
     Hardening (PR #289 review): the export's contents are repo/check-
     controlled, so the copy NEVER follows symlinks — the artifacts root must
     be a real directory resolving inside the export, and only regular,
-    non-symlink files are copied (anything else is skipped and counted).
-    Each collection is an exact atomic snapshot: files land in a temp dir
-    that is renamed over any prior ``round_NN/<check>`` — stale files from an
-    earlier execution never merge in. Best-effort throughout: failure is
-    logged, never fatal, and never blocks the tree cleanup that follows.
+    non-symlink files are copied (anything else is skipped and counted); a
+    traversal error fails the whole collection rather than publishing a
+    partial snapshot as success.
+
+    Snapshot contract: after a SUCCESSFUL pass, ``round_NN/<check>`` reflects
+    exactly this execution — files staged in a temp dir are published over any
+    prior snapshot (rmtree + rename: a brief missing-destination window, fine
+    for the sequential panel workflow — not a stronger atomicity claim), and
+    an execution that produced nothing RETIRES the prior snapshot, so
+    reviewers never mistake an older execution's artifacts for the current
+    one. After a FAILED pass the prior snapshot is left untouched — its state
+    is "unknown", not "no artifacts" — and the failure is logged, never
+    fatal, never blocking the tree cleanup that follows.
     """
     if not config.artifacts_path:
         return
     src = tree / config.artifacts_path
+    dest = config.artifacts_dir / f"round_{round_no:02d}" / check_name
     tmp: Path | None = None
     try:
         if src.is_symlink() or not src.is_dir():
+            _retire_prior(dest)
             return
         if not src.resolve().is_relative_to(tree.resolve()):
             logger.warning(
@@ -60,12 +77,15 @@ def collect_check_artifacts(
                 check_name,
                 src,
             )
+            _retire_prior(dest)
             return
         config.artifacts_dir.mkdir(parents=True, exist_ok=True)
         tmp = config.artifacts_dir / f".tmp-{check_name}-{uuid.uuid4().hex}"
         copied = 0
         skipped = 0
-        for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(
+            src, onerror=_raise_walk_error, followlinks=False
+        ):
             rel = Path(dirpath).relative_to(src)
             for fname in filenames:
                 entry = Path(dirpath) / fname
@@ -82,8 +102,8 @@ def collect_check_artifacts(
             skipped += len(links)
             dirnames[:] = [d for d in dirnames if d not in links]
         if copied == 0:
+            _retire_prior(dest)
             return
-        dest = config.artifacts_dir / f"round_{round_no:02d}" / check_name
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             shutil.rmtree(dest)
@@ -109,3 +129,10 @@ def collect_check_artifacts(
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _retire_prior(dest: Path) -> None:
+    """An execution that produced no artifacts must not leave a previous
+    execution's snapshot posing as current (PR #289 round 2)."""
+    if dest.exists():
+        shutil.rmtree(dest)
