@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.evals.review import patch
-from lithos_loom.evals.review.case import Case, Expected
+from lithos_loom.evals.review.case import Case, Expected, load_case
 from lithos_loom.runner import git, worktree
 
 _EXPECTED = Expected(file="x.py", keywords=("bug",), min_severity="critical")
@@ -169,3 +169,64 @@ def test_materialise_patched_head_raises_on_unapplyable_patch(
     bad.write_text("--- a/nope.txt\n+++ b/nope.txt\n@@ -1 +1 @@\n-x\n+y\n")
     with pytest.raises(RuntimeError):
         patch._materialise_patched_head(tmp_git_repo, base, bad, parent=tmp_path / "p")
+
+
+# ── shipped cases: patches must MATERIALISE, not just load (#292 finding 3) ──
+# test_every_shipped_case_loads (test_eval_review_case.py) proves TOML/AC
+# structure; this proves the base commit exists and the patch applies — so a
+# drifted patch fails the gate, not the paid live eval hours later. Guards keep
+# it runnable everywhere it can't be exercised for real: the in-sandbox gate
+# tree has no .git (skip), a shallow CI clone lacks the base (skip — CI's
+# checkout uses fetch-depth: 0 precisely so same-repo cases DO run there), and
+# cross-repo cases skip on hosts without the sibling checkout.
+
+_SHIPPED_CASES_DIR = Path(__file__).resolve().parents[1] / "evals" / "review" / "cases"
+
+
+def _shipped_patch_case_dirs() -> list[Path]:
+    return sorted(
+        d for d in _SHIPPED_CASES_DIR.iterdir() if (d / "case.toml").is_file()
+    )
+
+
+def _commit_exists(repo: Path, sha: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
+@pytest.mark.parametrize("case_dir", _shipped_patch_case_dirs(), ids=lambda d: d.name)
+def test_shipped_patch_cases_materialise(
+    case_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = load_case(case_dir)
+    if not case.head_patch and not case.known_good_head_patch:
+        pytest.skip("sha-based case — nothing to materialise")
+    # Same resolution rule as materialise_patch_heads: cwd-relative.
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(
+            f"base {case.base[:12]} not present (shallow clone?) — "
+            "preflight from a full clone before a live eval run"
+        )
+    # git commit needs an identity; CI runners have none configured.
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        assert resolved.head
+        assert resolved.head != case.base
+        if case.known_good_head_patch:
+            assert resolved.known_good_head
+    finally:
+        cleanup()

@@ -118,6 +118,22 @@ CLIs): the sibling checkout must exist and contain the case's `base` commit
 self-contained in the case dir, so nothing in the customer repo needs tags or
 kept-alive commits.
 
+### Preflight: patches are materialised in the gate
+
+`test_shipped_patch_cases_materialise` (tests/test_eval_review_patch.py) applies
+every shipped patch case at its pinned base as part of `make check`, so a
+drifted patch or missing base fails the gate rather than the paid live run. It
+skips — with a reason — wherever it *can't* run for real: no `.git` (the
+in-sandbox gate tree), a shallow clone missing the base (loom CI checks out with
+`fetch-depth: 0` so same-repo cases do run there), or an absent sibling checkout
+for cross-repo cases. Before a paid eval run on a new host, preflight with:
+
+```bash
+uv run pytest tests/test_eval_review_patch.py -k shipped -v
+```
+
+and treat any SKIPPED cross-repo case as "this host can't run that case".
+
 ### Sha form (when history already isolates the defect)
 
 ```toml

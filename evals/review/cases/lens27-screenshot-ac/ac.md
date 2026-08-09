@@ -4,24 +4,20 @@ Give lens a browser-level evaluation surface so loom's coder/reviewers/gate can
 run and see the UI, not just read diffs.
 
 1. **Fake-Lithos app mode.** A harness that serves the REAL app against the
-   in-process protocol fakes (the fake client seam from T1-S1) — e.g.
-   `LITHOS_LENS_FAKE=1 uvicorn ...` or an app factory taking the fake client —
-   seeded with a small fixture dataset (notes, tasks, edges, a contradicts
-   pair). Hermetic: no live Lithos, no network beyond first-run browser install.
+   in-process protocol fakes (the fake client seam from T1-S1), seeded with a
+   small fixture dataset (notes, tasks, edges, a contradicts pair). No live
+   Lithos required.
 
 2. **Playwright smoke suite** (`make e2e`): every top-level route renders with
-   no console errors; key interactions (HTMX swap on an expandable card, a
-   graph-view node click) work; screenshots at 320/768/1024/1440 written to an
-   artifacts dir; basic a11y pass (axe or playwright's accessibility snapshot)
-   as informational.
+   no console errors; at least one key click-through interaction is exercised;
+   screenshots at 320/768/1024/1440 written to an artifacts dir.
 
-3. **Dependency + environment contract.** Add `playwright` (pin the 1.62.x
-   line — it must stay compatible with the browser + OS deps baked into the
-   ralph-sandbox:python-ui gate image, which pins playwright 1.62.0) as a lens
-   dev-dependency; the image does NOT provide the Python package, only the
-   browser cache (`PLAYWRIGHT_BROWSERS_PATH=/opt/playwright`), OS deps, and
-   CLI. `make e2e` starts with `uv run playwright install chromium` — a no-op
-   when the project's version matches the baked revision.
+3. **Dependency + environment contract.** Pin playwright to the 1.62.x line —
+   it must stay compatible with the browser + OS deps baked into the
+   ralph-sandbox:python-ui gate image, which pins playwright 1.62.0 and bakes
+   the browser cache at `PLAYWRIGHT_BROWSERS_PATH=/opt/playwright`. `make e2e`
+   installs the pinned browser when absent — a no-op against the image's baked
+   cache.
 
 4. **Make target, kept OUT of `make check`.** `make e2e` runs the suite
    headless so the fast gate stays fast. Gate integration happens via the
