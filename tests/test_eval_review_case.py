@@ -294,12 +294,12 @@ def test_ac_provenance_rejects_unknown_value(tmp_path: Path) -> None:
         load_case(case_dir)
 
 
-def test_every_shipped_patch_case_declares_ac_provenance() -> None:
-    # The four 2026-08 escape cases (and any future patch-form case) must say
-    # what their AC is; legacy sha-era cases are grandfathered as undeclared.
+def test_every_shipped_case_declares_ac_provenance() -> None:
+    # EVERY shipped case must say what its AC is — no ID allowlist, so a future
+    # case can't silently regress to undocumented provenance. (The loader keeps
+    # the field optional only for cases mid-authoring outside the shipped set.)
     for case_dir in _shipped_case_dirs():
         case = load_case(case_dir)
-        if case.head_patch and case.id.startswith(("289", "291", "lens")):
-            assert case.ac_provenance is not None, (
-                f"{case.id}: declare ac_provenance (replay | trimmed | synthetic)"
-            )
+        assert case.ac_provenance is not None, (
+            f"{case.id}: declare ac_provenance (replay | trimmed | synthetic)"
+        )

@@ -25,7 +25,8 @@ _SEVERITIES = ("critical", "major", "minor")
 #   "synthetic" — written for the fixture (no authentic AC existed, e.g. a
 #                 hand-developed PR that never went through a panel).
 # Declaring it keeps the benchmark honest about what a catch/miss measures.
-# None = undeclared (legacy sha-era cases are grandfathered).
+# The loader treats it as optional (mid-authoring), but the shipped-case gate
+# test requires it on every case under evals/review/cases/.
 _AC_PROVENANCES = ("replay", "trimmed", "synthetic")
 
 
@@ -71,7 +72,7 @@ class Case:
     head_patch: str | None = None
     known_good_head_patch: str | None = None
     case_dir: Path | None = None
-    # See _AC_PROVENANCES; None = undeclared (legacy).
+    # See _AC_PROVENANCES; None = undeclared (allowed only mid-authoring).
     ac_provenance: str | None = None
 
 

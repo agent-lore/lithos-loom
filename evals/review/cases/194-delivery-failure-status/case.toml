@@ -16,6 +16,7 @@ defect by removing the `if delivery_error is not None:` branch in
 comment-only clarification to the same function — no behaviour change, so a correct
 review finds nothing. JUDGE-SCORED (the default).
 """
+ac_provenance = "synthetic"
 repo = "."
 base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
 head_patch = "reintroduce-defect.patch"

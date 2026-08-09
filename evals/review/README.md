@@ -125,8 +125,12 @@ case measures. Declare it with `ac_provenance`:
 - **`synthetic`** — written for the fixture, typically because no authentic AC
   existed (e.g. a hand-developed PR that never went through a panel).
 
-Unknown values fail at load; omitting the field is allowed only for legacy
-sha-era cases (new patch-form cases must declare it — gate-enforced).
+Unknown values fail at load. The loader keeps the field optional (a case dir
+mid-authoring outside the shipped set may omit it), but **every shipped case
+must declare it** — gate-enforced with no allowlist, so a future case can't
+silently regress to undocumented provenance. All pre-2026-08 cases are
+`synthetic`: they replay escapes from hand-developed loom PRs that never had a
+panel AC, with problem statements written for the fixture.
 
 ### Cross-repo cases (escapes from customer projects)
 

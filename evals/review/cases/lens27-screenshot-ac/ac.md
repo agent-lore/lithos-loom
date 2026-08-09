@@ -8,9 +8,10 @@ run and see the UI, not just read diffs.
    small fixture dataset (notes, tasks, edges, a contradicts pair). No live
    Lithos required.
 
-2. **Playwright smoke suite** (`make e2e`): every top-level route renders from
-   the seeded fixtures; at least one key click-through interaction is
-   exercised; screenshots at 320/768/1024/1440 written to an artifacts dir.
+2. **Playwright smoke suite** (`make e2e`): the dashboard, task-detail,
+   knowledge-note (including its related panel), and missing-note surfaces
+   render from the seeded fixtures; at least one key click-through interaction
+   is exercised; screenshots at 320/768/1024/1440 written to an artifacts dir.
 
 3. **Dependency + environment contract.** Declare playwright as a
    dev-dependency of the e2e suite, compatible with the browser + OS deps

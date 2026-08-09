@@ -23,7 +23,10 @@ head. Trims, each because 43ccbdf does not satisfy the original wording and
 none is the measured escape: the a11y-informational clause and the named
 HTMX/graph interactions are dropped; "renders with no console errors" is
 weakened to "renders from the seeded fixtures" (the suite asserts rendering,
-not console silence); the "pin the 1.62.x line" dependency wording is weakened
+not console silence); "every top-level route" is replaced by the enumerated
+surfaces the suite actually visits — dashboard, task-detail, knowledge-note,
+missing-note — because the app also serves a findings page the suite never
+opens; the "pin the 1.62.x line" dependency wording is weakened
 to gate-image compatibility (the delivered suite declares npm @playwright/test
 ^1.62.0 with no lockfile at this head — a floor, not a pin — and is npm, not
 the Python package the original task text assumed); hermeticity wording that

@@ -14,6 +14,7 @@ PATCH-BASED case (#193): `base` is the hardened `main`; `head_patch` removes the
 so a stale prior-run result.json false-dones the next run -> catch. Catch-only.
 JUDGE-SCORED (the default).
 """
+ac_provenance = "synthetic"
 repo = "."
 base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
 head_patch = "reintroduce-defect.patch"
