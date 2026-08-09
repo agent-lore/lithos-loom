@@ -1,0 +1,45 @@
+[case]
+id = "lens33-confidence-crash"
+description = """
+lens PR #33 escape (K1-S3, story-develop run 75d8ee2b): the standard panel
+(correctness + security, 2 rounds, zero findings) AND the new approval-hold
+artifact pass approved and delivered head 1d190ba with unvalidated frontmatter
+confidence. _format_confidence documents confidence as a 0..1 fraction but
+formats ANY numeric: out-of-range values render misleading chips (2 -> "200%"),
+and non-finite values (`confidence: .nan` / `.inf` in frontmatter) pass the
+isinstance guard and make round() raise (ValueError / OverflowError)
+mid-render — crashing the whole /note/{id} page. Frontmatter is untrusted,
+agent-written input; the module's own convention (malformed input -> no chip)
+was applied to type errors but not to range/finiteness. Caught externally:
+Copilot flagged the misleading-percentage form post-delivery; the fix round
+exposed the page-crash form. Fixed in lens 87c9560 (range guard: not
+0 <= value <= 1 -> no chip; comparison semantics reject NaN for free).
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
+diff as the panel approved it (base = lens main a429e8e post-K1-S2; patch =
+delivered head 1d190ba, pre-fix).
+"""
+ac_provenance = "replay"
+repo = "../lithos-lens"
+base = "a429e8e952359011fdcdc039e24255ba1d77559b"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_lens/knowledge_metadata.py"
+keywords = ["confidence", "out-of-range", "out of range", "nan", "inf", "round(", "0..1", "unvalidated"]
+min_severity = "major"
+mechanism = """
+_format_confidence accepts any int/float and formats it as a percentage with
+round(value * 100): it never validates the documented 0..1 range or finiteness.
+Frontmatter is untrusted agent-written input, so (1) out-of-range numerics
+render misleading chips ("200%", "-50%") instead of following the module's
+malformed-input no-chip convention, and (2) NaN / infinity pass the isinstance
+type guard and make round() raise ValueError / OverflowError inside template
+rendering — a single malformed frontmatter value crashes the entire /note/{id}
+page. The finding must identify the missing range/finiteness validation on the
+confidence value (either symptom form counts: misleading percentage rendering
+or the render-crash).
+"""
