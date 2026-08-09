@@ -20,7 +20,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
-| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 1 |
+| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 2 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
@@ -46,7 +46,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | M | 4 | 11 |
+| `lithos_loom.plugins.story_develop.rounds` | L | 4 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
@@ -76,6 +76,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.check_artifacts`
 - def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).
+- def `render_artifacts_note` — The reviewer-prompt section enumerating collected artifacts (#283 s2).
 
 ### `lithos_loom.plugins.story_develop.check_catalog`
 - class `CheckMapping` — One canonical check's command per ecosystem.

@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ...runner import git
-from . import containers, engines, handoff, limits
+from . import check_artifacts, containers, engines, handoff, limits
 from .agent_session import (
     _CONTINUATION_PROMPT,
     PauseBudget,
@@ -188,6 +188,7 @@ def _review_turn(
     model: str | None = None,
     effort: str | None = None,
     validate: Callable[[ReviewHandoff], str | None] | None = None,
+    review_file: str | None = None,
 ) -> tuple[ReviewOutcome, TurnResult | None, str]:
     """Run one reviewer turn against an already-running reviewer container.
 
@@ -205,7 +206,9 @@ def _review_turn(
     one for claude, the tool-minted ``thread_id`` for codex (#94). The turn runs
     through *services* (ARCH-1.S4) so the loop is testable with fakes.
     """
-    review_file = handoff.reviewer_handoff_name(round_no, reviewer)
+    # #283 artifact pass: an explicit override targets the pass's own handoff
+    # file so it never clobbers this round's regular review.
+    review_file = review_file or handoff.reviewer_handoff_name(round_no, reviewer)
     review_path = config.handoff_dir / review_file
 
     def _read_checked() -> tuple[ReviewHandoff | None, str | None]:
@@ -342,6 +345,9 @@ def _run_reviewer_with_reaction(
     prompt: str,
     timeout: int,
     base: str,
+    review_file: str | None = None,
+    reseed_prompt_override: str | None = None,
+    skip_lifecycle_validation: bool = False,
 ) -> tuple[ReviewOutcome, float, bool, datetime | None]:
     """One reviewer's round, with the T5 usage-limit reaction wrapped around it.
 
@@ -367,7 +373,12 @@ def _run_reviewer_with_reaction(
         engine=rstate.engine_now,
         model=rstate.spec.model,
         effort=rstate.spec.effort,
-        validate=rstate.ledger.check,
+        validate=(None if skip_lifecycle_validation else rstate.ledger.check),
+        # PR #291 re-review (High): the override MUST reach the initial turn
+        # too — reading the round's stale regular LGTM here while the reviewer
+        # wrote its visual verdict to the artifact file silently defeated the
+        # whole hold.
+        review_file=review_file,
     )
     cost = review.cost_usd
 
@@ -410,7 +421,12 @@ def _run_reviewer_with_reaction(
                 read_only=True,
             )
             containers.start_container(rstate.run_cmd)
-            reseed_prompt = render_prompt(
+            # PR #291 re-review (Medium): an artifact pass's replacement
+            # reviewer must still be told to inspect the rendered pages — the
+            # generic reseed has no artifact listing, so a fresh engine could
+            # LGTM off the code alone. The artifact prompt is self-contained,
+            # so the caller passes it as the reseed override.
+            reseed_prompt = reseed_prompt_override or render_prompt(
                 handoff.load_prompt("reviewer_reseed.md"),
                 reviewer=name,
                 reviewer_brief=_reviewer_brief(rstate.spec),
@@ -422,7 +438,9 @@ def _run_reviewer_with_reaction(
                     rstate.outcome.findings if rstate.outcome else []
                 ),
                 prior_review=_prior_review_text(config, round_no, name),
-                review_file=handoff.reviewer_handoff_name(round_no, name),
+                review_file=(
+                    review_file or handoff.reviewer_handoff_name(round_no, name)
+                ),
             )
             review, rev_failed, rstate.session = _review_turn(
                 config,
@@ -438,7 +456,8 @@ def _run_reviewer_with_reaction(
                 engine=rstate.engine_now,
                 model=rstate.spec.model,
                 effort=rstate.spec.effort,
-                validate=rstate.ledger.check,
+                validate=(None if skip_lifecycle_validation else rstate.ledger.check),
+                review_file=review_file,
             )
             cost += review.cost_usd
             continue
@@ -481,7 +500,8 @@ def _run_reviewer_with_reaction(
             engine=rstate.engine_now,
             model=rstate.spec.model,
             effort=rstate.spec.effort,
-            validate=rstate.ledger.check,
+            validate=(None if skip_lifecycle_validation else rstate.ledger.check),
+            review_file=review_file,
         )
         cost += review.cost_usd
 
@@ -504,6 +524,7 @@ def run_panel_round(
     reviewer_timeout: int,
     coder_summary: str,
     services: Services | None = None,
+    artifact_pass: bool = False,
 ) -> PanelRoundResult:
     """Drive the reviewer panel for a single round — the one shared primitive.
 
@@ -523,6 +544,8 @@ def run_panel_round(
     the first interrupted or invalid reviewer.
     """
     resolved = services if services is not None else Services.live()
+    # #283 slice 2: computed once per panel invocation, not per reviewer.
+    artifacts_note_value = check_artifacts.render_artifacts_note(config)
     round_reviews: list[ReviewOutcome] = []
     cost = 0.0
     interrupted = False
@@ -530,7 +553,30 @@ def run_panel_round(
     invalid_reviewer: str | None = None
     for rstate in reviewers:
         name = rstate.spec.name
-        if round_no == 1:
+        review_file_override: str | None = None
+        if artifact_pass:
+            # #283 (PR #291 review): a panel-only pass shown the artifacts the
+            # candidate checks collected AFTER this round's regular review —
+            # its own handoff file, so the round's review is never clobbered.
+            review_file_override = handoff.reviewer_handoff_name(
+                round_no, f"{name}_artifacts"
+            )
+            review_prompt = render_prompt(
+                handoff.load_prompt("reviewer_artifacts.md"),
+                reviewer=name,
+                reviewer_brief=_reviewer_brief(rstate.spec),
+                round_no=str(round_no),
+                acceptance_criteria=config.effective_acceptance_criteria,
+                base_sha=base[:12],
+                artifacts_note=artifacts_note_value,
+                gate_summary=render_check_summary(
+                    check_set, for_coder=False, gate_ledger=gate_ledger
+                ),
+                severity_calibration=SEVERITY_CALIBRATION,
+                review_file=review_file_override,
+            )
+            review_resume = True
+        elif round_no == 1:
             review_prompt = render_prompt(
                 handoff.load_prompt("reviewer_round.md"),
                 reviewer=name,
@@ -542,6 +588,7 @@ def run_panel_round(
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
+                artifacts_note=artifacts_note_value,
                 severity_calibration=SEVERITY_CALIBRATION,
                 review_file=handoff.reviewer_handoff_name(1, name),
             )
@@ -560,6 +607,7 @@ def run_panel_round(
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
+                artifacts_note=artifacts_note_value,
                 severity_calibration=SEVERITY_CALIBRATION,
                 review_file=handoff.reviewer_handoff_name(round_no, name),
             )
@@ -576,19 +624,30 @@ def run_panel_round(
                 prompt=review_prompt,
                 timeout=reviewer_timeout,
                 base=base,
+                review_file=review_file_override,
+                reseed_prompt_override=(review_prompt if artifact_pass else None),
+                # #291 round 3: the artifact handoff is not required to account
+                # for the code review's open ids — it neither lists nor
+                # reassesses them.
+                skip_lifecycle_validation=artifact_pass,
             )
         )
         cost += rev_cost
         if review.status != "invalid":
-            # T7: commit the (already check()-validated) review into the ledger;
-            # downstream sees ledger-canonical ids.
-            applied = rstate.ledger.apply_review(
-                ReviewHandoff(
-                    status=review.status,
-                    summary="",
-                    findings=review.findings,
-                ),
-                round_no,
+            # T7: commit the (already check()-validated) review into the
+            # ledger; downstream sees ledger-canonical ids. An artifact pass
+            # commits ADDITIVELY (#291 round 3): its LGTM must not close the
+            # code review's open findings, and its new visual findings append
+            # without mutating existing entries.
+            parsed = ReviewHandoff(
+                status=review.status,
+                summary="",
+                findings=review.findings,
+            )
+            applied = (
+                rstate.ledger.apply_artifact_review(parsed, round_no)
+                if artifact_pass
+                else rstate.ledger.apply_review(parsed, round_no)
             )
             review = replace(review, findings=applied)
         round_reviews.append(review)

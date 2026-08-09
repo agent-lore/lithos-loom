@@ -200,6 +200,13 @@ def conversation_log(handoff_dir: Path, rounds: int, reviewers: Sequence[str]) -
             (f"Reviewer [{reviewer}]", reviewer_handoff_name(r, reviewer))
             for reviewer in reviewers
         ]
+        # #283/#291: an artifact-review pass writes its verdict to its own
+        # per-reviewer file — the review that actually controlled approval
+        # belongs in the audit trail. Optional: rendered only when present.
+        for reviewer in reviewers:
+            name = reviewer_handoff_name(r, f"{reviewer}_artifacts")
+            if (handoff_dir / name).is_file():
+                entries.append((f"Reviewer [{reviewer}] (artifact pass)", name))
         parts += render_log_section(handoff_dir, f"## Round {r}", entries)
     return "\n".join(parts) + "\n"
 

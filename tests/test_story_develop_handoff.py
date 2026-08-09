@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from lithos_loom.plugins.story_develop.handoff import (
@@ -197,3 +199,34 @@ def test_folded_scalar_keeps_embedded_bullet_lists() -> None:
     assert "- the lock is taken twice" in first.rationale
     assert "- the error path leaks the fd" in first.rationale
     assert second.severity == "minor" and second.rationale == "separate item"
+
+
+def test_conversation_log_includes_artifact_pass_handoffs(tmp_path: Path) -> None:
+    # #291: the review that actually controlled approval (the artifact pass)
+    # must appear in the durable audit trail; absent files render nothing.
+    from lithos_loom.plugins.story_develop import handoff as h
+
+    d = tmp_path
+    (d / h.coder_handoff_name(1)).write_text("did the work")
+    (d / h.reviewer_handoff_name(1, "correctness")).write_text("LGTM early")
+    (d / h.reviewer_handoff_name(1, "correctness_artifacts")).write_text(
+        "visual findings"
+    )
+
+    log = h.conversation_log(d, 1, ["correctness"])
+
+    assert "artifact pass" in log
+    assert "visual findings" in log
+    assert log.index("LGTM early") < log.index("visual findings")
+
+
+def test_conversation_log_omits_absent_artifact_handoffs(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop import handoff as h
+
+    d = tmp_path
+    (d / h.coder_handoff_name(1)).write_text("did the work")
+    (d / h.reviewer_handoff_name(1, "correctness")).write_text("LGTM")
+
+    log = h.conversation_log(d, 1, ["correctness"])
+
+    assert "artifact pass" not in log

@@ -19,6 +19,8 @@ acceptance criteria below.
 
 {gate_summary}
 
+{artifacts_note}
+
 {severity_calibration}
 
 ## Your job

@@ -24,6 +24,8 @@ changed — and any points it disputes.
 
 {gate_summary}
 
+{artifacts_note}
+
 {severity_calibration}
 
 ## Your job

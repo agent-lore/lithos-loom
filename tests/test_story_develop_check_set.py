@@ -1817,3 +1817,85 @@ def test_unreadable_nested_dir_fails_collection_and_keeps_prior_snapshot(
     # nothing partial published; the prior snapshot survives a FAILED pass
     assert (prior / "previous-good.png").read_text() == "prior"
     assert not (prior / "top.png").exists()
+
+
+# --- artifacts note for the reviewer prompt (#283 slice 2) --------------------
+
+
+def test_render_artifacts_note_empty_when_nothing_collected(tmp_path: Path) -> None:
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    assert check_runner.check_artifacts.render_artifacts_note(cfg) == ""
+
+
+def test_render_artifacts_note_lists_in_container_paths(tmp_path: Path) -> None:
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    shots = cfg.artifacts_dir / "round_01" / "repo-parity"
+    shots.mkdir(parents=True)
+    for name in ("note-320.png", "note-768.png", "dashboard-320.png"):
+        (shots / name).write_text("png")
+
+    note = check_runner.check_artifacts.render_artifacts_note(cfg)
+
+    # reviewers work in-container: the note must use the mounted path, not the
+    # host path
+    assert "/workspace/.handoff/artifacts/round_01/repo-parity" in note
+    assert str(cfg.artifacts_dir) not in note
+    assert "dashboard-320.png" in note and "note-768.png" in note
+    # guidance so a diff-reading persona knows these are for LOOKING at
+    assert "screenshot" in note.lower() or "rendered" in note.lower()
+
+
+def test_render_artifacts_note_caps_long_listings(tmp_path: Path) -> None:
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    shots = cfg.artifacts_dir / "round_02" / "repo-parity"
+    shots.mkdir(parents=True)
+    for i in range(30):
+        (shots / f"shot-{i:02d}.png").write_text("png")
+
+    note = check_runner.check_artifacts.render_artifacts_note(cfg)
+
+    assert "shot-00.png" in note
+    assert "shot-29.png" not in note
+    assert "more" in note  # "+N more" marker
+    assert "30 file" in note
+
+
+def test_render_artifacts_note_preserves_nested_relative_paths(tmp_path: Path) -> None:
+    # PR #291 review (finding 2): the collector preserves nested dirs, so the
+    # note must list openable relative paths — `screens/home/320.png`, not a
+    # bare `320.png` that is neither openable nor unique.
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    base = cfg.artifacts_dir / "round_01" / "repo-parity"
+    (base / "screens" / "home").mkdir(parents=True)
+    (base / "screens" / "detail").mkdir(parents=True)
+    (base / "screens" / "home" / "320.png").write_text("a")
+    (base / "screens" / "detail" / "320.png").write_text("b")
+
+    note = check_runner.check_artifacts.render_artifacts_note(cfg)
+
+    assert "screens/home/320.png" in note
+    assert "screens/detail/320.png" in note
+
+
+def test_render_artifacts_note_bounds_total_size_favoring_newest_rounds(
+    tmp_path: Path,
+) -> None:
+    # PR #291 review (finding 3): the per-check cap alone lets many rounds x
+    # checks grow the prompt unboundedly. A TOTAL listed-file budget applies,
+    # spent newest-round-first; older dirs beyond it collapse to a count line.
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    for rnd in (1, 2, 3, 4, 5):
+        d = cfg.artifacts_dir / f"round_{rnd:02d}" / "repo-parity"
+        d.mkdir(parents=True)
+        for i in range(12):
+            (d / f"r{rnd}-shot-{i:02d}.png").write_text("png")
+
+    note = check_runner.check_artifacts.render_artifacts_note(cfg)
+
+    # newest round fully listed; oldest collapsed to a count-only line
+    assert "r5-shot-00.png" in note
+    assert "r1-shot-00.png" not in note
+    assert "round_01/repo-parity" in note  # still enumerated, count only
+    assert "listing omitted" in note
+    listed = note.count(".png")
+    assert listed <= 36

@@ -152,3 +152,11 @@ def test_reviewer_brief_adds_focus_discipline_when_a_focus_is_set() -> None:
 def test_reviewer_brief_is_empty_for_the_generalist_default() -> None:
     # The zero-config code-quality reviewer has no focus; its prompt is unchanged.
     assert _reviewer_brief(ReviewerSpec(name="code-quality")) == ""
+
+
+def test_reviewer_templates_carry_the_artifacts_note_slot() -> None:
+    # #283 slice 2: collected gate artifacts (rendered-page screenshots) are
+    # enumerated into BOTH reviewer prompts — round one and re-review — so a
+    # panel evaluating a web UI sees pages, not just the diff.
+    assert "{artifacts_note}" in load_prompt("reviewer_round.md")
+    assert "{artifacts_note}" in load_prompt("reviewer_rereview.md")
