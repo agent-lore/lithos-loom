@@ -13,7 +13,23 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from lithos_loom.plugins.story_develop.config import HANDOFF_DIRNAME
+import pytest
+
+from lithos_loom.plugins.story_develop import engines as _engines
+from lithos_loom.plugins.story_develop import rounds as rounds_mod
+from lithos_loom.plugins.story_develop.agent_session import PauseBudget
+from lithos_loom.plugins.story_develop.check_set import Check, CheckSetResult
+from lithos_loom.plugins.story_develop.config import (
+    HANDOFF_DIRNAME,
+    DevelopConfig,
+    ReviewerSpec,
+)
+from lithos_loom.plugins.story_develop.gate_findings import GateLedger
+from lithos_loom.plugins.story_develop.panel import (
+    PanelRoundResult,
+    ReviewerState,
+    ReviewOutcome,
+)
 from lithos_loom.plugins.story_develop.rounds import commit_round
 
 
@@ -77,3 +93,145 @@ def test_handoff_dirname_matches_the_legacy_delivery_literal() -> None:
     # commit_round(exclude=[HANDOFF_DIRNAME]); pin the constant to the value the
     # literal carried so the drift-fix stays behaviour-preserving.
     assert HANDOFF_DIRNAME == ".handoff"
+
+
+# --- artifact-review pass holds approval (#283 / PR #291 review) --------------
+
+
+def _passed(reviewer: str = "correctness") -> ReviewOutcome:
+    return ReviewOutcome(
+        reviewer=reviewer, status="LGTM", passed=True, max_severity=None
+    )
+
+
+def _failed_outcome(reviewer: str = "correctness") -> ReviewOutcome:
+    return ReviewOutcome(
+        reviewer=reviewer, status="FINDINGS", passed=False, max_severity="major"
+    )
+
+
+def _artifact_ctx(tmp_path: Path, *, collects: bool, panel_passes: bool) -> tuple:
+    """A minimal RoundContext aimed at approval_phase: reviews already passed,
+    one candidate check whose (stubbed) run publishes an artifact when
+    *collects*, and a run_panel_round stub scripted by *panel_passes*."""
+    config = DevelopConfig(
+        repo=tmp_path / "repo",
+        description="x",
+        work_dir=tmp_path / "run",
+        artifacts_path="e2e/artifacts",
+    )
+    panel_calls: list[dict] = []
+
+    def fake_run_check_set(cfg, wt, sha, round_no, checks, ledger):
+        if collects:
+            shots = cfg.artifacts_dir / f"round_{round_no:02d}" / "repo-parity"
+            shots.mkdir(parents=True, exist_ok=True)
+            (shots / "note-320.png").write_text("png")
+        return CheckSetResult(())
+
+    def fake_run_panel_round(cfg, reviewers, **kw):
+        panel_calls.append(kw)
+        outcome = _passed() if panel_passes else _failed_outcome()
+        return PanelRoundResult(
+            round_reviews=[outcome],
+            cost=0.02,
+            interrupted=False,
+            resume_after=None,
+            invalid_reviewer=None,
+        )
+
+    services = rounds_mod.Services(
+        run_turn=lambda **kw: (_ for _ in ()).throw(AssertionError("no turns")),
+        sleep=lambda s: None,
+        start_container=lambda cmd: "cid",
+        stop_container=lambda cid: None,
+        run_check_set=fake_run_check_set,
+    )
+    spec = ReviewerSpec(name="correctness", tool="claude")
+    rstate = ReviewerState(spec, "container", ["cmd"], tmp_path)
+    ctx = rounds_mod.RoundContext(
+        config=config,
+        wt=tmp_path / "repo",
+        base="0" * 40,
+        names=["correctness"],
+        services=services,
+        reviewers=[rstate],
+        coder_container="coder",
+        coder_engine=_engines.get_engine("claude"),
+        coder_timeout=60,
+        reviewer_timeout=60,
+        fast_checks=(),
+        candidate_checks=(
+            Check(
+                name="repo-parity",
+                command="make e2e",
+                state="required",
+                stage="candidate",
+                raw_exit=True,
+            ),
+        ),
+        formatters=[],
+        gate_ledger=GateLedger(),
+        budget=PauseBudget(0),
+        coder_session="s",
+        turn_with_limit_pauses=lambda **kw: None,  # type: ignore[arg-type]
+        run_panel_round=fake_run_panel_round,
+        resume_after_from=lambda t: None,  # type: ignore[arg-type]
+        render_panel_findings=lambda r: "",
+        coder_summary=lambda c, r: "",
+        record_coder_disputes=lambda c, r, n: None,
+        coder_handoff_nudge=lambda r: "",
+    )
+    ctx.final_reviews = [_passed()]
+    ctx.gated_sha = "a" * 40
+    return ctx, panel_calls
+
+
+def test_approval_held_for_artifact_pass_then_sealed(tmp_path: Path) -> None:
+    # PR #291 review (High): candidate checks collect screenshots AFTER the
+    # panel; sealing without a reviewer seeing them defeats #283. The pass runs
+    # (artifact_pass=True), LGTMs, and only then does approval seal.
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=True)
+
+    exit_ = rounds_mod.approval_phase(ctx, 1)
+
+    assert [c.get("artifact_pass") for c in panel_calls] == [True]
+    assert exit_ is not None and exit_.status == "approved"
+    assert ctx.review_cost == pytest.approx(0.02)
+
+
+def test_artifact_pass_findings_hold_approval_and_continue(tmp_path: Path) -> None:
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=False)
+
+    exit_ = rounds_mod.approval_phase(ctx, 1)
+
+    assert len(panel_calls) == 1
+    assert exit_ is None  # loop continues; the coder answers the findings
+    assert ctx.final_reviews and ctx.final_reviews[0].passed is False
+
+
+def test_no_new_artifacts_seals_without_extra_pass(tmp_path: Path) -> None:
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+
+    exit_ = rounds_mod.approval_phase(ctx, 1)
+
+    assert panel_calls == []
+    assert exit_ is not None and exit_.status == "approved"
+
+
+def test_unchanged_artifacts_do_not_retrigger_the_pass(tmp_path: Path) -> None:
+    # The no-loop property: after a findings pass, the NEXT approval attempt on
+    # the SAME sha (candidate dedup skips the re-run, artifacts unchanged)
+    # seals without a second artifact pass.
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=True)
+    first = rounds_mod.approval_phase(ctx, 1)
+    assert first is not None and first.status == "approved"
+    assert len(panel_calls) == 1
+
+    # next round: panel passed again (its prompt now includes the artifacts),
+    # same gated sha -> candidate skipped -> artifacts view unchanged
+    ctx.final_reviews = [_passed()]
+    exit_ = rounds_mod.approval_phase(ctx, 2)
+
+    assert len(panel_calls) == 1  # no second pass
+    assert exit_ is not None and exit_.status == "approved"

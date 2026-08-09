@@ -427,8 +427,7 @@ def _run_reviewer_with_reaction(
                 ),
                 prior_review=_prior_review_text(config, round_no, name),
                 review_file=(
-                    review_file
-                    or handoff.reviewer_handoff_name(round_no, name)
+                    review_file or handoff.reviewer_handoff_name(round_no, name)
                 ),
             )
             review, rev_failed, rstate.session = _review_turn(

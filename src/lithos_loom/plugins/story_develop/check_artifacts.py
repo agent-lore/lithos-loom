@@ -142,6 +142,11 @@ def _retire_prior(dest: Path) -> None:
 # collapse to "+N more" (a 4-page x 4-width screenshot matrix is 16 files —
 # enumerable, but a long suite must not drown the prompt).
 _NOTE_FILES_PER_CHECK = 12
+# Total listed-file budget across ALL rounds/checks (PR #291 review): per-check
+# caps alone let many rounds x checks grow every reviewer prompt unboundedly.
+# Spent newest-round-first — the current round's rendering is what approval
+# hinges on; older dirs beyond the budget stay enumerated as count-only lines.
+_NOTE_TOTAL_FILE_BUDGET = 36
 
 
 def render_artifacts_note(config: DevelopConfig) -> str:
@@ -150,27 +155,42 @@ def render_artifacts_note(config: DevelopConfig) -> str:
     Empty string when nothing was collected (the template slot renders blank).
     Paths are the IN-CONTAINER view — ``/workspace/.handoff/artifacts/…`` (the
     read-only mount) — because the reader is an agent inside the container,
-    not the host. Lists every collected round (a re-review can compare an
-    earlier round's rendering against the fix), deterministically ordered,
-    with per-dir file listings capped at :data:`_NOTE_FILES_PER_CHECK`.
+    not the host. Nested files keep their check-relative paths (openable as
+    listed, and duplicate basenames stay distinguishable). Rounds are listed
+    newest first; a total listed-file budget applies across the whole note,
+    with per-dir listings additionally capped — dirs beyond the budget render
+    as count-only lines so nothing is silently hidden.
     """
     root = config.artifacts_dir
     if not root.is_dir():
         return ""
     lines: list[str] = []
-    for round_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+    remaining = _NOTE_TOTAL_FILE_BUDGET
+    for round_dir in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
         for check_dir in sorted(p for p in round_dir.iterdir() if p.is_dir()):
-            files = sorted(p.name for p in check_dir.rglob("*") if p.is_file())
+            files = sorted(
+                p.relative_to(check_dir).as_posix()
+                for p in check_dir.rglob("*")
+                if p.is_file()
+            )
             if not files:
                 continue
             mount = (
                 f"{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}/artifacts/"
                 f"{round_dir.name}/{check_dir.name}"
             )
-            shown = files[:_NOTE_FILES_PER_CHECK]
-            extra = len(files) - len(shown)
-            listing = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
-            lines.append(f"- `{mount}/` — {len(files)} file(s): {listing}")
+            cap = min(_NOTE_FILES_PER_CHECK, remaining)
+            shown = files[:cap]
+            remaining -= len(shown)
+            if shown:
+                extra = len(files) - len(shown)
+                listing = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
+                lines.append(f"- `{mount}/` — {len(files)} file(s): {listing}")
+            else:
+                lines.append(
+                    f"- `{mount}/` — {len(files)} file(s) "
+                    "(listing omitted — prompt budget; older round)"
+                )
     if not lines:
         return ""
     return (
