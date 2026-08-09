@@ -22,6 +22,7 @@ path validation is not filesystem-boundary enforcement, and host-side writes
 into agent-writable directories cross the container trust boundary. Fixed in
 #289 (host-controlled artifacts dir + RO nested mount + followlinks=False walk).
 """
+ac_provenance = "synthetic"
 repo = "."
 base = "78b650a2ad649848978e1c47ec70633aff92d301"
 head_patch = "feature-with-defect.patch"

@@ -91,6 +91,7 @@ head_patch = "reintroduce-defect.patch"   # applied to base -> the buggy head
 personas = ["correctness"]                # validated at load (a typo fails closed)
 profile = "standard"                      # selects the check-set; validated at load
 acceptance_criteria_file = "ac.md"
+ac_provenance = "replay"                  # what ac.md IS — see below
 
 # Optional clean pair for the false-positive measurement — its own patch (an
 # independent clean change), or a sha (`head` / `base`), or omit for catch-only.
@@ -107,6 +108,25 @@ mechanism = "prose describing the defect (the LLM-judge keys on this)"
 `load_case` enforces **exactly one** of `head` / `head_patch` (and likewise for the
 known-good); a patch file must exist in the case dir (fail-closed at load). See
 `cases/194-delivery-failure-status/` for a worked example.
+
+### AC provenance — say what the criteria ARE
+
+A case's *patch* should always be the authentic historical diff, but its `ac.md`
+may not be the authentic review input, and that changes what a catch/miss on the
+case measures. Declare it with `ac_provenance`:
+
+- **`replay`** — ac.md is the authentic criteria the original review context had
+  (e.g. the real Lithos task body).
+- **`trimmed`** — an authentic source edited to isolate the measured escape; the
+  case `description` must document **every** trim and why (each trimmed clause
+  is one the head genuinely didn't satisfy, so leaving it in would let a
+  reviewer be scored a miss while reporting a real unmet criterion). Findings
+  against trimmed-away criteria are fixture noise, not signal.
+- **`synthetic`** — written for the fixture, typically because no authentic AC
+  existed (e.g. a hand-developed PR that never went through a panel).
+
+Unknown values fail at load; omitting the field is allowed only for legacy
+sha-era cases (new patch-form cases must declare it — gate-enforced).
 
 ### Cross-repo cases (escapes from customer projects)
 

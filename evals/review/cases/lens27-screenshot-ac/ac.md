@@ -8,16 +8,15 @@ run and see the UI, not just read diffs.
    small fixture dataset (notes, tasks, edges, a contradicts pair). No live
    Lithos required.
 
-2. **Playwright smoke suite** (`make e2e`): every top-level route renders with
-   no console errors; at least one key click-through interaction is exercised;
-   screenshots at 320/768/1024/1440 written to an artifacts dir.
+2. **Playwright smoke suite** (`make e2e`): every top-level route renders from
+   the seeded fixtures; at least one key click-through interaction is
+   exercised; screenshots at 320/768/1024/1440 written to an artifacts dir.
 
-3. **Dependency + environment contract.** Pin playwright to the 1.62.x line —
-   it must stay compatible with the browser + OS deps baked into the
-   ralph-sandbox:python-ui gate image, which pins playwright 1.62.0 and bakes
-   the browser cache at `PLAYWRIGHT_BROWSERS_PATH=/opt/playwright`. `make e2e`
-   installs the pinned browser when absent — a no-op against the image's baked
-   cache.
+3. **Dependency + environment contract.** Declare playwright as a
+   dev-dependency of the e2e suite, compatible with the browser + OS deps
+   baked into the ralph-sandbox:python-ui gate image (playwright 1.62.0,
+   browser cache at `PLAYWRIGHT_BROWSERS_PATH=/opt/playwright`). `make e2e`
+   installs the browser when absent — a no-op against the image's baked cache.
 
 4. **Make target, kept OUT of `make check`.** `make e2e` runs the suite
    headless so the fast gate stays fast. Gate integration happens via the

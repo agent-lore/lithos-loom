@@ -19,6 +19,7 @@ against unchanged code it interacts with (the stylesheet the changed template
 class still hits) — the cross-file lifecycle discipline the panel prompts
 demand. Caught by the codex external backstop; fixed in lens 734e5ef.
 """
+ac_provenance = "replay"
 repo = "../lithos-lens"
 base = "dd8c78a80aadedf66915082638f426062b40035b"
 head_patch = "feature-with-defect.patch"
