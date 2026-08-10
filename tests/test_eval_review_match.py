@@ -380,3 +380,86 @@ def test_confidence_unrelated_finding_matches_neither_expected() -> None:
     score = score_run(_confidence_case(), _confidence_report(_UNRELATED_RATIONALE))
     assert score.caught is False
     assert [m.caught for m in score.matches] == [False, False]
+
+
+# ── shipped lens34 case: false-truncation vs overlap-ordering score separately ─
+# (same partial-catch semantics as 289-symlink / lens33 — a limit check fixes
+# the false banner but not the elif ordering, and vice versa).
+
+_FRONTIER_FILE = "src/lithos_lens/frontier.py"
+
+_TRUNCATION_ONLY_RATIONALE = (
+    "truncated is inferred from unclassified rows without ever checking that a "
+    "response actually reached frontier_limit, so read-skew between the three "
+    "independent reads renders a false truncation warning"
+)
+_OVERLAP_ONLY_RATIONALE = (
+    "a task returned by both frontier responses is silently classified Ready "
+    "because the elif chain tests the ready set first — a contested row is "
+    "shown as workable with no warning"
+)
+
+
+def _frontier_case() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "lens34-truncation")
+
+
+def _frontier_report(*rationales: str) -> dict:
+    return {
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS",
+                "findings": [
+                    _finding("major", [_FRONTIER_FILE], r, fid=f"f-{i:03d}")
+                    for i, r in enumerate(rationales, start=1)
+                ],
+            }
+        ]
+    }
+
+
+def test_frontier_case_has_two_expected_defects() -> None:
+    assert len(_frontier_case().expected) == 2
+
+
+def test_frontier_truncation_only_finding_is_a_partial_miss() -> None:
+    score = score_run(_frontier_case(), _frontier_report(_TRUNCATION_ONLY_RATIONALE))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [True, False]
+
+
+def test_frontier_overlap_only_finding_is_a_partial_miss() -> None:
+    score = score_run(_frontier_case(), _frontier_report(_OVERLAP_ONLY_RATIONALE))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [False, True]
+
+
+def test_frontier_both_forms_as_separate_findings_is_caught() -> None:
+    score = score_run(
+        _frontier_case(),
+        _frontier_report(_TRUNCATION_ONLY_RATIONALE, _OVERLAP_ONLY_RATIONALE),
+    )
+    assert score.caught is True
+
+
+def test_frontier_one_comprehensive_finding_catches_both() -> None:
+    score = score_run(
+        _frontier_case(),
+        _frontier_report(
+            _TRUNCATION_ONLY_RATIONALE + "; worse, " + _OVERLAP_ONLY_RATIONALE
+        ),
+    )
+    assert score.caught is True
+
+
+def test_frontier_unrelated_finding_matches_neither_expected() -> None:
+    score = score_run(
+        _frontier_case(),
+        _frontier_report(
+            "the master-open read in frontier.py should paginate instead of "
+            "loading every open task in one call"
+        ),
+    )
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [False, False]

@@ -1,0 +1,74 @@
+[case]
+id = "lens34-truncation"
+description = """
+lens PR #34 escape (T1-S2, story-develop run 4b285595: FIVE internal rounds,
+correctness + security, zero findings, $31.75 — and the escape still shipped):
+the frontier join treats three independent concurrent reads (master-open,
+ready, blocked) as a coherent snapshot. Two distinct consequences at the
+delivered head 5151c2b, both caught by the external round-1 review (which
+reproduced them), neither by the panel:
+
+(1) `truncated = frontier_ok and bool(partition["unclassified"])` — the
+truncation banner fires from ANY unclassified row without ever checking
+whether a frontier response actually reached frontier_limit, so pure read-skew
+(a task created/completed/blocked between the reads) renders a false
+"frontier truncated at 500" warning.
+
+(2) The classify chain tests `task.id in ready_ids` BEFORE `task.id in
+blocked_map`, so a task returned by BOTH frontiers (same race class) is
+silently classified Ready — a contested row presented as "unclaimed and
+workable now" with no retry, no warning.
+
+The two consequences are INDEPENDENTLY REMEDIABLE — a limit check fixes the
+false banner but not the overlap ordering; overlap handling fixes neither
+banner semantics — so they are two [[expected]] defects with the
+289-symlink/lens33 partial-catch semantics. Fixed across lens 92eb79e/
+d5012ae/37b343a (limit-fact truncation, one-generation retry of all three
+reads, render-effective overlap → conservative Blocked + reconciliation
+banner) — the entire reconciliation design emerged from four external review
+rounds after the panel approved this diff.
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
+diff as the panel approved it (base = lens main a429e8e post-K1-S2, the
+branch's true merge-base; patch = delivered head 5151c2b, pre-rebase).
+"""
+ac_provenance = "replay"
+repo = "../lithos-lens"
+base = "a429e8e952359011fdcdc039e24255ba1d77559b"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_lens/frontier.py"
+keywords = ["truncat", "frontier_limit", "reached the limit", "hit the limit"]
+min_severity = "minor"
+mechanism = """
+FALSE-TRUNCATION form: `truncated` is computed as "both frontier reads
+succeeded AND some open task is in neither frontier response" — it never
+verifies that either response actually returned frontier_limit rows. The
+master-open, ready, and blocked calls are independent reads, not a snapshot: a
+task created, completed, or newly blocked between them is legitimately absent
+from both frontier lists with no limit involved, yet the dashboard then shows
+a false "frontier truncated" accuracy warning to the operator. The finding
+must identify that the truncation signal is inferred from unclassified rows
+rather than from a response actually reaching the configured limit (read-skew
+misreported as truncation).
+"""
+
+[[expected]]
+file = "src/lithos_lens/frontier.py"
+keywords = ["both ready and blocked", "both frontier", "both lists", "both responses", "overlap", "contested"]
+min_severity = "major"
+mechanism = """
+OVERLAP-ORDERING form: the section classifier checks membership in the ready
+set BEFORE the blocked map, so a task id returned by BOTH frontier responses —
+the same concurrent-read race class — is silently classified Ready. A
+contested row is presented to the operator as "unclaimed and workable now"
+with no retry, no warning, and no indication the two reads disagreed; the
+blocked evidence (including its blocker chips) is discarded by branch order.
+The finding must identify that ready/blocked overlap is possible across
+independent reads and is resolved silently by elif ordering instead of being
+treated as an inconsistent snapshot.
+"""
