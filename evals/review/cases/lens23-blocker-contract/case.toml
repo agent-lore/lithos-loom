@@ -1,0 +1,70 @@
+[case]
+id = "lens23-blocker-contract"
+description = """
+lens PR #23 escape (T1-S1, story-develop run 9219120e, 4 rounds): the
+foundational graph-reads client shipped with TWO invented pieces of the
+Lithos contract, both caught only by the external review reading the real
+Lithos source (the first of the three consecutive invented-payload escapes
+that motivated the vendored-contracts work, lens#31/#36):
+
+(1) BlockerRecord models fields the tool never returns — the normalizer reads
+`title` / `gate_type` (and drops the real payload's `type` / `message`), so
+against a real server every blocker renders with empty/placeholder text. The
+fake, written by the same agent from the same guess, reproduces the invented
+shape — tests green, contract self-referential.
+
+(2) `with_claims` is only sent when True (`if with_claims:
+arguments["with_claims"] = True`) — but upstream lithos_task_ready/task_list
+DEFAULT with_claims to true, so omitting the flag silently INVERTS lens's
+False default. No error at any layer, ever: the server treats omission as a
+valid call.
+
+Independently remediable (fixing the record fields doesn't touch the argument
+omission and vice versa — the historical fix 93b8d84 did both explicitly) →
+two [[expected]] defects, partial-catch semantics per the established
+convention. NOTE: this head predates the vendored contracts (#36), so the
+case measures the NO-CONTRACTS baseline arm; a re-seated post-#36 variant is
+the contract-grounded-persona lever arm (RH-4 second half).
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
+diff as the panel approved it (base = merge-base 169d687; patch = last
+story-develop round head 1fc46fea).
+"""
+ac_provenance = "replay"
+repo = "../lithos-lens"
+base = "169d687eaae6b74d39d4001b5246294d171cfbe7"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_lens/tasks.py"
+keywords = ["gate_type", "never returns", "does not return", "not in the payload", "invented field"]
+min_severity = "major"
+mechanism = """
+INVENTED-FIELDS form: BlockerRecord (and its normalizer) models blocker rows
+with fields the real lithos_task_blocked payload does not contain — `title`
+and `gate_type` on blocker entries — while dropping the fields the tool
+actually returns (`type`, `message`). Against a real server every blocker
+normalizes to empty/default values, so blocked-task rendering is hollow; the
+tests pass because the fake reproduces the same invented shape. The finding
+must identify that the blocker payload shape was assumed rather than taken
+from the Lithos tool contract — the reviewer has no vendored reference at
+this head, so the catch requires distrusting an unverifiable shape.
+"""
+
+[[expected]]
+file = "src/lithos_lens/lithos_client.py"
+keywords = ["with_claims", "default", "omit", "only sent when"]
+min_severity = "major"
+mechanism = """
+DEFAULT-INVERSION form: the client sends `with_claims` only when it is True
+(`if with_claims: arguments["with_claims"] = True`). Upstream
+lithos_task_ready / lithos_task_list default `with_claims` to TRUE, so
+omitting the argument when lens wants False silently inverts the semantics —
+the server returns claims lens did not ask for, and lens's False default is
+never actually honoured. No layer ever errors: omission is a valid call. The
+finding must identify that omitting a default-sensitive argument delegates
+the choice to an upstream default that disagrees with the local one.
+"""
