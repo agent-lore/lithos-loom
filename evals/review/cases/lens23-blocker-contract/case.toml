@@ -56,7 +56,7 @@ this head, so the catch requires distrusting an unverifiable shape.
 
 [[expected]]
 file = "src/lithos_lens/lithos_client.py"
-keywords = ["with_claims", "default", "omit", "only sent when"]
+keywords = ["with_claims", "only sent when", "sent only when", "inverted", "inverts"]
 min_severity = "major"
 mechanism = """
 DEFAULT-INVERSION form: the client sends `with_claims` only when it is True

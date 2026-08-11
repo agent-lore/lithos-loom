@@ -51,7 +51,7 @@ assumed rather than verified against the tool's accepted surface.
 
 [[expected]]
 file = "src/lithos_lens/knowledge.py"
-keywords = ["nested", "outgoing", "incoming", "flat"]
+keywords = ["nest", "links.outgoing", "links.incoming", "flat"]
 min_severity = "major"
 mechanism = """
 INVENTED-FLAT-SHAPE form: normalize_related reads top-level flat lists —

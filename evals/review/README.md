@@ -109,6 +109,18 @@ mechanism = "prose describing the defect (the LLM-judge keys on this)"
 known-good); a patch file must exist in the case dir (fail-closed at load). See
 `cases/194-delivery-failure-status/` for a worked example.
 
+Keywords are substring-matched (case-insensitive) against the finding's
+rationale + files, so keep them **discriminative**: prefer exact identifiers
+(`with_claims`, `frontier_limit`) and multi-word phrases over generic terms
+(`default`, `incoming` — both burned us in review), and watch substring traps
+(`"inf"` ⊂ "insufficient"). Every new case should ship scoring tests in
+`tests/test_eval_review_match.py` including at least one **same-file negative**
+per expected — a plausibly-wordable unrelated finding that must NOT match —
+since a topic-adjacent structured match silently inflates `--no-judge` numbers.
+The LLM judge (the default, authoritative scorer per ADR 0005) keys on
+`mechanism` prose instead; keyword precision matters for `--no-judge` runs and
+offline re-scoring of stored reports.
+
 ### AC provenance — say what the criteria ARE
 
 A case's *patch* should always be the authentic historical diff, but its `ac.md`

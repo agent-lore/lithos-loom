@@ -254,7 +254,8 @@ class _SplitCase:
     file_b: str  # expected[1]'s file
     only_a: str  # representative finding catching ONLY expected[0]
     only_b: str  # representative finding catching ONLY expected[1]
-    unrelated: str  # same-file finding that must match NEITHER
+    unrelated_a: str  # finding on file_a that must match NEITHER expected
+    unrelated_b: str  # finding on file_b that must match NEITHER expected
 
 
 _CHECK_RUNNER = "src/lithos_loom/plugins/story_develop/check_runner.py"
@@ -279,9 +280,13 @@ _SPLIT_CASES = (
             "pre-create the predictable round/check path as a symlink and the "
             "host writes through it onto arbitrary host files"
         ),
-        unrelated=(
+        unrelated_a=(
             "the collector in check_runner.py logs at warning level for every "
             "skipped file which will be noisy on large artifact sets"
+        ),
+        unrelated_b=(
+            "check_runner.py rereads result.json once per round instead of "
+            "caching the parsed document"
         ),
     ),
     _SplitCase(
@@ -298,9 +303,13 @@ _SPLIT_CASES = (
             "with ValueError inside template rendering, crashing the whole "
             "note page"
         ),
-        unrelated=(
+        unrelated_a=(
             "the confidence chip has insufficient colour contrast against the "
             "surface background and should meet WCAG AA"
+        ),
+        unrelated_b=(
+            "the metadata table sorts keys alphabetically so confidence sits "
+            "below tags; consider preserving source order"
         ),
     ),
     _SplitCase(
@@ -318,9 +327,13 @@ _SPLIT_CASES = (
             "Ready because the elif chain tests the ready set first — a "
             "contested row is shown as workable with no warning"
         ),
-        unrelated=(
+        unrelated_a=(
             "the master-open read in frontier.py should paginate instead of "
             "loading every open task in one call"
+        ),
+        unrelated_b=(
+            "the ready table re-renders fully on every SSE event and should "
+            "diff rows instead"
         ),
     ),
     _SplitCase(
@@ -338,9 +351,16 @@ _SPLIT_CASES = (
             "True — but upstream defaults it to true, so lens's False default "
             "is silently inverted"
         ),
-        unrelated=(
+        unrelated_a=(
             "the normalizer in tasks.py reparses ISO timestamps per row and "
             "should cache the parse"
+        ),
+        # The review-round hazard: an omitted-default finding on the client
+        # must not satisfy the with_claims expected now that the generic
+        # "default"/"omit" keywords are gone.
+        unrelated_b=(
+            "the client omits a request timeout so a hung server blocks the "
+            "TUI indefinitely; the default httpx timeout should be overridden"
         ),
     ),
     _SplitCase(
@@ -357,9 +377,16 @@ _SPLIT_CASES = (
             "payload nests rows under links.outgoing and links.incoming, so "
             "every section renders empty"
         ),
-        unrelated=(
+        unrelated_a=(
             "the title fan-out in lithos_client.py awaits reads sequentially "
             "and should batch them"
+        ),
+        # The review-round hazard: an incoming-title observation on
+        # knowledge.py must not satisfy the nested-shape expected now that the
+        # bare "incoming" keyword is the dotted links.incoming form.
+        unrelated_b=(
+            "normalize_related repeats the incoming-title lookup for every "
+            "row sequentially; results should be memoized per id"
         ),
     ),
 )
@@ -447,6 +474,52 @@ def test_split_case_one_comprehensive_finding_catches_both(
 def test_split_case_unrelated_finding_matches_neither_expected(
     spec: _SplitCase,
 ) -> None:
-    score = score_run(_split_case(spec), _split_report((spec.file_a, spec.unrelated)))
+    # Both defect files get a negative: for the cross-file cases the second
+    # expected's keyword precision is otherwise never exercised.
+    for file, rationale in (
+        (spec.file_a, spec.unrelated_a),
+        (spec.file_b, spec.unrelated_b),
+    ):
+        score = score_run(_split_case(spec), _split_report((file, rationale)))
+        assert score.caught is False
+        assert [m.caught for m in score.matches] == [False, False]
+
+
+# ── lens30: single-expected precision ─────────────────────────────────────────
+# One topic-adjacent structured match flips the whole case, so its keyword set
+# gets a positive/negative pair of its own.
+
+
+def _lens30() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "lens30-list-envelope")
+
+
+def test_lens30_envelope_finding_is_caught() -> None:
+    score = score_run(
+        _lens30(),
+        _split_report(
+            (
+                _LENS_CLIENT,
+                "list_notes reads response rows from invented keys but the "
+                "tool's only container key is items, so every disambiguation "
+                "lookup yields an empty candidate list",
+            )
+        ),
+    )
+    assert score.caught is True
+
+
+def test_lens30_topic_adjacent_finding_is_not_a_catch() -> None:
+    # A same-file pagination finding wordable as "returns every document"
+    # must not satisfy the envelope expected.
+    score = score_run(
+        _lens30(),
+        _split_report(
+            (
+                _LENS_CLIENT,
+                "list_notes returns every document without pagination and "
+                "should pass a limit",
+            )
+        ),
+    )
     assert score.caught is False
-    assert [m.caught for m in score.matches] == [False, False]

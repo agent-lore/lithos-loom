@@ -33,7 +33,7 @@ acceptance_criteria_file = "ac.md"
 
 [[expected]]
 file = "src/lithos_lens/lithos_client.py"
-keywords = ["items", "notes", "documents", "envelope", "container key", "wrong key"]
+keywords = ["items", "envelope", "container key", "wrong key", "misread"]
 min_severity = "major"
 mechanism = """
 INVENTED-ENVELOPE form: list_notes reads the lithos_list response rows from
