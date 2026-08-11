@@ -535,27 +535,32 @@ def test_review_invalid_when_never_well_formed(
     assert result.review.passed is False
 
 
-def test_review_invalid_when_turn_fails_even_with_parseable_file(
+def test_failed_turn_with_valid_handoff_is_salvaged(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    # A failed reviewer turn that left a *valid* handoff must NOT be accepted.
-    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM, "ok": False}])
+    # #298 artifact-first salvage: a reviewer turn that dies on infra (non-
+    # usage-limit) AFTER writing a valid handoff no longer discards the round —
+    # the artifact is authoritative, and no correction retry burns a turn.
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM, "ok": False}])
     result = develop_mod.develop(config)
-    assert result.status == "failed"
-    assert result.review is not None and result.review.status == "invalid"
+    assert result.status == "approved"
+    assert result.review is not None and result.review.status == "LGTM"
+    assert state["review_calls"] == [(1, False, False)]  # no extra turn
 
 
-def test_review_invalid_when_retry_turn_fails(
+def test_failed_retry_turn_with_valid_rewrite_is_salvaged(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
+    # #298: the correction retry rewrote a valid handoff and THEN died — the
+    # rewritten artifact is re-read rather than discarded with the retry.
     _install_fakes(
         monkeypatch,
         config,
         reviews=[{"text": _GARBAGE, "retry_text": _LGTM, "retry_ok": False}],
     )
     result = develop_mod.develop(config)
-    assert result.status == "failed"
-    assert result.review is not None and result.review.status == "invalid"
+    assert result.status == "approved"
+    assert result.review is not None and result.review.status == "LGTM"
 
 
 # --- coder failure modes (no review, no commit) -----------------------------
