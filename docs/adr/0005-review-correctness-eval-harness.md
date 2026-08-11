@@ -208,7 +208,27 @@ decision to **measure before reducing**: the eval can't yet *exhibit* the live #
 #181-hardened, and review-only strips the coder/multi-round context), so the first slice is
 to build *harder* cases / live-loop measurement, not a panel change. See [ADR 0006](0006-review-variance-measure-before-reducing.md).
 
-## Deferred
+## Update (2026-08-11, RH-6): case tiers — frontier headline vs saturated floor
+
+The 2026-08 baseline (10 cases × K=5, then 14 after the contract cases) showed
+the benchmark had split into two populations: five legacy cases saturated at
+5/5 — with panel prompts tuned in their presence during the #181 arc — plus
+`lens27-screenshot-ac` (5/5, validating the #208 AC-checklist), versus eight
+discriminating cases at 0–3/5 (the blind-spot and variance classes). Any
+aggregate over all cases flatters every future A/B with ~30 free catches, and
+"which cases count" lived only in convention.
+
+The split is now tooling-enforced: `case.toml` declares `tier = "floor" |
+"frontier"` (loader-validated like `ac_provenance`; optional mid-authoring,
+gate-required on every shipped case, undeclared treated as frontier so a case
+never opts into the floor silently). `eval review` reports a **pooled frontier
+catch-rate** (per-sample catches summed across frontier cases, Wilson CI) as
+the headline, renders floor rows as `ok`/`REGRESSED`, and **exits 1 iff a
+floor case falls below the bar or a case has no valid samples** — a frontier
+FAIL is the measurement, not a failure of the run, so the exit code now means
+"regression" and is usable by A/B wrappers. The tiering criterion is
+saturation, not age: a case moves to floor once it sits at 5/5 and prompt work
+has happened in its presence. Per-case `summary.json` carries the tier.
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
   its fix differing by *only* the defect) so the false-positive measurement is

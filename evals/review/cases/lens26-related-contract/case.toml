@@ -28,6 +28,7 @@ diff as the panel approved it (base = merge-base 6e16f9c; patch = last
 story-develop round head 304b8fb).
 """
 ac_provenance = "replay"
+tier = "frontier"       # discriminating at the 2026-08 baseline — headline signal
 repo = "../lithos-lens"
 base = "6e16f9c35b6167eb8de7ddbd060ab0751f4f36bf"
 head_patch = "feature-with-defect.patch"

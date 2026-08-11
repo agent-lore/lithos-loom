@@ -21,6 +21,7 @@ import typer
 from .case import load_case
 from .harness import DEFAULT_BAR, DEFAULT_K, CaseResult, ReportSink, run_case
 from .judge import build_agent_judge
+from .stats import wilson_interval
 
 eval_app = typer.Typer(
     name="eval",
@@ -72,23 +73,40 @@ def review(
         _DEFAULT_CASES_DIR, "--cases-dir", help="Directory of case folders."
     ),
 ) -> None:
-    """Measure the panel's catch-rate on the seeded-defect benchmark."""
+    """Measure the panel's catch-rate on the seeded-defect benchmark.
+
+    Cases score in two tiers (RH-6): the headline pools catches over
+    **frontier** cases only; **floor** cases (saturated) are a regression gate.
+    Exit 1 iff a floor case falls below the bar or a case has no valid samples
+    (all-errored infra failure) — a frontier FAIL is the measurement, not a
+    failure of the run.
+    """
     case_dirs = _discover(cases_dir, case)
 
     judge_fn = build_agent_judge(tool=judge_tool) if judge else None
     sink = _make_report_sink(report_dir) if report_dir is not None else None
 
-    results = []
+    results: list[tuple[str, CaseResult]] = []
     for case_dir in case_dirs:
         loaded = load_case(case_dir)
+        # Undeclared tier counts as frontier: a case never silently opts INTO
+        # the floor (the shipped-case gate test forces a declaration anyway).
+        tier = loaded.tier or "frontier"
         typer.echo(f"running {loaded.id} × {k} …", err=True)
         result = run_case(loaded, k=k, bar=bar, judge=judge_fn, report_sink=sink)
-        results.append(result)
+        results.append((tier, result))
         if report_dir is not None:
-            _write_summary(report_dir, result)
+            _write_summary(report_dir, result, tier)
 
     _print_table(results)
-    if any(not r.passed for r in results):
+    floor_regressed = any(t == "floor" and not r.passed for t, r in results)
+    no_valid = [r.case_id for _, r in results if r.n - sum(r.errored_per_sample) == 0]
+    if no_valid:
+        typer.echo(
+            f"no valid samples (reviewer infra failure): {', '.join(no_valid)}",
+            err=True,
+        )
+    if floor_regressed or no_valid:
         raise typer.Exit(1)
 
 
@@ -105,7 +123,7 @@ def _make_report_sink(report_dir: Path) -> ReportSink:
     return sink
 
 
-def _write_summary(report_dir: Path, r: CaseResult) -> None:
+def _write_summary(report_dir: Path, r: CaseResult, tier: str) -> None:
     """Write a per-case ``summary.json`` (rates + per-sample booleans + CIs).
 
     Beside the per-run ``buggy-N.json`` files, so a costly K-sample run is
@@ -120,6 +138,7 @@ def _write_summary(report_dir: Path, r: CaseResult) -> None:
         json.dumps(
             {
                 "case": r.case_id,
+                "tier": tier,
                 "k": r.n,
                 "n_valid": r.n - errored,
                 "errored": errored,
@@ -152,19 +171,25 @@ def _err_suffix(n: int) -> str:
     return f" +{n}err" if n else ""
 
 
-def _print_table(results: list[CaseResult]) -> None:
+def _print_table(results: list[tuple[str, CaseResult]]) -> None:
     header = (
-        f"{'case':<28} {'n':>3} {'catch (95% CI)':>20} "
+        f"{'case':<28} {'tier':<8} {'n':>3} {'catch (95% CI)':>20} "
         f"{'sev':>5} {'fp (95% CI)':>20}  result"
     )
     typer.echo(header)
     typer.echo("-" * len(header))
-    for r in results:
+    # (caught, n_valid) per case, keyed by tier, for the roll-up lines.
+    tallies: dict[str, list[tuple[CaseResult, int, int]]] = {
+        "floor": [],
+        "frontier": [],
+    }
+    for tier, r in results:
         # Denominators are the VALID (non-errored) samples; errored counts are
         # shown separately so a crashed reviewer never deflates a rate (#182 A3).
         n_err = sum(r.errored_per_sample)
         n_valid = r.n - n_err
         caught = sum(r.caught_per_sample)
+        tallies[tier].append((r, caught, n_valid))
         catch_cell = (
             f"{caught}/{n_valid} {_ci_band(*r.catch_rate_ci)}{_err_suffix(n_err)}"
         )
@@ -187,8 +212,39 @@ def _print_table(results: list[CaseResult]) -> None:
             )
         else:
             fp_cell = f"{r.false_positive_rate * 100:.0f}%"
-        mark = "PASS" if r.passed else "FAIL"
+        # Floor rows read ok/REGRESSED — the floor is a regression gate, not a
+        # pass/fail measurement (RH-6).
+        if tier == "floor":
+            mark = "ok" if r.passed else "REGRESSED"
+        else:
+            mark = "PASS" if r.passed else "FAIL"
         typer.echo(
-            f"{r.case_id:<28} {r.n:>3} {catch_cell:>20} "
+            f"{r.case_id:<28} {tier:<8} {r.n:>3} {catch_cell:>20} "
             f"{r.severity_correctness * 100:>4.0f}% {fp_cell:>20}  {mark}"
         )
+    _print_rollups(tallies)
+
+
+def _plural(word: str, n: int) -> str:
+    return word if n == 1 else f"{word}s"
+
+
+def _print_rollups(tallies: dict[str, list[tuple[CaseResult, int, int]]]) -> None:
+    """The two tier roll-up lines (RH-6): frontier headline, floor gate."""
+    frontier = tallies["frontier"]
+    if frontier:
+        caught = sum(c for _, c, _ in frontier)
+        valid = sum(v for _, _, v in frontier)
+        ci = wilson_interval(caught, valid) if valid else (0.0, 0.0)
+        typer.echo(
+            f"frontier: {caught}/{valid} pooled catch (95% CI {_ci_band(*ci)}) "
+            f"over {len(frontier)} {_plural('case', len(frontier))}"
+        )
+    floor = tallies["floor"]
+    if floor:
+        regressed = [(r, c, v) for r, c, v in floor if not r.passed]
+        if regressed:
+            detail = ", ".join(f"{r.case_id} {c}/{v}" for r, c, v in regressed)
+            typer.echo(f"floor: REGRESSED — {detail}")
+        else:
+            typer.echo(f"floor: OK ({len(floor)} {_plural('case', len(floor))} at bar)")

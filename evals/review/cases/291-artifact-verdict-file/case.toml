@@ -19,6 +19,7 @@ backstop reading the data flow write-site -> read-site; fixed in #291 (initial
 call forwards the override + non-stubbed conflicting-verdicts test).
 """
 ac_provenance = "synthetic"
+tier = "frontier"       # discriminating at the 2026-08 baseline — headline signal
 repo = "."
 base = "da1444137352555fa025dfc90687e5e083ae16b4"
 head_patch = "feature-with-defect.patch"

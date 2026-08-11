@@ -303,3 +303,40 @@ def test_every_shipped_case_declares_ac_provenance() -> None:
         assert case.ac_provenance is not None, (
             f"{case.id}: declare ac_provenance (replay | trimmed | synthetic)"
         )
+
+
+# ── tier: saturated regression floor vs discriminating frontier (RH-6) ──
+# A "floor" case is saturated (and the panel prompts may have been tuned in its
+# presence), so it contributes a regression gate, never headline signal; a
+# "frontier" case is what the headline catch-rate is measured over.
+
+
+def test_tier_loads_when_declared(tmp_path: Path) -> None:
+    toml = _SEED_TOML.replace('id = "180', 'tier = "floor"\nid = "180')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    assert load_case(case_dir).tier == "floor"
+
+
+def test_tier_defaults_to_none(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_SEED_TOML)
+    assert load_case(case_dir).tier is None
+
+
+def test_tier_rejects_unknown_value(tmp_path: Path) -> None:
+    toml = _SEED_TOML.replace('id = "180', 'tier = "legacy"\nid = "180')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="tier"):
+        load_case(case_dir)
+
+
+def test_every_shipped_case_declares_tier() -> None:
+    # EVERY shipped case must place itself in a tier — no ID allowlist, so a
+    # future saturated case can't silently keep padding the headline. (The
+    # loader keeps the field optional only for cases mid-authoring outside the
+    # shipped set; the CLI treats undeclared as frontier.)
+    for case_dir in _shipped_case_dirs():
+        case = load_case(case_dir)
+        assert case.tier is not None, f"{case.id}: declare tier (floor | frontier)"
