@@ -1,0 +1,64 @@
+[case]
+id = "lens26-related-contract"
+description = """
+lens PR #26 escape (K1-S4 related panel, story-develop run 3fabbed9, 4
+rounds): the second consecutive invented-payload escape (after lens PR #23,
+before #30 — the run that motivated lens#31/#36). The panel approved a related
+panel whose every real-server interaction was wrong end to end:
+
+(1) The lithos_related call sends a PHANTOM argument — `agent_id` — that the
+tool does not accept (real signature: id / include / depth / namespace).
+FastMCP rejects unexpected arguments outright, so against a real server the
+call fails wholesale and the panel renders nothing.
+
+(2) normalize_related reads an INVENTED FLAT payload — raw.get("links"),
+raw.get("backlinks") — where the real tool returns a NESTED shape:
+links.outgoing / links.incoming (with to_id / from_id endpoints). Even with a
+successful call, every section normalizes to empty.
+
+The fake reproduces both inventions, so the suite is green — the contract is
+self-referential. Caught only by the external round-1 review reading the real
+Lithos read_search.py. Independently remediable (dropping the phantom arg
+doesn't fix the flat read; historical fix bc211d45 did both: "real
+lithos_related contract — nested payload + exact tool args") → two
+[[expected]] defects. NO-CONTRACTS baseline arm (head predates #36).
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
+diff as the panel approved it (base = merge-base 6e16f9c; patch = last
+story-develop round head 304b8fb).
+"""
+ac_provenance = "replay"
+repo = "../lithos-lens"
+base = "6e16f9c35b6167eb8de7ddbd060ab0751f4f36bf"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_lens/lithos_client.py"
+keywords = ["agent_id", "does not accept", "unexpected argument", "rejects", "phantom"]
+min_severity = "major"
+mechanism = """
+PHANTOM-ARGUMENT form: the lithos_related call includes an `agent_id`
+argument the tool does not accept — the real signature is id / include /
+depth / namespace only. FastMCP rejects calls carrying unexpected arguments,
+so against a real Lithos server EVERY related-panel request fails outright;
+the feature works only against the fake, which was written to accept the same
+invented argument. The finding must identify that the request arguments were
+assumed rather than verified against the tool's accepted surface.
+"""
+
+[[expected]]
+file = "src/lithos_lens/knowledge.py"
+keywords = ["nest", "links.outgoing", "links.incoming", "flat"]
+min_severity = "major"
+mechanism = """
+INVENTED-FLAT-SHAPE form: normalize_related reads top-level flat lists —
+raw.get("links"), raw.get("backlinks") — but the real lithos_related response
+nests link rows under links.outgoing / links.incoming (with to_id / from_id
+endpoint keys). Against a real payload every section normalizes to empty and
+the panel renders blank; the fake returns the same invented flat shape, so
+tests are green. The finding must identify that the response payload shape
+was invented rather than taken from the real tool's nested structure.
+"""

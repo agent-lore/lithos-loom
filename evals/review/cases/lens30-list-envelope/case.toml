@@ -1,0 +1,48 @@
+[case]
+id = "lens30-list-envelope"
+description = """
+lens PR #30 escape (K1-S2 wiki-link resolver, story-develop run 2c9420b9, 3
+rounds): the third consecutive invented-payload escape (after lens PRs #23
+and #26 — this one finally triggered lens#31/#36, the vendored contracts).
+The wiki-link disambiguation step lists candidate notes via lithos_list, and
+the client reads the response rows from INVENTED envelope keys —
+payload.get("notes") / "documents" / "results" — none of which exist. The
+real (and only) container key is `items` (`results` belongs to
+lithos_search, a different tool). Every disambiguation lookup against a real
+server silently returns an empty candidate list — no error at any layer,
+since the response is valid and merely misread — so unresolved wiki-links can
+never disambiguate. The fake returns the invented keys, tests green,
+contract self-referential. Caught by the external review's items-envelope
+round. Fixed in a51eeee5 ("lithos_list reads the real 'items' envelope —
+invented aliases dropped").
+
+Single [[expected]]: one defect site, one remediation. NO-CONTRACTS baseline
+arm (head predates #36).
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
+diff as the panel approved it (base = merge-base 7a51e1c post-#29; patch =
+last story-develop round head 4cbcb19).
+"""
+ac_provenance = "replay"
+repo = "../lithos-lens"
+base = "7a51e1c6cbac251e0b59f58bbcb0ddec51d98137"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_lens/lithos_client.py"
+keywords = ["items", "envelope", "container key", "wrong key", "misread"]
+min_severity = "major"
+mechanism = """
+INVENTED-ENVELOPE form: list_notes reads the lithos_list response rows from
+invented container keys — payload.get("notes"), falling through "documents"
+and "results" — but the tool's only row container is `items` ("results" is
+lithos_search's key, a different tool). A real response is valid and simply
+misread, so the client silently yields an empty list: wiki-link
+disambiguation never produces candidates, with no error anywhere. The fake
+uses the same invented keys, so the suite is green. The finding must identify
+that the response envelope key was assumed/aliased rather than taken from the
+real tool's contract.
+"""

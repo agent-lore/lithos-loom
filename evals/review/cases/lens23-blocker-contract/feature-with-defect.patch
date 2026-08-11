@@ -1,0 +1,1171 @@
+diff --git a/docs/generated/components/Tasks.md b/docs/generated/components/Tasks.md
+index 7f445d9..1a6b84b 100644
+--- a/docs/generated/components/Tasks.md
++++ b/docs/generated/components/Tasks.md
+@@ -11,7 +11,7 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.tasks` | M | 14 | 15 |
++| `lithos_lens.tasks` | L | 17 | 18 |
+ 
+ ## Public API
+ 
+@@ -19,6 +19,9 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - class `SectionState`
+ - class `TaskRecord`
+ - class `ClaimRecord`
++- class `BlockerRecord` — One structured reason a task is blocked, from a lithos_task_blocked row.
++- class `EdgeRecord` — A task-graph edge as returned by lithos_task_edge_list.
++- class `BlockedTaskRecord` — A row from lithos_task_blocked: the task plus its structured blockers.
+ - class `TaskStatusRecord`
+ - class `FindingRecord`
+ - class `AgentRecord`
+@@ -36,6 +39,9 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - def `find_task`
+ - def `resolve_finding_notes`
+ - def `normalize_task`
++- def `normalize_blocker`
++- def `normalize_blocked_task`
++- def `normalize_edge`
+ - def `normalize_task_status`
+ - def `normalize_finding`
+ - def `normalize_agent`
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 0ca3194..284333b 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -52,6 +52,16 @@ classDiagram
+     +type str
+     +last_seen_at str
+   }
++  class BlockedTaskRecord
++  class BlockerRecord {
++    +kind BlockerKind
++    +task_id str
++    +title str
++    +status str
++    +gate_type str
++    +message str
++    +members tuple[str, ...]
++  }
+   class ClaimRecord {
+     +agent str
+     +aspect str
+@@ -64,6 +74,15 @@ classDiagram
+     +claim_filter_limited bool
+     +errors tuple[str, ...]
+   }
++  class EdgeRecord {
++    +from_task_id str
++    +to_task_id str
++    +type EdgeType
++    +direction str
++    +metadata dict[str, Any]
++    +created_by str
++    +created_at str
++  }
+   class EnrichedTask {
+     +claim_error str
+   }
+@@ -110,6 +129,8 @@ classDiagram
+     +metadata dict[str, Any]
+     +outcome str
+     +completed_at str
++    +task_type TaskType
++    +resolved_at str
+   }
+   class TaskStatusRecord {
+     +id str
+@@ -127,6 +148,8 @@ classDiagram
+     +recent_cancelled int
+     +agents int
+   }
++  BlockedTaskRecord "1" --> "0..*" BlockerRecord : blockers
++  BlockedTaskRecord "1" --> "1" TaskRecord : task
+   DashboardData "1" --> "0..*" AgentRecord : agents
+   DashboardData "1" --> "0..*" EnrichedTask : groups
+   DashboardData "1" --> "1" TaskFilters : filters
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index 5e6de04..8836c96 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -42,8 +42,8 @@
+         "max_function": "lithos_lens.state.AppState.refresh_health"
+       },
+       "Tasks": {
+-        "functions_over_10": 5,
+-        "max_complexity": 21,
++        "functions_over_10": 6,
++        "max_complexity": 24,
+         "max_function": "lithos_lens.tasks.normalize_task"
+       },
+       "Telemetry": {
+@@ -57,15 +57,15 @@
+         "max_function": "lithos_lens.web.create_app.note"
+       }
+     },
+-    "functions_over_10": 6,
++    "functions_over_10": 7,
+     "top_functions": [
+       {
+-        "complexity": 23,
+-        "qualname": "lithos_lens.config._apply_env_overrides"
++        "complexity": 24,
++        "qualname": "lithos_lens.tasks.normalize_task"
+       },
+       {
+-        "complexity": 21,
+-        "qualname": "lithos_lens.tasks.normalize_task"
++        "complexity": 23,
++        "qualname": "lithos_lens.config._apply_env_overrides"
+       },
+       {
+         "complexity": 20,
+@@ -79,6 +79,10 @@
+         "complexity": 11,
+         "qualname": "lithos_lens.tasks._enrich_open_tasks"
+       },
++      {
++        "complexity": 11,
++        "qualname": "lithos_lens.tasks.normalize_blocker"
++      },
+       {
+         "complexity": 11,
+         "qualname": "lithos_lens.tasks.normalize_task_status"
+@@ -94,17 +98,13 @@
+       {
+         "complexity": 9,
+         "qualname": "lithos_lens.config._optional_status_groups"
+-      },
+-      {
+-        "complexity": 8,
+-        "qualname": "lithos_lens.lithos_client.LithosClient.list_tasks"
+       }
+     ],
+-    "total_functions": 119
++    "total_functions": 138
+   },
+   "domain": {
+-    "associations": 12,
+-    "models": 16,
++    "associations": 14,
++    "models": 19,
+     "models_without_docstrings": 16
+   },
+   "graph": {
+@@ -247,13 +247,13 @@
+       },
+       "LithosClient": {
+         "classes": 4,
+-        "functions": 27,
++        "functions": 38,
+         "largest_module": "lithos_lens.lithos_client",
+-        "largest_module_lines": 368,
+-        "lines": 368,
++        "largest_module_lines": 511,
++        "lines": 511,
+         "modules": 1,
+         "public_symbols": 4,
+-        "sloc": 300
++        "sloc": 431
+       },
+       "Logging": {
+         "classes": 1,
+@@ -276,14 +276,14 @@
+         "sloc": 50
+       },
+       "Tasks": {
+-        "classes": 14,
+-        "functions": 30,
++        "classes": 17,
++        "functions": 38,
+         "largest_module": "lithos_lens.tasks",
+-        "largest_module_lines": 616,
+-        "lines": 616,
++        "largest_module_lines": 771,
++        "lines": 771,
+         "modules": 1,
+-        "public_symbols": 29,
+-        "sloc": 510
++        "public_symbols": 35,
++        "sloc": 632
+       },
+       "Telemetry": {
+         "classes": 0,
+@@ -306,16 +306,16 @@
+         "sloc": 265
+       }
+     },
+-    "max_module": "lithos_lens.config",
+-    "max_module_lines": 671,
++    "max_module": "lithos_lens.tasks",
++    "max_module_lines": 771,
+     "modules_over_800": [],
+-    "total_lines": 2443,
++    "total_lines": 2741,
+     "total_modules": 13,
+-    "total_sloc": 2034
++    "total_sloc": 2287
+   },
+   "tests": {
+-    "ratio": 1.56,
+-    "src_lines": 2443,
+-    "test_lines": 3804
++    "ratio": 1.55,
++    "src_lines": 2741,
++    "test_lines": 4245
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 2eb621a..6ff96ba 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -14,7 +14,7 @@ lower a budget after improving the code to lock in the gain.
+ | `component_cycles` | 0 | 0 | 0 |
+ | `cross_component_edges` | 20 | 20 | 0 |
+ | `cross_module_private_refs` | 0 | 0 | 0 |
+-| `max_module_lines` | 671 | 800 | 129 |
++| `max_module_lines` | 771 | 800 | 29 |
+ | `module_cycles` | 0 | 0 | 0 |
+ | `modules_over_800_lines` | 0 | 0 | 0 |
+ | `tests_private_imports` | 0 | 0 | 0 |
+@@ -39,37 +39,37 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Errors | 1 | 15 | 9 | 2 | 0 | 0.00 | - | 0 |
+ | Events | 1 | 208 | 180 | 1 | 1 | 0.50 | 10 (`lithos_lens.events.parse_lithos_sse_frame`) | 0 |
+ | Knowledge | 1 | 64 | 43 | 1 | 0 | 0.00 | 3 (`lithos_lens.knowledge.render_markdown`) | 0 |
+-| LithosClient | 1 | 368 | 300 | 2 | 2 | 0.50 | 8 (`lithos_lens.lithos_client.LithosClient.list_tasks`) | 0 |
++| LithosClient | 1 | 511 | 431 | 2 | 2 | 0.50 | 8 (`lithos_lens.lithos_client.LithosClient.list_tasks`) | 0 |
+ | Logging | 1 | 60 | 48 | 1 | 1 | 0.50 | 5 (`lithos_lens.logging.JsonFormatter.format`) | 0 |
+ | State | 1 | 63 | 50 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.refresh_health`) | 0 |
+-| Tasks | 1 | 616 | 510 | 3 | 0 | 0.00 | 21 (`lithos_lens.tasks.normalize_task`) | 5 |
++| Tasks | 1 | 771 | 632 | 3 | 0 | 0.00 | 24 (`lithos_lens.tasks.normalize_task`) | 6 |
+ | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
+ | Web | 1 | 296 | 265 | 1 | 6 | 0.86 | 7 (`lithos_lens.web.create_app.note`) | 0 |
+ 
+ ## Size
+ 
+-- Modules: **13**, lines: **2443**, SLOC: **2034**
+-- Largest module: `lithos_lens.config` (671 lines)
++- Modules: **13**, lines: **2741**, SLOC: **2287**
++- Largest module: `lithos_lens.tasks` (771 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **119**, cyclomatic > 10: **6**
++- Functions: **138**, cyclomatic > 10: **7**
+ 
+ Top 10 most complex functions:
+ 
+ | Complexity | Function |
+ |---:|---|
++| 24 | `lithos_lens.tasks.normalize_task` |
+ | 23 | `lithos_lens.config._apply_env_overrides` |
+-| 21 | `lithos_lens.tasks.normalize_task` |
+ | 20 | `lithos_lens.tasks.load_dashboard` |
+ | 12 | `lithos_lens.tasks._matches_filters` |
+ | 11 | `lithos_lens.tasks._enrich_open_tasks` |
++| 11 | `lithos_lens.tasks.normalize_blocker` |
+ | 11 | `lithos_lens.tasks.normalize_task_status` |
+ | 10 | `lithos_lens.events.parse_lithos_sse_frame` |
+ | 10 | `lithos_lens.tasks.parse_filters` |
+ | 9 | `lithos_lens.config._optional_status_groups` |
+-| 8 | `lithos_lens.lithos_client.LithosClient.list_tasks` |
+ 
+ ## Seams
+ 
+@@ -81,5 +81,5 @@ Private-name reaches across module seams. Both counts can be pinned as
+ 
+ ## Domain & tests
+ 
+-- Domain models: **16** (12 associations, 16 without docstrings)
+-- Test-to-source line ratio: **1.56** (3804 test lines / 2443 source lines)
++- Domain models: **19** (14 associations, 16 without docstrings)
++- Test-to-source line ratio: **1.55** (4245 test lines / 2741 source lines)
+diff --git a/src/lithos_lens/lithos_client.py b/src/lithos_lens/lithos_client.py
+index 5643ba6..88d57c0 100644
+--- a/src/lithos_lens/lithos_client.py
++++ b/src/lithos_lens/lithos_client.py
+@@ -21,11 +21,15 @@ import httpx
+ from lithos_lens.config import LithosConfig
+ from lithos_lens.tasks import (
+     AgentRecord,
++    BlockedTaskRecord,
++    EdgeRecord,
+     FindingRecord,
+     NoteRecord,
+     TaskRecord,
+     TaskStatusRecord,
+     normalize_agent,
++    normalize_blocked_task,
++    normalize_edge,
+     normalize_finding,
+     normalize_note,
+     normalize_task,
+@@ -68,6 +72,41 @@ class LithosClientProtocol(Protocol):
+         with_claims: bool = False,
+     ) -> list[TaskRecord]: ...
+ 
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]: ...
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]: ...
++
++    async def task_get(self, task_id: str) -> TaskRecord | None: ...
++
++    async def task_children(
++        self,
++        task_id: str,
++        *,
++        recursive: bool = False,
++        include_closed: bool = False,
++    ) -> list[TaskRecord]: ...
++
++    async def task_edge_list(
++        self,
++        task_id: str,
++        *,
++        direction: str = "both",
++        types: list[str] | None = None,
++    ) -> list[EdgeRecord]: ...
++
+     async def task_status(self, task_id: str) -> TaskStatusRecord | None: ...
+ 
+     async def list_findings(
+@@ -90,7 +129,16 @@ class RegistrationResult:
+ 
+ 
+ class LithosToolError(RuntimeError):
+-    """Raised when Lithos returns an error envelope from a tool call."""
++    """Raised when Lithos returns an error envelope from a tool call.
++
++    ``code`` carries the Lithos 0.4 error code (e.g. ``task_not_found``) when
++    the envelope supplies one, so callers can distinguish a missing task from a
++    missing tool without matching on message text.
++    """
++
++    def __init__(self, message: str, *, code: str = "") -> None:
++        super().__init__(message)
++        self.code = code
+ 
+ 
+ class LithosClient:
+@@ -212,6 +260,100 @@ class LithosClient:
+             if isinstance(task, dict)
+         ]
+ 
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]:
++        arguments: dict[str, Any] = {}
++        if limit is not None:
++            arguments["limit"] = limit
++        if with_claims:
++            arguments["with_claims"] = True
++        if project:
++            arguments["project"] = project
++        if tags:
++            arguments["tags"] = tags
++        payload = await self._call_tool("lithos_task_ready", arguments)
++        _raise_for_error(payload)
++        return [
++            normalize_task(task)
++            for task in payload.get("tasks", [])
++            if isinstance(task, dict)
++        ]
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]:
++        arguments: dict[str, Any] = {}
++        if limit is not None:
++            arguments["limit"] = limit
++        if project:
++            arguments["project"] = project
++        if tags:
++            arguments["tags"] = tags
++        payload = await self._call_tool("lithos_task_blocked", arguments)
++        _raise_for_error(payload)
++        return [
++            normalize_blocked_task(task)
++            for task in payload.get("tasks", [])
++            if isinstance(task, dict)
++        ]
++
++    async def task_get(self, task_id: str) -> TaskRecord | None:
++        payload = await self._call_tool("lithos_task_get", {"task_id": task_id})
++        _raise_for_error(payload)
++        raw = payload.get("task")
++        if raw is None:
++            tasks = payload.get("tasks") or []
++            raw = tasks[0] if tasks else None
++        return normalize_task(raw) if isinstance(raw, dict) else None
++
++    async def task_children(
++        self,
++        task_id: str,
++        *,
++        recursive: bool = False,
++        include_closed: bool = False,
++    ) -> list[TaskRecord]:
++        arguments: dict[str, Any] = {"task_id": task_id}
++        if recursive:
++            arguments["recursive"] = True
++        if include_closed:
++            arguments["include_closed"] = True
++        payload = await self._call_tool("lithos_task_children", arguments)
++        _raise_for_error(payload)
++        return [
++            normalize_task(task)
++            for task in payload.get("tasks", [])
++            if isinstance(task, dict)
++        ]
++
++    async def task_edge_list(
++        self,
++        task_id: str,
++        *,
++        direction: str = "both",
++        types: list[str] | None = None,
++    ) -> list[EdgeRecord]:
++        arguments: dict[str, Any] = {"task_id": task_id, "direction": direction}
++        if types:
++            arguments["types"] = types
++        payload = await self._call_tool("lithos_task_edge_list", arguments)
++        _raise_for_error(payload)
++        return [
++            normalize_edge(edge)
++            for edge in payload.get("edges", [])
++            if isinstance(edge, dict)
++        ]
++
+     async def task_status(self, task_id: str) -> TaskStatusRecord | None:
+         payload = await self._call_tool("lithos_task_status", {"task_id": task_id})
+         _raise_for_error(payload)
+@@ -364,5 +506,6 @@ def _decode_tool_result(result: Any) -> dict[str, Any]:
+ 
+ def _raise_for_error(payload: dict[str, Any]) -> None:
+     if payload.get("status") == "error":
+-        message = str(payload.get("message") or payload.get("code") or "Lithos error")
+-        raise LithosToolError(message)
++        code = str(payload.get("code") or "")
++        message = str(payload.get("message") or code or "Lithos error")
++        raise LithosToolError(message, code=code)
+diff --git a/src/lithos_lens/tasks.py b/src/lithos_lens/tasks.py
+index 2b3a25e..7090dfd 100644
+--- a/src/lithos_lens/tasks.py
++++ b/src/lithos_lens/tasks.py
+@@ -10,6 +10,15 @@ from typing import Any, Literal, Protocol, cast
+ 
+ TaskStatusName = Literal["open", "completed", "cancelled"]
+ ClaimedState = Literal["any", "known_claimed", "known_unclaimed"]
++# Task types from the Lithos 0.4 task graph. Workable tasks are "task"; "epic"
++# and "gate" rows never enter the workable frontier sections.
++TaskType = Literal["task", "epic", "gate"]
++# Structured blocker kinds returned in a lithos_task_blocked row's `blockers`
++# array: a blocking open task, a gate, a cancelled (unsatisfiable) predecessor,
++# or a dependency cycle.
++BlockerKind = Literal["task", "gate", "blocker_unsatisfiable", "cycle"]
++# The four task-graph edge types.
++EdgeType = Literal["blocks", "parent_child", "discovered_from", "waits_on_gate"]
+ 
+ TASK_STATUSES: tuple[TaskStatusName, ...] = ("open", "completed", "cancelled")
+ 
+@@ -31,6 +40,11 @@ class TaskRecord:
+     metadata: dict[str, Any] = field(default_factory=dict)
+     outcome: str = ""
+     completed_at: str = ""
++    # Task-graph type (lithos 0.4). Older payloads omit it; default "task".
++    task_type: TaskType = "task"
++    # Timestamp a task reached a terminal state. Completed/cancelled rows are
++    # windowed by this (not created_at). Empty for open tasks or older payloads.
++    resolved_at: str = ""
+     # Inline claims when the upstream lithos_task_list call was made with
+     # with_claims=True (added in lithos #221). ``None`` means "claims were
+     # not requested or not returned"; an empty tuple means "no active claims".
+@@ -44,6 +58,59 @@ class ClaimRecord:
+     expires_at: str = ""
+ 
+ 
++@dataclass(frozen=True)
++class BlockerRecord:
++    """One structured reason a task is blocked, from a lithos_task_blocked row.
++
++    Field population depends on ``kind``:
++
++    - ``task`` / ``gate`` / ``blocker_unsatisfiable`` — the blocking predecessor
++      is named by ``task_id`` / ``title`` / ``status`` (a ``gate`` also carries
++      ``gate_type``; ``blocker_unsatisfiable`` is a predecessor that was
++      cancelled).
++    - ``cycle`` — ``message`` describes the cycle and ``members`` lists the
++      participating task ids; no single predecessor applies.
++    """
++
++    kind: BlockerKind
++    task_id: str = ""
++    title: str = ""
++    status: str = ""
++    gate_type: str = ""
++    message: str = ""
++    members: tuple[str, ...] = ()
++
++
++@dataclass(frozen=True)
++class EdgeRecord:
++    """A task-graph edge as returned by lithos_task_edge_list.
++
++    ``direction`` is relative to the task the edge list was fetched for
++    (``incoming`` / ``outgoing``); it is empty when the source does not report
++    one.
++    """
++
++    from_task_id: str
++    to_task_id: str
++    type: EdgeType
++    direction: str = ""
++    metadata: dict[str, Any] = field(default_factory=dict)
++    created_by: str = ""
++    created_at: str = ""
++
++
++@dataclass(frozen=True)
++class BlockedTaskRecord:
++    """A row from lithos_task_blocked: the task plus its structured blockers.
++
++    lithos_task_blocked does not return claims — the master open list supplies
++    those — so this pairs the task identity with just its blocker reasons.
++    """
++
++    task: TaskRecord
++    blockers: tuple[BlockerRecord, ...] = ()
++
++
+ @dataclass(frozen=True)
+ class TaskStatusRecord:
+     id: str
+@@ -166,6 +233,41 @@ class TaskLithosClientProtocol(Protocol):
+         with_claims: bool = False,
+     ) -> list[TaskRecord]: ...
+ 
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]: ...
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]: ...
++
++    async def task_get(self, task_id: str) -> TaskRecord | None: ...
++
++    async def task_children(
++        self,
++        task_id: str,
++        *,
++        recursive: bool = False,
++        include_closed: bool = False,
++    ) -> list[TaskRecord]: ...
++
++    async def task_edge_list(
++        self,
++        task_id: str,
++        *,
++        direction: str = "both",
++        types: list[str] | None = None,
++    ) -> list[EdgeRecord]: ...
++
+     async def task_status(self, task_id: str) -> TaskStatusRecord | None: ...
+ 
+     async def list_findings(
+@@ -413,6 +515,10 @@ async def resolve_finding_notes(
+ def normalize_task(raw: dict[str, Any]) -> TaskRecord:
+     status_raw = str(raw.get("status") or "open")
+     status: TaskStatusName = status_raw if status_raw in TASK_STATUSES else "open"  # type: ignore[assignment]
++    task_type_raw = str(raw.get("task_type") or "task")
++    task_type: TaskType = (
++        task_type_raw if task_type_raw in {"task", "epic", "gate"} else "task"
++    )  # type: ignore[assignment]
+     claims: tuple[ClaimRecord, ...] | None = None
+     if "claims" in raw and raw["claims"] is not None:
+         claims = tuple(
+@@ -435,10 +541,59 @@ def normalize_task(raw: dict[str, Any]) -> TaskRecord:
+         metadata=dict(raw.get("metadata") or {}),
+         outcome=str(raw.get("outcome") or ""),
+         completed_at=str(raw.get("completed_at") or ""),
++        task_type=task_type,
++        resolved_at=str(raw.get("resolved_at") or ""),
+         claims=claims,
+     )
+ 
+ 
++def normalize_blocker(raw: dict[str, Any]) -> BlockerRecord:
++    kind_raw = str(raw.get("kind") or "")
++    kind: BlockerKind = (
++        kind_raw
++        if kind_raw in {"task", "gate", "blocker_unsatisfiable", "cycle"}
++        else "task"
++    )  # type: ignore[assignment]
++    return BlockerRecord(
++        kind=kind,
++        task_id=str(raw.get("task_id") or raw.get("id") or ""),
++        title=str(raw.get("title") or ""),
++        status=str(raw.get("status") or ""),
++        gate_type=str(raw.get("gate_type") or ""),
++        message=str(raw.get("message") or ""),
++        members=tuple(str(member) for member in raw.get("members") or []),
++    )
++
++
++def normalize_blocked_task(raw: dict[str, Any]) -> BlockedTaskRecord:
++    return BlockedTaskRecord(
++        task=normalize_task(raw),
++        blockers=tuple(
++            normalize_blocker(blocker)
++            for blocker in raw.get("blockers") or []
++            if isinstance(blocker, dict)
++        ),
++    )
++
++
++def normalize_edge(raw: dict[str, Any]) -> EdgeRecord:
++    type_raw = str(raw.get("type") or "")
++    edge_type: EdgeType = (
++        type_raw
++        if type_raw in {"blocks", "parent_child", "discovered_from", "waits_on_gate"}
++        else "blocks"
++    )  # type: ignore[assignment]
++    return EdgeRecord(
++        from_task_id=str(raw.get("from_task_id") or ""),
++        to_task_id=str(raw.get("to_task_id") or ""),
++        type=edge_type,
++        direction=str(raw.get("direction") or ""),
++        metadata=dict(raw.get("metadata") or {}),
++        created_by=str(raw.get("created_by") or ""),
++        created_at=str(raw.get("created_at") or ""),
++    )
++
++
+ def normalize_task_status(raw: dict[str, Any]) -> TaskStatusRecord:
+     return TaskStatusRecord(
+         id=str(raw.get("id") or ""),
+diff --git a/tests/test_common_core.py b/tests/test_common_core.py
+index d54fff9..29e7f2a 100644
+--- a/tests/test_common_core.py
++++ b/tests/test_common_core.py
+@@ -13,6 +13,8 @@ from lithos_lens.lithos_client import LithosHealth
+ from lithos_lens.logging import JsonFormatter
+ from lithos_lens.tasks import (
+     AgentRecord,
++    BlockedTaskRecord,
++    EdgeRecord,
+     FindingRecord,
+     NoteRecord,
+     TaskRecord,
+@@ -49,6 +51,46 @@ class RecordingLithosClient:
+     ) -> list[TaskRecord]:
+         return []
+ 
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]:
++        return []
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]:
++        return []
++
++    async def task_get(self, task_id: str) -> TaskRecord | None:
++        return None
++
++    async def task_children(
++        self,
++        task_id: str,
++        *,
++        recursive: bool = False,
++        include_closed: bool = False,
++    ) -> list[TaskRecord]:
++        return []
++
++    async def task_edge_list(
++        self,
++        task_id: str,
++        *,
++        direction: str = "both",
++        types: list[str] | None = None,
++    ) -> list[EdgeRecord]:
++        return []
++
+     async def task_status(self, task_id: str) -> TaskStatusRecord | None:
+         return None
+ 
+diff --git a/tests/test_tasks_graph_reads.py b/tests/test_tasks_graph_reads.py
+new file mode 100644
+index 0000000..4881f86
+--- /dev/null
++++ b/tests/test_tasks_graph_reads.py
+@@ -0,0 +1,311 @@
++"""T1 slice 1 — Lithos client graph reads + data model.
++
++Covers the new normalizers (BlockerRecord, EdgeRecord, TaskRecord graph
++fields) and the five new LithosClient graph-read tool methods. The headline
++acceptance criterion is that the normalizers round-trip all four blocker kinds
++and all four edge types.
++"""
++
++from __future__ import annotations
++
++import asyncio
++from typing import Any
++
++import pytest
++
++from lithos_lens.config import LithosConfig
++from lithos_lens.lithos_client import LithosClient, LithosToolError
++from lithos_lens.tasks import (
++    BlockedTaskRecord,
++    BlockerRecord,
++    EdgeRecord,
++    normalize_blocked_task,
++    normalize_blocker,
++    normalize_edge,
++    normalize_task,
++)
++
++# --- Normalizers: blocker kinds -------------------------------------------
++
++
++def test_normalize_blocker_task_kind_round_trips() -> None:
++    blocker = normalize_blocker(
++        {
++            "kind": "task",
++            "task_id": "dep-1",
++            "title": "Design schema",
++            "status": "open",
++        }
++    )
++    assert blocker == BlockerRecord(
++        kind="task", task_id="dep-1", title="Design schema", status="open"
++    )
++
++
++def test_normalize_blocker_gate_kind_round_trips() -> None:
++    blocker = normalize_blocker(
++        {
++            "kind": "gate",
++            "task_id": "gate-7",
++            "title": "Human review",
++            "status": "open",
++            "gate_type": "human",
++        }
++    )
++    assert blocker == BlockerRecord(
++        kind="gate",
++        task_id="gate-7",
++        title="Human review",
++        status="open",
++        gate_type="human",
++    )
++
++
++def test_normalize_blocker_unsatisfiable_kind_round_trips() -> None:
++    blocker = normalize_blocker(
++        {
++            "kind": "blocker_unsatisfiable",
++            "task_id": "old-spike",
++            "title": "Old spike",
++            "status": "cancelled",
++        }
++    )
++    assert blocker.kind == "blocker_unsatisfiable"
++    assert blocker.title == "Old spike"
++    assert blocker.status == "cancelled"
++
++
++def test_normalize_blocker_cycle_kind_round_trips() -> None:
++    blocker = normalize_blocker(
++        {
++            "kind": "cycle",
++            "message": "cycle: A → B → A",
++            "members": ["A", "B"],
++        }
++    )
++    assert blocker.kind == "cycle"
++    assert blocker.message == "cycle: A → B → A"
++    assert blocker.members == ("A", "B")
++
++
++def test_normalize_blocker_unknown_kind_defaults_to_task() -> None:
++    assert normalize_blocker({"kind": "surprise"}).kind == "task"
++    assert normalize_blocker({}).kind == "task"
++
++
++# --- Normalizers: edge types ----------------------------------------------
++
++
++@pytest.mark.parametrize(
++    "edge_type", ["blocks", "parent_child", "discovered_from", "waits_on_gate"]
++)
++def test_normalize_edge_round_trips_every_type(edge_type: str) -> None:
++    edge = normalize_edge(
++        {
++            "from_task_id": "a",
++            "to_task_id": "b",
++            "type": edge_type,
++            "direction": "incoming",
++            "metadata": {"note": "x"},
++            "created_by": "planner",
++            "created_at": "2026-04-26T10:00:00+00:00",
++        }
++    )
++    assert edge == EdgeRecord(
++        from_task_id="a",
++        to_task_id="b",
++        type=edge_type,  # type: ignore[arg-type]
++        direction="incoming",
++        metadata={"note": "x"},
++        created_by="planner",
++        created_at="2026-04-26T10:00:00+00:00",
++    )
++
++
++def test_normalize_edge_unknown_type_defaults_to_blocks() -> None:
++    assert normalize_edge({"from_task_id": "a", "to_task_id": "b"}).type == "blocks"
++
++
++# --- Normalizers: TaskRecord graph fields ---------------------------------
++
++
++def test_normalize_task_reads_task_type_and_resolved_at() -> None:
++    task = normalize_task(
++        {
++            "id": "epic-1",
++            "title": "Auth rework",
++            "task_type": "epic",
++            "status": "completed",
++            "resolved_at": "2026-04-27T09:00:00+00:00",
++        }
++    )
++    assert task.task_type == "epic"
++    assert task.resolved_at == "2026-04-27T09:00:00+00:00"
++
++
++def test_normalize_task_defaults_graph_fields_for_older_payloads() -> None:
++    task = normalize_task({"id": "t-1", "title": "Legacy"})
++    assert task.task_type == "task"
++    assert task.resolved_at == ""
++
++
++def test_normalize_task_unknown_task_type_falls_back_to_task() -> None:
++    assert normalize_task({"id": "t-1", "task_type": "bogus"}).task_type == "task"
++
++
++def test_normalize_blocked_task_pairs_task_with_its_blockers() -> None:
++    record = normalize_blocked_task(
++        {
++            "id": "t-blocked",
++            "title": "Blocked work",
++            "task_type": "task",
++            "blockers": [
++                {"kind": "task", "task_id": "dep-1", "title": "Predecessor"},
++                {"kind": "gate", "task_id": "gate-1", "gate_type": "human"},
++                "not-a-dict",
++            ],
++        }
++    )
++    assert record.task.id == "t-blocked"
++    assert [blocker.kind for blocker in record.blockers] == ["task", "gate"]
++
++
++# --- Client graph-read methods --------------------------------------------
++
++
++class _StubClient(LithosClient):
++    """LithosClient with the MCP transport stubbed out.
++
++    Records each ``(tool, arguments)`` pair and returns a canned payload keyed
++    by tool name, so the graph-read methods can be exercised end-to-end without
++    a live session.
++    """
++
++    def __init__(self, payloads: dict[str, dict[str, Any]]) -> None:
++        super().__init__(LithosConfig())
++        self._payloads = payloads
++        self.calls: list[tuple[str, dict[str, Any]]] = []
++
++    async def _call_tool(  # type: ignore[override]
++        self, name: str, arguments: dict[str, Any]
++    ) -> dict[str, Any]:
++        self.calls.append((name, arguments))
++        return self._payloads.get(name, {})
++
++
++def _run(client: _StubClient, coro: Any) -> Any:
++    async def _driver() -> Any:
++        try:
++            return await coro
++        finally:
++            await client.close()
++
++    return asyncio.run(_driver())
++
++
++def test_task_ready_sends_limit_and_claims_and_normalizes() -> None:
++    client = _StubClient(
++        {"lithos_task_ready": {"tasks": [{"id": "r-1", "title": "Ready one"}]}}
++    )
++    tasks = _run(client, client.task_ready(limit=500, with_claims=True))
++
++    assert [task.id for task in tasks] == ["r-1"]
++    name, arguments = client.calls[0]
++    assert name == "lithos_task_ready"
++    assert arguments == {"limit": 500, "with_claims": True}
++
++
++def test_task_blocked_returns_blocked_records_with_structured_blockers() -> None:
++    client = _StubClient(
++        {
++            "lithos_task_blocked": {
++                "tasks": [
++                    {
++                        "id": "b-1",
++                        "title": "Blocked one",
++                        "blockers": [{"kind": "task", "task_id": "dep-1"}],
++                    }
++                ]
++            }
++        }
++    )
++    blocked = _run(client, client.task_blocked(limit=500))
++
++    assert isinstance(blocked[0], BlockedTaskRecord)
++    assert blocked[0].task.id == "b-1"
++    assert blocked[0].blockers[0].kind == "task"
++    assert client.calls[0] == ("lithos_task_blocked", {"limit": 500})
++
++
++def test_task_get_returns_task_and_supports_task_envelope() -> None:
++    client = _StubClient(
++        {
++            "lithos_task_get": {
++                "task": {"id": "t-1", "title": "One", "task_type": "gate"}
++            }
++        }
++    )
++    task = _run(client, client.task_get("t-1"))
++
++    assert task is not None
++    assert task.id == "t-1"
++    assert task.task_type == "gate"
++    assert client.calls[0] == ("lithos_task_get", {"task_id": "t-1"})
++
++
++def test_task_get_raises_with_code_on_not_found_envelope() -> None:
++    client = _StubClient(
++        {
++            "lithos_task_get": {
++                "status": "error",
++                "code": "task_not_found",
++                "message": "no such task",
++            }
++        }
++    )
++    with pytest.raises(LithosToolError) as excinfo:
++        _run(client, client.task_get("missing"))
++    assert excinfo.value.code == "task_not_found"
++
++
++def test_task_children_sends_recursive_and_include_closed() -> None:
++    client = _StubClient(
++        {"lithos_task_children": {"tasks": [{"id": "c-1", "title": "Child"}]}}
++    )
++    children = _run(
++        client,
++        client.task_children("epic-1", recursive=True, include_closed=True),
++    )
++
++    assert [task.id for task in children] == ["c-1"]
++    assert client.calls[0] == (
++        "lithos_task_children",
++        {"task_id": "epic-1", "recursive": True, "include_closed": True},
++    )
++
++
++def test_task_edge_list_sends_direction_and_types_and_normalizes() -> None:
++    client = _StubClient(
++        {
++            "lithos_task_edge_list": {
++                "edges": [
++                    {
++                        "from_task_id": "g-1",
++                        "to_task_id": "t-1",
++                        "type": "waits_on_gate",
++                        "direction": "outgoing",
++                    }
++                ]
++            }
++        }
++    )
++    edges = _run(
++        client,
++        client.task_edge_list("g-1", direction="outgoing", types=["waits_on_gate"]),
++    )
++
++    assert edges[0].type == "waits_on_gate"
++    assert client.calls[0] == (
++        "lithos_task_edge_list",
++        {"task_id": "g-1", "direction": "outgoing", "types": ["waits_on_gate"]},
++    )
+diff --git a/tests/test_tasks_mvp.py b/tests/test_tasks_mvp.py
+index d5acf9a..05c085b 100644
+--- a/tests/test_tasks_mvp.py
++++ b/tests/test_tasks_mvp.py
+@@ -14,7 +14,10 @@ from lithos_lens.config import load_config
+ from lithos_lens.lithos_client import LithosHealth
+ from lithos_lens.tasks import (
+     AgentRecord,
++    BlockedTaskRecord,
++    BlockerRecord,
+     ClaimRecord,
++    EdgeRecord,
+     FindingRecord,
+     NoteRecord,
+     TaskRecord,
+@@ -38,6 +41,15 @@ class TaskFakeLithosClient:
+         self.register_calls = 0
+         self.status_calls: list[str] = []
+         self.list_calls: list[dict[str, Any]] = []
++        # Task-graph oracle state (lithos 0.4). Lens never re-derives readiness,
++        # so the fake is the source of truth: ready_ids / blocked drive the
++        # frontier, edges/children drive the detail surfaces. All default empty.
++        self.ready_ids: set[str] = set()
++        self.blocked: dict[str, tuple[BlockerRecord, ...]] = {}
++        self.edges: dict[str, list[EdgeRecord]] = {}
++        self.children: dict[str, list[str]] = {}
++        self.get_calls: list[str] = []
++        self.edge_list_calls: list[dict[str, Any]] = []
+         self.notes: dict[str, NoteRecord] = {
+             "note-1": NoteRecord(
+                 id="note-1",
+@@ -133,6 +145,82 @@ class TaskFakeLithosClient:
+             rows = [replace(task, claims=self._claims_for(task.id)) for task in rows]
+         return rows
+ 
++    def _by_id(self, task_id: str) -> TaskRecord | None:
++        return next((task for task in self.tasks if task.id == task_id), None)
++
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]:
++        rows = [
++            task
++            for task in self.tasks
++            if task.id in self.ready_ids and task.status == "open"
++        ]
++        if with_claims:
++            rows = [replace(task, claims=self._claims_for(task.id)) for task in rows]
++        return rows[:limit] if limit is not None else rows
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]:
++        rows = [
++            BlockedTaskRecord(task=task, blockers=self.blocked[task.id])
++            for task in self.tasks
++            if task.id in self.blocked and task.status == "open"
++        ]
++        return rows[:limit] if limit is not None else rows
++
++    async def task_get(self, task_id: str) -> TaskRecord | None:
++        self.get_calls.append(task_id)
++        return self._by_id(task_id)
++
++    async def task_children(
++        self,
++        task_id: str,
++        *,
++        recursive: bool = False,
++        include_closed: bool = False,
++    ) -> list[TaskRecord]:
++        child_ids = list(self.children.get(task_id, []))
++        if recursive:
++            queue = list(child_ids)
++            while queue:
++                grandchildren = self.children.get(queue.pop(), [])
++                for cid in grandchildren:
++                    if cid not in child_ids:
++                        child_ids.append(cid)
++                        queue.append(cid)
++        rows = [task for cid in child_ids if (task := self._by_id(cid)) is not None]
++        if not include_closed:
++            rows = [task for task in rows if task.status == "open"]
++        return rows
++
++    async def task_edge_list(
++        self,
++        task_id: str,
++        *,
++        direction: str = "both",
++        types: list[str] | None = None,
++    ) -> list[EdgeRecord]:
++        self.edge_list_calls.append(
++            {"task_id": task_id, "direction": direction, "types": types}
++        )
++        rows = list(self.edges.get(task_id, []))
++        if direction != "both":
++            rows = [edge for edge in rows if edge.direction == direction]
++        if types:
++            rows = [edge for edge in rows if edge.type in types]
++        return rows
++
+     def _claims_for(self, task_id: str) -> tuple[ClaimRecord, ...]:
+         if task_id == "open-claimed":
+             return (

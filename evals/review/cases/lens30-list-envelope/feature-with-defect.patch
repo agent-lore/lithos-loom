@@ -1,0 +1,1678 @@
+diff --git a/docs/generated/components/Knowledge.md b/docs/generated/components/Knowledge.md
+index f474c08..4f2968b 100644
+--- a/docs/generated/components/Knowledge.md
++++ b/docs/generated/components/Knowledge.md
+@@ -11,12 +11,13 @@ Knowledge-note rendering and normalization (safe server-side markdown + the rela
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.knowledge` | M | 6 | 3 |
++| `lithos_lens.knowledge` | M | 9 | 5 |
+ 
+ ## Public API
+ 
+ ### `lithos_lens.knowledge`
+ - def `render_markdown` — Render a note's markdown body to safe HTML.
++- def `wiki_link_href` — URL for a wiki-link's per-click resolver route (§6.3).
+ - class `RelatedRef` — A raw neighbor reference from ``lithos_related``, before title lookup.
+ - class `RelatedNeighborhood` — One ``lithos_related`` call's worth of a note's neighborhood (raw ids).
+ - class `RelatedItem` — A neighbor rendered in the panel — by title when it could be resolved.
+@@ -25,6 +26,10 @@ Knowledge-note rendering and normalization (safe server-side markdown + the rela
+ - class `KnowledgeLithosClientProtocol` — Subset of Lithos operations required by the knowledge note view.
+ - def `load_related_panel` — Load and resolve a note's related panel from one ``lithos_related`` call.
+ - def `normalize_related` — Normalize a ``lithos_related`` payload into a ``RelatedNeighborhood``.
++- class `ResolveCandidate` — One plausible target for a wiki-link, shown on the disambiguation page.
++- class `ResolveOutcome` — The result of resolving one wiki-link click.
++- class `WikiResolverClientProtocol` — Subset of Lithos operations required by the wiki-link resolver.
++- def `resolve_wiki_link` — Resolve a wiki-link ``target`` clicked from note ``from_id`` (§6.3).
+ 
+ ## Dependencies
+ 
+diff --git a/docs/generated/components/Tasks.md b/docs/generated/components/Tasks.md
+index 01dda4d..75769e1 100644
+--- a/docs/generated/components/Tasks.md
++++ b/docs/generated/components/Tasks.md
+@@ -11,7 +11,7 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.tasks` | M | 14 | 15 |
++| `lithos_lens.tasks` | M | 15 | 16 |
+ 
+ ## Public API
+ 
+@@ -23,6 +23,7 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - class `FindingRecord`
+ - class `AgentRecord`
+ - class `NoteRecord`
++- class `NoteSummary` — A lightweight note row from ``lithos_list`` (no body).
+ - class `EnrichedTask`
+ - class `TaskFilters`
+ - class `TaskSummary`
+@@ -40,6 +41,7 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - def `normalize_finding`
+ - def `normalize_agent`
+ - def `normalize_note`
++- def `normalize_note_summary`
+ - def `default_since`
+ - def `normalize_since_input`
+ - def `format_display_date`
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index bafa504..0d381eb 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -51,6 +51,17 @@ classDiagram
+   class RelatedSection {
+     +overflow int
+   }
++  class ResolveCandidate {
++    +id str
++    +title str
++    +path str
++  }
++  class ResolveOutcome {
++    +kind str
++    +target str
++    +target_id str
++    +search_query str
++  }
+   RelatedNeighborhood "1" --> "0..*" RelatedRef : backlinks
+   RelatedNeighborhood "1" --> "0..*" RelatedRef : derived
+   RelatedNeighborhood "1" --> "0..*" RelatedRef : edges
+@@ -62,6 +73,7 @@ classDiagram
+   RelatedPanel "1" --> "1" RelatedSection : links
+   RelatedPanel "1" --> "1" RelatedSection : sources
+   RelatedSection "1" --> "0..*" RelatedItem : items
++  ResolveOutcome "1" --> "0..*" ResolveCandidate : candidates
+ ```
+ 
+ ## LithosClient
+@@ -156,6 +168,13 @@ classDiagram
+     +tags tuple[str, ...]
+     +metadata dict[str, Any]
+   }
++  class NoteSummary {
++    +id str
++    +title str
++    +path str
++    +updated str
++    +tags tuple[str, ...]
++  }
+   class TaskDetailData {
+     +status_state SectionState
+     +findings_state SectionState
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index cd4f974..f38d298 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -105,11 +105,11 @@
+         "qualname": "lithos_lens.events.parse_lithos_sse_frame"
+       }
+     ],
+-    "total_functions": 182
++    "total_functions": 208
+   },
+   "domain": {
+-    "associations": 25,
+-    "models": 24,
++    "associations": 26,
++    "models": 27,
+     "models_without_docstrings": 16
+   },
+   "graph": {
+@@ -246,24 +246,24 @@
+         "sloc": 180
+       },
+       "Knowledge": {
+-        "classes": 6,
+-        "functions": 17,
++        "classes": 9,
++        "functions": 34,
+         "largest_module": "lithos_lens.knowledge",
+-        "largest_module_lines": 411,
+-        "lines": 411,
++        "largest_module_lines": 691,
++        "lines": 691,
+         "modules": 1,
+-        "public_symbols": 9,
+-        "sloc": 325
++        "public_symbols": 14,
++        "sloc": 528
+       },
+       "LithosClient": {
+         "classes": 7,
+-        "functions": 69,
++        "functions": 75,
+         "largest_module": "lithos_lens.lithos_client",
+-        "largest_module_lines": 595,
+-        "lines": 1238,
++        "largest_module_lines": 662,
++        "lines": 1336,
+         "modules": 3,
+         "public_symbols": 9,
+-        "sloc": 1035
++        "sloc": 1122
+       },
+       "Logging": {
+         "classes": 1,
+@@ -296,14 +296,14 @@
+         "sloc": 88
+       },
+       "Tasks": {
+-        "classes": 14,
+-        "functions": 30,
++        "classes": 15,
++        "functions": 31,
+         "largest_module": "lithos_lens.tasks",
+-        "largest_module_lines": 640,
+-        "lines": 640,
++        "largest_module_lines": 668,
++        "lines": 668,
+         "modules": 1,
+-        "public_symbols": 29,
+-        "sloc": 521
++        "public_symbols": 31,
++        "sloc": 543
+       },
+       "Telemetry": {
+         "classes": 0,
+@@ -317,25 +317,25 @@
+       },
+       "Web": {
+         "classes": 0,
+-        "functions": 16,
++        "functions": 18,
+         "largest_module": "lithos_lens.web",
+-        "largest_module_lines": 350,
+-        "lines": 350,
++        "largest_module_lines": 445,
++        "lines": 445,
+         "modules": 1,
+         "public_symbols": 5,
+-        "sloc": 306
++        "sloc": 390
+       }
+     },
+     "max_module": "lithos_lens.config",
+     "max_module_lines": 725,
+     "modules_over_800": [],
+-    "total_lines": 3943,
++    "total_lines": 4444,
+     "total_modules": 16,
+-    "total_sloc": 3259
++    "total_sloc": 3655
+   },
+   "tests": {
+-    "ratio": 1.51,
+-    "src_lines": 3943,
+-    "test_lines": 5953
++    "ratio": 1.47,
++    "src_lines": 4444,
++    "test_lines": 6512
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 6896ee0..ce3d82f 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -38,24 +38,24 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Entrypoint | 2 | 74 | 52 | 0 | 4 | 1.00 | 4 (`lithos_lens.main.resolve_port`) | 0 |
+ | Errors | 1 | 15 | 9 | 2 | 0 | 0.00 | - | 0 |
+ | Events | 1 | 208 | 180 | 2 | 1 | 0.33 | 10 (`lithos_lens.events.parse_lithos_sse_frame`) | 0 |
+-| Knowledge | 1 | 411 | 325 | 2 | 1 | 0.33 | 11 (`lithos_lens.knowledge._normalize_edges`) | 1 |
+-| LithosClient | 3 | 1238 | 1035 | 2 | 5 | 0.71 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 1 |
++| Knowledge | 1 | 691 | 528 | 2 | 1 | 0.33 | 11 (`lithos_lens.knowledge._normalize_edges`) | 1 |
++| LithosClient | 3 | 1336 | 1122 | 2 | 5 | 0.71 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 1 |
+ | Logging | 1 | 60 | 48 | 1 | 1 | 0.50 | 5 (`lithos_lens.logging.JsonFormatter.format`) | 0 |
+ | State | 1 | 71 | 56 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
+ | TaskGraph | 1 | 119 | 88 | 1 | 1 | 0.50 | 8 (`lithos_lens.task_graph.normalize_edge`) | 0 |
+-| Tasks | 1 | 640 | 521 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
++| Tasks | 1 | 668 | 543 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
+ | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
+-| Web | 1 | 350 | 306 | 1 | 6 | 0.86 | 11 (`lithos_lens.web.create_app.note`) | 1 |
++| Web | 1 | 445 | 390 | 1 | 6 | 0.86 | 11 (`lithos_lens.web.create_app.note`) | 1 |
+ 
+ ## Size
+ 
+-- Modules: **16**, lines: **3943**, SLOC: **3259**
++- Modules: **16**, lines: **4444**, SLOC: **3655**
+ - Largest module: `lithos_lens.config` (725 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **182**, cyclomatic > 10: **9**
++- Functions: **208**, cyclomatic > 10: **9**
+ 
+ Top 10 most complex functions:
+ 
+@@ -82,5 +82,5 @@ Private-name reaches across module seams. Both counts can be pinned as
+ 
+ ## Domain & tests
+ 
+-- Domain models: **24** (25 associations, 16 without docstrings)
+-- Test-to-source line ratio: **1.51** (5953 test lines / 3943 source lines)
++- Domain models: **27** (26 associations, 16 without docstrings)
++- Test-to-source line ratio: **1.47** (6512 test lines / 4444 source lines)
+diff --git a/src/lithos_lens/fake_lithos.py b/src/lithos_lens/fake_lithos.py
+index c667307..114ebeb 100644
+--- a/src/lithos_lens/fake_lithos.py
++++ b/src/lithos_lens/fake_lithos.py
+@@ -44,6 +44,7 @@ from lithos_lens.tasks import (
+     ClaimRecord,
+     FindingRecord,
+     NoteRecord,
++    NoteSummary,
+     TaskRecord,
+     TaskStatusRecord,
+ )
+@@ -325,6 +326,36 @@ class FakeLithosClient:
+             note = replace(note, content=note.content[:max_length])
+         return note
+ 
++    async def read_note_by_path(self, path: str) -> NoteRecord | None:
++        """Resolve a note by path for the wiki-link resolver's existence probe.
++
++        The dataset keys notes by id, so the path stem (``folder/note`` from
++        ``folder/note.md``) is matched against note ids — enough for the demo's
++        ``[[note-influx-rollback]]`` style links to resolve. A miss returns
++        ``None`` (parity with the concrete client, which maps ``doc_not_found``
++        to ``None`` on this probe), never a raised error.
++        """
++        stem = path[:-3] if path.endswith(".md") else path
++        return self.dataset.notes.get(stem) or self.dataset.notes.get(path)
++
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]:
++        rows = [
++            NoteSummary(id=note.id, title=note.title, path=note.id, tags=note.tags)
++            for note in self.dataset.notes.values()
++        ]
++        if title_contains:
++            needle = title_contains.lower()
++            rows = [row for row in rows if needle in row.title.lower()]
++        if tags:
++            rows = [row for row in rows if all(tag in row.tags for tag in tags)]
++        return rows[:limit] if limit is not None else rows
++
+     async def related(self, knowledge_id: str) -> RelatedNeighborhood:
+         """Neighborhood lookup so the K1-S4 related panel lights up.
+ 
+diff --git a/src/lithos_lens/knowledge.py b/src/lithos_lens/knowledge.py
+index 4da7083..58533ed 100644
+--- a/src/lithos_lens/knowledge.py
++++ b/src/lithos_lens/knowledge.py
+@@ -14,14 +14,17 @@ from __future__ import annotations
+ 
+ import asyncio
+ import logging
++import re
++import uuid
+ from dataclasses import dataclass, field
+ from html import escape
+ from typing import Any, Protocol
+-from urllib.parse import urlparse
++from urllib.parse import urlencode, urlparse
+ 
+ from markdown_it import MarkdownIt
++from markdown_it.token import Token
+ 
+-from lithos_lens.tasks import NoteRecord, SectionState
++from lithos_lens.tasks import NoteRecord, NoteSummary, SectionState
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -59,19 +62,25 @@ MARKDOWN = (
+ MARKDOWN.validateLink = _validate_link
+ 
+ 
+-def render_markdown(text: str) -> str:
++def render_markdown(text: str, from_id: str = "") -> str:
+     """Render a note's markdown body to safe HTML.
+ 
+     Raw HTML in ``text`` is escaped and link schemes outside the §6.2
+     allow-list are neutralized, so a hostile or sloppy note cannot script the
+-    browser. The full body is always rendered — ``/note/{id}`` is the canonical
++    browser. ``[[wiki-link]]`` patterns are spliced into anchors pointing at the
++    per-click resolver route (``from_id`` is the source note whose links these
++    are; it rides along so the resolver can cross-check the note's own outgoing
++    set). The full body is always rendered — ``/note/{id}`` is the canonical
+     document page, so bounding render cost would be an explicit product
+     decision, not a silent cap. If parsing fails for any reason the fallback is
+     HTML-escaped plaintext — never raw passthrough.
+     """
+     body = text or ""
+     try:
+-        return MARKDOWN.render(body)
++        env: dict[str, Any] = {}
++        tokens = MARKDOWN.parse(body, env)
++        _splice_wiki_links(tokens, from_id)
++        return MARKDOWN.renderer.render(tokens, MARKDOWN.options, env)
+     except Exception:
+         logger.warning(
+             "markdown render failed; falling back to escaped plaintext",
+@@ -80,6 +89,84 @@ def render_markdown(text: str) -> str:
+         return f'<pre class="markdown-fallback">{escape(body)}</pre>'
+ 
+ 
++# ── Wiki-link tokenizer (K1-S2) ────────────────────────────────────────
++#
++# A wiki-link is ``[[target]]`` or ``[[target|display]]``. Splicing happens at
++# the token level — only inside *text* tokens of the parsed stream — never by
++# regexing the raw markdown, because ``[[…]]``-shaped text inside a code fence
++# or inline code is a separate token type and must stay literal (§6.3).
++#
++# ``[`` is excluded from both inner classes (not just ``]``/``|``). Note bodies
++# are never size-bounded, so a long run of ``[`` would otherwise present a
++# ``[[`` start at every offset and force O(n²) backtracking (a CPU-DoS on
++# ``/note/{id}`` render). Excluding ``[`` makes every such start fail in O(1),
++# and no legitimate wiki target/display contains a literal ``[``.
++_WIKI_LINK_RE = re.compile(r"\[\[([^\]\[|]+)(?:\|([^\]\[]+))?\]\]")
++
++
++def wiki_link_href(target: str, from_id: str) -> str:
++    """URL for a wiki-link's per-click resolver route (§6.3)."""
++    return "/knowledge/resolve?" + urlencode({"target": target, "from": from_id})
++
++
++def _splice_wiki_links(tokens: list[Token], from_id: str) -> None:
++    """Rewrite ``[[wiki-link]]`` runs inside every inline token's text children."""
++    for token in tokens:
++        if token.type == "inline" and token.children:
++            token.children = _splice_children(token.children, from_id)
++
++
++def _splice_children(children: list[Token], from_id: str) -> list[Token]:
++    spliced: list[Token] = []
++    for child in children:
++        if child.type == "text" and "[[" in child.content:
++            spliced.extend(_split_wiki_text(child, from_id))
++        else:
++            # code_inline / softbreak / emphasis markers etc. pass through
++            # untouched, so wiki-syntax inside inline code stays literal.
++            spliced.append(child)
++    return spliced
++
++
++def _split_wiki_text(token: Token, from_id: str) -> list[Token]:
++    text = token.content
++    pieces: list[Token] = []
++    pos = 0
++    matched = False
++    for match in _WIKI_LINK_RE.finditer(text):
++        matched = True
++        if match.start() > pos:
++            pieces.append(_text_token(text[pos : match.start()]))
++        target = match.group(1).strip()
++        display = (match.group(2) or match.group(1)).strip()
++        pieces.extend(_wiki_link_tokens(target, display, from_id))
++        pos = match.end()
++    if not matched:
++        return [token]
++    if pos < len(text):
++        pieces.append(_text_token(text[pos:]))
++    return pieces
++
++
++def _text_token(content: str) -> Token:
++    token = Token("text", "", 0)
++    token.content = content
++    return token
++
++
++def _wiki_link_tokens(target: str, display: str, from_id: str) -> list[Token]:
++    return [
++        Token(
++            "link_open",
++            "a",
++            1,
++            attrs={"href": wiki_link_href(target, from_id), "class": "wiki-link"},
++        ),
++        _text_token(display),
++        Token("link_close", "a", -1),
++    ]
++
++
+ # ── Related panel (K1-S4) ──────────────────────────────────────────────
+ 
+ 
+@@ -409,3 +496,196 @@ def _normalize_unresolved(items: Any) -> tuple[str, ...]:
+     if not isinstance(items, list):
+         return ()
+     return tuple(item for item in items if isinstance(item, str) and item)
++
++
++# ── Wiki-link resolver (K1-S2) ─────────────────────────────────────────
++#
++# No MCP response maps an inline ``[[target]]`` to a note id, so resolution is
++# per-click in ``GET /knowledge/resolve`` (§6.3): a UUID target is a direct
++# redirect, a ``target + ".md"`` path probe covers the dominant
++# ``[[folder/note]]`` convention, and otherwise candidates are gathered from the
++# source note's outgoing links and a title search — one confident candidate
++# redirects, several disambiguate, none is reported as an unresolved link.
++
++# Upper bound on candidates gathered for the title-disambiguation step, so a
++# broad ``title_contains`` match can't inflate the disambiguation page.
++RESOLVE_CANDIDATE_LIMIT = 10
++
++
++@dataclass(frozen=True)
++class ResolveCandidate:
++    """One plausible target for a wiki-link, shown on the disambiguation page."""
++
++    id: str
++    title: str = ""
++    path: str = ""
++
++    @property
++    def label(self) -> str:
++        """Human label: title, then path, falling back to the bare id."""
++        return self.title or self.path or self.id
++
++
++@dataclass(frozen=True)
++class ResolveOutcome:
++    """The result of resolving one wiki-link click.
++
++    ``kind`` is ``redirect`` (follow ``target_id``), ``disambiguation`` (show
++    ``candidates``), or ``unresolved`` (offer a search for ``search_query``).
++    """
++
++    kind: str
++    target: str = ""
++    target_id: str = ""
++    candidates: tuple[ResolveCandidate, ...] = ()
++    search_query: str = ""
++
++
++class WikiResolverClientProtocol(Protocol):
++    """Subset of Lithos operations required by the wiki-link resolver."""
++
++    async def read_note_by_path(self, path: str) -> NoteRecord | None: ...
++
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood: ...
++
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]: ...
++
++
++async def resolve_wiki_link(
++    lithos: WikiResolverClientProtocol,
++    target: str,
++    from_id: str,
++    *,
++    candidate_limit: int = RESOLVE_CANDIDATE_LIMIT,
++) -> ResolveOutcome:
++    """Resolve a wiki-link ``target`` clicked from note ``from_id`` (§6.3)."""
++    target = target.strip()
++    if not target:
++        return ResolveOutcome(kind="unresolved", target=target)
++
++    if _is_uuid(target):
++        return ResolveOutcome(kind="redirect", target=target, target_id=target)
++
++    note = await _probe_path(lithos, target)
++    if note is not None and note.id:
++        return ResolveOutcome(kind="redirect", target=target, target_id=note.id)
++
++    candidates = await _gather_candidates(
++        lithos, target, from_id, limit=candidate_limit
++    )
++    if len(candidates) == 1:
++        return ResolveOutcome(
++            kind="redirect", target=target, target_id=candidates[0].id
++        )
++    if candidates:
++        return ResolveOutcome(
++            kind="disambiguation", target=target, candidates=candidates
++        )
++    return ResolveOutcome(kind="unresolved", target=target, search_query=target)
++
++
++def _is_uuid(value: str) -> bool:
++    try:
++        uuid.UUID(value)
++    except ValueError:
++        return False
++    return True
++
++
++def _last_component(target: str) -> str:
++    """The last path component of a ``folder/note`` target (the title search key)."""
++    return target.rstrip("/").split("/")[-1] or target
++
++
++def _is_unsafe_probe_target(target: str) -> bool:
++    """Whether ``target`` must not be forwarded to a path-addressed read.
++
++    ``target`` is an unauthenticated query param, so a raw ``target + ".md"``
++    probe would turn ``GET /knowledge/resolve`` into a path-traversal existence
++    oracle against ``lithos_read(path=…)`` — and a hit escalates to full-content
++    disclosure via the ``302 /note/{id}`` redirect (CWE-22 / CWE-639). Reject
++    traversal (``..`` path segments), absolute paths (leading ``/`` or a
++    backslash), and NUL; such a target simply misses the probe and falls through
++    to the title search, which only ever passes the last path component.
++    """
++    if "\x00" in target or "\\" in target:
++        return True
++    if target.startswith("/"):
++        return True
++    return ".." in target.split("/")
++
++
++async def _probe_path(
++    lithos: WikiResolverClientProtocol, target: str
++) -> NoteRecord | None:
++    """Cheap ``lithos_read(path=target + ".md", max_length=1)`` existence probe.
++
++    Traversal/absolute targets are refused before the probe (treated as a miss).
++    A miss (the common case for a title-style target) is not an error here: any
++    failure falls through to the candidate-gathering step, so it degrades to
++    ``None`` rather than propagating.
++    """
++    if _is_unsafe_probe_target(target):
++        return None
++    path = target if target.endswith(".md") else f"{target}.md"
++    try:
++        return await lithos.read_note_by_path(path)
++    except Exception:
++        return None
++
++
++async def _gather_candidates(
++    lithos: WikiResolverClientProtocol,
++    target: str,
++    from_id: str,
++    *,
++    limit: int,
++) -> tuple[ResolveCandidate, ...]:
++    """Candidate targets from the source note's links plus a title search.
++
++    A confident match from the source note's own outgoing links (its title
++    equals the target or the target's last path component) ranks first; the
++    ``lithos_list(title_contains=…)`` matches follow. De-duplicated by id and
++    capped at ``limit`` so a broad title match can't inflate the page.
++    """
++    last = _last_component(target)
++    candidates: dict[str, ResolveCandidate] = {}
++
++    if from_id:
++        try:
++            neighborhood = await lithos.related(from_id)
++        except Exception:
++            neighborhood = None
++        if neighborhood is not None:
++            for ref in neighborhood.links:
++                if ref.id and _title_matches(ref.title, target, last):
++                    candidates.setdefault(
++                        ref.id, ResolveCandidate(id=ref.id, title=ref.title)
++                    )
++
++    try:
++        matches = await lithos.list_notes(title_contains=last, limit=limit)
++    except Exception:
++        matches = []
++    for note in matches:
++        if note.id:
++            candidates.setdefault(
++                note.id,
++                ResolveCandidate(id=note.id, title=note.title, path=note.path),
++            )
++
++    return tuple(candidates.values())[:limit]
++
++
++def _title_matches(title: str, target: str, last: str) -> bool:
++    """Whether an outgoing link's ``title`` is a confident match for the target."""
++    if not title:
++        return False
++    normalized = title.strip().lower()
++    return normalized in {target.strip().lower(), last.strip().lower()}
+diff --git a/src/lithos_lens/lithos_client.py b/src/lithos_lens/lithos_client.py
+index 9011bdb..5f49c8a 100644
+--- a/src/lithos_lens/lithos_client.py
++++ b/src/lithos_lens/lithos_client.py
+@@ -30,11 +30,13 @@ from lithos_lens.tasks import (
+     AgentRecord,
+     FindingRecord,
+     NoteRecord,
++    NoteSummary,
+     TaskRecord,
+     TaskStatusRecord,
+     normalize_agent,
+     normalize_finding,
+     normalize_note,
++    normalize_note_summary,
+     normalize_task,
+     normalize_task_status,
+ )
+@@ -124,8 +126,18 @@ class LithosClientProtocol(Protocol):
+         self, knowledge_id: str, *, max_length: int | None = None
+     ) -> NoteRecord | None: ...
+ 
++    async def read_note_by_path(self, path: str) -> NoteRecord | None: ...
++
+     async def related(self, knowledge_id: str) -> RelatedNeighborhood: ...
+ 
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]: ...
++
+     async def close(self) -> None: ...
+ 
+ 
+@@ -439,6 +451,29 @@ class LithosClient:
+         _raise_for_error(payload)
+         return normalize_note(payload)
+ 
++    async def read_note_by_path(self, path: str) -> NoteRecord | None:
++        """Resolve a note by ``path`` (the wiki-link resolver's existence probe).
++
++        A missing path is the common case for a title-style wiki target, so the
++        coded ``doc_not_found`` envelope is answered with ``None`` rather than a
++        raised error; any other failure propagates. The truncated
++        ``max_length=1`` read still returns complete frontmatter (§6.3), so the
++        id needed for the redirect is always present on a hit.
++        """
++        arguments: dict[str, Any] = {
++            "path": path,
++            "agent_id": self._config.agent_id,
++            "max_length": 1,
++        }
++        try:
++            payload = await self._call_tool("lithos_read", arguments)
++            _raise_for_error(payload)
++        except LithosToolError as exc:
++            if exc.code == "doc_not_found":
++                return None
++            raise
++        return normalize_note(payload)
++
+     async def related(self, knowledge_id: str) -> RelatedNeighborhood:
+         """Fetch a note's related neighborhood via ``lithos_related``.
+ 
+@@ -453,6 +488,38 @@ class LithosClient:
+         _raise_for_error(payload)
+         return normalize_related(payload)
+ 
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]:
++        """List notes via ``lithos_list`` (wiki-link title disambiguation).
++
++        Only the arguments an active filter needs are sent; ``lithos_list``
++        returns lightweight rows (``id``/``title``/``path``/``updated``/``tags``,
++        no body).
++        """
++        arguments: dict[str, Any] = {}
++        if title_contains:
++            arguments["title_contains"] = title_contains
++        if tags:
++            arguments["tags"] = tags
++        if limit is not None:
++            arguments["limit"] = limit
++        payload = await self._call_tool("lithos_list", arguments)
++        _raise_for_error(payload)
++        # lithos_list's row container has drifted across versions; accept the
++        # documented aliases rather than pinning one key.
++        rows: Any = (
++            payload.get("notes")
++            or payload.get("documents")
++            or payload.get("results")
++            or []
++        )
++        return [normalize_note_summary(item) for item in rows if isinstance(item, dict)]
++
+     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+         if self._worker_task is None:
+             # startup() was never called; fall back to a one-shot session so
+diff --git a/src/lithos_lens/tasks.py b/src/lithos_lens/tasks.py
+index 7594937..78d3e1f 100644
+--- a/src/lithos_lens/tasks.py
++++ b/src/lithos_lens/tasks.py
+@@ -92,6 +92,22 @@ class NoteRecord:
+     metadata: dict[str, Any] = field(default_factory=dict)
+ 
+ 
++@dataclass(frozen=True)
++class NoteSummary:
++    """A lightweight note row from ``lithos_list`` (no body).
++
++    Used by the wiki-link resolver's title-disambiguation step; the ``path`` /
++    ``updated`` / ``tags`` fields carry the browsing metadata later slices (the
++    ``/knowledge`` recent list) render.
++    """
++
++    id: str
++    title: str = ""
++    path: str = ""
++    updated: str = ""
++    tags: tuple[str, ...] = ()
++
++
+ @dataclass(frozen=True)
+ class EnrichedTask:
+     task: TaskRecord
+@@ -513,6 +529,18 @@ def normalize_note(raw: dict[str, Any]) -> NoteRecord:
+     )
+ 
+ 
++def normalize_note_summary(raw: dict[str, Any]) -> NoteSummary:
++    metadata = dict(raw.get("metadata") or {})
++    tags = raw.get("tags") or metadata.get("tags") or []
++    return NoteSummary(
++        id=str(raw.get("id") or ""),
++        title=str(raw.get("title") or ""),
++        path=str(raw.get("path") or ""),
++        updated=str(raw.get("updated") or raw.get("updated_at") or ""),
++        tags=tuple(str(tag) for tag in tags),
++    )
++
++
+ def default_since(default_days: int) -> str:
+     return (datetime.now(UTC) - timedelta(days=default_days)).date().isoformat()
+ 
+diff --git a/src/lithos_lens/templates/knowledge/landing.html b/src/lithos_lens/templates/knowledge/landing.html
+new file mode 100644
+index 0000000..be6b46c
+--- /dev/null
++++ b/src/lithos_lens/templates/knowledge/landing.html
+@@ -0,0 +1,52 @@
++{% extends "base.html" %}
++
++{% block title %}Knowledge | Lithos Lens{% endblock %}
++
++{% block content %}
++  <section class="knowledge-landing">
++    <header>
++      <p class="eyebrow">Knowledge</p>
++      <h1>Search notes</h1>
++    </header>
++
++    <form class="knowledge-search" method="get" action="/knowledge" role="search">
++      <input
++        type="search"
++        name="q"
++        value="{{ query }}"
++        placeholder="Search notes by title"
++        aria-label="Search knowledge"
++      >
++      <button type="submit">Search</button>
++    </form>
++
++    {% if error %}
++      <section class="banner banner-warning" role="status">
++        <span>{{ error }}</span>
++      </section>
++    {% elif results is not none %}
++      {% if query %}
++        <h2>Results for &ldquo;{{ query }}&rdquo;</h2>
++      {% elif tag %}
++        <h2>Notes tagged {{ tag | format_tag }}</h2>
++      {% else %}
++        <h2>Recently updated</h2>
++      {% endif %}
++
++      {% if results %}
++        <ul class="knowledge-results">
++          {% for note in results %}
++            <li>
++              <a href="/note/{{ note.id }}">{{ note.title or note.path or note.id }}</a>
++              {% if note.path %}
++                <span class="knowledge-result-path">{{ note.path }}</span>
++              {% endif %}
++            </li>
++          {% endfor %}
++        </ul>
++      {% else %}
++        <p class="knowledge-empty">No matching notes.</p>
++      {% endif %}
++    {% endif %}
++  </section>
++{% endblock %}
+diff --git a/src/lithos_lens/templates/knowledge/resolve.html b/src/lithos_lens/templates/knowledge/resolve.html
+new file mode 100644
+index 0000000..5975ec6
+--- /dev/null
++++ b/src/lithos_lens/templates/knowledge/resolve.html
+@@ -0,0 +1,47 @@
++{% extends "base.html" %}
++
++{% block title %}Resolve link | Lithos Lens{% endblock %}
++
++{% block content %}
++  <p><a href="/tasks">&larr; Back to tasks</a></p>
++
++  {% if outcome.kind == "disambiguation" %}
++    <section class="resolve-panel resolve-disambiguation">
++      <header>
++        <p class="eyebrow">Wiki-link</p>
++        <h1>Which &ldquo;{{ outcome.target }}&rdquo;?</h1>
++      </header>
++      <p>This link matches several notes. Pick the one you meant:</p>
++      <ul class="resolve-candidates">
++        {% for candidate in outcome.candidates %}
++          <li>
++            <a href="/note/{{ candidate.id }}">{{ candidate.label }}</a>
++            {% if candidate.path %}
++              <span class="resolve-candidate-path">{{ candidate.path }}</span>
++            {% endif %}
++          </li>
++        {% endfor %}
++      </ul>
++    </section>
++  {% else %}
++    <section class="resolve-panel resolve-unresolved">
++      <header>
++        <p class="eyebrow">Wiki-link</p>
++        <h1>Unresolved link</h1>
++      </header>
++      {% if offline %}
++        <p>
++          Lithos is offline or degraded, so
++          <strong>{{ outcome.target }}</strong> can&rsquo;t be resolved right now.
++        </p>
++      {% else %}
++        <p>Nothing resolves <strong>{{ outcome.target }}</strong>.</p>
++      {% endif %}
++      <p>
++        <a href="/knowledge?q={{ outcome.search_query | urlencode }}">
++          Search knowledge for &ldquo;{{ outcome.search_query }}&rdquo;
++        </a>
++      </p>
++    </section>
++  {% endif %}
++{% endblock %}
+diff --git a/src/lithos_lens/templates/note.html b/src/lithos_lens/templates/note.html
+index 10aaeaf..f65a4b8 100644
+--- a/src/lithos_lens/templates/note.html
++++ b/src/lithos_lens/templates/note.html
+@@ -77,7 +77,7 @@
+           {% endfor %}
+         </div>
+       {% endif %}
+-      <div class="markdown-body">{{ note.content | render_markdown | safe }}</div>
++      <div class="markdown-body">{{ note.content | render_markdown(note.id) | safe }}</div>
+     </article>
+ 
+     {% if related %}
+diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
+index cb4aab8..4578bf6 100644
+--- a/src/lithos_lens/web.py
++++ b/src/lithos_lens/web.py
+@@ -10,7 +10,7 @@ from pathlib import Path
+ from urllib.parse import quote, urlencode
+ 
+ from fastapi import FastAPI, Request
+-from fastapi.responses import HTMLResponse, StreamingResponse
++from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+ from fastapi.staticfiles import StaticFiles
+ from fastapi.templating import Jinja2Templates
+ 
+@@ -20,7 +20,12 @@ from lithos_lens.fake_lithos import (
+     FakeLithosClient,
+     fake_lithos_enabled,
+ )
+-from lithos_lens.knowledge import load_related_panel, render_markdown
++from lithos_lens.knowledge import (
++    ResolveOutcome,
++    load_related_panel,
++    render_markdown,
++    resolve_wiki_link,
++)
+ from lithos_lens.lithos_client import (
+     LithosClient,
+     LithosClientProtocol,
+@@ -43,6 +48,11 @@ TEMPLATE_DIR = PACKAGE_ROOT / "templates"
+ STATIC_DIR = PACKAGE_ROOT / "static"
+ logger = logging.getLogger(__name__)
+ 
++# Cap on the recently-updated list shown by /knowledge with no query. A local
++# constant, not config: K1-S6 introduces the [knowledge].recent_limit dial when
++# it builds out the full landing page.
++_KNOWLEDGE_RECENT_LIMIT = 20
++
+ LithosClientFactory = Callable[[LithosLensConfig], LithosClientProtocol]
+ 
+ 
+@@ -203,6 +213,91 @@ def create_app(
+             },
+         )
+ 
++    @app.get("/knowledge", response_class=HTMLResponse)
++    async def knowledge(request: Request) -> HTMLResponse:
++        """Knowledge landing: a title search and a recently-updated browse list.
++
++        K1-S2 needs this so the resolver's "unresolved link" page can offer a
++        working ``/knowledge?q=…`` search instead of a dead 404. It is the
++        minimal functional surface — a ``lithos_list`` title/tag search plus a
++        recent list; hybrid ``lithos_search`` cards, snippets, and the nav search
++        box are K1-S6.
++        """
++        query = request.query_params.get("q", "").strip()
++        tag = request.query_params.get("tag", "").strip()
++        snapshot = await state.refresh_health()
++        results = None
++        error = ""
++        if snapshot.lithos != "ok":
++            error = "Lithos is offline or degraded. Knowledge search is unavailable."
++        else:
++            try:
++                # Every branch is capped: a broad ``?q=a`` / ``?tag=`` must not
++                # be able to materialize and render an unbounded result set (the
++                # resolver caps candidates for the same reason).
++                if query:
++                    results = await state.lithos_client.list_notes(
++                        title_contains=query, limit=_KNOWLEDGE_RECENT_LIMIT
++                    )
++                elif tag:
++                    results = await state.lithos_client.list_notes(
++                        tags=[tag], limit=_KNOWLEDGE_RECENT_LIMIT
++                    )
++                else:
++                    results = await state.lithos_client.list_notes(
++                        limit=_KNOWLEDGE_RECENT_LIMIT
++                    )
++            except Exception:
++                error = "Knowledge search is currently unavailable."
++        return templates.TemplateResponse(
++            request,
++            "knowledge/landing.html",
++            {
++                "config": state.config,
++                "health": snapshot,
++                "active_view": "knowledge",
++                "query": query,
++                "tag": tag,
++                "results": results,
++                "error": error,
++            },
++        )
++
++    @app.get("/knowledge/resolve")
++    async def knowledge_resolve(request: Request):
++        """Resolve a clicked ``[[wiki-link]]`` per §6.3 and redirect or explain.
++
++        A confident resolution 302-redirects to the note page; an ambiguous one
++        renders a disambiguation page listing candidates; an unresolvable one
++        renders an unresolved page offering a search. When Lithos is offline the
++        link can't be resolved, so the unresolved page is shown directly.
++        """
++        target = request.query_params.get("target", "").strip()
++        from_id = request.query_params.get("from", "").strip()
++        snapshot = await state.refresh_health()
++        offline = snapshot.lithos != "ok"
++        if offline:
++            outcome = ResolveOutcome(
++                kind="unresolved", target=target, search_query=target
++            )
++        else:
++            outcome = await resolve_wiki_link(state.lithos_client, target, from_id)
++            if outcome.kind == "redirect":
++                return RedirectResponse(
++                    f"/note/{quote(outcome.target_id)}", status_code=302
++                )
++        return templates.TemplateResponse(
++            request,
++            "knowledge/resolve.html",
++            {
++                "config": state.config,
++                "health": snapshot,
++                "active_view": "knowledge",
++                "outcome": outcome,
++                "offline": offline,
++            },
++        )
++
+     @app.get("/note/{knowledge_id}", response_class=HTMLResponse)
+     async def note(request: Request, knowledge_id: str) -> HTMLResponse:
+         snapshot = await state.refresh_health()
+diff --git a/tests/test_common_core.py b/tests/test_common_core.py
+index 55b07d4..1629595 100644
+--- a/tests/test_common_core.py
++++ b/tests/test_common_core.py
+@@ -17,6 +17,7 @@ from lithos_lens.tasks import (
+     AgentRecord,
+     FindingRecord,
+     NoteRecord,
++    NoteSummary,
+     TaskRecord,
+     TaskStatusRecord,
+ )
+@@ -111,9 +112,21 @@ class RecordingLithosClient:
+     ) -> NoteRecord | None:
+         return None
+ 
++    async def read_note_by_path(self, path: str) -> NoteRecord | None:
++        return None
++
+     async def related(self, knowledge_id: str) -> RelatedNeighborhood:
+         return RelatedNeighborhood()
+ 
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]:
++        return []
++
+     async def close(self) -> None:
+         self.closed = True
+ 
+diff --git a/tests/test_knowledge_related.py b/tests/test_knowledge_related.py
+index 5fb1481..8034bab 100644
+--- a/tests/test_knowledge_related.py
++++ b/tests/test_knowledge_related.py
+@@ -29,6 +29,7 @@ from lithos_lens.tasks import (
+     AgentRecord,
+     FindingRecord,
+     NoteRecord,
++    NoteSummary,
+     SectionState,
+     TaskRecord,
+     TaskStatusRecord,
+@@ -77,12 +78,24 @@ class KnowledgeFakeLithosClient:
+             return None
+         return NoteRecord(id=knowledge_id, title=title, content="")
+ 
++    async def read_note_by_path(self, path: str) -> NoteRecord | None:
++        return None
++
+     async def related(self, knowledge_id: str) -> RelatedNeighborhood:
+         self.related_calls.append(knowledge_id)
+         if self.related_error:
+             raise RuntimeError("related unavailable")
+         return self.neighborhood
+ 
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]:
++        return []
++
+     # ── unused task surface (present only to satisfy LithosClientProtocol) ──
+ 
+     async def list_tasks(
+diff --git a/tests/test_knowledge_wiki.py b/tests/test_knowledge_wiki.py
+new file mode 100644
+index 0000000..6f57186
+--- /dev/null
++++ b/tests/test_knowledge_wiki.py
+@@ -0,0 +1,520 @@
++"""K1-S2 — wiki-link tokenizer + per-click resolver route."""
++
++from __future__ import annotations
++
++import asyncio
++from pathlib import Path
++
++import pytest
++from fastapi.testclient import TestClient
++
++from lithos_lens.config import load_config
++from lithos_lens.fake_dataset import FakeLithosDataset
++from lithos_lens.fake_lithos import FakeLithosClient
++from lithos_lens.knowledge import (
++    RelatedNeighborhood,
++    RelatedRef,
++    ResolveOutcome,
++    render_markdown,
++    resolve_wiki_link,
++    wiki_link_href,
++)
++from lithos_lens.tasks import NoteRecord, NoteSummary
++from lithos_lens.web import create_app
++
++A_UUID = "550e8400-e29b-41d4-a716-446655440000"
++
++
++def _run(coro):
++    return asyncio.run(coro)
++
++
++# ── tokenizer (pure, table-driven) ─────────────────────────────────────
++
++
++@pytest.mark.parametrize(
++    ("body", "needle"),
++    [
++        # [[target]] — display defaults to the target.
++        (
++            "See [[note-a]] here",
++            '<a href="/knowledge/resolve?target=note-a&amp;from=src"'
++            ' class="wiki-link">note-a</a>',
++        ),
++        # [[target|display]] — display text wins, path target is url-encoded.
++        (
++            "See [[folder/note|Nice Name]]",
++            '<a href="/knowledge/resolve?target=folder%2Fnote&amp;from=src"'
++            ' class="wiki-link">Nice Name</a>',
++        ),
++    ],
++)
++def test_wiki_links_render_as_resolver_anchors(body: str, needle: str) -> None:
++    assert needle in render_markdown(body, from_id="src")
++
++
++def test_multiple_wiki_links_in_one_paragraph_all_render() -> None:
++    html = render_markdown("[[a]] then [[b]] then [[c]]", from_id="src")
++    assert html.count('class="wiki-link"') == 3
++    assert ">a</a>" in html and ">b</a>" in html and ">c</a>" in html
++
++
++def test_wiki_link_inside_code_fence_stays_literal() -> None:
++    html = render_markdown("```\n[[not-a-link]]\n```", from_id="src")
++    assert "wiki-link" not in html
++    assert "[[not-a-link]]" in html
++
++
++def test_wiki_link_inside_inline_code_stays_literal() -> None:
++    html = render_markdown("`[[literal]]` but [[real]] links", from_id="src")
++    assert "<code>[[literal]]</code>" in html
++    assert 'class="wiki-link">real</a>' in html
++
++
++def test_wiki_link_display_text_is_escaped() -> None:
++    # The display half is agent-authored; it must be HTML-escaped, not injected.
++    html = render_markdown("[[t|<script>x</script>]]", from_id="src")
++    assert "<script>x</script>" not in html
++    assert "&lt;script&gt;" in html
++
++
++def test_from_id_rides_along_in_the_resolver_href() -> None:
++    html = render_markdown("[[a]]", from_id="note-42")
++    assert "from=note-42" in html
++
++
++def test_text_without_wiki_links_is_untouched() -> None:
++    # A stray unmatched "[[" must not swallow surrounding text.
++    html = render_markdown("prose with [[ dangling and a # Heading", from_id="src")
++    assert "prose with [[ dangling and a # Heading" in html
++    assert "wiki-link" not in html
++
++
++def test_wiki_link_href_url_encodes_target_and_from() -> None:
++    assert (
++        wiki_link_href("a/b c", "n 1") == "/knowledge/resolve?target=a%2Fb+c&from=n+1"
++    )
++
++
++# ── resolver decision table (pure) ─────────────────────────────────────
++
++
++class ResolverFake:
++    """Controls each resolver branch: path probe, outgoing links, title search."""
++
++    def __init__(
++        self,
++        *,
++        path_hit: NoteRecord | None = None,
++        links: tuple[RelatedRef, ...] = (),
++        list_result: tuple[NoteSummary, ...] = (),
++    ) -> None:
++        self.path_hit = path_hit
++        self.links = links
++        self.list_result = list_result
++        self.path_calls: list[str] = []
++        self.list_calls: list[str | None] = []
++        self.related_calls: list[str] = []
++
++    async def read_note_by_path(self, path: str) -> NoteRecord | None:
++        self.path_calls.append(path)
++        return self.path_hit
++
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood:
++        self.related_calls.append(knowledge_id)
++        return RelatedNeighborhood(links=self.links)
++
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]:
++        self.list_calls.append(title_contains)
++        return list(self.list_result)
++
++
++def test_resolver_uuid_target_redirects_without_probing() -> None:
++    fake = ResolverFake()
++
++    outcome = _run(resolve_wiki_link(fake, A_UUID, "src"))
++
++    assert outcome == ResolveOutcome(kind="redirect", target=A_UUID, target_id=A_UUID)
++    # A UUID is authoritative — no path probe or title search is spent.
++    assert fake.path_calls == []
++    assert fake.list_calls == []
++
++
++def test_resolver_path_probe_hit_redirects() -> None:
++    fake = ResolverFake(path_hit=NoteRecord(id="found-id", title="Found", content=""))
++
++    outcome = _run(resolve_wiki_link(fake, "folder/note", "src"))
++
++    assert outcome.kind == "redirect"
++    assert outcome.target_id == "found-id"
++    # The probe appends ".md" to cover the [[folder/note]] path convention.
++    assert fake.path_calls == ["folder/note.md"]
++
++
++def test_resolver_single_title_candidate_redirects() -> None:
++    fake = ResolverFake(
++        list_result=(NoteSummary(id="only", title="Only Match", path="p/only.md"),)
++    )
++
++    outcome = _run(resolve_wiki_link(fake, "Only Match", "src"))
++
++    assert outcome.kind == "redirect"
++    assert outcome.target_id == "only"
++
++
++def test_resolver_confident_outgoing_link_redirects() -> None:
++    # The source note already links to a note whose title equals the target.
++    fake = ResolverFake(links=(RelatedRef(id="linked", title="Design Doc"),))
++
++    outcome = _run(resolve_wiki_link(fake, "Design Doc", "src"))
++
++    assert outcome.kind == "redirect"
++    assert outcome.target_id == "linked"
++
++
++def test_resolver_multiple_candidates_disambiguate() -> None:
++    fake = ResolverFake(
++        list_result=(
++            NoteSummary(id="a", title="Plan A", path="p/a.md"),
++            NoteSummary(id="b", title="Plan B", path="p/b.md"),
++        )
++    )
++
++    outcome = _run(resolve_wiki_link(fake, "Plan", "src"))
++
++    assert outcome.kind == "disambiguation"
++    assert [c.id for c in outcome.candidates] == ["a", "b"]
++    assert [c.path for c in outcome.candidates] == ["p/a.md", "p/b.md"]
++
++
++def test_resolver_dedupes_link_and_list_candidate_by_id() -> None:
++    # The same note surfaces via both the outgoing link and the title search;
++    # it must collapse to one confident candidate, not two.
++    fake = ResolverFake(
++        links=(RelatedRef(id="dup", title="Shared"),),
++        list_result=(NoteSummary(id="dup", title="Shared", path="p/dup.md"),),
++    )
++
++    outcome = _run(resolve_wiki_link(fake, "Shared", "src"))
++
++    assert outcome.kind == "redirect"
++    assert outcome.target_id == "dup"
++
++
++def test_resolver_zero_candidates_is_unresolved_with_search() -> None:
++    fake = ResolverFake()
++
++    outcome = _run(resolve_wiki_link(fake, "ghost/target", "src"))
++
++    assert outcome.kind == "unresolved"
++    assert outcome.search_query == "ghost/target"
++
++
++def test_resolver_uses_last_path_component_for_title_search() -> None:
++    fake = ResolverFake()
++
++    _run(resolve_wiki_link(fake, "folder/sub/leaf", "src"))
++
++    assert fake.list_calls == ["leaf"]
++
++
++def test_resolver_empty_target_is_unresolved() -> None:
++    fake = ResolverFake()
++
++    outcome = _run(resolve_wiki_link(fake, "   ", "src"))
++
++    assert outcome.kind == "unresolved"
++    assert fake.path_calls == []
++
++
++def test_resolver_survives_related_failure() -> None:
++    class FailingRelated(ResolverFake):
++        async def related(self, knowledge_id: str) -> RelatedNeighborhood:
++            raise RuntimeError("related down")
++
++    fake = FailingRelated(
++        list_result=(NoteSummary(id="one", title="One", path="p/one.md"),)
++    )
++
++    outcome = _run(resolve_wiki_link(fake, "One", "src"))
++
++    # A dead cross-check degrades to the title search, not a 500.
++    assert outcome.kind == "redirect"
++    assert outcome.target_id == "one"
++
++
++# ── security: path-traversal probe guard (security/f-001) ──────────────
++
++
++@pytest.mark.parametrize(
++    "target",
++    [
++        "../../../secret/note",
++        "/etc/passwd",
++        "a/../../b",
++        "notes\\..\\secret",
++        "note\x00.md",
++    ],
++)
++def test_resolver_never_path_probes_traversal_or_absolute_targets(
++    target: str,
++) -> None:
++    # A traversal/absolute target must NOT be forwarded to read_note_by_path:
++    # even though this fake would "find" a note, the probe is skipped so it
++    # can't leak an id (or act as an existence oracle) via the redirect.
++    fake = ResolverFake(
++        path_hit=NoteRecord(id="leaked-secret", title="Secret", content="")
++    )
++
++    outcome = _run(resolve_wiki_link(fake, target, "src"))
++
++    assert fake.path_calls == []
++    assert outcome.kind == "unresolved"
++
++
++def test_resolver_still_probes_ordinary_dotted_names() -> None:
++    # The guard rejects ".." path *segments*, not any dot — a plain dotted name
++    # must still be probed so real notes keep resolving.
++    fake = ResolverFake(
++        path_hit=NoteRecord(id="v1.2-notes", title="Release", content="")
++    )
++
++    outcome = _run(resolve_wiki_link(fake, "releases/v1.2-notes", "src"))
++
++    assert fake.path_calls == ["releases/v1.2-notes.md"]
++    assert outcome.kind == "redirect"
++
++
++# ── security: linear wiki-link scan (security/f-002) ───────────────────
++
++
++def test_bracket_run_renders_no_wiki_link_and_stays_fast() -> None:
++    """Regression for the O(n²) backtracking DoS: a long run of ``[`` once
++    presented a ``[[`` start at every offset, so the wiki-link pass backtracked
++    quadratically (the finding measured ~8.5 s for 30 KB). Excluding ``[`` from
++    the target class makes each start fail in O(1). Black-box through the public
++    render so the guard is pinned where it's actually reached — a viewer request
++    to render a note body — and asserts both that no anchor is produced and that
++    the render doesn't blow up."""
++    import time
++
++    body = "[" * 30_000
++    start = time.perf_counter()
++    html = render_markdown(body, from_id="src")
++    elapsed = time.perf_counter() - start
++
++    assert "wiki-link" not in html
++    assert elapsed < 2.0  # pre-fix: several seconds and rising with n²
++
++
++# ── resolver route integration ─────────────────────────────────────────
++
++
++def _client(config_path: Path, fake: FakeLithosClient) -> TestClient:
++    config = load_config(config_path)
++    app = create_app(config, lithos_client_factory=lambda _: fake)
++    return TestClient(app)
++
++
++def _dataset(notes: dict[str, NoteRecord]) -> FakeLithosDataset:
++    return FakeLithosDataset(notes=notes)
++
++
++def test_resolve_route_uuid_redirects(lithos_lens_config_env: Path) -> None:
++    fake = FakeLithosClient(dataset=_dataset({}))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get(
++            f"/knowledge/resolve?target={A_UUID}&from=src",
++            follow_redirects=False,
++        )
++
++    assert response.status_code == 302
++    assert response.headers["location"] == f"/note/{A_UUID}"
++
++
++def test_resolve_route_path_probe_redirects(lithos_lens_config_env: Path) -> None:
++    notes = {
++        "target-note": NoteRecord(
++            id="target-note", title="Target Note", content="Body."
++        )
++    }
++    fake = FakeLithosClient(dataset=_dataset(notes))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get(
++            "/knowledge/resolve?target=target-note&from=src",
++            follow_redirects=False,
++        )
++
++    assert response.status_code == 302
++    assert response.headers["location"] == "/note/target-note"
++
++
++def test_resolve_route_disambiguation_lists_candidates(
++    lithos_lens_config_env: Path,
++) -> None:
++    notes = {
++        "shared-one": NoteRecord(id="shared-one", title="Shared design", content=""),
++        "shared-two": NoteRecord(id="shared-two", title="Shared rollout", content=""),
++    }
++    fake = FakeLithosClient(dataset=_dataset(notes))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get(
++            "/knowledge/resolve?target=Shared&from=src",
++            follow_redirects=False,
++        )
++
++    assert response.status_code == 200
++    assert "Which" in response.text
++    assert "Shared design" in response.text
++    assert "Shared rollout" in response.text
++    assert "/note/shared-one" in response.text
++    assert "/note/shared-two" in response.text
++
++
++def test_resolve_route_unresolved_offers_search(lithos_lens_config_env: Path) -> None:
++    fake = FakeLithosClient(dataset=_dataset({}))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get(
++            "/knowledge/resolve?target=nothing-here&from=src",
++            follow_redirects=False,
++        )
++
++    assert response.status_code == 200
++    assert "Unresolved link" in response.text
++    assert "/knowledge?q=nothing-here" in response.text
++
++
++def test_resolve_route_offline_renders_unresolved(
++    lithos_lens_config_env: Path,
++) -> None:
++    fake = FakeLithosClient(dataset=_dataset({}))
++
++    async def _degraded() -> str:
++        return "degraded"
++
++    fake.health = _degraded  # type: ignore[assignment]
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get(
++            "/knowledge/resolve?target=whatever&from=src",
++            follow_redirects=False,
++        )
++
++    assert response.status_code == 200
++    assert "Unresolved link" in response.text
++    assert "offline or degraded" in response.text
++
++
++def test_note_body_wiki_link_points_at_resolver(lithos_lens_config_env: Path) -> None:
++    notes = {
++        "root": NoteRecord(
++            id="root",
++            title="Root",
++            content="Follow [[note-influx-rollback]] for the abort route.",
++        )
++    }
++    fake = FakeLithosClient(dataset=_dataset(notes))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/root")
++
++    assert response.status_code == 200
++    assert 'href="/knowledge/resolve?target=note-influx-rollback&amp;from=root"' in (
++        response.text
++    )
++
++
++# ── /knowledge landing (correctness/f-001: search link is not a dead end) ──
++
++
++def test_unresolved_search_link_reaches_a_real_search_page(
++    lithos_lens_config_env: Path,
++) -> None:
++    # The resolver's unresolved page advertises /knowledge?q=<target>; that
++    # target must render a real search surface, not a 404 dead end.
++    notes = {
++        "influx-plan": NoteRecord(
++            id="influx-plan", title="Influx migration plan", content=""
++        )
++    }
++    fake = FakeLithosClient(dataset=_dataset(notes))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/knowledge?q=Influx", follow_redirects=False)
++
++    assert response.status_code == 200
++    assert "Results for" in response.text
++    assert "Influx migration plan" in response.text
++    assert "/note/influx-plan" in response.text
++
++
++def test_knowledge_landing_without_query_lists_recent(
++    lithos_lens_config_env: Path,
++) -> None:
++    notes = {
++        "a": NoteRecord(id="a", title="Note A", content=""),
++        "b": NoteRecord(id="b", title="Note B", content=""),
++    }
++    fake = FakeLithosClient(dataset=_dataset(notes))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/knowledge")
++
++    assert response.status_code == 200
++    assert "Recently updated" in response.text
++    assert "Note A" in response.text
++    assert "Note B" in response.text
++
++
++def test_knowledge_landing_empty_query_result(
++    lithos_lens_config_env: Path,
++) -> None:
++    fake = FakeLithosClient(dataset=_dataset({}))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/knowledge?q=no-such-note")
++
++    assert response.status_code == 200
++    assert "No matching notes." in response.text
++
++
++def test_knowledge_query_search_is_capped(lithos_lens_config_env: Path) -> None:
++    # Regression for security/f-003: a broad ?q= must not render an unbounded
++    # result set — it is capped like the recent list and resolver candidates.
++    notes = {
++        f"n-{i}": NoteRecord(id=f"n-{i}", title=f"Match {i:02d}", content="")
++        for i in range(25)
++    }
++    fake = FakeLithosClient(dataset=_dataset(notes))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/knowledge?q=Match")
++
++    assert response.status_code == 200
++    assert response.text.count('href="/note/') == 20
++
++
++def test_knowledge_tag_search_is_capped(lithos_lens_config_env: Path) -> None:
++    notes = {
++        f"n-{i}": NoteRecord(
++            id=f"n-{i}", title=f"Note {i:02d}", content="", tags=("project:x",)
++        )
++        for i in range(25)
++    }
++    fake = FakeLithosClient(dataset=_dataset(notes))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/knowledge?tag=project:x")
++
++    assert response.status_code == 200
++    assert response.text.count('href="/note/') == 20
+diff --git a/tests/test_tasks_mvp.py b/tests/test_tasks_mvp.py
+index 59d88d3..d82cb5e 100644
+--- a/tests/test_tasks_mvp.py
++++ b/tests/test_tasks_mvp.py
+@@ -19,6 +19,7 @@ from lithos_lens.tasks import (
+     ClaimRecord,
+     FindingRecord,
+     NoteRecord,
++    NoteSummary,
+     TaskRecord,
+     TaskStatusRecord,
+ )
+@@ -292,9 +293,21 @@ class TaskFakeLithosClient:
+             raise RuntimeError("missing note")
+         return self.notes[knowledge_id]
+ 
++    async def read_note_by_path(self, path: str) -> NoteRecord | None:
++        return None
++
+     async def related(self, knowledge_id: str) -> RelatedNeighborhood:
+         return RelatedNeighborhood()
+ 
++    async def list_notes(
++        self,
++        *,
++        title_contains: str | None = None,
++        tags: list[str] | None = None,
++        limit: int | None = None,
++    ) -> list[NoteSummary]:
++        return []
++
+     async def close(self) -> None:
+         self.closed = True
+ 

@@ -1,0 +1,1618 @@
+diff --git a/docs/architecture.toml b/docs/architecture.toml
+index e904442..d889680 100644
+--- a/docs/architecture.toml
++++ b/docs/architecture.toml
+@@ -33,7 +33,7 @@ LithosClient = "MCP-over-SSE client to the Lithos server — health probing, age
+ Config       = "Configuration and environment loading from lithos-lens.toml with env overrides."
+ Tasks        = "Tasks-dashboard data loading and normalization (task/claim/finding records + view models)."
+ TaskGraph    = "Task-graph transport records and normalizers (blocked-task rows + edges from the Lithos 0.4 graph reads)."
+-Knowledge    = "Knowledge-note rendering and normalization (safe server-side markdown; wiki-links + view models to follow)."
++Knowledge    = "Knowledge-note rendering and normalization (safe server-side markdown + the related-panel neighborhood/view models)."
+ Logging      = "Structured JSON logging setup (JsonFormatter)."
+ Telemetry    = "Optional OpenTelemetry hooks and request middleware."
+ Errors       = "Exception hierarchy rooted at LithosLensError."
+@@ -69,7 +69,7 @@ Foundation  = ["Config", "Tasks", "TaskGraph", "Knowledge", "Logging", "Telemetr
+ # is deliberately NOT pinned to the exact current high-water mark. Ratchet the
+ # *count* of oversized modules down via modules_over_800_lines instead.
+ [budgets]
+-cross_component_edges  = 22   # +2 for LithosClient -> TaskGraph and TaskGraph -> Tasks (T1 graph reads); direction: down
++cross_component_edges  = 24   # +2 for the K1-S4 Knowledge related-panel seams (LithosClient -> Knowledge, Knowledge -> Tasks); direction: down
+ component_cycles       = 0    # no component-level cycles today; keep it that way
+ module_cycles          = 0    # no module-level cycles today; keep it that way
+ modules_over_800_lines = 0    # no god modules today; keep it that way
+@@ -85,6 +85,7 @@ tests_private_imports     = 0  # tests use only the public surface; keep it that
+ include_modules = [
+     "lithos_lens.tasks",
+     "lithos_lens.task_graph",
++    "lithos_lens.knowledge",
+     "lithos_lens.events",
+     "lithos_lens.state",
+     "lithos_lens.lithos_client",
+diff --git a/docs/generated/architecture.md b/docs/generated/architecture.md
+index 9f6456c..84db58a 100644
+--- a/docs/generated/architecture.md
++++ b/docs/generated/architecture.md
+@@ -42,7 +42,9 @@ graph TD
+   Entrypoint --> Logging
+   Entrypoint --> Web
+   Events --> Config
++  Knowledge --> Tasks
+   LithosClient --> Config
++  LithosClient --> Knowledge
+   LithosClient --> TaskGraph
+   LithosClient --> Tasks
+   Logging --> Config
+@@ -68,10 +70,12 @@ graph TD
+   linkStyle 9 stroke:#bbb
+   linkStyle 10 stroke:#bbb
+   linkStyle 11 stroke:#bbb
+-  linkStyle 14 stroke:#bbb
+-  linkStyle 15 stroke:#bbb
+-  linkStyle 16 stroke:#999,stroke-dasharray:4
+-  linkStyle 17 stroke:#999,stroke-dasharray:4
+-  linkStyle 20 stroke:#999,stroke-dasharray:4
+-  linkStyle 21 stroke:#999,stroke-dasharray:4
++  linkStyle 12 stroke:#bbb
++  linkStyle 13 stroke:#bbb
++  linkStyle 16 stroke:#bbb
++  linkStyle 17 stroke:#bbb
++  linkStyle 18 stroke:#999,stroke-dasharray:4
++  linkStyle 19 stroke:#999,stroke-dasharray:4
++  linkStyle 22 stroke:#999,stroke-dasharray:4
++  linkStyle 23 stroke:#999,stroke-dasharray:4
+ ```
+diff --git a/docs/generated/components/Config.md b/docs/generated/components/Config.md
+index bc1b281..187b024 100644
+--- a/docs/generated/components/Config.md
++++ b/docs/generated/components/Config.md
+@@ -11,7 +11,7 @@ Configuration and environment loading from lithos-lens.toml with env overrides.
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.config` | M | 10 | 3 |
++| `lithos_lens.config` | L | 11 | 3 |
+ 
+ ## Public API
+ 
+@@ -26,6 +26,7 @@ Configuration and environment loading from lithos-lens.toml with env overrides.
+ - class `TelemetryConfig`
+ - class `UIConfig`
+ - class `HealthConfig`
++- class `KnowledgeConfig`
+ - class `LithosLensConfig`
+ - def `find_config_path` — Return the first existing ``lithos-lens.toml`` in the discovery order.
+ - def `load_config` — Load, validate, and return a ``LithosLensConfig``.
+diff --git a/docs/generated/components/Knowledge.md b/docs/generated/components/Knowledge.md
+index c1b0868..f474c08 100644
+--- a/docs/generated/components/Knowledge.md
++++ b/docs/generated/components/Knowledge.md
+@@ -3,7 +3,7 @@
+ 
+ # Knowledge
+ 
+-Knowledge-note rendering and normalization (safe server-side markdown; wiki-links + view models to follow).
++Knowledge-note rendering and normalization (safe server-side markdown + the related-panel neighborhood/view models).
+ 
+ **Tier:** Foundation
+ 
+@@ -11,16 +11,24 @@ Knowledge-note rendering and normalization (safe server-side markdown; wiki-link
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.knowledge` | XS | 0 | 1 |
++| `lithos_lens.knowledge` | M | 6 | 3 |
+ 
+ ## Public API
+ 
+ ### `lithos_lens.knowledge`
+ - def `render_markdown` — Render a note's markdown body to safe HTML.
++- class `RelatedRef` — A raw neighbor reference from ``lithos_related``, before title lookup.
++- class `RelatedNeighborhood` — One ``lithos_related`` call's worth of a note's neighborhood (raw ids).
++- class `RelatedItem` — A neighbor rendered in the panel — by title when it could be resolved.
++- class `RelatedSection` — One panel section: resolved items plus a count collapsed past the cap.
++- class `RelatedPanel` — The four related-panel sections plus loose provenance and load state.
++- class `KnowledgeLithosClientProtocol` — Subset of Lithos operations required by the knowledge note view.
++- def `load_related_panel` — Load and resolve a note's related panel from one ``lithos_related`` call.
++- def `normalize_related` — Normalize a ``lithos_related`` payload into a ``RelatedNeighborhood``.
+ 
+ ## Dependencies
+ 
+-- Depends on: —
+-- Used by: [Web](Web.md)
++- Depends on: [Tasks](Tasks.md)
++- Used by: [LithosClient](LithosClient.md), [Web](Web.md)
+ 
+ [← all generated docs](../README.md)
+diff --git a/docs/generated/components/LithosClient.md b/docs/generated/components/LithosClient.md
+index 69f55cf..5eac053 100644
+--- a/docs/generated/components/LithosClient.md
++++ b/docs/generated/components/LithosClient.md
+@@ -23,7 +23,7 @@ MCP-over-SSE client to the Lithos server — health probing, agent registration,
+ 
+ ## Dependencies
+ 
+-- Depends on: [Config](Config.md), [TaskGraph](TaskGraph.md), [Tasks](Tasks.md)
++- Depends on: [Config](Config.md), [Knowledge](Knowledge.md), [TaskGraph](TaskGraph.md), [Tasks](Tasks.md)
+ - Used by: [State](State.md), [Web](Web.md)
+ 
+ [← all generated docs](../README.md)
+diff --git a/docs/generated/components/Tasks.md b/docs/generated/components/Tasks.md
+index b33d68c..01dda4d 100644
+--- a/docs/generated/components/Tasks.md
++++ b/docs/generated/components/Tasks.md
+@@ -49,6 +49,6 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ ## Dependencies
+ 
+ - Depends on: —
+-- Used by: [Config](Config.md), [LithosClient](LithosClient.md), [TaskGraph](TaskGraph.md), [Web](Web.md)
++- Used by: [Config](Config.md), [Knowledge](Knowledge.md), [LithosClient](LithosClient.md), [TaskGraph](TaskGraph.md), [Web](Web.md)
+ 
+ [← all generated docs](../README.md)
+diff --git a/docs/generated/components/Web.md b/docs/generated/components/Web.md
+index 2a17479..43eabc6 100644
+--- a/docs/generated/components/Web.md
++++ b/docs/generated/components/Web.md
+@@ -11,7 +11,7 @@ FastAPI application factory serving the server-rendered dashboard UI (Jinja2 tem
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.web` | S | 0 | 5 |
++| `lithos_lens.web` | M | 0 | 5 |
+ 
+ ## Public API
+ 
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 19c9d8a..bf478af 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -21,6 +21,45 @@ classDiagram
+   }
+ ```
+ 
++## Knowledge
++
++```mermaid
++classDiagram
++  class RelatedItem {
++    +id str
++    +title str
++    +edge_type str
++    +weight float | None
++  }
++  class RelatedNeighborhood {
++    +unresolved tuple[str, ...]
++  }
++  class RelatedPanel {
++    +unresolved tuple[str, ...]
++    +state SectionState
++  }
++  class RelatedRef {
++    +id str
++    +title str
++    +edge_type str
++    +weight float | None
++  }
++  class RelatedSection {
++    +overflow int
++  }
++  RelatedNeighborhood "1" --> "0..*" RelatedRef : backlinks
++  RelatedNeighborhood "1" --> "0..*" RelatedRef : derived
++  RelatedNeighborhood "1" --> "0..*" RelatedRef : edges
++  RelatedNeighborhood "1" --> "0..*" RelatedRef : links
++  RelatedNeighborhood "1" --> "0..*" RelatedRef : sources
++  RelatedPanel "1" --> "1" RelatedSection : backlinks
++  RelatedPanel "1" --> "1" RelatedSection : derived
++  RelatedPanel "1" --> "1" RelatedSection : edges
++  RelatedPanel "1" --> "1" RelatedSection : links
++  RelatedPanel "1" --> "1" RelatedSection : sources
++  RelatedSection "1" --> "0..*" RelatedItem : items
++```
++
+ ## LithosClient
+ 
+ ```mermaid
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index c44624d..3f3aed3 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -23,8 +23,8 @@
+       },
+       "Knowledge": {
+         "functions_over_10": 0,
+-        "max_complexity": 3,
+-        "max_function": "lithos_lens.knowledge.render_markdown"
++        "max_complexity": 9,
++        "max_function": "lithos_lens.knowledge._normalize_edges"
+       },
+       "LithosClient": {
+         "functions_over_10": 0,
+@@ -58,7 +58,7 @@
+       },
+       "Web": {
+         "functions_over_10": 0,
+-        "max_complexity": 7,
++        "max_complexity": 8,
+         "max_function": "lithos_lens.web.create_app.note"
+       }
+     },
+@@ -101,15 +101,15 @@
+         "qualname": "lithos_lens.config._optional_status_groups"
+       },
+       {
+-        "complexity": 8,
+-        "qualname": "lithos_lens.task_graph.normalize_edge"
++        "complexity": 9,
++        "qualname": "lithos_lens.knowledge._normalize_edges"
+       }
+     ],
+-    "total_functions": 134
++    "total_functions": 154
+   },
+   "domain": {
+-    "associations": 14,
+-    "models": 19,
++    "associations": 25,
++    "models": 24,
+     "models_without_docstrings": 16
+   },
+   "graph": {
+@@ -136,14 +136,14 @@
+         "instability": 0.5
+       },
+       "Knowledge": {
+-        "fan_in": 1,
+-        "fan_out": 0,
+-        "instability": 0.0
++        "fan_in": 2,
++        "fan_out": 1,
++        "instability": 0.33
+       },
+       "LithosClient": {
+         "fan_in": 2,
+-        "fan_out": 3,
+-        "instability": 0.6
++        "fan_out": 4,
++        "instability": 0.67
+       },
+       "Logging": {
+         "fan_in": 1,
+@@ -161,7 +161,7 @@
+         "instability": 0.5
+       },
+       "Tasks": {
+-        "fan_in": 4,
++        "fan_in": 5,
+         "fan_out": 0,
+         "instability": 0.0
+       },
+@@ -176,8 +176,8 @@
+         "instability": 0.86
+       }
+     },
+-    "cross_component_edges": 22,
+-    "cross_component_module_edges": 22,
++    "cross_component_edges": 24,
++    "cross_component_module_edges": 24,
+     "longest_component_chain": 5,
+     "module_cycle_count": 0,
+     "module_cycles": [],
+@@ -206,14 +206,14 @@
+   "size": {
+     "components": {
+       "Config": {
+-        "classes": 10,
+-        "functions": 21,
++        "classes": 11,
++        "functions": 22,
+         "largest_module": "lithos_lens.config",
+-        "largest_module_lines": 671,
+-        "lines": 671,
++        "largest_module_lines": 719,
++        "lines": 719,
+         "modules": 1,
+-        "public_symbols": 13,
+-        "sloc": 575
++        "public_symbols": 14,
++        "sloc": 613
+       },
+       "Entrypoint": {
+         "classes": 0,
+@@ -246,24 +246,24 @@
+         "sloc": 180
+       },
+       "Knowledge": {
+-        "classes": 0,
+-        "functions": 2,
++        "classes": 6,
++        "functions": 19,
+         "largest_module": "lithos_lens.knowledge",
+-        "largest_module_lines": 64,
+-        "lines": 64,
++        "largest_module_lines": 375,
++        "lines": 375,
+         "modules": 1,
+-        "public_symbols": 1,
+-        "sloc": 43
++        "public_symbols": 9,
++        "sloc": 298
+       },
+       "LithosClient": {
+         "classes": 4,
+-        "functions": 39,
++        "functions": 41,
+         "largest_module": "lithos_lens.lithos_client",
+-        "largest_module_lines": 545,
+-        "lines": 545,
++        "largest_module_lines": 563,
++        "lines": 563,
+         "modules": 1,
+         "public_symbols": 4,
+-        "sloc": 454
++        "sloc": 470
+       },
+       "Logging": {
+         "classes": 1,
+@@ -319,23 +319,23 @@
+         "classes": 0,
+         "functions": 15,
+         "largest_module": "lithos_lens.web",
+-        "largest_module_lines": 296,
+-        "lines": 296,
++        "largest_module_lines": 305,
++        "lines": 305,
+         "modules": 1,
+         "public_symbols": 5,
+-        "sloc": 265
++        "sloc": 274
+       }
+     },
+     "max_module": "lithos_lens.config",
+-    "max_module_lines": 671,
++    "max_module_lines": 719,
+     "modules_over_800": [],
+-    "total_lines": 2763,
++    "total_lines": 3149,
+     "total_modules": 14,
+-    "total_sloc": 2287
++    "total_sloc": 2605
+   },
+   "tests": {
+-    "ratio": 1.6,
+-    "src_lines": 2763,
+-    "test_lines": 4407
++    "ratio": 1.54,
++    "src_lines": 3149,
++    "test_lines": 4858
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index f6ba04e..528443b 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -12,16 +12,16 @@ lower a budget after improving the code to lock in the gain.
+ | Metric | Actual | Budget | Headroom |
+ |---|---:|---:|---:|
+ | `component_cycles` | 0 | 0 | 0 |
+-| `cross_component_edges` | 22 | 22 | 0 |
++| `cross_component_edges` | 24 | 24 | 0 |
+ | `cross_module_private_refs` | 0 | 0 | 0 |
+-| `max_module_lines` | 671 | 800 | 129 |
++| `max_module_lines` | 719 | 800 | 81 |
+ | `module_cycles` | 0 | 0 | 0 |
+ | `modules_over_800_lines` | 0 | 0 | 0 |
+ | `tests_private_imports` | 0 | 0 | 0 |
+ 
+ ## Import graph
+ 
+-- Cross-component edges: **22** (22 module-level)
++- Cross-component edges: **24** (24 module-level)
+ - Component cycles: none
+ - Module cycles: none
+ - Tier-skipping edges (Entrypoints → Foundation): 7 (Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> Logging, Web -> Config, Web -> Knowledge, Web -> Tasks, Web -> Telemetry)
+@@ -34,28 +34,28 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ 
+ | Component | Modules | Lines | SLOC | Fan-in | Fan-out | Instability | Max complexity | Functions > 10 |
+ |---|---:|---:|---:|---:|---:|---:|---|---:|
+-| Config | 1 | 671 | 575 | 7 | 2 | 0.22 | 23 (`lithos_lens.config._apply_env_overrides`) | 1 |
++| Config | 1 | 719 | 613 | 7 | 2 | 0.22 | 23 (`lithos_lens.config._apply_env_overrides`) | 1 |
+ | Entrypoint | 2 | 50 | 32 | 0 | 4 | 1.00 | 2 (`lithos_lens.main.main`) | 0 |
+ | Errors | 1 | 15 | 9 | 2 | 0 | 0.00 | - | 0 |
+ | Events | 1 | 208 | 180 | 1 | 1 | 0.50 | 10 (`lithos_lens.events.parse_lithos_sse_frame`) | 0 |
+-| Knowledge | 1 | 64 | 43 | 1 | 0 | 0.00 | 3 (`lithos_lens.knowledge.render_markdown`) | 0 |
+-| LithosClient | 1 | 545 | 454 | 2 | 3 | 0.60 | 7 (`lithos_lens.lithos_client.LithosClient.list_tasks`) | 0 |
++| Knowledge | 1 | 375 | 298 | 2 | 1 | 0.33 | 9 (`lithos_lens.knowledge._normalize_edges`) | 0 |
++| LithosClient | 1 | 563 | 470 | 2 | 4 | 0.67 | 7 (`lithos_lens.lithos_client.LithosClient.list_tasks`) | 0 |
+ | Logging | 1 | 60 | 48 | 1 | 1 | 0.50 | 5 (`lithos_lens.logging.JsonFormatter.format`) | 0 |
+ | State | 1 | 63 | 50 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.refresh_health`) | 0 |
+ | TaskGraph | 1 | 119 | 88 | 1 | 1 | 0.50 | 8 (`lithos_lens.task_graph.normalize_edge`) | 0 |
+-| Tasks | 1 | 640 | 521 | 4 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
++| Tasks | 1 | 640 | 521 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
+ | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
+-| Web | 1 | 296 | 265 | 1 | 6 | 0.86 | 7 (`lithos_lens.web.create_app.note`) | 0 |
++| Web | 1 | 305 | 274 | 1 | 6 | 0.86 | 8 (`lithos_lens.web.create_app.note`) | 0 |
+ 
+ ## Size
+ 
+-- Modules: **14**, lines: **2763**, SLOC: **2287**
+-- Largest module: `lithos_lens.config` (671 lines)
++- Modules: **14**, lines: **3149**, SLOC: **2605**
++- Largest module: `lithos_lens.config` (719 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **134**, cyclomatic > 10: **6**
++- Functions: **154**, cyclomatic > 10: **6**
+ 
+ Top 10 most complex functions:
+ 
+@@ -70,7 +70,7 @@ Top 10 most complex functions:
+ | 10 | `lithos_lens.events.parse_lithos_sse_frame` |
+ | 10 | `lithos_lens.tasks.parse_filters` |
+ | 9 | `lithos_lens.config._optional_status_groups` |
+-| 8 | `lithos_lens.task_graph.normalize_edge` |
++| 9 | `lithos_lens.knowledge._normalize_edges` |
+ 
+ ## Seams
+ 
+@@ -82,5 +82,5 @@ Private-name reaches across module seams. Both counts can be pinned as
+ 
+ ## Domain & tests
+ 
+-- Domain models: **19** (14 associations, 16 without docstrings)
+-- Test-to-source line ratio: **1.60** (4407 test lines / 2763 source lines)
++- Domain models: **24** (25 associations, 16 without docstrings)
++- Test-to-source line ratio: **1.54** (4858 test lines / 3149 source lines)
+diff --git a/src/lithos_lens/config.py b/src/lithos_lens/config.py
+index b6b6eb0..abca584 100644
+--- a/src/lithos_lens/config.py
++++ b/src/lithos_lens/config.py
+@@ -27,6 +27,7 @@ __all__ = [
+     "EventsConfig",
+     "ConfigError",
+     "HealthConfig",
++    "KnowledgeConfig",
+     "LithosLensConfig",
+     "LithosConfig",
+     "LLMConfig",
+@@ -63,6 +64,10 @@ DEFAULT_TASKS_VISIBLE_CAP = 50
+ DEFAULT_TASKS_DEFAULT_TIME_RANGE_DAYS = 30
+ DEFAULT_LLM_MAX_TOKENS = 2048
+ DEFAULT_HEALTH_REFRESH_INTERVAL_S = 30
++DEFAULT_KNOWLEDGE_RELATED_TITLE_FANOUT_CAP = 20
++MAX_KNOWLEDGE_RELATED_TITLE_FANOUT_CAP = 100
++DEFAULT_KNOWLEDGE_RELATED_RENDER_CAP = 50
++MAX_KNOWLEDGE_RELATED_RENDER_CAP = 200
+ 
+ 
+ def parse_log_level(value: str) -> LogLevel:
+@@ -138,6 +143,12 @@ class HealthConfig:
+     refresh_interval_s: int = DEFAULT_HEALTH_REFRESH_INTERVAL_S
+ 
+ 
++@dataclass(frozen=True)
++class KnowledgeConfig:
++    related_title_fanout_cap: int = DEFAULT_KNOWLEDGE_RELATED_TITLE_FANOUT_CAP
++    related_render_cap: int = DEFAULT_KNOWLEDGE_RELATED_RENDER_CAP
++
++
+ @dataclass(frozen=True)
+ class LithosLensConfig:
+     environment: str
+@@ -151,6 +162,7 @@ class LithosLensConfig:
+     telemetry: TelemetryConfig
+     ui: UIConfig
+     health: HealthConfig
++    knowledge: KnowledgeConfig
+ 
+ 
+ # ── Discovery and loading ──────────────────────────────────────────────
+@@ -245,6 +257,7 @@ def load_config(path: Path | None = None) -> LithosLensConfig:
+     telemetry = _parse_telemetry(lithos_lens_section.get("telemetry", {}), config_path)
+     ui = _parse_ui(lithos_lens_section.get("ui", {}), config_path)
+     health = _parse_health(lithos_lens_section.get("health", {}), config_path)
++    knowledge = _parse_knowledge(lithos_lens_section.get("knowledge", {}), config_path)
+ 
+     cfg = LithosLensConfig(
+         environment=environment,
+@@ -258,6 +271,7 @@ def load_config(path: Path | None = None) -> LithosLensConfig:
+         telemetry=telemetry,
+         ui=ui,
+         health=health,
++        knowledge=knowledge,
+     )
+     return _apply_env_overrides(cfg)
+ 
+@@ -445,6 +459,37 @@ def _parse_health(data: Any, config_path: Path) -> HealthConfig:
+     )
+ 
+ 
++def _parse_knowledge(data: Any, config_path: Path) -> KnowledgeConfig:
++    if not isinstance(data, dict):
++        raise ConfigError(f"{config_path}: [lithos-lens.knowledge] must be a table")
++    return KnowledgeConfig(
++        related_title_fanout_cap=_optional_int(
++            data,
++            "related_title_fanout_cap",
++            DEFAULT_KNOWLEDGE_RELATED_TITLE_FANOUT_CAP,
++            config_path,
++            "lithos-lens.knowledge",
++            minimum=1,
++            # Bound the per-request title fan-out so a misconfigured cap can't
++            # amplify one /note/{id} request into an unbounded concurrent
++            # lithos_read burst against the shared MCP session.
++            maximum=MAX_KNOWLEDGE_RELATED_TITLE_FANOUT_CAP,
++        ),
++        related_render_cap=_optional_int(
++            data,
++            "related_render_cap",
++            DEFAULT_KNOWLEDGE_RELATED_RENDER_CAP,
++            config_path,
++            "lithos-lens.knowledge",
++            minimum=1,
++            # Ceiling the render cap too, so its own size bound can't be
++            # misconfigured away (mirrors related_title_fanout_cap): a huge cap
++            # would re-open the hub-note render amplification the cap closes.
++            maximum=MAX_KNOWLEDGE_RELATED_RENDER_CAP,
++        ),
++    )
++
++
+ def _optional_str(
+     data: dict[str, Any],
+     key: str,
+@@ -483,6 +528,7 @@ def _optional_int(
+     section: str,
+     *,
+     minimum: int | None = None,
++    maximum: int | None = None,
+ ) -> int:
+     if key not in data:
+         return default
+@@ -491,6 +537,8 @@ def _optional_int(
+         raise ConfigError(f"{config_path}: [{section}].{key} must be an integer")
+     if minimum is not None and value < minimum:
+         raise ConfigError(f"{config_path}: [{section}].{key} must be >= {minimum}")
++    if maximum is not None and value > maximum:
++        raise ConfigError(f"{config_path}: [{section}].{key} must be <= {maximum}")
+     return value
+ 
+ 
+diff --git a/src/lithos_lens/knowledge.py b/src/lithos_lens/knowledge.py
+index adca78e..1ccc767 100644
+--- a/src/lithos_lens/knowledge.py
++++ b/src/lithos_lens/knowledge.py
+@@ -1,18 +1,28 @@
+ """Knowledge note rendering and normalization.
+ 
+-Foundation module for the knowledge browser surface (mirrors ``tasks.py``).
+-K1 slice 1 introduces server-side markdown rendering; later slices add the
+-wiki-link tokenizer, metadata chips, related panel, and search view models.
++Foundation module for the knowledge browser surface (mirrors ``tasks.py``):
++frozen dataclasses, pure normalizers, a narrow client protocol, and ``load_*``
++orchestrators with per-section state. K1 slice 1 introduced server-side
++markdown rendering; K1-S4 adds the *related panel* — one ``lithos_related``
++call turned into four scannable sections (outgoing links, back-links,
++provenance, typed edges) with link/edge endpoints shown by title rather than
++bare id. Later slices add the wiki-link tokenizer, metadata chips, and search
++view models.
+ """
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import logging
++from dataclasses import dataclass, field
+ from html import escape
++from typing import Any, Protocol
+ from urllib.parse import urlparse
+ 
+ from markdown_it import MarkdownIt
+ 
++from lithos_lens.tasks import NoteRecord, SectionState
++
+ logger = logging.getLogger(__name__)
+ 
+ # Schemes an agent-authored link may use (REQUIREMENTS.md §6.2). Anything else —
+@@ -62,3 +72,304 @@ def render_markdown(text: str) -> str:
+             exc_info=True,
+         )
+         return f'<pre class="markdown-fallback">{escape(body)}</pre>'
++
++
++# ── Related panel (K1-S4) ──────────────────────────────────────────────
++
++
++@dataclass(frozen=True)
++class RelatedRef:
++    """A raw neighbor reference from ``lithos_related``, before title lookup.
++
++    Outgoing/back-link entries carry a ``title`` inline in the response; typed
++    edges carry endpoint ids only, so their titles are filled in by a separate
++    capped ``lithos_read`` fan-out.
++    """
++
++    id: str
++    title: str = ""
++    edge_type: str = ""
++    weight: float | None = None
++
++
++@dataclass(frozen=True)
++class RelatedNeighborhood:
++    """One ``lithos_related`` call's worth of a note's neighborhood (raw ids)."""
++
++    links: tuple[RelatedRef, ...] = ()
++    backlinks: tuple[RelatedRef, ...] = ()
++    sources: tuple[RelatedRef, ...] = ()
++    derived: tuple[RelatedRef, ...] = ()
++    unresolved: tuple[str, ...] = ()
++    edges: tuple[RelatedRef, ...] = ()
++
++
++@dataclass(frozen=True)
++class RelatedItem:
++    """A neighbor rendered in the panel — by title when it could be resolved."""
++
++    id: str
++    title: str = ""
++    edge_type: str = ""
++    weight: float | None = None
++
++    @property
++    def label(self) -> str:
++        """Human label: the resolved title, falling back to the bare id."""
++        return self.title or self.id
++
++
++@dataclass(frozen=True)
++class RelatedSection:
++    """One panel section: resolved items plus a count collapsed past the cap."""
++
++    items: tuple[RelatedItem, ...] = ()
++    overflow: int = 0
++
++
++@dataclass(frozen=True)
++class RelatedPanel:
++    """The four related-panel sections plus loose provenance and load state."""
++
++    links: RelatedSection = field(default_factory=RelatedSection)
++    backlinks: RelatedSection = field(default_factory=RelatedSection)
++    sources: RelatedSection = field(default_factory=RelatedSection)
++    derived: RelatedSection = field(default_factory=RelatedSection)
++    unresolved: tuple[str, ...] = ()
++    edges: RelatedSection = field(default_factory=RelatedSection)
++    state: SectionState = SectionState.OK
++
++    @property
++    def has_provenance(self) -> bool:
++        return bool(
++            self.sources.items
++            or self.sources.overflow
++            or self.derived.items
++            or self.derived.overflow
++            or self.unresolved
++        )
++
++    @property
++    def is_empty(self) -> bool:
++        return not (
++            self.links.items
++            or self.backlinks.items
++            or self.has_provenance
++            or self.edges.items
++        )
++
++
++class KnowledgeLithosClientProtocol(Protocol):
++    """Subset of Lithos operations required by the knowledge note view."""
++
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood: ...
++
++    async def read_note(
++        self, knowledge_id: str, *, max_length: int | None = None
++    ) -> NoteRecord | None: ...
++
++
++async def load_related_panel(
++    lithos: KnowledgeLithosClientProtocol,
++    knowledge_id: str,
++    *,
++    title_fanout_cap: int,
++    render_cap: int,
++) -> RelatedPanel:
++    """Load and resolve a note's related panel from one ``lithos_related`` call.
++
++    Two independent bounds apply. ``title_fanout_cap`` limits the ``lithos_read``
++    fan-out — at most that many distinct ids are looked up to resolve titles,
++    bounding backend *call* count. ``render_cap`` limits how many items each
++    section *emits*, bounding response *size* even for a hub note whose
++    neighbors arrive with inline titles (which need no fan-out). Anything past
++    either bound collapses into the section's ``overflow`` count. A failed
++    ``lithos_related`` call degrades to ``SectionState.ERROR`` so the note body
++    still renders.
++    """
++
++    try:
++        neighborhood = await lithos.related(knowledge_id)
++    except Exception:
++        return RelatedPanel(state=SectionState.ERROR)
++
++    titles = await _resolve_titles(lithos, neighborhood, cap=title_fanout_cap)
++    return RelatedPanel(
++        links=_build_section(neighborhood.links, titles, render_cap=render_cap),
++        backlinks=_build_section(neighborhood.backlinks, titles, render_cap=render_cap),
++        sources=_build_section(neighborhood.sources, titles, render_cap=render_cap),
++        derived=_build_section(neighborhood.derived, titles, render_cap=render_cap),
++        unresolved=neighborhood.unresolved,
++        edges=_build_section(neighborhood.edges, titles, render_cap=render_cap),
++    )
++
++
++def normalize_related(raw: dict[str, Any]) -> RelatedNeighborhood:
++    """Normalize a ``lithos_related`` payload into a ``RelatedNeighborhood``."""
++    unresolved = _provenance(raw, "unresolved")
++    if unresolved is None:
++        unresolved = _provenance(raw, "unresolved_sources")
++    return RelatedNeighborhood(
++        links=_normalize_refs(raw.get("links")),
++        backlinks=_normalize_refs(raw.get("backlinks") or raw.get("back_links")),
++        sources=_normalize_refs(_provenance(raw, "sources")),
++        derived=_normalize_refs(_provenance(raw, "derived")),
++        unresolved=_normalize_unresolved(unresolved),
++        edges=_normalize_edges(raw.get("edges")),
++    )
++
++
++def _ordered_ids(neighborhood: RelatedNeighborhood) -> list[str]:
++    """Distinct ids needing a title lookup, in section order.
++
++    Refs whose title arrived inline in the ``lithos_related`` response are
++    skipped — they already render by title and never spend fan-out budget.
++    """
++    seen: dict[str, None] = {}
++    for refs in (
++        neighborhood.links,
++        neighborhood.backlinks,
++        neighborhood.sources,
++        neighborhood.derived,
++        neighborhood.edges,
++    ):
++        for ref in refs:
++            if ref.id and not ref.title:
++                seen.setdefault(ref.id, None)
++    return list(seen)
++
++
++async def _resolve_titles(
++    lithos: KnowledgeLithosClientProtocol,
++    neighborhood: RelatedNeighborhood,
++    *,
++    cap: int,
++) -> dict[str, str]:
++    ids = _ordered_ids(neighborhood)[: max(cap, 0)]
++    if not ids:
++        return {}
++
++    async def fetch(note_id: str) -> str:
++        try:
++            note = await lithos.read_note(note_id, max_length=1)
++        except Exception:
++            return ""
++        return note.title if note else ""
++
++    results = await asyncio.gather(*(fetch(note_id) for note_id in ids))
++    return dict(zip(ids, results, strict=True))
++
++
++def _build_section(
++    refs: tuple[RelatedRef, ...],
++    titles: dict[str, str],
++    *,
++    render_cap: int,
++) -> RelatedSection:
++    """Render refs with a known title; collapse the rest into ``overflow``.
++
++    A title is known when it arrived inline in the response (``ref.title``) or
++    when the capped fan-out resolved it (``titles``). Two things collapse into
++    ``overflow``: refs with no known title (past the fan-out cap), and
++    renderable refs past ``render_cap`` — a separate ceiling on how many items a
++    section emits, so a hub note with many *inline* titles cannot inflate the
++    rendered page beyond a lens-side bound.
++    """
++    items: list[RelatedItem] = []
++    overflow = 0
++    for ref in refs:
++        renderable = bool(ref.title or ref.id in titles)
++        if renderable and len(items) < render_cap:
++            items.append(
++                RelatedItem(
++                    id=ref.id,
++                    title=ref.title or titles[ref.id],
++                    edge_type=ref.edge_type,
++                    weight=ref.weight,
++                )
++            )
++        else:
++            overflow += 1
++    return RelatedSection(items=tuple(items), overflow=overflow)
++
++
++def _ref_id(raw: Any) -> str:
++    if isinstance(raw, str):
++        return raw
++    if isinstance(raw, dict):
++        return str(
++            raw.get("id")
++            or raw.get("target")
++            or raw.get("to")
++            or raw.get("knowledge_id")
++            or ""
++        )
++    return ""
++
++
++def _ref_title(raw: Any) -> str:
++    if isinstance(raw, dict):
++        return str(raw.get("title") or raw.get("display") or "")
++    return ""
++
++
++def _normalize_refs(items: Any) -> tuple[RelatedRef, ...]:
++    if not isinstance(items, list):
++        return ()
++    refs: list[RelatedRef] = []
++    for item in items:
++        ref_id = _ref_id(item)
++        if ref_id:
++            refs.append(RelatedRef(id=ref_id, title=_ref_title(item)))
++    return tuple(refs)
++
++
++def _normalize_edges(items: Any) -> tuple[RelatedRef, ...]:
++    if not isinstance(items, list):
++        return ()
++    refs: list[RelatedRef] = []
++    for item in items:
++        ref_id = _ref_id(item)
++        if not ref_id:
++            continue
++        edge_type = ""
++        weight: float | None = None
++        if isinstance(item, dict):
++            edge_type = str(item.get("type") or item.get("edge_type") or "")
++            raw_weight = item.get("weight")
++            if isinstance(raw_weight, (int, float)) and not isinstance(
++                raw_weight, bool
++            ):
++                weight = float(raw_weight)
++        refs.append(
++            RelatedRef(
++                id=ref_id,
++                title=_ref_title(item),
++                edge_type=edge_type,
++                weight=weight,
++            )
++        )
++    return tuple(refs)
++
++
++def _normalize_unresolved(items: Any) -> tuple[str, ...]:
++    if not isinstance(items, list):
++        return ()
++    values: list[str] = []
++    for item in items:
++        if isinstance(item, str):
++            text = item
++        elif isinstance(item, dict):
++            text = str(item.get("target") or item.get("display") or "")
++        else:
++            text = ""
++        if text:
++            values.append(text)
++    return tuple(values)
++
++
++def _provenance(raw: dict[str, Any], key: str) -> Any:
++    provenance = raw.get("provenance")
++    if isinstance(provenance, dict) and key in provenance:
++        return provenance.get(key)
++    return raw.get(key)
+diff --git a/src/lithos_lens/lithos_client.py b/src/lithos_lens/lithos_client.py
+index 68efcd1..ab262ab 100644
+--- a/src/lithos_lens/lithos_client.py
++++ b/src/lithos_lens/lithos_client.py
+@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
+ import httpx
+ 
+ from lithos_lens.config import LithosConfig
++from lithos_lens.knowledge import RelatedNeighborhood, normalize_related
+ from lithos_lens.task_graph import (
+     BlockedTaskRecord,
+     EdgeRecord,
+@@ -119,7 +120,11 @@ class LithosClientProtocol(Protocol):
+ 
+     async def list_agents(self) -> list[AgentRecord]: ...
+ 
+-    async def read_note(self, knowledge_id: str) -> NoteRecord | None: ...
++    async def read_note(
++        self, knowledge_id: str, *, max_length: int | None = None
++    ) -> NoteRecord | None: ...
++
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood: ...
+ 
+     async def close(self) -> None: ...
+ 
+@@ -421,13 +426,26 @@ class LithosClient:
+             if isinstance(agent, dict)
+         ]
+ 
+-    async def read_note(self, knowledge_id: str) -> NoteRecord | None:
++    async def read_note(
++        self, knowledge_id: str, *, max_length: int | None = None
++    ) -> NoteRecord | None:
++        arguments: dict[str, Any] = {
++            "id": knowledge_id,
++            "agent_id": self._config.agent_id,
++        }
++        if max_length is not None:
++            arguments["max_length"] = max_length
++        payload = await self._call_tool("lithos_read", arguments)
++        _raise_for_error(payload)
++        return normalize_note(payload)
++
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood:
+         payload = await self._call_tool(
+-            "lithos_read",
+-            {"id": knowledge_id, "agent_id": self._config.agent_id},
++            "lithos_related",
++            {"id": knowledge_id, "depth": 1, "agent_id": self._config.agent_id},
+         )
+         _raise_for_error(payload)
+-        return normalize_note(payload)
++        return normalize_related(payload)
+ 
+     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+         if self._worker_task is None:
+diff --git a/src/lithos_lens/templates/note.html b/src/lithos_lens/templates/note.html
+index e64d23a..1510d00 100644
+--- a/src/lithos_lens/templates/note.html
++++ b/src/lithos_lens/templates/note.html
+@@ -2,6 +2,50 @@
+ 
+ {% block title %}Note | Lithos Lens{% endblock %}
+ 
++{% macro related_link(item) %}
++  <a href="/note/{{ item.id }}">{{ item.label }}</a>
++{%- endmacro %}
++
++{% macro related_section(heading, section, edges=False) %}
++  {% if section.items or section.overflow %}
++    <section class="related-section">
++      <h3>{{ heading }}</h3>
++      <ul>
++        {% for item in section.items %}
++          <li>
++            {{ related_link(item) }}
++            {% if edges and item.edge_type %}
++              <span class="edge-type">{{ item.edge_type }}</span>
++            {% endif %}
++            {% if edges and item.weight is not none %}
++              <span class="edge-weight">{{ "%.2f"|format(item.weight) }}</span>
++            {% endif %}
++          </li>
++        {% endfor %}
++        {% if section.overflow %}
++          <li class="related-more">+{{ section.overflow }} more</li>
++        {% endif %}
++      </ul>
++    </section>
++  {% endif %}
++{%- endmacro %}
++
++{% macro related_ref_list(heading, section) %}
++  {% if section.items or section.overflow %}
++    <div class="related-group">
++      <h4>{{ heading }}</h4>
++      <ul>
++        {% for item in section.items %}
++          <li>{{ related_link(item) }}</li>
++        {% endfor %}
++        {% if section.overflow %}
++          <li class="related-more">+{{ section.overflow }} more</li>
++        {% endif %}
++      </ul>
++    </div>
++  {% endif %}
++{%- endmacro %}
++
+ {% block content %}
+   {% if task %}
+     <p><a href="/tasks/{{ task.id }}">&larr; Back to {{ task.title }}</a></p>
+@@ -29,5 +73,39 @@
+       {% endif %}
+       <div class="markdown-body">{{ note.content | render_markdown | safe }}</div>
+     </article>
++
++    {% if related %}
++      <aside class="related-panel" aria-label="Related notes">
++        <h2>Related</h2>
++        {% if related.state == "error" %}
++          <p class="related-error" role="status">
++            The related panel could not be loaded.
++          </p>
++        {% elif related.is_empty %}
++          <p class="related-empty">No related notes.</p>
++        {% else %}
++          {{ related_section("Outgoing links", related.links) }}
++          {{ related_section("Back-links", related.backlinks) }}
++          {% if related.has_provenance %}
++            <section class="related-section related-provenance">
++              <h3>Provenance</h3>
++              {{ related_ref_list("Sources", related.sources) }}
++              {{ related_ref_list("Derived from", related.derived) }}
++              {% if related.unresolved %}
++                <div class="related-group">
++                  <h4>Unresolved</h4>
++                  <ul>
++                    {% for target in related.unresolved %}
++                      <li>{{ target }}</li>
++                    {% endfor %}
++                  </ul>
++                </div>
++              {% endif %}
++            </section>
++          {% endif %}
++          {{ related_section("Typed edges", related.edges, edges=True) }}
++        {% endif %}
++      </aside>
++    {% endif %}
+   {% endif %}
+ {% endblock %}
+diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
+index 511c5a5..938928a 100644
+--- a/src/lithos_lens/web.py
++++ b/src/lithos_lens/web.py
+@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
+ from fastapi.templating import Jinja2Templates
+ 
+ from lithos_lens.config import LithosLensConfig
+-from lithos_lens.knowledge import render_markdown
++from lithos_lens.knowledge import load_related_panel, render_markdown
+ from lithos_lens.lithos_client import LithosClient, LithosClientProtocol
+ from lithos_lens.state import AppState
+ from lithos_lens.tasks import (
+@@ -171,6 +171,7 @@ def create_app(
+         snapshot = await state.refresh_health()
+         note_record = None
+         task = None
++        related = None
+         error = ""
+         if snapshot.lithos != "ok":
+             error = "Lithos is offline or degraded. The note cannot be loaded."
+@@ -181,6 +182,13 @@ def create_app(
+                 error = "Could not load this document from Lithos."
+             if note_record is None and not error:
+                 error = "Document not found."
++            if note_record is not None:
++                related = await load_related_panel(
++                    state.lithos_client,
++                    knowledge_id,
++                    title_fanout_cap=state.config.knowledge.related_title_fanout_cap,
++                    render_cap=state.config.knowledge.related_render_cap,
++                )
+             task_id = request.query_params.get("task", "")
+             if task_id:
+                 try:
+@@ -196,6 +204,7 @@ def create_app(
+                 "active_view": "knowledge",
+                 "note": note_record,
+                 "task": task,
++                "related": related,
+                 "error": error,
+             },
+         )
+diff --git a/tests/test_common_core.py b/tests/test_common_core.py
+index a5208c5..55b07d4 100644
+--- a/tests/test_common_core.py
++++ b/tests/test_common_core.py
+@@ -9,6 +9,7 @@ from pathlib import Path
+ from fastapi.testclient import TestClient
+ 
+ from lithos_lens.config import load_config
++from lithos_lens.knowledge import RelatedNeighborhood
+ from lithos_lens.lithos_client import LithosHealth, LithosToolError
+ from lithos_lens.logging import JsonFormatter
+ from lithos_lens.task_graph import BlockedTaskRecord, EdgeRecord
+@@ -105,9 +106,14 @@ class RecordingLithosClient:
+     async def list_agents(self) -> list[AgentRecord]:
+         return []
+ 
+-    async def read_note(self, knowledge_id: str) -> NoteRecord | None:
++    async def read_note(
++        self, knowledge_id: str, *, max_length: int | None = None
++    ) -> NoteRecord | None:
+         return None
+ 
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood:
++        return RelatedNeighborhood()
++
+     async def close(self) -> None:
+         self.closed = True
+ 
+diff --git a/tests/test_knowledge_related.py b/tests/test_knowledge_related.py
+new file mode 100644
+index 0000000..6134b22
+--- /dev/null
++++ b/tests/test_knowledge_related.py
+@@ -0,0 +1,439 @@
++"""K1-S4 Related panel behavior tests."""
++
++from __future__ import annotations
++
++import asyncio
++from pathlib import Path
++
++import pytest
++from fastapi.testclient import TestClient
++
++from lithos_lens.config import ConfigError, load_config
++from lithos_lens.knowledge import (
++    RelatedNeighborhood,
++    RelatedRef,
++    load_related_panel,
++    normalize_related,
++)
++from lithos_lens.lithos_client import LithosHealth
++from lithos_lens.tasks import (
++    AgentRecord,
++    FindingRecord,
++    NoteRecord,
++    SectionState,
++    TaskRecord,
++    TaskStatusRecord,
++)
++from lithos_lens.web import create_app
++
++
++class KnowledgeFakeLithosClient:
++    """Fake exercising only the note-view surface used by the related panel."""
++
++    def __init__(
++        self,
++        *,
++        neighborhood: RelatedNeighborhood | None = None,
++        titles: dict[str, str] | None = None,
++        note: NoteRecord | None = None,
++        related_error: bool = False,
++        health: LithosHealth = "ok",
++    ) -> None:
++        self.neighborhood = neighborhood or RelatedNeighborhood()
++        self.titles = titles or {}
++        self.note = note
++        self.related_error = related_error
++        self.health_value: LithosHealth = health
++        self.read_calls: list[tuple[str, int | None]] = []
++        self.related_calls: list[str] = []
++        self.closed = False
++
++    async def startup(self) -> None:
++        return None
++
++    async def health(self) -> LithosHealth:
++        return self.health_value
++
++    async def register_agent(self) -> bool:
++        return True
++
++    async def read_note(
++        self, knowledge_id: str, *, max_length: int | None = None
++    ) -> NoteRecord | None:
++        self.read_calls.append((knowledge_id, max_length))
++        if self.note is not None and knowledge_id == self.note.id:
++            return self.note
++        title = self.titles.get(knowledge_id)
++        if title is None:
++            return None
++        return NoteRecord(id=knowledge_id, title=title, content="")
++
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood:
++        self.related_calls.append(knowledge_id)
++        if self.related_error:
++            raise RuntimeError("related unavailable")
++        return self.neighborhood
++
++    # ── unused task surface (present only to satisfy LithosClientProtocol) ──
++
++    async def list_tasks(
++        self,
++        *,
++        agent: str | None = None,
++        status: str | None = None,
++        tags: list[str] | None = None,
++        since: str | None = None,
++        with_claims: bool = False,
++    ) -> list[TaskRecord]:
++        return []
++
++    async def task_status(self, task_id: str) -> TaskStatusRecord | None:
++        return None
++
++    async def list_findings(
++        self, task_id: str, *, since: str | None = None
++    ) -> list[FindingRecord]:
++        return []
++
++    async def stats(self) -> dict[str, object]:
++        return {}
++
++    async def list_agents(self) -> list[AgentRecord]:
++        return []
++
++    async def close(self) -> None:
++        self.closed = True
++
++
++def _run(coro):
++    return asyncio.run(coro)
++
++
++# ── normalizer ─────────────────────────────────────────────────────────
++
++
++def test_normalize_related_extracts_all_sections() -> None:
++    payload = {
++        "status": "ok",
++        "links": [{"id": "out-1"}, {"target": "out-2"}],
++        "backlinks": [{"id": "in-1"}],
++        "provenance": {
++            "sources": [{"id": "src-1"}],
++            "derived": [{"id": "der-1"}],
++            "unresolved": ["draft/missing", {"target": "other/missing"}],
++        },
++        "edges": [
++            {"target": "edge-1", "type": "supports", "weight": 0.75},
++            {"id": "edge-2", "edge_type": "refutes"},
++        ],
++    }
++
++    neighborhood = normalize_related(payload)
++
++    assert [ref.id for ref in neighborhood.links] == ["out-1", "out-2"]
++    assert [ref.id for ref in neighborhood.backlinks] == ["in-1"]
++    assert [ref.id for ref in neighborhood.sources] == ["src-1"]
++    assert [ref.id for ref in neighborhood.derived] == ["der-1"]
++    assert neighborhood.unresolved == ("draft/missing", "other/missing")
++    assert neighborhood.edges[0] == RelatedRef(
++        id="edge-1", edge_type="supports", weight=0.75
++    )
++    assert neighborhood.edges[1] == RelatedRef(id="edge-2", edge_type="refutes")
++
++
++def test_normalize_related_tolerates_missing_and_malformed_fields() -> None:
++    neighborhood = normalize_related({"links": "nope", "edges": [42, {}]})
++
++    assert neighborhood.links == ()
++    assert neighborhood.edges == ()
++    assert neighborhood.unresolved == ()
++
++
++def test_normalize_related_keeps_inline_titles_and_unresolved_sources() -> None:
++    """Regression for f-001: titles arrive inline and unresolved provenance may
++    use the `unresolved_sources` key."""
++    payload = {
++        "links": [{"id": "n1", "title": "Readable title"}],
++        "backlinks": [{"id": "n2", "display": "Back title"}],
++        "edges": [{"id": "e1", "type": "supports", "title": "Edge title"}],
++        "provenance": {"unresolved_sources": ["missing.md"]},
++    }
++
++    neighborhood = normalize_related(payload)
++
++    assert neighborhood.links[0].title == "Readable title"
++    assert neighborhood.backlinks[0].title == "Back title"
++    assert neighborhood.edges[0].title == "Edge title"
++    assert neighborhood.unresolved == ("missing.md",)
++
++
++# ── load_related_panel ─────────────────────────────────────────────────
++
++
++def test_related_panel_resolves_titles_and_lists_backlinks() -> None:
++    neighborhood = RelatedNeighborhood(
++        links=(RelatedRef(id="out-1"),),
++        backlinks=(RelatedRef(id="in-1"), RelatedRef(id="in-2")),
++        sources=(RelatedRef(id="src-1"),),
++        edges=(RelatedRef(id="edge-1", edge_type="supports", weight=0.5),),
++    )
++    titles = {
++        "out-1": "Outgoing Note",
++        "in-1": "First Backlink",
++        "in-2": "Second Backlink",
++        "src-1": "Source Note",
++        "edge-1": "Edge Note",
++    }
++    fake = KnowledgeFakeLithosClient(neighborhood=neighborhood, titles=titles)
++
++    panel = _run(load_related_panel(fake, "root", title_fanout_cap=20, render_cap=50))
++
++    assert panel.state == SectionState.OK
++    assert [item.label for item in panel.backlinks.items] == [
++        "First Backlink",
++        "Second Backlink",
++    ]
++    assert panel.links.items[0].label == "Outgoing Note"
++    assert panel.sources.items[0].label == "Source Note"
++    assert panel.edges.items[0].edge_type == "supports"
++    assert panel.edges.items[0].weight == 0.5
++    # Title fan-out uses the cheap max_length=1 read.
++    assert all(max_length == 1 for _, max_length in fake.read_calls)
++
++
++def test_related_panel_caps_title_fanout_and_reports_overflow() -> None:
++    edges = tuple(RelatedRef(id=f"edge-{i}", edge_type="supports") for i in range(25))
++    titles = {f"edge-{i}": f"Edge {i}" for i in range(25)}
++    fake = KnowledgeFakeLithosClient(
++        neighborhood=RelatedNeighborhood(edges=edges), titles=titles
++    )
++
++    panel = _run(load_related_panel(fake, "root", title_fanout_cap=20, render_cap=50))
++
++    assert len(panel.edges.items) == 20
++    assert panel.edges.overflow == 5
++    # Only the capped set of ids is looked up, not all 25.
++    assert len(fake.read_calls) == 20
++
++
++def test_related_panel_renders_bare_id_when_title_unresolved() -> None:
++    fake = KnowledgeFakeLithosClient(
++        neighborhood=RelatedNeighborhood(links=(RelatedRef(id="ghost"),)),
++        titles={},
++    )
++
++    panel = _run(load_related_panel(fake, "root", title_fanout_cap=20, render_cap=50))
++
++    # Within the cap but unresolvable -> rendered as a bare id, not overflow.
++    assert panel.links.items[0].label == "ghost"
++    assert panel.links.overflow == 0
++
++
++def test_related_panel_degrades_when_related_call_fails() -> None:
++    fake = KnowledgeFakeLithosClient(related_error=True)
++
++    panel = _run(load_related_panel(fake, "root", title_fanout_cap=20, render_cap=50))
++
++    assert panel.state == SectionState.ERROR
++    assert panel.is_empty
++
++
++def test_related_panel_uses_inline_title_beyond_fanout_cap() -> None:
++    """Regression for f-001: an inline title renders even past the cap and does
++    not spend fan-out budget."""
++    links = tuple(RelatedRef(id=f"n-{i}", title=f"Title {i}") for i in range(25))
++    fake = KnowledgeFakeLithosClient(neighborhood=RelatedNeighborhood(links=links))
++
++    panel = _run(load_related_panel(fake, "root", title_fanout_cap=20, render_cap=50))
++
++    assert len(panel.links.items) == 25
++    assert panel.links.overflow == 0
++    assert panel.links.items[24].label == "Title 24"
++    # Inline titles need no lookup, so nothing is fanned out.
++    assert fake.read_calls == []
++
++
++def test_related_panel_render_cap_collapses_excess_inline_titles() -> None:
++    """Regression for security/f-002: inline titles no longer bypass a lens-side
++    render bound — excess collapses into overflow (+N more), re-bounding page
++    size for a highly connected hub note."""
++    links = tuple(RelatedRef(id=f"n-{i}", title=f"Title {i}") for i in range(30))
++    fake = KnowledgeFakeLithosClient(neighborhood=RelatedNeighborhood(links=links))
++
++    panel = _run(load_related_panel(fake, "root", title_fanout_cap=20, render_cap=10))
++
++    assert len(panel.links.items) == 10
++    assert panel.links.overflow == 20
++    # Still no fan-out — the render cap is independent of backend calls.
++    assert fake.read_calls == []
++
++
++def test_related_panel_provenance_overflow_is_reported() -> None:
++    """Regression for f-002: sources collapsed past the cap still surface as
++    provenance overflow rather than vanishing."""
++    links = tuple(RelatedRef(id=f"link-{i}") for i in range(20))
++    sources = tuple(RelatedRef(id=f"src-{i}") for i in range(5))
++    titles = {f"link-{i}": f"Link {i}" for i in range(20)}
++    fake = KnowledgeFakeLithosClient(
++        neighborhood=RelatedNeighborhood(links=links, sources=sources),
++        titles=titles,
++    )
++
++    panel = _run(load_related_panel(fake, "root", title_fanout_cap=20, render_cap=50))
++
++    assert panel.sources.items == ()
++    assert panel.sources.overflow == 5
++    assert panel.has_provenance
++
++
++# ── note page integration ──────────────────────────────────────────────
++
++
++def _client(config_path: Path, fake: KnowledgeFakeLithosClient) -> TestClient:
++    config = load_config(config_path)
++    app = create_app(config, lithos_client_factory=lambda _: fake)
++    return TestClient(app)
++
++
++def test_note_page_renders_related_panel_sections(
++    lithos_lens_config_env: Path,
++) -> None:
++    note = NoteRecord(id="root", title="Root Note", content="Body text.")
++    neighborhood = RelatedNeighborhood(
++        backlinks=(RelatedRef(id="in-1"),),
++        sources=(RelatedRef(id="src-1"),),
++        edges=(RelatedRef(id="edge-1", edge_type="supports", weight=0.9),),
++    )
++    titles = {
++        "in-1": "Incoming Note",
++        "src-1": "Provenance Source",
++        "edge-1": "Edge Target Note",
++    }
++    fake = KnowledgeFakeLithosClient(
++        neighborhood=neighborhood, titles=titles, note=note
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/root")
++
++    assert response.status_code == 200
++    assert "Back-links" in response.text
++    assert "Incoming Note" in response.text
++    assert "Provenance" in response.text
++    assert "Provenance Source" in response.text
++    assert "Typed edges" in response.text
++    assert "Edge Target Note" in response.text
++    assert "supports" in response.text
++
++
++def test_note_page_related_panel_shows_overflow_note(
++    lithos_lens_config_env: Path,
++) -> None:
++    note = NoteRecord(id="root", title="Root Note", content="Body.")
++    edges = tuple(RelatedRef(id=f"edge-{i}", edge_type="supports") for i in range(25))
++    titles = {f"edge-{i}": f"Edge {i}" for i in range(25)}
++    fake = KnowledgeFakeLithosClient(
++        neighborhood=RelatedNeighborhood(edges=edges), titles=titles, note=note
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/root")
++
++    assert response.status_code == 200
++    assert "+5 more" in response.text
++
++
++def test_note_page_survives_related_panel_failure(
++    lithos_lens_config_env: Path,
++) -> None:
++    note = NoteRecord(id="root", title="Root Note", content="Still here.")
++    fake = KnowledgeFakeLithosClient(note=note, related_error=True)
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/root")
++
++    assert response.status_code == 200
++    # Body still renders even though the related panel failed to load.
++    assert "Root Note" in response.text
++    assert "Still here." in response.text
++    assert "The related panel could not be loaded." in response.text
++
++
++def test_note_page_renders_provenance_overflow(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Regression for f-002: provenance sources collapsed past the fan-out cap
++    still render the Provenance section with a "+N more" indicator."""
++    note = NoteRecord(id="root", title="Root Note", content="Body.")
++    links = tuple(RelatedRef(id=f"link-{i}") for i in range(20))
++    sources = tuple(RelatedRef(id=f"src-{i}") for i in range(5))
++    titles = {f"link-{i}": f"Link {i}" for i in range(20)}
++    fake = KnowledgeFakeLithosClient(
++        neighborhood=RelatedNeighborhood(links=links, sources=sources),
++        titles=titles,
++        note=note,
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/root")
++
++    assert response.status_code == 200
++    assert "Provenance" in response.text
++    assert "Sources" in response.text
++    assert "+5 more" in response.text
++
++
++def test_config_rejects_oversized_related_fanout_cap(tmp_path: Path) -> None:
++    """The title fan-out cap is bounded above so a misconfiguration can't
++    amplify one request into an unbounded concurrent read burst."""
++    config_path = tmp_path / "lithos-lens.toml"
++    config_path.write_text(
++        "[lithos-lens]\n"
++        'environment = "test"\n'
++        "[lithos-lens.knowledge]\n"
++        "related_title_fanout_cap = 1000\n"
++    )
++
++    with pytest.raises(ConfigError, match="related_title_fanout_cap"):
++        load_config(config_path)
++
++
++def test_config_rejects_oversized_related_render_cap(tmp_path: Path) -> None:
++    """Regression for security/f-003: the render cap is bounded above too, so its
++    own size bound cannot be misconfigured away."""
++    config_path = tmp_path / "lithos-lens.toml"
++    config_path.write_text(
++        "[lithos-lens]\n"
++        'environment = "test"\n'
++        "[lithos-lens.knowledge]\n"
++        "related_render_cap = 100000\n"
++    )
++
++    with pytest.raises(ConfigError, match="related_render_cap"):
++        load_config(config_path)
++
++
++def test_note_page_render_cap_bounds_inline_titled_items(tmp_path: Path) -> None:
++    """Regression for security/f-002: the configured render cap bounds how many
++    inline-titled hub neighbors reach the page, collapsing the rest to +N more."""
++    config_path = tmp_path / "lithos-lens.toml"
++    config_path.write_text(
++        "[lithos-lens]\n"
++        'environment = "test"\n'
++        "[lithos-lens.knowledge]\n"
++        "related_render_cap = 3\n"
++    )
++    note = NoteRecord(id="root", title="Root Note", content="Body.")
++    links = tuple(RelatedRef(id=f"n-{i}", title=f"Hub Link {i}") for i in range(10))
++    fake = KnowledgeFakeLithosClient(
++        neighborhood=RelatedNeighborhood(links=links), note=note
++    )
++
++    config = load_config(config_path)
++    app = create_app(config, lithos_client_factory=lambda _: fake)
++    with TestClient(app) as client:
++        response = client.get("/note/root")
++
++    assert response.status_code == 200
++    assert response.text.count("Hub Link ") == 3
++    assert "+7 more" in response.text
+diff --git a/tests/test_tasks_mvp.py b/tests/test_tasks_mvp.py
+index 19a5067..59d88d3 100644
+--- a/tests/test_tasks_mvp.py
++++ b/tests/test_tasks_mvp.py
+@@ -11,6 +11,7 @@ import pytest
+ from fastapi.testclient import TestClient
+ 
+ from lithos_lens.config import load_config
++from lithos_lens.knowledge import RelatedNeighborhood
+ from lithos_lens.lithos_client import LithosHealth, LithosToolError
+ from lithos_lens.task_graph import BlockedTaskRecord, BlockerRecord, EdgeRecord
+ from lithos_lens.tasks import (
+@@ -284,11 +285,16 @@ class TaskFakeLithosClient:
+             AgentRecord(id="worker", name="Worker"),
+         ]
+ 
+-    async def read_note(self, knowledge_id: str) -> NoteRecord | None:
++    async def read_note(
++        self, knowledge_id: str, *, max_length: int | None = None
++    ) -> NoteRecord | None:
+         if knowledge_id not in self.notes:
+             raise RuntimeError("missing note")
+         return self.notes[knowledge_id]
+ 
++    async def related(self, knowledge_id: str) -> RelatedNeighborhood:
++        return RelatedNeighborhood()
++
+     async def close(self) -> None:
+         self.closed = True
+ 

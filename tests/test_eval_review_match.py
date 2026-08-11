@@ -6,7 +6,10 @@ LLM-judge fallback is injected as a callable so these tests never call an agent.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 from lithos_loom.evals.review.case import Case, Expected, load_case
 from lithos_loom.evals.review.match import (
@@ -232,234 +235,291 @@ def test_score_run_sets_incomplete() -> None:
     )
 
 
-# ── shipped 289-symlink case: two directions, partial catches must not score ──
-# as full catches (#292 review finding 2). Uses the REAL shipped fixture so the
-# keyword sets stay honest: a representative single-direction finding matches
-# exactly its own [[expected]] under the structured matcher.
+# ── shipped split-expected cases: partial catches must not score as full ──────
+# Every case whose escape has two independently-remediable defects gets the
+# same five guarantees, against the REAL shipped fixture so the keyword sets
+# stay honest: a representative single-defect finding matches exactly its own
+# [[expected]]; two findings — or one comprehensive finding — catch both; an
+# unrelated same-file finding matches neither. Table-driven since the five
+# cases differ only in their representative wordings (and, for the cross-file
+# cases, which file each defect lives in).
 
 _SHIPPED_CASES_DIR = Path(__file__).resolve().parents[1] / "evals" / "review" / "cases"
 
-_READ_ONLY_RATIONALE = (
-    "shutil.copytree in check_runner.py follows symlinks, so a symlink planted "
-    "in the artifacts dir makes the host collector read files from outside the "
-    "export into the handoff"
-)
-_WRITE_ONLY_RATIONALE = (
-    "the destination in check_runner.py is agent-writable: an agent can "
-    "pre-create the predictable round/check path as a symlink and the host "
-    "writes through it onto arbitrary host files"
-)
-_SYMLINK_FILE = "src/lithos_loom/plugins/story_develop/check_runner.py"
+
+@dataclass(frozen=True)
+class _SplitCase:
+    case_id: str
+    file_a: str  # expected[0]'s file
+    file_b: str  # expected[1]'s file
+    only_a: str  # representative finding catching ONLY expected[0]
+    only_b: str  # representative finding catching ONLY expected[1]
+    unrelated_a: str  # finding on file_a that must match NEITHER expected
+    unrelated_b: str  # finding on file_b that must match NEITHER expected
 
 
-def _symlink_case() -> Case:
-    return load_case(_SHIPPED_CASES_DIR / "289-symlink-artifacts")
+_CHECK_RUNNER = "src/lithos_loom/plugins/story_develop/check_runner.py"
+_KNOWLEDGE_METADATA = "src/lithos_lens/knowledge_metadata.py"
+_FRONTIER = "src/lithos_lens/frontier.py"
+_LENS_TASKS = "src/lithos_lens/tasks.py"
+_LENS_CLIENT = "src/lithos_lens/lithos_client.py"
+_LENS_KNOWLEDGE = "src/lithos_lens/knowledge.py"
 
-
-def _symlink_report(*rationales: str) -> dict:
-    return {
-        "reviewers": [
-            {
-                "name": "security",
-                "status": "FINDINGS",
-                "findings": [
-                    _finding("critical", [_SYMLINK_FILE], r, fid=f"f-{i:03d}")
-                    for i, r in enumerate(rationales, start=1)
-                ],
-            }
-        ]
-    }
-
-
-def test_symlink_case_has_two_expected_defects() -> None:
-    assert len(_symlink_case().expected) == 2
-
-
-def test_symlink_read_only_finding_is_a_partial_miss() -> None:
-    score = score_run(_symlink_case(), _symlink_report(_READ_ONLY_RATIONALE))
-    assert score.caught is False
-    assert [m.caught for m in score.matches] == [True, False]
-
-
-def test_symlink_write_only_finding_is_a_partial_miss() -> None:
-    score = score_run(_symlink_case(), _symlink_report(_WRITE_ONLY_RATIONALE))
-    assert score.caught is False
-    assert [m.caught for m in score.matches] == [False, True]
-
-
-def test_symlink_both_directions_as_separate_findings_is_caught() -> None:
-    score = score_run(
-        _symlink_case(), _symlink_report(_READ_ONLY_RATIONALE, _WRITE_ONLY_RATIONALE)
-    )
-    assert score.caught is True
-
-
-def test_symlink_one_comprehensive_finding_catches_both() -> None:
-    score = score_run(
-        _symlink_case(),
-        _symlink_report(_READ_ONLY_RATIONALE + "; also " + _WRITE_ONLY_RATIONALE),
-    )
-    assert score.caught is True
-
-
-# ── shipped lens33 case: the two confidence failure modes score separately ──
-# (#293 review finding 1 — same partial-catch semantics as 289-symlink). The
-# negative test also pins finding 2: an unrelated confidence-adjacent finding
-# on the same file must not structurally match either expected.
-
-_CONFIDENCE_FILE = "src/lithos_lens/knowledge_metadata.py"
-
-_RANGE_ONLY_RATIONALE = (
-    "_format_confidence formats any finite numeric, so confidence values "
-    "outside the documented 0..1 range render misleading chips like 200%"
-)
-_CRASH_ONLY_RATIONALE = (
-    "confidence: .nan passes the isinstance guard and round() blows up with "
-    "ValueError inside template rendering, crashing the whole note page"
-)
-_UNRELATED_RATIONALE = (
-    "the confidence chip has insufficient colour contrast against the "
-    "surface background and should meet WCAG AA"
-)
-
-
-def _confidence_case() -> Case:
-    return load_case(_SHIPPED_CASES_DIR / "lens33-confidence-crash")
-
-
-def _confidence_report(*rationales: str) -> dict:
-    return {
-        "reviewers": [
-            {
-                "name": "correctness",
-                "status": "FINDINGS",
-                "findings": [
-                    _finding("major", [_CONFIDENCE_FILE], r, fid=f"f-{i:03d}")
-                    for i, r in enumerate(rationales, start=1)
-                ],
-            }
-        ]
-    }
-
-
-def test_confidence_case_has_two_expected_defects() -> None:
-    assert len(_confidence_case().expected) == 2
-
-
-def test_confidence_range_only_finding_is_a_partial_miss() -> None:
-    score = score_run(_confidence_case(), _confidence_report(_RANGE_ONLY_RATIONALE))
-    assert score.caught is False
-    assert [m.caught for m in score.matches] == [True, False]
-
-
-def test_confidence_crash_only_finding_is_a_partial_miss() -> None:
-    score = score_run(_confidence_case(), _confidence_report(_CRASH_ONLY_RATIONALE))
-    assert score.caught is False
-    assert [m.caught for m in score.matches] == [False, True]
-
-
-def test_confidence_both_forms_as_separate_findings_is_caught() -> None:
-    score = score_run(
-        _confidence_case(),
-        _confidence_report(_RANGE_ONLY_RATIONALE, _CRASH_ONLY_RATIONALE),
-    )
-    assert score.caught is True
-
-
-def test_confidence_one_comprehensive_finding_catches_both() -> None:
-    score = score_run(
-        _confidence_case(),
-        _confidence_report(_RANGE_ONLY_RATIONALE + "; also " + _CRASH_ONLY_RATIONALE),
-    )
-    assert score.caught is True
-
-
-def test_confidence_unrelated_finding_matches_neither_expected() -> None:
-    # No generic "confidence" keyword: a same-file finding about something else
-    # entirely must not count in --no-judge mode (#293 review finding 2).
-    score = score_run(_confidence_case(), _confidence_report(_UNRELATED_RATIONALE))
-    assert score.caught is False
-    assert [m.caught for m in score.matches] == [False, False]
-
-
-# ── shipped lens34 case: false-truncation vs overlap-ordering score separately ─
-# (same partial-catch semantics as 289-symlink / lens33 — a limit check fixes
-# the false banner but not the elif ordering, and vice versa).
-
-_FRONTIER_FILE = "src/lithos_lens/frontier.py"
-
-_TRUNCATION_ONLY_RATIONALE = (
-    "truncated is inferred from unclassified rows without ever checking that a "
-    "response actually reached frontier_limit, so read-skew between the three "
-    "independent reads renders a false truncation warning"
-)
-_OVERLAP_ONLY_RATIONALE = (
-    "a task returned by both frontier responses is silently classified Ready "
-    "because the elif chain tests the ready set first — a contested row is "
-    "shown as workable with no warning"
-)
-
-
-def _frontier_case() -> Case:
-    return load_case(_SHIPPED_CASES_DIR / "lens34-truncation")
-
-
-def _frontier_report(*rationales: str) -> dict:
-    return {
-        "reviewers": [
-            {
-                "name": "correctness",
-                "status": "FINDINGS",
-                "findings": [
-                    _finding("major", [_FRONTIER_FILE], r, fid=f"f-{i:03d}")
-                    for i, r in enumerate(rationales, start=1)
-                ],
-            }
-        ]
-    }
-
-
-def test_frontier_case_has_two_expected_defects() -> None:
-    assert len(_frontier_case().expected) == 2
-
-
-def test_frontier_truncation_only_finding_is_a_partial_miss() -> None:
-    score = score_run(_frontier_case(), _frontier_report(_TRUNCATION_ONLY_RATIONALE))
-    assert score.caught is False
-    assert [m.caught for m in score.matches] == [True, False]
-
-
-def test_frontier_overlap_only_finding_is_a_partial_miss() -> None:
-    score = score_run(_frontier_case(), _frontier_report(_OVERLAP_ONLY_RATIONALE))
-    assert score.caught is False
-    assert [m.caught for m in score.matches] == [False, True]
-
-
-def test_frontier_both_forms_as_separate_findings_is_caught() -> None:
-    score = score_run(
-        _frontier_case(),
-        _frontier_report(_TRUNCATION_ONLY_RATIONALE, _OVERLAP_ONLY_RATIONALE),
-    )
-    assert score.caught is True
-
-
-def test_frontier_one_comprehensive_finding_catches_both() -> None:
-    score = score_run(
-        _frontier_case(),
-        _frontier_report(
-            _TRUNCATION_ONLY_RATIONALE + "; worse, " + _OVERLAP_ONLY_RATIONALE
+_SPLIT_CASES = (
+    _SplitCase(
+        case_id="289-symlink-artifacts",
+        file_a=_CHECK_RUNNER,
+        file_b=_CHECK_RUNNER,
+        only_a=(
+            "shutil.copytree in check_runner.py follows symlinks, so a symlink "
+            "planted in the artifacts dir makes the host collector read files "
+            "from outside the export into the handoff"
         ),
-    )
-    assert score.caught is True
-
-
-def test_frontier_unrelated_finding_matches_neither_expected() -> None:
-    score = score_run(
-        _frontier_case(),
-        _frontier_report(
+        only_b=(
+            "the destination in check_runner.py is agent-writable: an agent can "
+            "pre-create the predictable round/check path as a symlink and the "
+            "host writes through it onto arbitrary host files"
+        ),
+        unrelated_a=(
+            "the collector in check_runner.py logs at warning level for every "
+            "skipped file which will be noisy on large artifact sets"
+        ),
+        unrelated_b=(
+            "check_runner.py rereads result.json once per round instead of "
+            "caching the parsed document"
+        ),
+    ),
+    _SplitCase(
+        case_id="lens33-confidence-crash",
+        file_a=_KNOWLEDGE_METADATA,
+        file_b=_KNOWLEDGE_METADATA,
+        only_a=(
+            "_format_confidence formats any finite numeric, so confidence "
+            "values outside the documented 0..1 range render misleading chips "
+            "like 200%"
+        ),
+        only_b=(
+            "confidence: .nan passes the isinstance guard and round() blows up "
+            "with ValueError inside template rendering, crashing the whole "
+            "note page"
+        ),
+        unrelated_a=(
+            "the confidence chip has insufficient colour contrast against the "
+            "surface background and should meet WCAG AA"
+        ),
+        unrelated_b=(
+            "the metadata table sorts keys alphabetically so confidence sits "
+            "below tags; consider preserving source order"
+        ),
+    ),
+    _SplitCase(
+        case_id="lens34-truncation",
+        file_a=_FRONTIER,
+        file_b=_FRONTIER,
+        only_a=(
+            "truncated is inferred from unclassified rows without ever checking "
+            "that a response actually reached frontier_limit, so read-skew "
+            "between the three independent reads renders a false truncation "
+            "warning"
+        ),
+        only_b=(
+            "a task returned by both frontier responses is silently classified "
+            "Ready because the elif chain tests the ready set first — a "
+            "contested row is shown as workable with no warning"
+        ),
+        unrelated_a=(
             "the master-open read in frontier.py should paginate instead of "
             "loading every open task in one call"
         ),
+        unrelated_b=(
+            "the ready table re-renders fully on every SSE event and should "
+            "diff rows instead"
+        ),
+    ),
+    _SplitCase(
+        case_id="lens23-blocker-contract",
+        file_a=_LENS_TASKS,
+        file_b=_LENS_CLIENT,
+        only_a=(
+            "BlockerRecord in tasks.py models title and gate_type on blocker "
+            "rows — fields lithos_task_blocked never returns; the real payload "
+            "carries type and message, so blockers render hollow against a "
+            "real server"
+        ),
+        only_b=(
+            "the client omits with_claims when False — it is only sent when "
+            "True — but upstream defaults it to true, so lens's False default "
+            "is silently inverted"
+        ),
+        unrelated_a=(
+            "the normalizer in tasks.py reparses ISO timestamps per row and "
+            "should cache the parse"
+        ),
+        # The review-round hazard: an omitted-default finding on the client
+        # must not satisfy the with_claims expected now that the generic
+        # "default"/"omit" keywords are gone.
+        unrelated_b=(
+            "the client omits a request timeout so a hung server blocks the "
+            "TUI indefinitely; the default httpx timeout should be overridden"
+        ),
+    ),
+    _SplitCase(
+        case_id="lens26-related-contract",
+        file_a=_LENS_CLIENT,
+        file_b=_LENS_KNOWLEDGE,
+        only_a=(
+            "the related call in lithos_client.py sends agent_id, an argument "
+            "lithos_related does not accept, so the server rejects every call "
+            "outright"
+        ),
+        only_b=(
+            "normalize_related reads flat links and backlinks keys but the real "
+            "payload nests rows under links.outgoing and links.incoming, so "
+            "every section renders empty"
+        ),
+        unrelated_a=(
+            "the title fan-out in lithos_client.py awaits reads sequentially "
+            "and should batch them"
+        ),
+        # The review-round hazard: an incoming-title observation on
+        # knowledge.py must not satisfy the nested-shape expected now that the
+        # bare "incoming" keyword is the dotted links.incoming form.
+        unrelated_b=(
+            "normalize_related repeats the incoming-title lookup for every "
+            "row sequentially; results should be memoized per id"
+        ),
+    ),
+)
+
+_SPLIT_IDS = [c.case_id for c in _SPLIT_CASES]
+
+
+def _split_report(*findings: tuple[str, str]) -> dict:
+    """A one-reviewer report; each finding is a (file, rationale) pair."""
+    return {
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS",
+                "findings": [
+                    _finding("critical", [file], rationale, fid=f"f-{i:03d}")
+                    for i, (file, rationale) in enumerate(findings, start=1)
+                ],
+            }
+        ]
+    }
+
+
+def _split_case(spec: _SplitCase) -> Case:
+    return load_case(_SHIPPED_CASES_DIR / spec.case_id)
+
+
+@pytest.mark.parametrize("spec", _SPLIT_CASES, ids=_SPLIT_IDS)
+def test_split_case_has_two_expected_defects(spec: _SplitCase) -> None:
+    assert len(_split_case(spec).expected) == 2
+
+
+@pytest.mark.parametrize("spec", _SPLIT_CASES, ids=_SPLIT_IDS)
+def test_split_case_first_defect_alone_is_a_partial_miss(spec: _SplitCase) -> None:
+    score = score_run(_split_case(spec), _split_report((spec.file_a, spec.only_a)))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [True, False]
+
+
+@pytest.mark.parametrize("spec", _SPLIT_CASES, ids=_SPLIT_IDS)
+def test_split_case_second_defect_alone_is_a_partial_miss(spec: _SplitCase) -> None:
+    score = score_run(_split_case(spec), _split_report((spec.file_b, spec.only_b)))
+    assert score.caught is False
+    assert [m.caught for m in score.matches] == [False, True]
+
+
+@pytest.mark.parametrize("spec", _SPLIT_CASES, ids=_SPLIT_IDS)
+def test_split_case_both_defects_as_separate_findings_is_caught(
+    spec: _SplitCase,
+) -> None:
+    score = score_run(
+        _split_case(spec),
+        _split_report((spec.file_a, spec.only_a), (spec.file_b, spec.only_b)),
+    )
+    assert score.caught is True
+
+
+@pytest.mark.parametrize("spec", _SPLIT_CASES, ids=_SPLIT_IDS)
+def test_split_case_one_comprehensive_finding_catches_both(
+    spec: _SplitCase,
+) -> None:
+    # One finding whose files list spans both sites and whose rationale covers
+    # both mechanisms satisfies both expecteds.
+    report = {
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS",
+                "findings": [
+                    {
+                        "reviewer": "correctness",
+                        "severity": "critical",
+                        "files": [spec.file_a, spec.file_b],
+                        "rationale": spec.only_a + "; worse, " + spec.only_b,
+                        "finding_id": "f-001",
+                    }
+                ],
+            }
+        ]
+    }
+    assert score_run(_split_case(spec), report).caught is True
+
+
+@pytest.mark.parametrize("spec", _SPLIT_CASES, ids=_SPLIT_IDS)
+def test_split_case_unrelated_finding_matches_neither_expected(
+    spec: _SplitCase,
+) -> None:
+    # Both defect files get a negative: for the cross-file cases the second
+    # expected's keyword precision is otherwise never exercised.
+    for file, rationale in (
+        (spec.file_a, spec.unrelated_a),
+        (spec.file_b, spec.unrelated_b),
+    ):
+        score = score_run(_split_case(spec), _split_report((file, rationale)))
+        assert score.caught is False
+        assert [m.caught for m in score.matches] == [False, False]
+
+
+# ── lens30: single-expected precision ─────────────────────────────────────────
+# One topic-adjacent structured match flips the whole case, so its keyword set
+# gets a positive/negative pair of its own.
+
+
+def _lens30() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "lens30-list-envelope")
+
+
+def test_lens30_envelope_finding_is_caught() -> None:
+    score = score_run(
+        _lens30(),
+        _split_report(
+            (
+                _LENS_CLIENT,
+                "list_notes reads response rows from invented keys but the "
+                "tool's only container key is items, so every disambiguation "
+                "lookup yields an empty candidate list",
+            )
+        ),
+    )
+    assert score.caught is True
+
+
+def test_lens30_topic_adjacent_finding_is_not_a_catch() -> None:
+    # A same-file pagination finding wordable as "returns every document"
+    # must not satisfy the envelope expected.
+    score = score_run(
+        _lens30(),
+        _split_report(
+            (
+                _LENS_CLIENT,
+                "list_notes returns every document without pagination and "
+                "should pass a limit",
+            )
+        ),
     )
     assert score.caught is False
-    assert [m.caught for m in score.matches] == [False, False]
