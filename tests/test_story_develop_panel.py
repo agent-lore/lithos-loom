@@ -714,6 +714,108 @@ def test_failed_turn_without_valid_handoff_stays_invalid(tmp_path: Path) -> None
     assert result.invalid_reviewer == "correctness"
 
 
+def test_stale_handoff_from_usage_limited_attempt_is_not_salvaged_by_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #299 review (Medium): the usage-limited attempt writes a valid
+    handoff, the tool-switch fallback dies on infra WITHOUT writing — its
+    salvage pass must not accept the excluded attempt's stale file."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    rstate = _ReviewerState(
+        ReviewerSpec(name="correctness", fallback_chain=("codex",)),
+        "cid-correctness",
+        [],
+        tmp_path,
+    )
+    monkeypatch.setattr(panel_mod.containers, "stop_container", lambda c: None)
+    monkeypatch.setattr(panel_mod.containers, "start_container", lambda cmd: "cid2")
+    monkeypatch.setattr(panel_mod, "build_run_cmd", lambda *a, **k: ("cid2", ["cmd"]))
+    calls = {"n": 0}
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            (
+                config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+            ).write_text(_ART_LGTM)
+            return _limited_turn()
+        return _infra_failed_turn()  # fallback dies, writes nothing
+
+    result = panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+    )
+
+    assert calls["n"] == 2
+    assert result.round_reviews[0].status == "invalid"
+    assert result.invalid_reviewer == "correctness"
+
+
+def test_stale_handoff_is_not_salvaged_by_pause_retry(tmp_path: Path) -> None:
+    """Same stale-provenance hole via the pause path: the usage-limited attempt
+    wrote a valid handoff, the post-pause retry fails without writing."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    calls = {"n": 0}
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            (
+                config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+            ).write_text(_ART_LGTM)
+            return _limited_turn()
+        return _infra_failed_turn()  # post-pause retry dies, writes nothing
+
+    result = _run_live_round(
+        config,
+        [_reviewer("correctness", tmp_path)],
+        run_turn,
+        budget_seconds=24 * 3600,
+    )
+
+    assert calls["n"] == 2
+    assert result.round_reviews[0].status == "invalid"
+    assert result.invalid_reviewer == "correctness"
+
+
+def test_preexisting_handoff_untouched_by_failed_attempt_is_not_salvaged(
+    tmp_path: Path,
+) -> None:
+    """A valid handoff already on disk BEFORE the attempt (e.g. left by a prior
+    dispatch resuming into the same round) is not the failed attempt's work —
+    salvage requires the attempt itself to have created or rewritten the file."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (
+        config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+    ).write_text(_ART_LGTM)
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        return _infra_failed_turn()  # writes nothing
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert result.round_reviews[0].status == "invalid"
+    assert result.invalid_reviewer == "correctness"
+
+
 def test_usage_limited_turn_is_not_salvaged(tmp_path: Path) -> None:
     """A usage-limited turn belongs to the T5 reaction (switch/pause), even if
     a valid handoff exists — salvaging would bypass the budgeted pause."""

@@ -24,6 +24,7 @@ the tests patch on the ``containers`` module).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from collections.abc import Callable, Sequence
@@ -157,6 +158,19 @@ def _read_review(path: Path) -> tuple[ReviewHandoff | None, str | None]:
         return None, str(exc)
 
 
+def _handoff_fingerprint(path: Path) -> str | None:
+    """Content identity of the round handoff (``None`` = absent/unreadable).
+
+    Salvage provenance (#298 / PR #299 review): a failed attempt may only
+    salvage an artifact it *itself* created or rewrote, so each attempt
+    snapshots the file before running and compares after.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def _prior_review_text(config: DevelopConfig, round_no: int, reviewer: str) -> str:
     """The outgoing reviewer's most recent handoff text (reseed payload)."""
     for r in range(round_no - 1, 0, -1):
@@ -199,9 +213,12 @@ def _review_turn(
     non-usage-limit reason (engine infra: auth 401, stream disconnect), a
     valid on-disk handoff for this round is salvaged rather than discarded
     (#298): the artifact is the reviewer's work product, and the exit code
-    still drives the failure fixture. A *clean* turn whose handoff stays
-    invalid after the correction retry is still rejected — that is reviewer
-    output, not infra.
+    still drives the failure fixture. Salvage is provenance-guarded: only a
+    file the failed attempt *itself* created or rewrote (content fingerprint
+    snapshotted before each attempt) is eligible — a stale valid file from an
+    earlier usage-limited attempt or a prior dispatch is never accepted. A
+    *clean* turn whose handoff stays invalid after the correction retry is
+    still rejected — that is reviewer output, not infra.
 
     Returns ``(outcome, failed_turn, session_handle)``: *failed_turn* is the
     TurnResult of a turn-level failure (for usage-limit classification by the
@@ -228,6 +245,11 @@ def _review_turn(
     parsed: ReviewHandoff | None = None
     err: str | None = "reviewer did not run"
     failed_turn: TurnResult | None = None
+    # Snapshot before the attempt: salvage may only accept a file this
+    # attempt created or rewrote — a valid file left by an earlier attempt
+    # (usage-limited switch, pause retry, a prior dispatch resuming into the
+    # same round) is not this attempt's work.
+    pre_attempt = _handoff_fingerprint(review_path)
 
     turn = services.run_turn(
         container=container,
@@ -260,6 +282,9 @@ def _review_turn(
                 f"Your review at .handoff/{review_file} was not valid: {err}. "
                 f"Please rewrite only that file per /workspace/.handoff/FORMAT.md."
             )
+            # Re-snapshot: the correction retry is now the attempt whose
+            # rewrite (and only its rewrite) is salvage-eligible.
+            pre_attempt = _handoff_fingerprint(review_path)
             retry = services.run_turn(
                 container=container,
                 prompt=correction,
@@ -294,19 +319,26 @@ def _review_turn(
         # stream disconnect) may land after the review was already written.
         # Usage-limited turns are excluded: the T5 reaction (tool switch /
         # budgeted pause) owns those, and salvaging would bypass it only to
-        # hit the same limit next round.
-        parsed, salvage_err = _read_checked()
-        if parsed is not None:
-            logger.warning(
-                "story-develop %s: round %d reviewer [%s] turn failed (%s) "
-                "but a valid handoff exists on disk; using the artifact",
-                config.run_id,
-                round_no,
-                reviewer,
-                err,
-            )
+        # hit the same limit next round. The fingerprint guard scopes salvage
+        # to the failed attempt's OWN write — never a stale file from an
+        # earlier attempt or dispatch.
+        if _handoff_fingerprint(review_path) != pre_attempt:
+            parsed, salvage_err = _read_checked()
+            if parsed is not None:
+                logger.warning(
+                    "story-develop %s: round %d reviewer [%s] turn failed "
+                    "(%s) but the attempt wrote a valid handoff at %s; "
+                    "using the artifact",
+                    config.run_id,
+                    round_no,
+                    reviewer,
+                    err,
+                    review_path,
+                )
+            else:
+                err = f"{err}; salvage: {salvage_err}"
         else:
-            err = f"{err}; salvage: {salvage_err}"
+            err = f"{err}; salvage skipped: handoff unchanged by this attempt"
 
     if parsed is None:
         logger.warning(
