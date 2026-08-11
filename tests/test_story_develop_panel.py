@@ -580,3 +580,156 @@ def test_artifact_findings_append_without_invalid_handoff_retry(
     new_ids = [k for k in rstate.ledger.entries if k != fid]
     assert len(new_ids) == 1  # the visual finding appended as NEW
     assert rstate.ledger.entries[new_ids[0]].severity == "major"
+
+
+# --- #298 artifact-first salvage: a failed turn's valid handoff is trusted ---
+
+
+def _infra_failed_turn() -> TurnResult:
+    # A transport/infra death (classified agent_error, NOT usage-limited) —
+    # the observed #298 class: auth 401 / stream disconnect after the review
+    # work was already done.
+    return TurnResult(
+        exit_code=1,
+        succeeded=False,
+        session_id="",
+        result_text="API Error: 401 OAuth access token has been revoked",
+        cost_usd=0.005,
+        raw={"is_error": True},
+        stderr="",
+    )
+
+
+def _run_live_round(config, reviewers, run_turn, *, budget_seconds: int = 0):
+    return panel_mod.run_panel_round(
+        config,
+        reviewers,
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(budget_seconds),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+    )
+
+
+def test_failed_turn_with_valid_handoff_salvages_the_artifact(
+    tmp_path: Path,
+) -> None:
+    """#298: the reviewer finished the review (valid handoff on disk) but the
+    turn died on engine infra — the artifact is authoritative, not the exit
+    code. Run 2bf85bc2's shape: green work discarded over a transport blip."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+        ).write_text(_ART_LGTM)
+        return _infra_failed_turn()
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    out = result.round_reviews[0]
+    assert out.status == "LGTM" and out.passed is True
+    assert result.invalid_reviewer is None
+    assert result.interrupted is False
+    # The failure evidence trail is still recorded for classification capture.
+    assert list(config.failures_dir.glob("round_01_review-correctness*.json"))
+
+
+def test_salvaged_findings_flow_into_the_ledger(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    rstate = _reviewer("correctness", tmp_path)
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+        ).write_text(_ART_FINDINGS)
+        return _infra_failed_turn()
+
+    result = _run_live_round(config, [rstate], run_turn)
+
+    out = result.round_reviews[0]
+    assert out.status == "FINDINGS" and out.passed is False
+    assert out.findings and "320" in out.findings[0].rationale
+    assert len(rstate.ledger.entries) == 1  # salvaged findings hit the ledger
+
+
+def test_failed_correction_retry_salvages_the_rewritten_handoff(
+    tmp_path: Path,
+) -> None:
+    """The correction retry may rewrite a valid handoff and THEN die — the
+    rewritten artifact must be re-read, not discarded with the retry."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    review_path = config.handoff_dir / handoff_mod.reviewer_handoff_name(
+        1, "correctness"
+    )
+    calls = {"n": 0}
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            review_path.write_text("not a handoff")
+            return _ok_turn(session_id)
+        review_path.write_text(_ART_LGTM)
+        return _infra_failed_turn()
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert calls["n"] == 2  # initial + correction retry, no more
+    out = result.round_reviews[0]
+    assert out.status == "LGTM" and out.passed is True
+    assert result.invalid_reviewer is None
+
+
+def test_failed_turn_without_valid_handoff_stays_invalid(tmp_path: Path) -> None:
+    """Salvage never invents a verdict: a failed turn that left an unparseable
+    file is still the terminal invalid outcome."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+        ).write_text("half-written garb")
+        return _infra_failed_turn()
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert result.round_reviews[0].status == "invalid"
+    assert result.invalid_reviewer == "correctness"
+
+
+def test_usage_limited_turn_is_not_salvaged(tmp_path: Path) -> None:
+    """A usage-limited turn belongs to the T5 reaction (switch/pause), even if
+    a valid handoff exists — salvaging would bypass the budgeted pause."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+        ).write_text(_ART_LGTM)
+        return _limited_turn()
+
+    # No fallback chain + zero pause budget: the reaction gives up immediately.
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert result.interrupted is True
+    assert result.round_reviews[0].status == "invalid"

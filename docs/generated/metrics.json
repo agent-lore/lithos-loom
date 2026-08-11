@@ -52,7 +52,7 @@
         "max_function": "lithos_loom.lithos_client._parse_note"
       },
       "Plugins": {
-        "functions_over_10": 28,
+        "functions_over_10": 29,
         "max_complexity": 94,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
@@ -97,7 +97,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 78,
+    "functions_over_10": 79,
     "top_functions": [
       {
         "complexity": 94,
@@ -434,10 +434,10 @@
         "functions": 335,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1075,
-        "lines": 12627,
+        "lines": 12656,
         "modules": 40,
         "public_symbols": 207,
-        "sloc": 10080
+        "sloc": 10102
       },
       "ProjectContext": {
         "classes": 0,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 36943,
+    "total_lines": 36972,
     "total_modules": 117,
-    "total_sloc": 29297
+    "total_sloc": 29319
   },
   "tests": {
-    "ratio": 1.61,
-    "src_lines": 36943,
-    "test_lines": 59633
+    "ratio": 1.62,
+    "src_lines": 36972,
+    "test_lines": 59791
   }
 }

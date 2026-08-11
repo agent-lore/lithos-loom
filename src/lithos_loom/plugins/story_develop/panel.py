@@ -194,15 +194,20 @@ def _review_turn(
 
     Re-prompts the *same* session once if the handoff is malformed — or, T7,
     if it fails the *validate* callback (the finding-lifecycle check: unknown
-    or dropped ids). The handoff is only authoritative if the turn that
-    produced it SUCCEEDED (clean exit + structured result) — a failed turn
-    that happens to leave a parseable file is rejected, preserving the
-    exit-code contract (ADR 0002).
+    or dropped ids). A handoff is normally read only after a SUCCEEDED turn
+    (clean exit + structured result, ADR 0002) — but when a turn FAILS for a
+    non-usage-limit reason (engine infra: auth 401, stream disconnect), a
+    valid on-disk handoff for this round is salvaged rather than discarded
+    (#298): the artifact is the reviewer's work product, and the exit code
+    still drives the failure fixture. A *clean* turn whose handoff stays
+    invalid after the correction retry is still rejected — that is reviewer
+    output, not infra.
 
     Returns ``(outcome, failed_turn, session_handle)``: *failed_turn* is the
     TurnResult of a turn-level failure (for usage-limit classification by the
     caller), or ``None`` when the turns ran cleanly (even if the handoff stayed
-    invalid). *session_handle* is the handle to resume next round — the inbound
+    invalid) or a valid handoff was salvaged from a failed turn.
+    *session_handle* is the handle to resume next round — the inbound
     one for claude, the tool-minted ``thread_id`` for codex (#94). The turn runs
     through *services* (ARCH-1.S4) so the loop is testable with fakes.
     """
@@ -278,6 +283,30 @@ def _review_turn(
                     round_no=round_no,
                     turn=retry,
                 )
+
+    if (
+        parsed is None
+        and failed_turn is not None
+        and limits.classify_failure(failed_turn) != limits.USAGE_LIMITED
+    ):
+        # #298 artifact-first salvage: the reviewer's work product is the
+        # handoff file, not the turn's exit status — an infra death (auth 401,
+        # stream disconnect) may land after the review was already written.
+        # Usage-limited turns are excluded: the T5 reaction (tool switch /
+        # budgeted pause) owns those, and salvaging would bypass it only to
+        # hit the same limit next round.
+        parsed, salvage_err = _read_checked()
+        if parsed is not None:
+            logger.warning(
+                "story-develop %s: round %d reviewer [%s] turn failed (%s) "
+                "but a valid handoff exists on disk; using the artifact",
+                config.run_id,
+                round_no,
+                reviewer,
+                err,
+            )
+        else:
+            err = f"{err}; salvage: {salvage_err}"
 
     if parsed is None:
         logger.warning(
