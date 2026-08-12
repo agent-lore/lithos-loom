@@ -343,7 +343,7 @@ def test_bad_override_fails_before_any_run(
             "corectness.model=x",
         ],
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 2  # the stated pre-run validation contract
     assert seen == []
 
 
@@ -355,7 +355,7 @@ def test_unknown_profile_fails_before_any_run(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--profile", "thorogh"],
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert seen == []
 
 
@@ -367,7 +367,7 @@ def test_unknown_reviewer_fails_before_any_run(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--reviewer", "corectness"],
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert seen == []
 
 
@@ -379,8 +379,79 @@ def test_gate_only_profile_without_reviewer_fails_before_any_run(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--profile", "minimal"],
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert seen == []
+
+
+def test_capability_crossing_override_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # Syntactically valid, but correctness runs codex (no effort knob): the
+    # requested lever could never fire, so the whole invocation must abort —
+    # every case's panel resolves BEFORE the first paid run.
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--reviewer-override",
+            "correctness.effort=xhigh",
+        ],
+    )
+    assert result.exit_code == 2
+    assert seen == []
+
+
+def test_cli_flags_reach_live_review(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # The composition proof: the CLI-built review_fn must carry the SAME
+    # resolved panel it writes to summary.json — otherwise the paid agents
+    # could run a different arm than the one recorded.
+    captured: dict = {}
+
+    def fake_live_review(case, head_sha, *, reviewers=None, profile=None):
+        captured["reviewers"] = reviewers
+        captured["profile"] = profile
+        return {}
+
+    def fake_run_case(case, **kwargs):
+        kwargs["review_fn"](case, "deadbeef")
+        return CaseResult(
+            case_id=case.id,
+            n=1,
+            catch_rate=1.0,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=True,
+            caught_per_sample=(True,),
+            severity_per_sample=(True,),
+            catch_rate_ci=wilson_interval(1, 1),
+        )
+
+    monkeypatch.setattr(eval_cli, "live_review", fake_live_review)
+    monkeypatch.setattr(eval_cli, "run_case", fake_run_case)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--profile",
+            "thorough",
+            "--reviewer-override",
+            "correctness.model=some-model",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["profile"] == "thorough"
+    by_name = {s.name: s for s in captured["reviewers"]}
+    assert len(by_name) == 5  # thorough's panel reached the execution path
+    assert by_name["correctness"].model == "some-model"
 
 
 def test_override_passes_a_review_fn(

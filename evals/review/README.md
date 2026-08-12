@@ -102,7 +102,16 @@ Semantics:
   panel: a case whose panel lacks the persona runs unmodified (full-benchmark
   sweeps mix panels), while the persona *name* is still validated against the
   registry so a typo fails closed. Later duplicates win.
-- Everything validates **before any paid run** (exit 2, no containers).
+- **Effort is a claude-only knob** (codex depth is model-driven —
+  `supports_effort=False`): an explicit `PERSONA.effort=` override whose
+  effective engine has no effort knob is **rejected** — the requested lever
+  could never fire, so the paid arm would silently run identical to control.
+  An effort merely *inherited* from a persona across a `PERSONA.tool=codex`
+  swap is **cleared**, so `summary.json` always records the *effective*
+  runtime configuration, never a recorded-but-ignored setting.
+- Everything validates **before any paid run** (exit 2, no containers) —
+  including the capability check above, which resolves every selected case's
+  panel up front.
 - Each case's `summary.json` records the **effective** profile + panel
   (`name/tool/model/effort/block_threshold` per reviewer), so two report dirs are
   comparable arm-to-arm. A sweep is N invocations with distinct `--report-dir`s —

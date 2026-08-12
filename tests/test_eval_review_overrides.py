@@ -110,16 +110,19 @@ def test_default_panel_is_case_derived() -> None:
 
 
 def test_override_applies_to_present_persona() -> None:
+    # security is the claude persona, so the effort lever is real here (an
+    # effort override on a codex persona is rejected — see the capability
+    # crossing tests below)
     overrides = parse_reviewer_overrides(
-        ["correctness.model=some-model", "correctness.effort=low"]
+        ["security.model=some-model", "security.effort=low"]
     )
-    _, panel = resolve_panel(_case(), overrides=overrides)
+    _, panel = resolve_panel(_case(personas=("security",)), overrides=overrides)
     (spec,) = panel
-    assert spec.name == "correctness"
+    assert spec.name == "security"
     assert spec.model == "some-model"
     assert spec.effort == "low"
     # the shared canonical registry must never be mutated
-    assert canonical_personas()["correctness"].model is None
+    assert canonical_personas()["security"].model is None
 
 
 def test_override_for_absent_persona_leaves_panel_untouched() -> None:
@@ -177,3 +180,46 @@ def test_overrides_apply_on_top_of_profile_panel() -> None:
     by_name = {s.name: s for s in panel}
     assert by_name["correctness"].model == "some-model"
     assert by_name["security"].model is None
+
+
+# ── engine capability crossings: effort is a claude-only knob ────────────────
+# Codex has supports_effort=False (depth is model-driven), so an effort lever
+# on a codex reviewer would silently run identical to control — poison for a
+# paid A/B. Explicitly requested no-ops are REJECTED; effort merely inherited
+# from a persona across a tool swap is CLEARED so the recorded panel is the
+# effective runtime configuration.
+
+
+def test_effort_override_on_non_effort_engine_is_rejected() -> None:
+    # correctness is a codex persona — the requested lever could never fire
+    overrides = parse_reviewer_overrides(["correctness.effort=xhigh"])
+    with pytest.raises(ValueError, match="effort"):
+        resolve_panel(_case(), overrides=overrides)
+
+
+def test_tool_swap_to_codex_clears_inherited_effort() -> None:
+    # security is claude + effort=xhigh; swapping the tool must not RECORD an
+    # effort codex will ignore
+    overrides = parse_reviewer_overrides(["security.tool=codex"])
+    _, panel = resolve_panel(_case(personas=("security",)), overrides=overrides)
+    (spec,) = panel
+    assert spec.tool == "codex"
+    assert spec.effort is None
+
+
+def test_tool_swap_to_codex_with_explicit_effort_is_rejected() -> None:
+    overrides = parse_reviewer_overrides(
+        ["security.tool=codex", "security.effort=high"]
+    )
+    with pytest.raises(ValueError, match="effort"):
+        resolve_panel(_case(personas=("security",)), overrides=overrides)
+
+
+def test_tool_swap_to_claude_with_effort_is_accepted() -> None:
+    overrides = parse_reviewer_overrides(
+        ["correctness.tool=claude", "correctness.effort=high"]
+    )
+    _, panel = resolve_panel(_case(), overrides=overrides)
+    (spec,) = panel
+    assert spec.tool == "claude"
+    assert spec.effort == "high"

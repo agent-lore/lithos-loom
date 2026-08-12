@@ -252,6 +252,15 @@ new `reviewers=`/`profile=` seam. Each case's `summary.json` now records the
 arm-to-arm; a multi-arm sweep is N invocations, and a matrix orchestrator is
 deliberately deferred until the manual RH-2/RH-8 arms prove tedious.
 
+Engine capability crossings are normalised at resolution (review round 1):
+effort is a claude-only knob (`CodexEngine.supports_effort = False` — depth is
+model-driven), so an **explicitly overridden** effort on a no-effort engine is
+rejected — the requested lever could never fire, and a paid arm would silently
+run identical to control while `summary.json` claimed otherwise — while an
+effort merely **inherited** across a `tool` swap is cleared, keeping the
+recorded panel the *effective* runtime configuration. Every selected case's
+panel resolves before the first paid run, preserving fail-before-work.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and

@@ -20,9 +20,7 @@ from pathlib import Path
 import typer
 
 from ...plugins.story_develop.config import ReviewerSpec
-from ...plugins.story_develop.personas import canonical_personas
-from ...plugins.story_develop.profiles import UnknownProfileError, get_profile
-from .case import load_case
+from .case import Case, load_case
 from .harness import (
     DEFAULT_BAR,
     DEFAULT_K,
@@ -118,43 +116,34 @@ def review(
     """
     case_dirs = _discover(cases_dir, case)
 
-    # Fail closed on every override BEFORE any paid run: a typo must abort the
-    # invocation up front, not one case into a K-sample sweep.
+    # Fail closed BEFORE any paid run: overrides parse up front, then EVERY
+    # selected case's effective panel is resolved (unknown profile/reviewer,
+    # gate-only profile, capability crossings like effort-on-codex) — a typo
+    # or a no-op lever aborts the whole invocation, not one case into a sweep.
     try:
         overrides = parse_reviewer_overrides(reviewer_override or [])
-        if profile is not None:
-            prof = get_profile(profile)
-            if not prof.personas and not reviewer:
-                raise ValueError(
-                    f"--profile {profile!r} is gate-only (no personas) — "
-                    "nothing to measure; add --reviewer to name a panel"
-                )
-        if reviewer:
-            # resolve_panel validates names per case too, but a bad name must
-            # abort here, before case 1 starts.
-            registry = canonical_personas()
-            unknown = [n for n in reviewer if n not in registry]
-            if unknown:
-                raise ValueError(
-                    f"--reviewer: unknown persona(s) {unknown}; "
-                    f"known: {', '.join(sorted(registry))}"
-                )
-    except (ValueError, UnknownProfileError) as exc:
+    except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     panel_active = bool(overrides or profile or reviewer)
+
+    prepared: list[tuple[Case, str, str, tuple[ReviewerSpec, ...]]] = []
+    for case_dir in case_dirs:
+        loaded = load_case(case_dir)
+        try:
+            eff_profile, panel = resolve_panel(
+                loaded, profile=profile, reviewers=reviewer, overrides=overrides
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        # Undeclared tier counts as frontier: a case never silently opts INTO
+        # the floor (the shipped-case gate test forces a declaration anyway).
+        prepared.append((loaded, loaded.tier or "frontier", eff_profile, panel))
 
     judge_fn = build_agent_judge(tool=judge_tool) if judge else None
     sink = _make_report_sink(report_dir) if report_dir is not None else None
 
     results: list[tuple[str, CaseResult]] = []
-    for case_dir in case_dirs:
-        loaded = load_case(case_dir)
-        # Undeclared tier counts as frontier: a case never silently opts INTO
-        # the floor (the shipped-case gate test forces a declaration anyway).
-        tier = loaded.tier or "frontier"
-        eff_profile, panel = resolve_panel(
-            loaded, profile=profile, reviewers=reviewer, overrides=overrides
-        )
+    for loaded, tier, eff_profile, panel in prepared:
         review_fn: ReviewFn | None = None
         note = ""
         if panel_active:

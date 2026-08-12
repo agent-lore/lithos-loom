@@ -97,6 +97,14 @@ def resolve_panel(
     mixes panels), the typo protection being the registry check in
     :func:`parse_reviewer_overrides`. Specs are rebuilt with
     ``dataclasses.replace`` — the shared cached registry is never mutated.
+
+    Engine capability crossings are normalised last (effort is a claude-only
+    knob — codex depth is model-driven): an **explicitly overridden** effort on
+    a no-effort engine is rejected, because the requested lever could never
+    fire and the paid arm would silently run identical to control; an effort
+    merely **inherited** from a persona across a ``tool`` swap is cleared, so
+    the returned panel (and hence ``summary.json``) is the *effective* runtime
+    configuration, never a recorded-but-ignored setting.
     """
     registry = canonical_personas()
     effective_profile = profile or case.profile
@@ -127,4 +135,19 @@ def resolve_panel(
             replace(spec, **overrides[spec.name]) if spec.name in overrides else spec
             for spec in panel
         )
+    panel = tuple(_normalise_effort(spec, overrides or {}) for spec in panel)
     return effective_profile, panel
+
+
+def _normalise_effort(spec: ReviewerSpec, overrides: ReviewerOverrides) -> ReviewerSpec:
+    """Reject an explicit no-op effort; clear an inherited one (see above)."""
+    if spec.effort is None or engines.get_engine(spec.tool).supports_effort:
+        return spec
+    if "effort" in overrides.get(spec.name, {}):
+        raise ValueError(
+            f"--reviewer-override {spec.name}.effort={spec.effort}: tool "
+            f"{spec.tool!r} has no effort knob (depth is model-driven) — the "
+            "requested lever could never fire, so the arm would run identical "
+            "to control"
+        )
+    return replace(spec, effort=None)
