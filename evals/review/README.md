@@ -62,8 +62,63 @@ reporting gap, not (yet) a run failure.
   (`claude` | `codex`).
 - `--report-dir DIR`: write every run's report to `DIR/<case>/<variant>-<i>.json`
   (`variant` = `buggy` / `known-good`) so you can read the findings behind a number,
-  plus a per-case `DIR/<case>/summary.json` (rates, per-sample booleans, CIs) so a
-  costly K-sample run is re-analysable for variance without re-scoring.
+  plus a per-case `DIR/<case>/summary.json` (rates, per-sample booleans, CIs, and
+  the effective profile + panel) so a costly K-sample run is re-analysable for
+  variance without re-scoring.
+- `--profile NAME` / `--reviewer NAME` / `--reviewer-override PERSONA.FIELD=VALUE`:
+  the panel-override axis — see below.
+
+### Panel overrides (RH-7)
+
+The eval can vary the panel **per run**, without editing case files or persona
+definitions — the lever axis behind the RH-2 (thorough) and RH-8 (model) A/Bs:
+
+```bash
+# Thorough A/B: the full thorough panel (5 personas) + its deeper check-set
+uv run lithos-loom eval review --case lens33-confidence-crash --profile thorough
+
+# Model A/B: a stronger model on the correctness reviewer, prompts unchanged
+uv run lithos-loom eval review --reviewer-override correctness.model=<model-id>
+
+# "standard plus one": add/remove reviewers by enumerating the panel
+uv run lithos-loom eval review --reviewer correctness --reviewer security \
+  --reviewer dependency-hygiene
+
+# Engine swap on one persona (mixed-panel levers)
+uv run lithos-loom eval review --reviewer-override security.tool=codex
+```
+
+Semantics:
+
+- **`--profile NAME` replaces the panel** with the profile's personas AND sets its
+  check-set — exactly what a live run with `develop_review_profile = NAME` would
+  field. A gate-only profile (`minimal`) is rejected unless `--reviewer` supplies
+  the panel (then `--profile` is check-set-only).
+- **`--reviewer NAME` (repeatable) wins the panel**: explicit enumeration of
+  canonical personas (dedup, order preserved) — this is how you add or remove
+  reviewers relative to a case/profile panel.
+- **`--reviewer-override PERSONA.FIELD=VALUE`** (repeatable; `FIELD` ∈ `model` |
+  `effort` | `tool`) then adjusts personas **where present** in the effective
+  panel: a case whose panel lacks the persona runs unmodified (full-benchmark
+  sweeps mix panels), while the persona *name* is still validated against the
+  registry so a typo fails closed. Later duplicates win.
+- **Effort is a claude-only knob** (codex depth is model-driven —
+  `supports_effort=False`): an explicit `PERSONA.effort=` override whose
+  effective engine has no effort knob is **rejected** — the requested lever
+  could never fire, so the paid arm would silently run identical to control.
+  An effort merely *inherited* from a persona across a `PERSONA.tool=codex`
+  swap is **cleared**, so `summary.json` always records the *effective*
+  runtime configuration, never a recorded-but-ignored setting.
+- Everything validates **before any paid run** (exit 2, no containers) —
+  including the capability check above, which resolves every selected case's
+  panel up front.
+- Each case's `summary.json` records the **effective** profile + panel
+  (`name/tool/model/effort/block_threshold` per reviewer), so two report dirs are
+  comparable arm-to-arm. A sweep is N invocations with distinct `--report-dir`s —
+  a matrix orchestrator is deliberately a follow-up.
+
+There is no coder to override: `eval review` is review-only mode. The judge's
+engine is `--judge-tool`.
 
 ## Add a case
 
