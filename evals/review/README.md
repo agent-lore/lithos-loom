@@ -49,7 +49,11 @@ A reviewer turn that **crashes** (a failed/short-circuited turn — `status`
 sample is **errored**: excluded from the catch / FP denominators and reported as
 `+Nerr`, so agent flakiness never masquerades as a review miss (the `fp` above is
 `0/4` valid + `16err`, not a misleading `0/20`). A genuine catch is still counted
-even if a panel peer crashed.
+even if a panel peer crashed. The infra-failure exit gate keys on the **buggy-side**
+samples only: a known-good pass whose samples all errored is reported as `+Nerr`
+with no trustable FP number, but deliberately does not affect the exit code — the
+pass definition gates on catch-rate, and an unavailable FP measurement is a
+reporting gap, not (yet) a run failure.
 
 - `--judge` / `--no-judge` (**default on**): the mechanism LLM-judge confirms each
   finding describes the case's *specific* defect, not just the same file/topic.

@@ -342,6 +342,54 @@ def test_table_shows_tier_column_and_rollups(
     assert "floor: OK" in result.output
 
 
+def test_frontier_rollup_pools_counts_across_cases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The headline must POOL per-sample catches and valid denominators across
+    # frontier cases — not average per-case percentages (here pooled 5/8 ≈ 62%
+    # vs a percentage-average ≈ 57%) — and errored samples must drop out of the
+    # pooled denominator too. The floor case's 5/5 must stay out entirely.
+    d = tmp_path / "cases"
+    _make_case(d, "floor-case", tier="floor")
+    _make_case(d, "frontier-a", tier="frontier")
+    _make_case(d, "frontier-b", tier="frontier")
+
+    per_case = {
+        # caught, per-sample tuples: floor 5/5; frontier-a 4/5 valid 5;
+        # frontier-b 1/3 valid (2 errored) -> pooled frontier 5/8.
+        "floor-case": ((True,) * 5, (False,) * 5),
+        "frontier-a": ((True, True, True, True, False), (False,) * 5),
+        "frontier-b": ((True, False, False, False, False), (False,) * 3 + (True,) * 2),
+    }
+
+    def fake(case, **kwargs):
+        caught_per_sample, errored_per_sample = per_case[case.id]
+        n_valid = 5 - sum(errored_per_sample)
+        caught = sum(caught_per_sample)
+        return CaseResult(
+            case_id=case.id,
+            n=5,
+            catch_rate=caught / n_valid,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=caught / n_valid >= 0.8,
+            caught_per_sample=caught_per_sample,
+            severity_per_sample=caught_per_sample,
+            catch_rate_ci=wilson_interval(caught, n_valid),
+            errored_per_sample=errored_per_sample,
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code == 0, result.output
+    lo, hi = wilson_interval(5, 8)
+    assert (
+        f"frontier: 5/8 pooled catch (95% CI {lo * 100:.0f}-{hi * 100:.0f}%) "
+        "over 2 cases"
+    ) in result.output
+    assert "floor: OK (1 case at bar)" in result.output
+
+
 def test_floor_row_reads_ok_not_pass(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
