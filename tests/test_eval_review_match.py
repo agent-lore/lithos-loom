@@ -523,3 +523,48 @@ def test_lens30_topic_adjacent_finding_is_not_a_catch() -> None:
         ),
     )
     assert score.caught is False
+
+
+# ── lens22-artifact: the RH-3 artifact-pass twin scores on rendered evidence ──
+# Findings come from the artifact-review pass (screenshots), so the rationale
+# describes what the captures show; scoring is unchanged — same matcher, same
+# same-file-negative discipline.
+
+_LENS_CSS = "src/lithos_lens/static/lens.css"
+
+
+def _lens22_artifact() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "lens22-artifact-prewrap")
+
+
+def test_lens22_artifact_prewrap_finding_is_caught() -> None:
+    score = score_run(
+        _lens22_artifact(),
+        _split_report(
+            (
+                _LENS_CSS,
+                "the rendered note pages show anomalous vertical gaps between "
+                "every list item and doubled blank space after headings — "
+                ".markdown-body still applies white-space: pre-wrap, so the "
+                "newlines between generated block elements render literally",
+            )
+        ),
+    )
+    assert score.caught is True
+
+
+def test_lens22_artifact_same_file_style_finding_is_not_a_catch() -> None:
+    # A same-file cosmetic finding (palette/contrast critique of the same
+    # stylesheet) must not satisfy the whitespace-rendering expected.
+    score = score_run(
+        _lens22_artifact(),
+        _split_report(
+            (
+                _LENS_CSS,
+                "the note card accent color fails WCAG contrast against the "
+                "ochre background and the serif body face reads poorly at "
+                "320px — revisit the palette tokens",
+            )
+        ),
+    )
+    assert score.caught is False

@@ -13,7 +13,8 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 |---|---|---:|---:|
 | `lithos_loom.evals` | XS | 0 | 0 |
 | `lithos_loom.evals.review` | XS | 0 | 0 |
-| `lithos_loom.evals.review.case` | S | 2 | 1 |
+| `lithos_loom.evals.review.artifacts` | XS | 0 | 1 |
+| `lithos_loom.evals.review.case` | M | 2 | 1 |
 | `lithos_loom.evals.review.cli` | M | 0 | 1 |
 | `lithos_loom.evals.review.harness` | S | 1 | 2 |
 | `lithos_loom.evals.review.judge` | S | 0 | 1 |
@@ -23,6 +24,9 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
 
 ## Public API
+
+### `lithos_loom.evals.review.artifacts`
+- def `seed_case_artifacts` — Copy *case*'s artifacts under ``config.artifacts_dir``; return the count.
 
 ### `lithos_loom.evals.review.case`
 - class `Expected` — A defect a correct review MUST surface.

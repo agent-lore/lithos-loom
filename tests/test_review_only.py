@@ -233,6 +233,53 @@ def test_review_head_returns_raw_panel_and_check_set(
     assert intake.blocking is report.blocking
 
 
+# --- artifact-only mode (RH-3 / #294) -----------------------------------------
+# The eval harness measures the approval-hold artifact-review pass by seeding
+# config.artifacts_dir and asking review-only for the artifact pass INSTEAD of
+# the diff panel + gate.
+
+
+def _seed_artifacts(config: DevelopConfig) -> None:
+    shots = config.artifacts_dir / "round_01" / "seeded"
+    shots.mkdir(parents=True)
+    (shots / "page-800.png").write_text("png")
+
+
+def test_artifact_only_runs_artifact_pass_and_skips_checks(
+    harness: dict, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    _seed_artifacts(config)
+
+    report = review_only.review_change(config, _CHANGE, artifact_only=True)
+
+    # the deterministic gate never runs — the measured surface is the pass alone
+    assert harness["gate_calls"] == []
+    assert harness["panel_calls"][0]["artifact_pass"] is True
+    assert {r.name for r in report.reviewers} == {"correctness", "security"}
+    assert report.blocking is False
+
+
+def test_artifact_only_without_artifacts_fails_before_any_agent(
+    harness: dict, tmp_path: Path
+) -> None:
+    # nothing seeded -> nothing to review; an LGTM over zero artifacts would be
+    # a fabricated approval, so fail closed before any container starts
+    config = _config(tmp_path)
+    with pytest.raises(ValueError, match="artifact"):
+        review_only.review_change(config, _CHANGE, artifact_only=True)
+    assert harness["started"] == []
+    assert harness["panel_calls"] == []
+
+
+def test_default_review_does_not_run_the_artifact_pass(
+    harness: dict, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    review_only.review_change(config, _CHANGE)
+    assert not harness["panel_calls"][0].get("artifact_pass", False)
+
+
 def _panel(
     *, interrupted: bool = False, invalid: str | None = None
 ) -> PanelRoundResult:

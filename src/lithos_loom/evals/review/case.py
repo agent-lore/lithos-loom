@@ -40,6 +40,37 @@ _AC_PROVENANCES = ("replay", "trimmed", "synthetic")
 # CLI treats undeclared as frontier — a case never opts INTO the floor silently.
 _TIERS = ("floor", "frontier")
 
+# What an artifact case's checked-in captures ARE (RH-3 / #294):
+#   "captured"  — real e2e output rendered at the case head (the authentic
+#                 evidence the live artifact pass would have been shown);
+#   "synthetic" — hand-made renders (no authentic capture existed).
+# Mirrors ac_provenance's honesty rule; required whenever artifacts_dir is set.
+_ARTIFACT_PROVENANCES = ("captured", "synthetic")
+
+# Strict case.toml vocabulary: a typo'd knob (e.g. a misspelled artifacts_dir)
+# would silently run the case on a DIFFERENT surface than it claims to measure —
+# the same fail-closed rule the profile/persona checks apply.
+_CASE_KEYS = frozenset(
+    {
+        "id",
+        "description",
+        "repo",
+        "base",
+        "head",
+        "head_patch",
+        "acceptance_criteria_file",
+        "personas",
+        "profile",
+        "ac_provenance",
+        "tier",
+        "artifacts_dir",
+        "artifact_provenance",
+    }
+)
+_TOP_LEVEL_KEYS = frozenset({"case", "expected", "known_good"})
+_KNOWN_GOOD_KEYS = frozenset({"base", "head", "head_patch"})
+_EXPECTED_KEYS = frozenset({"file", "keywords", "min_severity", "mechanism"})
+
 
 @dataclass(frozen=True)
 class Expected:
@@ -87,12 +118,20 @@ class Case:
     ac_provenance: str | None = None
     # See _TIERS; None = undeclared (allowed only mid-authoring).
     tier: str | None = None
+    # RH-3 (#294): a case-dir-relative directory of checked-in rendered-page
+    # captures. When set, the harness seeds them into the run's artifacts dir
+    # and measures the approval-hold ARTIFACT-REVIEW pass instead of the diff
+    # panel. Validated at load: exists, non-empty, regular files only.
+    artifacts_dir: str | None = None
+    # See _ARTIFACT_PROVENANCES; required whenever artifacts_dir is set.
+    artifact_provenance: str | None = None
 
 
 def load_case(case_dir: Path) -> Case:
     """Load and validate the case in *case_dir* (``case.toml`` + the AC file)."""
     data = tomllib.loads((case_dir / "case.toml").read_text(encoding="utf-8"))
     case = data.get("case", {})
+    _reject_unknown_keys(case_dir.name, data, case)
 
     required = ("id", "base")
     missing = [k for k in required if not case.get(k)]
@@ -168,6 +207,10 @@ def load_case(case_dir: Path) -> Case:
             f"case {case.get('id')}: tier must be one of {_TIERS} (got {tier!r})"
         )
 
+    artifacts_dir = case.get("artifacts_dir")
+    artifact_provenance = case.get("artifact_provenance")
+    _validate_artifacts(case_dir, case.get("id"), artifacts_dir, artifact_provenance)
+
     return Case(
         id=str(case["id"]),
         description=str(case.get("description", "")),
@@ -185,7 +228,85 @@ def load_case(case_dir: Path) -> Case:
         case_dir=case_dir,
         ac_provenance=str(ac_provenance) if ac_provenance else None,
         tier=str(tier) if tier else None,
+        artifacts_dir=str(artifacts_dir) if artifacts_dir else None,
+        artifact_provenance=str(artifact_provenance) if artifact_provenance else None,
     )
+
+
+def _reject_unknown_keys(case_name: str, data: dict, case: dict) -> None:
+    """Fail closed on any unknown ``case.toml`` key at any level.
+
+    tomllib has no unknown-key notion, so ``case.get(...)`` would silently
+    ignore a typo — and a typo'd ``artifacts_dir`` runs the case as a diff-only
+    review that measures a different surface than the case declares.
+    """
+
+    def _check(scope: str, keys: set[str], known: frozenset[str]) -> None:
+        unknown = sorted(keys - known)
+        if unknown:
+            raise ValueError(
+                f"case {case_name}: unknown {scope} key(s) {unknown}; "
+                f"known: {', '.join(sorted(known))}"
+            )
+
+    _check("top-level", set(data), _TOP_LEVEL_KEYS)
+    _check("[case]", set(case), _CASE_KEYS)
+    _check("[known_good]", set(data.get("known_good", {})), _KNOWN_GOOD_KEYS)
+    for e in data.get("expected", []):
+        _check("[[expected]]", set(e), _EXPECTED_KEYS)
+
+
+def _validate_artifacts(
+    case_dir: Path, case_id: object, artifacts_dir: object, provenance: object
+) -> None:
+    """Validate the RH-3 artifact declaration pair, fail-closed at load.
+
+    Both-or-neither: a dir without provenance leaves the benchmark unable to
+    say what a catch measures; provenance without a dir means the author
+    intended an artifact case that would silently run as a diff case. The files
+    themselves must be regular and symlink-free (the seeder is a host-side
+    writer — same hardening posture as the artifact collector, PR #289) and
+    non-empty (a 0-byte capture reviews as nothing while claiming coverage).
+    """
+    if provenance is not None and provenance not in _ARTIFACT_PROVENANCES:
+        raise ValueError(
+            f"case {case_id}: artifact_provenance must be one of "
+            f"{_ARTIFACT_PROVENANCES} (got {provenance!r})"
+        )
+    if artifacts_dir is None and provenance is None:
+        return
+    if artifacts_dir is None:
+        raise ValueError(
+            f"case {case_id}: artifact_provenance without artifacts_dir — declare "
+            "the artifacts directory or drop the provenance"
+        )
+    if provenance is None:
+        raise ValueError(
+            f"case {case_id}: artifacts_dir requires artifact_provenance "
+            f"({' | '.join(_ARTIFACT_PROVENANCES)})"
+        )
+    root = case_dir / str(artifacts_dir)
+    if not root.is_dir():
+        raise ValueError(
+            f"case {case_id}: artifacts_dir {str(artifacts_dir)!r} is not a "
+            f"directory in {case_dir.name}"
+        )
+    files = [p for p in sorted(root.rglob("*")) if not p.is_dir() or p.is_symlink()]
+    if not files:
+        raise ValueError(
+            f"case {case_id}: artifacts_dir {str(artifacts_dir)!r} contains no files"
+        )
+    for p in files:
+        rel = p.relative_to(root)
+        if p.is_symlink():
+            raise ValueError(
+                f"case {case_id}: artifact {rel} is a symlink — artifacts must be "
+                "regular files inside the case dir"
+            )
+        if not p.is_file():
+            raise ValueError(f"case {case_id}: artifact {rel} is not a regular file")
+        if p.stat().st_size == 0:
+            raise ValueError(f"case {case_id}: artifact {rel} is empty")
 
 
 def _head_spec(
