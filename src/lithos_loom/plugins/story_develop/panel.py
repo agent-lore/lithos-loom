@@ -636,7 +636,12 @@ def run_panel_round(
                 severity_calibration=SEVERITY_CALIBRATION,
                 review_file=review_file_override,
             )
-            review_resume = True
+            # Resume only a session a prior round actually minted: in develop
+            # the pass follows this round's regular review (resume, unchanged);
+            # in review-only artifact-only mode (RH-3) the panel is fresh, and
+            # resume=True would hand `claude --resume` a session that does not
+            # exist, failing every turn before it starts.
+            review_resume = rstate.outcome is not None
         elif round_no == 1:
             review_prompt = render_prompt(
                 handoff.load_prompt("reviewer_round.md"),

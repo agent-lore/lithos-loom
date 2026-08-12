@@ -20,7 +20,7 @@ from pathlib import Path
 import typer
 
 from ...plugins.story_develop.config import ReviewerSpec
-from .case import Case, load_case
+from .case import Case, iter_artifact_files, load_case, resolve_artifacts_root
 from .harness import (
     DEFAULT_BAR,
     DEFAULT_K,
@@ -149,6 +149,10 @@ def review(
         if panel_active:
             review_fn = partial(live_review, reviewers=panel, profile=eff_profile)
             note = f" [profile={eff_profile}; panel={_panel_phrase(panel)}]"
+        artifacts = _artifact_info(loaded)
+        if artifacts is not None:
+            # RH-3: the measured surface is the artifact-review pass, not the diff
+            note += f" [artifact pass; {artifacts['n_files']} file(s)]"
         typer.echo(f"running {loaded.id} × {k} …{note}", err=True)
         result = run_case(
             loaded,
@@ -160,7 +164,9 @@ def review(
         )
         results.append((tier, result))
         if report_dir is not None:
-            _write_summary(report_dir, result, tier, eff_profile, panel)
+            _write_summary(
+                report_dir, result, tier, eff_profile, panel, artifacts=artifacts
+            )
 
     _print_table(results)
     floor_regressed = any(t == "floor" and not r.passed for t, r in results)
@@ -187,6 +193,23 @@ def _make_report_sink(report_dir: Path) -> ReportSink:
     return sink
 
 
+def _artifact_info(case: Case) -> dict | None:
+    """The artifact block for an RH-3 case: seeded file count + provenance.
+
+    ``None`` for ordinary diff cases (the summary key is then omitted, so old
+    summaries and diff-case summaries read identically). Counts via the same
+    shared walk the loader and seeder use (#302 review), so the recorded
+    ``n_files`` is exactly what the pass reviews.
+    """
+    if case.artifacts_dir is None or case.case_dir is None:
+        return None
+    root = resolve_artifacts_root(case.case_dir, case.artifacts_dir, case.id)
+    return {
+        "n_files": len(iter_artifact_files(root, case.id)),
+        "provenance": case.artifact_provenance,
+    }
+
+
 def _panel_phrase(panel: tuple[ReviewerSpec, ...]) -> str:
     """A compact one-line panel rendering for the per-case stderr note."""
 
@@ -203,56 +226,54 @@ def _write_summary(
     tier: str,
     profile: str,
     panel: tuple[ReviewerSpec, ...],
+    *,
+    artifacts: dict | None = None,
 ) -> None:
     """Write a per-case ``summary.json`` (rates + per-sample booleans + CIs).
 
     Beside the per-run ``buggy-N.json`` files, so a costly K-sample run is
     re-analysable for variance **without** re-scoring (which would re-invoke the
-    paid judge). Records the **effective** profile + panel (RH-7) — with
-    per-run overrides in play, this is what makes two report dirs comparable.
+    paid judge). Records the **effective** profile + panel (RH-7) — and, for an
+    artifact case, the measured surface (RH-3) — with per-run overrides in
+    play, this is what makes two report dirs comparable.
     """
     out = report_dir / r.case_id
     out.mkdir(parents=True, exist_ok=True)
     errored = sum(r.errored_per_sample)
     fp_errored = sum(r.false_positive_errored_per_sample)
-    (out / "summary.json").write_text(
-        json.dumps(
+    payload = {
+        "case": r.case_id,
+        "tier": tier,
+        "profile": profile,
+        "panel": [
             {
-                "case": r.case_id,
-                "tier": tier,
-                "profile": profile,
-                "panel": [
-                    {
-                        "name": s.name,
-                        "tool": s.tool,
-                        "model": s.model,
-                        "effort": s.effort,
-                        "block_threshold": s.block_threshold,
-                    }
-                    for s in panel
-                ],
-                "k": r.n,
-                "n_valid": r.n - errored,
-                "errored": errored,
-                "catch_rate": r.catch_rate,
-                "catch_rate_ci": list(r.catch_rate_ci),
-                "caught_per_sample": list(r.caught_per_sample),
-                "errored_per_sample": list(r.errored_per_sample),
-                "severity_correctness": r.severity_correctness,
-                "severity_per_sample": list(r.severity_per_sample),
-                "false_positive_rate": r.false_positive_rate,
-                "false_positive_rate_ci": list(r.false_positive_rate_ci),
-                "false_positive_per_sample": list(r.false_positive_per_sample),
-                "false_positive_errored": fp_errored,
-                "false_positive_errored_per_sample": list(
-                    r.false_positive_errored_per_sample
-                ),
-                "passed": r.passed,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+                "name": s.name,
+                "tool": s.tool,
+                "model": s.model,
+                "effort": s.effort,
+                "block_threshold": s.block_threshold,
+            }
+            for s in panel
+        ],
+        "k": r.n,
+        "n_valid": r.n - errored,
+        "errored": errored,
+        "catch_rate": r.catch_rate,
+        "catch_rate_ci": list(r.catch_rate_ci),
+        "caught_per_sample": list(r.caught_per_sample),
+        "errored_per_sample": list(r.errored_per_sample),
+        "severity_correctness": r.severity_correctness,
+        "severity_per_sample": list(r.severity_per_sample),
+        "false_positive_rate": r.false_positive_rate,
+        "false_positive_rate_ci": list(r.false_positive_rate_ci),
+        "false_positive_per_sample": list(r.false_positive_per_sample),
+        "false_positive_errored": fp_errored,
+        "false_positive_errored_per_sample": list(r.false_positive_errored_per_sample),
+        "passed": r.passed,
+    }
+    if artifacts is not None:
+        payload["artifacts"] = artifacts
+    (out / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _ci_band(lo: float, hi: float) -> str:

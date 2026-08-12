@@ -340,3 +340,292 @@ def test_every_shipped_case_declares_tier() -> None:
     for case_dir in _shipped_case_dirs():
         case = load_case(case_dir)
         assert case.tier is not None, f"{case.id}: declare tier (floor | frontier)"
+
+
+# ── artifact cases (RH-3 / #294): seeded rendered-page artifacts ──
+# A case may carry the screenshots the approval-hold artifact-review pass would
+# have been shown; the harness then measures that pass instead of the diff
+# panel. The files are validated at load (fail closed before any paid run).
+
+
+def _write_artifact(
+    case_dir: Path, rel: str = "artifacts/page-800.png", data: bytes = b"\x89PNG..."
+) -> Path:
+    p = case_dir / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    return p
+
+
+# No [known_good]: artifact cases are catch-only (#302 review — the fixed head
+# would be reviewed against the buggy captures, poisoning the FP metric).
+_ARTIFACT_TOML = _SEED_TOML.replace('[known_good]\nhead = "cccccccc"\n', "").replace(
+    'id = "180',
+    'artifacts_dir = "artifacts"\nartifact_provenance = "captured"\nid = "180',
+)
+
+
+def test_artifact_case_loads(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    _write_artifact(case_dir)
+    case = load_case(case_dir)
+    assert case.artifacts_dir == "artifacts"
+    assert case.artifact_provenance == "captured"
+
+
+def test_artifact_fields_default_to_none(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_SEED_TOML)
+    case = load_case(case_dir)
+    assert case.artifacts_dir is None
+    assert case.artifact_provenance is None
+
+
+def test_artifact_provenance_rejects_unknown_value(tmp_path: Path) -> None:
+    toml = _ARTIFACT_TOML.replace(
+        'artifact_provenance = "captured"', 'artifact_provenance = "real"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match="artifact_provenance"):
+        load_case(case_dir)
+
+
+def test_artifacts_dir_requires_provenance(tmp_path: Path) -> None:
+    # an artifact case must say whether its captures are authentic e2e output
+    # or hand-made — the benchmark-honesty rule ac_provenance already applies
+    toml = _ARTIFACT_TOML.replace('artifact_provenance = "captured"\n', "")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match="artifact_provenance"):
+        load_case(case_dir)
+
+
+def test_provenance_without_artifacts_dir_rejected(tmp_path: Path) -> None:
+    # a dangling provenance means the author INTENDED an artifact case; running
+    # it as a diff case would silently measure the wrong surface
+    toml = _ARTIFACT_TOML.replace('artifacts_dir = "artifacts"\n', "")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="artifacts_dir"):
+        load_case(case_dir)
+
+
+def test_rejects_missing_artifacts_dir(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)  # the dir is NOT created
+    with pytest.raises(ValueError, match="artifacts"):
+        load_case(case_dir)
+
+
+def test_rejects_empty_artifacts_dir(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    (case_dir / "artifacts").mkdir()
+    with pytest.raises(ValueError, match="artifacts"):
+        load_case(case_dir)
+
+
+def test_rejects_empty_artifact_file(tmp_path: Path) -> None:
+    # a 0-byte "screenshot" reviews as nothing while the case claims coverage
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    _write_artifact(case_dir, data=b"")
+    with pytest.raises(ValueError, match="empty"):
+        load_case(case_dir)
+
+
+def test_rejects_symlink_in_artifacts_dir(tmp_path: Path) -> None:
+    # same hardening posture as the host artifact collector (PR #289): the case
+    # dir is data, and a symlink could smuggle content from outside it
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    _write_artifact(case_dir)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"x")
+    (case_dir / "artifacts" / "link.png").symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+# ── artifact-root escapes (#302 review, High): the root itself must be a real
+# directory inside the case dir — a `../`, absolute, or symlinked root would
+# expose arbitrary host files to the reviewer container (and its provider).
+
+
+def test_rejects_parent_traversal_artifacts_dir(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"s3cret")
+    toml = _ARTIFACT_TOML.replace(
+        'artifacts_dir = "artifacts"', 'artifacts_dir = "../outside"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match=r"\.\."):
+        load_case(case_dir)
+
+
+def test_rejects_absolute_artifacts_dir(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.png").write_bytes(b"s")
+    toml = _ARTIFACT_TOML.replace(
+        'artifacts_dir = "artifacts"', f'artifacts_dir = "{outside}"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="absolute"):
+        load_case(case_dir)
+
+
+def test_rejects_symlinked_artifacts_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "page.png").write_bytes(b"x")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    (case_dir / "artifacts").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+def test_rejects_intermediate_symlinked_dir(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "page.png").write_bytes(b"x")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    _write_artifact(case_dir)  # one legitimate file so non-emptiness passes
+    (case_dir / "artifacts" / "sub").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+def test_rejects_blank_artifacts_dir(tmp_path: Path) -> None:
+    # #302 review round 2 (Medium): Path("") is the case dir itself, whose
+    # case.toml/ac.md satisfy the non-empty walk — and the Case constructor
+    # then normalises "" to None, silently running a DIFF review while
+    # artifact_provenance still claims "captured". Exactly the wrong-surface
+    # poison this validation exists to prevent.
+    toml = _ARTIFACT_TOML.replace('artifacts_dir = "artifacts"', 'artifacts_dir = ""')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="blank"):
+        load_case(case_dir)
+
+
+def test_rejects_whitespace_artifacts_dir(tmp_path: Path) -> None:
+    toml = _ARTIFACT_TOML.replace('artifacts_dir = "artifacts"', 'artifacts_dir = " "')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="blank"):
+        load_case(case_dir)
+
+
+def test_rejects_symlinked_component_in_artifacts_root(tmp_path: Path) -> None:
+    # #302 review round 2 (Low): "no symlinks anywhere" must include the
+    # DECLARED root path's components — alias/shots where alias is a symlink
+    # (even to a directory inside the case) is a mutable validation boundary.
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    real = case_dir / "real" / "shots"
+    real.mkdir(parents=True)
+    (real / "page.png").write_bytes(b"x")
+    (case_dir / "alias").symlink_to(case_dir / "real", target_is_directory=True)
+    toml = _ARTIFACT_TOML.replace(
+        'artifacts_dir = "artifacts"', 'artifacts_dir = "alias/shots"'
+    )
+    (case_dir / "case.toml").write_text(toml)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+def test_artifact_case_rejects_known_good(tmp_path: Path) -> None:
+    # #302 review (Medium): run_case reviews the known-good head with the SAME
+    # case — the fixed code against the buggy captures — so any FP number would
+    # be meaningless. Catch-only until variant-specific captures exist.
+    toml = _SEED_TOML.replace(
+        'id = "180',
+        'artifacts_dir = "artifacts"\nartifact_provenance = "captured"\nid = "180',
+    )  # keeps _SEED_TOML's [known_good]
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match="catch-only"):
+        load_case(case_dir)
+
+
+# ── strict case.toml keys: a typo'd knob must fail, not silently no-op ──
+# e.g. a misspelled artifacts_dir would silently degrade the case to a diff-only
+# run — the same measured-surface poison the profile/persona checks fail closed on.
+
+
+def test_rejects_unknown_case_key(tmp_path: Path) -> None:
+    toml = _SEED_TOML.replace('id = "180', 'artifcats_dir = "artifacts"\nid = "180')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="artifcats_dir"):
+        load_case(case_dir)
+
+
+def test_rejects_unknown_top_level_table(tmp_path: Path) -> None:
+    toml = _SEED_TOML + '\n[extras]\nnote = "x"\n'
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="extras"):
+        load_case(case_dir)
+
+
+def test_rejects_unknown_expected_key(tmp_path: Path) -> None:
+    toml = _SEED_TOML.replace(
+        'min_severity = "critical"', 'min_severity = "critical"\nseverity = "major"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="severity"):
+        load_case(case_dir)
+
+
+def test_rejects_unknown_known_good_key(tmp_path: Path) -> None:
+    toml = _SEED_TOML.replace(
+        '[known_good]\nhead = "cccccccc"', '[known_good]\nhead = "cccccccc"\nsha = "d"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="sha"):
+        load_case(case_dir)
+
+
+# ── shipped artifact cases: byte budget ──
+# Committed screenshots are the repo's first binaries; the budget keeps a case
+# from quietly growing past what a clone should carry.
+
+_ARTIFACTS_BUDGET_BYTES = 2 * 1024 * 1024
+
+
+def test_shipped_artifact_cases_fit_the_byte_budget() -> None:
+    for case_dir in _shipped_case_dirs():
+        case = load_case(case_dir)
+        if case.artifacts_dir is None:
+            continue
+        total = sum(
+            p.stat().st_size
+            for p in (case_dir / case.artifacts_dir).rglob("*")
+            if p.is_file()
+        )
+        assert total <= _ARTIFACTS_BUDGET_BYTES, (
+            f"{case.id}: artifacts total {total} bytes exceeds the "
+            f"{_ARTIFACTS_BUDGET_BYTES}-byte per-case budget — downscale/crop"
+        )
+
+
+def test_at_least_one_shipped_artifact_case_exists() -> None:
+    # RH-3 ships the mode WITH a real case (lens22 twin) — this pins that the
+    # artifact surface stays represented in the benchmark.
+    assert any(load_case(d).artifacts_dir is not None for d in _shipped_case_dirs()), (
+        "no shipped artifact case — the artifact-review surface is unmeasured"
+    )

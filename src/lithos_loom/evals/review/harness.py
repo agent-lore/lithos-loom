@@ -21,6 +21,7 @@ from ...plugins.story_develop.config import DevelopConfig, ReviewerSpec
 from ...plugins.story_develop.personas import canonical_personas
 from ...plugins.story_develop.review_only import review_change
 from ...plugins.story_develop.review_resolve import ResolvedChange
+from .artifacts import seed_case_artifacts
 from .case import Case
 from .match import Judge, score_run
 from .patch import materialise_patch_heads
@@ -204,6 +205,13 @@ def live_review(
             head_ref=f"{case.id}@{head_sha[:12]}",
             body=case.acceptance_criteria,
         )
+        # RH-3: an artifact case seeds its checked-in captures into the run's
+        # artifacts dir and measures the approval-hold artifact-review pass
+        # instead of the diff panel — one surface per case, so a catch is
+        # attributable (findings carry no pass provenance).
+        if case.artifacts_dir is not None:
+            seed_case_artifacts(case, config)
+            return review_change(config, change, artifact_only=True).to_json()
         return review_change(config, change).to_json()
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

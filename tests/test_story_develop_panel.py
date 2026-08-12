@@ -351,6 +351,41 @@ def _limited_turn() -> TurnResult:
     )
 
 
+def test_artifact_pass_resume_follows_prior_round(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The artifact pass resumes a reviewer's session only when a prior round
+    minted one. In develop it always follows a regular round (so it resumes,
+    unchanged); in review-only artifact-only mode (RH-3) the panel is fresh —
+    resume=True would hand ``claude --resume`` an id no session has, failing
+    every turn before it starts."""
+    config = _config(tmp_path)
+    fresh = _reviewer("correctness", tmp_path)
+    seasoned = _reviewer("security", tmp_path)
+    seasoned.outcome = ReviewOutcome(
+        reviewer="security", status="LGTM", passed=True, max_severity=None, findings=[]
+    )
+    calls = _install_reviewer_stub(monkeypatch)
+
+    panel_mod.run_panel_round(
+        config,
+        [fresh, seasoned],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        artifact_pass=True,
+    )
+
+    by_name = {c["name"]: c for c in calls}
+    assert by_name["correctness"]["resume"] is False
+    assert by_name["security"]["resume"] is True
+
+
 def test_artifact_pass_verdict_comes_from_the_artifact_handoff(
     tmp_path: Path,
 ) -> None:

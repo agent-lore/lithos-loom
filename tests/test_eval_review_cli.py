@@ -37,7 +37,9 @@ mechanism = "exits before delivery"
 """
 
 
-def _make_case(cases_dir: Path, case_id: str, tier: str | None = None) -> None:
+def _make_case(
+    cases_dir: Path, case_id: str, tier: str | None = None, artifacts: bool = False
+) -> None:
     d = cases_dir / case_id
     d.mkdir(parents=True)
     toml = _TOML.format(id=case_id)
@@ -45,6 +47,15 @@ def _make_case(cases_dir: Path, case_id: str, tier: str | None = None) -> None:
         toml = toml.replace(
             'profile = "standard"', f'profile = "standard"\ntier = "{tier}"'
         )
+    if artifacts:
+        toml = toml.replace(
+            'profile = "standard"',
+            'profile = "standard"\nartifacts_dir = "artifacts"\n'
+            'artifact_provenance = "captured"',
+        )
+        art = d / "artifacts"
+        art.mkdir()
+        (art / "page-800.png").write_bytes(b"\x89PNG...")
     (d / "case.toml").write_text(toml)
     (d / "ac.md").write_text("attach must wait for delivery")
 
@@ -322,6 +333,49 @@ def test_summary_json_carries_errored(
     assert data["errored"] == 2
     assert data["n_valid"] == 18
     assert sum(data["errored_per_sample"]) == 2
+
+
+# ── artifact cases (RH-3): the summary records the measured surface ──
+
+
+def test_summary_json_carries_artifacts_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # two report dirs are only comparable if each records WHICH surface (diff
+    # vs artifact pass) and what was seeded — the RH-7 effective-panel rule
+    cases = tmp_path / "cases"
+    _make_case(cases, "art-case", tier="frontier", artifacts=True)
+    _stub_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases), "--report-dir", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads((out / "art-case" / "summary.json").read_text())
+    assert data["artifacts"] == {"n_files": 1, "provenance": "captured"}
+    assert "artifact" in result.output  # the running line names the surface
+
+
+def test_summary_json_omits_artifacts_for_diff_cases(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "180-attach-delivery",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert "artifacts" not in data
 
 
 # ── panel overrides (RH-7): --profile / --reviewer / --reviewer-override ──

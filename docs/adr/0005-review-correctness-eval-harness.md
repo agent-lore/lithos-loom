@@ -261,6 +261,57 @@ effort merely **inherited** across a `tool` swap is cleared, keeping the
 recorded panel the *effective* runtime configuration. Every selected case's
 panel resolves before the first paid run, preserving fail-before-work.
 
+## Update (2026-08-12, RH-3 / #294): artifact cases — measuring the artifact-review pass
+
+The live panel reviews on **two** surfaces — the diff, and the approval-hold
+**artifact-review pass** (#283/#291) that shows reviewers the rendered-page
+screenshots the gate collected — but the harness could only measure the first.
+The lens22 baseline made the cost concrete: 0/5 with *zero findings*, because
+a browser-level escape is structurally invisible in a diff; and the lens PR
+#34 chips escape (unstyled plain text, visible in the captures the live pass
+approved) had nowhere to become a regression case. An **artifact case** now
+declares `artifacts_dir` (checked-in captures) + `artifact_provenance`
+(`captured` — authentic renders of the materialised case head, documented in
+the description — or `synthetic`; both-or-neither, mirroring `ac_provenance`'s
+honesty rule). The harness seeds the files into the run's
+`config.artifacts_dir` (the exact layout `render_artifacts_note` walks; the
+seeder re-applies the collector's symlink hardening since it is the one other
+sanctioned writer to a host-collector-only dir) and runs review-only in
+**artifact-only** mode: no check-set, one `reviewer_artifacts.md` round via
+the same `run_panel_round` primitive (`artifact_pass=True`, resume now
+derived from whether a prior round minted a session, so a fresh panel starts
+one instead of resuming a nonexistent id).
+
+**One surface per case, deliberately:** `ReviewFinding` carries no pass
+provenance, so a combined diff+artifact run could not attribute a catch to
+the surface under measurement — the same no-op/mis-attribution poison RH-7
+rejects. The A/B instrument is the **twin pair**: `lens22-artifact-prewrap`
+(shipped with this update — real Playwright captures of the delivered head,
+whose retained `white-space: pre-wrap` renders visible gaps between every
+list item) shares base + patch + AC with the diff-form
+`lens22-markdown-prewrap`. Scoring is unchanged (same matcher, same judge,
+same same-file-negative discipline); `summary.json` records
+`artifacts: {n_files, provenance}`. Two hardening precedents ride along:
+committed screenshots are the repo's **first binaries** (gate-enforced 2 MB
+per-case budget + `.gitattributes`), and `case.toml` now **rejects unknown
+keys at every level** — a typo'd `artifacts_dir` would otherwise silently
+run the case as a diff review measuring the wrong surface.
+
+The #302 review hardened two edges of the initial cut. **Root escape (High):**
+the first implementation validated only descendants, so an absolute, `..`, or
+symlinked `artifacts_dir` root could expose arbitrary host files to the
+reviewer container (reproduced by the reviewer). The root check now lives in
+one shared `resolve_artifacts_root` + `iter_artifact_files` pair used by the
+loader, the seeder, and the CLI summary count — relative-only, no `..`, root
+must be a real non-symlink directory resolving inside the case dir, and the
+seeder re-runs the full check so even an unvalidated `Case` cannot copy host
+files into the reviewer-visible mount. **Catch-only (Medium):** `run_case`
+reviews the known-good head with the *same* `Case`, so an artifact case with
+`[known_good]` would show the fixed code the buggy captures — the FP number
+would be meaningless. `[known_good]` is now rejected on artifact cases;
+variant-specific captures (a known-good `artifacts_dir`) are the follow-up if
+FP measurement on this surface is ever wanted.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and

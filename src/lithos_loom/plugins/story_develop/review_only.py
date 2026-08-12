@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 
 from ...runner import worktree
-from . import containers, engines
+from . import check_artifacts, containers, engines
 from .agent_session import PauseBudget, build_run_cmd
 from .check_runner import (
     build_check_set,
@@ -122,16 +122,24 @@ def review_change(
     *,
     reviewer_timeout: int = 3600,
     keep_worktree: bool = False,
+    artifact_only: bool = False,
 ) -> ReviewReport:
     """Run the panel + deterministic gate against an existing *change*.
 
     Materialises a read-only worktree at ``change.head_sha``, runs the resolved
     profile's check-set once, runs each reviewer once (round 1), and returns the
     consolidated :class:`ReviewReport`. The worktree + reviewer containers are
-    torn down on exit unless *keep_worktree* is set.
+    torn down on exit unless *keep_worktree* is set. With *artifact_only* (the
+    RH-3 eval mode) the pass is the approval-hold **artifact review** instead:
+    no check-set, one ``reviewer_artifacts.md`` round over the artifacts already
+    present in ``config.artifacts_dir``.
     """
     intake = review_head(
-        config, change, reviewer_timeout=reviewer_timeout, keep_worktree=keep_worktree
+        config,
+        change,
+        reviewer_timeout=reviewer_timeout,
+        keep_worktree=keep_worktree,
+        artifact_only=artifact_only,
     )
     return _build_report(
         config,
@@ -149,6 +157,7 @@ def review_head(
     *,
     reviewer_timeout: int = 3600,
     keep_worktree: bool = False,
+    artifact_only: bool = False,
 ) -> IntakeResult:
     """Run the panel + gate once at the change head and return the RAW pieces.
 
@@ -158,7 +167,19 @@ def review_head(
     Materialises a read-only worktree at ``change.head_sha``, runs the profile's
     check-set once and the reviewer panel once (round 1, no coder), and tears the
     worktree + reviewer containers down unless *keep_worktree*.
+
+    With *artifact_only* (RH-3: the eval harness measuring the artifact-review
+    surface in isolation) the check-set is skipped and the one panel round is
+    the ``artifact_pass`` — the caller must have populated
+    ``config.artifacts_dir`` first, checked fail-closed here before any
+    container starts (an LGTM over zero artifacts would be a fabricated
+    approval, not a review).
     """
+    if artifact_only and not check_artifacts.render_artifacts_note(config):
+        raise ValueError(
+            "artifact-only review: no artifacts to review under "
+            f"{config.artifacts_dir} — seed them before the run"
+        )
     specs = config.effective_reviewers
     for spec in specs:
         if not engines.is_supported(spec.tool):
@@ -210,7 +231,9 @@ def review_head(
     check_set: CheckSetResult | None = None
     panel = None
     try:
-        checks = build_check_set(config, wt)
+        # Artifact-only measures the artifact-review pass in isolation — the
+        # deterministic gate is a different surface and never runs.
+        checks = () if artifact_only else build_check_set(config, wt)
         for rstate in reviewers:
             containers.start_container(rstate.run_cmd)
         # Gate first so the panel prompt carries the deterministic summary, then
@@ -229,7 +252,10 @@ def review_head(
             gate_ledger=gate_ledger,
             budget=PauseBudget(config.max_pause_minutes * 60),
             reviewer_timeout=reviewer_timeout,
-            coder_summary=_REVIEW_ONLY_CODER_SUMMARY,
+            # the artifact prompt has no coder_summary slot — mirror develop's
+            # artifact pass, which passes the empty string
+            coder_summary="" if artifact_only else _REVIEW_ONLY_CODER_SUMMARY,
+            artifact_pass=artifact_only,
         )
     finally:
         for rstate in reviewers:

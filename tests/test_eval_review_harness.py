@@ -364,6 +364,66 @@ def test_live_review_honours_explicit_panel_and_profile(
     assert captured["config"].review_profile == "thorough"
 
 
+def _artifact_case(tmp_path) -> Case:
+    case_dir = tmp_path / "case"
+    art = case_dir / "artifacts"
+    art.mkdir(parents=True)
+    (art / "page-800.png").write_bytes(b"\x89PNG...")
+    return Case(
+        id="c",
+        description="",
+        repo=".",
+        base="b",
+        head="h",
+        acceptance_criteria="ac",
+        personas=("correctness",),
+        profile="standard",
+        expected=(_EXPECTED,),
+        case_dir=case_dir,
+        artifacts_dir="artifacts",
+        artifact_provenance="captured",
+    )
+
+
+def test_live_review_seeds_artifacts_and_runs_artifact_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # RH-3: an artifact case measures the approval-hold artifact-review pass —
+    # live_review seeds the checked-in captures into the run's artifacts dir
+    # (where render_artifacts_note walks) and asks review-only for the
+    # artifact pass INSTEAD of the diff panel.
+    captured: dict = {}
+
+    def fake_review_change(config, change, **kw):
+        captured["artifact_only"] = kw.get("artifact_only")
+        captured["seeded"] = sorted(
+            p.name for p in config.artifacts_dir.rglob("*") if p.is_file()
+        )
+        return _fake_report()
+
+    monkeypatch.setattr(harness_mod, "review_change", fake_review_change)
+    live_review(_artifact_case(tmp_path), "h")
+    assert captured["artifact_only"] is True
+    assert captured["seeded"] == ["page-800.png"]
+
+
+def test_live_review_without_artifacts_stays_on_the_diff_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    def fake_review_change(config, change, **kw):
+        captured["kw"] = kw
+        captured["artifacts_exists"] = config.artifacts_dir.exists()
+        return _fake_report()
+
+    monkeypatch.setattr(harness_mod, "review_change", fake_review_change)
+    live_review(_live_case(), "h")
+    # no artifact_only kwarg passed and nothing seeded — today's path exactly
+    assert "artifact_only" not in captured["kw"]
+    assert captured["artifacts_exists"] is False
+
+
 def test_live_review_cleans_up_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 

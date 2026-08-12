@@ -1,0 +1,49 @@
+[case]
+id = "lens22-artifact-prewrap"
+description = """
+ARTIFACT twin of lens22-markdown-prewrap (RH-3 / #294): same delivered change
+(base = lens main dd8c78a pre-K1-S1; patch = the run's delivered head a253fe3),
+same replayed AC — but the measured surface is the approval-hold
+ARTIFACT-REVIEW pass, not the diff panel. The diff twin baselines 0/5 (the
+escape is browser-level, structurally invisible in the diff); this case asks
+whether the panel catches it when shown the rendered pages the live pass
+would have been shown.
+
+Artifacts are authentic captures of the delivered head (2026-08-12): the head
+was materialised in a worktree, served against the operator's live Lithos KB,
+and /note/b322d64c ("Agent Zero daily research tasks queue articles for Influx
+ingestion" — a short note with headings, an ordered list, and bullet lists)
+was captured full-page with Playwright Chromium at 768 and 1440 widths
+(note-<width>.png, the e2e artifacts naming contract). The defect is plainly
+exhibited: .markdown-body retains 'white-space: pre-wrap', so the newlines
+markdown-it emits between block elements render as extra vertical gaps —
+visible line-height holes between every list item and doubled spacing after
+each heading/paragraph — where a correct markdown render collapses them.
+"""
+ac_provenance = "replay"
+tier = "frontier"       # new surface — nothing measures the artifact pass yet
+artifacts_dir = "artifacts"
+artifact_provenance = "captured"
+repo = "../lithos-lens"
+base = "dd8c78a80aadedf66915082638f426062b40035b"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[[expected]]
+file = "src/lithos_lens/static/lens.css"
+keywords = ["pre-wrap", "white-space", "spacing", "line break", "gap"]
+min_severity = "major"
+mechanism = """
+The rendered-page captures show markdown output displayed under
+'white-space: pre-wrap' (the .markdown-body rule retained from the plaintext
+<pre> era): every newline markdown-it emits between generated block elements
+is preserved, so the screenshots exhibit anomalous vertical gaps between list
+items and doubled blank space between headings and paragraphs, and CommonMark
+soft line breaks inside a paragraph would display as hard line breaks. A
+correct rendered-markdown surface collapses that whitespace. The finding must
+identify the wrong line-break/whitespace rendering of the note body as a
+defect of the delivered change (rendered markdown inheriting pre-formatted
+whitespace), not merely restyle preferences.
+"""

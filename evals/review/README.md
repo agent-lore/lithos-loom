@@ -131,6 +131,7 @@ cases/<id>/
   case.toml             # the defect: base + head (sha OR patch), expected findings
   ac.md                 # the acceptance criteria the reviewer receives (issue body)
   head.patch            # (patch form, #193) the seeded change applied to base
+  artifacts/            # (artifact case, RH-3) rendered-page captures — see below
 ```
 
 ### Patch form (#193, preferred)
@@ -240,6 +241,69 @@ as frontier — a case never opts into the floor silently.
 
 Naming note: this "floor" is unrelated to the **check-set floor** in
 `profiles.py` (the required checks a review profile always runs).
+
+### Artifact cases — measuring the artifact-review pass (RH-3, #294)
+
+The live panel has **two** surfaces: the diff review and the approval-hold
+**artifact-review pass** (#283/#291) that shows reviewers the rendered-page
+screenshots the gate's checks collected. Diff-form cases can't measure the
+second surface — lens22's escape is *browser-level* (every HTML-string test
+passes; only the rendered page is wrong) and baselined 0/5 exactly because the
+defect is structurally invisible in a diff. An **artifact case** carries the
+captures and measures that pass instead:
+
+```toml
+artifacts_dir = "artifacts"          # case-dir-relative; PNGs checked in
+artifact_provenance = "captured"     # captured | synthetic — see below
+```
+
+Semantics — one surface per case, deliberately:
+
+- The harness seeds `artifacts/` into the run's artifacts dir (the exact
+  layout the live pass renders) and runs review-only in **artifact-only**
+  mode: no check-set, one `reviewer_artifacts.md` round (`artifact_pass`),
+  the same panel primitive `develop()` uses. The diff panel does **not** run —
+  findings carry no pass provenance, so a combined run could not attribute a
+  catch to the surface under measurement. Pair an artifact case with its
+  diff-form twin (same base, same patch) to A/B the two surfaces:
+  `lens22-artifact-prewrap` / `lens22-markdown-prewrap` are that pair.
+- `[[expected]]` scores identically (structured match + judge); write the
+  `mechanism` in terms of what the captures *show*.
+- **Catch-only** (#302 review): `[known_good]` is rejected on artifact cases —
+  the harness reviews the known-good head with the *same* case, so the fixed
+  code would be shown the buggy captures and the false-positive number would
+  be meaningless. Variant-specific captures (a known-good `artifacts_dir`)
+  are a follow-up if FP measurement on this surface is ever needed.
+- `artifact_provenance` mirrors `ac_provenance`'s honesty rule: **`captured`**
+  = authentic renders of the case head (materialise the head, serve it, take
+  real screenshots — document what/when/how in the `description`);
+  **`synthetic`** = hand-made renders. Required whenever `artifacts_dir` is
+  set; both-or-neither is load-enforced.
+- Validation is fail-closed at load AND at seed time (one shared root check +
+  walk, so the two can't drift): `artifacts_dir` must be a real, non-symlink
+  directory **inside the case dir** (absolute paths and `..` rejected — an
+  escaping root would expose arbitrary host files to the reviewer container),
+  with ≥1 non-empty regular file and no symlinks anywhere; and unknown
+  `case.toml` keys now fail everywhere (a typo'd `artifacts_dir` would
+  silently measure the wrong surface).
+- **Byte budget:** committed screenshots are the repo's only binaries;
+  gate-enforced ≤ 2 MB total per case (`_ARTIFACTS_BUDGET_BYTES`). Downscale
+  and prefer a short page over cropping the defect out.
+
+Capture recipe (what produced the lens22 twin's PNGs):
+
+```bash
+git -C <customer-repo> worktree add /tmp/head <base-sha>
+cd /tmp/head && git apply <case-dir>/feature-with-defect.patch
+# serve the head (against live backing services if the app needs them), then:
+npx playwright screenshot --viewport-size=768,1200 --full-page <url> \
+  <case-dir>/artifacts/<page>-768.png     # repeat per width
+```
+
+Runs use the normal CLI unchanged — every axis (K, judge, tier roll-ups,
+RH-7 panel overrides) composes; `summary.json` gains
+`"artifacts": {n_files, provenance}` and the running line notes
+`[artifact pass; N file(s)]`.
 
 ### Cross-repo cases (escapes from customer projects)
 

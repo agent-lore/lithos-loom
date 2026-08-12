@@ -1,0 +1,2 @@
+# Eval artifact-case screenshots (RH-3) — the repo's only binaries.
+evals/review/cases/**/*.png binary -diff
