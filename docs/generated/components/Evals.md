@@ -14,10 +14,11 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals` | XS | 0 | 0 |
 | `lithos_loom.evals.review` | XS | 0 | 0 |
 | `lithos_loom.evals.review.case` | S | 2 | 1 |
-| `lithos_loom.evals.review.cli` | S | 0 | 1 |
+| `lithos_loom.evals.review.cli` | M | 0 | 1 |
 | `lithos_loom.evals.review.harness` | S | 1 | 2 |
 | `lithos_loom.evals.review.judge` | S | 0 | 1 |
 | `lithos_loom.evals.review.match` | S | 2 | 3 |
+| `lithos_loom.evals.review.overrides` | S | 0 | 2 |
 | `lithos_loom.evals.review.patch` | S | 0 | 1 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
 
@@ -45,6 +46,10 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `match_expected` — Match one *expected* defect against the *produced* findings.
 - def `review_incomplete` — Whether any reviewer's turn did not produce a verdict (#182 A3).
 - def `score_run` — Score one review run: the case is caught iff EVERY expected matches.
+
+### `lithos_loom.evals.review.overrides`
+- def `parse_reviewer_overrides` — Parse ``PERSONA.FIELD=VALUE`` override strings, fail-closed.
+- def `resolve_panel` — The effective ``(profile, panel)`` for *case* under the run's overrides.
 
 ### `lithos_loom.evals.review.patch`
 - def `materialise_patch_heads` — Resolve a case's patch-defined head(s) to ephemeral-commit shas (#193).

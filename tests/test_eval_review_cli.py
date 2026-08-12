@@ -324,6 +324,152 @@ def test_summary_json_carries_errored(
     assert sum(data["errored_per_sample"]) == 2
 
 
+# ── panel overrides (RH-7): --profile / --reviewer / --reviewer-override ──
+
+
+def test_bad_override_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # Fail closed BEFORE paid work: a malformed override must abort with no
+    # run_case calls at all.
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--reviewer-override",
+            "corectness.model=x",
+        ],
+    )
+    assert result.exit_code != 0
+    assert seen == []
+
+
+def test_unknown_profile_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--profile", "thorogh"],
+    )
+    assert result.exit_code != 0
+    assert seen == []
+
+
+def test_unknown_reviewer_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--reviewer", "corectness"],
+    )
+    assert result.exit_code != 0
+    assert seen == []
+
+
+def test_gate_only_profile_without_reviewer_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--profile", "minimal"],
+    )
+    assert result.exit_code != 0
+    assert seen == []
+
+
+def test_override_passes_a_review_fn(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--reviewer-override",
+            "correctness.model=some-model",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen[0]["kwargs"]["review_fn"] is not None
+
+
+def test_no_override_flags_leave_review_fn_default(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "other-case"],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen[0]["kwargs"]["review_fn"] is None
+
+
+def test_summary_json_carries_effective_panel(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "180-attach-delivery",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert data["profile"] == "standard"
+    (reviewer,) = data["panel"]
+    assert reviewer["name"] == "correctness"
+    assert reviewer["tool"] == "codex"  # the canonical persona's engine
+    assert reviewer["model"] is None
+
+
+def test_summary_json_carries_overridden_panel(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    # The effective panel is what makes two report dirs comparable (RH-7).
+    _stub_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "180-attach-delivery",
+            "--profile",
+            "thorough",
+            "--reviewer-override",
+            "correctness.model=some-model",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert data["profile"] == "thorough"
+    by_name = {r["name"]: r for r in data["panel"]}
+    assert len(by_name) == 5  # thorough's full persona panel replaced the case's
+    assert by_name["correctness"]["model"] == "some-model"
+    assert by_name["security"]["model"] is None
+
+
 # ── tier split (RH-6): floor = regression gate, frontier = headline ──
 
 

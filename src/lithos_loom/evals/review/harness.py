@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...plugins.story_develop.config import DevelopConfig
+from ...plugins.story_develop.config import DevelopConfig, ReviewerSpec
 from ...plugins.story_develop.personas import canonical_personas
 from ...plugins.story_develop.review_only import review_change
 from ...plugins.story_develop.review_resolve import ResolvedChange
@@ -167,18 +167,27 @@ def _base_for(case: Case, head_sha: str) -> str:
     return case.known_good_base or case.base
 
 
-def live_review(case: Case, head_sha: str) -> dict:
+def live_review(
+    case: Case,
+    head_sha: str,
+    *,
+    reviewers: tuple[ReviewerSpec, ...] | None = None,
+    profile: str | None = None,
+) -> dict:
     """Run review-only mode against *head_sha* and return its report JSON.
 
     Host-only — needs docker + the agent CLIs. Resolves the case's personas to
-    their canonical reviewer specs (engine / threshold / focus brief). The
+    their canonical reviewer specs (engine / threshold / focus brief) unless an
+    already-resolved *reviewers* panel / *profile* override is supplied (the
+    RH-7 seam — the eval CLI resolves overrides once and closes over them). The
     per-sample work dir (run state, handoffs, reviewer transcripts) is removed
     after the run so a K×cases×variants sweep does not leave state behind.
     """
-    registry = canonical_personas()
-    # load_case() validated every persona, so direct lookup can't KeyError and
-    # an unknown name was never silently dropped.
-    reviewers = tuple(registry[p] for p in case.personas)
+    if reviewers is None:
+        registry = canonical_personas()
+        # load_case() validated every persona, so direct lookup can't KeyError
+        # and an unknown name was never silently dropped.
+        reviewers = tuple(registry[p] for p in case.personas)
     work_dir = Path(tempfile.mkdtemp(prefix="loom-eval-"))
     try:
         config = DevelopConfig(
@@ -186,7 +195,7 @@ def live_review(case: Case, head_sha: str) -> dict:
             description=f"eval case {case.id}",
             work_dir=work_dir,
             acceptance_criteria=case.acceptance_criteria,
-            review_profile=case.profile,
+            review_profile=profile or case.profile,
             reviewers=reviewers,
         )
         change = ResolvedChange(

@@ -14,13 +14,26 @@ back to the cheap structured matcher. ``--report-dir`` retains each run's report
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 
 import typer
 
+from ...plugins.story_develop.config import ReviewerSpec
+from ...plugins.story_develop.personas import canonical_personas
+from ...plugins.story_develop.profiles import UnknownProfileError, get_profile
 from .case import load_case
-from .harness import DEFAULT_BAR, DEFAULT_K, CaseResult, ReportSink, run_case
+from .harness import (
+    DEFAULT_BAR,
+    DEFAULT_K,
+    CaseResult,
+    ReportSink,
+    ReviewFn,
+    live_review,
+    run_case,
+)
 from .judge import build_agent_judge
+from .overrides import parse_reviewer_overrides, resolve_panel
 from .stats import wilson_interval
 
 eval_app = typer.Typer(
@@ -72,6 +85,24 @@ def review(
     cases_dir: Path = typer.Option(
         _DEFAULT_CASES_DIR, "--cases-dir", help="Directory of case folders."
     ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help="Override every case's profile: panel := its personas, "
+        "check-set := its checks.",
+    ),
+    reviewer: list[str] | None = typer.Option(
+        None,
+        "--reviewer",
+        help="Explicitly enumerate the panel (repeatable canonical persona "
+        "names); wins over --profile's panel.",
+    ),
+    reviewer_override: list[str] | None = typer.Option(
+        None,
+        "--reviewer-override",
+        help="PERSONA.FIELD=VALUE with FIELD in model|effort|tool "
+        "(repeatable); applies where the persona is in the effective panel.",
+    ),
 ) -> None:
     """Measure the panel's catch-rate on the seeded-defect benchmark.
 
@@ -80,8 +111,37 @@ def review(
     Exit 1 iff a floor case falls below the bar or a case has no valid samples
     (all-errored infra failure) — a frontier FAIL is the measurement, not a
     failure of the run.
+
+    The panel-override axis (RH-7): ``--profile`` / ``--reviewer`` /
+    ``--reviewer-override`` vary the panel per run without editing case files;
+    the effective panel is recorded in each case's ``summary.json``.
     """
     case_dirs = _discover(cases_dir, case)
+
+    # Fail closed on every override BEFORE any paid run: a typo must abort the
+    # invocation up front, not one case into a K-sample sweep.
+    try:
+        overrides = parse_reviewer_overrides(reviewer_override or [])
+        if profile is not None:
+            prof = get_profile(profile)
+            if not prof.personas and not reviewer:
+                raise ValueError(
+                    f"--profile {profile!r} is gate-only (no personas) — "
+                    "nothing to measure; add --reviewer to name a panel"
+                )
+        if reviewer:
+            # resolve_panel validates names per case too, but a bad name must
+            # abort here, before case 1 starts.
+            registry = canonical_personas()
+            unknown = [n for n in reviewer if n not in registry]
+            if unknown:
+                raise ValueError(
+                    f"--reviewer: unknown persona(s) {unknown}; "
+                    f"known: {', '.join(sorted(registry))}"
+                )
+    except (ValueError, UnknownProfileError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    panel_active = bool(overrides or profile or reviewer)
 
     judge_fn = build_agent_judge(tool=judge_tool) if judge else None
     sink = _make_report_sink(report_dir) if report_dir is not None else None
@@ -92,11 +152,26 @@ def review(
         # Undeclared tier counts as frontier: a case never silently opts INTO
         # the floor (the shipped-case gate test forces a declaration anyway).
         tier = loaded.tier or "frontier"
-        typer.echo(f"running {loaded.id} × {k} …", err=True)
-        result = run_case(loaded, k=k, bar=bar, judge=judge_fn, report_sink=sink)
+        eff_profile, panel = resolve_panel(
+            loaded, profile=profile, reviewers=reviewer, overrides=overrides
+        )
+        review_fn: ReviewFn | None = None
+        note = ""
+        if panel_active:
+            review_fn = partial(live_review, reviewers=panel, profile=eff_profile)
+            note = f" [profile={eff_profile}; panel={_panel_phrase(panel)}]"
+        typer.echo(f"running {loaded.id} × {k} …{note}", err=True)
+        result = run_case(
+            loaded,
+            k=k,
+            bar=bar,
+            judge=judge_fn,
+            report_sink=sink,
+            review_fn=review_fn,
+        )
         results.append((tier, result))
         if report_dir is not None:
-            _write_summary(report_dir, result, tier)
+            _write_summary(report_dir, result, tier, eff_profile, panel)
 
     _print_table(results)
     floor_regressed = any(t == "floor" and not r.passed for t, r in results)
@@ -123,12 +198,29 @@ def _make_report_sink(report_dir: Path) -> ReportSink:
     return sink
 
 
-def _write_summary(report_dir: Path, r: CaseResult, tier: str) -> None:
+def _panel_phrase(panel: tuple[ReviewerSpec, ...]) -> str:
+    """A compact one-line panel rendering for the per-case stderr note."""
+
+    def one(s: ReviewerSpec) -> str:
+        extras = [s.tool] + [v for v in (s.model, s.effort) if v]
+        return f"{s.name}({','.join(extras)})"
+
+    return ", ".join(one(s) for s in panel)
+
+
+def _write_summary(
+    report_dir: Path,
+    r: CaseResult,
+    tier: str,
+    profile: str,
+    panel: tuple[ReviewerSpec, ...],
+) -> None:
     """Write a per-case ``summary.json`` (rates + per-sample booleans + CIs).
 
     Beside the per-run ``buggy-N.json`` files, so a costly K-sample run is
     re-analysable for variance **without** re-scoring (which would re-invoke the
-    paid judge).
+    paid judge). Records the **effective** profile + panel (RH-7) — with
+    per-run overrides in play, this is what makes two report dirs comparable.
     """
     out = report_dir / r.case_id
     out.mkdir(parents=True, exist_ok=True)
@@ -139,6 +231,17 @@ def _write_summary(report_dir: Path, r: CaseResult, tier: str) -> None:
             {
                 "case": r.case_id,
                 "tier": tier,
+                "profile": profile,
+                "panel": [
+                    {
+                        "name": s.name,
+                        "tool": s.tool,
+                        "model": s.model,
+                        "effort": s.effort,
+                        "block_threshold": s.block_threshold,
+                    }
+                    for s in panel
+                ],
                 "k": r.n,
                 "n_valid": r.n - errored,
                 "errored": errored,

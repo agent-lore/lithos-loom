@@ -230,6 +230,30 @@ FAIL is the measurement, not a failure of the run, so the exit code now means
 saturation, not age: a case moves to floor once it sits at 5/5 and prompt work
 has happened in its presence. Per-case `summary.json` carries the tier.
 
+## Update (2026-08-12, RH-7): the panel-override axis
+
+The harness measured only the panel a case file declared, so comparing levers
+(thorough profile, stronger model on one persona, engine swap) meant editing
+case files or copying the cases dir — RH-2's temp-dir workaround, and a
+blocker for RH-8's model-axis A/B. `eval review` now takes per-run overrides:
+`--profile` (replaces the panel with the profile's personas AND sets its
+check-set — what a live `develop_review_profile` run would field; gate-only
+profiles rejected unless `--reviewer` names a panel), repeatable `--reviewer`
+(explicit panel enumeration — add/remove; wins the panel), and repeatable
+`--reviewer-override PERSONA.FIELD=VALUE` for `model` / `effort` / `tool`
+(**apply-where-present**: a case whose panel lacks the persona runs
+unmodified, so full-benchmark sweeps mix panels safely, while the persona
+name is still registry-validated so typos fail closed **before any paid
+run**). This is exposure, not capability — `ReviewerSpec.model/.effort` (#93)
+and `.tool` (#94) already reach the agent in review-only mode; the CLI
+resolves the effective panel once per case and closes over `live_review`'s
+new `reviewers=`/`profile=` seam. Each case's `summary.json` now records the
+**effective** profile + panel, which is what makes two report dirs comparable
+arm-to-arm; a multi-arm sweep is N invocations, and a matrix orchestrator is
+deliberately deferred until the manual RH-2/RH-8 arms prove tedious.
+
+## Deferred
+
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
   its fix differing by *only* the defect) so the false-positive measurement is
   meaningful even under `--no-judge`. **Partly done, conclusion revised** (see

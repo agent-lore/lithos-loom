@@ -325,6 +325,45 @@ def test_live_review_cleans_up_its_work_dir(monkeypatch: pytest.MonkeyPatch) -> 
     assert not captured["work_dir"].exists()
 
 
+def test_live_review_defaults_to_case_panel_and_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lithos_loom.plugins.story_develop.personas import canonical_personas
+
+    captured: dict = {}
+
+    def fake_review_change(config, change, **kw):
+        captured["config"] = config
+        return _fake_report()
+
+    monkeypatch.setattr(harness_mod, "review_change", fake_review_change)
+    live_review(_live_case(), "h")
+    assert captured["config"].reviewers == (canonical_personas()["correctness"],)
+    assert captured["config"].review_profile == "standard"
+
+
+def test_live_review_honours_explicit_panel_and_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The RH-7 seam: an already-resolved panel + profile override land on the
+    # DevelopConfig verbatim (nothing re-resolves personas downstream).
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop.personas import canonical_personas
+
+    captured: dict = {}
+
+    def fake_review_change(config, change, **kw):
+        captured["config"] = config
+        return _fake_report()
+
+    monkeypatch.setattr(harness_mod, "review_change", fake_review_change)
+    spec = replace(canonical_personas()["security"], model="some-model")
+    live_review(_live_case(), "h", reviewers=(spec,), profile="thorough")
+    assert captured["config"].reviewers == (spec,)
+    assert captured["config"].review_profile == "thorough"
+
+
 def test_live_review_cleans_up_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
