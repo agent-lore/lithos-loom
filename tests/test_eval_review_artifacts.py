@@ -161,6 +161,28 @@ def test_seed_rejects_symlinked_root(tmp_path: Path) -> None:
         seed_case_artifacts(_case(case_dir), _config(tmp_path))
 
 
+def test_seed_rejects_blank_root(tmp_path: Path) -> None:
+    # Path("") is the case dir itself — the shared root check rejects it at
+    # the seeder too, not only at load
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "case.toml").write_text("x")
+    with pytest.raises(ValueError, match="blank"):
+        seed_case_artifacts(_case(case_dir, artifacts_dir=""), _config(tmp_path))
+
+
+def test_seed_rejects_symlinked_root_component(tmp_path: Path) -> None:
+    case_dir = tmp_path / "case"
+    real = case_dir / "real" / "shots"
+    real.mkdir(parents=True)
+    (real / "page.png").write_bytes(b"x")
+    (case_dir / "alias").symlink_to(case_dir / "real", target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        seed_case_artifacts(
+            _case(case_dir, artifacts_dir="alias/shots"), _config(tmp_path)
+        )
+
+
 def test_seed_rejects_empty_file(tmp_path: Path) -> None:
     # #302 review (Low): the loader rejects 0-byte captures; the seeder must
     # too — a file truncated after load (or an unvalidated Case) would seed a

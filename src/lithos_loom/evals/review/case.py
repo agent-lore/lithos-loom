@@ -270,6 +270,14 @@ def resolve_artifacts_root(case_dir: Path, artifacts_dir: str, case_id: object) 
     arbitrary host files to the reviewer container (and its provider). Shared
     by the loader and the seeder so the two can never drift.
     """
+    if not artifacts_dir.strip():
+        # Path("") is the case dir itself — whose case.toml/ac.md would satisfy
+        # the walk while the Case constructor normalises "" to None, silently
+        # running a DIFF review under a "captured" provenance claim.
+        raise ValueError(
+            f"case {case_id}: artifacts_dir must not be blank — name a real "
+            "directory inside the case dir"
+        )
     rel = Path(artifacts_dir)
     if rel.is_absolute():
         raise ValueError(
@@ -281,12 +289,19 @@ def resolve_artifacts_root(case_dir: Path, artifacts_dir: str, case_id: object) 
             f"case {case_id}: artifacts_dir must not traverse outside the case "
             f"dir ('..' in {artifacts_dir!r})"
         )
+    # "No symlinks anywhere" includes every component of the DECLARED path —
+    # alias/shots with alias a symlink (even to a directory inside the case)
+    # is a mutable validation boundary, not a real directory.
+    probe = case_dir
+    for part in rel.parts:
+        probe = probe / part
+        if probe.is_symlink():
+            raise ValueError(
+                f"case {case_id}: artifacts_dir {artifacts_dir!r} contains a "
+                f"symlink component ({part!r}) — every component must be a "
+                "real directory inside the case dir"
+            )
     root = case_dir / rel
-    if root.is_symlink():
-        raise ValueError(
-            f"case {case_id}: artifacts_dir {artifacts_dir!r} is a symlink — "
-            "it must be a real directory inside the case dir"
-        )
     if not root.is_dir():
         raise ValueError(
             f"case {case_id}: artifacts_dir {artifacts_dir!r} is not a "

@@ -505,6 +505,45 @@ def test_rejects_intermediate_symlinked_dir(tmp_path: Path) -> None:
         load_case(case_dir)
 
 
+def test_rejects_blank_artifacts_dir(tmp_path: Path) -> None:
+    # #302 review round 2 (Medium): Path("") is the case dir itself, whose
+    # case.toml/ac.md satisfy the non-empty walk — and the Case constructor
+    # then normalises "" to None, silently running a DIFF review while
+    # artifact_provenance still claims "captured". Exactly the wrong-surface
+    # poison this validation exists to prevent.
+    toml = _ARTIFACT_TOML.replace('artifacts_dir = "artifacts"', 'artifacts_dir = ""')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="blank"):
+        load_case(case_dir)
+
+
+def test_rejects_whitespace_artifacts_dir(tmp_path: Path) -> None:
+    toml = _ARTIFACT_TOML.replace('artifacts_dir = "artifacts"', 'artifacts_dir = " "')
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="blank"):
+        load_case(case_dir)
+
+
+def test_rejects_symlinked_component_in_artifacts_root(tmp_path: Path) -> None:
+    # #302 review round 2 (Low): "no symlinks anywhere" must include the
+    # DECLARED root path's components — alias/shots where alias is a symlink
+    # (even to a directory inside the case) is a mutable validation boundary.
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    real = case_dir / "real" / "shots"
+    real.mkdir(parents=True)
+    (real / "page.png").write_bytes(b"x")
+    (case_dir / "alias").symlink_to(case_dir / "real", target_is_directory=True)
+    toml = _ARTIFACT_TOML.replace(
+        'artifacts_dir = "artifacts"', 'artifacts_dir = "alias/shots"'
+    )
+    (case_dir / "case.toml").write_text(toml)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
 def test_artifact_case_rejects_known_good(tmp_path: Path) -> None:
     # #302 review (Medium): run_case reviews the known-good head with the SAME
     # case — the fixed code against the buggy captures — so any FP number would
