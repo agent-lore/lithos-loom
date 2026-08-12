@@ -37,18 +37,23 @@ mechanism = "exits before delivery"
 """
 
 
-def _make_case(cases_dir: Path, case_id: str) -> None:
+def _make_case(cases_dir: Path, case_id: str, tier: str | None = None) -> None:
     d = cases_dir / case_id
     d.mkdir(parents=True)
-    (d / "case.toml").write_text(_TOML.format(id=case_id))
+    toml = _TOML.format(id=case_id)
+    if tier is not None:
+        toml = toml.replace(
+            'profile = "standard"', f'profile = "standard"\ntier = "{tier}"'
+        )
+    (d / "case.toml").write_text(toml)
     (d / "ac.md").write_text("attach must wait for delivery")
 
 
 @pytest.fixture
 def cases_dir(tmp_path: Path) -> Path:
     d = tmp_path / "cases"
-    _make_case(d, "180-attach-delivery")
-    _make_case(d, "other-case")
+    _make_case(d, "180-attach-delivery", tier="floor")
+    _make_case(d, "other-case", tier="frontier")
     return d
 
 
@@ -109,15 +114,38 @@ def test_k_is_threaded_through(
     assert seen[0]["kwargs"]["k"] == 3
 
 
-def test_failing_bar_exits_nonzero(
+def test_floor_regression_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
+    # A floor case below the bar is a HARD failure regardless of frontier gains
+    # (RH-6): the floor exists purely as a regression gate.
+    _stub_run_case(monkeypatch, catch_rate=0.2, passed=False)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "180-attach-delivery"],
+    )
+    assert result.exit_code == 1
+    assert "REGRESSED" in result.output
+    assert "floor: REGRESSED" in result.output
+    # a floor-only run has no headline to report
+    assert "frontier:" not in result.output
+
+
+def test_frontier_fail_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # Frontier cases are EXPECTED to fail while they discriminate — a frontier
+    # FAIL is the measurement, not a regression, so it must not gate the exit
+    # code (RH-6).
     _stub_run_case(monkeypatch, catch_rate=0.2, passed=False)
     result = runner.invoke(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--case", "other-case"],
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
+    assert "FAIL" in result.output
+    # a frontier-only run has no floor to report
+    assert "floor:" not in result.output
 
 
 def test_unknown_case_errors(monkeypatch: pytest.MonkeyPatch, cases_dir: Path) -> None:
@@ -294,3 +322,152 @@ def test_summary_json_carries_errored(
     assert data["errored"] == 2
     assert data["n_valid"] == 18
     assert sum(data["errored_per_sample"]) == 2
+
+
+# ── tier split (RH-6): floor = regression gate, frontier = headline ──
+
+
+def test_table_shows_tier_column_and_rollups(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_run_case(monkeypatch, catch_rate=0.8)
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(cases_dir)])
+    assert result.exit_code == 0, result.output
+    assert "tier" in result.output
+    assert "floor" in result.output
+    assert "frontier" in result.output
+    # frontier roll-up pools per-sample catches across frontier cases only:
+    # here one frontier case at 4/5 (the floor case's 4/5 must NOT pool in)
+    assert "frontier: 4/5 pooled catch" in result.output
+    assert "floor: OK" in result.output
+
+
+def test_frontier_rollup_pools_counts_across_cases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The headline must POOL per-sample catches and valid denominators across
+    # frontier cases — not average per-case percentages (here pooled 5/8 ≈ 62%
+    # vs a percentage-average ≈ 57%) — and errored samples must drop out of the
+    # pooled denominator too. The floor case's 5/5 must stay out entirely.
+    d = tmp_path / "cases"
+    _make_case(d, "floor-case", tier="floor")
+    _make_case(d, "frontier-a", tier="frontier")
+    _make_case(d, "frontier-b", tier="frontier")
+
+    per_case = {
+        # caught, per-sample tuples: floor 5/5; frontier-a 4/5 valid 5;
+        # frontier-b 1/3 valid (2 errored) -> pooled frontier 5/8.
+        "floor-case": ((True,) * 5, (False,) * 5),
+        "frontier-a": ((True, True, True, True, False), (False,) * 5),
+        "frontier-b": ((True, False, False, False, False), (False,) * 3 + (True,) * 2),
+    }
+
+    def fake(case, **kwargs):
+        caught_per_sample, errored_per_sample = per_case[case.id]
+        n_valid = 5 - sum(errored_per_sample)
+        caught = sum(caught_per_sample)
+        return CaseResult(
+            case_id=case.id,
+            n=5,
+            catch_rate=caught / n_valid,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=caught / n_valid >= 0.8,
+            caught_per_sample=caught_per_sample,
+            severity_per_sample=caught_per_sample,
+            catch_rate_ci=wilson_interval(caught, n_valid),
+            errored_per_sample=errored_per_sample,
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code == 0, result.output
+    lo, hi = wilson_interval(5, 8)
+    assert (
+        f"frontier: 5/8 pooled catch (95% CI {lo * 100:.0f}-{hi * 100:.0f}%) "
+        "over 2 cases"
+    ) in result.output
+    assert "floor: OK (1 case at bar)" in result.output
+
+
+def test_floor_row_reads_ok_not_pass(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # Floor rows report pass/regressed (RH-6 wording), not the frontier's
+    # PASS/FAIL — the row itself says which semantics apply.
+    _stub_run_case(monkeypatch, catch_rate=1.0)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "180-attach-delivery"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "ok" in result.output
+    assert "PASS" not in result.output
+
+
+def test_undeclared_tier_is_treated_as_frontier(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Opt-in floor: a case that hasn't declared a tier must never silently pad
+    # the regression floor (or gate the exit code).
+    d = tmp_path / "cases"
+    _make_case(d, "untiered-case")
+    _stub_run_case(monkeypatch, catch_rate=0.2, passed=False)
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code == 0, result.output
+    assert "frontier:" in result.output
+    assert "floor:" not in result.output
+
+
+def _stub_no_valid_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_case returns a result whose every sample errored (n_valid == 0)."""
+
+    def fake(case, **kwargs):
+        return CaseResult(
+            case_id=case.id,
+            n=2,
+            catch_rate=0.0,
+            severity_correctness=0.0,
+            false_positive_rate=0.0,
+            passed=False,
+            caught_per_sample=(False, False),
+            severity_per_sample=(False, False),
+            catch_rate_ci=(0.0, 0.0),
+            errored_per_sample=(True, True),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+
+
+def test_zero_valid_samples_exits_nonzero_even_for_frontier(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # All-errored is an infra failure, not a measurement — it must not read as
+    # "frontier miss, exit 0" or the harness could silently measure nothing.
+    _stub_no_valid_samples(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "other-case"],
+    )
+    assert result.exit_code == 1
+
+
+def test_summary_json_carries_tier(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "180-attach-delivery",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert data["tier"] == "floor"

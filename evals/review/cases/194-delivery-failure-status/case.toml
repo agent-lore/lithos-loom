@@ -17,6 +17,7 @@ comment-only clarification to the same function — no behaviour change, so a co
 review finds nothing. JUDGE-SCORED (the default).
 """
 ac_provenance = "synthetic"
+tier = "floor"          # saturated (5/5 at the 2026-08 baseline) — regression gate only
 repo = "."
 base = "ac862fcf578bdeca73e4d6c8e2f1720313ef513a"
 head_patch = "reintroduce-defect.patch"

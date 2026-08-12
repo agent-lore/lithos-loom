@@ -29,6 +29,17 @@ _SEVERITIES = ("critical", "major", "minor")
 # test requires it on every case under evals/review/cases/.
 _AC_PROVENANCES = ("replay", "trimmed", "synthetic")
 
+# Which benchmark tier a case scores in (RH-6):
+#   "floor"    — saturated (and the panel prompts may have been tuned in its
+#                presence, e.g. the #181 arc), so it contributes only a
+#                regression gate: below-bar = hard failure of the whole run;
+#   "frontier" — discriminating; the headline catch-rate pools frontier cases
+#                only, so floor saturation can't flatter an A/B.
+# (Unrelated to the check-set "floor" in profiles.py.) The loader treats it as
+# optional (mid-authoring), but the shipped-case gate test requires it, and the
+# CLI treats undeclared as frontier — a case never opts INTO the floor silently.
+_TIERS = ("floor", "frontier")
+
 
 @dataclass(frozen=True)
 class Expected:
@@ -74,6 +85,8 @@ class Case:
     case_dir: Path | None = None
     # See _AC_PROVENANCES; None = undeclared (allowed only mid-authoring).
     ac_provenance: str | None = None
+    # See _TIERS; None = undeclared (allowed only mid-authoring).
+    tier: str | None = None
 
 
 def load_case(case_dir: Path) -> Case:
@@ -149,6 +162,12 @@ def load_case(case_dir: Path) -> Case:
             f"{_AC_PROVENANCES} (got {ac_provenance!r})"
         )
 
+    tier = case.get("tier")
+    if tier is not None and tier not in _TIERS:
+        raise ValueError(
+            f"case {case.get('id')}: tier must be one of {_TIERS} (got {tier!r})"
+        )
+
     return Case(
         id=str(case["id"]),
         description=str(case.get("description", "")),
@@ -165,6 +184,7 @@ def load_case(case_dir: Path) -> Case:
         known_good_head_patch=kg_head_patch,
         case_dir=case_dir,
         ac_provenance=str(ac_provenance) if ac_provenance else None,
+        tier=str(tier) if tier else None,
     )
 
 

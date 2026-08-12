@@ -32,6 +32,7 @@ The head commit (eval/180-noguard) is off-branch; it is kept alive by the pushed
 See evals/review/README.md ("Keeping synthetic-case commits alive").
 """
 ac_provenance = "synthetic"
+tier = "floor"          # saturated (5/5 at the 2026-08 baseline) — regression gate only
 repo = "."
 base = "a127361ad25c592645764bbaa33251dee235e406"
 head = "f14e2203476f94d15b40556300e3cf5c46f486e3"

@@ -39,6 +39,7 @@ lens 13bf0df (16-capture spec + artifact existence assertions + documented
 e2e/artifacts/<page>-<width>.png contract).
 """
 ac_provenance = "trimmed"
+tier = "floor"          # saturated (5/5 at the 2026-08 baseline) — regression gate only
 repo = "../lithos-lens"
 base = "8393481402b30b142cf352e591e5d0f126832371"
 head_patch = "feature-with-defect.patch"

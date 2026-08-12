@@ -23,14 +23,22 @@ uv run lithos-loom eval review --case 180-attach-delivery -k 8 --bar 0.9 \
 uv run lithos-loom eval review --no-judge
 ```
 
-The command prints a per-case table and exits non-zero if any case falls below
-its bar. Catch and FP are shown as a count over K plus a **Wilson 95% CI** (#182)
-— so a rate is read with its sampling error, not as a bare point estimate:
+The command prints a per-case table plus two tier roll-up lines (see
+[Case tier](#case-tier--floor-vs-frontier)): the headline pools catches over
+**frontier** cases; **floor** cases report `ok`/`REGRESSED`. It exits non-zero
+iff a floor case falls below the bar or a case has no valid samples
+(all-errored infra failure) — a frontier FAIL is the measurement, not a failure
+of the run. Catch and FP are shown as a count over K plus a **Wilson 95% CI**
+(#182) — so a rate is read with its sampling error, not as a bare point
+estimate:
 
 ```
-case                           n       catch (95% CI)   sev          fp (95% CI)  result
-----------------------------------------------------------------------------------------
-180-attach-delivery           20        20/20 84-100%  100%     0/4 0-49% +16err  PASS
+case                         tier       n       catch (95% CI)   sev          fp (95% CI)  result
+-------------------------------------------------------------------------------------------------
+180-attach-delivery          floor     20        20/20 84-100%  100%     0/4 0-49% +16err  ok
+lens33-confidence-crash      frontier  20          2/20  3-30%  100%                   0%  FAIL
+frontier: 2/20 pooled catch (95% CI 3-30%) over 1 case
+floor: OK (1 case at bar)
 ```
 
 The CI is why a low-K run can't prove a clean panel: `5/5` still spans `57-100%`
@@ -41,7 +49,11 @@ A reviewer turn that **crashes** (a failed/short-circuited turn — `status`
 sample is **errored**: excluded from the catch / FP denominators and reported as
 `+Nerr`, so agent flakiness never masquerades as a review miss (the `fp` above is
 `0/4` valid + `16err`, not a misleading `0/20`). A genuine catch is still counted
-even if a panel peer crashed.
+even if a panel peer crashed. The infra-failure exit gate keys on the **buggy-side**
+samples only: a known-good pass whose samples all errored is reported as `+Nerr`
+with no trustable FP number, but deliberately does not affect the exit code — the
+pass definition gates on catch-rate, and an unavailable FP measurement is a
+reporting gap, not (yet) a run failure.
 
 - `--judge` / `--no-judge` (**default on**): the mechanism LLM-judge confirms each
   finding describes the case's *specific* defect, not just the same file/topic.
@@ -92,6 +104,7 @@ personas = ["correctness"]                # validated at load (a typo fails clos
 profile = "standard"                      # selects the check-set; validated at load
 acceptance_criteria_file = "ac.md"
 ac_provenance = "replay"                  # what ac.md IS — see below
+tier = "frontier"                         # floor | frontier — see below
 
 # Optional clean pair for the false-positive measurement — its own patch (an
 # independent clean change), or a sha (`head` / `base`), or omit for catch-only.
@@ -143,6 +156,35 @@ must declare it** — gate-enforced with no allowlist, so a future case can't
 silently regress to undocumented provenance. All pre-2026-08 cases are
 `synthetic`: they replay escapes from hand-developed loom PRs that never had a
 panel AC, with problem statements written for the fixture.
+
+### Case tier — floor vs frontier
+
+The benchmark's headline number must only count cases that still discriminate.
+The five legacy loom cases saturated at 5/5 — and the panel prompts were tuned
+in their presence (the #181 arc) — so any aggregate including them flatters
+every future A/B with free catches. Declare each case's role with `tier`
+(RH-6):
+
+- **`floor`** — saturated: the panel reliably catches it (and its presence may
+  reflect prompt tuning rather than general skill). It contributes a
+  **regression gate only**: the row reads `ok`/`REGRESSED`, and a floor case
+  below the bar is a **hard failure** of the whole run (exit 1) regardless of
+  frontier gains.
+- **`frontier`** — discriminating: the headline **pooled catch-rate** (per-sample
+  catches summed across frontier cases, with a Wilson CI) is measured over
+  these only. A frontier FAIL is expected while the case discriminates and
+  does not affect the exit code.
+
+The criterion is **saturation, not age**: a case moves to floor once it has
+been at 5/5 and prompt work has happened in its presence (that's why
+`lens27-screenshot-ac` is floor alongside the legacy five, while the eight
+2026-08 blind-spot/variance cases are frontier). Unknown values fail at load;
+the loader keeps the field optional mid-authoring, but **every shipped case
+must declare it** (gate-enforced, no allowlist) and the CLI treats undeclared
+as frontier — a case never opts into the floor silently.
+
+Naming note: this "floor" is unrelated to the **check-set floor** in
+`profiles.py` (the required checks a review profile always runs).
 
 ### Cross-repo cases (escapes from customer projects)
 
@@ -201,7 +243,11 @@ seed). The patch form (above) avoids that.
 
 A case is **caught** in a run iff *every* expected defect matches. Reported over K
 runs: catch-rate, severity-correctness (among caught), and false-positive rate (on
-the known-good head). A case **passes** at `catch-rate ≥ bar` (default 0.8).
+the known-good head). A case is at bar when `catch-rate ≥ bar` (default 0.8) —
+but what that *means* depends on its [tier](#case-tier--floor-vs-frontier):
+below-bar is `REGRESSED` (hard failure, exit 1) for a floor case and an
+informational `FAIL` for a frontier case, whose signal is the pooled headline
+catch-rate.
 
 ## Seed case
 

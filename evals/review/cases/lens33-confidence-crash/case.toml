@@ -27,6 +27,7 @@ diff as the panel approved it (base = lens main a429e8e post-K1-S2; patch =
 delivered head 1d190ba, pre-fix).
 """
 ac_provenance = "replay"
+tier = "frontier"       # discriminating at the 2026-08 baseline — headline signal
 repo = "../lithos-lens"
 base = "a429e8e952359011fdcdc039e24255ba1d77559b"
 head_patch = "feature-with-defect.patch"
