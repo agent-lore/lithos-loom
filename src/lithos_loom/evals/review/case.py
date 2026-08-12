@@ -209,7 +209,13 @@ def load_case(case_dir: Path) -> Case:
 
     artifacts_dir = case.get("artifacts_dir")
     artifact_provenance = case.get("artifact_provenance")
-    _validate_artifacts(case_dir, case.get("id"), artifacts_dir, artifact_provenance)
+    _validate_artifacts(
+        case_dir,
+        case.get("id"),
+        artifacts_dir,
+        artifact_provenance,
+        has_known_good=bool(kg_head or kg_head_patch),
+    )
 
     return Case(
         id=str(case["id"]),
@@ -256,17 +262,94 @@ def _reject_unknown_keys(case_name: str, data: dict, case: dict) -> None:
         _check("[[expected]]", set(e), _EXPECTED_KEYS)
 
 
+def resolve_artifacts_root(case_dir: Path, artifacts_dir: str, case_id: object) -> Path:
+    """Resolve + validate a case's artifact root — the ONE root check (#302 review).
+
+    The root must be a real, non-symlink directory that stays inside the case
+    dir: an absolute path, a ``..`` component, or a symlinked root would expose
+    arbitrary host files to the reviewer container (and its provider). Shared
+    by the loader and the seeder so the two can never drift.
+    """
+    rel = Path(artifacts_dir)
+    if rel.is_absolute():
+        raise ValueError(
+            f"case {case_id}: artifacts_dir must be relative to the case dir "
+            f"(got absolute path {artifacts_dir!r})"
+        )
+    if ".." in rel.parts:
+        raise ValueError(
+            f"case {case_id}: artifacts_dir must not traverse outside the case "
+            f"dir ('..' in {artifacts_dir!r})"
+        )
+    root = case_dir / rel
+    if root.is_symlink():
+        raise ValueError(
+            f"case {case_id}: artifacts_dir {artifacts_dir!r} is a symlink — "
+            "it must be a real directory inside the case dir"
+        )
+    if not root.is_dir():
+        raise ValueError(
+            f"case {case_id}: artifacts_dir {artifacts_dir!r} is not a "
+            f"directory in {case_dir.name}"
+        )
+    if not root.resolve().is_relative_to(case_dir.resolve()):
+        raise ValueError(
+            f"case {case_id}: artifacts_dir {artifacts_dir!r} resolves outside "
+            "the case dir"
+        )
+    return root
+
+
+def iter_artifact_files(root: Path, case_id: object) -> list[Path]:
+    """Every artifact file under a *validated* root, fail-closed (#302 review).
+
+    Rejects symlinks anywhere (files AND intermediate directories), non-regular
+    and empty files, and anything resolving outside the root; requires ≥1 file.
+    The single walk shared by the loader, the seeder, and the CLI summary so
+    the rules cannot diverge again.
+    """
+    resolved_root = root.resolve()
+    files: list[Path] = []
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root)
+        if p.is_symlink():
+            raise ValueError(
+                f"case {case_id}: artifact {rel} is a symlink — artifacts must "
+                "be regular files inside the case dir"
+            )
+        if p.is_dir():
+            continue
+        if not p.is_file():
+            raise ValueError(f"case {case_id}: artifact {rel} is not a regular file")
+        if p.stat().st_size == 0:
+            raise ValueError(f"case {case_id}: artifact {rel} is empty")
+        if not p.resolve().is_relative_to(resolved_root):
+            raise ValueError(f"case {case_id}: artifact {rel} escapes the case dir")
+        files.append(p)
+    if not files:
+        raise ValueError(f"case {case_id}: artifacts dir contains no files")
+    return files
+
+
 def _validate_artifacts(
-    case_dir: Path, case_id: object, artifacts_dir: object, provenance: object
+    case_dir: Path,
+    case_id: object,
+    artifacts_dir: object,
+    provenance: object,
+    *,
+    has_known_good: bool,
 ) -> None:
     """Validate the RH-3 artifact declaration pair, fail-closed at load.
 
     Both-or-neither: a dir without provenance leaves the benchmark unable to
     say what a catch measures; provenance without a dir means the author
-    intended an artifact case that would silently run as a diff case. The files
-    themselves must be regular and symlink-free (the seeder is a host-side
-    writer — same hardening posture as the artifact collector, PR #289) and
-    non-empty (a 0-byte capture reviews as nothing while claiming coverage).
+    intended an artifact case that would silently run as a diff case. Root and
+    files go through the shared :func:`resolve_artifacts_root` /
+    :func:`iter_artifact_files` checks (host-collector posture, PR #289).
+    Artifact cases are **catch-only** (#302 review): ``run_case`` reviews the
+    known-good head with the same Case, so the fixed code would be reviewed
+    against the buggy captures and the false-positive number would be
+    meaningless — variant-specific captures are a follow-up.
     """
     if provenance is not None and provenance not in _ARTIFACT_PROVENANCES:
         raise ValueError(
@@ -285,28 +368,15 @@ def _validate_artifacts(
             f"case {case_id}: artifacts_dir requires artifact_provenance "
             f"({' | '.join(_ARTIFACT_PROVENANCES)})"
         )
-    root = case_dir / str(artifacts_dir)
-    if not root.is_dir():
+    if has_known_good:
         raise ValueError(
-            f"case {case_id}: artifacts_dir {str(artifacts_dir)!r} is not a "
-            f"directory in {case_dir.name}"
+            f"case {case_id}: artifact cases are catch-only — [known_good] "
+            "would review the fixed head against the buggy captures, so the "
+            "false-positive rate would be meaningless; drop [known_good] "
+            "(variant-specific captures are a follow-up)"
         )
-    files = [p for p in sorted(root.rglob("*")) if not p.is_dir() or p.is_symlink()]
-    if not files:
-        raise ValueError(
-            f"case {case_id}: artifacts_dir {str(artifacts_dir)!r} contains no files"
-        )
-    for p in files:
-        rel = p.relative_to(root)
-        if p.is_symlink():
-            raise ValueError(
-                f"case {case_id}: artifact {rel} is a symlink — artifacts must be "
-                "regular files inside the case dir"
-            )
-        if not p.is_file():
-            raise ValueError(f"case {case_id}: artifact {rel} is not a regular file")
-        if p.stat().st_size == 0:
-            raise ValueError(f"case {case_id}: artifact {rel} is empty")
+    root = resolve_artifacts_root(case_dir, str(artifacts_dir), case_id)
+    iter_artifact_files(root, case_id)
 
 
 def _head_spec(

@@ -119,3 +119,53 @@ def test_seed_rejects_symlinks(tmp_path: Path) -> None:
     (case_dir / "artifacts" / "link.png").symlink_to(outside)
     with pytest.raises(ValueError, match="symlink"):
         seed_case_artifacts(_case(case_dir), _config(tmp_path))
+
+
+# ── root escapes (#302 review, High): the seeder is the host-side writer, so it
+# re-validates the ROOT too — an unvalidated Case must not copy host files from
+# outside the case dir into the reviewer-visible mount.
+
+
+def test_seed_rejects_parent_traversal_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"s3cret")
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    config = _config(tmp_path)
+    with pytest.raises(ValueError, match=r"\.\."):
+        seed_case_artifacts(_case(case_dir, artifacts_dir="../outside"), config)
+    assert not config.artifacts_dir.exists()  # nothing copied
+
+
+def test_seed_rejects_absolute_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.png").write_bytes(b"s")
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    with pytest.raises(ValueError, match="absolute"):
+        seed_case_artifacts(
+            _case(case_dir, artifacts_dir=str(outside)), _config(tmp_path)
+        )
+
+
+def test_seed_rejects_symlinked_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "page.png").write_bytes(b"x")
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / "artifacts").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        seed_case_artifacts(_case(case_dir), _config(tmp_path))
+
+
+def test_seed_rejects_empty_file(tmp_path: Path) -> None:
+    # #302 review (Low): the loader rejects 0-byte captures; the seeder must
+    # too — a file truncated after load (or an unvalidated Case) would seed a
+    # "reviewable" artifact that reviews as nothing
+    case_dir = tmp_path / "case"
+    _write(case_dir, "artifacts/page-800.png", data=b"")
+    with pytest.raises(ValueError, match="empty"):
+        seed_case_artifacts(_case(case_dir), _config(tmp_path))

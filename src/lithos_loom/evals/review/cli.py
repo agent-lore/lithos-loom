@@ -20,7 +20,7 @@ from pathlib import Path
 import typer
 
 from ...plugins.story_develop.config import ReviewerSpec
-from .case import Case, load_case
+from .case import Case, iter_artifact_files, load_case, resolve_artifacts_root
 from .harness import (
     DEFAULT_BAR,
     DEFAULT_K,
@@ -197,13 +197,15 @@ def _artifact_info(case: Case) -> dict | None:
     """The artifact block for an RH-3 case: seeded file count + provenance.
 
     ``None`` for ordinary diff cases (the summary key is then omitted, so old
-    summaries and diff-case summaries read identically).
+    summaries and diff-case summaries read identically). Counts via the same
+    shared walk the loader and seeder use (#302 review), so the recorded
+    ``n_files`` is exactly what the pass reviews.
     """
     if case.artifacts_dir is None or case.case_dir is None:
         return None
-    root = case.case_dir / case.artifacts_dir
+    root = resolve_artifacts_root(case.case_dir, case.artifacts_dir, case.id)
     return {
-        "n_files": sum(1 for p in root.rglob("*") if p.is_file()),
+        "n_files": len(iter_artifact_files(root, case.id)),
         "provenance": case.artifact_provenance,
     }
 

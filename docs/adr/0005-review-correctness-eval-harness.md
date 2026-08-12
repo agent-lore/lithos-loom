@@ -297,6 +297,21 @@ per-case budget + `.gitattributes`), and `case.toml` now **rejects unknown
 keys at every level** — a typo'd `artifacts_dir` would otherwise silently
 run the case as a diff review measuring the wrong surface.
 
+The #302 review hardened two edges of the initial cut. **Root escape (High):**
+the first implementation validated only descendants, so an absolute, `..`, or
+symlinked `artifacts_dir` root could expose arbitrary host files to the
+reviewer container (reproduced by the reviewer). The root check now lives in
+one shared `resolve_artifacts_root` + `iter_artifact_files` pair used by the
+loader, the seeder, and the CLI summary count — relative-only, no `..`, root
+must be a real non-symlink directory resolving inside the case dir, and the
+seeder re-runs the full check so even an unvalidated `Case` cannot copy host
+files into the reviewer-visible mount. **Catch-only (Medium):** `run_case`
+reviews the known-good head with the *same* `Case`, so an artifact case with
+`[known_good]` would show the fixed code the buggy captures — the FP number
+would be meaningless. `[known_good]` is now rejected on artifact cases;
+variant-specific captures (a known-good `artifacts_dir`) are the follow-up if
+FP measurement on this surface is ever wanted.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and

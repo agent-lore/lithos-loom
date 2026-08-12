@@ -269,16 +269,23 @@ Semantics — one surface per case, deliberately:
   `lens22-artifact-prewrap` / `lens22-markdown-prewrap` are that pair.
 - `[[expected]]` scores identically (structured match + judge); write the
   `mechanism` in terms of what the captures *show*.
+- **Catch-only** (#302 review): `[known_good]` is rejected on artifact cases —
+  the harness reviews the known-good head with the *same* case, so the fixed
+  code would be shown the buggy captures and the false-positive number would
+  be meaningless. Variant-specific captures (a known-good `artifacts_dir`)
+  are a follow-up if FP measurement on this surface is ever needed.
 - `artifact_provenance` mirrors `ac_provenance`'s honesty rule: **`captured`**
   = authentic renders of the case head (materialise the head, serve it, take
   real screenshots — document what/when/how in the `description`);
   **`synthetic`** = hand-made renders. Required whenever `artifacts_dir` is
   set; both-or-neither is load-enforced.
-- Validation is fail-closed at load: the dir must exist with ≥1 non-empty
-  regular file, symlinks are rejected (the seeder is a host-side writer —
-  same posture as the artifact collector), and unknown `case.toml` keys now
-  fail everywhere (a typo'd `artifacts_dir` would silently measure the wrong
-  surface).
+- Validation is fail-closed at load AND at seed time (one shared root check +
+  walk, so the two can't drift): `artifacts_dir` must be a real, non-symlink
+  directory **inside the case dir** (absolute paths and `..` rejected — an
+  escaping root would expose arbitrary host files to the reviewer container),
+  with ≥1 non-empty regular file and no symlinks anywhere; and unknown
+  `case.toml` keys now fail everywhere (a typo'd `artifacts_dir` would
+  silently measure the wrong surface).
 - **Byte budget:** committed screenshots are the repo's only binaries;
   gate-enforced ≤ 2 MB total per case (`_ARTIFACTS_BUDGET_BYTES`). Downscale
   and prefer a short page over cropping the defect out.

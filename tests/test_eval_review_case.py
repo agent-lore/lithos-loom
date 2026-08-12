@@ -357,7 +357,9 @@ def _write_artifact(
     return p
 
 
-_ARTIFACT_TOML = _SEED_TOML.replace(
+# No [known_good]: artifact cases are catch-only (#302 review — the fixed head
+# would be reviewed against the buggy captures, poisoning the FP metric).
+_ARTIFACT_TOML = _SEED_TOML.replace('[known_good]\nhead = "cccccccc"\n', "").replace(
     'id = "180',
     'artifacts_dir = "artifacts"\nartifact_provenance = "captured"\nid = "180',
 )
@@ -446,6 +448,75 @@ def test_rejects_symlink_in_artifacts_dir(tmp_path: Path) -> None:
     outside.write_bytes(b"x")
     (case_dir / "artifacts" / "link.png").symlink_to(outside)
     with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+# ── artifact-root escapes (#302 review, High): the root itself must be a real
+# directory inside the case dir — a `../`, absolute, or symlinked root would
+# expose arbitrary host files to the reviewer container (and its provider).
+
+
+def test_rejects_parent_traversal_artifacts_dir(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"s3cret")
+    toml = _ARTIFACT_TOML.replace(
+        'artifacts_dir = "artifacts"', 'artifacts_dir = "../outside"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match=r"\.\."):
+        load_case(case_dir)
+
+
+def test_rejects_absolute_artifacts_dir(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.png").write_bytes(b"s")
+    toml = _ARTIFACT_TOML.replace(
+        'artifacts_dir = "artifacts"', f'artifacts_dir = "{outside}"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="absolute"):
+        load_case(case_dir)
+
+
+def test_rejects_symlinked_artifacts_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "page.png").write_bytes(b"x")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    (case_dir / "artifacts").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+def test_rejects_intermediate_symlinked_dir(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "page.png").write_bytes(b"x")
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    _write_artifact(case_dir)  # one legitimate file so non-emptiness passes
+    (case_dir / "artifacts" / "sub").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+def test_artifact_case_rejects_known_good(tmp_path: Path) -> None:
+    # #302 review (Medium): run_case reviews the known-good head with the SAME
+    # case — the fixed code against the buggy captures — so any FP number would
+    # be meaningless. Catch-only until variant-specific captures exist.
+    toml = _SEED_TOML.replace(
+        'id = "180',
+        'artifacts_dir = "artifacts"\nartifact_provenance = "captured"\nid = "180',
+    )  # keeps _SEED_TOML's [known_good]
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match="catch-only"):
         load_case(case_dir)
 
 
