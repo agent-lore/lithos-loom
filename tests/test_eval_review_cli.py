@@ -896,3 +896,33 @@ def test_summary_json_judge_null_when_disabled(
     )
     data = json.loads((out / "other-case" / "summary.json").read_text())
     assert data["judge"] is None
+
+
+def test_unsupported_judge_tool_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # #305 review round 2: a configured default for an unknown tool key is
+    # accepted (forward compat), so the model check alone would let an
+    # unsupported --judge-tool through — and it would only crash when the
+    # first finding reached the judge, AFTER paid reviewer runs.
+    monkeypatch.setattr(
+        eval_cli,
+        "load_tool_default_models",
+        lambda: ({"opencode": "some-model", "codex": "gpt-test"}, ()),
+    )
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--judge-tool",
+            "opencode",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "opencode" in result.output
+    assert seen == []

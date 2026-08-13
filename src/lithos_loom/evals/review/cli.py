@@ -19,6 +19,7 @@ from pathlib import Path
 
 import typer
 
+from ...plugins.story_develop import engines
 from ...plugins.story_develop.config import ReviewerSpec
 from ...plugins.story_develop.daemon_io import load_tool_default_models
 from ...plugins.story_develop.model_policy import (
@@ -159,7 +160,16 @@ def review(
 
     # #305 review (finding 4): the judge is an agent invocation too — its
     # verdicts decide whether findings count, so its model must be explicit
-    # and recorded, not the host CLI's drifting default.
+    # and recorded, not the host CLI's drifting default. The TOOL validates
+    # first (round 2): unknown default_models keys are accepted for forward
+    # compat, so a configured model alone would let an unsupported tool
+    # through to crash only when the first finding reaches the judge —
+    # after paid reviewer runs.
+    if judge and not engines.is_supported(judge_tool):
+        raise typer.BadParameter(
+            f"--judge-tool {judge_tool!r} is not a supported agent tool "
+            f"(known: {', '.join(sorted(engines.supported_tools()))})"
+        )
     judge_model = default_models.get(judge_tool)
     if judge and judge_model is None:
         raise typer.BadParameter(

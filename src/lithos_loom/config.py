@@ -303,9 +303,10 @@ class StoryDevelopConfig:
     Per-*tool* (not per-role) because a heterogeneous panel (#94) mixes claude
     and codex agents in one run, so a single tool-blind default can't serve
     both: a codex reviewer and a claude coder each pick up the default for
-    their own tool. Only consulted by daemon-mode runs (the route-runner path
-    this config file drives); standalone CLI runs pin models with their own
-    flags.
+    their own tool. Consumed by EVERY agent-running surface — daemon-mode
+    runs, the standalone plugin CLI, ``develop review`` / ``converge``, and
+    the eval harness (panel + judge) — as the layer below any per-agent pin;
+    an agent whose model resolves nowhere fails its run closed (#304).
 
     ``operator_github_login`` (#113): when set, a delivered PR requests this
     GitHub user as a reviewer so native notifications fire. ``None`` → no human
