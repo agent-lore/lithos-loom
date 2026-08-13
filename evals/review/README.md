@@ -120,6 +120,16 @@ Semantics:
 There is no coder to override: `eval review` is review-only mode. The judge's
 engine is `--judge-tool`.
 
+**Explicit models (#304).** After override resolution the harness applies the
+loom TOML's `[story_develop.default_models]` (tool → model) to every panel
+member still on `model=None`, and a reviewer left without an explicit model
+aborts the whole invocation pre-paid. Rationale: the fallback was the sandbox
+image CLI's builtin default — recorded nowhere, drifting with image rebuilds —
+which made arms silently incomparable (#303 found every historical run pinned
+to whatever the image shipped). `summary.json` therefore always records the
+real model of every reviewer, and the per-case stderr line prints the resolved
+panel on every run, not only under override flags.
+
 ## Add a case
 
 Every defect that escapes review and is caught later (by a human, by the codex

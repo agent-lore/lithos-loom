@@ -40,6 +40,21 @@ from lithos_loom.plugins.story_develop.daemon_io import (
 from lithos_loom.plugins.story_develop.develop import DevelopResult
 from tests.support import FakeLithosClient, make_note
 
+
+@pytest.fixture(autouse=True)
+def _default_models_for_daemon_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #304: daemon-mode main() fails closed when an agent resolves to no
+    # explicit model, so every test that reaches the config build needs
+    # per-tool defaults; tests exercising the policy itself re-patch this.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
+
+
 # ── read_task_payload ──────────────────────────────────────────────────
 
 
@@ -1197,7 +1212,11 @@ def test_daemon_records_delivery_failure_when_deliver_raises(
     monkeypatch.setattr(
         main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1282,7 +1301,11 @@ def _stub_daemon_run(monkeypatch, tmp_path: Path, captured: dict) -> None:
         "resolve_project_settings",
         lambda url, meta: captured.get("settings", ProjectDevelopSettings()),
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1502,7 +1525,11 @@ def test_daemon_mode_halts_on_unknown_review_profile(
     monkeypatch.setattr(
         main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1567,7 +1594,11 @@ def test_daemon_mode_happy_path_writes_result(
     # No host loom config is set in the test env; stub the per-tool-default
     # loader so this test stays focused on friction *posting* (its real daemon
     # run always has a loadable config — that path is covered separately).
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1631,7 +1662,11 @@ def test_daemon_records_delivery_deadline_before_delivering(
     monkeypatch.setattr(
         main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1731,7 +1766,11 @@ def test_daemon_mode_metadata_image_flows_into_config(
         "resolve_project_settings",
         lambda url, meta: ProjectDevelopSettings(image="ghcr.io/acme/dev:2026-06"),
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1762,7 +1801,11 @@ def test_daemon_mode_image_falls_back_to_route_flag(
         "resolve_project_settings",
         lambda url, meta: ProjectDevelopSettings(),  # image=None
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1792,7 +1835,11 @@ def test_daemon_mode_review_profile_flows_into_config(
         "resolve_project_settings",
         lambda url, meta: ProjectDevelopSettings(review_profile_project="thorough"),
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(
         main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
     )
@@ -1886,7 +1933,8 @@ def test_daemon_mode_bad_cli_fallback_degrades_with_friction(
         tmp_git_repo, tmp_path, "--coder-model", "   ", "--coder-effort", "lo"
     )
     assert main_mod.main(argv) == EXIT_SUCCEEDED  # never fails the run
-    assert captured["config"].coder_model is None  # bad fallback dropped
+    # bad fallback dropped; the tool default fills the gap (#304 layering)
+    assert captured["config"].coder_model == "test-claude-model"
     assert captured["config"].coder_effort is None  # bad effort dropped, not crashed
     joined = "\n".join(captured["frictions"])
     assert "--coder-model" in joined and "--coder-effort" in joined
@@ -1950,4 +1998,38 @@ def test_daemon_mode_interrupted_run_reports_resume(
     payload = json.loads(result_file.read_text(encoding="utf-8"))
     assert payload["status"] == "interrupted"
     assert payload["resume"]["resume_after"] == "2026-06-12T15:00:00+00:00"
+    validate_result_schema(payload)
+
+
+def test_daemon_mode_missing_agent_model_fails_closed(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """#304: an agent still on model=None after every layer (metadata, task,
+    route fallback, [story_develop.default_models]) would run the sandbox
+    image CLI's invisible builtin — a do-not-retry config failure reported
+    through result.json BEFORE any agent runs."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(),
+    )
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+
+    def never(config, **kw):  # pragma: no cover - the point is it never runs
+        raise AssertionError("develop() must not run without explicit models")
+
+    monkeypatch.setattr(main_mod, "develop", never)
+
+    argv, result_file = _daemon_args(tmp_git_repo, tmp_path)
+    rc = main_mod.main(argv)
+    assert rc == EXIT_BAD_INPUT
+
+    payload = json.loads(result_file.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["error"]["category"] == "config"
+    assert "[story_develop.default_models]" in payload["error"]["message"]
     validate_result_schema(payload)

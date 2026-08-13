@@ -26,11 +26,16 @@ runner = CliRunner()
 def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     captured: dict = {}
 
+    # #304/#305: default models come from the SAME loaded host config the
+    # command uses (honouring --config) — never re-discovered ambient config.
     monkeypatch.setattr(
         review_cli,
         "load_config",
         lambda config=None: SimpleNamespace(
-            orchestrator=SimpleNamespace(work_dir=tmp_path / "work")
+            orchestrator=SimpleNamespace(work_dir=tmp_path / "work"),
+            story_develop=SimpleNamespace(
+                default_models={"codex": "gpt-test", "claude": "claude-test"}
+            ),
         ),
     )
 
@@ -118,6 +123,57 @@ def test_reviewer_override_and_profile(stubs: dict) -> None:
     assert [r.name for r in specs] == ["correctness"]
     assert specs[0].tool == "codex"
     assert specs[0].system_prompt  # the correctness focus brief is baked in
+    assert specs[0].model == "gpt-test"  # #304: default model applied
+
+
+def test_missing_default_model_fails_closed(
+    stubs: dict, monkeypatch, tmp_path: Path
+) -> None:
+    # #304: a reviewer with no explicit model must not reach a container —
+    # the sandbox CLI's builtin default is invisible and drifts with rebuilds.
+    monkeypatch.setattr(
+        review_cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(work_dir=tmp_path / "work"),
+            story_develop=None,
+        ),
+    )
+    result = runner.invoke(develop_app, ["review", "#142", "--ac", "x"])
+    assert result.exit_code != 0
+    assert "[story_develop.default_models]" in result.output
+    assert "config" not in stubs  # failed before review_change ran
+
+
+def test_model_policy_never_rediscovers_ambient_config(
+    stubs: dict, monkeypatch
+) -> None:
+    # #305 review (High): --config must be authoritative — the policy draws
+    # from the command's loaded host config, never a second ambient discovery.
+    from lithos_loom.plugins.story_develop import daemon_io
+
+    def boom() -> tuple[dict, tuple]:
+        raise AssertionError("ambient load_tool_default_models must not be called")
+
+    monkeypatch.setattr(daemon_io, "load_tool_default_models", boom)
+    result = runner.invoke(develop_app, ["review", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    specs = stubs["config"].reviewers
+    assert {s.tool: s.model for s in specs} == {
+        "codex": "gpt-test",
+        "claude": "claude-test",
+    }
+
+
+def test_builtin_fallback_reviewer_gets_a_default_model(stubs: dict) -> None:
+    # The `minimal` profile resolves to an empty panel; the folded-in built-in
+    # reviewer is an agent invocation too, so the policy covers it (#304).
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--profile", "minimal"]
+    )
+    assert result.exit_code == 0, result.output
+    (spec,) = stubs["config"].reviewers
+    assert spec.model is not None
 
 
 def test_test_timeout_overrides_config(stubs: dict) -> None:

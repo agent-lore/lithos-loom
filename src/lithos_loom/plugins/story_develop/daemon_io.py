@@ -43,6 +43,7 @@ from .config import (
     parse_reviewer_entry,
 )
 from .lithos_io import AGENT_ID, TaskContext
+from .model_policy import apply_panel_default_models
 from .personas import canonical_personas
 from .profiles import DEFAULT_PROFILE_NAME, get_profile, resolve_profile
 from .settings_resolver import resolve_scalar_settings
@@ -393,9 +394,12 @@ def load_tool_default_models() -> tuple[dict[str, str], tuple[str, ...]]:
     Re-reads the same loom config the daemon runs under — the plugin subprocess
     inherits the daemon's env + CWD, so :func:`~lithos_loom.config.find_config_path`
     resolves the identical file. Never raises: an unreadable / missing config
-    degrades to an empty mapping with a friction breadcrumb so the run proceeds
-    on agent defaults. A config that simply has no ``[story_develop]`` section
-    is the normal case and yields no friction.
+    degrades to an empty mapping with a friction breadcrumb — under the #304
+    explicit-model policy the run then fails closed at model validation (with
+    the friction explaining why the defaults were empty) rather than silently
+    proceeding on agent-CLI defaults. A config that simply has no
+    ``[story_develop]`` section yields no friction; if it also pins no models
+    anywhere else, the same fail-closed validation reports what is missing.
     """
     from ...config import load_config
 
@@ -404,7 +408,8 @@ def load_tool_default_models() -> tuple[dict[str, str], tuple[str, ...]]:
     except Exception as exc:
         return {}, (
             f"cannot load loom config for per-tool default models ({exc}); "
-            "using agent defaults",
+            "model resolution will fail closed unless every agent is pinned "
+            "elsewhere (#304)",
         )
     if cfg.story_develop is None:
         return {}, ()
@@ -439,24 +444,17 @@ def apply_tool_default_models(
     applied AFTER project metadata, per-task overrides, and the route-level
     ``--coder-model`` / ``--reviewer-model`` fallbacks, and keyed by each
     agent's RESOLVED tool — so a heterogeneous panel (#94) has the coder and
-    every reviewer pick up the default for *their* own tool, and a tool with no
-    configured default leaves that agent on its CLI default. A no-op when
-    *default_models* is empty.
+    every reviewer pick up the default for *their* own tool. A tool with no
+    configured default leaves that agent's model ``None`` — which the #304
+    fail-closed validation rejects downstream. A no-op when *default_models*
+    is empty.
     """
     if not default_models:
         return settings
     coder_model = settings.coder_model
     if coder_model is None:
         coder_model = default_models.get(settings.coder)
-    reviewers = tuple(
-        replace(
-            spec,
-            model=(
-                spec.model if spec.model is not None else default_models.get(spec.tool)
-            ),
-        )
-        for spec in settings.reviewers
-    )
+    reviewers = apply_panel_default_models(settings.reviewers, default_models)
     return replace(settings, coder_model=coder_model, reviewers=reviewers)
 
 

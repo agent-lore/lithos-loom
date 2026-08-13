@@ -10,8 +10,11 @@
 #   fallback_chain  alternate tools tried when this one is usage-limited (e.g.
 #                   ["codex"] to switch engines when claude is rate-limited)
 #   model           model alias (opus/sonnet/haiku/fable) or a full id; omit
-#                   to inherit the agent default. For codex this is the `-m`
-#                   model (codex depth is model-driven)
+#                   to draw from [story_develop.default_models] for the
+#                   reviewer's tool (#304 — an agent with no model from any
+#                   layer fails the run closed; there is no silent agent-CLI
+#                   default). For codex this is the `-m` model (codex depth
+#                   is model-driven)
 #   effort          reasoning level: low | medium | high | xhigh | max; omit
 #                   to inherit the agent default. NOT a token budget — these
 #                   are Claude's --effort levels (the canonical set). Ignored

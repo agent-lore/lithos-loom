@@ -174,6 +174,7 @@ def live_review(
     *,
     reviewers: tuple[ReviewerSpec, ...] | None = None,
     profile: str | None = None,
+    default_models: dict[str, str] | None = None,
 ) -> dict:
     """Run review-only mode against *head_sha* and return its report JSON.
 
@@ -198,6 +199,9 @@ def live_review(
             acceptance_criteria=case.acceptance_criteria,
             review_profile=profile or case.profile,
             reviewers=reviewers,
+            # #305: the switch-time model source should a reviewer's engine
+            # ever fall back mid-run (canonical personas carry no chains today)
+            default_models=default_models or {},
         )
         change = ResolvedChange(
             base_sha=_base_for(case, head_sha),

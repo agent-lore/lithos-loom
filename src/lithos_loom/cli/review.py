@@ -13,6 +13,7 @@ function the review-correctness eval harness (#183) drives.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import typer
@@ -28,6 +29,7 @@ from lithos_loom.plugins.story_develop.config import (
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.daemon_io import profile_panel
+from lithos_loom.plugins.story_develop.model_policy import resolve_config_models
 from lithos_loom.plugins.story_develop.personas import canonical_personas
 from lithos_loom.plugins.story_develop.profiles import (
     UnknownProfileError,
@@ -163,6 +165,11 @@ def review_command(
         check_states=check_states,
         parity_command=parity_command,
     )
+    develop_config = apply_model_policy(
+        develop_config,
+        where="develop review",
+        default_models=host_default_models(host),
+    )
 
     report = review_change(develop_config, resolved, keep_worktree=keep_worktree)
 
@@ -172,6 +179,43 @@ def review_command(
         json_out.write_text(json.dumps(report.to_json(), indent=2), encoding="utf-8")
 
     raise typer.Exit(1 if report.blocking else 0)
+
+
+def host_default_models(host: object) -> dict[str, str]:
+    """The ``[story_develop.default_models]`` mapping of an already-loaded config.
+
+    #305 review (High): the policy must draw from the SAME config the command
+    loaded (honouring ``--config``) — re-discovering ambient config inside the
+    policy would resolve models from a different file than every other host
+    setting.
+    """
+    section = getattr(host, "story_develop", None)
+    if section is None:
+        return {}
+    return dict(section.default_models)
+
+
+def apply_model_policy(
+    config: DevelopConfig,
+    *,
+    where: str,
+    default_models: Mapping[str, str],
+    include_coder: bool = False,
+) -> DevelopConfig:
+    """Make every agent's model explicit, or fail closed as a usage error (#304).
+
+    Thin typer adapter over :func:`resolve_config_models` — *default_models*
+    is the loaded host config's mapping (see :func:`host_default_models`, which
+    is how ``--config`` stays authoritative). *include_coder* extends the
+    policy to ``coder_model`` on surfaces that run one (``develop converge``
+    runs a coder for its fix rounds; ``develop review`` does not).
+    """
+    try:
+        return resolve_config_models(
+            config, default_models, where=where, include_coder=include_coder
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def resolve_acceptance_criteria(

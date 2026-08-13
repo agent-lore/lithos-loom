@@ -870,3 +870,67 @@ def test_usage_limited_turn_is_not_salvaged(tmp_path: Path) -> None:
 
     assert result.interrupted is True
     assert result.round_reviews[0].status == "invalid"
+
+
+def test_tool_switch_uses_the_fallback_tools_default_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#305 review (High): a reviewer's `model` belongs to its PRIMARY tool.
+    After a usage-limit switch the replacement engine must draw from the
+    per-tool defaults — a claude model string must never reach `codex -m`."""
+    from dataclasses import replace as dc_replace
+
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = dc_replace(
+        _config(tmp_path), default_models={"codex": "codex-default-model"}
+    )
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    rstate = _ReviewerState(
+        ReviewerSpec(
+            name="security",
+            tool="claude",
+            model="claude-explicit",
+            fallback_chain=("codex",),
+        ),
+        "cid-security",
+        [],
+        tmp_path,
+    )
+    monkeypatch.setattr(panel_mod.containers, "stop_container", lambda c: None)
+    monkeypatch.setattr(panel_mod.containers, "start_container", lambda cmd: "cid2")
+    monkeypatch.setattr(panel_mod, "build_run_cmd", lambda *a, **k: ("cid2", ["cmd"]))
+
+    turns: list[tuple[str, str | None]] = []
+
+    def run_turn(
+        *, container, prompt, session_id, resume, timeout, engine, model=None, **kw
+    ):
+        turns.append((engine.name, model))
+        if len(turns) == 1:
+            return _limited_turn()
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "security")
+        ).write_text("## Status: LGTM\n## Summary\nok\n## Findings\n(none)\n")
+        return _ok_turn(session_id)
+
+    result = panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+    )
+
+    assert turns == [
+        ("claude", "claude-explicit"),  # primary tool: the explicit pin
+        ("codex", "codex-default-model"),  # fallback tool: ITS default, not the pin
+    ]
+    assert result.round_reviews[0].status == "LGTM"

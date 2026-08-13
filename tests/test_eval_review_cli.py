@@ -68,6 +68,17 @@ def cases_dir(tmp_path: Path) -> Path:
     return d
 
 
+@pytest.fixture(autouse=True)
+def _default_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #304: the CLI fails closed when an agent resolves to no explicit model,
+    # so the tests provide per-tool defaults; fail-closed tests override this.
+    monkeypatch.setattr(
+        eval_cli,
+        "load_tool_default_models",
+        lambda: ({"codex": "gpt-test", "claude": "claude-test"}, ()),
+    )
+
+
 def _stub_run_case(monkeypatch: pytest.MonkeyPatch, *, catch_rate=1.0, passed=True):
     seen = []
 
@@ -466,7 +477,9 @@ def test_cli_flags_reach_live_review(
     # could run a different arm than the one recorded.
     captured: dict = {}
 
-    def fake_live_review(case, head_sha, *, reviewers=None, profile=None):
+    def fake_live_review(
+        case, head_sha, *, reviewers=None, profile=None, default_models=None
+    ):
         captured["reviewers"] = reviewers
         captured["profile"] = profile
         return {}
@@ -528,16 +541,59 @@ def test_override_passes_a_review_fn(
     assert seen[0]["kwargs"]["review_fn"] is not None
 
 
-def test_no_override_flags_leave_review_fn_default(
+def test_plain_run_passes_resolved_panel_with_default_models(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
+    # #304: even without override flags the resolved panel (default models
+    # applied) must reach the harness — never the personas' model=None specs.
     seen = _stub_run_case(monkeypatch)
     result = runner.invoke(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--case", "other-case"],
     )
     assert result.exit_code == 0, result.output
-    assert seen[0]["kwargs"]["review_fn"] is None
+    assert seen[0]["kwargs"]["review_fn"] is not None
+
+
+def test_missing_default_model_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # #304 fail-closed: no default for the persona's tool and no override —
+    # reject pre-paid with the agent named and the config remedy.
+    monkeypatch.setattr(eval_cli, "load_tool_default_models", lambda: ({}, ()))
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "other-case"],
+    )
+    assert result.exit_code == 2
+    assert "correctness" in result.output
+    assert "[story_develop.default_models]" in result.output
+    assert seen == []
+
+
+def test_override_satisfies_the_model_policy_without_defaults(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # an explicit --reviewer-override model is the other way to be explicit
+    # (--no-judge: with empty defaults the judge would otherwise need one too)
+    monkeypatch.setattr(eval_cli, "load_tool_default_models", lambda: ({}, ()))
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--no-judge",
+            "--reviewer-override",
+            "correctness.model=some-model",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
 
 
 def test_summary_json_carries_effective_panel(
@@ -562,7 +618,7 @@ def test_summary_json_carries_effective_panel(
     (reviewer,) = data["panel"]
     assert reviewer["name"] == "correctness"
     assert reviewer["tool"] == "codex"  # the canonical persona's engine
-    assert reviewer["model"] is None
+    assert reviewer["model"] == "gpt-test"  # #304: default models applied
 
 
 def test_summary_json_carries_overridden_panel(
@@ -591,8 +647,8 @@ def test_summary_json_carries_overridden_panel(
     assert data["profile"] == "thorough"
     by_name = {r["name"]: r for r in data["panel"]}
     assert len(by_name) == 5  # thorough's full persona panel replaced the case's
-    assert by_name["correctness"]["model"] == "some-model"
-    assert by_name["security"]["model"] is None
+    assert by_name["correctness"]["model"] == "some-model"  # override wins
+    assert by_name["security"]["model"] == "claude-test"  # default fills the rest
 
 
 # ── tier split (RH-6): floor = regression gate, frontier = headline ──
@@ -742,3 +798,131 @@ def test_summary_json_carries_tier(
     )
     data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
     assert data["tier"] == "floor"
+
+
+# ── judge model policy (#305 review finding 4) ─────────────────────────
+
+
+def test_judge_gets_an_explicit_model(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # The judge decides whether a finding counts — an unrecorded drifting
+    # judge model makes eval scores incomparable even with a pinned panel.
+    _stub_run_case(monkeypatch)
+    seen: dict = {}
+
+    def fake_judge(**kwargs):
+        seen.update(kwargs)
+        return "JUDGE"
+
+    monkeypatch.setattr(eval_cli, "build_agent_judge", fake_judge)
+    result = runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["tool"] == "claude"
+    assert seen["model"] == "claude-test"
+
+
+def test_judge_without_a_default_model_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    monkeypatch.setattr(
+        eval_cli, "load_tool_default_models", lambda: ({"codex": "gpt-test"}, ())
+    )
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert result.exit_code == 2
+    assert "judge" in result.output
+    assert seen == []
+
+
+def test_no_judge_needs_no_judge_model(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    monkeypatch.setattr(
+        eval_cli, "load_tool_default_models", lambda: ({"codex": "gpt-test"}, ())
+    )
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "other-case", "--no-judge"],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
+
+
+def test_summary_json_records_the_judge(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_run_case(monkeypatch)
+    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    data = json.loads((out / "other-case" / "summary.json").read_text())
+    assert data["judge"] == {"tool": "claude", "model": "claude-test"}
+
+
+def test_summary_json_judge_null_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--no-judge",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    data = json.loads((out / "other-case" / "summary.json").read_text())
+    assert data["judge"] is None
+
+
+def test_unsupported_judge_tool_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # #305 review round 2: a configured default for an unknown tool key is
+    # accepted (forward compat), so the model check alone would let an
+    # unsupported --judge-tool through — and it would only crash when the
+    # first finding reached the judge, AFTER paid reviewer runs.
+    monkeypatch.setattr(
+        eval_cli,
+        "load_tool_default_models",
+        lambda: ({"opencode": "some-model", "codex": "gpt-test"}, ()),
+    )
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--judge-tool",
+            "opencode",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "opencode" in result.output
+    assert seen == []

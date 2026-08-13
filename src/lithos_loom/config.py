@@ -293,17 +293,20 @@ class StoryDevelopConfig:
 
     ``default_models`` maps an agent *tool* (``"claude"`` / ``"codex"``) to the
     model used by every story-develop agent running that tool when nothing more
-    specific pins one. It is the lowest-priority layer of the model-resolution
-    precedence (below project-context metadata, per-task overrides, and the
-    route-level ``--coder-model`` / ``--reviewer-model`` fallbacks), just above
-    the agent CLI's own default — see SPECIFICATION.md §5.5.
+    specific pins one. It is the lowest-priority EXPLICIT layer of the
+    model-resolution precedence (below project-context metadata, per-task
+    overrides, and the route-level ``--coder-model`` / ``--reviewer-model``
+    fallbacks); an agent with no model from any layer fails the run closed
+    (#304 — there is no silent agent-CLI-default tail) — see
+    SPECIFICATION.md §5.5.
 
     Per-*tool* (not per-role) because a heterogeneous panel (#94) mixes claude
     and codex agents in one run, so a single tool-blind default can't serve
     both: a codex reviewer and a claude coder each pick up the default for
-    their own tool. Only consulted by daemon-mode runs (the route-runner path
-    this config file drives); standalone CLI runs pin models with their own
-    flags.
+    their own tool. Consumed by EVERY agent-running surface — daemon-mode
+    runs, the standalone plugin CLI, ``develop review`` / ``converge``, and
+    the eval harness (panel + judge) — as the layer below any per-agent pin;
+    an agent whose model resolves nowhere fails its run closed (#304).
 
     ``operator_github_login`` (#113): when set, a delivered PR requests this
     GitHub user as a reviewer so native notifications fire. ``None`` → no human
@@ -851,8 +854,9 @@ _UNKNOWN_PROFILE_POLICIES: frozenset[str] = frozenset({"halt", "strongest"})
 def _parse_story_develop(data: Any, config_path: Path) -> StoryDevelopConfig | None:
     """Parse the optional ``[story_develop]`` section (host-wide plugin defaults).
 
-    Absence → ``None`` (no host-wide defaults; agents fall through to their own
-    CLI default model). Model strings are NOT validated against a catalogue —
+    Absence → ``None`` (no host-wide defaults — under the #304 explicit-model
+    policy, any agent not pinned by a higher-precedence layer then fails its
+    run closed). Model strings are NOT validated against a catalogue —
     model names drift and the plugin deliberately never hard-pins one — so this
     enforces shape only: a table of tool-name → non-empty model string. Unknown
     tool keys are accepted (forward-compatible with tools beyond claude/codex);
