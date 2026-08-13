@@ -51,6 +51,7 @@ from .handoff import (
     render_findings,
     render_prompt,
 )
+from .model_policy import active_model
 from .rounds import Services
 from .turns import TurnResult
 
@@ -432,7 +433,9 @@ def _run_reviewer_with_reaction(
         prompt=prompt,
         timeout=timeout,
         engine=rstate.engine_now,
-        model=rstate.spec.model,
+        # #305 review (High): the model must match the ACTIVE engine — after a
+        # usage-limit tool switch, spec.model is another provider's id.
+        model=active_model(rstate.spec, rstate.engine_now.name, config.default_models),
         effort=rstate.spec.effort,
         validate=(None if skip_lifecycle_validation else rstate.ledger.check),
         # PR #291 re-review (High): the override MUST reach the initial turn
@@ -515,7 +518,9 @@ def _run_reviewer_with_reaction(
                 prompt=reseed_prompt,
                 timeout=timeout,
                 engine=rstate.engine_now,
-                model=rstate.spec.model,
+                model=active_model(
+                    rstate.spec, rstate.engine_now.name, config.default_models
+                ),
                 effort=rstate.spec.effort,
                 validate=(None if skip_lifecycle_validation else rstate.ledger.check),
                 review_file=review_file,

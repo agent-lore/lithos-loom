@@ -95,7 +95,7 @@ from .lithos_io import (
     fetch_task_context,
     post_results,
 )
-from .model_policy import require_agent_models
+from .model_policy import resolve_config_models
 from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver_guarded
 from .profiles import resolve_profile
 
@@ -593,13 +593,12 @@ def _daemon_main(args: argparse.Namespace) -> int:
     # #304 explicit-model policy: an agent still on model=None after every
     # layer would run the sandbox image CLI's invisible builtin default —
     # halt before any agent runs, same do-not-retry posture as the profile
-    # halt above.
+    # halt above. The resolver also stores the mapping on the config for the
+    # panel's usage-limit switch-time model resolution (#305 finding 1) and
+    # validates every reachable fallback-chain tool has a default.
     try:
-        require_agent_models(
-            panel=config.effective_reviewers,
-            coder=config.coder,
-            coder_model=config.coder_model,
-            where="story-develop",
+        config = resolve_config_models(
+            config, default_models, where="story-develop", include_coder=True
         )
     except ValueError as exc:
         return _fail_payload("config", str(exc), EXIT_BAD_INPUT)
@@ -949,6 +948,19 @@ def main(argv: list[str] | None = None) -> int:
         base_branch=args.branch,
         notify_github_login=notify_github_login,
     )
+    # #304: the standalone plugin is an agent-invocation surface too — resolve
+    # per-tool defaults (ambient loom config; standalone has no --config) and
+    # fail closed before any container starts.
+    default_models, dm_frictions = load_tool_default_models()
+    for friction in dm_frictions:
+        print(f"[Friction] {friction}", file=sys.stderr)
+    try:
+        config = resolve_config_models(
+            config, default_models, where="story-develop", include_coder=True
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     result = develop(
         config,

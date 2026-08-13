@@ -24,7 +24,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | M | 2 | 14 |
+| `lithos_loom.plugins.story_develop.config` | L | 2 | 14 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
@@ -38,7 +38,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | S | 2 | 3 |
-| `lithos_loom.plugins.story_develop.model_policy` | XS | 0 | 3 |
+| `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 4 | 20 |
@@ -221,8 +221,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.model_policy`
 - def `apply_panel_default_models` — Fill each reviewer's model from the per-tool default where still unset.
+- def `active_model` — The model for *spec* running on the currently-active *tool*.
 - def `missing_agent_models` — The agents that would run WITHOUT an explicit model, as operator phrases.
+- def `missing_fallback_models` — Reachable fallback tools with no per-tool default model, as phrases.
 - def `require_agent_models` — Fail closed when any agent lacks an explicit model (#304).
+- def `resolve_config_models` — Resolve + validate every agent model on a built config (#304).
 
 ### `lithos_loom.plugins.story_develop.panel`
 - class `ReviewOutcome` — The result of a single reviewer's pass in one round.

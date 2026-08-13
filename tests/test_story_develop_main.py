@@ -9,7 +9,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lithos_loom.plugins.story_develop.__main__ import main
+
+
+@pytest.fixture(autouse=True)
+def _default_models_for_standalone(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #304: standalone main() fails closed when an agent resolves to no
+    # explicit model; provide per-tool defaults so wiring tests pass — the
+    # policy tests re-patch this.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
 
 
 def test_main_rejects_empty_description(tmp_git_repo: Path, capsys) -> None:
@@ -1206,3 +1222,63 @@ def test_main_open_pr_delivery_failure_skips_completion_and_exits_nonzero(
     marker = json.loads((seen["run_dir"] / "delivery.json").read_text(encoding="utf-8"))
     assert marker["failed"] is True
     assert "gh pr create failed" in marker["reason"]
+
+
+def test_standalone_missing_agent_model_fails_closed(
+    tmp_git_repo: Path, monkeypatch, capsys
+) -> None:
+    """#305 review (Medium): the documented standalone plugin is an agent
+    invocation surface too — no model from any layer must fail BEFORE
+    develop() runs, not silently use the sandbox CLI's builtin."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+
+    def never(config, **kw):  # pragma: no cover - the point is it never runs
+        raise AssertionError("develop() must not run without explicit models")
+
+    monkeypatch.setattr(main_mod, "develop", never)
+    rc = main(["--repo", str(tmp_git_repo), "--description", "do a thing"])
+    assert rc == 2
+    assert "[story_develop.default_models]" in capsys.readouterr().err
+
+
+def test_standalone_applies_default_models(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+
+    captured: dict = {}
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.0,
+            review_cost_usd=0.0,
+            message="m",
+        )
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    rc = main(["--repo", str(tmp_git_repo), "--description", "do a thing"])
+    assert rc == 0
+    cfg = captured["config"]
+    assert cfg.coder_model == "test-claude-model"  # coder default applied
+    # the standard profile panel (correctness=codex, security=claude): each
+    # persona picks up ITS tool's default
+    assert {s.tool: s.model for s in cfg.effective_reviewers} == {
+        "codex": "test-codex-model",
+        "claude": "test-claude-model",
+    }
+    assert cfg.default_models == {
+        "claude": "test-claude-model",
+        "codex": "test-codex-model",
+    }

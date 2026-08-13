@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -79,9 +79,11 @@ class ReviewerSpec:
     reviewer's tool is usage-limited (T5).
 
     ``model`` / ``effort`` are per-reviewer (#93): a strong reviewer can run a
-    more capable model + higher reasoning effort than a lenient one. ``None``
-    means "inherit the agent's default" — see :class:`DevelopConfig` for why we
-    do not hard-pin a model string. ``effort`` is one of :data:`VALID_EFFORTS`.
+    more capable model + higher reasoning effort than a lenient one. A ``None``
+    model means "resolve from ``[story_develop.default_models]`` for my tool" —
+    an agent with no model from ANY layer fails the run closed (#304; the
+    registry still never hard-pins a staleable id in code). ``None`` effort
+    inherits the agent default. ``effort`` is one of :data:`VALID_EFFORTS`.
     """
 
     name: str
@@ -533,6 +535,12 @@ class DevelopConfig:
     # when other tools land (#94) — see VALID_EFFORTS for why it's not universal.
     coder_model: str | None = None
     coder_effort: str | None = None
+    # #304/#305: the per-tool default models (`[story_develop.default_models]`)
+    # the run was resolved under. Entry points use them to FILL unset agent
+    # models before validation; the panel needs them at runtime too — a
+    # usage-limit fallback switches engines mid-run, and the replacement
+    # engine's model comes from here (spec.model belongs to the primary tool).
+    default_models: Mapping[str, str] = field(default_factory=dict)
     image: str = DEFAULT_IMAGE
     # #283 slice 1: repo-relative dir whose contents each gate check's isolated
     # tree export contributes to the run handoff (``develop_artifacts_path``,

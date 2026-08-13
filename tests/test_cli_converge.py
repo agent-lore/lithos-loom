@@ -16,7 +16,6 @@ import pytest
 from typer.testing import CliRunner
 
 from lithos_loom.cli import converge as converge_cli
-from lithos_loom.cli import review as review_cli
 from lithos_loom.cli.develop import develop_app
 from lithos_loom.plugins.story_develop.converge import ConvergeResult
 from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
@@ -35,19 +34,17 @@ runner = CliRunner()
 def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     captured: dict = {}
 
+    # #304/#305: default models come from converge's own loaded host config
+    # (honouring --config), applied via review.apply_model_policy.
     monkeypatch.setattr(
         converge_cli,
         "load_config",
         lambda config=None: SimpleNamespace(
-            orchestrator=SimpleNamespace(work_dir=tmp_path / "work")
+            orchestrator=SimpleNamespace(work_dir=tmp_path / "work"),
+            story_develop=SimpleNamespace(
+                default_models={"codex": "gpt-test", "claude": "claude-test"}
+            ),
         ),
-    )
-    # #304: converge fails closed when the coder or a reviewer resolves to no
-    # explicit model (policy applied via review.apply_model_policy).
-    monkeypatch.setattr(
-        review_cli,
-        "load_tool_default_models",
-        lambda: ({"codex": "gpt-test", "claude": "claude-test"}, ()),
     )
 
     def fake_resolve(repo, spec, *, base_branch="main", base_override=None):
@@ -81,17 +78,29 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
 
 
 def test_coder_and_panel_get_default_models(stubs: dict) -> None:
-    # #304: converge runs a coder too — both it and every reviewer must carry
-    # an explicit model after the policy pass.
+    # #304: converge runs a coder too — it and every reviewer must carry the
+    # EXACT per-tool default from the loaded host config.
     result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
     assert result.exit_code == 0, result.output
     config = stubs["config"]
-    assert config.coder_model is not None
-    assert all(s.model is not None for s in config.reviewers)
+    assert config.coder == "claude" and config.coder_model == "claude-test"
+    assert {s.tool: s.model for s in config.reviewers} == {
+        "codex": "gpt-test",
+        "claude": "claude-test",
+    }
 
 
-def test_missing_default_model_fails_closed(stubs: dict, monkeypatch) -> None:
-    monkeypatch.setattr(review_cli, "load_tool_default_models", lambda: ({}, ()))
+def test_missing_default_model_fails_closed(
+    stubs: dict, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        converge_cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(work_dir=tmp_path / "work"),
+            story_develop=None,
+        ),
+    )
     result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
     assert result.exit_code == 2  # UsageError — see the fail-closed note above
     assert "config" not in stubs  # failed before converge_pr ran
