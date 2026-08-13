@@ -394,15 +394,18 @@ tags = ["trigger:story-develop"]
 #     > per-task metadata.develop_model (coder only)
 #     > route-level --coder-model / --reviewer-model fallback
 #     > [story_develop].default_models[<tool>]   ← this section
-#     > the agent CLI's own default model
+#     > FAIL-CLOSED ERROR (#304 — no silent agent-CLI default)
 #
 # Keyed by TOOL (claude / codex), not by role, so a heterogeneous panel
 # (#94) — say a claude coder with a codex reviewer — picks the right
-# default for each agent. Only consulted by daemon-mode (route-runner)
-# runs; standalone CLI runs pin models with their own flags. Model names
-# are NOT validated against a catalogue (they drift), so a typo silently
-# falls through to the agent default — set this once and verify a run.
-# Uncomment to set host-wide defaults.
+# default for each agent. Applied by daemon-mode (route-runner) runs,
+# `develop review` / `develop converge`, and `eval review` alike, and
+# effectively REQUIRED for any tool an agent runs on: an agent still on
+# model=None after every layer fails the run closed (#304) instead of
+# silently using the sandbox image CLI's builtin default — that value is
+# recorded nowhere and drifts with image rebuilds (#303). Model names
+# are NOT validated against a catalogue (they drift) — set this once and
+# verify a run.
 #
 # operator_github_login (#113): GitHub user to notify when a story-develop PR
 # is delivered — requested as a reviewer, or *assigned* to the PR when they

@@ -38,6 +38,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | S | 2 | 3 |
+| `lithos_loom.plugins.story_develop.model_policy` | XS | 0 | 3 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 4 | 20 |
@@ -217,6 +218,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `fetch_task_context` — Fetch the task and distil the run context. Raises :class:`LithosIOError`.
 - def `post_results` — Post the run outcome back to the task. Returns True when fully posted.
 - def `complete_task` — Mark the task completed (``--complete-on-approval`` opt-in only).
+
+### `lithos_loom.plugins.story_develop.model_policy`
+- def `apply_panel_default_models` — Fill each reviewer's model from the per-tool default where still unset.
+- def `missing_agent_models` — The agents that would run WITHOUT an explicit model, as operator phrases.
+- def `require_agent_models` — Fail closed when any agent lacks an explicit model (#304).
 
 ### `lithos_loom.plugins.story_develop.panel`
 - class `ReviewOutcome` — The result of a single reviewer's pass in one round.

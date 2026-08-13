@@ -23,6 +23,7 @@ from pathlib import Path
 import typer
 
 from lithos_loom.cli.review import (
+    apply_model_policy,
     resolve_acceptance_criteria,
     resolve_check_commands,
     resolve_check_states,
@@ -218,6 +219,9 @@ def converge_command(
         check_states=check_states,
         parity_command=parity_command,
         **overrides,
+    )
+    develop_config = apply_model_policy(
+        develop_config, where="develop converge", include_coder=True
     )
 
     result = converge_pr(develop_config, resolved, no_push=no_push)

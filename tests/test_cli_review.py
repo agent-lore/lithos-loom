@@ -33,6 +33,13 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
             orchestrator=SimpleNamespace(work_dir=tmp_path / "work")
         ),
     )
+    # #304: the command fails closed when a reviewer resolves to no explicit
+    # model; the tests provide per-tool defaults (fail-closed tests override).
+    monkeypatch.setattr(
+        review_cli,
+        "load_tool_default_models",
+        lambda: ({"codex": "gpt-test", "claude": "claude-test"}, ()),
+    )
 
     def fake_resolve(repo, spec, *, base_branch="main", base_override=None):
         captured["resolve"] = {"spec": spec, "base_override": base_override}
@@ -118,6 +125,28 @@ def test_reviewer_override_and_profile(stubs: dict) -> None:
     assert [r.name for r in specs] == ["correctness"]
     assert specs[0].tool == "codex"
     assert specs[0].system_prompt  # the correctness focus brief is baked in
+    assert specs[0].model == "gpt-test"  # #304: default model applied
+
+
+def test_missing_default_model_fails_closed(stubs: dict, monkeypatch) -> None:
+    # #304: a reviewer with no explicit model must not reach a container —
+    # the sandbox CLI's builtin default is invisible and drifts with rebuilds.
+    monkeypatch.setattr(review_cli, "load_tool_default_models", lambda: ({}, ()))
+    result = runner.invoke(develop_app, ["review", "#142", "--ac", "x"])
+    assert result.exit_code != 0
+    assert "[story_develop.default_models]" in result.output
+    assert "config" not in stubs  # failed before review_change ran
+
+
+def test_builtin_fallback_reviewer_gets_a_default_model(stubs: dict) -> None:
+    # The `minimal` profile resolves to an empty panel; the folded-in built-in
+    # reviewer is an agent invocation too, so the policy covers it (#304).
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--profile", "minimal"]
+    )
+    assert result.exit_code == 0, result.output
+    (spec,) = stubs["config"].reviewers
+    assert spec.model is not None
 
 
 def test_test_timeout_overrides_config(stubs: dict) -> None:

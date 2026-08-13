@@ -68,6 +68,17 @@ def cases_dir(tmp_path: Path) -> Path:
     return d
 
 
+@pytest.fixture(autouse=True)
+def _default_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #304: the CLI fails closed when an agent resolves to no explicit model,
+    # so the tests provide per-tool defaults; fail-closed tests override this.
+    monkeypatch.setattr(
+        eval_cli,
+        "load_tool_default_models",
+        lambda: ({"codex": "gpt-test", "claude": "claude-test"}, ()),
+    )
+
+
 def _stub_run_case(monkeypatch: pytest.MonkeyPatch, *, catch_rate=1.0, passed=True):
     seen = []
 
@@ -528,16 +539,57 @@ def test_override_passes_a_review_fn(
     assert seen[0]["kwargs"]["review_fn"] is not None
 
 
-def test_no_override_flags_leave_review_fn_default(
+def test_plain_run_passes_resolved_panel_with_default_models(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
+    # #304: even without override flags the resolved panel (default models
+    # applied) must reach the harness — never the personas' model=None specs.
     seen = _stub_run_case(monkeypatch)
     result = runner.invoke(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--case", "other-case"],
     )
     assert result.exit_code == 0, result.output
-    assert seen[0]["kwargs"]["review_fn"] is None
+    assert seen[0]["kwargs"]["review_fn"] is not None
+
+
+def test_missing_default_model_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # #304 fail-closed: no default for the persona's tool and no override —
+    # reject pre-paid with the agent named and the config remedy.
+    monkeypatch.setattr(eval_cli, "load_tool_default_models", lambda: ({}, ()))
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases_dir), "--case", "other-case"],
+    )
+    assert result.exit_code == 2
+    assert "correctness" in result.output
+    assert "[story_develop.default_models]" in result.output
+    assert seen == []
+
+
+def test_override_satisfies_the_model_policy_without_defaults(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # an explicit --reviewer-override model is the other way to be explicit
+    monkeypatch.setattr(eval_cli, "load_tool_default_models", lambda: ({}, ()))
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--reviewer-override",
+            "correctness.model=some-model",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
 
 
 def test_summary_json_carries_effective_panel(
@@ -562,7 +614,7 @@ def test_summary_json_carries_effective_panel(
     (reviewer,) = data["panel"]
     assert reviewer["name"] == "correctness"
     assert reviewer["tool"] == "codex"  # the canonical persona's engine
-    assert reviewer["model"] is None
+    assert reviewer["model"] == "gpt-test"  # #304: default models applied
 
 
 def test_summary_json_carries_overridden_panel(
@@ -591,8 +643,8 @@ def test_summary_json_carries_overridden_panel(
     assert data["profile"] == "thorough"
     by_name = {r["name"]: r for r in data["panel"]}
     assert len(by_name) == 5  # thorough's full persona panel replaced the case's
-    assert by_name["correctness"]["model"] == "some-model"
-    assert by_name["security"]["model"] is None
+    assert by_name["correctness"]["model"] == "some-model"  # override wins
+    assert by_name["security"]["model"] == "claude-test"  # default fills the rest
 
 
 # ── tier split (RH-6): floor = regression gate, frontier = headline ──

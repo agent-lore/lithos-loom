@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from lithos_loom.cli import converge as converge_cli
+from lithos_loom.cli import review as review_cli
 from lithos_loom.cli.develop import develop_app
 from lithos_loom.plugins.story_develop.converge import ConvergeResult
 from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
@@ -40,6 +41,13 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         lambda config=None: SimpleNamespace(
             orchestrator=SimpleNamespace(work_dir=tmp_path / "work")
         ),
+    )
+    # #304: converge fails closed when the coder or a reviewer resolves to no
+    # explicit model (policy applied via review.apply_model_policy).
+    monkeypatch.setattr(
+        review_cli,
+        "load_tool_default_models",
+        lambda: ({"codex": "gpt-test", "claude": "claude-test"}, ()),
     )
 
     def fake_resolve(repo, spec, *, base_branch="main", base_override=None):
@@ -70,6 +78,23 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
 
     monkeypatch.setattr(converge_cli, "converge_pr", fake_converge_pr)
     return captured
+
+
+def test_coder_and_panel_get_default_models(stubs: dict) -> None:
+    # #304: converge runs a coder too — both it and every reviewer must carry
+    # an explicit model after the policy pass.
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    config = stubs["config"]
+    assert config.coder_model is not None
+    assert all(s.model is not None for s in config.reviewers)
+
+
+def test_missing_default_model_fails_closed(stubs: dict, monkeypatch) -> None:
+    monkeypatch.setattr(review_cli, "load_tool_default_models", lambda: ({}, ()))
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 2  # UsageError — see the fail-closed note above
+    assert "config" not in stubs  # failed before converge_pr ran
 
 
 def test_resolves_pr_and_passes_ac(stubs: dict) -> None:

@@ -43,6 +43,7 @@ from .config import (
     parse_reviewer_entry,
 )
 from .lithos_io import AGENT_ID, TaskContext
+from .model_policy import apply_panel_default_models
 from .personas import canonical_personas
 from .profiles import DEFAULT_PROFILE_NAME, get_profile, resolve_profile
 from .settings_resolver import resolve_scalar_settings
@@ -448,15 +449,7 @@ def apply_tool_default_models(
     coder_model = settings.coder_model
     if coder_model is None:
         coder_model = default_models.get(settings.coder)
-    reviewers = tuple(
-        replace(
-            spec,
-            model=(
-                spec.model if spec.model is not None else default_models.get(spec.tool)
-            ),
-        )
-        for spec in settings.reviewers
-    )
+    reviewers = apply_panel_default_models(settings.reviewers, default_models)
     return replace(settings, coder_model=coder_model, reviewers=reviewers)
 
 

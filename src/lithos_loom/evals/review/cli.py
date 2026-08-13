@@ -20,6 +20,11 @@ from pathlib import Path
 import typer
 
 from ...plugins.story_develop.config import ReviewerSpec
+from ...plugins.story_develop.daemon_io import load_tool_default_models
+from ...plugins.story_develop.model_policy import (
+    apply_panel_default_models,
+    require_agent_models,
+)
 from .case import Case, iter_artifact_files, load_case, resolve_artifacts_root
 from .harness import (
     DEFAULT_BAR,
@@ -124,7 +129,14 @@ def review(
         overrides = parse_reviewer_overrides(reviewer_override or [])
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    panel_active = bool(overrides or profile or reviewer)
+
+    # #304 explicit-model policy: the per-tool defaults from the loom TOML are
+    # the lowest-priority explicit layer; a reviewer still on model=None after
+    # them would run the sandbox image CLI's invisible builtin — rejected
+    # pre-paid like any other no-op arm.
+    default_models, dm_frictions = load_tool_default_models()
+    for friction in dm_frictions:
+        typer.echo(f"[Friction] {friction}", err=True)
 
     prepared: list[tuple[Case, str, str, tuple[ReviewerSpec, ...]]] = []
     for case_dir in case_dirs:
@@ -133,6 +145,8 @@ def review(
             eff_profile, panel = resolve_panel(
                 loaded, profile=profile, reviewers=reviewer, overrides=overrides
             )
+            panel = apply_panel_default_models(panel, default_models)
+            require_agent_models(panel=panel, where=f"case {loaded.id}")
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
         # Undeclared tier counts as frontier: a case never silently opts INTO
@@ -144,11 +158,13 @@ def review(
 
     results: list[tuple[str, CaseResult]] = []
     for loaded, tier, eff_profile, panel in prepared:
-        review_fn: ReviewFn | None = None
-        note = ""
-        if panel_active:
-            review_fn = partial(live_review, reviewers=panel, profile=eff_profile)
-            note = f" [profile={eff_profile}; panel={_panel_phrase(panel)}]"
+        # The resolved panel (default models applied) ALWAYS drives the run —
+        # letting the harness re-resolve personas would resurrect model=None
+        # specs and defeat the #304 policy.
+        review_fn: ReviewFn | None = partial(
+            live_review, reviewers=panel, profile=eff_profile
+        )
+        note = f" [profile={eff_profile}; panel={_panel_phrase(panel)}]"
         artifacts = _artifact_info(loaded)
         if artifacts is not None:
             # RH-3: the measured surface is the artifact-review pass, not the diff

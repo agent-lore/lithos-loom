@@ -262,7 +262,13 @@ def _stub_daemon(monkeypatch, tmp_path: Path) -> dict[str, Any]:
     monkeypatch.setattr(
         main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
     )
-    monkeypatch.setattr(main_mod, "load_tool_default_models", lambda: ({}, ()))
+    # #304: non-empty defaults so daemon-mode main() passes the explicit-model
+    # policy (these tests exercise idempotency, not model resolution)
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
     monkeypatch.setattr(main_mod, "post_frictions", lambda *a, **kw: None)
     monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
 

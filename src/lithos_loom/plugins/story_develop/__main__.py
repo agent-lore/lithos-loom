@@ -95,6 +95,7 @@ from .lithos_io import (
     fetch_task_context,
     post_results,
 )
+from .model_policy import require_agent_models
 from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver_guarded
 from .profiles import resolve_profile
 
@@ -588,6 +589,20 @@ def _daemon_main(args: argparse.Namespace) -> int:
             "(fail-closed). Define the profile or set unknown_profile=strongest.",
             EXIT_BAD_INPUT,
         )
+
+    # #304 explicit-model policy: an agent still on model=None after every
+    # layer would run the sandbox image CLI's invisible builtin default —
+    # halt before any agent runs, same do-not-retry posture as the profile
+    # halt above.
+    try:
+        require_agent_models(
+            panel=config.effective_reviewers,
+            coder=config.coder,
+            coder_model=config.coder_model,
+            where="story-develop",
+        )
+    except ValueError as exc:
+        return _fail_payload("config", str(exc), EXIT_BAD_INPUT)
 
     # Snapshot the task envelope into the run dir so `lithos-loom develop`
     # reports THIS run's title (and body/tags) even after the task is
