@@ -294,7 +294,19 @@ Semantics — one surface per case, deliberately:
   The seeder picks the variant matching the head under review. Both variants
   share one `artifact_provenance` (same pages, same recipe, two heads), and the
   known-good captures go through the identical root/symlink/empty-file checks.
-  Omitting either half fails closed at load. An artifact case without
+  Omitting either half fails closed at load.
+
+  The **pairing invariants** are load-enforced too, because each way of
+  breaking them yields a false-positive rate that measures the fixtures rather
+  than the review: the two heads must not be the same sha or the same patch
+  file (and, once materialised, must not resolve to the same commit or the same
+  **tree** — different patches can build byte-identical code); the two capture
+  roots must be **distinct and non-nested** (an outer root's recursive walk
+  would swallow the inner variant's files); they must hold the **same relative
+  paths** (two defect viewports against one known-good viewport compares
+  different stimuli); and at least one corresponding capture must **differ in
+  bytes** (identical captures mean the measured surface cannot tell the heads
+  apart at all). An artifact case without
   `[known_good]` stays catch-only, which is fine for a case whose defect has no
   fix to render — but a prompt or panel change that *sharpens* artifact review
   cannot be told apart from one that merely makes the reviewer trigger-happy
@@ -335,8 +347,9 @@ reproduce the committed PNGs byte for byte (it did for lens22).
 
 Runs use the normal CLI unchanged — every axis (K, judge, tier roll-ups,
 RH-7 panel overrides) composes; `summary.json` gains
-`"artifacts": {n_files, provenance}` and the running line notes
-`[artifact pass; N file(s)]`.
+`"artifacts": {n_files, provenance}` — plus `known_good_n_files` when the case
+is paired, so a report says whether it measured false positives at all — and
+the running line notes `[artifact pass; N file(s)]`.
 
 ### Cross-repo cases (escapes from customer projects)
 

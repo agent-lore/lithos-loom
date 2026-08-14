@@ -38,6 +38,16 @@ def base_sha(worktree: Path) -> str:
     return _git(worktree, "rev-parse", "HEAD")
 
 
+def tree_sha(worktree: Path, ref: str = "HEAD") -> str:
+    """Return the tree object *ref* points at — a commit's CONTENT identity.
+
+    Two commits with different SHAs can describe byte-identical code (they
+    differ only in message, author, or parent), so comparing commit SHAs is not
+    a comparison of what the commits contain.
+    """
+    return _git(worktree, "rev-parse", f"{ref}^{{tree}}")
+
+
 def commits_since(worktree: Path, base_sha: str) -> list[str]:
     """Return full 40-char SHAs added since *base_sha*, in chronological order."""
     out = _git(worktree, "rev-list", "--reverse", f"{base_sha}..HEAD")

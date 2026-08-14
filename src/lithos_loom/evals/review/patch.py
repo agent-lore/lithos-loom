@@ -48,6 +48,33 @@ def _materialise_patched_head(
         raise
 
 
+def _require_distinct_content(
+    repo: Path, case_id: str, head: str, known_good_head: str | None
+) -> None:
+    """Fail closed when a case's two heads describe the same code (#306 review).
+
+    ``load_case`` rejects the *declared* forms of this (the same sha or the same
+    patch file twice), but two different patches can still build byte-identical
+    trees — and then the commit shas differ (different commit messages) while
+    the known-good arm reviews the defect. Every "false positive" it reports
+    would really be a catch, which is the corruption the known-good pairing
+    exists to prevent, so this raises rather than reporting a number.
+    """
+    if not known_good_head:
+        return
+    if head == known_good_head:
+        raise ValueError(
+            f"case {case_id}: the defect and known-good heads resolved to the "
+            "same commit — the false-positive arm would review the defect itself"
+        )
+    if git.tree_sha(repo, head) == git.tree_sha(repo, known_good_head):
+        raise ValueError(
+            f"case {case_id}: the defect and known-good heads have identical "
+            "trees — different commits, byte-identical code, so the "
+            "false-positive arm would review the defect itself"
+        )
+
+
 def materialise_patch_heads(case: Case) -> tuple[Case, Callable[[], None]]:
     """Resolve a case's patch-defined head(s) to ephemeral-commit shas (#193).
 
@@ -95,6 +122,12 @@ def materialise_patch_heads(case: Case) -> tuple[Case, Callable[[], None]]:
             )
             built.append(wt)
             replacements["known_good_head"] = kg_sha
+        _require_distinct_content(
+            repo,
+            case.id,
+            replacements.get("head", case.head),
+            replacements.get("known_good_head", case.known_good_head),
+        )
         return replace(case, **replacements), cleanup
     except Exception:
         cleanup()

@@ -468,7 +468,9 @@ def test_paired_artifact_case_loads(tmp_path: Path) -> None:
     case_dir = tmp_path / "c"
     _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
     _write_artifact(case_dir)
-    _write_artifact(case_dir, rel="known-good-artifacts/page-800.png")
+    _write_artifact(
+        case_dir, rel="known-good-artifacts/page-800.png", data=b"\x89PNG-fixed"
+    )
 
     case = load_case(case_dir)
 
@@ -509,6 +511,87 @@ def test_known_good_artifacts_without_artifacts_dir_rejected(tmp_path: Path) -> 
     _write_case(case_dir, toml=toml)
     _write_artifact(case_dir, rel="known-good-artifacts/page-800.png")
     with pytest.raises(ValueError, match="artifacts_dir"):
+        load_case(case_dir)
+
+
+def test_rejects_identical_heads(tmp_path: Path) -> None:
+    # PR #306 review (Medium): a known-good head equal to the defect head means
+    # the FP arm reviews the SAME code — every "false positive" is really a
+    # catch. Silent, and it corrupts the metric this pairing exists to protect.
+    toml = _SEED_TOML.replace(
+        '[known_good]\nhead = "cccccccc"', '[known_good]\nhead = "bbbbbbbb"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="same head"):
+        load_case(case_dir)
+
+
+def test_rejects_the_same_patch_for_both_heads(tmp_path: Path) -> None:
+    # the patch-form of the same mistake: identical patches build identical
+    # trees, so the known-good arm reviews the defect
+    toml = _PATCH_TOML + '\n[known_good]\nhead_patch = "head.patch"\n'
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_patch(case_dir)
+    with pytest.raises(ValueError, match="same patch"):
+        load_case(case_dir)
+
+
+def test_rejects_the_same_artifacts_dir_for_both_variants(tmp_path: Path) -> None:
+    # PR #306 review (Medium): one dir for both variants recreates exactly the
+    # corruption #302 fail-closed on — the fixed head shown the buggy captures
+    toml = _PAIRED_ARTIFACT_TOML.replace(
+        'artifacts_dir = "known-good-artifacts"', 'artifacts_dir = "artifacts"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match="distinct"):
+        load_case(case_dir)
+
+
+def test_rejects_nested_capture_roots(tmp_path: Path) -> None:
+    # a nested known-good root is walked by the defect root's recursive scan,
+    # so the "defect" capture set would contain the known-good renders too
+    toml = _PAIRED_ARTIFACT_TOML.replace(
+        'artifacts_dir = "known-good-artifacts"',
+        'artifacts_dir = "artifacts/known-good"',
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    _write_artifact(
+        case_dir, rel="artifacts/known-good/page-800.png", data=b"\x89PNG-fixed"
+    )
+    with pytest.raises(ValueError, match="nested"):
+        load_case(case_dir)
+
+
+def test_rejects_mismatched_capture_file_sets(tmp_path: Path) -> None:
+    # "the same pages at the same widths" is the pairing contract: two buggy
+    # viewports against one known-good viewport compares different stimuli
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
+    _write_artifact(case_dir, rel="artifacts/page-768.png")
+    _write_artifact(case_dir, rel="artifacts/page-1440.png")
+    _write_artifact(
+        case_dir, rel="known-good-artifacts/page-768.png", data=b"\x89PNG-fixed"
+    )
+    with pytest.raises(ValueError, match="same relative"):
+        load_case(case_dir)
+
+
+def test_rejects_byte_identical_capture_sets(tmp_path: Path) -> None:
+    # identical captures cannot distinguish the heads on the measured surface,
+    # so the FP arm reviews the defect render under a "fixed" label
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
+    _write_artifact(case_dir, rel="artifacts/page-800.png", data=b"\x89PNG-same")
+    _write_artifact(
+        case_dir, rel="known-good-artifacts/page-800.png", data=b"\x89PNG-same"
+    )
+    with pytest.raises(ValueError, match="identical"):
         load_case(case_dir)
 
 

@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | S | 0 | 7 |
+| `lithos_loom.runner.git` | S | 0 | 8 |
 | `lithos_loom.runner.worktree` | S | 0 | 5 |
 
 ## Public API
@@ -31,6 +31,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.git`
 - def `base_sha` — Return the current ``HEAD`` SHA of *worktree*.
+- def `tree_sha` — Return the tree object *ref* points at — a commit's CONTENT identity.
 - def `commits_since` — Return full 40-char SHAs added since *base_sha*, in chronological order.
 - def `has_uncommitted_changes` — Return True if *worktree* has staged or unstaged changes.
 - def `commit_all` — Stage all changes (minus *exclude* pathspecs) and commit if any remain.

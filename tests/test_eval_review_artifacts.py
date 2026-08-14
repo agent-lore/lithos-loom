@@ -178,6 +178,25 @@ def test_seed_rejects_a_known_good_head_without_known_good_captures(
         seed_case_artifacts(case, _config(tmp_path), head_sha="kg")
 
 
+def test_seed_rejects_a_head_matching_both_variants(tmp_path: Path) -> None:
+    # PR #306 review (Medium): with head == known_good_head the first branch
+    # wins and BOTH variants silently get the defect captures. load_case
+    # rejects the case, but the seeder must not resolve the ambiguity by
+    # picking one — it is the writer, and the choice decides what gets measured.
+    case_dir = tmp_path / "case"
+    _write(case_dir, "artifacts/page-800.png", data=b"\x89PNG-buggy")
+    _write(case_dir, "known-good-artifacts/page-800.png", data=b"\x89PNG-fixed")
+    case = _case(
+        case_dir,
+        known_good_head="h",  # same as case.head
+        known_good_artifacts_dir="known-good-artifacts",
+    )
+    config = _config(tmp_path)
+    with pytest.raises(ValueError, match="both the defect and the known-good"):
+        seed_case_artifacts(case, config, head_sha="h")
+    assert not config.artifacts_dir.exists()
+
+
 def test_seed_rejects_an_unrecognised_head(tmp_path: Path) -> None:
     # neither head: seeding *something* would attribute a catch to the wrong
     # variant, so fail closed rather than guess

@@ -58,6 +58,15 @@ def _variant_for(case: Case, head_sha: str) -> tuple[str, str]:
 
     ``case.artifacts_dir`` is non-None by the time this is called.
     """
+    # Ambiguity first: with head == known_good_head a positional check would
+    # silently pick the defect captures for BOTH arms (#306 review). load_case
+    # rejects such a case, but the seeder is the writer — resolving the
+    # ambiguity by picking one is what decides what actually gets measured.
+    if head_sha == case.head and head_sha == case.known_good_head:
+        raise ValueError(
+            f"case {case.id}: head {head_sha!r} is both the defect and the "
+            "known-good head — refusing to choose which captures it reviews"
+        )
     if head_sha == case.head:
         return str(case.artifacts_dir), "artifacts_dir"
     if case.known_good_head is not None and head_sha == case.known_good_head:

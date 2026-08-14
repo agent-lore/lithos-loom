@@ -9,6 +9,7 @@ defect that escapes review becomes a case.
 
 from __future__ import annotations
 
+import filecmp
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -199,6 +200,21 @@ def load_case(case_dir: Path) -> Case:
     else:
         kg_head, kg_head_patch = "", None
     known_good_base = known_good.get("base")
+
+    # The known-good arm exists to review DIFFERENT code. Declaring the same
+    # head (or the same patch, which builds the same tree) makes every reported
+    # false positive really a catch — silently, after paid runs. #306 review.
+    if kg_head and kg_head == head:
+        raise ValueError(
+            f"case {case.get('id')}: [known_good] declares the same head as the "
+            "case — the false-positive arm would review the defect itself"
+        )
+    if kg_head_patch and kg_head_patch == head_patch:
+        raise ValueError(
+            f"case {case.get('id')}: [known_good] declares the same patch as the "
+            "case — both heads would build identical trees, so the "
+            "false-positive arm would review the defect itself"
+        )
 
     ac_provenance = case.get("ac_provenance")
     if ac_provenance is not None and ac_provenance not in _AC_PROVENANCES:
@@ -418,7 +434,7 @@ def _validate_artifacts(
             "head — declare [known_good] head / head_patch or drop the captures"
         )
     root = resolve_artifacts_root(case_dir, str(artifacts_dir), case_id)
-    iter_artifact_files(root, case_id)
+    files = iter_artifact_files(root, case_id)
     if known_good_artifacts_dir is not None:
         kg_root = resolve_artifacts_root(
             case_dir,
@@ -426,7 +442,61 @@ def _validate_artifacts(
             case_id,
             label="[known_good] artifacts_dir",
         )
-        iter_artifact_files(kg_root, case_id, label="known-good artifact")
+        kg_files = iter_artifact_files(kg_root, case_id, label="known-good artifact")
+        _validate_capture_pairing(case_id, root, kg_root, files, kg_files)
+
+
+def _validate_capture_pairing(
+    case_id: object,
+    root: Path,
+    kg_root: Path,
+    files: list[Path],
+    kg_files: list[Path],
+) -> None:
+    """Two independently-valid capture roots are not yet a PAIR (#306 review).
+
+    The pairing contract is "the same pages, from the same recipe, at two
+    heads" — the reviewer sees only the images, so anything that differs
+    between the variants other than the defect is a signal it could read
+    instead. Each rejection below is a way to report a false-positive rate that
+    measures the captures rather than the review:
+
+    - **one directory for both variants** — the known-good arm is shown the
+      defect renders, exactly what #302 fail-closed on;
+    - **a nested root** — the outer root's recursive walk swallows the inner
+      variant's files, so the "defect" set contains known-good renders;
+    - **different relative paths** — e.g. two defect viewports against one
+      known-good viewport compares different stimuli;
+    - **byte-identical captures** — the surface under measurement cannot tell
+      the heads apart at all.
+    """
+    resolved, kg_resolved = root.resolve(), kg_root.resolve()
+    if resolved == kg_resolved:
+        raise ValueError(
+            f"case {case_id}: both variants declare the same artifacts "
+            f"directory ({root.name!r}) — they must be distinct, or the "
+            "known-good arm reviews the defect captures"
+        )
+    if resolved.is_relative_to(kg_resolved) or kg_resolved.is_relative_to(resolved):
+        raise ValueError(
+            f"case {case_id}: the variants' artifacts directories are nested "
+            f"({root.name!r} / {kg_root.name!r}) — the outer one's walk would "
+            "include the inner one's captures"
+        )
+    rel = {p.relative_to(root).as_posix() for p in files}
+    kg_rel = {p.relative_to(kg_root).as_posix() for p in kg_files}
+    if rel != kg_rel:
+        raise ValueError(
+            f"case {case_id}: the variants must capture the same relative "
+            f"paths (the same pages at the same widths); only one side has "
+            f"{sorted(rel ^ kg_rel)}"
+        )
+    if all(filecmp.cmp(root / r, kg_root / r, shallow=False) for r in sorted(rel)):
+        raise ValueError(
+            f"case {case_id}: the variants' captures are byte-identical — the "
+            "artifact surface cannot tell the two heads apart, so the "
+            "false-positive arm would review the defect render"
+        )
 
 
 def _head_spec(
