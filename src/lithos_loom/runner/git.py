@@ -38,6 +38,17 @@ def base_sha(worktree: Path) -> str:
     return _git(worktree, "rev-parse", "HEAD")
 
 
+def commit_sha(worktree: Path, ref: str = "HEAD") -> str:
+    """Resolve *ref* to its full commit SHA.
+
+    Generalises :func:`base_sha` to any ref: two different declaration strings
+    (a tag, a branch, an abbreviated sha) can name the same commit, so callers
+    comparing "are these the same commit?" must compare resolved SHAs, not the
+    strings they were handed.
+    """
+    return _git(worktree, "rev-parse", f"{ref}^{{commit}}")
+
+
 def tree_sha(worktree: Path, ref: str = "HEAD") -> str:
     """Return the tree object *ref* points at — a commit's CONTENT identity.
 

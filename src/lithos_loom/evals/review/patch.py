@@ -48,26 +48,61 @@ def _materialise_patched_head(
         raise
 
 
+def _resolved(repo: Path, ref: str) -> tuple[str, str] | None:
+    """``(commit_sha, tree_sha)`` for *ref*, or ``None`` when it does not resolve.
+
+    Unresolvable is not "fine": it means the review worktree cannot be created
+    at that head either, so the run fails loudly a moment later
+    (:func:`~...runner.worktree.create_at`). Returning ``None`` here defers to
+    that error instead of masking it with a comparison failure — and keeps the
+    hermetic aggregation tests, which script fake shas against a real checkout,
+    free of git.
+    """
+    try:
+        return git.commit_sha(repo, ref), git.tree_sha(repo, ref)
+    except (RuntimeError, OSError):
+        return None
+
+
 def _require_distinct_content(
     repo: Path, case_id: str, head: str, known_good_head: str | None
 ) -> None:
     """Fail closed when a case's two heads describe the same code (#306 review).
 
-    ``load_case`` rejects the *declared* forms of this (the same sha or the same
-    patch file twice), but two different patches can still build byte-identical
-    trees — and then the commit shas differ (different commit messages) while
-    the known-good arm reviews the defect. Every "false positive" it reports
-    would really be a catch, which is the corruption the known-good pairing
-    exists to prevent, so this raises rather than reporting a number.
+    ``load_case`` compares the *declared* strings, which catches the same sha or
+    the same patch file twice. Two further forms only exist once git resolves
+    them, and both are checked here for **every** paired case — patch-built or
+    pinned (#306 review 2: a sha-only case supplied via ``--cases-dir`` never
+    meets the shipped-case preflight, so the runtime path has to carry this):
+
+    - **different refs, one commit** — a tag, a branch, or an abbreviated sha
+      alongside the full one;
+    - **different commits, one tree** — e.g. two patches that build identical
+      code, or an ``--allow-empty`` commit. The commit SHAs differ (message,
+      parent) while the content does not.
+
+    Either way the known-good arm reviews the defect, so every "false positive"
+    it reports is really a catch — the corruption the pairing exists to prevent.
+    Raise rather than report a number.
     """
     if not known_good_head:
         return
     if head == known_good_head:
         raise ValueError(
-            f"case {case_id}: the defect and known-good heads resolved to the "
-            "same commit — the false-positive arm would review the defect itself"
+            f"case {case_id}: the defect and known-good heads are the same "
+            "commit — the false-positive arm would review the defect itself"
         )
-    if git.tree_sha(repo, head) == git.tree_sha(repo, known_good_head):
+    head_ids = _resolved(repo, head)
+    kg_ids = _resolved(repo, known_good_head)
+    if head_ids is None or kg_ids is None:
+        return
+    if head_ids[0] == kg_ids[0]:
+        raise ValueError(
+            f"case {case_id}: the defect and known-good heads name the same "
+            f"commit ({head_ids[0][:12]}) under different refs — the "
+            "false-positive arm would review the defect itself"
+        )
+    if head_ids[1] == kg_ids[1]:
         raise ValueError(
             f"case {case_id}: the defect and known-good heads have identical "
             "trees — different commits, byte-identical code, so the "
@@ -86,6 +121,14 @@ def materialise_patch_heads(case: Case) -> tuple[Case, Callable[[], None]]:
     across all K samples (and stay reachable for the run's whole lifetime).
     """
     if not case.head_patch and not case.known_good_head_patch:
+        # Nothing to build — but a PAIRED case still owes the content check
+        # (#306 review 2). load_case only compares the declared strings, so two
+        # pinned refs naming one commit, or two commits sharing a tree, would
+        # otherwise reach the paid run and report catches as false positives.
+        if case.known_good_head:
+            _require_distinct_content(
+                Path(case.repo).resolve(), case.id, case.head, case.known_good_head
+            )
         return case, lambda: None
 
     repo = Path(case.repo).resolve()  # cwd-relative, like live_review — NOT case_dir

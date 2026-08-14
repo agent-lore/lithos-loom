@@ -154,6 +154,91 @@ def test_materialise_patch_heads_rejects_patches_that_build_identical_trees(
         patch.materialise_patch_heads(case)
 
 
+# ── sha-only PAIRED cases (#306 review 2) ──────────────────────────────────
+# These build no patches, so they take the identity path — but they are still
+# paired, and a case supplied via --cases-dir never meets the shipped-case
+# preflight. The runtime function has to carry the check itself.
+
+
+def test_materialise_rejects_a_sha_pair_sharing_one_tree(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # two REAL, distinct commits with the same tree (an empty commit is the
+    # simplest construction): load_case sees two different sha strings and
+    # passes it, so only a tree comparison catches the known-good arm
+    # reviewing byte-identical code.
+    base = _seed_tracked_file(tmp_git_repo)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "same tree"],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    empty = git.base_sha(tmp_git_repo)
+    assert empty != base
+    case = _case(tmp_git_repo, tmp_path, base, head=base, known_good_head=empty)
+
+    with pytest.raises(ValueError, match="identical"):
+        patch.materialise_patch_heads(case)
+
+
+def test_materialise_rejects_two_refs_naming_one_commit(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # equivalent refs with different declaration strings — a tag beside the sha
+    base = _seed_tracked_file(tmp_git_repo)
+    subprocess.run(
+        ["git", "tag", "known-good"], cwd=tmp_git_repo, check=True, capture_output=True
+    )
+    case = _case(tmp_git_repo, tmp_path, base, head=base, known_good_head="known-good")
+
+    with pytest.raises(ValueError, match="same commit"):
+        patch.materialise_patch_heads(case)
+
+
+def test_materialise_keeps_a_valid_sha_pair_on_the_identity_path(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # the check must not disturb a legitimate pinned pair: still identity, still
+    # a no-op cleanup, no ephemeral commits built.
+    base = _seed_tracked_file(tmp_git_repo)
+    (tmp_git_repo / "mod.py").write_text("ok = False  # BUG\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=tmp_git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "bug"],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    buggy = git.base_sha(tmp_git_repo)
+    case = _case(tmp_git_repo, tmp_path, base, head=buggy, known_good_head=base)
+
+    out, cleanup = patch.materialise_patch_heads(case)
+    assert out is case
+    cleanup()  # must not raise
+
+
+def test_materialise_defers_to_the_worktree_error_for_an_unresolvable_head(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # a head git cannot resolve is not silently "distinct enough" — it is a
+    # different failure, surfaced when the review worktree is created at it.
+    # Comparing here would raise a confusing rev-parse error instead, and the
+    # hermetic aggregation tests script exactly this shape.
+    case = _case(
+        tmp_git_repo,
+        tmp_path,
+        "aaaaaaa",
+        head="nope-buggy",
+        known_good_head="nope-good",
+    )
+    out, cleanup = patch.materialise_patch_heads(case)
+    assert out is case
+    cleanup()
+
+
 def test_materialise_patch_heads_works_with_a_relative_case_dir(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
