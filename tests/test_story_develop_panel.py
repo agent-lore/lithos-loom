@@ -28,6 +28,7 @@ from lithos_loom.plugins.story_develop.panel import (
 from lithos_loom.plugins.story_develop.panel import (
     ReviewOutcome,
 )
+from lithos_loom.plugins.story_develop.personas import canonical_personas
 from lithos_loom.plugins.story_develop.rounds import Services
 from lithos_loom.plugins.story_develop.turns import TurnResult
 
@@ -934,3 +935,139 @@ def test_tool_switch_uses_the_fallback_tools_default_model(
         ("codex", "codex-default-model"),  # fallback tool: ITS default, not the pin
     ]
     assert result.round_reviews[0].status == "LGTM"
+
+
+# ── the artifact pass's assembled prompt (#308 review, finding 1) ────────────
+# Every canonical persona's code brief narrows hard ("judge only ... — nothing
+# else", "find ways this change can be abused — nothing else", plus the shared
+# stay-in-your-lane rule), and dependency-hygiene answers "a quick LGTM is the
+# right answer" when its dimension is untouched. Rendered on a pass about
+# screenshots those are instructions to rubber-stamp, contradicting the pass's
+# own instructions. RH-1 only ever measured `correctness`, where the conflict is
+# mildest — so pin the ASSEMBLED prompt for all of them.
+
+
+@pytest.mark.parametrize("persona", sorted(canonical_personas()))
+def test_artifact_prompt_gives_every_persona_one_visual_responsibility(
+    persona: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    rstate = _ReviewerState(canonical_personas()[persona], "cid", [], tmp_path)
+    calls = _install_reviewer_stub(monkeypatch)
+
+    panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        artifact_pass=True,
+    )
+
+    prompt = calls[0]["prompt"]
+    assert "every rendering defect is yours to report" in prompt.lower()
+    # no code-review narrowing reaches this pass, in any of its forms
+    assert "do not report outside your lane" not in prompt.lower()
+    assert "nothing else" not in prompt.lower()
+    assert "a quick LGTM is the right answer" not in prompt
+
+
+def test_artifact_prompt_does_not_inject_a_project_defined_brief(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #308 review 2 asked whether discarding a pool reviewer's `system_prompt`
+    # here was intentional. It is now — measured, not assumed (see
+    # _artifact_reviewer_brief). This pins the decision so the next person to
+    # "restore" the brief has to argue with the numbers.
+    config = _config(tmp_path)
+    spec = ReviewerSpec(
+        name="specialist",
+        system_prompt="Check WCAG contrast ratios and keyboard focus order.",
+    )
+    rstate = _ReviewerState(spec, "cid", [], tmp_path)
+    calls = _install_reviewer_stub(monkeypatch)
+
+    panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        artifact_pass=True,
+    )
+
+    prompt = calls[0]["prompt"]
+    # DELIBERATE, and the exception `ReviewerSpec.system_prompt` documents:
+    # re-attaching a configured brief here — even as an additive lens with its
+    # narrowing language suspended — made the pass block a CLEAN render 2-3
+    # times in 3 (dependency-hygiene, K=3) while never improving the catch.
+    # A speciality worth having on this surface belongs to a reviewer that IS
+    # one (RH-9), not to whichever code reviewer happens to be in the panel.
+    assert "WCAG contrast ratios and keyboard focus order" not in prompt
+    assert "every rendering defect is yours to report" in prompt.lower()
+    assert "specialist" in prompt  # its identity still reaches the reviewer
+
+
+def test_artifact_prompt_needs_no_brief_for_the_generalist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # the zero-config code-quality reviewer has no focus to re-attach; it still
+    # gets the visual mandate, with no dangling "your usual brief follows"
+    config = _config(tmp_path)
+    rstate = _ReviewerState(ReviewerSpec(name="code-quality"), "cid", [], tmp_path)
+    calls = _install_reviewer_stub(monkeypatch)
+
+    panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        artifact_pass=True,
+    )
+
+    prompt = calls[0]["prompt"]
+    assert "every rendering defect is yours to report" in prompt.lower()
+    assert "Your usual brief follows" not in prompt
+    assert "## Your focus" in prompt  # the mandate lands for the generalist too
+
+
+def test_diff_rounds_keep_their_lane_discipline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # the counterpart: suspending the lane rule is scoped to the artifact pass.
+    # A regular round still tells a persona to stay in its dimension, which is
+    # what stops N reviewers producing N overlapping general reviews.
+    config = _config(tmp_path)
+    rstate = _ReviewerState(canonical_personas()["security"], "cid", [], tmp_path)
+    calls = _install_reviewer_stub(monkeypatch)
+
+    panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base="0" * 40,
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="the coder did a thing",
+    )
+
+    assert "do not report outside your lane" in calls[0]["prompt"].lower()

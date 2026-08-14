@@ -149,6 +149,54 @@ def _reviewer_brief(spec) -> str:
     )
 
 
+def _artifact_reviewer_brief(spec) -> str:
+    """The reviewer's responsibility on the ARTIFACT pass (#308 review).
+
+    Deliberately **not** the code-review brief, and this is a documented
+    exception to ``ReviewerSpec.system_prompt`` — see below, it was measured.
+
+    Those briefs narrow hard: "judge only what this change does to the
+    dependencies — nothing else", "find ways this change can be abused —
+    nothing else", plus the stay-in-your-lane rule :func:`_reviewer_brief`
+    appends; ``dependency-hygiene`` adds "if it adds or bumps no dependency, a
+    quick LGTM is the right answer". On a pass about screenshots that is a
+    licence to rubber-stamp, so injecting them handed every persona but
+    ``correctness`` two incompatible orders.
+
+    Re-attaching the brief as an *additive* lens with its narrowing language
+    explicitly suspended was tried, because dropping it discards a project pool's
+    configured speciality (#308 review 2). Measured on ``lens22-artifact-prewrap``
+    with ``dependency-hygiene``, K=3 — the catch never moved, and the clean
+    render is the only thing that changed:
+
+    ==================================  ======  ==========================
+    artifact brief                      catch   known-good runs that BLOCK
+    ==================================  ======  ==========================
+    mandate only (this)                 3/3     0/3
+    + brief re-attached, suspended       3/3     3/3  (1-4 findings each)
+    + brief re-attached, scope-guarded   3/3     2/3  (1 finding each)
+    ==================================  ======  ==========================
+
+    A reviewer holding approval on correct pages is a broken gate, and the
+    residue is exactly the sharpened-eye-turned-noise failure mode: on the
+    *fixed* render it filed "the top-level heading has no space above it".
+    A speciality worth having on this surface (accessibility, brand,
+    design-system) is better served by a reviewer that *is* one than by a
+    dependency reviewer wearing its hat — the artifact panel's composition is
+    RH-9's question. Engine, model and block threshold still vary per persona.
+    """
+    return (
+        "\n## Your focus\n\n"
+        f"You are the **{spec.name}** reviewer. This is not a code review: on "
+        "this pass you are the only reviewer looking at these rendered pages, "
+        "so **every rendering defect is yours to report** — whichever code "
+        "dimension it would otherwise belong to, and however much it reads as "
+        "styling. That widens what you look **for**, not what counts as a "
+        "defect: report what a user would experience as wrong on the page in "
+        "front of you, never work this change did not claim to do.\n"
+    )
+
+
 def _read_review(path: Path) -> tuple[ReviewHandoff | None, str | None]:
     """Read + parse a reviewer handoff. Returns (handoff, error_message)."""
     if not path.is_file():
@@ -630,7 +678,7 @@ def run_panel_round(
             review_prompt = render_prompt(
                 handoff.load_prompt("reviewer_artifacts.md"),
                 reviewer=name,
-                reviewer_brief=_reviewer_brief(rstate.spec),
+                reviewer_brief=_artifact_reviewer_brief(rstate.spec),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
                 base_sha=base[:12],

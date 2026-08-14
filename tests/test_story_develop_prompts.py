@@ -160,3 +160,64 @@ def test_reviewer_templates_carry_the_artifacts_note_slot() -> None:
     # panel evaluating a web UI sees pages, not just the diff.
     assert "{artifacts_note}" in load_prompt("reviewer_round.md")
     assert "{artifacts_note}" in load_prompt("reviewer_rereview.md")
+
+
+# ── the artifact pass's semantics (RH-1 / #308 review) ────────────────────────
+# The pass returned ZERO findings over 20+ samples until these instructions
+# existed, so they are load-bearing behaviour, not prose. Each assertion below
+# pins a diagnosed cause of that blindness.
+
+
+def test_artifact_prompt_leads_with_rendering_fidelity() -> None:
+    # the breakage-shaped checklist had no bucket for "renders, but renders
+    # wrong" — reviewers enumerated it back verbatim and LGTM'd
+    body = load_prompt("reviewer_artifacts.md")
+    assert "Rendering fidelity" in body
+    assert "internally inconsistent" in body
+
+
+def test_artifact_prompt_invites_the_source_cross_check() -> None:
+    # "do not re-litigate the diff" forbade the one move that makes a visual
+    # anomaly decidable: open the rule that produces it
+    body = load_prompt("reviewer_artifacts.md")
+    assert "do not re-litigate" not in body.lower()
+    assert "find the\n   rule responsible" in body or "rule responsible" in body
+
+
+def test_artifact_prompt_keeps_a_finding_reportable_without_a_known_cause() -> None:
+    # #308 review (finding 2): demanding an identified source rule for EVERY
+    # finding suppresses real defects with no localisable cause (a broken
+    # asset, a failed script) or invites fabricated attribution
+    body = load_prompt("reviewer_artifacts.md")
+    assert "cannot be localised" in body
+    assert "**Report those too**" in body
+    assert "when you identified one" in body
+
+
+def test_artifact_prompt_accounts_for_a_capped_listing() -> None:
+    # #308 review (finding 3): render_artifacts_note caps at 12 files per check
+    # and 36 overall, so "open every image listed" understates the job
+    body = load_prompt("reviewer_artifacts.md")
+    assert "capped" in body
+    assert "+N more" in body
+    assert "List each directory" in body
+
+
+def test_artifact_prompt_carries_no_approval_prime() -> None:
+    # the preamble used to assert the panel had already approved this change —
+    # priming, and counterfactual in the eval's artifact-only mode
+    body = load_prompt("reviewer_artifacts.md").lower()
+    assert "you approved" not in body
+    assert "review of this work passed" not in body
+
+
+def test_artifact_prompt_treats_the_criteria_as_a_floor() -> None:
+    body = load_prompt("reviewer_artifacts.md")
+    assert "floor, not a\n   ceiling" in body or "floor, not a ceiling" in body
+
+
+def test_artifact_prompt_guards_against_taste_findings() -> None:
+    # the counterweight to the above: a sharper eye must not become a
+    # trigger-happy one (the known-good arm measures this for real)
+    body = load_prompt("reviewer_artifacts.md")
+    assert "not what you would have designed differently" in body

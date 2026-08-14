@@ -89,6 +89,10 @@ class ReviewerSpec:
     name: str
     tool: str = DEFAULT_REVIEWER_TOOL
     block_threshold: str = DEFAULT_BLOCK_THRESHOLD
+    # NOT injected into the approval-hold ARTIFACT pass (#308): that pass
+    # states one visual responsibility instead. Re-attaching a configured
+    # brief there — even suspended — made the pass block a CLEAN render 2-3
+    # runs in 3 without improving the catch; see _artifact_reviewer_brief.
     system_prompt: str | None = None
     fallback_chain: tuple[str, ...] = ()
     model: str | None = None
