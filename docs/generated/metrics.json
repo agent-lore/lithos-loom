@@ -404,10 +404,10 @@
         "functions": 49,
         "largest_module": "lithos_loom.evals.review.case",
         "largest_module_lines": 549,
-        "lines": 1896,
+        "lines": 1911,
         "modules": 11,
         "public_symbols": 20,
-        "sloc": 1529
+        "sloc": 1543
       },
       "GitHub": {
         "classes": 12,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 38222,
+    "total_lines": 38237,
     "total_modules": 120,
-    "total_sloc": 30330
+    "total_sloc": 30344
   },
   "tests": {
     "ratio": 1.64,
-    "src_lines": 38222,
-    "test_lines": 62555
+    "src_lines": 38237,
+    "test_lines": 62600
   }
 }

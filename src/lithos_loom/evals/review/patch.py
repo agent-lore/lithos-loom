@@ -51,12 +51,9 @@ def _materialise_patched_head(
 def _resolved(repo: Path, ref: str) -> tuple[str, str] | None:
     """``(commit_sha, tree_sha)`` for *ref*, or ``None`` when it does not resolve.
 
-    Unresolvable is not "fine": it means the review worktree cannot be created
-    at that head either, so the run fails loudly a moment later
-    (:func:`~...runner.worktree.create_at`). Returning ``None`` here defers to
-    that error instead of masking it with a comparison failure — and keeps the
-    hermetic aggregation tests, which script fake shas against a real checkout,
-    free of git.
+    Callers distinguish "neither side resolves" (a scripted, git-free case —
+    see :func:`_require_distinct_content`) from "one side does", which is a
+    broken case that must fail before any paid work.
     """
     try:
         return git.commit_sha(repo, ref), git.tree_sha(repo, ref)
@@ -84,6 +81,15 @@ def _require_distinct_content(
     Either way the known-good arm reviews the defect, so every "false positive"
     it reports is really a catch — the corruption the pairing exists to prevent.
     Raise rather than report a number.
+
+    Resolution is asymmetric on purpose (#306 review 3). ``run_case`` reviews
+    **every** buggy sample before it touches the known-good head, so a case
+    whose known-good ref is a typo would spend K reviewer turns plus their
+    judge calls and write partial reports before anything noticed — the
+    opposite of the harness's fail-before-paid-work posture. So: exactly one
+    side unresolvable is a **broken case**, raised here; *neither* side
+    resolvable is a scripted case (the hermetic aggregation tests drive fake
+    shas against a real checkout), which defers and needs no git.
     """
     if not known_good_head:
         return
@@ -94,8 +100,17 @@ def _require_distinct_content(
         )
     head_ids = _resolved(repo, head)
     kg_ids = _resolved(repo, known_good_head)
-    if head_ids is None or kg_ids is None:
+    if head_ids is None and kg_ids is None:
         return
+    if head_ids is None or kg_ids is None:
+        unresolved, label = (
+            (head, "defect") if head_ids is None else (known_good_head, "known-good")
+        )
+        raise ValueError(
+            f"case {case_id}: the {label} head {unresolved!r} does not resolve "
+            f"in {repo} — refusing to start a paired run that would spend every "
+            "buggy sample before the known-good arm found out"
+        )
     if head_ids[0] == kg_ids[0]:
         raise ValueError(
             f"case {case_id}: the defect and known-good heads name the same "

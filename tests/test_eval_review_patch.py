@@ -220,13 +220,11 @@ def test_materialise_keeps_a_valid_sha_pair_on_the_identity_path(
     cleanup()  # must not raise
 
 
-def test_materialise_defers_to_the_worktree_error_for_an_unresolvable_head(
+def test_materialise_defers_when_neither_head_resolves(
     tmp_git_repo: Path, tmp_path: Path
 ) -> None:
-    # a head git cannot resolve is not silently "distinct enough" — it is a
-    # different failure, surfaced when the review worktree is created at it.
-    # Comparing here would raise a confusing rev-parse error instead, and the
-    # hermetic aggregation tests script exactly this shape.
+    # a fully scripted case (the hermetic aggregation tests drive fake shas
+    # against a real checkout) needs no git and must stay identity
     case = _case(
         tmp_git_repo,
         tmp_path,
@@ -237,6 +235,53 @@ def test_materialise_defers_to_the_worktree_error_for_an_unresolvable_head(
     out, cleanup = patch.materialise_patch_heads(case)
     assert out is case
     cleanup()
+
+
+def test_materialise_rejects_a_pair_whose_known_good_ref_is_missing(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # PR #306 review 3: run_case reviews EVERY buggy sample before it touches
+    # the known-good head, so a typo'd known-good ref would burn K reviewer
+    # turns and their judge calls before anything noticed. Exactly one side
+    # resolving is a broken case, not a scripted one.
+    base = _seed_tracked_file(tmp_git_repo)
+    case = _case(
+        tmp_git_repo, tmp_path, base, head=base, known_good_head="typo-not-a-ref"
+    )
+    with pytest.raises(ValueError, match="known-good head 'typo-not-a-ref'"):
+        patch.materialise_patch_heads(case)
+
+
+def test_materialise_rejects_a_pair_whose_defect_ref_is_missing(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    base = _seed_tracked_file(tmp_git_repo)
+    case = _case(
+        tmp_git_repo, tmp_path, base, head="typo-not-a-ref", known_good_head=base
+    )
+    with pytest.raises(ValueError, match="defect head 'typo-not-a-ref'"):
+        patch.materialise_patch_heads(case)
+
+
+def test_run_case_spends_nothing_when_the_known_good_ref_is_missing(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # the property that actually matters: not one reviewer call happens.
+    from lithos_loom.evals.review.harness import run_case
+
+    base = _seed_tracked_file(tmp_git_repo)
+    case = _case(
+        tmp_git_repo, tmp_path, base, head=base, known_good_head="typo-not-a-ref"
+    )
+    calls: list[str] = []
+
+    def spy(case_, head):
+        calls.append(head)
+        return {"reviewers": []}
+
+    with pytest.raises(ValueError, match="does not resolve"):
+        run_case(case, k=5, review_fn=spy)
+    assert calls == []
 
 
 def test_materialise_patch_heads_works_with_a_relative_case_dir(
