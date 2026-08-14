@@ -407,6 +407,106 @@ def test_live_review_seeds_artifacts_and_runs_artifact_only(
     assert captured["seeded"] == ["page-800.png"]
 
 
+def test_live_review_seeds_the_variant_matching_the_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # RH-1: the known-good run must review the FIXED render, not the buggy one —
+    # otherwise the false-positive rate measures nothing.
+    from dataclasses import replace
+
+    case_dir = tmp_path / "case"
+    art = case_dir / "artifacts"
+    art.mkdir(parents=True)
+    (art / "page-800.png").write_bytes(b"\x89PNG-buggy")
+    kg = case_dir / "known-good-artifacts"
+    kg.mkdir(parents=True)
+    (kg / "page-800.png").write_bytes(b"\x89PNG-fixed")
+    case = replace(
+        _artifact_case(tmp_path / "unused"),
+        case_dir=case_dir,
+        known_good_head="kg",
+        known_good_artifacts_dir="known-good-artifacts",
+    )
+    seeded: dict = {}
+
+    def fake_review_change(config, change, **kw):
+        dest = config.artifacts_dir / "round_01" / "seeded" / "page-800.png"
+        seeded[change.head_sha] = dest.read_bytes()
+        return _fake_report()
+
+    monkeypatch.setattr(harness_mod, "review_change", fake_review_change)
+    live_review(case, "h")
+    live_review(case, "kg")
+    assert seeded == {"h": b"\x89PNG-buggy", "kg": b"\x89PNG-fixed"}
+
+
+def test_run_case_scores_a_paired_artifact_case_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # PR #306 review: the per-head seeding is unit-tested, but nothing proved
+    # the whole paired-artifact flow through run_case's aggregation — that the
+    # catch arm and the FP arm review DIFFERENT captures and score separately.
+    # The stub reports the defect only when it is shown the defect renders, so
+    # a regression that seeds one variant for both arms shows up as fp == 1.0.
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop.review_report import (
+        ReviewerReport,
+        ReviewFinding,
+    )
+
+    case_dir = tmp_path / "case"
+    (case_dir / "artifacts").mkdir(parents=True)
+    (case_dir / "artifacts" / "page.png").write_bytes(b"\x89PNG-buggy")
+    (case_dir / "known-good-artifacts").mkdir(parents=True)
+    (case_dir / "known-good-artifacts" / "page.png").write_bytes(b"\x89PNG-fixed")
+    case = replace(
+        _artifact_case(tmp_path / "unused"),
+        case_dir=case_dir,
+        known_good_head="kg",
+        known_good_artifacts_dir="known-good-artifacts",
+        expected=(_EXPECTED,),
+    )
+
+    def fake_review_change(config, change, **kw):
+        seeded = (
+            config.artifacts_dir / "round_01" / "seeded" / "page.png"
+        ).read_bytes()
+        if seeded == b"\x89PNG-buggy":
+            reviewers = [
+                ReviewerReport(
+                    name="correctness",
+                    status="FINDINGS",
+                    passed=False,
+                    findings=[
+                        ReviewFinding(
+                            reviewer="correctness",
+                            severity="critical",
+                            files=["cli/develop.py"],
+                            rationale="exits before delivery",
+                        )
+                    ],
+                )
+            ]
+        else:
+            reviewers = [ReviewerReport(name="correctness", status="LGTM", passed=True)]
+        return ReviewReport(
+            head_ref="x",
+            base_sha="b",
+            head_sha=change.head_sha,
+            profile="standard",
+            reviewers=reviewers,
+        )
+
+    monkeypatch.setattr(harness_mod, "review_change", fake_review_change)
+    result = run_case(case, k=2, judge=None)
+
+    assert result.catch_rate == 1.0
+    assert result.false_positive_rate == 0.0
+    assert result.caught_per_sample == (True, True)
+    assert result.false_positive_per_sample == (False, False)
+
+
 def test_live_review_without_artifacts_stays_on_the_diff_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

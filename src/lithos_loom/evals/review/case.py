@@ -9,6 +9,7 @@ defect that escapes review becomes a case.
 
 from __future__ import annotations
 
+import filecmp
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,7 +69,7 @@ _CASE_KEYS = frozenset(
     }
 )
 _TOP_LEVEL_KEYS = frozenset({"case", "expected", "known_good"})
-_KNOWN_GOOD_KEYS = frozenset({"base", "head", "head_patch"})
+_KNOWN_GOOD_KEYS = frozenset({"base", "head", "head_patch", "artifacts_dir"})
 _EXPECTED_KEYS = frozenset({"file", "keywords", "min_severity", "mechanism"})
 
 
@@ -125,6 +126,12 @@ class Case:
     artifacts_dir: str | None = None
     # See _ARTIFACT_PROVENANCES; required whenever artifacts_dir is set.
     artifact_provenance: str | None = None
+    # RH-1: the SAME pages captured at the known-good head. The seeder picks the
+    # variant matching the head under review, which is what makes an artifact
+    # case's false-positive rate mean anything — reviewing the fixed code
+    # against the buggy captures would measure the captures, not the review.
+    # Required when an artifact case declares a [known_good] head.
+    known_good_artifacts_dir: str | None = None
 
 
 def load_case(case_dir: Path) -> Case:
@@ -194,6 +201,21 @@ def load_case(case_dir: Path) -> Case:
         kg_head, kg_head_patch = "", None
     known_good_base = known_good.get("base")
 
+    # The known-good arm exists to review DIFFERENT code. Declaring the same
+    # head (or the same patch, which builds the same tree) makes every reported
+    # false positive really a catch — silently, after paid runs. #306 review.
+    if kg_head and kg_head == head:
+        raise ValueError(
+            f"case {case.get('id')}: [known_good] declares the same head as the "
+            "case — the false-positive arm would review the defect itself"
+        )
+    if kg_head_patch and kg_head_patch == head_patch:
+        raise ValueError(
+            f"case {case.get('id')}: [known_good] declares the same patch as the "
+            "case — both heads would build identical trees, so the "
+            "false-positive arm would review the defect itself"
+        )
+
     ac_provenance = case.get("ac_provenance")
     if ac_provenance is not None and ac_provenance not in _AC_PROVENANCES:
         raise ValueError(
@@ -209,11 +231,13 @@ def load_case(case_dir: Path) -> Case:
 
     artifacts_dir = case.get("artifacts_dir")
     artifact_provenance = case.get("artifact_provenance")
+    kg_artifacts_dir = known_good.get("artifacts_dir")
     _validate_artifacts(
         case_dir,
         case.get("id"),
         artifacts_dir,
         artifact_provenance,
+        kg_artifacts_dir,
         has_known_good=bool(kg_head or kg_head_patch),
     )
 
@@ -236,6 +260,7 @@ def load_case(case_dir: Path) -> Case:
         tier=str(tier) if tier else None,
         artifacts_dir=str(artifacts_dir) if artifacts_dir else None,
         artifact_provenance=str(artifact_provenance) if artifact_provenance else None,
+        known_good_artifacts_dir=(str(kg_artifacts_dir) if kg_artifacts_dir else None),
     )
 
 
@@ -262,7 +287,9 @@ def _reject_unknown_keys(case_name: str, data: dict, case: dict) -> None:
         _check("[[expected]]", set(e), _EXPECTED_KEYS)
 
 
-def resolve_artifacts_root(case_dir: Path, artifacts_dir: str, case_id: object) -> Path:
+def resolve_artifacts_root(
+    case_dir: Path, artifacts_dir: str, case_id: object, *, label: str = "artifacts_dir"
+) -> Path:
     """Resolve + validate a case's artifact root — the ONE root check (#302 review).
 
     The root must be a real, non-symlink directory that stays inside the case
@@ -275,18 +302,18 @@ def resolve_artifacts_root(case_dir: Path, artifacts_dir: str, case_id: object) 
         # the walk while the Case constructor normalises "" to None, silently
         # running a DIFF review under a "captured" provenance claim.
         raise ValueError(
-            f"case {case_id}: artifacts_dir must not be blank — name a real "
+            f"case {case_id}: {label} must not be blank — name a real "
             "directory inside the case dir"
         )
     rel = Path(artifacts_dir)
     if rel.is_absolute():
         raise ValueError(
-            f"case {case_id}: artifacts_dir must be relative to the case dir "
+            f"case {case_id}: {label} must be relative to the case dir "
             f"(got absolute path {artifacts_dir!r})"
         )
     if ".." in rel.parts:
         raise ValueError(
-            f"case {case_id}: artifacts_dir must not traverse outside the case "
+            f"case {case_id}: {label} must not traverse outside the case "
             f"dir ('..' in {artifacts_dir!r})"
         )
     # "No symlinks anywhere" includes every component of the DECLARED path —
@@ -297,25 +324,26 @@ def resolve_artifacts_root(case_dir: Path, artifacts_dir: str, case_id: object) 
         probe = probe / part
         if probe.is_symlink():
             raise ValueError(
-                f"case {case_id}: artifacts_dir {artifacts_dir!r} contains a "
+                f"case {case_id}: {label} {artifacts_dir!r} contains a "
                 f"symlink component ({part!r}) — every component must be a "
                 "real directory inside the case dir"
             )
     root = case_dir / rel
     if not root.is_dir():
         raise ValueError(
-            f"case {case_id}: artifacts_dir {artifacts_dir!r} is not a "
+            f"case {case_id}: {label} {artifacts_dir!r} is not a "
             f"directory in {case_dir.name}"
         )
     if not root.resolve().is_relative_to(case_dir.resolve()):
         raise ValueError(
-            f"case {case_id}: artifacts_dir {artifacts_dir!r} resolves outside "
-            "the case dir"
+            f"case {case_id}: {label} {artifacts_dir!r} resolves outside the case dir"
         )
     return root
 
 
-def iter_artifact_files(root: Path, case_id: object) -> list[Path]:
+def iter_artifact_files(
+    root: Path, case_id: object, *, label: str = "artifact"
+) -> list[Path]:
     """Every artifact file under a *validated* root, fail-closed (#302 review).
 
     Rejects symlinks anywhere (files AND intermediate directories), non-regular
@@ -329,20 +357,20 @@ def iter_artifact_files(root: Path, case_id: object) -> list[Path]:
         rel = p.relative_to(root)
         if p.is_symlink():
             raise ValueError(
-                f"case {case_id}: artifact {rel} is a symlink — artifacts must "
+                f"case {case_id}: {label} {rel} is a symlink — artifacts must "
                 "be regular files inside the case dir"
             )
         if p.is_dir():
             continue
         if not p.is_file():
-            raise ValueError(f"case {case_id}: artifact {rel} is not a regular file")
+            raise ValueError(f"case {case_id}: {label} {rel} is not a regular file")
         if p.stat().st_size == 0:
-            raise ValueError(f"case {case_id}: artifact {rel} is empty")
+            raise ValueError(f"case {case_id}: {label} {rel} is empty")
         if not p.resolve().is_relative_to(resolved_root):
-            raise ValueError(f"case {case_id}: artifact {rel} escapes the case dir")
+            raise ValueError(f"case {case_id}: {label} {rel} escapes the case dir")
         files.append(p)
     if not files:
-        raise ValueError(f"case {case_id}: artifacts dir contains no files")
+        raise ValueError(f"case {case_id}: {label}s dir contains no files")
     return files
 
 
@@ -351,25 +379,35 @@ def _validate_artifacts(
     case_id: object,
     artifacts_dir: object,
     provenance: object,
+    known_good_artifacts_dir: object,
     *,
     has_known_good: bool,
 ) -> None:
-    """Validate the RH-3 artifact declaration pair, fail-closed at load.
+    """Validate the RH-3 artifact declaration set, fail-closed at load.
 
     Both-or-neither: a dir without provenance leaves the benchmark unable to
     say what a catch measures; provenance without a dir means the author
     intended an artifact case that would silently run as a diff case. Root and
     files go through the shared :func:`resolve_artifacts_root` /
     :func:`iter_artifact_files` checks (host-collector posture, PR #289).
-    Artifact cases are **catch-only** (#302 review): ``run_case`` reviews the
-    known-good head with the same Case, so the fixed code would be reviewed
-    against the buggy captures and the false-positive number would be
-    meaningless — variant-specific captures are a follow-up.
+
+    A known-good head needs its **own** captures (RH-1). ``run_case`` reviews
+    that head with the same Case, so without them the fixed code would be
+    reviewed against the buggy captures and the false-positive number would
+    measure nothing — which is why #302 rejected the pairing outright. Both
+    variants share one ``artifact_provenance``: they are the same pages from
+    the same recipe at two heads.
     """
     if provenance is not None and provenance not in _ARTIFACT_PROVENANCES:
         raise ValueError(
             f"case {case_id}: artifact_provenance must be one of "
             f"{_ARTIFACT_PROVENANCES} (got {provenance!r})"
+        )
+    if artifacts_dir is None and known_good_artifacts_dir is not None:
+        raise ValueError(
+            f"case {case_id}: [known_good] artifacts_dir without [case] "
+            "artifacts_dir — a diff case has no artifact surface to compare "
+            "against; declare the defect captures or drop the known-good ones"
         )
     if artifacts_dir is None and provenance is None:
         return
@@ -383,15 +421,82 @@ def _validate_artifacts(
             f"case {case_id}: artifacts_dir requires artifact_provenance "
             f"({' | '.join(_ARTIFACT_PROVENANCES)})"
         )
-    if has_known_good:
+    if has_known_good and known_good_artifacts_dir is None:
         raise ValueError(
-            f"case {case_id}: artifact cases are catch-only — [known_good] "
-            "would review the fixed head against the buggy captures, so the "
-            "false-positive rate would be meaningless; drop [known_good] "
-            "(variant-specific captures are a follow-up)"
+            f"case {case_id}: [known_good] on an artifact case requires its own "
+            "known-good captures ([known_good] artifacts_dir) — the fixed head "
+            "reviewed against the buggy captures would make the false-positive "
+            "rate meaningless"
+        )
+    if known_good_artifacts_dir is not None and not has_known_good:
+        raise ValueError(
+            f"case {case_id}: [known_good] artifacts_dir without a known-good "
+            "head — declare [known_good] head / head_patch or drop the captures"
         )
     root = resolve_artifacts_root(case_dir, str(artifacts_dir), case_id)
-    iter_artifact_files(root, case_id)
+    files = iter_artifact_files(root, case_id)
+    if known_good_artifacts_dir is not None:
+        kg_root = resolve_artifacts_root(
+            case_dir,
+            str(known_good_artifacts_dir),
+            case_id,
+            label="[known_good] artifacts_dir",
+        )
+        kg_files = iter_artifact_files(kg_root, case_id, label="known-good artifact")
+        _validate_capture_pairing(case_id, root, kg_root, files, kg_files)
+
+
+def _validate_capture_pairing(
+    case_id: object,
+    root: Path,
+    kg_root: Path,
+    files: list[Path],
+    kg_files: list[Path],
+) -> None:
+    """Two independently-valid capture roots are not yet a PAIR (#306 review).
+
+    The pairing contract is "the same pages, from the same recipe, at two
+    heads" — the reviewer sees only the images, so anything that differs
+    between the variants other than the defect is a signal it could read
+    instead. Each rejection below is a way to report a false-positive rate that
+    measures the captures rather than the review:
+
+    - **one directory for both variants** — the known-good arm is shown the
+      defect renders, exactly what #302 fail-closed on;
+    - **a nested root** — the outer root's recursive walk swallows the inner
+      variant's files, so the "defect" set contains known-good renders;
+    - **different relative paths** — e.g. two defect viewports against one
+      known-good viewport compares different stimuli;
+    - **byte-identical captures** — the surface under measurement cannot tell
+      the heads apart at all.
+    """
+    resolved, kg_resolved = root.resolve(), kg_root.resolve()
+    if resolved == kg_resolved:
+        raise ValueError(
+            f"case {case_id}: both variants declare the same artifacts "
+            f"directory ({root.name!r}) — they must be distinct, or the "
+            "known-good arm reviews the defect captures"
+        )
+    if resolved.is_relative_to(kg_resolved) or kg_resolved.is_relative_to(resolved):
+        raise ValueError(
+            f"case {case_id}: the variants' artifacts directories are nested "
+            f"({root.name!r} / {kg_root.name!r}) — the outer one's walk would "
+            "include the inner one's captures"
+        )
+    rel = {p.relative_to(root).as_posix() for p in files}
+    kg_rel = {p.relative_to(kg_root).as_posix() for p in kg_files}
+    if rel != kg_rel:
+        raise ValueError(
+            f"case {case_id}: the variants must capture the same relative "
+            f"paths (the same pages at the same widths); only one side has "
+            f"{sorted(rel ^ kg_rel)}"
+        )
+    if all(filecmp.cmp(root / r, kg_root / r, shallow=False) for r in sorted(rel)):
+        raise ValueError(
+            f"case {case_id}: the variants' captures are byte-identical — the "
+            "artifact surface cannot tell the two heads apart, so the "
+            "false-positive arm would review the defect render"
+        )
 
 
 def _head_spec(

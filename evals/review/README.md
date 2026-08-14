@@ -279,11 +279,38 @@ Semantics — one surface per case, deliberately:
   `lens22-artifact-prewrap` / `lens22-markdown-prewrap` are that pair.
 - `[[expected]]` scores identically (structured match + judge); write the
   `mechanism` in terms of what the captures *show*.
-- **Catch-only** (#302 review): `[known_good]` is rejected on artifact cases —
-  the harness reviews the known-good head with the *same* case, so the fixed
-  code would be shown the buggy captures and the false-positive number would
-  be meaningless. Variant-specific captures (a known-good `artifacts_dir`)
-  are a follow-up if FP measurement on this surface is ever needed.
+- **False positives need paired captures** (RH-1). The harness reviews the
+  known-good head with the *same* case, so a `[known_good]` head must bring its
+  own renders — otherwise the fixed code would be shown the buggy captures and
+  the FP number would measure the captures, not the review. #302 rejected the
+  pairing outright for that reason; declaring both variants is what lifts it:
+
+  ```toml
+  [known_good]
+  head_patch = "known-good.patch"           # the defect patch + its fix
+  artifacts_dir = "known-good-artifacts"    # the SAME pages at that head
+  ```
+
+  The seeder picks the variant matching the head under review. Both variants
+  share one `artifact_provenance` (same pages, same recipe, two heads), and the
+  known-good captures go through the identical root/symlink/empty-file checks.
+  Omitting either half fails closed at load.
+
+  The **pairing invariants** are load-enforced too, because each way of
+  breaking them yields a false-positive rate that measures the fixtures rather
+  than the review: the two heads must not be the same sha or the same patch
+  file (and, once materialised, must not resolve to the same commit or the same
+  **tree** — different patches can build byte-identical code); the two capture
+  roots must be **distinct and non-nested** (an outer root's recursive walk
+  would swallow the inner variant's files); they must hold the **same relative
+  paths** (two defect viewports against one known-good viewport compares
+  different stimuli); and at least one corresponding capture must **differ in
+  bytes** (identical captures mean the measured surface cannot tell the heads
+  apart at all). An artifact case without
+  `[known_good]` stays catch-only, which is fine for a case whose defect has no
+  fix to render — but a prompt or panel change that *sharpens* artifact review
+  cannot be told apart from one that merely makes the reviewer trigger-happy
+  unless the case is paired.
 - `artifact_provenance` mirrors `ac_provenance`'s honesty rule: **`captured`**
   = authentic renders of the case head (materialise the head, serve it, take
   real screenshots — document what/when/how in the `description`);
@@ -310,10 +337,19 @@ npx playwright screenshot --viewport-size=768,1200 --full-page <url> \
   <case-dir>/artifacts/<page>-768.png     # repeat per width
 ```
 
+Capture **both variants in one session**, from the same source data and the
+same recipe, so the pair differs only by the defect: serve each head on its own
+port and shoot the same URL at the same widths. Anything else that moves
+between the two captures (fixture content, fonts, browser version, viewport)
+becomes a signal the reviewer could pick up on instead of the defect. A useful
+check that the recipe is deterministic: re-capturing the *defect* head should
+reproduce the committed PNGs byte for byte (it did for lens22).
+
 Runs use the normal CLI unchanged — every axis (K, judge, tier roll-ups,
 RH-7 panel overrides) composes; `summary.json` gains
-`"artifacts": {n_files, provenance}` and the running line notes
-`[artifact pass; N file(s)]`.
+`"artifacts": {n_files, provenance}` — plus `known_good_n_files` when the case
+is paired, so a report says whether it measured false positives at all — and
+the running line notes `[artifact pass; N file(s)]`.
 
 ### Cross-repo cases (escapes from customer projects)
 

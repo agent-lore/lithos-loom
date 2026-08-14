@@ -130,6 +130,160 @@ def test_materialise_patch_heads_resolves_known_good_patch(
         cleanup()
 
 
+def test_materialise_patch_heads_rejects_patches_that_build_identical_trees(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # PR #306 review (Medium): two DIFFERENT patch files can produce the same
+    # tree. The commit shas still differ (different commit messages), so a
+    # sha-distinctness check passes while the known-good arm reviews byte-
+    # identical code — a false-positive rate measuring nothing.
+    base = _seed_tracked_file(tmp_git_repo)
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    _patch_editing_mod(tmp_git_repo, case_dir / "head.patch", new="ok = False\n")
+    _patch_editing_mod(tmp_git_repo, case_dir / "clean.patch", new="ok = False\n")
+    case = _case(
+        tmp_git_repo,
+        case_dir,
+        base,
+        head_patch="head.patch",
+        known_good_head_patch="clean.patch",
+    )
+
+    with pytest.raises(ValueError, match="identical"):
+        patch.materialise_patch_heads(case)
+
+
+# ── sha-only PAIRED cases (#306 review 2) ──────────────────────────────────
+# These build no patches, so they take the identity path — but they are still
+# paired, and a case supplied via --cases-dir never meets the shipped-case
+# preflight. The runtime function has to carry the check itself.
+
+
+def test_materialise_rejects_a_sha_pair_sharing_one_tree(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # two REAL, distinct commits with the same tree (an empty commit is the
+    # simplest construction): load_case sees two different sha strings and
+    # passes it, so only a tree comparison catches the known-good arm
+    # reviewing byte-identical code.
+    base = _seed_tracked_file(tmp_git_repo)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "same tree"],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    empty = git.base_sha(tmp_git_repo)
+    assert empty != base
+    case = _case(tmp_git_repo, tmp_path, base, head=base, known_good_head=empty)
+
+    with pytest.raises(ValueError, match="identical"):
+        patch.materialise_patch_heads(case)
+
+
+def test_materialise_rejects_two_refs_naming_one_commit(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # equivalent refs with different declaration strings — a tag beside the sha
+    base = _seed_tracked_file(tmp_git_repo)
+    subprocess.run(
+        ["git", "tag", "known-good"], cwd=tmp_git_repo, check=True, capture_output=True
+    )
+    case = _case(tmp_git_repo, tmp_path, base, head=base, known_good_head="known-good")
+
+    with pytest.raises(ValueError, match="same commit"):
+        patch.materialise_patch_heads(case)
+
+
+def test_materialise_keeps_a_valid_sha_pair_on_the_identity_path(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # the check must not disturb a legitimate pinned pair: still identity, still
+    # a no-op cleanup, no ephemeral commits built.
+    base = _seed_tracked_file(tmp_git_repo)
+    (tmp_git_repo / "mod.py").write_text("ok = False  # BUG\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=tmp_git_repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "bug"],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    buggy = git.base_sha(tmp_git_repo)
+    case = _case(tmp_git_repo, tmp_path, base, head=buggy, known_good_head=base)
+
+    out, cleanup = patch.materialise_patch_heads(case)
+    assert out is case
+    cleanup()  # must not raise
+
+
+def test_materialise_defers_when_neither_head_resolves(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # a fully scripted case (the hermetic aggregation tests drive fake shas
+    # against a real checkout) needs no git and must stay identity
+    case = _case(
+        tmp_git_repo,
+        tmp_path,
+        "aaaaaaa",
+        head="nope-buggy",
+        known_good_head="nope-good",
+    )
+    out, cleanup = patch.materialise_patch_heads(case)
+    assert out is case
+    cleanup()
+
+
+def test_materialise_rejects_a_pair_whose_known_good_ref_is_missing(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # PR #306 review 3: run_case reviews EVERY buggy sample before it touches
+    # the known-good head, so a typo'd known-good ref would burn K reviewer
+    # turns and their judge calls before anything noticed. Exactly one side
+    # resolving is a broken case, not a scripted one.
+    base = _seed_tracked_file(tmp_git_repo)
+    case = _case(
+        tmp_git_repo, tmp_path, base, head=base, known_good_head="typo-not-a-ref"
+    )
+    with pytest.raises(ValueError, match="known-good head 'typo-not-a-ref'"):
+        patch.materialise_patch_heads(case)
+
+
+def test_materialise_rejects_a_pair_whose_defect_ref_is_missing(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    base = _seed_tracked_file(tmp_git_repo)
+    case = _case(
+        tmp_git_repo, tmp_path, base, head="typo-not-a-ref", known_good_head=base
+    )
+    with pytest.raises(ValueError, match="defect head 'typo-not-a-ref'"):
+        patch.materialise_patch_heads(case)
+
+
+def test_run_case_spends_nothing_when_the_known_good_ref_is_missing(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # the property that actually matters: not one reviewer call happens.
+    from lithos_loom.evals.review.harness import run_case
+
+    base = _seed_tracked_file(tmp_git_repo)
+    case = _case(
+        tmp_git_repo, tmp_path, base, head=base, known_good_head="typo-not-a-ref"
+    )
+    calls: list[str] = []
+
+    def spy(case_, head):
+        calls.append(head)
+        return {"reviewers": []}
+
+    with pytest.raises(ValueError, match="does not resolve"):
+        run_case(case, k=5, review_fn=spy)
+    assert calls == []
+
+
 def test_materialise_patch_heads_works_with_a_relative_case_dir(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -205,8 +359,12 @@ def test_shipped_patch_cases_materialise(
     case_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case = load_case(case_dir)
-    if not case.head_patch and not case.known_good_head_patch:
-        pytest.skip("sha-based case — nothing to materialise")
+    has_patch = bool(case.head_patch or case.known_good_head_patch)
+    # A sha-based case has nothing to materialise, but a PAIRED one still owes
+    # the distinctness check below (#306 review): two pinned shas can describe
+    # identical trees, and nothing at load time can see that.
+    if not has_patch and not case.known_good_head:
+        pytest.skip("sha-based case with no known-good pair — nothing to check")
     # Same resolution rule as materialise_patch_heads: cwd-relative.
     repo = Path(case.repo).resolve()
     if not (repo / ".git").exists():
@@ -224,9 +382,78 @@ def test_shipped_patch_cases_materialise(
 
     resolved, cleanup = patch.materialise_patch_heads(case)
     try:
-        assert resolved.head
-        assert resolved.head != case.base
-        if case.known_good_head_patch:
-            assert resolved.known_good_head
+        if has_patch:
+            assert resolved.head
+            assert resolved.head != case.base
+        if resolved.known_good_head:
+            # PR #306 review (Medium): "it applied" is not "it is a known-good
+            # state". Distinct CONTENT is the weakest property the pairing
+            # needs — pin it for every shipped paired case, not just lens22.
+            assert resolved.known_good_head != resolved.head
+            if _commit_exists(repo, resolved.head) and _commit_exists(
+                repo, resolved.known_good_head
+            ):
+                assert _tree_of(repo, resolved.head) != _tree_of(
+                    repo, resolved.known_good_head
+                )
+    finally:
+        cleanup()
+
+
+def _tree_of(repo: Path, sha: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", f"{sha}^{{tree}}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def _css_at(repo: Path, sha: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{sha}:src/lithos_lens/static/lens.css"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def _rule_body(css: str, selector: str) -> str:
+    """The declarations inside ``<selector> { … }``."""
+    start = css.index(f"{selector} {{")
+    return css[start : css.index("}", start)]
+
+
+def test_lens22_artifact_fixture_pins_its_buggy_and_fixed_css(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PR #306 review (Medium): known-good.patch is a 679-line external fixture
+    # whose benchmark validity rests on ONE css hunk. Swapping it for the
+    # defect patch — or losing the fix in a re-generation — would still apply
+    # cleanly and still materialise, silently corrupting every later FP number.
+    # Assert the semantic state each head is supposed to represent.
+    case_dir = _SHIPPED_CASES_DIR / "lens22-artifact-prewrap"
+    case = load_case(case_dir)
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        buggy_css = _css_at(repo, resolved.head)
+        fixed_css = _css_at(repo, resolved.known_good_head or "")
+        # the defect: rendered markdown inherits the plaintext <pre> whitespace
+        assert "white-space: pre-wrap" in _rule_body(buggy_css, ".markdown-body")
+        # the fix (lens 734e5ef): dropped from .markdown-body, scoped to its pre
+        assert "white-space: pre-wrap" not in _rule_body(fixed_css, ".markdown-body")
+        assert "white-space: pre-wrap" in _rule_body(fixed_css, ".markdown-body pre")
     finally:
         cleanup()

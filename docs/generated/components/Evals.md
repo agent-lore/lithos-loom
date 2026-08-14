@@ -26,7 +26,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 ## Public API
 
 ### `lithos_loom.evals.review.artifacts`
-- def `seed_case_artifacts` — Copy *case*'s artifacts under ``config.artifacts_dir``; return the count.
+- def `seed_case_artifacts` — Copy *case*'s artifacts for *head_sha* under ``config.artifacts_dir``.
 
 ### `lithos_loom.evals.review.case`
 - class `Expected` — A defect a correct review MUST surface.

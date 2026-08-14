@@ -19,6 +19,18 @@ exhibited: .markdown-body retains 'white-space: pre-wrap', so the newlines
 markdown-it emits between block elements render as extra vertical gaps —
 visible line-height holes between every list item and doubled spacing after
 each heading/paragraph — where a correct markdown render collapses them.
+
+PAIRED CONTROL (RH-1, 2026-08-14). known-good.patch is this same delivered
+change plus the authentic fix lens later shipped in 734e5ef (.markdown-body
+drops white-space: pre-wrap; preservation is scoped to .markdown-body pre).
+known-good-artifacts/ holds the SAME note at the SAME two widths rendered at
+that head, captured in one session with the buggy pair by the identical
+recipe — re-running it reproduced the shipped defect captures byte for byte,
+so the two variants differ only by the defect. The pre-wrap gaps add 546px of
+blank vertical space: 1804px tall buggy vs 1258px fixed at 1440. Without this
+pairing the false-positive run would review the FIXED code against the BUGGY
+captures, so a sharpened artifact prompt could not be told apart from a
+trigger-happy one.
 """
 ac_provenance = "replay"
 tier = "frontier"       # new surface — nothing measures the artifact pass yet
@@ -30,6 +42,10 @@ head_patch = "feature-with-defect.patch"
 personas = ["correctness"]
 profile = "standard"
 acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+artifacts_dir = "known-good-artifacts"
 
 [[expected]]
 file = "src/lithos_lens/static/lens.css"

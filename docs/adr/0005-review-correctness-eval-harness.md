@@ -310,7 +310,33 @@ reviews the known-good head with the *same* `Case`, so an artifact case with
 `[known_good]` would show the fixed code the buggy captures — the FP number
 would be meaningless. `[known_good]` is now rejected on artifact cases;
 variant-specific captures (a known-good `artifacts_dir`) are the follow-up if
-FP measurement on this surface is ever wanted.
+FP measurement on this surface is ever wanted. *(Superseded 2026-08-14 — see
+the RH-1 update below: the pairing shipped.)*
+
+## Update (2026-08-14, RH-1): paired captures make artifact FP measurable
+
+The catch-only restriction above is lifted by declaring the captures **per
+variant**: `[known_good] artifacts_dir` alongside `[known_good] head_patch`,
+with the seeder picking the set that matches the head under review. Both halves
+are required together (load-enforced) — the whole point is that reviewing the
+fixed code against the buggy captures would measure the captures, not the
+review — and the known-good root goes through the same shared checks.
+
+The motivation is an A/B, not completeness. RH-1's step-0 diagnosis found the
+artifact pass's 0-findings result is prompt-caused rather than a vision
+capability gap (the reviewer demonstrably calls `view_image` on the captures and
+still LGTMs), so the fix under test is a **sharper artifact prompt** — and a
+sharper prompt is exactly the change that could raise catch-rate by making the
+reviewer flag ordinary design as defective. Without a known-good render the
+benchmark scores that failure mode as success.
+
+The pairing carries a data-quality obligation the harness cannot enforce:
+capture both variants in one session from the same source, so the only
+difference is the defect. For `lens22-artifact-prewrap` the fix is the authentic
+one lens shipped (`734e5ef`, dropping `white-space: pre-wrap` from
+`.markdown-body`), and re-running the recipe reproduced the committed defect
+captures byte for byte — evidence the recipe is deterministic and the pair is
+genuinely matched.
 
 ## Deferred
 

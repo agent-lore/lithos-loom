@@ -451,6 +451,185 @@ def test_rejects_symlink_in_artifacts_dir(tmp_path: Path) -> None:
         load_case(case_dir)
 
 
+# ── paired artifact cases (RH-1): per-variant captures make FP measurable ──
+# An artifact case may pair its defect captures with the SAME pages rendered at
+# a known-good head. Without that pairing the fixed head would be reviewed
+# against the buggy captures, so #302 rejected [known_good] on artifact cases
+# outright; the pairing is what lifts that restriction.
+
+_PAIRED_ARTIFACT_TOML = _ARTIFACT_TOML.replace(
+    "[[expected]]",
+    '[known_good]\nhead = "cccccccc"\n'
+    'artifacts_dir = "known-good-artifacts"\n\n[[expected]]',
+)
+
+
+def test_paired_artifact_case_loads(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
+    _write_artifact(case_dir)
+    _write_artifact(
+        case_dir, rel="known-good-artifacts/page-800.png", data=b"\x89PNG-fixed"
+    )
+
+    case = load_case(case_dir)
+
+    assert case.artifacts_dir == "artifacts"
+    assert case.known_good_artifacts_dir == "known-good-artifacts"
+    assert case.known_good_head == "cccccccc"
+
+
+def test_known_good_artifacts_dir_defaults_to_none(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_ARTIFACT_TOML)
+    _write_artifact(case_dir)
+
+    assert load_case(case_dir).known_good_artifacts_dir is None
+
+
+def test_artifact_case_known_good_requires_its_own_captures(tmp_path: Path) -> None:
+    # the #302 rule, now scoped: a known-good head with NO known-good captures
+    # would be reviewed against the buggy ones — a meaningless FP number
+    toml = _ARTIFACT_TOML.replace(
+        "[[expected]]", '[known_good]\nhead = "cccccccc"\n\n[[expected]]'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match="known-good captures"):
+        load_case(case_dir)
+
+
+def test_known_good_artifacts_without_artifacts_dir_rejected(tmp_path: Path) -> None:
+    # a diff case with known-good captures means the author intended an artifact
+    # case; running it as a diff case would measure a different surface
+    toml = _SEED_TOML.replace(
+        '[known_good]\nhead = "cccccccc"\n',
+        '[known_good]\nhead = "cccccccc"\nartifacts_dir = "known-good-artifacts"\n',
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir, rel="known-good-artifacts/page-800.png")
+    with pytest.raises(ValueError, match="artifacts_dir"):
+        load_case(case_dir)
+
+
+def test_rejects_identical_heads(tmp_path: Path) -> None:
+    # PR #306 review (Medium): a known-good head equal to the defect head means
+    # the FP arm reviews the SAME code — every "false positive" is really a
+    # catch. Silent, and it corrupts the metric this pairing exists to protect.
+    toml = _SEED_TOML.replace(
+        '[known_good]\nhead = "cccccccc"', '[known_good]\nhead = "bbbbbbbb"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    with pytest.raises(ValueError, match="same head"):
+        load_case(case_dir)
+
+
+def test_rejects_the_same_patch_for_both_heads(tmp_path: Path) -> None:
+    # the patch-form of the same mistake: identical patches build identical
+    # trees, so the known-good arm reviews the defect
+    toml = _PATCH_TOML + '\n[known_good]\nhead_patch = "head.patch"\n'
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_patch(case_dir)
+    with pytest.raises(ValueError, match="same patch"):
+        load_case(case_dir)
+
+
+def test_rejects_the_same_artifacts_dir_for_both_variants(tmp_path: Path) -> None:
+    # PR #306 review (Medium): one dir for both variants recreates exactly the
+    # corruption #302 fail-closed on — the fixed head shown the buggy captures
+    toml = _PAIRED_ARTIFACT_TOML.replace(
+        'artifacts_dir = "known-good-artifacts"', 'artifacts_dir = "artifacts"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match="distinct"):
+        load_case(case_dir)
+
+
+def test_rejects_nested_capture_roots(tmp_path: Path) -> None:
+    # a nested known-good root is walked by the defect root's recursive scan,
+    # so the "defect" capture set would contain the known-good renders too
+    toml = _PAIRED_ARTIFACT_TOML.replace(
+        'artifacts_dir = "known-good-artifacts"',
+        'artifacts_dir = "artifacts/known-good"',
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    _write_artifact(
+        case_dir, rel="artifacts/known-good/page-800.png", data=b"\x89PNG-fixed"
+    )
+    with pytest.raises(ValueError, match="nested"):
+        load_case(case_dir)
+
+
+def test_rejects_mismatched_capture_file_sets(tmp_path: Path) -> None:
+    # "the same pages at the same widths" is the pairing contract: two buggy
+    # viewports against one known-good viewport compares different stimuli
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
+    _write_artifact(case_dir, rel="artifacts/page-768.png")
+    _write_artifact(case_dir, rel="artifacts/page-1440.png")
+    _write_artifact(
+        case_dir, rel="known-good-artifacts/page-768.png", data=b"\x89PNG-fixed"
+    )
+    with pytest.raises(ValueError, match="same relative"):
+        load_case(case_dir)
+
+
+def test_rejects_byte_identical_capture_sets(tmp_path: Path) -> None:
+    # identical captures cannot distinguish the heads on the measured surface,
+    # so the FP arm reviews the defect render under a "fixed" label
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
+    _write_artifact(case_dir, rel="artifacts/page-800.png", data=b"\x89PNG-same")
+    _write_artifact(
+        case_dir, rel="known-good-artifacts/page-800.png", data=b"\x89PNG-same"
+    )
+    with pytest.raises(ValueError, match="identical"):
+        load_case(case_dir)
+
+
+def test_rejects_missing_known_good_artifacts_dir(tmp_path: Path) -> None:
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
+    _write_artifact(case_dir)  # only the buggy captures exist
+    with pytest.raises(ValueError, match="artifacts"):
+        load_case(case_dir)
+
+
+def test_rejects_symlink_in_known_good_artifacts_dir(tmp_path: Path) -> None:
+    # the known-good captures go through the SAME hardening as the buggy ones
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=_PAIRED_ARTIFACT_TOML)
+    _write_artifact(case_dir)
+    _write_artifact(case_dir, rel="known-good-artifacts/page-800.png")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"x")
+    (case_dir / "known-good-artifacts" / "link.png").symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        load_case(case_dir)
+
+
+def test_rejects_parent_traversal_known_good_artifacts_dir(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"s3cret")
+    toml = _PAIRED_ARTIFACT_TOML.replace(
+        'artifacts_dir = "known-good-artifacts"', 'artifacts_dir = "../outside"'
+    )
+    case_dir = tmp_path / "c"
+    _write_case(case_dir, toml=toml)
+    _write_artifact(case_dir)
+    with pytest.raises(ValueError, match=r"\.\."):
+        load_case(case_dir)
+
+
 # ── artifact-root escapes (#302 review, High): the root itself must be a real
 # directory inside the case dir — a `../`, absolute, or symlinked root would
 # expose arbitrary host files to the reviewer container (and its provider).
@@ -544,21 +723,6 @@ def test_rejects_symlinked_component_in_artifacts_root(tmp_path: Path) -> None:
         load_case(case_dir)
 
 
-def test_artifact_case_rejects_known_good(tmp_path: Path) -> None:
-    # #302 review (Medium): run_case reviews the known-good head with the SAME
-    # case — the fixed code against the buggy captures — so any FP number would
-    # be meaningless. Catch-only until variant-specific captures exist.
-    toml = _SEED_TOML.replace(
-        'id = "180',
-        'artifacts_dir = "artifacts"\nartifact_provenance = "captured"\nid = "180',
-    )  # keeps _SEED_TOML's [known_good]
-    case_dir = tmp_path / "c"
-    _write_case(case_dir, toml=toml)
-    _write_artifact(case_dir)
-    with pytest.raises(ValueError, match="catch-only"):
-        load_case(case_dir)
-
-
 # ── strict case.toml keys: a typo'd knob must fail, not silently no-op ──
 # e.g. a misspelled artifacts_dir would silently degrade the case to a diff-only
 # run — the same measured-surface poison the profile/persona checks fail closed on.
@@ -612,9 +776,14 @@ def test_shipped_artifact_cases_fit_the_byte_budget() -> None:
         case = load_case(case_dir)
         if case.artifacts_dir is None:
             continue
+        # Both variants count: a paired case carries two sets of captures, and
+        # the budget is about what a clone pulls down, not per-directory size.
+        variants = [case.artifacts_dir, case.known_good_artifacts_dir]
         total = sum(
             p.stat().st_size
-            for p in (case_dir / case.artifacts_dir).rglob("*")
+            for v in variants
+            if v is not None
+            for p in (case_dir / v).rglob("*")
             if p.is_file()
         )
         assert total <= _ARTIFACTS_BUDGET_BYTES, (
