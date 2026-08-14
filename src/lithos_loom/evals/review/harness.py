@@ -212,9 +212,11 @@ def live_review(
         # RH-3: an artifact case seeds its checked-in captures into the run's
         # artifacts dir and measures the approval-hold artifact-review pass
         # instead of the diff panel — one surface per case, so a catch is
-        # attributable (findings carry no pass provenance).
+        # attributable (findings carry no pass provenance). The seeder picks
+        # the captures matching *this* head (RH-1), so the known-good run
+        # reviews the fixed render.
         if case.artifacts_dir is not None:
-            seed_case_artifacts(case, config)
+            seed_case_artifacts(case, config, head_sha=head_sha)
             return review_change(config, change, artifact_only=True).to_json()
         return review_change(config, change).to_json()
     finally:

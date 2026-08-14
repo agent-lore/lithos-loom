@@ -249,15 +249,28 @@ def _artifact_info(case: Case) -> dict | None:
     ``None`` for ordinary diff cases (the summary key is then omitted, so old
     summaries and diff-case summaries read identically). Counts via the same
     shared walk the loader and seeder use (#302 review), so the recorded
-    ``n_files`` is exactly what the pass reviews.
+    ``n_files`` is exactly what the pass reviews. A paired case (RH-1) also
+    records its known-good capture count — whether an artifact case measured
+    false positives at all is part of what makes two report dirs comparable.
     """
     if case.artifacts_dir is None or case.case_dir is None:
         return None
     root = resolve_artifacts_root(case.case_dir, case.artifacts_dir, case.id)
-    return {
+    info = {
         "n_files": len(iter_artifact_files(root, case.id)),
         "provenance": case.artifact_provenance,
     }
+    if case.known_good_artifacts_dir is not None:
+        kg_root = resolve_artifacts_root(
+            case.case_dir,
+            case.known_good_artifacts_dir,
+            case.id,
+            label="[known_good] artifacts_dir",
+        )
+        info["known_good_n_files"] = len(
+            iter_artifact_files(kg_root, case.id, label="known-good artifact")
+        )
+    return info
 
 
 def _panel_phrase(panel: tuple[ReviewerSpec, ...]) -> str:

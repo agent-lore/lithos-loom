@@ -41,7 +41,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
 | Entrypoint | 2 | 618 | 490 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
 | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
-| Evals | 11 | 1662 | 1331 | 1 | 2 | 0.67 | 24 (`lithos_loom.evals.review.case.load_case`) | 5 |
+| Evals | 11 | 1741 | 1398 | 1 | 2 | 0.67 | 25 (`lithos_loom.evals.review.case.load_case`) | 6 |
 | GitHub | 1 | 796 | 616 | 5 | 1 | 0.17 | 14 (`lithos_loom.github_client._parse_pull_request`) | 1 |
 | LithosClient | 1 | 2195 | 1841 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Plugins | 41 | 12929 | 10314 | 2 | 5 | 0.71 | 96 (`lithos_loom.plugins.story_develop.__main__.main`) | 29 |
@@ -56,7 +56,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **120**, lines: **37967**, SLOC: **30117**
+- Modules: **120**, lines: **38046**, SLOC: **30184**
 - Largest module: `lithos_loom.lithos_client` (2195 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **959**, cyclomatic > 10: **82**
+- Functions: **960**, cyclomatic > 10: **83**
 
 Top 10 most complex functions:
 
@@ -83,7 +83,7 @@ Top 10 most complex functions:
 | 28 | `lithos_loom.config._parse_obsidian_sync` |
 | 28 | `lithos_loom.plugins.story_develop.pr_delivery._deliver_after_open` |
 | 25 | `lithos_loom.cli.develop._outcome_line` |
-| 24 | `lithos_loom.evals.review.case.load_case` |
+| 25 | `lithos_loom.evals.review.case.load_case` |
 
 ## Seams
 
@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **17** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.63** (61977 test lines / 37967 source lines)
+- Test-to-source line ratio: **1.63** (62204 test lines / 38046 source lines)

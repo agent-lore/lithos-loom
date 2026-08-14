@@ -38,7 +38,11 @@ mechanism = "exits before delivery"
 
 
 def _make_case(
-    cases_dir: Path, case_id: str, tier: str | None = None, artifacts: bool = False
+    cases_dir: Path,
+    case_id: str,
+    tier: str | None = None,
+    artifacts: bool = False,
+    known_good_artifacts: bool = False,
 ) -> None:
     d = cases_dir / case_id
     d.mkdir(parents=True)
@@ -56,6 +60,14 @@ def _make_case(
         art = d / "artifacts"
         art.mkdir()
         (art / "page-800.png").write_bytes(b"\x89PNG...")
+    if known_good_artifacts:
+        toml += (
+            '\n[known_good]\nhead = "cccccccc"\n'
+            'artifacts_dir = "known-good-artifacts"\n'
+        )
+        kg = d / "known-good-artifacts"
+        kg.mkdir()
+        (kg / "page-800.png").write_bytes(b"\x89PNG-fixed")
     (d / "case.toml").write_text(toml)
     (d / "ac.md").write_text("attach must wait for delivery")
 
@@ -366,6 +378,30 @@ def test_summary_json_carries_artifacts_block(
     data = json.loads((out / "art-case" / "summary.json").read_text())
     assert data["artifacts"] == {"n_files": 1, "provenance": "captured"}
     assert "artifact" in result.output  # the running line names the surface
+
+
+def test_summary_json_records_the_known_good_captures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # RH-1: whether an artifact case measured false positives — and against how
+    # many captures — is part of what makes two report dirs comparable
+    cases = tmp_path / "cases"
+    _make_case(
+        cases, "art-case", tier="frontier", artifacts=True, known_good_artifacts=True
+    )
+    _stub_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(cases), "--report-dir", str(out)],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads((out / "art-case" / "summary.json").read_text())
+    assert data["artifacts"] == {
+        "n_files": 1,
+        "provenance": "captured",
+        "known_good_n_files": 1,
+    }
 
 
 def test_summary_json_omits_artifacts_for_diff_cases(
