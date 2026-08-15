@@ -415,3 +415,128 @@ def test_run_host_agent_raises_on_an_os_error(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(judge_mod.subprocess, "run", boom)
     with pytest.raises(JudgeUnavailable, match="PermissionError"):
         _run_host_agent("claude", "p", model=None, timeout=1)
+
+
+# --- a FAILED turn's text is never a verdict (#307 review round 1) -----------
+
+
+def _codex_stream(*events: dict) -> str:
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def test_a_hard_failed_claude_turn_with_a_readable_verdict_is_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial or stale output must never be scored as an answer.
+
+    `succeeded` folds together two very different things: "this turn worked" and
+    "it minted a resumable handle". Treating the whole of it as a benign anomaly
+    let a crashed turn whose retained text happened to end in `MATCHED: f-001`
+    manufacture a catch — the very defect this change set out to close.
+    """
+    monkeypatch.setattr(
+        judge_mod.subprocess,
+        "run",
+        lambda cmd, *a, **k: subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout=_claude_reply("analysis…\nMATCHED: f-001", is_error=True),
+            stderr="fatal",
+        ),
+    )
+    verdict = build_agent_judge(tool="claude", model="opus")("mech", _FINDINGS)
+
+    assert verdict.status == "failed"
+    assert verdict.matched_ids == ()
+    assert verdict.reply  # the text is still retained, for the audit record
+
+
+def test_a_codex_turn_that_fails_after_answering_is_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The codex stream keeps the last agent message even when the turn fails."""
+    stream = _codex_stream(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "MATCHED: f-001"},
+        },
+        {"type": "turn.failed", "error": "boom"},
+    )
+    monkeypatch.setattr(
+        judge_mod.subprocess,
+        "run",
+        lambda cmd, *a, **k: subprocess.CompletedProcess(
+            cmd, 0, stdout=stream, stderr=""
+        ),
+    )
+    verdict = build_agent_judge(tool="codex", model="gpt")("mech", _FINDINGS)
+
+    assert verdict.status == "failed"
+    assert verdict.matched_ids == ()
+
+
+def test_a_codex_answer_without_a_thread_id_is_still_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The narrow exception: completed cleanly, just not resumable."""
+    stream = _codex_stream(
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "MATCHED: f-001"},
+        },
+        {"type": "turn.completed", "usage": {}},
+    )
+    monkeypatch.setattr(
+        judge_mod.subprocess,
+        "run",
+        lambda cmd, *a, **k: subprocess.CompletedProcess(
+            cmd, 0, stdout=stream, stderr=""
+        ),
+    )
+    verdict = build_agent_judge(tool="codex", model="gpt")("mech", _FINDINGS)
+
+    assert verdict.status == "ok"
+    assert verdict.matched_ids == ("f-001",)
+    assert "resumable" in verdict.detail  # recorded, not acted on
+
+
+def test_a_hard_failed_turn_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def flaky(cmd, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout=_claude_reply("MATCHED: f-001", is_error=True),
+                stderr="x",
+            )
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=_claude_reply("MATCHED: f-002"), stderr=""
+        )
+
+    monkeypatch.setattr(judge_mod.subprocess, "run", flaky)
+    verdict = build_agent_judge(tool="claude", model="opus")("mech", _FINDINGS)
+
+    assert calls["n"] == 2
+    assert verdict.status == "ok"
+    assert verdict.matched_ids == ("f-002",)
+
+
+def test_run_host_agent_raises_on_a_turn_that_did_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        judge_mod.subprocess,
+        "run",
+        lambda cmd, *a, **k: subprocess.CompletedProcess(
+            cmd, 1, stdout=_claude_reply("partial", is_error=True), stderr="fatal"
+        ),
+    )
+    with pytest.raises(JudgeUnavailable, match="did not complete") as exc:
+        _run_host_agent("claude", "p", model=None, timeout=1)
+    assert exc.value.text == "partial"  # retained for the audit record

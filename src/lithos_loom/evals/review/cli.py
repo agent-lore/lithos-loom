@@ -40,7 +40,7 @@ from .harness import (
     run_case,
 )
 from .judge import build_agent_judge
-from .match import RunScore
+from .match import RunScore, judge_status_errored
 from .overrides import parse_reviewer_overrides, resolve_panel
 from .stats import wilson_interval
 
@@ -422,7 +422,11 @@ def _write_summary(
             for s in panel
         ],
         "k": r.n,
-        "n_valid": r.n - errored,
+        # Validity is the combined rule (#307): a sample the JUDGE could not rule
+        # on is excluded exactly like a crashed reviewer, so this must agree with
+        # catch_rate, the table and the block-rate gate. `errored` keeps its
+        # narrower reviewer-only meaning, so older report dirs stay comparable.
+        "n_valid": sum(1 for e in r.excluded_per_sample if not e),
         "errored": errored,
         "catch_rate": r.catch_rate,
         "catch_rate_ci": list(r.catch_rate_ci),
@@ -442,8 +446,11 @@ def _write_summary(
         "known_good_findings_per_sample": list(r.known_good_findings_per_sample),
         "known_good_blocked_per_sample": list(r.known_good_blocked_per_sample),
         "known_good_blocked": count_valid(
-            r.known_good_blocked_per_sample, r.false_positive_errored_per_sample
+            r.known_good_blocked_per_sample, r.false_positive_excluded_per_sample
         )[0],
+        "false_positive_n_valid": count_valid(
+            r.false_positive_per_sample, r.false_positive_excluded_per_sample
+        )[1],
         "findings_per_sample": list(r.findings_per_sample),
         "blocked_per_sample": list(r.blocked_per_sample),
         # #307: which samples the JUDGE could not rule on (distinct from a
@@ -585,6 +592,7 @@ def _print_table(results: list[tuple[str, CaseResult]]) -> None:
             fp_cell = (
                 f"{flagged}/{fp_valid} "
                 f"{_ci_band(*r.false_positive_rate_ci)}{_err_suffix(fp_err)}"
+                f"{_judge_err_suffix(sum(r.false_positive_judge_errored_per_sample))}"
             )
         else:
             fp_cell = f"{r.false_positive_rate * 100:.0f}%"
@@ -630,9 +638,34 @@ def _struct_note(r: CaseResult, judged_caught: int) -> str:
     still prints its free counterfactual.
     """
     struct, struct_valid = _structured_tally(r)
-    if not struct_valid or struct == judged_caught:
+    if not struct_valid or not _struct_disagrees(r, judged_caught):
         return ""
     return f"  struct {struct}/{struct_valid}"
+
+
+def _struct_disagrees(r: CaseResult, judged_caught: int) -> bool:
+    """Whether the judge and the structured matcher actually disagree.
+
+    Equal totals do **not** imply agreement: a judge that catches sample 0 and
+    misses sample 1 while the structured matcher does the reverse both tally
+    ``1/2``, and comparing only the totals would hide a case where *every*
+    sample disagreed — precisely the per-sample instability the audit trail
+    exists to expose. So the totals are checked first, then each comparable
+    sample. A sample is comparable when the reviewer produced a verdict and the
+    judge actually ruled: where the judge errored there is no answer to disagree
+    with (the differing *totals* already surface that case).
+    """
+    struct, _ = _structured_tally(r)
+    if struct != judged_caught:
+        return True
+    errored = r.errored_per_sample or (False,) * r.n
+    statuses = r.judge_status_per_sample or ("",) * r.n
+    for i in range(min(r.n, len(r.structured_caught_per_sample))):
+        if errored[i] or judge_status_errored(statuses[i]):
+            continue
+        if r.caught_per_sample[i] != r.structured_caught_per_sample[i]:
+            return True
+    return False
 
 
 def _noise_cell(r: CaseResult) -> str:

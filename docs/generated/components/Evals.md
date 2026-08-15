@@ -15,7 +15,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review` | XS | 0 | 0 |
 | `lithos_loom.evals.review.artifacts` | XS | 0 | 1 |
 | `lithos_loom.evals.review.case` | M | 2 | 3 |
-| `lithos_loom.evals.review.cli` | M | 0 | 1 |
+| `lithos_loom.evals.review.cli` | L | 0 | 1 |
 | `lithos_loom.evals.review.harness` | M | 1 | 3 |
 | `lithos_loom.evals.review.judge` | S | 1 | 1 |
 | `lithos_loom.evals.review.match` | S | 3 | 7 |

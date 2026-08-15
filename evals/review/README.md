@@ -477,11 +477,19 @@ different things:
 |---|---|---|
 | `ok` | a real answer — matched ids, or an explicit `MATCHED: none` veto | the measurement |
 | `unparsed` | the reply had no readable `MATCHED:` line | **excluded** (`+Njerr`) |
-| `failed` | no reply at all — timeout, missing CLI (retried once first) | **excluded** (`+Njerr`) |
+| `failed` | no usable reply — timeout, missing CLI, or a turn that did not complete (retried once first) | **excluded** (`+Njerr`) |
 
 Excluded samples leave the denominators exactly as a crashed reviewer does (#182 A3),
 so a judge timeout can no longer masquerade as a review miss. They are reported
-separately from `+Nerr`, so you can tell which half of the instrument broke.
+separately from `+Nerr`, so you can tell which half of the instrument broke — and
+`+Njerr` appears on the arm it happened to, beside `catch` or beside `fp`.
+
+A turn that did not *complete* (non-zero exit, claude `is_error`, codex
+`turn.failed`) is `failed` and its text is never parsed: it may be partial or
+stale, and the codex stream retains the last agent message even when a later event
+fails the turn. A turn that completed but minted no resumable session handle is
+still scored — that handle only matters for resume turns, which a one-shot judge
+call never does.
 
 With `--report-dir`, every judged sample writes its verdicts — including the judge's
 **raw reply** — to `<case>/judge/<variant>-<i>.json`. To find every veto in a run:

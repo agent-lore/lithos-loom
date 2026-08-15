@@ -51,6 +51,7 @@ class TurnResult:
     cost_usd: float
     raw: dict | None
     stderr: str
+    completed: bool = True
 
     @property
     def timed_out(self) -> bool:
@@ -254,15 +255,18 @@ class ClaudeEngine(_BaseEngine):
         parsed_session = str(raw.get("session_id") or "") if raw else ""
         result_text = str(raw.get("result") or "") if raw else ""
         cost_usd = float(raw.get("total_cost_usd") or 0.0) if raw else 0.0
-        # A non-empty session_id is required for success so later resume turns
-        # (T3) always have a handle to resume.
-        succeeded = (
-            exit_code == 0 and raw is not None and not is_error and bool(parsed_session)
-        )
+        # `completed` is the turn's own outcome; `succeeded` additionally demands
+        # a resumable handle, since later resume turns (T3) need one. Splitting
+        # them lets a one-shot caller (the eval judge, #307) tell a genuinely
+        # failed turn — whose partial text must never be trusted — from a good
+        # answer that merely cannot be resumed.
+        completed = exit_code == 0 and raw is not None and not is_error
+        succeeded = completed and bool(parsed_session)
 
         return TurnResult(
             exit_code=exit_code,
             succeeded=succeeded,
+            completed=completed,
             session_id=parsed_session,
             result_text=result_text,
             cost_usd=cost_usd,
@@ -394,9 +398,12 @@ class CodexEngine(_BaseEngine):
         # On resume, keep the handle we resumed even if the stream didn't re-emit
         # thread.started; on the first turn the handle MUST be captured fresh.
         handle = thread_id or (session_id if resume else "")
-        succeeded = (
-            exit_code == 0 and saw_completed and not failure_events and bool(handle)
-        )
+        # See the claude parser: `completed` is the turn's own outcome, and
+        # matters on its own because this stream retains the last agent message
+        # even when a later `turn.failed` arrives — so partial output must not be
+        # mistaken for an answer (#307).
+        completed = exit_code == 0 and saw_completed and not failure_events
+        succeeded = completed and bool(handle)
         raw_parts: dict = {}
         if usage is not None:
             raw_parts["usage"] = usage
@@ -407,6 +414,7 @@ class CodexEngine(_BaseEngine):
         return TurnResult(
             exit_code=exit_code,
             succeeded=succeeded,
+            completed=completed,
             session_id=handle,
             result_text=result_text,
             cost_usd=0.0,

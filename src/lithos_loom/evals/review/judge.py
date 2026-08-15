@@ -57,14 +57,11 @@ def build_agent_judge(
         except JudgeUnavailable as exc:
             return JudgeVerdict(status="failed", reply=exc.text, detail=exc.detail)
         verdict = _parse_verdict(turn.text, valid)
-        if not turn.anomaly:
-            return verdict
-        # The turn fell short of the engine's success bar. If the model still
-        # answered readably, the answer counts and the anomaly is recorded; if it
-        # did not, say WHY there is no verdict rather than blaming the parse.
-        if verdict.usable:
-            return replace(verdict, detail=turn.anomaly)
-        return replace(verdict, status="failed", detail=turn.anomaly)
+        # The turn completed, so its text is a real answer; the only thing it
+        # lacked was a resumable handle, which this one-shot call never uses.
+        # Recorded rather than acted on, so a change in the CLI's session
+        # plumbing shows up in the audit trail instead of voiding the run.
+        return replace(verdict, detail=turn.anomaly) if turn.anomaly else verdict
 
     def judge(mechanism: str, findings: list[dict]) -> JudgeVerdict:
         if not findings:
@@ -130,11 +127,17 @@ def _run_host_agent(
     ``engine.cli_argv(session_id=None)`` and the result parse is
     ``engine.parse_turn`` — one implementation.
 
-    ``TurnResult.succeeded`` is reported as an *anomaly*, not an error: both
-    engines fold a **session handle** into it so a later resume turn can
-    re-attach, which a one-shot judge Q&A never needs. Gating the eval's scorer
-    on that would mean a CLI that stopped echoing a handle turned every case
-    into zero valid samples (#307).
+    A turn that did not **complete** (non-zero exit, claude ``is_error``, a codex
+    ``turn.failed`` / missing ``turn.completed``) raises: its text may be partial
+    or stale — the codex stream retains the last agent message even when a later
+    event fails the turn — so parsing it could manufacture a verdict out of a
+    crash (#307).
+
+    A turn that completed but minted **no resumable handle** is only an
+    *anomaly*: both engines fold that handle into ``succeeded`` so a later resume
+    turn can re-attach, which a one-shot judge Q&A never needs. Gating the eval's
+    scorer on it would mean a CLI that stopped echoing a handle turned every case
+    into zero valid samples.
     """
     if not engines.is_supported(tool):
         raise ValueError(
@@ -150,12 +153,15 @@ def _run_host_agent(
     result = engine.parse_turn(
         proc.stdout, exit_code=proc.returncode, stderr=proc.stderr
     )
+    if not result.completed:
+        raise JudgeUnavailable(
+            f"turn did not complete (exit {result.exit_code}): "
+            f"{result.stderr.strip()[:200]}",
+            text=result.result_text,
+        )
     anomaly = ""
     if not result.succeeded:
-        anomaly = (
-            f"turn did not succeed (exit {result.exit_code}, "
-            f"session {result.session_id!r}): {result.stderr.strip()[:200]}"
-        )
+        anomaly = f"turn minted no resumable session handle (exit {result.exit_code})"
     return _HostTurn(text=result.result_text, anomaly=anomaly)
 
 

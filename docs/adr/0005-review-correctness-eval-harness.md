@@ -414,12 +414,25 @@ verdict and are excluded from every denominator like a crashed reviewer (#182 A3
 but reported separately (`+Njerr`) so it is clear which half of the instrument
 broke. The whole-reply fallback is deleted.
 
-`TurnResult.succeeded` is deliberately **not** promoted to a failure. Both engines
-fold a *session handle* into it so a later resume turn can re-attach — meaningless
-for a one-shot host-direct Q&A — so gating the scorer on it would mean a CLI that
-stopped echoing a handle turned every case into zero valid samples. It is recorded
-as an anomaly instead; a failed turn's payload carries no `MATCHED:` line and so
-lands on `unparsed`/`failed` on its own merits.
+`TurnResult.succeeded` turned out to conflate two things, and the first review
+round caught the cost of treating them alike. It means *both* "this turn worked"
+and "it minted a resumable session handle". The handle exists so a later resume
+turn can re-attach — meaningless for a one-shot host-direct Q&A — so gating the
+scorer on the whole predicate would mean a CLI that stopped echoing a handle
+turned every case into zero valid samples. But the first attempt at that
+exemption demoted *every* `succeeded == False` to a benign anomaly, on the
+assumption that a failed turn carries no `MATCHED:` line. That assumption was
+wrong for both engines: a claude reply with `is_error: true` can still carry one,
+and the codex stream **retains the last agent message even when a later
+`turn.failed` arrives**. So a crashed turn could manufacture a catch out of
+partial or stale output — the very defect the change set out to close.
+
+`TurnResult` therefore now carries **`completed`** (the turn's own outcome)
+alongside `succeeded` (`completed` *and* resumable). The judge treats a turn that
+did not complete as `failed` — text retained for audit, retried once, never
+parsed — and reserves the anomaly for the narrow missing-handle case. The
+distinction lives in the engine adapter rather than in per-tool JSON knowledge
+re-derived inside the judge, which ARCH-2.E5 deliberately removed.
 
 Two consequences for auditability. The structured matcher is pure over the stored
 findings, so **both** answers are now computed every run for free, and the catch

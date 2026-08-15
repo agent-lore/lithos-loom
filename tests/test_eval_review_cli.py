@@ -1496,3 +1496,112 @@ def test_judge_failures_are_named_on_stderr(
     assert "judge gave no verdict" in plain
     assert "1 failed" in plain
     assert "+1jerr" in plain  # and it is visible in the catch cell too
+
+
+def test_summary_validity_counts_judge_errors_too(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    """summary.json must not contradict the rates it sits beside (#307 review).
+
+    `n_valid` was reviewer-errors-only while `catch_rate`, the table and the
+    block-rate gate all used the combined rule — so a report dir could record
+    `n_valid: 3` for a catch rate computed over one sample.
+    """
+    _stub_judging_run_case(
+        monkeypatch,
+        statuses=("ok", "failed", "failed"),
+        caught=(True, False, False),
+        structured=(True, True, True),
+    )
+    out = tmp_path / "reports"
+    _invoke(cases_dir, out)
+
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert data["n_valid"] == 1  # not 3
+    assert data["errored"] == 0  # reviewer-only meaning is preserved
+    assert data["judge_errored"] == 2
+
+
+def test_summary_known_good_block_count_excludes_judge_errors(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    def fake(case, **kwargs):
+        return CaseResult(
+            case_id=case.id,
+            n=2,
+            catch_rate=1.0,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=True,
+            caught_per_sample=(True, True),
+            severity_per_sample=(True, True),
+            catch_rate_ci=wilson_interval(2, 2),
+            errored_per_sample=(False, False),
+            false_positive_per_sample=(False, False),
+            false_positive_errored_per_sample=(False, False),
+            known_good_findings_per_sample=(1, 1),
+            known_good_blocked_per_sample=(True, True),
+            # the second known-good sample could not be judged at all
+            false_positive_judge_status_per_sample=("ok", "failed"),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+    out = tmp_path / "reports"
+    _invoke(cases_dir, out)
+
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert data["known_good_blocked"] == 1  # not 2
+    assert data["false_positive_n_valid"] == 1
+    assert data["false_positive_judge_errored"] == 1
+
+
+def test_known_good_judge_errors_are_visible_in_the_fp_cell(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    """Otherwise the known-good denominator silently shrinks (#307 review)."""
+
+    def fake(case, **kwargs):
+        return CaseResult(
+            case_id=case.id,
+            n=2,
+            catch_rate=1.0,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=True,
+            caught_per_sample=(True, True),
+            severity_per_sample=(True, True),
+            catch_rate_ci=wilson_interval(2, 2),
+            errored_per_sample=(False, False),
+            false_positive_per_sample=(False, False),
+            false_positive_errored_per_sample=(False, False),
+            known_good_findings_per_sample=(0, 0),
+            known_good_blocked_per_sample=(False, False),
+            false_positive_judge_status_per_sample=("ok", "failed"),
+            judge_status_per_sample=("ok", "ok"),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+    result = _invoke(cases_dir)
+    plain = _plain(result.output)
+
+    assert "0/1 " in plain  # the fp denominator did shrink...
+    assert "+1jerr" in plain  # ...and the table says why
+
+
+def test_crossed_per_sample_disagreement_still_shows_the_struct_note(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    """Equal totals do not mean agreement (#307 review).
+
+    Judge catches sample 0 and misses 1; the structured matcher does the
+    reverse. Both tally 1/2, so comparing only the totals hid a case where
+    *every* sample disagreed.
+    """
+    _stub_judging_run_case(
+        monkeypatch,
+        statuses=("ok", "ok"),
+        caught=(True, False),
+        structured=(False, True),
+    )
+    result = _invoke(cases_dir)
+    assert "struct 1/2" in _plain(result.output)

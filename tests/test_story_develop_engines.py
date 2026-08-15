@@ -411,3 +411,70 @@ def test_engines_satisfy_the_engine_protocol() -> None:
     for e in engines_under_test:
         for member in required:
             assert hasattr(e, member), f"{type(e).__name__} missing {member!r}"
+
+
+# ── completed vs succeeded: turn outcome vs resumability (#307) ──────────────
+
+
+def _claude_json(text: str, *, is_error: bool = False, session: str = "sid-1") -> str:
+    return json.dumps(
+        {"type": "result", "is_error": is_error, "result": text, "session_id": session}
+    )
+
+
+def _codex_json(*events: dict) -> str:
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def test_claude_completed_is_true_without_a_session_handle() -> None:
+    """A good answer that simply cannot be resumed still completed.
+
+    `succeeded` requires a handle so a later resume turn (T3) can re-attach;
+    one-shot callers need the turn's own outcome, and conflating the two let a
+    crashed turn's partial text pass for an answer (#307).
+    """
+    r = get_engine("claude").parse_turn(
+        _claude_json("done", session=""), exit_code=0, stderr=""
+    )
+    assert r.completed is True
+    assert r.succeeded is False
+
+
+def test_claude_completed_is_false_on_is_error() -> None:
+    r = get_engine("claude").parse_turn(
+        _claude_json("partial", is_error=True), exit_code=1, stderr="fatal"
+    )
+    assert r.completed is False
+    assert r.succeeded is False
+    assert r.result_text == "partial"  # retained for the audit record
+
+
+def test_claude_completed_is_false_on_nonzero_exit() -> None:
+    r = get_engine("claude").parse_turn(_claude_json("partial"), exit_code=1, stderr="")
+    assert r.completed is False
+
+
+def test_codex_completed_is_false_when_the_turn_fails_after_answering() -> None:
+    stream = _codex_json(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}},
+        {"type": "turn.failed", "error": "boom"},
+    )
+    r = get_engine("codex").parse_turn(stream, exit_code=0, stderr="")
+    assert r.completed is False
+    assert r.result_text == "hi"  # the stream retains it — hence the distinction
+
+
+def test_codex_completed_is_true_without_a_thread_id() -> None:
+    stream = _codex_json(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}},
+        {"type": "turn.completed", "usage": {}},
+    )
+    r = get_engine("codex").parse_turn(stream, exit_code=0, stderr="")
+    assert r.completed is True
+    assert r.succeeded is False
+
+
+def test_a_fully_good_turn_is_both_completed_and_succeeded() -> None:
+    r = get_engine("claude").parse_turn(_claude_json("done"), exit_code=0, stderr="")
+    assert (r.completed, r.succeeded) == (True, True)
