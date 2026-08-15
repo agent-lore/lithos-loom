@@ -24,7 +24,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.overrides` | S | 0 | 2 |
 | `lithos_loom.evals.review.patch` | S | 0 | 1 |
 | `lithos_loom.evals.review.report` | S | 0 | 12 |
-| `lithos_loom.evals.review.rescore` | M | 5 | 5 |
+| `lithos_loom.evals.review.rescore` | M | 5 | 6 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
 
 ## Public API
@@ -102,8 +102,9 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - class `CaseReports` — Every retained artefact for one case in a report dir.
 - class `JudgeSite` — One (sample × expected) decision point, and its verdict per repeat.
 - class `CaseRescore` — A case re-scored: the authoritative result plus what varied around it.
-- def `load_report_dir` — Every case in *report_dir*, parsed up front so failures precede paid work.
-- def `judge_call_count` — Exactly how many judge calls a rescore will make — known before paying.
+- def `load_report_dir` — Every case in *report_dir*, parsed **and structurally validated** up front.
+- def `judge_call_count` — How many **verdict requests** a rescore will make — known before paying.
+- def `resolve_bar` — The bar to score at, and where it came from — flag, run, or default.
 - def `rescore_case` — Score *reports* against *case*, plus the free structured counterfactual.
 - def `drift_vs_summary` — Per-key comparison against what the run recorded, if anything.
 - def `identity_of` — ``verified`` | ``changed`` | ``unverifiable`` for a case's scoring inputs.

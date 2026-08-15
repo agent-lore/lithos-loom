@@ -22,7 +22,11 @@ from lithos_loom.evals.review.rescore import (
     judge_call_count,
     load_report_dir,
     rescore_case,
+    resolve_bar,
 )
+
+_FAILED = JudgeVerdict(status="failed", detail="TimeoutExpired: 300s")
+_UNPARSED = JudgeVerdict(status="unparsed", reply="I think f-001 is wrong")
 
 _EXPECTED = Expected(
     file="cli/develop.py",
@@ -97,6 +101,26 @@ def _vetoing(_mech: str, _findings: list[dict]) -> JudgeVerdict:
     return JudgeVerdict()
 
 
+def _scripted(verdicts: list[JudgeVerdict]):
+    """A judge answering *verdicts* in call order (sample-major, then repeat)."""
+    calls = {"n": 0}
+
+    def judge(_mech: str, findings: list[dict]) -> JudgeVerdict:
+        i = calls["n"]
+        calls["n"] += 1
+        v = verdicts[min(i, len(verdicts) - 1)]
+        # A confirming verdict names the findings it was actually shown.
+        if v.status == "ok" and v.matched_ids == ("*",):
+            return JudgeVerdict(matched_ids=tuple(f["finding_id"] for f in findings))
+        return v
+
+    return judge
+
+
+_CONFIRM = JudgeVerdict(matched_ids=("*",))
+_VETO = JudgeVerdict()
+
+
 def _flipping(pattern: list[bool]):
     """A judge whose Nth call confirms or vetoes per *pattern* — a scripted flip."""
     calls = {"n": 0}
@@ -164,6 +188,87 @@ def test_load_rejects_a_report_that_is_not_a_review_report(tmp_path: Path) -> No
     root = _dir(tmp_path, [_report([_finding()])])
     (root / "180-attach-delivery" / "buggy-1.json").write_text('{"nope": 1}')
     with pytest.raises(RescoreError, match="not a ReviewReport"):
+        load_report_dir(root)
+
+
+def test_load_rejects_reviewers_that_are_not_a_list(tmp_path: Path) -> None:
+    root = _dir(tmp_path, [_report([_finding()])])
+    (root / "180-attach-delivery" / "buggy-1.json").write_text('{"reviewers": 3}')
+    with pytest.raises(RescoreError, match="'reviewers' is not a list"):
+        load_report_dir(root)
+
+
+def test_load_rejects_a_reviewer_that_is_not_an_object(tmp_path: Path) -> None:
+    root = _dir(tmp_path, [_report([_finding()])])
+    (root / "180-attach-delivery" / "buggy-1.json").write_text('{"reviewers": ["x"]}')
+    with pytest.raises(RescoreError, match=r"reviewers\[0\] is not an object"):
+        load_report_dir(root)
+
+
+def test_load_rejects_findings_that_are_not_a_list(tmp_path: Path) -> None:
+    root = _dir(tmp_path, [_report([_finding()])])
+    (root / "180-attach-delivery" / "buggy-1.json").write_text(
+        json.dumps({"reviewers": [{"findings": "nope"}]})
+    )
+    with pytest.raises(RescoreError, match=r"findings is not a list"):
+        load_report_dir(root)
+
+
+def test_load_rejects_a_finding_that_is_not_an_object(tmp_path: Path) -> None:
+    """The shape the scorer would crash on AFTER paying for earlier samples."""
+    root = _dir(tmp_path, [_report([_finding()])])
+    (root / "180-attach-delivery" / "buggy-1.json").write_text(
+        json.dumps({"reviewers": [{"findings": ["not-a-finding"]}]})
+    )
+    with pytest.raises(RescoreError, match=r"findings\[0\] is not an object"):
+        load_report_dir(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("rationale", 7, "rationale is not a string"),
+        ("files", "cli/develop.py", "files is not a list of strings"),
+        ("files", [1], "files is not a list of strings"),
+        ("finding_id", 1, "finding_id is not a string"),
+        ("severity", "blocker", "severity must be one of"),
+        ("severity", None, "severity must be one of"),
+    ],
+)
+def test_load_rejects_a_finding_field_the_scorer_would_choke_on(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    bad = {**_finding(), field: value}
+    root = _dir(tmp_path, [_report([bad])])
+    with pytest.raises(RescoreError, match=message):
+        load_report_dir(root)
+
+
+def test_load_rejects_a_malformed_summary_array(tmp_path: Path) -> None:
+    """Drift runs after the whole measurement is paid for — so it fails here."""
+    root = _dir(
+        tmp_path, [_report([_finding()])], summary={"caught_per_sample": "true"}
+    )
+    with pytest.raises(RescoreError, match="caught_per_sample is not a list"):
+        load_report_dir(root)
+
+
+@pytest.mark.parametrize("bar", [1.5, -0.1, "high", True, float("nan")])
+def test_load_rejects_an_unusable_recorded_bar(tmp_path: Path, bar: object) -> None:
+    root = _dir(tmp_path, [_report([_finding()])], summary={"bar": bar})
+    with pytest.raises(RescoreError, match="bar must be a finite rate"):
+        load_report_dir(root)
+
+
+def test_load_validates_every_case_before_returning_any(tmp_path: Path) -> None:
+    """A malformed report in the LAST case must not surface after the first
+    case has already been judged and paid for."""
+    root = _dir(tmp_path, [_report([_finding()])])
+    other = root / "zz-later-case"
+    other.mkdir()
+    (other / "buggy-0.json").write_text(json.dumps({"reviewers": [{"findings": [1]}]}))
+
+    with pytest.raises(RescoreError, match="zz-later-case"):
         load_report_dir(root)
 
 
@@ -298,7 +403,108 @@ def test_a_veto_is_recorded_even_at_one_repeat(tmp_path: Path) -> None:
 
     (site,) = scored.sites
     assert site.produced_ids == ("f-001",)
-    assert site.verdicts == (frozenset(),)
+    assert [(v.status, v.matched_ids) for v in site.verdicts] == [("ok", ())]
+
+
+# ── a judge error is an ABSENCE of a verdict, never a stable veto ────────────
+
+
+def test_an_errored_repeat_is_not_a_stable_veto(tmp_path: Path) -> None:
+    """A timeout and a veto both match nothing — only the status separates them.
+
+    Collapsing them would let a site the judge never answered be reported as a
+    verdict it stuck to, which is the false confidence #307 exists to remove.
+    """
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(
+        _case(), reports, bar=0.5, judge=_scripted([_VETO, _FAILED]), repeats=2
+    )
+
+    (site,) = scored.sites
+    assert site.errored is True
+    assert site.stable is False
+    assert site.flipped is False  # nothing DISAGREED — there was only one answer
+    assert scored.measured_sites == 0
+    assert scored.unmeasured_sites == 1
+
+
+def test_every_repeat_failing_is_unmeasured_not_stable(tmp_path: Path) -> None:
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(
+        _case(), reports, bar=0.5, judge=_scripted([_FAILED]), repeats=3
+    )
+
+    assert scored.judged_sites == 1
+    assert scored.measured_sites == 0  # a 100%-stable reading here would be a lie
+    assert scored.flipped_sites == 0
+    assert scored.unmeasured_sites == 1
+
+
+def test_an_unparsed_reply_counts_as_an_error_too(tmp_path: Path) -> None:
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(
+        _case(), reports, bar=0.5, judge=_scripted([_CONFIRM, _UNPARSED]), repeats=2
+    )
+
+    assert scored.sites[0].errored is True
+    assert scored.measured_sites == 0
+
+
+def test_a_flip_between_answering_repeats_survives_an_unrelated_error(
+    tmp_path: Path,
+) -> None:
+    """A disagreement SEEN is a fact about the judge; a timeout must not erase it."""
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(
+        _case(),
+        reports,
+        bar=0.5,
+        judge=_scripted([_CONFIRM, _VETO, _FAILED]),
+        repeats=3,
+    )
+
+    assert scored.sites[0].flipped is True
+    assert scored.flipped_sites == 1
+    assert scored.measured_sites == 1
+    assert scored.unmeasured_sites == 0
+
+
+def test_the_spread_denominator_follows_each_repeats_valid_samples(
+    tmp_path: Path,
+) -> None:
+    """A repeat where the judge errored has fewer scorable samples — holding K
+    fixed would render that as a drop in catches instead of missing data."""
+    root = _dir(tmp_path, [_report([_finding()]), _report([_finding()])])
+    (reports,) = load_report_dir(root)
+    # sample 0: confirm, then a timeout; sample 1: confirm twice
+    scored = rescore_case(
+        _case(),
+        reports,
+        bar=0.5,
+        judge=_scripted([_CONFIRM, _FAILED, _CONFIRM, _CONFIRM]),
+        repeats=2,
+    )
+
+    assert scored.catch_per_repeat == (2, 1)
+    assert scored.valid_per_repeat == (2, 1)  # not (2, 2): one sample was excluded
+
+
+def test_an_errored_repeat_keeps_its_status_and_detail_for_the_audit(
+    tmp_path: Path,
+) -> None:
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(
+        _case(), reports, bar=0.5, judge=_scripted([_FAILED]), repeats=1
+    )
+
+    (verdict,) = scored.sites[0].verdicts
+    assert verdict.status == "failed"
+    assert "TimeoutExpired" in verdict.detail
 
 
 # ── drift, and the identity guard ────────────────────────────────────────────
@@ -337,6 +543,72 @@ def test_no_summary_means_no_drift_block(tmp_path: Path) -> None:
     (reports,) = load_report_dir(root)
     scored = rescore_case(_case(), reports, bar=0.5, judge=None, repeats=1)
     assert drift_vs_summary(scored.judged, None) == {}
+
+
+def test_drift_flags_a_sample_the_report_dir_gained(tmp_path: Path) -> None:
+    """A positional zip skips a trailing sample entirely — a different corpus
+    would read as an unchanged one."""
+    root = _dir(tmp_path, [_report([_finding()]), _report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(_case(), reports, bar=0.5, judge=None, repeats=1)
+
+    drift = drift_vs_summary(scored.judged, {"caught_per_sample": [True]})
+    assert drift["caught_per_sample"]["flipped"] == [1]
+
+
+def test_drift_flags_a_sample_the_report_dir_lost(tmp_path: Path) -> None:
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(_case(), reports, bar=0.5, judge=None, repeats=1)
+
+    drift = drift_vs_summary(scored.judged, {"caught_per_sample": [True, True]})
+    assert drift["caught_per_sample"]["flipped"] == [1]
+
+
+def test_drift_compares_the_judge_status_arms(tmp_path: Path) -> None:
+    """An original veto and a rescore timeout both leave `caught` False, so only
+    the status says the sample stopped being scorable at all."""
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(
+        _case(), reports, bar=0.5, judge=_scripted([_FAILED]), repeats=1
+    )
+
+    drift = drift_vs_summary(
+        scored.judged,
+        {"caught_per_sample": [False], "judge_status_per_sample": ["ok"]},
+    )
+    assert drift["caught_per_sample"]["flipped"] == []
+    assert drift["judge_status_per_sample"]["flipped"] == [0]
+
+
+def test_drift_does_not_compare_judge_status_without_a_judge(tmp_path: Path) -> None:
+    """A structured-only rescore has no judge answer; flagging every case would
+    bury the comparisons that do mean something."""
+    root = _dir(tmp_path, [_report([_finding()])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(_case(), reports, bar=0.5, judge=None, repeats=1)
+
+    drift = drift_vs_summary(
+        scored.judged, {"judge_status_per_sample": ["ok"]}, compare_judge_status=False
+    )
+    assert drift["judge_status_per_sample"] is None
+
+
+# ── the bar the run was scored at ────────────────────────────────────────────
+
+
+def test_bar_comes_from_the_recorded_summary() -> None:
+    assert resolve_bar({"bar": 0.6}, None) == (0.6, "summary")
+
+
+def test_an_explicit_bar_overrides_the_recorded_one() -> None:
+    assert resolve_bar({"bar": 0.6}, 0.9) == (0.9, "flag")
+
+
+def test_bar_falls_back_to_the_default_and_says_so() -> None:
+    assert resolve_bar({}, None) == (0.8, "default")
+    assert resolve_bar(None, None) == (0.8, "default")
 
 
 def test_identity_is_verified_when_the_fingerprint_matches() -> None:

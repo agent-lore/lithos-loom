@@ -102,8 +102,17 @@ def _default_models(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _stub_judge(monkeypatch: pytest.MonkeyPatch, *, pattern: list[bool] | None = None):
-    """Install a scripted judge; returns the call counter."""
+def _stub_judge(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pattern: list[bool] | None = None,
+    verdicts: list[JudgeVerdict] | None = None,
+):
+    """Install a scripted judge; returns the call counter.
+
+    *pattern* scripts confirm/veto; *verdicts* scripts whole verdicts, so a
+    judge ERROR (a timeout, an unreadable reply) can be driven too.
+    """
     calls = {"n": 0}
     seq = pattern or [True]
 
@@ -111,6 +120,8 @@ def _stub_judge(monkeypatch: pytest.MonkeyPatch, *, pattern: list[bool] | None =
         def judge(_mech: str, findings: list[dict]) -> JudgeVerdict:
             i = calls["n"]
             calls["n"] += 1
+            if verdicts is not None:
+                return verdicts[min(i, len(verdicts) - 1)]
             if seq[min(i, len(seq) - 1)]:
                 return JudgeVerdict(
                     matched_ids=tuple(f["finding_id"] for f in findings)
@@ -186,22 +197,54 @@ def test_the_veto_audit_trail_is_recorded_at_one_repeat(
     (case,) = json.loads((report_dir / "rescore.json").read_text())["cases"]
     site = case["stability"]["sites"][0]
     assert site["produced"] == ["f-001"]
-    assert site["verdicts"] == [[]]  # a finding was produced and nothing matched
+    # a finding was produced, the judge answered, and nothing matched
+    assert site["verdicts"] == [
+        {"status": "ok", "matched": [], "detail": "", "reply": ""}
+    ]
+
+
+def test_a_judge_error_is_serialised_with_its_status_and_reply(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """Without the status a timeout is indistinguishable from a veto on disk."""
+    _stub_judge(
+        monkeypatch,
+        verdicts=[JudgeVerdict(status="unparsed", reply="no verdict line here")],
+    )
+    _run(report_dir, cases_dir)
+
+    (case,) = json.loads((report_dir / "rescore.json").read_text())["cases"]
+    (verdict,) = case["stability"]["sites"][0]["verdicts"]
+    assert verdict["status"] == "unparsed"
+    assert verdict["reply"] == "no verdict line here"
+    assert case["stability"]["unmeasured_sites"] == 2
 
 
 # ── cost is visible, and payable only on purpose ─────────────────────────────
 
 
-def test_dry_run_prints_the_call_count_and_makes_no_call(
+def test_dry_run_prints_the_request_count_and_makes_no_call(
     monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
 ) -> None:
     calls = _stub_judge(monkeypatch)
     result = _run(report_dir, cases_dir, "--dry-run")
 
     assert result.exit_code == 0
-    assert "2 judge call(s)" in _unwrapped(result.output)
+    assert "2 judge verdict request(s)" in _unwrapped(result.output)
     assert calls["n"] == 0
     assert not (report_dir / "rescore.json").exists()
+
+
+def test_the_preflight_states_the_retry_ceiling_too(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """A failed call retries once, so the request count is not the paid ceiling."""
+    _stub_judge(monkeypatch)
+    result = _run(report_dir, cases_dir, "--dry-run")
+
+    plain = _unwrapped(result.output)
+    assert "up to 4 agent invocations" in plain
+    assert "retries once" in plain
 
 
 def test_no_judge_makes_no_calls(
@@ -261,6 +304,60 @@ def test_a_flipped_verdict_is_reported(
     assert "1/2 judged sites flipped" in plain
 
 
+def test_a_judge_error_is_never_reported_as_a_stable_verdict(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """The failure this command must never have: an all-timed-out measurement
+    reading as 100% stable because a timeout matches nothing, like a veto."""
+    _stub_judge(monkeypatch, verdicts=[JudgeVerdict(status="failed", detail="boom")])
+    result = _run(report_dir, cases_dir, "--judge-repeats", "2")
+    plain = _unwrapped(result.output)
+
+    assert "100.0% stable" not in plain
+    assert "UNMEASURED" in plain
+    assert "no site answered all 2 repeats" in plain
+
+
+def test_a_site_with_one_errored_repeat_is_excluded_and_counted(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    # sample 0: confirm then a timeout (unmeasurable); sample 1: confirm twice
+    _stub_judge(
+        monkeypatch,
+        verdicts=[
+            JudgeVerdict(matched_ids=("f-001",)),
+            JudgeVerdict(status="failed", detail="boom"),
+            JudgeVerdict(matched_ids=("f-001",)),
+            JudgeVerdict(matched_ids=("f-001",)),
+        ],
+    )
+    result = _run(report_dir, cases_dir, "--judge-repeats", "2")
+    plain = _unwrapped(result.output)
+
+    assert "0/1 judged sites flipped" in plain  # denominator excludes the errored site
+    assert "1 site(s) unmeasured" in plain
+    assert "+1jerr" in plain  # and the row says which case carried it
+
+
+def test_the_spread_denominator_tracks_each_repeats_valid_samples(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    _stub_judge(
+        monkeypatch,
+        verdicts=[
+            JudgeVerdict(matched_ids=("f-001",)),
+            JudgeVerdict(status="failed", detail="boom"),
+            JudgeVerdict(matched_ids=("f-001",)),
+            JudgeVerdict(matched_ids=("f-001",)),
+        ],
+    )
+    result = _run(report_dir, cases_dir, "--judge-repeats", "2")
+
+    # 1-2 catches over 1-2 valid samples — not a fixed K of 2, which would read
+    # as a real drop in catches rather than as missing data
+    assert "1-2/1-2" in _unwrapped(result.output)
+
+
 def test_repeats_with_no_judge_is_rejected_pre_paid(
     monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
 ) -> None:
@@ -314,6 +411,115 @@ def test_a_case_missing_from_the_tree_aborts_before_any_call(
     assert result.exit_code != 0
     assert "gone-case" in _unwrapped(result.output)
     assert calls["n"] == 0
+
+
+def test_a_malformed_report_aborts_before_any_call(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """Even behind a valid case: the whole corpus is validated before paying."""
+    other = report_dir / "zz-later"
+    other.mkdir()
+    (other / "buggy-0.json").write_text(json.dumps({"reviewers": [{"findings": [7]}]}))
+    calls = _stub_judge(monkeypatch)
+
+    result = _run(report_dir, cases_dir)
+    assert result.exit_code != 0
+    assert "is not an object" in _unwrapped(result.output)
+    assert calls["n"] == 0
+
+
+def test_out_pointing_at_a_retained_report_is_refused_pre_paid(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """--out over an input would destroy a paid artefact for a cheap one."""
+    victim = report_dir / "180-attach-delivery" / "buggy-0.json"
+    before = victim.read_bytes()
+    calls = _stub_judge(monkeypatch)
+
+    result = _run(report_dir, cases_dir, "--out", str(victim))
+    assert result.exit_code != 0
+    assert "refusing to overwrite a paid input" in _unwrapped(result.output)
+    assert calls["n"] == 0
+    assert victim.read_bytes() == before
+
+
+def test_out_pointing_at_a_recorded_summary_is_refused(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    summary = report_dir / "180-attach-delivery" / "summary.json"
+    summary.write_text('{"case": "180-attach-delivery"}')
+    _stub_judge(monkeypatch)
+
+    result = _run(report_dir, cases_dir, "--out", str(summary))
+    assert result.exit_code != 0
+    assert "refusing to overwrite a paid input" in _unwrapped(result.output)
+
+
+def test_out_with_a_missing_parent_is_refused_pre_paid(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path, tmp_path: Path
+) -> None:
+    """Otherwise the write fails only once the measurement is already bought."""
+    calls = _stub_judge(monkeypatch)
+    result = _run(report_dir, cases_dir, "--out", str(tmp_path / "nope" / "r.json"))
+
+    assert result.exit_code != 0
+    assert "no directory" in _unwrapped(result.output)
+    assert calls["n"] == 0
+
+
+def test_out_pointing_at_a_directory_is_refused(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_judge(monkeypatch)
+    result = _run(report_dir, cases_dir, "--out", str(tmp_path))
+
+    assert result.exit_code != 0
+    assert "is a directory" in _unwrapped(result.output)
+
+
+# ── the bar the run was scored at ────────────────────────────────────────────
+
+
+def test_the_recorded_bar_is_honoured(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """A run scored at --bar 0.5 must not read REGRESSED under a default 0.8."""
+    (report_dir / "180-attach-delivery" / "summary.json").write_text(
+        json.dumps({"case": "180-attach-delivery", "bar": 0.5})
+    )
+    _stub_judge(monkeypatch, pattern=[True, False])  # 1/2 catches
+
+    result = _run(report_dir, cases_dir)
+    assert result.exit_code == 0
+    assert "PASS" in result.output
+    (case,) = json.loads((report_dir / "rescore.json").read_text())["cases"]
+    assert (case["bar"], case["bar_source"]) == (0.5, "summary")
+
+
+def test_an_explicit_bar_overrides_the_recorded_one_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    (report_dir / "180-attach-delivery" / "summary.json").write_text(
+        json.dumps({"case": "180-attach-delivery", "bar": 0.5})
+    )
+    _stub_judge(monkeypatch, pattern=[True, False])
+
+    result = _run(report_dir, cases_dir, "--bar", "0.9")
+    assert "FAIL" in result.output
+    assert "--bar overrides the bar these runs recorded" in _unwrapped(result.output)
+    (case,) = json.loads((report_dir / "rescore.json").read_text())["cases"]
+    assert (case["bar"], case["bar_source"]) == (0.9, "flag")
+
+
+def test_a_run_with_no_recorded_bar_says_it_is_defaulting(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    _stub_judge(monkeypatch)
+    result = _run(report_dir, cases_dir)
+
+    assert "no bar recorded by these runs" in _unwrapped(result.output)
+    (case,) = json.loads((report_dir / "rescore.json").read_text())["cases"]
+    assert case["bar_source"] == "default"
 
 
 def test_judge_without_an_explicit_model_is_rejected(

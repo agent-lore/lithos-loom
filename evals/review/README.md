@@ -81,7 +81,7 @@ reviewer — the only cost is judge calls:
 # free: the structured counterfactual, zero tokens
 uv run lithos-loom eval rescore ~/lithos-loom-eval-reports/baseline-pinned-2026-08-13 --no-judge
 
-# see the exact judge-call count and stop
+# see what it will cost and stop
 uv run lithos-loom eval rescore REPORT_DIR --judge-repeats 5 --dry-run
 
 # the measurement #307 exists for: the same question, five times, identical input
@@ -92,18 +92,35 @@ Above one repeat the table gains two columns:
 
 | column | reads | means |
 |---|---|---|
-| `flip` | `FLIPPED/JUDGED` | judged sites whose N verdicts were not unanimous. Sites where the run produced no findings are excluded — the judge never saw them, and counting free unanimity as stability would flatter a quiet arm. |
-| `spread` | `MIN-MAX/N` | catch count under each of the N universes. `4-5/5` says the arm could have reported either. |
+| `flip` | `FLIPPED/MEASURED +Njerr` | judged sites whose verdicts disagreed, over the sites that could be measured at all. Sites where the run produced no findings are excluded — the judge never saw them, and counting free unanimity as stability would flatter a quiet arm. |
+| `spread` | `MIN-MAX/VALID` | catch count under each of the N universes, over each one's own valid denominator. `4-5/5` says the arm could have reported either. |
+
+**A judge error is not a verdict.** A timeout and a veto both match nothing, so a
+site is *stable* only when every repeat answered and they agreed; two repeats that
+answered differently *flip* (counted even if a third errored); anything else judged
+is **unmeasured** and reported beside the ratio, never inside it — an all-timed-out
+measurement reads `UNMEASURED`, never `100% stable`. A repeat where the judge
+errored also has fewer scorable samples, which is why `spread`'s denominator moves
+with it rather than sitting at K.
 
 **Repeat 0 is authoritative.** The command measures variance; it does not quietly
 re-estimate while measuring (majority-of-N is #307's suggestion 3, held until this
 says whether it is needed).
 
-`rescore.json` lands **beside** `summary.json`, never over it, and reuses its field
-names so drift compares field-for-field. Per-site verdicts are recorded even at one
-repeat: a site whose findings were produced and whose verdict is empty *is* a veto,
-named. Everything fails closed before the first judge call, and the printed call
-count is exact rather than an estimate.
+`rescore.json` lands at the report-dir root (`--out` redirects it; it is refused if
+it names a retained report or `summary.json`, since that would overwrite a paid
+input with a re-score of it) and reuses `summary.json`'s field names so drift
+compares field-for-field. Per-site verdicts are recorded even at one repeat, each
+with its status and raw reply: a site whose findings were produced and whose verdict
+matched nothing *is* a veto, named — and the status is what separates it from a call
+that never answered. Everything fails closed before the first judge call, including
+a structural check of every retained report the scorer reads. The printed count is
+the number of **verdict requests**; a failed call retries once, so the same line
+gives the ceiling (`up to 2N agent invocations`).
+
+`--bar` defaults to **the bar the run recorded**. Re-scoring at 0.8 a run scored at
+0.6 would report `REGRESSED` for a case that never moved — that is the flag talking,
+not the judge. Dirs with no recorded bar say so and fall back to the default.
 
 Report dirs written before #307 have no `expected_fingerprint`, so they warn
 ("case identity unverifiable") and proceed — refusing them would make the whole

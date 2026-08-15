@@ -7,12 +7,17 @@ measure how often it answers differently.
 
 Measurement never sets the exit code: a floor case reading ``REGRESSED`` under
 re-scoring, or drift against the recorded summary, are this command's *products*.
-Exit 2 is reserved for usage failures, all raised before any judge call.
+Exit 2 is reserved for usage failures, all raised before any judge call — which
+is why the output target and the scoring bar are resolved up front, beside the
+flag checks, rather than at the point they are used.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import typer
@@ -27,15 +32,19 @@ from .app import (
 )
 from .case import Case, load_case
 from .harness import DEFAULT_BAR
-from .report import case_result_payload, print_results_table
+from .report import case_result_payload, judge_err_suffix, print_results_table
 from .rescore import (
+    MAX_ATTEMPTS_PER_REQUEST,
+    CaseReports,
     CaseRescore,
+    JudgeSite,
     RescoreError,
     drift_vs_summary,
     identity_of,
     judge_call_count,
     load_report_dir,
     rescore_case,
+    resolve_bar,
 )
 
 
@@ -50,8 +59,10 @@ def rescore(
     cases_dir: Path = typer.Option(
         DEFAULT_CASES_DIR, "--cases-dir", help="Directory of case folders."
     ),
-    bar: float = typer.Option(
-        DEFAULT_BAR, "--bar", help="Catch-rate a case must reach to pass."
+    bar: float | None = typer.Option(
+        None,
+        "--bar",
+        help="Catch-rate a case must reach (default: the bar the run recorded).",
     ),
     judge: bool = typer.Option(
         True, "--judge/--no-judge", help="Use the mechanism LLM-judge (default on)."
@@ -65,7 +76,9 @@ def rescore(
         help="Ask the judge each question N times and report verdict stability.",
     ),
     out: Path | None = typer.Option(
-        None, "--out", help="Where to write the payload (default: <dir>/rescore.json)."
+        None,
+        "--out",
+        help="Where to write the payload (default: <report-dir>/rescore.json).",
     ),
     allow_changed_cases: bool = typer.Option(
         False,
@@ -73,7 +86,7 @@ def rescore(
         help="Rescore even where the case's [[expected]] has changed since the run.",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print the exact judge-call count and stop."
+        False, "--dry-run", help="Print the judge verdict-request count and stop."
     ),
 ) -> None:
     """Re-score a retained report dir — no reviewer runs, judge calls only.
@@ -107,6 +120,9 @@ def rescore(
     cases = _load_cases(cases_dir, [r.case_id for r in reports])
     identities = {r.case_id: identity_of(cases[r.case_id], r.summary) for r in reports}
     _check_identities(identities, allow_changed_cases)
+    bars = {r.case_id: resolve_bar(r.summary, bar) for r in reports}
+    _report_bars(reports, bars)
+    target = _resolve_out(report_dir, out, reports)
 
     default_models, frictions = load_tool_default_models()
     for friction in frictions:
@@ -115,40 +131,34 @@ def rescore(
         judge=judge, judge_tool=judge_tool, default_models=default_models
     )
 
-    calls = judge_call_count(reports, cases, judge_repeats) if judge else 0
-    typer.echo(
-        f"rescoring {len(reports)} case(s) from {report_dir} — {calls} judge call(s)"
-        f"{f' ({judge_repeats} repeats)' if judge_repeats > 1 else ''}",
-        err=True,
-    )
+    requests = judge_call_count(reports, cases, judge_repeats) if judge else 0
+    _announce(report_dir, len(reports), requests, judge_repeats, judged=judge)
     if dry_run:
         return
 
     results: list[CaseRescore] = []
     for case_reports in reports:
-        loaded = cases[case_reports.case_id]
+        case_bar, bar_source = bars[case_reports.case_id]
         scored = rescore_case(
-            loaded,
+            cases[case_reports.case_id],
             case_reports,
-            bar=bar,
+            bar=case_bar,
             judge=judge_fn,
             repeats=judge_repeats,
         )
         results.append(
-            CaseRescore(
-                case_id=scored.case_id,
-                judged=scored.judged,
-                structured=scored.structured,
-                sites=scored.sites,
-                catch_per_repeat=scored.catch_per_repeat,
-                fingerprint=scored.fingerprint,
+            replace(
+                scored,
+                bar_source=bar_source,
                 identity=identities[case_reports.case_id],
-                drift=drift_vs_summary(scored.judged, case_reports.summary),
+                drift=drift_vs_summary(
+                    scored.judged, case_reports.summary, compare_judge_status=judge
+                ),
             )
         )
 
     _print(results, reports, cases, judge_repeats, judged=judge)
-    _write(results, report_dir, out, judge_info, judge_repeats, calls)
+    _write(results, target, judge_info, judge_repeats, requests)
 
 
 def _load_cases(cases_dir: Path, case_ids: list[str]) -> dict[str, Case]:
@@ -190,22 +200,113 @@ def _check_identities(identities: dict[str, str], allow_changed: bool) -> None:
         )
 
 
+def _report_bars(
+    reports: Sequence[CaseReports], bars: dict[str, tuple[float, str]]
+) -> None:
+    """Say where each case's bar came from, whenever it isn't the run's own.
+
+    Both notes exist because the bar decides PASS / REGRESSED without appearing
+    in the table: a silent default (or a silent override) would present a verdict
+    about the judge that was really a verdict about a flag.
+    """
+    defaulted = sorted(cid for cid, (_, src) in bars.items() if src == "default")
+    if defaulted:
+        typer.echo(
+            f"no bar recorded by these runs: {', '.join(defaulted)} — scoring at "
+            f"the default {DEFAULT_BAR}",
+            err=True,
+        )
+    recorded = {r.case_id: (r.summary or {}).get("bar") for r in reports}
+    overridden = [
+        f"{cid} (recorded {recorded[cid]})"
+        for cid, (value, src) in sorted(bars.items())
+        if src == "flag" and recorded[cid] is not None and recorded[cid] != value
+    ]
+    if overridden:
+        typer.echo(
+            f"--bar overrides the bar these runs recorded: {', '.join(overridden)}",
+            err=True,
+        )
+
+
+def _resolve_out(
+    report_dir: Path, out: Path | None, reports: Sequence[CaseReports]
+) -> Path:
+    """Where the payload goes — resolved and checked **before** any judge call.
+
+    A ``--out`` aimed at a retained report or its summary would destroy a paid
+    input in exchange for a cheap one, and a missing parent directory would fail
+    only once the whole measurement had been bought. Both are usage errors, so
+    both belong in the preflight.
+    """
+    target = out or (report_dir / "rescore.json")
+    resolved = target.resolve()
+    if resolved.is_dir():
+        raise typer.BadParameter(f"--out {target} is a directory")
+    inputs = {p.resolve() for r in reports for p in r.input_paths()}
+    if resolved in inputs:
+        raise typer.BadParameter(
+            f"--out {target} is one of the retained reports this command reads — "
+            "refusing to overwrite a paid input with a re-score of it"
+        )
+    if not resolved.parent.is_dir():
+        raise typer.BadParameter(f"--out {target}: no directory {resolved.parent}")
+    return target
+
+
+def _announce(
+    report_dir: Path, n_cases: int, requests: int, repeats: int, *, judged: bool
+) -> None:
+    """The pre-paid cost line: what will be asked, and what it can cost.
+
+    Two numbers, not one: ``requests`` is exact as a count of questions, but a
+    failed call retries once, so a flaky sweep can invoke the agent twice per
+    question. Printing only the first would understate the worst case by 2x.
+    """
+    head = f"rescoring {n_cases} case(s) from {report_dir}"
+    if not judged:
+        typer.echo(f"{head} — no judge (structured matcher only)", err=True)
+        return
+    detail = f" ({repeats} repeats)" if repeats > 1 else ""
+    typer.echo(
+        f"{head} — {requests} judge verdict request(s){detail}, up to "
+        f"{requests * MAX_ATTEMPTS_PER_REQUEST} agent invocations "
+        "(a failed call retries once)",
+        err=True,
+    )
+
+
 def _stability_cell(scored: CaseRescore) -> str:
+    """``flipped/measured`` — and the sites that could not be measured at all.
+
+    A judged site whose repeats did not all answer is neither stable nor
+    flipped; it is missing data, and folding it into the denominator would let
+    an all-timed-out case report perfect stability.
+    """
     if not scored.judged_sites:
         return "—"
-    return f"{scored.flipped_sites}/{scored.judged_sites}"
+    return (
+        f"{scored.flipped_sites}/{scored.measured_sites}"
+        f"{judge_err_suffix(scored.unmeasured_sites)}"
+    )
 
 
 def _spread_cell(scored: CaseRescore) -> str:
+    """Catch count across the repeat universes, over each one's own denominator."""
     if not scored.catch_per_repeat:
         return "—"
     lo, hi = min(scored.catch_per_repeat), max(scored.catch_per_repeat)
-    return f"{lo}-{hi}/{scored.judged.n}"
+    valid = scored.valid_per_repeat or (scored.judged.n,)
+    vlo, vhi = min(valid), max(valid)
+    # A varying denominator IS the signal that the judge failed on some repeats;
+    # printing a fixed K would hide it behind a plausible-looking drop.
+    denom = f"{vlo}" if vlo == vhi else f"{vlo}-{vhi}"
+    return f"{lo}-{hi}/{denom}"
 
 
 def _print(
     results: list[CaseRescore],
-    reports,
+    reports: Sequence[CaseReports],
     cases: dict[str, Case],
     repeats: int,
     *,
@@ -223,19 +324,39 @@ def _print(
     if repeats > 1:
         # Only meaningful above one draw: a single verdict cannot flip.
         extras = [
-            ("flip", 7, lambda r: _stability_cell(by_id[r.case_id])),
-            ("spread", 9, lambda r: _spread_cell(by_id[r.case_id])),
+            ("flip", 11, lambda r: _stability_cell(by_id[r.case_id])),
+            ("spread", 11, lambda r: _spread_cell(by_id[r.case_id])),
         ]
     print_results_table(tiers, extra_columns=extras)
 
     if repeats > 1:
-        n_judged = sum(r.judged_sites for r in results)
-        flipped = sum(r.flipped_sites for r in results)
-        pct = 100 * (1 - flipped / n_judged) if n_judged else 100.0
+        _print_stability(results, repeats)
+    _print_drift(results, reports, judged=judged)
+
+
+def _print_stability(results: list[CaseRescore], repeats: int) -> None:
+    measured = sum(r.measured_sites for r in results)
+    flipped = sum(r.flipped_sites for r in results)
+    unmeasured = sum(r.unmeasured_sites for r in results)
+    if not measured:
         typer.echo(
-            f"judge stability: {flipped}/{n_judged} judged sites flipped over "
-            f"{repeats} repeats ({pct:.1f}% stable)"
+            f"judge stability: UNMEASURED — no site answered all {repeats} repeats "
+            f"({unmeasured} site(s) errored)"
         )
+        return
+    pct = 100 * (1 - flipped / measured)
+    line = (
+        f"judge stability: {flipped}/{measured} judged sites flipped over "
+        f"{repeats} repeats ({pct:.1f}% stable)"
+    )
+    if unmeasured:
+        line += f"; {unmeasured} site(s) unmeasured (the judge errored on a repeat)"
+    typer.echo(line)
+
+
+def _print_drift(
+    results: list[CaseRescore], reports: Sequence[CaseReports], *, judged: bool
+) -> None:
     drifted = [r for r in results if _has_drift(r)]
     if not drifted:
         return
@@ -260,26 +381,62 @@ def _has_drift(r: CaseRescore) -> bool:
     return any(cmp and cmp["flipped"] for cmp in r.drift.values())
 
 
+def _site_payload(site: JudgeSite) -> dict:
+    """One decision point's full audit record.
+
+    The whole verdict is kept per repeat — status, matched ids, detail and the
+    raw reply — because the question this command answers ("why did two
+    identical asks differ?") is unanswerable from the ids alone, and because a
+    veto and a timeout are indistinguishable once the status is dropped.
+    """
+    return {
+        "variant": site.variant,
+        "sample": site.sample,
+        "expected": site.expected,
+        "produced": list(site.produced_ids),
+        "verdicts": [
+            {
+                "status": v.status,
+                "matched": list(v.matched_ids),
+                "detail": v.detail,
+                "reply": v.reply,
+            }
+            for v in site.verdicts
+        ],
+        "judged": site.judged,
+        "stable": site.stable,
+        "flipped": site.flipped,
+        "errored": site.errored,
+    }
+
+
 def _write(
     results: list[CaseRescore],
-    report_dir: Path,
-    out: Path | None,
+    target: Path,
     judge_info: dict | None,
     repeats: int,
-    calls: int,
+    requests: int,
 ) -> None:
-    """Write the payload beside — never over — the run's own ``summary.json``."""
+    """Write the payload to the pre-validated *target*, atomically.
+
+    Temp file + ``os.replace`` so a re-score that dies mid-write cannot leave a
+    truncated payload where a complete one was — the same rule the vault writers
+    follow, for the same reason.
+    """
     payload = {
         "schema_version": 1,
         "tool": "lithos-loom eval rescore",
-        "report_dir": str(report_dir),
         "judge": {**(judge_info or {}), "repeats": repeats} if judge_info else None,
-        "judge_calls": calls,
+        # Questions asked vs what they can cost: a failed request retries once.
+        "judge_verdict_requests": requests,
+        "max_agent_invocations": requests * MAX_ATTEMPTS_PER_REQUEST,
         "cases": [
             {
                 "case": r.case_id,
                 "expected_fingerprint": r.fingerprint,
                 "case_identity": r.identity,
+                "bar": r.bar,
+                "bar_source": r.bar_source,
                 # Same field names as summary.json (one payload builder), so a
                 # drift comparison is field-for-field rather than a mapping job.
                 "judged": case_result_payload(r.judged),
@@ -287,27 +444,21 @@ def _write(
                 "stability": {
                     "repeats": repeats,
                     "judged_sites": r.judged_sites,
+                    "measured_sites": r.measured_sites,
                     "flipped_sites": r.flipped_sites,
+                    "unmeasured_sites": r.unmeasured_sites,
                     "catch_per_repeat": list(r.catch_per_repeat),
-                    # Recorded even at one repeat: a site whose verdict is empty
-                    # while findings were produced IS the veto audit trail.
-                    "sites": [
-                        {
-                            "variant": s.variant,
-                            "sample": s.sample,
-                            "expected": s.expected,
-                            "produced": list(s.produced_ids),
-                            "verdicts": [sorted(v) for v in s.verdicts],
-                            "stable": s.stable,
-                        }
-                        for s in r.sites
-                    ],
+                    "valid_per_repeat": list(r.valid_per_repeat),
+                    # Recorded even at one repeat: a site whose verdict matched
+                    # nothing while findings were produced IS the veto audit trail.
+                    "sites": [_site_payload(s) for s in r.sites],
                 },
                 "drift": r.drift,
             }
             for r in results
         ],
     }
-    target = out or (report_dir / "rescore.json")
-    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp = target.parent / f".{target.name}.tmp"
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp, target)
     typer.echo(f"wrote {target}", err=True)

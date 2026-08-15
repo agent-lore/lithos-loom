@@ -19,7 +19,9 @@ from pathlib import Path
 from ...plugins.story_develop.personas import canonical_personas
 from ...plugins.story_develop.profiles import UnknownProfileError, get_profile
 
-_SEVERITIES = ("critical", "major", "minor")
+# Public: `eval rescore` validates a RETAINED report's severities against the
+# same list before scoring it, and a cross-module private import would be one.
+SEVERITIES = ("critical", "major", "minor")
 
 # What a case's ac.md IS relative to the escape it replays (#292 review):
 #   "replay"    — the authentic criteria the original review context had;
@@ -148,7 +150,9 @@ def expected_fingerprint(case: Case) -> str:
 
     Keyword order and the order of the expected entries are normalised, since
     neither changes scoring; ``mechanism`` prose is not, since a reflow genuinely
-    changes the judge's prompt.
+    changes the judge's prompt. The case **id** is covered too: a case renamed in
+    place should read as changed rather than silently compare a report dir
+    against a different identity's expectations.
     """
     entries = sorted(
         json.dumps(
@@ -567,9 +571,9 @@ def _parse_expected(case_id: str | None, e: dict) -> Expected:
     if not keywords:
         raise ValueError(f"case {case_id}: an [[expected]] needs at least one keyword")
     min_severity = str(e.get("min_severity", "")).lower()
-    if min_severity not in _SEVERITIES:
+    if min_severity not in SEVERITIES:
         raise ValueError(
-            f"case {case_id}: min_severity must be one of {_SEVERITIES} "
+            f"case {case_id}: min_severity must be one of {SEVERITIES} "
             f"(got {min_severity!r})"
         )
     if not e.get("file"):
