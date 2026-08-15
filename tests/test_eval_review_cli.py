@@ -7,6 +7,7 @@ case selection, the results table, and the exit code.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,20 @@ from lithos_loom.evals.review.harness import CaseResult
 from lithos_loom.evals.review.stats import wilson_interval
 
 runner = CliRunner()
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(output: str) -> str:
+    """CLI output with styling stripped.
+
+    Rich's option highlighter splits a long flag into separately-styled runs
+    (``--max-known-good-block-rate`` renders as ``-`` + ``-max`` +
+    ``-known-good-block-rate``, each wrapped in escapes), so a raw substring
+    check passes only where colour happens to be off — locally, but not in CI.
+    """
+    return _ANSI.sub("", output)
+
 
 _TOML = """
 [case]
@@ -1239,7 +1254,7 @@ def test_out_of_range_block_rate_fails_before_any_run(
         ],
     )
     assert result.exit_code == 2
-    assert "max-known-good-block-rate" in result.output
+    assert "max-known-good-block-rate" in _plain(result.output)
     assert seen == []
 
 
@@ -1274,7 +1289,7 @@ def test_out_of_range_bar_fails_before_any_run(
         eval_app, ["review", "--cases-dir", str(cases_dir), "--bar", bad]
     )
     assert result.exit_code == 2
-    assert "bar" in result.output
+    assert "--bar must be a finite rate" in _plain(result.output)
     assert seen == []
 
 
