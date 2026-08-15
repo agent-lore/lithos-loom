@@ -14,6 +14,7 @@ import pytest
 from lithos_loom.evals.review.case import Case, Expected, load_case
 from lithos_loom.evals.review.match import (
     _structured_match,
+    finding_count,
     match_expected,
     review_incomplete,
     score_run,
@@ -638,3 +639,17 @@ def test_score_run_records_noise_on_a_run_that_missed_the_defect() -> None:
     assert score.caught is False
     assert score.n_findings == 3
     assert score.blocked is True
+
+
+def test_finding_count_is_the_public_offline_helper() -> None:
+    # Documented in evals/review/README.md for re-deriving noise from report
+    # dirs that predate #310 — so it must stay public and agree with score_run.
+    report = {
+        "reviewers": [
+            {"name": "a", "findings": [_finding("minor", ["x.py"], "one")]},
+            {"name": "b", "findings": [_finding("minor", ["y.py"], "two", fid="f-2")]},
+        ]
+    }
+    assert finding_count(report) == 2
+    assert finding_count(report) == score_run(_case(), report).n_findings
+    assert finding_count({"reviewers": []}) == 0

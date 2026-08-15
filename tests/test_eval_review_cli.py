@@ -1154,3 +1154,134 @@ def test_known_good_block_gate_excludes_errored_samples(
         ],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_known_good_block_gate_fails_closed_when_every_sample_errored(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # The known-good arm runs AFTER the buggy one, so an exhausted quota can
+    # wipe it out entirely. An explicitly requested clean-head gate must not
+    # read "no evidence" as "no violation".
+    _stub_noisy(
+        monkeypatch,
+        noisy=(False, False, False),
+        blocked=(True, True, True),
+        errored=(True, True, True),
+    )
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--max-known-good-block-rate",
+            "0.5",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "other-case" in result.output
+
+
+def test_all_errored_known_good_arm_still_exits_zero_without_the_gate(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # Unchanged default: an unmeasurable FP arm is a reporting gap, not a run
+    # failure (the infra-failure exit keys on the buggy side). Only an explicit
+    # gate request makes it fail closed.
+    _stub_noisy(
+        monkeypatch,
+        noisy=(False, False, False),
+        blocked=(True, True, True),
+        errored=(True, True, True),
+    )
+    result = runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_known_good_block_gate_at_exactly_the_bar_does_not_convict(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_noisy(monkeypatch, blocked=(True, True, False))
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--max-known-good-block-rate",
+            str(2 / 3),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "1.1", "nan", "inf", "-inf"])
+def test_out_of_range_block_rate_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, bad: str
+) -> None:
+    # A typo'd `10` for `0.10` would silently disable the gate the operator
+    # explicitly asked for; a negative one would convict a silent arm.
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--max-known-good-block-rate",
+            bad,
+        ],
+    )
+    assert result.exit_code == 2
+    assert "max-known-good-block-rate" in result.output
+    assert seen == []
+
+
+@pytest.mark.parametrize("edge", ["0.0", "1.0"])
+def test_block_rate_accepts_the_closed_interval(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, edge: str
+) -> None:
+    _stub_noisy(monkeypatch, blocked=(False, False, False))
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--max-known-good-block-rate",
+            edge,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "1.1", "nan", "inf"])
+def test_out_of_range_bar_fails_before_any_run(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, bad: str
+) -> None:
+    # Same class of silent failure on the pass bar: `--bar 0` would quietly
+    # retire the floor regression gate.
+    seen = _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--bar", bad]
+    )
+    assert result.exit_code == 2
+    assert "bar" in result.output
+    assert seen == []
+
+
+def test_help_exit_contract_names_the_block_gate() -> None:
+    # The generated help must not state one exit contract in the "Exit 1 iff …"
+    # sentence and a different one two paragraphs later.
+    doc = eval_cli.review.__doc__ or ""
+    exit_sentence = doc[doc.index("Exit 1 iff") : doc.index("Exit 1 iff") + 400]
+    assert "known-good" in exit_sentence
+    assert "floor case" in exit_sentence

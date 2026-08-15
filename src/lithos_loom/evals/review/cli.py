@@ -14,6 +14,7 @@ back to the cheap structured matcher. ``--report-dir`` retains each run's report
 from __future__ import annotations
 
 import json
+import math
 from functools import partial
 from pathlib import Path
 
@@ -119,9 +120,11 @@ def review(
 
     Cases score in two tiers (RH-6): the headline pools catches over
     **frontier** cases only; **floor** cases (saturated) are a regression gate.
-    Exit 1 iff a floor case falls below the bar or a case has no valid samples
-    (all-errored infra failure) — a frontier FAIL is the measurement, not a
-    failure of the run.
+    Exit 1 iff a floor case falls below the bar, a case has no valid samples
+    (all-errored infra failure), or — when ``--max-known-good-block-rate`` is
+    given — a case exceeds it on the known-good head or has no valid known-good
+    sample to judge it by. A frontier FAIL is the measurement, not a failure of
+    the run.
 
     The panel-override axis (RH-7): ``--profile`` / ``--reviewer`` /
     ``--reviewer-override`` vary the panel per run without editing case files;
@@ -133,6 +136,13 @@ def review(
     latter into a gate; it is off by default because no baseline for it exists
     yet, and gating an unmeasured quantity is how a lever gets chosen blind.
     """
+    # Cheapest fail-closed check first: a rate outside [0, 1] silently changes
+    # what the run means rather than erroring — `--max-known-good-block-rate 10`
+    # (a typo for 0.10) disables the very gate the operator asked for, and
+    # `--bar 0` retires the floor regression gate.
+    _require_rate("--bar", bar)
+    _require_rate("--max-known-good-block-rate", max_known_good_block_rate)
+
     case_dirs = _discover(cases_dir, case)
 
     # Fail closed BEFORE any paid run: overrides parse up front, then EVERY
@@ -239,41 +249,73 @@ def review(
             f"no valid samples (reviewer infra failure): {', '.join(no_valid)}",
             err=True,
         )
-    too_noisy = _over_block_rate(results, max_known_good_block_rate)
-    if too_noisy:
+    over, unjudgeable = _block_rate_gate(results, max_known_good_block_rate)
+    if over:
         typer.echo(
             "held approval on the known-good head above "
             f"--max-known-good-block-rate {max_known_good_block_rate}: "
-            + ", ".join(f"{cid} {b}/{v}" for cid, b, v in too_noisy),
+            + ", ".join(f"{cid} {b}/{v}" for cid, b, v in over),
             err=True,
         )
-    if floor_regressed or no_valid or too_noisy:
+    if unjudgeable:
+        typer.echo(
+            "--max-known-good-block-rate given but the known-good arm produced "
+            f"no valid sample to judge: {', '.join(unjudgeable)}",
+            err=True,
+        )
+    if floor_regressed or no_valid or over or unjudgeable:
         raise typer.Exit(1)
 
 
-def _over_block_rate(
-    results: list[tuple[str, CaseResult]], bar: float | None
-) -> list[tuple[str, int, int]]:
-    """Cases whose known-good block rate exceeds *bar* — ``(case, blocked, valid)``.
+def _require_rate(flag: str, value: float | None) -> None:
+    """Reject a rate option that is not a finite fraction in ``[0, 1]``.
 
-    Empty when the gate is off (*bar* is ``None``) or a case has no known-good
-    arm: a catch-only case measures no false positives, so a zero bar must not
-    convict it. Errored samples are excluded — an incomplete panel blocks *by
-    definition* (:func:`intake_blocks`), so counting a crash as a block would
-    convict the arm for infra flakiness.
+    Out-of-range values do not error on their own — they quietly redefine the
+    run (a bar above 1 fails every case; below 0 passes every case; NaN compares
+    false against everything), which is the same silent no-op class the panel
+    overrides already fail closed on.
+    """
+    if value is None:
+        return
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise typer.BadParameter(
+            f"{flag} must be a finite rate between 0 and 1 (got {value})"
+        )
+
+
+def _block_rate_gate(
+    results: list[tuple[str, CaseResult]], bar: float | None
+) -> tuple[list[tuple[str, int, int]], list[str]]:
+    """Apply the known-good block gate: ``(over the bar, unjudgeable)``.
+
+    Both empty when the gate is off (*bar* is ``None``) or a case has no
+    known-good arm at all: a catch-only case measures no false positives, so a
+    zero bar must not convict it. Errored samples are excluded from the rate —
+    an incomplete panel blocks *by definition* (:func:`intake_blocks`), so
+    counting a crash as a block would convict the arm for infra flakiness.
+
+    A case whose known-good arm ran but produced **no valid sample** is
+    *unjudgeable* and fails the gate. Without a gate that stays a reporting gap
+    (the documented default — the infra-failure exit keys on the buggy side),
+    but the known-good arm runs *after* the buggy one, so an exhausted quota
+    wipes out exactly the evidence an explicitly requested clean-head gate
+    exists to weigh. "No evidence" must not read as "no violation".
     """
     if bar is None:
-        return []
-    over = []
+        return [], []
+    over: list[tuple[str, int, int]] = []
+    unjudgeable: list[str] = []
     for _, r in results:
         if not r.known_good_blocked_per_sample:
             continue
         blocked, valid = count_valid(
             r.known_good_blocked_per_sample, r.false_positive_errored_per_sample
         )
-        if valid and blocked / valid > bar:
+        if not valid:
+            unjudgeable.append(r.case_id)
+        elif blocked / valid > bar:
             over.append((r.case_id, blocked, valid))
-    return over
+    return over, unjudgeable
 
 
 def _make_report_sink(report_dir: Path) -> ReportSink:

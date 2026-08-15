@@ -373,7 +373,11 @@ are excluded from catch and FP — an incomplete panel reports nothing, and bloc
 or flatter an arm for infra flakiness.
 
 Making a blocked known-good head a **gate** (the way a floor regression fails a
-run) is available as opt-in `--max-known-good-block-rate`, not a default. No
+run) is available as opt-in `--max-known-good-block-rate`, not a default. Once
+requested it fails **closed**: a case whose known-good arm produced no valid
+sample fails it too, since that arm runs *after* the buggy one and an exhausted
+quota destroys exactly the evidence the gate weighs. Without the flag an
+unmeasurable known-good arm remains a reporting gap, unchanged. No
 baseline for these numbers exists yet — every report dir predating this change
 has none — and gating on an unmeasured quantity is the mistake *Update (#182)*
 already named. Re-deriving the numbers offline from retained reports needs no

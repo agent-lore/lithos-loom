@@ -132,6 +132,16 @@ def review_incomplete(report_json: dict) -> bool:
     )
 
 
+def finding_count(report_json: dict) -> int:
+    """How many findings the run produced, across every reviewer (#310).
+
+    Public because re-deriving the noise instrumentation from an **existing**
+    report dir is free (pure counting — no judge, no tokens), so report dirs
+    predating #310 stay analysable.
+    """
+    return len(_all_produced(report_json))
+
+
 def review_blocked(report_json: dict) -> bool:
     """Whether the run **held approval** — the report's own blocking rule (#310).
 
@@ -158,3 +168,15 @@ def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> R
         n_findings=len(produced),
         blocked=review_blocked(report_json),
     )
+
+
+__all__ = [
+    "Judge",
+    "MatchResult",
+    "RunScore",
+    "finding_count",
+    "match_expected",
+    "review_blocked",
+    "review_incomplete",
+    "score_run",
+]

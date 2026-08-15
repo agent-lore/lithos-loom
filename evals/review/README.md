@@ -53,7 +53,9 @@ even if a panel peer crashed. The infra-failure exit gate keys on the **buggy-si
 samples only: a known-good pass whose samples all errored is reported as `+Nerr`
 with no trustable FP number, but deliberately does not affect the exit code — the
 pass definition gates on catch-rate, and an unavailable FP measurement is a
-reporting gap, not (yet) a run failure.
+reporting gap, not (yet) a run failure. The one exception is an explicitly
+requested `--max-known-good-block-rate`, which fails closed on an unmeasurable
+known-good arm — see [Noise](#noise-what-the-fp-rate-cannot-see-310).
 
 - `--judge` / `--no-judge` (**default on**): the mechanism LLM-judge confirms each
   finding describes the case's *specific* defect, not just the same file/topic.
@@ -103,12 +105,24 @@ regression) when a case blocks its known-good head more often than `RATE`. It is
 unmeasured quantity is how a lever gets picked blind. Cases with no known-good
 arm are never convicted by it.
 
+Once requested it fails **closed**: a case whose known-good arm ran but produced
+**no valid sample** (all errored) fails the gate too. That arm runs *after* the
+buggy one, so an exhausted quota destroys exactly the evidence a clean-head gate
+weighs — "no evidence" must not read as "no violation". Without the flag an
+unmeasurable known-good arm stays a reporting gap, as documented above.
+
+Both rate options (`--bar`, `--max-known-good-block-rate`) must be finite and
+within `[0, 1]`, checked before any paid run. An out-of-range rate does not error
+on its own — it silently redefines the run: `--max-known-good-block-rate 10` (a
+typo for `0.10`) disables the very gate it asks for, and `--bar 0` retires the
+floor regression gate.
+
 Because the numbers are pure counting off the retained report JSON — no judge,
 no tokens — an **existing** `--report-dir` can be re-derived offline:
 
 ```python
-from lithos_loom.evals.review.match import _all_produced, review_blocked
-n_findings, blocked = len(_all_produced(report)), review_blocked(report)
+from lithos_loom.evals.review.match import finding_count, review_blocked
+n_findings, blocked = finding_count(report), review_blocked(report)
 ```
 
 ### Panel overrides (RH-7)
