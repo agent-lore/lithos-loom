@@ -64,7 +64,10 @@ app.add_typer(obsidian_sync_app, name="obsidian-sync")
 app.add_typer(develop_app, name="develop")
 
 # On-demand eval harnesses (#183) — not part of `make check`; host-only.
-from lithos_loom.evals.review.cli import eval_app  # noqa: E402
+# Import the command modules for their registration side effects; the group
+# itself lives in `app` so several commands can share its pre-paid checks.
+from lithos_loom.evals.review import cli as _eval_review_cli  # noqa: E402,F401
+from lithos_loom.evals.review.app import eval_app  # noqa: E402
 
 app.add_typer(eval_app, name="eval")
 

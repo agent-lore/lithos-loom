@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from lithos_loom.evals.review import app as eval_app_mod
 from lithos_loom.evals.review import cli as eval_cli
 from lithos_loom.evals.review.case import Expected
 from lithos_loom.evals.review.cli import eval_app
@@ -210,7 +211,7 @@ def test_unknown_case_errors(monkeypatch: pytest.MonkeyPatch, cases_dir: Path) -
 
 def test_judge_on_by_default(monkeypatch: pytest.MonkeyPatch, cases_dir: Path) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     runner.invoke(
         eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
     )
@@ -221,7 +222,7 @@ def test_no_judge_flag_disables_it(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     runner.invoke(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--case", "other-case", "--no-judge"],
@@ -233,7 +234,7 @@ def test_report_dir_passes_a_sink(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
 ) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     out = tmp_path / "reports"
     runner.invoke(
         eval_app,
@@ -254,7 +255,7 @@ def test_no_report_dir_means_no_sink(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     runner.invoke(
         eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
     )
@@ -286,7 +287,7 @@ def test_summary_json_written_when_report_dir(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
 ) -> None:
     _stub_run_case(monkeypatch, catch_rate=0.8)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     out = tmp_path / "reports"
     runner.invoke(
         eval_app,
@@ -869,7 +870,7 @@ def test_judge_gets_an_explicit_model(
         seen.update(kwargs)
         return "JUDGE"
 
-    monkeypatch.setattr(eval_cli, "build_agent_judge", fake_judge)
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", fake_judge)
     result = runner.invoke(
         eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
     )
@@ -912,7 +913,7 @@ def test_summary_json_records_the_judge(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
 ) -> None:
     _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     out = tmp_path / "reports"
     runner.invoke(
         eval_app,

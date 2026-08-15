@@ -11,8 +11,13 @@ import pytest
 
 from lithos_loom.evals.review import harness as harness_mod
 from lithos_loom.evals.review.case import Case, Expected
-from lithos_loom.evals.review.harness import _base_for, live_review, run_case
-from lithos_loom.evals.review.match import JudgeVerdict
+from lithos_loom.evals.review.harness import (
+    _base_for,
+    aggregate_case,
+    live_review,
+    run_case,
+)
+from lithos_loom.evals.review.match import JudgeVerdict, RunScore, score_run
 from lithos_loom.plugins.story_develop.review_report import ReviewReport
 
 _EXPECTED = Expected(
@@ -880,3 +885,45 @@ def test_judge_sink_receives_every_scored_sample() -> None:
     ]
     assert all(case_id == "180-attach-delivery" for case_id, _, _, _ in seen)
     assert all(status == "ok" for *_, status in seen)
+
+
+# ── aggregate_case: the arithmetic has one home (#307 slice 2) ───────────────
+
+
+def test_aggregate_case_needs_no_case_no_git_and_no_review_fn() -> None:
+    """It is a pure function of the per-sample scores.
+
+    This is what lets `eval rescore` reuse it against stored reports: no head to
+    materialise, no worktree, no container — just the scores.
+    """
+    buggy = [
+        RunScore(caught=True, severity_correct=True),
+        RunScore(caught=False, severity_correct=False),
+    ]
+    result = aggregate_case("c", buggy, k=2, bar=0.5)
+
+    assert result.case_id == "c"
+    assert result.catch_rate == 0.5
+    assert result.passed is True
+    assert result.caught_per_sample == (True, False)
+
+
+def test_aggregate_case_reproduces_run_case_exactly() -> None:
+    """The anti-drift guard: one implementation of the denominators and CIs.
+
+    If rescore ever grew its own copy of the errored/valid rule, the Wilson
+    intervals or the shared fp/noise denominator, a re-score would stop being
+    comparable to the run it re-scores — silently.
+    """
+    fn = _variant_review_fn([_caught(), _clean(), _caught()], [_clean(), _noisy(2)])
+    via_run = run_case(_case(), k=3, review_fn=fn, known_good_runs=2, bar=0.6)
+
+    scored = [
+        score_run(_case(), _caught()),
+        score_run(_case(), _clean()),
+        score_run(_case(), _caught()),
+    ]
+    kg = [score_run(_case(), _clean()), score_run(_case(), _noisy(2))]
+    via_aggregate = aggregate_case(_case().id, scored, kg, k=3, bar=0.6)
+
+    assert via_aggregate == via_run
