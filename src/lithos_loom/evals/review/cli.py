@@ -14,6 +14,7 @@ back to the cheap structured matcher. ``--report-dir`` retains each run's report
 from __future__ import annotations
 
 import json
+import math
 from functools import partial
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from .harness import (
     CaseResult,
     ReportSink,
     ReviewFn,
+    count_valid,
     live_review,
     run_case,
 )
@@ -107,19 +109,40 @@ def review(
         help="PERSONA.FIELD=VALUE with FIELD in model|effort|tool "
         "(repeatable); applies where the persona is in the effective panel.",
     ),
+    max_known_good_block_rate: float | None = typer.Option(
+        None,
+        "--max-known-good-block-rate",
+        help="Fail the run when a case holds approval on its known-good head "
+        "more often than this rate (default: off — record only).",
+    ),
 ) -> None:
     """Measure the panel's catch-rate on the seeded-defect benchmark.
 
     Cases score in two tiers (RH-6): the headline pools catches over
     **frontier** cases only; **floor** cases (saturated) are a regression gate.
-    Exit 1 iff a floor case falls below the bar or a case has no valid samples
-    (all-errored infra failure) — a frontier FAIL is the measurement, not a
-    failure of the run.
+    Exit 1 iff a floor case falls below the bar, a case has no valid samples
+    (all-errored infra failure), or — when ``--max-known-good-block-rate`` is
+    given — a case exceeds it on the known-good head or has no valid known-good
+    sample to judge it by. A frontier FAIL is the measurement, not a failure of
+    the run.
 
     The panel-override axis (RH-7): ``--profile`` / ``--reviewer`` /
     ``--reviewer-override`` vary the panel per run without editing case files;
     the effective panel is recorded in each case's ``summary.json``.
+
+    Beside the defect-specific false-positive rate, each paired case reports its
+    **noise** (#310) — the share of known-good runs that reported anything at
+    all, and how many held approval. ``--max-known-good-block-rate`` turns the
+    latter into a gate; it is off by default because no baseline for it exists
+    yet, and gating an unmeasured quantity is how a lever gets chosen blind.
     """
+    # Cheapest fail-closed check first: a rate outside [0, 1] silently changes
+    # what the run means rather than erroring — `--max-known-good-block-rate 10`
+    # (a typo for 0.10) disables the very gate the operator asked for, and
+    # `--bar 0` retires the floor regression gate.
+    _require_rate("--bar", bar)
+    _require_rate("--max-known-good-block-rate", max_known_good_block_rate)
+
     case_dirs = _discover(cases_dir, case)
 
     # Fail closed BEFORE any paid run: overrides parse up front, then EVERY
@@ -226,8 +249,73 @@ def review(
             f"no valid samples (reviewer infra failure): {', '.join(no_valid)}",
             err=True,
         )
-    if floor_regressed or no_valid:
+    over, unjudgeable = _block_rate_gate(results, max_known_good_block_rate)
+    if over:
+        typer.echo(
+            "held approval on the known-good head above "
+            f"--max-known-good-block-rate {max_known_good_block_rate}: "
+            + ", ".join(f"{cid} {b}/{v}" for cid, b, v in over),
+            err=True,
+        )
+    if unjudgeable:
+        typer.echo(
+            "--max-known-good-block-rate given but the known-good arm produced "
+            f"no valid sample to judge: {', '.join(unjudgeable)}",
+            err=True,
+        )
+    if floor_regressed or no_valid or over or unjudgeable:
         raise typer.Exit(1)
+
+
+def _require_rate(flag: str, value: float | None) -> None:
+    """Reject a rate option that is not a finite fraction in ``[0, 1]``.
+
+    Out-of-range values do not error on their own — they quietly redefine the
+    run (a bar above 1 fails every case; below 0 passes every case; NaN compares
+    false against everything), which is the same silent no-op class the panel
+    overrides already fail closed on.
+    """
+    if value is None:
+        return
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise typer.BadParameter(
+            f"{flag} must be a finite rate between 0 and 1 (got {value})"
+        )
+
+
+def _block_rate_gate(
+    results: list[tuple[str, CaseResult]], bar: float | None
+) -> tuple[list[tuple[str, int, int]], list[str]]:
+    """Apply the known-good block gate: ``(over the bar, unjudgeable)``.
+
+    Both empty when the gate is off (*bar* is ``None``) or a case has no
+    known-good arm at all: a catch-only case measures no false positives, so a
+    zero bar must not convict it. Errored samples are excluded from the rate —
+    an incomplete panel blocks *by definition* (:func:`intake_blocks`), so
+    counting a crash as a block would convict the arm for infra flakiness.
+
+    A case whose known-good arm ran but produced **no valid sample** is
+    *unjudgeable* and fails the gate. Without a gate that stays a reporting gap
+    (the documented default — the infra-failure exit keys on the buggy side),
+    but the known-good arm runs *after* the buggy one, so an exhausted quota
+    wipes out exactly the evidence an explicitly requested clean-head gate
+    exists to weigh. "No evidence" must not read as "no violation".
+    """
+    if bar is None:
+        return [], []
+    over: list[tuple[str, int, int]] = []
+    unjudgeable: list[str] = []
+    for _, r in results:
+        if not r.known_good_blocked_per_sample:
+            continue
+        blocked, valid = count_valid(
+            r.known_good_blocked_per_sample, r.false_positive_errored_per_sample
+        )
+        if not valid:
+            unjudgeable.append(r.case_id)
+        elif blocked / valid > bar:
+            over.append((r.case_id, blocked, valid))
+    return over, unjudgeable
 
 
 def _make_report_sink(report_dir: Path) -> ReportSink:
@@ -333,6 +421,17 @@ def _write_summary(
         "false_positive_per_sample": list(r.false_positive_per_sample),
         "false_positive_errored": fp_errored,
         "false_positive_errored_per_sample": list(r.false_positive_errored_per_sample),
+        # #310: the FP rate is defect-specific — these say what ELSE the run
+        # reported and whether it held approval, on both arms.
+        "noise_rate": r.noise_rate,
+        "noise_rate_ci": list(r.noise_rate_ci),
+        "known_good_findings_per_sample": list(r.known_good_findings_per_sample),
+        "known_good_blocked_per_sample": list(r.known_good_blocked_per_sample),
+        "known_good_blocked": count_valid(
+            r.known_good_blocked_per_sample, r.false_positive_errored_per_sample
+        )[0],
+        "findings_per_sample": list(r.findings_per_sample),
+        "blocked_per_sample": list(r.blocked_per_sample),
         "passed": r.passed,
     }
     if artifacts is not None:
@@ -352,7 +451,7 @@ def _err_suffix(n: int) -> str:
 def _print_table(results: list[tuple[str, CaseResult]]) -> None:
     header = (
         f"{'case':<28} {'tier':<8} {'n':>3} {'catch (95% CI)':>20} "
-        f"{'sev':>5} {'fp (95% CI)':>20}  result"
+        f"{'sev':>5} {'fp (95% CI)':>20} {'noise':>12}  result"
     )
     typer.echo(header)
     typer.echo("-" * len(header))
@@ -372,17 +471,9 @@ def _print_table(results: list[tuple[str, CaseResult]]) -> None:
             f"{caught}/{n_valid} {_ci_band(*r.catch_rate_ci)}{_err_suffix(n_err)}"
         )
         if r.false_positive_per_sample:
-            fp_err_samples = r.false_positive_errored_per_sample or (
-                (False,) * len(r.false_positive_per_sample)
-            )
-            fp_err = sum(fp_err_samples)
-            fp_valid = len(r.false_positive_per_sample) - fp_err
-            flagged = sum(
-                f
-                for f, e in zip(
-                    r.false_positive_per_sample, fp_err_samples, strict=True
-                )
-                if not e
+            fp_err = sum(r.false_positive_errored_per_sample)
+            flagged, fp_valid = count_valid(
+                r.false_positive_per_sample, r.false_positive_errored_per_sample
             )
             fp_cell = (
                 f"{flagged}/{fp_valid} "
@@ -390,6 +481,7 @@ def _print_table(results: list[tuple[str, CaseResult]]) -> None:
             )
         else:
             fp_cell = f"{r.false_positive_rate * 100:.0f}%"
+        noise_cell = _noise_cell(r)
         # Floor rows read ok/REGRESSED — the floor is a regression gate, not a
         # pass/fail measurement (RH-6).
         if tier == "floor":
@@ -398,9 +490,27 @@ def _print_table(results: list[tuple[str, CaseResult]]) -> None:
             mark = "PASS" if r.passed else "FAIL"
         typer.echo(
             f"{r.case_id:<28} {tier:<8} {r.n:>3} {catch_cell:>20} "
-            f"{r.severity_correctness * 100:>4.0f}% {fp_cell:>20}  {mark}"
+            f"{r.severity_correctness * 100:>4.0f}% {fp_cell:>20} "
+            f"{noise_cell:>12}  {mark}"
         )
     _print_rollups(tallies)
+
+
+def _noise_cell(r: CaseResult) -> str:
+    """The known-good noise cell: how many runs said anything, how many blocked.
+
+    Sits beside ``fp`` deliberately (#310) — ``fp 0/3`` and ``noise 3/3 blk3``
+    describe the same three runs, and only together do they say whether an arm
+    got sharper or merely louder. ``—`` for a case with no known-good arm.
+    """
+    if not r.known_good_findings_per_sample:
+        return "—"
+    errored = r.false_positive_errored_per_sample
+    noisy, valid = count_valid(
+        [n > 0 for n in r.known_good_findings_per_sample], errored
+    )
+    blocked, _ = count_valid(r.known_good_blocked_per_sample, errored)
+    return f"{noisy}/{valid} blk{blocked}"
 
 
 def _plural(word: str, n: int) -> str:

@@ -86,7 +86,10 @@ Run the panel **K times** per case (default 5) and report, over the K runs:
 - **severity-correctness** — among caught runs, the fraction at/above
   `min_severity`;
 - **false-positive rate** — fraction of runs on the paired **known-good** head
-  that wrongly trip the matcher.
+  that wrongly trip the matcher;
+- **noise rate** — fraction of known-good runs that reported *anything at all*
+  (#310; see *Update (2026-08-15)* — the FP rate above is defect-specific and
+  says nothing about what else a run reported).
 
 Agents are stochastic, so a case **passes** at a rate bar (catch-rate ≥ 0.8 over
 K, configurable) — never a single pass/fail.
@@ -337,6 +340,56 @@ one lens shipped (`734e5ef`, dropping `white-space: pre-wrap` from
 `.markdown-body`), and re-running the recipe reproduced the committed defect
 captures byte for byte — evidence the recipe is deterministic and the pair is
 genuinely matched.
+
+## Update (2026-08-15, #310): noise beside the false-positive rate
+
+The false-positive rate asks a known-good run one question: did it report **the
+case's expected defect**? Everything else it reported is invisible to that
+number — so a panel that files four unrelated findings on a clean head and
+**blocks** still scores `fp 0/3`. Measured on `lens22-artifact-prewrap` while
+choosing the RH-1 artifact prompt: three candidate arms with the *same* case,
+persona and captures scored an identical `fp 0/3` while their known-good
+behaviour ranged from silent to blocking every run. That is the wrong
+sensitivity for a harness whose whole purpose is choosing between
+configurations, and it flatters exactly the changes most likely to be harmful —
+anything that raises catch-rate by lowering the bar for what counts as a defect.
+
+So each run now also records the two raw observations its report already
+carried: **how many findings** it produced, and whether it **held approval**
+(`ReviewReport.blocking` — read from the report, so the eval can never disagree
+with what the review decided). Aggregated per case:
+
+- **noise rate** — the fraction of *valid* known-good runs that reported
+  anything at all, over the **same denominator** as the FP rate so the two read
+  side by side (`fp 0/3` `noise 3/3 blk3` describe the same three runs);
+- per-sample finding counts + block flags on **both** arms.
+
+The buggy arm is instrumented but deliberately **not rated**: an extra finding
+on a defective head may be a real second defect (the benchmark has found several
+— #295, lens#41), whereas on the known-good head it is at best a distraction.
+Errored samples are excluded from the noise denominator for the same reason they
+are excluded from catch and FP — an incomplete panel reports nothing, and blocks
+*by definition* (`intake_blocks`), so counting a crash either way would convict
+or flatter an arm for infra flakiness.
+
+Making a blocked known-good head a **gate** (the way a floor regression fails a
+run) is available as opt-in `--max-known-good-block-rate`, not a default. Once
+requested it fails **closed**: a case whose known-good arm produced no valid
+sample fails it too, since that arm runs *after* the buggy one and an exhausted
+quota destroys exactly the evidence the gate weighs. Without the flag an
+unmeasurable known-good arm remains a reporting gap, unchanged. No
+baseline for these numbers exists yet — every report dir predating this change
+has none — and gating on an unmeasured quantity is the mistake *Update (#182)*
+already named. Re-deriving the numbers offline from retained reports needs no
+judge and no tokens (it is pure counting off the report JSON), and doing so over
+the existing report dirs immediately surfaced one thing the headline metric had
+rendered invisible: the floor case `194-delivery-failure-status`, `ok` in every
+table it has ever appeared in, went from `noise 0/5` at the 2026-08-09 baseline
+to `noise 3/5 blk3` at the pinned 2026-08-13 baseline — three runs filing a
+*critical* "this diff only adds a comment" finding against a known-good head
+whose whole design is to be a comment-only no-op. Whether that is a fixture
+weakness or a legitimate review is a judgement call; the point is that it was
+unmeasurable before.
 
 ## Deferred
 

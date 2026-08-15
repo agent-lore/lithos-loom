@@ -631,3 +631,127 @@ def test_run_case_cleans_up_patch_head_even_on_review_error(
     assert "eval-patch" not in _worktree_list(
         tmp_git_repo
     )  # cleaned up despite the error
+
+
+# ── noise instrumentation (#310) ──────────────────────────────────────────────
+#
+# The false-positive rate asks one question of a known-good run: did it report
+# the case's *expected defect*? Everything else it reported is invisible to that
+# number — so a panel that files four unrelated findings and BLOCKS still scores
+# a clean `fp 0/3`. These cover the instrumentation that makes the difference
+# between two arms visible.
+
+
+def _noisy(n: int = 3, *, blocking: bool = True) -> dict:
+    """A run that reports *n* findings, none of them the expected defect."""
+    return {
+        "blocking": blocking,
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS",
+                "passed": False,
+                "findings": [
+                    {
+                        "reviewer": "correctness",
+                        "severity": "minor",
+                        "files": ["style.css"],
+                        "rationale": f"unrelated nit {i}",
+                        "finding_id": f"n-{i}",
+                    }
+                    for i in range(n)
+                ],
+            }
+        ],
+    }
+
+
+def _quiet() -> dict:
+    return {
+        "blocking": False,
+        "reviewers": [
+            {"name": "correctness", "status": "LGTM", "passed": True, "findings": []}
+        ],
+    }
+
+
+def _variant_review_fn(buggy: list[dict], good: list[dict]):
+    """Serve an explicit report per sample, per variant."""
+    counters = {"buggy": 0, "good": 0}
+
+    def review_fn(case: Case, head: str) -> dict:
+        if head == case.head:
+            r = buggy[counters["buggy"]]
+            counters["buggy"] += 1
+            return r
+        r = good[counters["good"]]
+        counters["good"] += 1
+        return r
+
+    return review_fn
+
+
+def test_noise_is_invisible_to_the_false_positive_rate() -> None:
+    # The measured #310 shape: every known-good run files unrelated findings and
+    # blocks. The defect-specific FP rate is a clean 0/3 — and must stay that
+    # way; the noise rate is what carries the signal.
+    fn = _variant_review_fn([_caught()] * 3, [_noisy(1), _noisy(4), _noisy(1)])
+    result = run_case(_case(), k=3, review_fn=fn, known_good_runs=3)
+    assert result.false_positive_rate == 0.0
+    assert result.noise_rate == 1.0
+    assert result.known_good_findings_per_sample == (1, 4, 1)
+    assert result.known_good_blocked_per_sample == (True, True, True)
+
+
+def test_a_quiet_known_good_arm_scores_zero_noise() -> None:
+    fn = _variant_review_fn([_caught()] * 3, [_quiet()] * 3)
+    result = run_case(_case(), k=3, review_fn=fn, known_good_runs=3)
+    assert result.noise_rate == 0.0
+    assert result.known_good_findings_per_sample == (0, 0, 0)
+    assert result.known_good_blocked_per_sample == (False, False, False)
+
+
+def test_noise_rate_is_the_any_finding_fraction() -> None:
+    fn = _variant_review_fn([_caught()] * 4, [_noisy(2), _quiet(), _quiet(), _noisy(1)])
+    result = run_case(_case(), k=4, review_fn=fn, known_good_runs=4)
+    assert result.noise_rate == 0.5
+    lo, hi = result.noise_rate_ci
+    assert 0.0 < lo < 0.5 < hi < 1.0
+
+
+def test_findings_without_blocking_are_noise_but_not_a_block() -> None:
+    # A minor finding under the reviewer's block threshold: noise, no held
+    # approval. The two are recorded separately because they cost differently.
+    fn = _variant_review_fn([_caught()] * 2, [_noisy(2, blocking=False)] * 2)
+    result = run_case(_case(), k=2, review_fn=fn, known_good_runs=2)
+    assert result.noise_rate == 1.0
+    assert result.known_good_blocked_per_sample == (False, False)
+
+
+def test_errored_known_good_samples_are_excluded_from_the_noise_denominator() -> None:
+    # An incomplete panel produces no findings — counting it as "quiet" would
+    # flatter the arm. Same denominator as the FP rate, so the two are directly
+    # comparable side by side.
+    fn = _variant_review_fn([_caught()] * 3, [_noisy(2), _errored(), _quiet()])
+    result = run_case(_case(), k=3, review_fn=fn, known_good_runs=3)
+    assert result.false_positive_errored_per_sample == (False, True, False)
+    assert result.noise_rate == 0.5  # 1 noisy of 2 VALID, not of 3
+
+
+def test_buggy_arm_carries_the_same_instrumentation() -> None:
+    # A run that catches the defect AND invents three others is not the same
+    # quality of catch — record it, but do not rate it (an extra finding on a
+    # buggy head may be a real second defect).
+    fn = _variant_review_fn([_caught(), _noisy(3)], [_quiet()] * 2)
+    result = run_case(_case(), k=2, review_fn=fn, known_good_runs=2)
+    assert result.findings_per_sample == (1, 3)
+    assert result.blocked_per_sample == (False, True)
+
+
+def test_no_known_good_means_no_noise_measurement() -> None:
+    fn = _variant_review_fn([_caught()] * 2, [])
+    result = run_case(_case(known_good=False), k=2, review_fn=fn)
+    assert result.known_good_findings_per_sample == ()
+    assert result.known_good_blocked_per_sample == ()
+    assert result.noise_rate == 0.0
+    assert result.noise_rate_ci == (0.0, 0.0)
