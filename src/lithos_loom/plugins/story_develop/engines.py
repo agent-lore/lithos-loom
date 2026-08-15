@@ -46,12 +46,16 @@ class TurnResult:
 
     exit_code: int
     succeeded: bool
+    # The turn's OWN outcome, independent of whether it minted a resumable
+    # session handle; `succeeded` is `completed` AND resumable. Required (no
+    # default) so every constructor states its intent — a default of True would
+    # let a failure path silently claim the turn worked (#307 review).
+    completed: bool
     session_id: str
     result_text: str
     cost_usd: float
     raw: dict | None
     stderr: str
-    completed: bool = True
 
     @property
     def timed_out(self) -> bool:

@@ -55,6 +55,7 @@ def run_turn(
         return TurnResult(
             exit_code=_TIMEOUT_EXIT,
             succeeded=False,
+            completed=False,
             session_id=session_id,
             result_text="",
             cost_usd=0.0,

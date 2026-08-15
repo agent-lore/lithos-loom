@@ -37,6 +37,7 @@ def _turn(
     return TurnResult(
         exit_code=0 if succeeded else 1,
         succeeded=succeeded,
+        completed=succeeded,
         session_id=session_id,
         result_text=result_text,
         cost_usd=cost,

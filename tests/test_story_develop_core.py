@@ -145,6 +145,7 @@ def _install_fakes(
         return TurnResult(
             exit_code=1,
             succeeded=False,
+            completed=False,
             session_id=session_id,
             result_text="Claude AI usage limit reached|1750000000",
             cost_usd=0.001,
@@ -216,6 +217,7 @@ def _install_fakes(
             return TurnResult(
                 exit_code=0 if turn_ok else 1,
                 succeeded=turn_ok,
+                completed=turn_ok,
                 session_id=session_id,
                 result_text="",
                 cost_usd=0.01,
@@ -247,6 +249,7 @@ def _install_fakes(
         return TurnResult(
             exit_code=0 if ok else 1,
             succeeded=ok,
+            completed=ok,
             session_id=session_id,
             result_text="",
             cost_usd=0.02,
@@ -1823,6 +1826,7 @@ def test_resume_after_uses_provider_reset_hint_when_future() -> None:
     turn = TurnResult(
         exit_code=1,
         succeeded=False,
+        completed=False,
         session_id="",
         result_text=f"Claude AI usage limit reached|{future_epoch}",
         cost_usd=0.0,
