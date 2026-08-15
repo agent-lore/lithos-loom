@@ -16,9 +16,9 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.artifacts` | XS | 0 | 1 |
 | `lithos_loom.evals.review.case` | M | 2 | 3 |
 | `lithos_loom.evals.review.cli` | M | 0 | 1 |
-| `lithos_loom.evals.review.harness` | S | 1 | 2 |
+| `lithos_loom.evals.review.harness` | S | 1 | 3 |
 | `lithos_loom.evals.review.judge` | S | 0 | 1 |
-| `lithos_loom.evals.review.match` | S | 2 | 3 |
+| `lithos_loom.evals.review.match` | S | 2 | 4 |
 | `lithos_loom.evals.review.overrides` | S | 0 | 2 |
 | `lithos_loom.evals.review.patch` | S | 0 | 1 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
@@ -40,6 +40,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 
 ### `lithos_loom.evals.review.harness`
 - class `CaseResult` — Aggregated metrics for one case over K runs.
+- def `count_valid` — ``(true count, number of valid samples)`` ignoring the errored ones.
 - def `run_case` — Run *case* *k* times and aggregate the catch / severity / FP rates.
 - def `live_review` — Run review-only mode against *head_sha* and return its report JSON.
 
@@ -51,6 +52,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - class `RunScore` — Score for one review run against a case (all expecteds must match).
 - def `match_expected` — Match one *expected* defect against the *produced* findings.
 - def `review_incomplete` — Whether any reviewer's turn did not produce a verdict (#182 A3).
+- def `review_blocked` — Whether the run **held approval** — the report's own blocking rule (#310).
 - def `score_run` — Score one review run: the case is caught iff EVERY expected matches.
 
 ### `lithos_loom.evals.review.overrides`

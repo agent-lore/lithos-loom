@@ -40,12 +40,22 @@ _INCOMPLETE_STATUSES = frozenset({"invalid", "not-run"})
 
 @dataclass(frozen=True)
 class RunScore:
-    """Score for one review run against a case (all expecteds must match)."""
+    """Score for one review run against a case (all expecteds must match).
+
+    ``n_findings`` / ``blocked`` are the run's **noise** instrumentation (#310):
+    the catch answer is about the case's *expected* defect alone, so everything
+    else a run reported — and whether it held approval over it — is invisible to
+    it. On a known-good head that gap flatters exactly the changes most likely to
+    be harmful (anything raising catch-rate by lowering the bar for what counts
+    as a defect), so the raw observations are recorded alongside the verdict.
+    """
 
     caught: bool
     severity_correct: bool
     matches: list[MatchResult] = field(default_factory=list)
     incomplete: bool = False
+    n_findings: int = 0
+    blocked: bool = False
 
 
 def _haystack(finding: dict) -> str:
@@ -122,6 +132,18 @@ def review_incomplete(report_json: dict) -> bool:
     )
 
 
+def review_blocked(report_json: dict) -> bool:
+    """Whether the run **held approval** — the report's own blocking rule (#310).
+
+    Read straight off the report so the eval can never disagree with what the
+    review actually decided (``intake_blocks``: any reviewer not passing, an
+    incomplete panel, or a blocking deterministic floor). A report without the
+    key is treated as non-blocking; every real ``ReviewReport.to_json()`` sets
+    it, so that default is reached by test stubs alone.
+    """
+    return bool(report_json.get("blocking", False))
+
+
 def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> RunScore:
     """Score one review run: the case is caught iff EVERY expected matches."""
     produced = _all_produced(report_json)
@@ -133,4 +155,6 @@ def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> R
         severity_correct=severity_correct,
         matches=matches,
         incomplete=review_incomplete(report_json),
+        n_findings=len(produced),
+        blocked=review_blocked(report_json),
     )

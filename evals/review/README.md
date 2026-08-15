@@ -33,10 +33,10 @@ of the run. Catch and FP are shown as a count over K plus a **Wilson 95% CI**
 estimate:
 
 ```
-case                         tier       n       catch (95% CI)   sev          fp (95% CI)  result
--------------------------------------------------------------------------------------------------
-180-attach-delivery          floor     20        20/20 84-100%  100%     0/4 0-49% +16err  ok
-lens33-confidence-crash      frontier  20          2/20  3-30%  100%                   0%  FAIL
+case                         tier       n       catch (95% CI)   sev          fp (95% CI)        noise  result
+--------------------------------------------------------------------------------------------------------------
+180-attach-delivery          floor     20        20/20 84-100%  100%     0/4 0-49% +16err   1/4 blk1  ok
+lens33-confidence-crash      frontier  20          2/20  3-30%  100%                   0%            —  FAIL
 frontier: 2/20 pooled catch (95% CI 3-30%) over 1 case
 floor: OK (1 case at bar)
 ```
@@ -62,11 +62,54 @@ reporting gap, not (yet) a run failure.
   (`claude` | `codex`).
 - `--report-dir DIR`: write every run's report to `DIR/<case>/<variant>-<i>.json`
   (`variant` = `buggy` / `known-good`) so you can read the findings behind a number,
-  plus a per-case `DIR/<case>/summary.json` (rates, per-sample booleans, CIs, and
-  the effective profile + panel) so a costly K-sample run is re-analysable for
-  variance without re-scoring.
+  plus a per-case `DIR/<case>/summary.json` (rates, per-sample booleans, CIs,
+  the noise instrumentation, and the effective profile + panel) so a costly
+  K-sample run is re-analysable for variance without re-scoring.
 - `--profile NAME` / `--reviewer NAME` / `--reviewer-override PERSONA.FIELD=VALUE`:
   the panel-override axis — see below.
+- `--max-known-good-block-rate RATE`: turn the `blk` count into a gate — see
+  [Noise](#noise-what-the-fp-rate-cannot-see-310). Off by default.
+
+### Noise: what the FP rate cannot see (#310)
+
+The `fp` column asks a known-good run **one** question: did it report *the case's
+expected defect*? Anything else it reported is invisible to that number — so a
+panel that files four unrelated findings on a clean head and **blocks** still
+scores `fp 0/3`. That is not hypothetical: three candidate arms of the RH-1
+artifact prompt, same case and persona, scored an identical `fp 0/3` while their
+known-good behaviour ranged from silent to blocking every single run.
+
+The `noise` column reads `NOISY/VALID blkN`:
+
+- **NOISY/VALID** — known-good runs that reported **anything at all**, over the
+  same valid denominator as `fp`, so the two describe the same runs. `fp 0/3`
+  beside `noise 3/3` means: it never mistook a clean head for the seeded defect,
+  and it never shut up either.
+- **blkN** — how many of those runs **held approval** (the report's own
+  `blocking` flag: any reviewer below its threshold, an incomplete panel, or a
+  blocking deterministic floor). This is the operational cost — a config with
+  `blk3` would hold a clean PR every time.
+- `—` for a case with no known-good arm (nothing to measure).
+
+`summary.json` carries `noise_rate` + CI, `known_good_findings_per_sample`,
+`known_good_blocked_per_sample`, `known_good_blocked`, and the same
+`findings_per_sample` / `blocked_per_sample` for the **buggy** arm — recorded but
+deliberately **not** rated, since an extra finding on a defective head may be a
+real second defect (this benchmark has found several).
+
+`--max-known-good-block-rate RATE` fails the run (exit 1, like a floor
+regression) when a case blocks its known-good head more often than `RATE`. It is
+**off by default**: no baseline for these numbers exists yet, and gating an
+unmeasured quantity is how a lever gets picked blind. Cases with no known-good
+arm are never convicted by it.
+
+Because the numbers are pure counting off the retained report JSON — no judge,
+no tokens — an **existing** `--report-dir` can be re-derived offline:
+
+```python
+from lithos_loom.evals.review.match import _all_produced, review_blocked
+n_findings, blocked = len(_all_produced(report)), review_blocked(report)
+```
 
 ### Panel overrides (RH-7)
 

@@ -962,3 +962,195 @@ def test_unsupported_judge_tool_fails_before_any_run(
     assert result.exit_code == 2
     assert "opencode" in result.output
     assert seen == []
+
+
+# ── noise reporting + the known-good block gate (#310) ────────────────────────
+
+
+def _noisy_result(
+    case_id: str,
+    *,
+    noisy: tuple[bool, ...] = (True, True, True),
+    blocked: tuple[bool, ...] = (True, True, True),
+    errored: tuple[bool, ...] = (False, False, False),
+) -> CaseResult:
+    n = len(noisy)
+    valid = [i for i in range(n) if not errored[i]]
+    noise_rate = sum(noisy[i] for i in valid) / len(valid) if valid else 0.0
+    return CaseResult(
+        case_id=case_id,
+        n=n,
+        catch_rate=1.0,
+        severity_correctness=1.0,
+        false_positive_rate=0.0,
+        passed=True,
+        caught_per_sample=(True,) * n,
+        severity_per_sample=(True,) * n,
+        catch_rate_ci=wilson_interval(n, n),
+        false_positive_per_sample=(False,) * n,
+        false_positive_errored_per_sample=errored,
+        findings_per_sample=(1,) * n,
+        blocked_per_sample=(False,) * n,
+        known_good_findings_per_sample=tuple(2 if x else 0 for x in noisy),
+        known_good_blocked_per_sample=blocked,
+        noise_rate=noise_rate,
+        noise_rate_ci=wilson_interval(sum(noisy[i] for i in valid), len(valid)),
+    )
+
+
+def _stub_noisy(monkeypatch: pytest.MonkeyPatch, **kwargs):
+    monkeypatch.setattr(
+        eval_cli, "run_case", lambda case, **_: _noisy_result(case.id, **kwargs)
+    )
+
+
+def test_table_shows_the_noise_cell_beside_fp(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # The whole point of #310: `fp 0/3` and `noise 3/3` must be readable side by
+    # side, or a config that blocks every clean render looks perfect.
+    _stub_noisy(monkeypatch)
+    result = runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "noise" in result.output
+    assert "3/3 blk3" in result.output
+
+
+def test_table_noise_cell_is_a_dash_without_a_known_good_arm(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_run_case(monkeypatch)  # no known-good samples at all
+    result = runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "blk" not in result.output
+
+
+def test_summary_json_carries_the_noise_instrumentation(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_noisy(monkeypatch)
+    out = tmp_path / "reports"
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--report-dir",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads((out / "other-case" / "summary.json").read_text())
+    assert payload["noise_rate"] == 1.0
+    assert len(payload["noise_rate_ci"]) == 2
+    assert payload["known_good_findings_per_sample"] == [2, 2, 2]
+    assert payload["known_good_blocked_per_sample"] == [True, True, True]
+    assert payload["known_good_blocked"] == 3
+    assert payload["findings_per_sample"] == [1, 1, 1]
+    assert payload["blocked_per_sample"] == [False, False, False]
+
+
+def test_known_good_block_gate_is_off_by_default(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # No baseline exists for the noise numbers yet, so the gate must be opt-in:
+    # blocking every known-good run records, it does not fail the run.
+    _stub_noisy(monkeypatch)
+    result = runner.invoke(
+        eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_known_good_block_gate_exits_nonzero_when_exceeded(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_noisy(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--max-known-good-block-rate",
+            "0.0",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "known-good" in result.output
+    assert "other-case" in result.output
+
+
+def test_known_good_block_gate_passes_under_the_bar(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_noisy(monkeypatch, blocked=(True, False, False))
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--max-known-good-block-rate",
+            "0.34",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_known_good_block_gate_ignores_cases_without_a_known_good_arm(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # A catch-only case measures no false positives; a zero bar must not fail it.
+    _stub_run_case(monkeypatch)
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--max-known-good-block-rate",
+            "0.0",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_known_good_block_gate_excludes_errored_samples(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # 1 block of 2 VALID samples = 0.5, not 1/3 — a crashed known-good sample
+    # blocks by definition (an incomplete panel holds approval) and would
+    # otherwise convict the arm.
+    _stub_noisy(
+        monkeypatch,
+        noisy=(True, False, False),
+        blocked=(True, True, False),
+        errored=(False, True, False),
+    )
+    result = runner.invoke(
+        eval_app,
+        [
+            "review",
+            "--cases-dir",
+            str(cases_dir),
+            "--case",
+            "other-case",
+            "--max-known-good-block-rate",
+            "0.5",
+        ],
+    )
+    assert result.exit_code == 0, result.output

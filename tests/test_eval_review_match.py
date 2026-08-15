@@ -568,3 +568,73 @@ def test_lens22_artifact_same_file_style_finding_is_not_a_catch() -> None:
         ),
     )
     assert score.caught is False
+
+
+# ── noise instrumentation (#310) ──────────────────────────────────────────────
+#
+# The defect-specific catch/FP answer says nothing about what ELSE a run
+# reported. ``score_run`` therefore also records the two raw observations the
+# report already carries: how many findings the pass produced, and whether it
+# held approval.
+
+
+def test_score_run_counts_every_finding_across_reviewers() -> None:
+    report = {
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS",
+                "findings": [
+                    _finding("minor", ["a.py"], "nit one", fid="f-001"),
+                    _finding("minor", ["b.py"], "nit two", fid="f-002"),
+                ],
+            },
+            {
+                "name": "security",
+                "status": "FINDINGS",
+                "findings": [_finding("major", ["c.py"], "nit three", fid="f-003")],
+            },
+        ]
+    }
+    assert score_run(_case(), report).n_findings == 3
+
+
+def test_score_run_counts_zero_findings_for_a_clean_pass() -> None:
+    assert score_run(_case(), _report_status("LGTM")).n_findings == 0
+
+
+def test_score_run_reads_the_reports_blocking_flag() -> None:
+    blocked = {"blocking": True, "reviewers": [{"name": "c", "findings": []}]}
+    clean = {"blocking": False, "reviewers": [{"name": "c", "findings": []}]}
+    assert score_run(_case(), blocked).blocked is True
+    assert score_run(_case(), clean).blocked is False
+
+
+def test_score_run_treats_a_blockingless_report_as_not_blocked() -> None:
+    # Robustness only: every real ReviewReport.to_json() carries `blocking`, so
+    # the default is reached by test stubs alone.
+    assert score_run(_case(), _report([])).blocked is False
+
+
+def test_score_run_records_noise_on_a_run_that_missed_the_defect() -> None:
+    # The #310 shape: findings that are NOT the expected defect. The catch
+    # answer is "miss"; the instrumentation must still see three findings and
+    # a held approval.
+    report = {
+        "blocking": True,
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS",
+                "findings": [
+                    _finding("minor", ["style.css"], "no max line length", fid="f-1"),
+                    _finding("minor", ["style.css"], "unstyled tag row", fid="f-2"),
+                    _finding("major", ["style.css"], "pre-existing margin", fid="f-3"),
+                ],
+            }
+        ],
+    }
+    score = score_run(_case(), report)
+    assert score.caught is False
+    assert score.n_findings == 3
+    assert score.blocked is True

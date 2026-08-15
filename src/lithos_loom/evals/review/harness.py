@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +48,16 @@ class CaseResult:
     ``errored_per_sample`` — ``catch_rate`` / ``false_positive_rate`` and their
     CIs are over the *valid* (non-errored) samples only, so agent flakiness never
     masquerades as a review miss.
+
+    The **noise** fields (#310) answer what the defect-specific rates cannot:
+    ``false_positive_rate`` counts only known-good runs that reported *the case's
+    expected defect*, so a panel filing four unrelated findings on a clean head —
+    and **blocking** — still scores `0/3`. ``noise_rate`` is the fraction of
+    *valid* known-good runs that reported **anything**, over the same denominator
+    so the two read side by side; the per-sample counts and block flags are kept
+    for both arms. The buggy arm is instrumented but deliberately **not** rated:
+    an extra finding there may be a real second defect, whereas on the known-good
+    head it is at best a distraction.
     """
 
     case_id: str
@@ -63,9 +73,29 @@ class CaseResult:
     false_positive_rate_ci: tuple[float, float] = (0.0, 0.0)
     errored_per_sample: tuple[bool, ...] = ()
     false_positive_errored_per_sample: tuple[bool, ...] = ()
+    findings_per_sample: tuple[int, ...] = ()
+    blocked_per_sample: tuple[bool, ...] = ()
+    known_good_findings_per_sample: tuple[int, ...] = ()
+    known_good_blocked_per_sample: tuple[bool, ...] = ()
+    noise_rate: float = 0.0
+    noise_rate_ci: tuple[float, float] = (0.0, 0.0)
 
 
 ReportSink = Callable[[str, str, int, dict], None]
+
+
+def count_valid(flags: Sequence[bool], errored: Sequence[bool]) -> tuple[int, int]:
+    """``(true count, number of valid samples)`` ignoring the errored ones.
+
+    Every rate in this module shares one denominator rule — the samples whose
+    reviewer turn actually produced a verdict (#182 A3) — so catch, false
+    positives and noise stay directly comparable. An *empty* ``errored`` (an
+    older ``CaseResult``, or a caller that tracks no errors) means none errored.
+    """
+    if not errored:
+        errored = (False,) * len(flags)
+    valid = [f for f, e in zip(flags, errored, strict=True) if not e]
+    return sum(valid), len(valid)
 
 
 def run_case(
@@ -102,6 +132,8 @@ def run_case(
         caught_samples: list[bool] = []
         severity_samples: list[bool] = []
         errored_samples: list[bool] = []
+        findings_samples: list[int] = []
+        blocked_samples: list[bool] = []
         for i in range(k):
             score = score_run(case, _review(case.head, "buggy", i), judge=judge)
             caught_samples.append(score.caught)
@@ -110,21 +142,22 @@ def run_case(
             # we can't tell a real miss from a crash-induced one, so exclude it. A
             # genuine catch is always trusted, even if a panel peer crashed.
             errored_samples.append((not score.caught) and score.incomplete)
+            findings_samples.append(score.n_findings)
+            blocked_samples.append(score.blocked)
 
-        n_valid = k - sum(errored_samples)
-        caught = sum(
-            c for c, e in zip(caught_samples, errored_samples, strict=True) if not e
-        )
-        severity_ok = sum(
-            s for s, e in zip(severity_samples, errored_samples, strict=True) if not e
-        )
+        caught, n_valid = count_valid(caught_samples, errored_samples)
+        severity_ok, _ = count_valid(severity_samples, errored_samples)
         catch_rate = caught / n_valid if n_valid else 0.0
         severity_correctness = severity_ok / caught if caught else 0.0
 
         fp_samples: list[bool] = []
         fp_errored_samples: list[bool] = []
+        kg_findings_samples: list[int] = []
+        kg_blocked_samples: list[bool] = []
         false_positive_rate = 0.0
         fp_ci = (0.0, 0.0)
+        noise_rate = 0.0
+        noise_ci = (0.0, 0.0)
         if case.known_good_head:
             j = known_good_runs if known_good_runs is not None else k
             for i in range(j):
@@ -133,12 +166,19 @@ def run_case(
                 )
                 fp_samples.append(score.caught)
                 fp_errored_samples.append((not score.caught) and score.incomplete)
-            fp_valid = j - sum(fp_errored_samples)
-            flagged = sum(
-                f for f, e in zip(fp_samples, fp_errored_samples, strict=True) if not e
-            )
+                kg_findings_samples.append(score.n_findings)
+                kg_blocked_samples.append(score.blocked)
+            flagged, fp_valid = count_valid(fp_samples, fp_errored_samples)
             false_positive_rate = flagged / fp_valid if fp_valid else 0.0
             fp_ci = wilson_interval(flagged, fp_valid)
+            # #310: "reported anything at all", over the same valid denominator
+            # as the FP rate — an incomplete panel reports nothing, so counting
+            # it as quiet would flatter the arm.
+            noisy, _ = count_valid(
+                [n > 0 for n in kg_findings_samples], fp_errored_samples
+            )
+            noise_rate = noisy / fp_valid if fp_valid else 0.0
+            noise_ci = wilson_interval(noisy, fp_valid)
 
         return CaseResult(
             case_id=case.id,
@@ -154,6 +194,12 @@ def run_case(
             false_positive_rate_ci=fp_ci,
             errored_per_sample=tuple(errored_samples),
             false_positive_errored_per_sample=tuple(fp_errored_samples),
+            findings_per_sample=tuple(findings_samples),
+            blocked_per_sample=tuple(blocked_samples),
+            known_good_findings_per_sample=tuple(kg_findings_samples),
+            known_good_blocked_per_sample=tuple(kg_blocked_samples),
+            noise_rate=noise_rate,
+            noise_rate_ci=noise_ci,
         )
     finally:
         cleanup()
