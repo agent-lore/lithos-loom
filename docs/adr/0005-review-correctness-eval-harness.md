@@ -452,6 +452,44 @@ valid comparison target. Whether residual variance warrants repeat-and-vote is a
 question for measurement, not assertion — #307's own suggestion 3, held until the
 audit trail can answer it.
 
+## Update (2026-08-15, #307 slice 2) — scoring separated from the paid run
+
+The judge became auditable in slice 1, but the question #307 actually asks — *how
+often does it answer differently?* — still needed a fresh paid sweep to answer,
+which is why it went unanswered. `eval rescore` removes that cost.
+
+The enabling observation is that `score_run` was already pure over
+`(case.expected, stored report JSON, judge)`: no git, no worktree, no container.
+Nothing about scoring ever needed the run. So a retained `--report-dir` can be
+scored again for **judge calls alone** — 69 for the whole pinned baseline (70
+reports, 85 judge sites, 69 with findings, since the judge short-circuits an empty
+findings list) — against hours of container reviewer runs for a fresh sweep.
+
+Two consequences beyond the immediate measurement. A judge-prompt change stops
+invalidating a paid baseline and becomes a few dollars of re-scoring. And the
+structured counterfactual over a whole corpus is free (`--no-judge`, zero tokens).
+
+**Repeat 0 is authoritative under `--judge-repeats N`.** Taking a majority would
+change the estimator in the same command that measures whether the estimator needs
+changing; majority-of-N remains suggestion 3, conditional on this evidence.
+Stability is reported over sites the judge *actually saw* — a sample that produced
+no findings is not a unanimous verdict, and counting it would flatter a quiet arm.
+
+**A measurement never sets the exit code.** A re-scored floor case reading
+`REGRESSED` is a finding about the judge, not a failure of the command; a gate that
+runs no reviewers would gate on the judge's mood.
+
+The comparability hazard is that a re-score reads the case from the tree as it
+stands *now*. `summary.json` therefore records an **`expected_fingerprint`** over
+exactly what the scorer consumes — the case's `[[expected]]`, with keyword and
+entry order normalised (neither changes scoring) but `mechanism` prose not (a reflow
+changes the judge's prompt). `ac.md`, personas and profile are deliberately out:
+they change what the *reviewer* saw, which a re-score never revisits — that is
+#309's question, and naming this key for the scorer's inputs alone leaves #309 free
+to add its own. A mismatch aborts; an absent fingerprint warns and proceeds, since
+every dir written before the field lands there and refusing them would make the
+retained corpus — the entire point of the command — unrescorable.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and

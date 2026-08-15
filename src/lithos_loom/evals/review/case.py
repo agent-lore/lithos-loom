@@ -10,6 +10,8 @@ defect that escapes review becomes a case.
 from __future__ import annotations
 
 import filecmp
+import hashlib
+import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,6 +134,37 @@ class Case:
     # against the buggy captures would measure the captures, not the review.
     # Required when an artifact case declares a [known_good] head.
     known_good_artifacts_dir: str | None = None
+
+
+def expected_fingerprint(case: Case) -> str:
+    """A hash of exactly what the SCORER consumes — the case's ``expected``.
+
+    Re-scoring a retained report dir compares against the case as it stands in
+    the tree *now*, so a changed ``[[expected]]`` would silently answer a
+    different question than the run did. This pins the scoring inputs and
+    nothing else: ``score_run`` reads ``case.expected`` alone, so ``ac.md``,
+    personas and profile are deliberately out — changing them changes what the
+    *reviewer* saw, which a re-score never revisits (that is #309's question).
+
+    Keyword order and the order of the expected entries are normalised, since
+    neither changes scoring; ``mechanism`` prose is not, since a reflow genuinely
+    changes the judge's prompt.
+    """
+    entries = sorted(
+        json.dumps(
+            {
+                "file": e.file,
+                "keywords": sorted(e.keywords),
+                "min_severity": e.min_severity,
+                "mechanism": e.mechanism,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for e in case.expected
+    )
+    blob = json.dumps({"id": case.id, "expected": entries}, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def load_case(case_dir: Path) -> Case:

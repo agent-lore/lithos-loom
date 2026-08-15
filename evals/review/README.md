@@ -72,6 +72,45 @@ known-good arm — see [Noise](#noise-what-the-fp-rate-cannot-see-310).
 - `--max-known-good-block-rate RATE`: turn the `blk` count into a gate — see
   [Noise](#noise-what-the-fp-rate-cannot-see-310). Off by default.
 
+### Re-scoring a stored report dir (#307)
+
+`--report-dir` output can be scored **again**, offline, without running a single
+reviewer — the only cost is judge calls:
+
+```bash
+# free: the structured counterfactual, zero tokens
+uv run lithos-loom eval rescore ~/lithos-loom-eval-reports/baseline-pinned-2026-08-13 --no-judge
+
+# see the exact judge-call count and stop
+uv run lithos-loom eval rescore REPORT_DIR --judge-repeats 5 --dry-run
+
+# the measurement #307 exists for: the same question, five times, identical input
+uv run lithos-loom eval rescore REPORT_DIR --judge-repeats 5 --case lens22-artifact-prewrap
+```
+
+Above one repeat the table gains two columns:
+
+| column | reads | means |
+|---|---|---|
+| `flip` | `FLIPPED/JUDGED` | judged sites whose N verdicts were not unanimous. Sites where the run produced no findings are excluded — the judge never saw them, and counting free unanimity as stability would flatter a quiet arm. |
+| `spread` | `MIN-MAX/N` | catch count under each of the N universes. `4-5/5` says the arm could have reported either. |
+
+**Repeat 0 is authoritative.** The command measures variance; it does not quietly
+re-estimate while measuring (majority-of-N is #307's suggestion 3, held until this
+says whether it is needed).
+
+`rescore.json` lands **beside** `summary.json`, never over it, and reuses its field
+names so drift compares field-for-field. Per-site verdicts are recorded even at one
+repeat: a site whose findings were produced and whose verdict is empty *is* a veto,
+named. Everything fails closed before the first judge call, and the printed call
+count is exact rather than an estimate.
+
+Report dirs written before #307 have no `expected_fingerprint`, so they warn
+("case identity unverifiable") and proceed — refusing them would make the whole
+retained corpus unrescorable. A fingerprint that is present and *differs* aborts:
+the case's `[[expected]]` changed, so a re-score would answer a different question
+than the run did (`--allow-changed-cases` to proceed anyway).
+
 ### Noise: what the FP rate cannot see (#310)
 
 The `fp` column asks a known-good run **one** question: did it report *the case's

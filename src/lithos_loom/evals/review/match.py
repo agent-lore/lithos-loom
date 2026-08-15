@@ -209,8 +209,13 @@ def match_expected(
     return MatchResult(caught=False, severity_correct=False, method="none")
 
 
-def _all_produced(report_json: dict) -> list[dict]:
-    """Flatten every reviewer's findings out of a ReviewReport JSON."""
+def produced_findings(report_json: dict) -> list[dict]:
+    """Flatten every reviewer's findings out of a ReviewReport JSON.
+
+    Public because offline re-scoring (``eval rescore``) asks the judge the same
+    question the live run did, and that needs the findings the run produced —
+    read straight off the retained report, no re-run.
+    """
     findings: list[dict] = []
     for reviewer in report_json.get("reviewers", []):
         findings.extend(reviewer.get("findings", []))
@@ -237,7 +242,7 @@ def finding_count(report_json: dict) -> int:
     report dir is free (pure counting — no judge, no tokens), so report dirs
     predating #310 stay analysable.
     """
-    return len(_all_produced(report_json))
+    return len(produced_findings(report_json))
 
 
 def review_blocked(report_json: dict) -> bool:
@@ -254,7 +259,7 @@ def review_blocked(report_json: dict) -> bool:
 
 def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> RunScore:
     """Score one review run: the case is caught iff EVERY expected matches."""
-    produced = _all_produced(report_json)
+    produced = produced_findings(report_json)
     matches = [match_expected(e, produced, judge=judge) for e in case.expected]
     caught = all(m.caught for m in matches)
     severity_correct = caught and all(m.severity_correct for m in matches)
@@ -281,6 +286,7 @@ __all__ = [
     "finding_count",
     "judge_status_errored",
     "match_expected",
+    "produced_findings",
     "review_blocked",
     "review_incomplete",
     "score_run",
