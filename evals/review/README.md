@@ -463,6 +463,46 @@ seed). The patch form (above) avoids that.
   when the known-good shares the defect's topic (the first live run measured 100% FP
   this way) — useful for a quick pass, not a trusted number.
 
+The structured answer is computed on **every** run, judge or not — it is pure over
+the stored findings, so it costs nothing. When it disagrees with the judge the catch
+cell gains a trailing `struct N/M`; when they agree it stays silent (the `+Nerr`
+precedent). `summary.json` always carries `structured_caught_per_sample`.
+
+### Auditing a judge verdict (#307)
+
+The judge answers with a **status**, because an empty match used to mean three
+different things:
+
+| status | meaning | scored as |
+|---|---|---|
+| `ok` | a real answer — matched ids, or an explicit `MATCHED: none` veto | the measurement |
+| `unparsed` | the reply had no readable `MATCHED:` line | **excluded** (`+Njerr`) |
+| `failed` | no usable reply — timeout, missing CLI, or a turn that did not complete (retried once first) | **excluded** (`+Njerr`) |
+
+Excluded samples leave the denominators exactly as a crashed reviewer does (#182 A3),
+so a judge timeout can no longer masquerade as a review miss. They are reported
+separately from `+Nerr`, so you can tell which half of the instrument broke — and
+`+Njerr` appears on the arm it happened to, beside `catch` or beside `fp`.
+
+A turn that did not *complete* (non-zero exit, claude `is_error`, codex
+`turn.failed`) is `failed` and its text is never parsed: it may be partial or
+stale, and the codex stream retains the last agent message even when a later event
+fails the turn. A turn that completed but minted no resumable session handle is
+still scored — that handle only matters for resume turns, which a one-shot judge
+call never does.
+
+With `--report-dir`, every judged sample writes its verdicts — including the judge's
+**raw reply** — to `<case>/judge/<variant>-<i>.json`. To find every veto in a run:
+
+```bash
+jq -r 'select(.caught==false and .structured_caught) |
+       "\(.case) \(.variant)-\(.sample): \(.expected[0].reply)"' \
+   REPORT_DIR/*/judge/*.json
+```
+
+That is the shape #307 was filed on: the structured matcher accepted a finding the
+judge rejected. Report dirs written before #307 have no `judge/` directory.
+
 A case is **caught** in a run iff *every* expected defect matches. Reported over K
 runs: catch-rate, severity-correctness (among caught), and false-positive rate (on
 the known-good head). A case is at bar when `catch-rate ≥ bar` (default 0.8) —

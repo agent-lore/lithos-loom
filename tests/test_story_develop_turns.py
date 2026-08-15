@@ -214,3 +214,34 @@ def test_parse_codex_success_raw_has_no_failure_events() -> None:
     assert r.succeeded is True
     assert r.raw is not None
     assert "failure_events" not in r.raw
+
+
+# ── the driver's own failure path (#307 review) ──────────────────────────────
+
+
+def test_a_timed_out_turn_did_not_complete(monkeypatch) -> None:
+    """`completed` is the turn's own outcome, and a timeout is not one.
+
+    The field is required on TurnResult precisely so this path cannot claim
+    success by omission — a default of True let the timeout constructor report
+    `completed=True` alongside `succeeded=False, timed_out=True`.
+    """
+    import subprocess
+
+    from lithos_loom.plugins.story_develop import containers, turns
+
+    def boom(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["docker"], timeout=1)
+
+    monkeypatch.setattr(containers, "exec_turn", boom)
+    result = turns.run_turn(
+        container="c",
+        prompt="p",
+        engine=ClaudeEngine(),
+        session_id="sid",
+        timeout=1,
+    )
+
+    assert result.timed_out is True
+    assert result.succeeded is False
+    assert result.completed is False

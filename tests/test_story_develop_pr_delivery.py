@@ -428,6 +428,7 @@ def _install(
         return TurnResult(
             exit_code=0 if coder_ok else 1,
             succeeded=coder_ok,
+            completed=coder_ok,
             session_id=session_id,
             result_text="",
             cost_usd=0.1,

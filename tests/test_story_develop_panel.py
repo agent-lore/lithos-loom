@@ -271,6 +271,7 @@ def test_run_panel_round_routes_the_reviewer_turn_through_injected_services(
         return TurnResult(
             exit_code=1,
             succeeded=False,
+            completed=False,
             session_id="",
             result_text="boom",
             cost_usd=0.03,
@@ -332,6 +333,7 @@ def _ok_turn(session_id: str) -> TurnResult:
     return TurnResult(
         exit_code=0,
         succeeded=True,
+        completed=True,
         session_id=session_id,
         result_text="done",
         cost_usd=0.01,
@@ -344,6 +346,7 @@ def _limited_turn() -> TurnResult:
     return TurnResult(
         exit_code=1,
         succeeded=False,
+        completed=False,
         session_id="",
         result_text="Claude AI usage limit reached|1750000000",
         cost_usd=0.001,
@@ -628,6 +631,7 @@ def _infra_failed_turn() -> TurnResult:
     return TurnResult(
         exit_code=1,
         succeeded=False,
+        completed=False,
         session_id="",
         result_text="API Error: 401 OAuth access token has been revoked",
         cost_usd=0.005,

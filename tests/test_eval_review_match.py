@@ -13,6 +13,7 @@ import pytest
 
 from lithos_loom.evals.review.case import Case, Expected, load_case
 from lithos_loom.evals.review.match import (
+    JudgeVerdict,
     _structured_match,
     finding_count,
     match_expected,
@@ -92,10 +93,10 @@ def test_judge_confirms_and_returns_the_matched_finding() -> None:
     ]
     seen = {}
 
-    def judge(mechanism: str, findings: list[dict]) -> list[str]:
+    def judge(mechanism: str, findings: list[dict]) -> JudgeVerdict:
         seen["mechanism"] = mechanism
         seen["ids"] = [f["finding_id"] for f in findings]
-        return ["f-007"]
+        return JudgeVerdict(matched_ids=("f-007",))
 
     m = match_expected(_EXPECTED, produced, judge=judge)
     assert m.caught is True
@@ -115,7 +116,7 @@ def test_judge_vetoes_a_false_structural_hit() -> None:
     ]
     assert _structured_match(_EXPECTED, produced[0]) is True  # would falsely match
 
-    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: [])
+    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: JudgeVerdict())
     assert m.caught is False
     assert m.method == "judge"
 
@@ -125,7 +126,8 @@ def test_judge_rescues_a_keyword_less_finding() -> None:
     produced = [_finding("critical", ["cli/develop.py"], "premature exit", fid="f-009")]
     assert _structured_match(_EXPECTED, produced[0]) is False
 
-    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: ["f-009"])
+    verdict = JudgeVerdict(matched_ids=("f-009",))
+    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: verdict)
     assert m.caught is True
     assert m.finding_id == "f-009"
 
@@ -134,7 +136,8 @@ def test_judge_match_below_min_severity_is_not_severity_correct() -> None:
     produced = [
         _finding("minor", ["cli/develop.py"], "exits before delivery", fid="f-1")
     ]
-    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: ["f-1"])
+    verdict = JudgeVerdict(matched_ids=("f-1",))
+    m = match_expected(_EXPECTED, produced, judge=lambda mech, fs: verdict)
     assert m.caught is True
     assert m.severity_correct is False
 
@@ -653,3 +656,112 @@ def test_finding_count_is_the_public_offline_helper() -> None:
     assert finding_count(report) == 2
     assert finding_count(report) == score_run(_case(), report).n_findings
     assert finding_count({"reviewers": []}) == 0
+
+
+# ── judge status: veto vs unreadable vs unreachable (#307) ───────────────────
+
+
+def _judging(verdict: JudgeVerdict):
+    return lambda mech, fs: verdict
+
+
+def test_judge_failure_is_not_a_veto() -> None:
+    """An unreachable judge answered nothing — that is not evidence of a miss."""
+    produced = [_finding("critical", ["cli/develop.py"], "approved before delivery")]
+    m = match_expected(
+        _EXPECTED, produced, judge=_judging(JudgeVerdict(status="failed"))
+    )
+
+    assert m.caught is False
+    assert m.judge is not None and m.judge.status == "failed"
+
+
+def test_match_records_the_judges_verdict() -> None:
+    verdict = JudgeVerdict(matched_ids=("f-001",), reply="because X\nMATCHED: f-001")
+    produced = [_finding("critical", ["cli/develop.py"], "approved before delivery")]
+    m = match_expected(_EXPECTED, produced, judge=_judging(verdict))
+
+    assert m.judge is not None
+    assert m.judge.matched_ids == ("f-001",)
+    assert "because X" in m.judge.reply  # the audit trail #307 asked for
+
+
+def test_structured_answer_is_computed_alongside_the_judge() -> None:
+    """The #307 shape: judge vetoes a finding the structured matcher accepts."""
+    produced = [
+        _finding("critical", ["cli/develop.py"], "the approved-state delivery summary")
+    ]
+    m = match_expected(_EXPECTED, produced, judge=_judging(JudgeVerdict()))
+
+    assert m.caught is False  # the judge's answer is authoritative
+    assert m.structured_caught is True  # ...and the divergence is recorded
+    assert m.structured_finding_id == "f-001"
+    assert m.method == "judge"
+
+
+def test_structured_answer_agrees_with_the_verdict_without_a_judge() -> None:
+    produced = [_finding("critical", ["cli/develop.py"], "approved before delivery")]
+    m = match_expected(_EXPECTED, produced, judge=None)
+    assert m.caught is True and m.structured_caught is True
+    assert m.judge is None
+
+
+def test_score_run_flags_judge_errored_without_setting_incomplete() -> None:
+    """The two halves of the instrument fail independently and are reported so."""
+    report = _report(
+        [_finding("critical", ["cli/develop.py"], "approved before delivery")]
+    )
+    score = score_run(_case(), report, judge=_judging(JudgeVerdict(status="failed")))
+
+    assert score.judge_errored is True
+    assert score.incomplete is False  # the REVIEWER was fine
+    assert score.judge_status == "failed"
+
+
+def test_score_run_unparsed_is_judge_errored_too() -> None:
+    report = _report([_finding("critical", ["cli/develop.py"], "approved delivery")])
+    score = score_run(_case(), report, judge=_judging(JudgeVerdict(status="unparsed")))
+    assert score.judge_errored is True
+
+
+def test_score_run_veto_is_not_judge_errored() -> None:
+    report = _report([_finding("critical", ["cli/develop.py"], "approved delivery")])
+    score = score_run(_case(), report, judge=_judging(JudgeVerdict()))
+    assert score.caught is False
+    assert score.judge_errored is False  # a veto IS a measurement
+
+
+def test_score_run_records_the_structured_counterfactual() -> None:
+    report = _report(
+        [_finding("critical", ["cli/develop.py"], "approved before delivery")]
+    )
+    score = score_run(_case(), report, judge=_judging(JudgeVerdict()))
+    assert score.caught is False
+    assert score.structured_caught is True
+
+
+def test_run_score_judge_status_is_empty_without_a_judge() -> None:
+    report = _report([_finding("critical", ["cli/develop.py"], "approved delivery")])
+    score = score_run(_case(), report)
+    assert score.judge_status == ""
+    assert score.judge_errored is False
+
+
+def test_judged_happy_path_verdict_is_unchanged() -> None:
+    """Comparability guard: a well-formed verdict scores exactly as it always did.
+
+    Only the failure paths changed behaviour in #307, so the pinned baseline
+    stays a valid comparison target.
+    """
+    produced = [
+        _finding("critical", ["cli/develop.py"], "exits before delivery", fid="f-007")
+    ]
+    m = match_expected(
+        _EXPECTED, produced, judge=_judging(JudgeVerdict(matched_ids=("f-007",)))
+    )
+    assert (m.caught, m.severity_correct, m.method, m.finding_id) == (
+        True,
+        True,
+        "judge",
+        "f-007",
+    )

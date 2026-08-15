@@ -391,6 +391,67 @@ whose whole design is to be a comment-only no-op. Whether that is a fixture
 weakness or a legitimate review is a judgement call; the point is that it was
 unmeasurable before.
 
+## Update (2026-08-15, #307) — the judge is an instrument, so it fails loudly
+
+The judge is **authoritative** by this ADR's original design, which made it the
+one component whose failures were indistinguishable from measurements. #307 caught
+it giving different verdicts to two findings naming the same file, line, severity
+and mechanism in different words (`4/5` judged vs `5/5` structured). Diagnosing
+that first required removing three ways the code manufactured the same signature:
+
+1. **A judge timeout or missing CLI returned `""`** — no matched ids, identical to
+   a veto — and was *not* counted as errored (that flag keyed only on *reviewer*
+   status), so it silently depressed catch-rate.
+2. **A turn that did not succeed had its text parsed anyway.**
+3. **A reply with no `MATCHED:` line was scanned wholesale for finding ids.** The
+   prompt asks the model to reason before concluding, so this scored
+   "f-001 does NOT describe this" as a match; `MATCHED: none of f-001, f-002`
+   matched both ids. Both manufacture a catch out of a rejection.
+
+So a verdict now carries a **status**: `ok` (a real answer, veto included),
+`unparsed`, or `failed` (retried once). The latter two are an *absence* of a
+verdict and are excluded from every denominator like a crashed reviewer (#182 A3),
+but reported separately (`+Njerr`) so it is clear which half of the instrument
+broke. The whole-reply fallback is deleted.
+
+`TurnResult.succeeded` turned out to conflate two things, and the first review
+round caught the cost of treating them alike. It means *both* "this turn worked"
+and "it minted a resumable session handle". The handle exists so a later resume
+turn can re-attach — meaningless for a one-shot host-direct Q&A — so gating the
+scorer on the whole predicate would mean a CLI that stopped echoing a handle
+turned every case into zero valid samples. But the first attempt at that
+exemption demoted *every* `succeeded == False` to a benign anomaly, on the
+assumption that a failed turn carries no `MATCHED:` line. That assumption was
+wrong for both engines: a claude reply with `is_error: true` can still carry one,
+and the codex stream **retains the last agent message even when a later
+`turn.failed` arrives**. So a crashed turn could manufacture a catch out of
+partial or stale output — the very defect the change set out to close.
+
+`TurnResult` therefore now carries **`completed`** (the turn's own outcome)
+alongside `succeeded` (`completed` *and* resumable). The judge treats a turn that
+did not complete as `failed` — text retained for audit, retried once, never
+parsed — and reserves the anomaly for the narrow missing-handle case. The
+distinction lives in the engine adapter rather than in per-tool JSON knowledge
+re-derived inside the judge, which ARCH-2.E5 deliberately removed.
+
+Two consequences for auditability. The structured matcher is pure over the stored
+findings, so **both** answers are now computed every run for free, and the catch
+cell shows `struct N/M` whenever they disagree — the divergence #307 was found by
+hand is now in the headline. And with `--report-dir`, each judged sample writes its
+verdicts *and the judge's raw reply* to `<case>/judge/<variant>-<i>.json`: a
+subdirectory, not a sibling file, because `<variant>-<i>.json` is the stable
+`ReviewReport` contract that offline re-scoring globs.
+
+What this update deliberately does **not** change is the judge's *policy*. Its
+disagreements with the structured matcher were checked and are correct — it rescues
+keyword-less catches (`lens27` 0→5, `289` 2→3, `lens34` 2→3) and both baseline
+vetoes are right (`lens33`'s finding described the finiteness form its case
+explicitly excludes; `291`'s described a different mechanism in the right file).
+Only failure paths changed behaviour, so `baseline-pinned-2026-08-13` remains a
+valid comparison target. Whether residual variance warrants repeat-and-vote is a
+question for measurement, not assertion — #307's own suggestion 3, held until the
+audit trail can answer it.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and

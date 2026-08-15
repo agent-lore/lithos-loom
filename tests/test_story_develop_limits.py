@@ -27,6 +27,7 @@ def _failed(
     return TurnResult(
         exit_code=exit_code,
         succeeded=False,
+        completed=False,
         session_id="",
         result_text=result_text,
         cost_usd=0.0,
@@ -123,6 +124,7 @@ def test_classify_rejects_successful_turn() -> None:
     ok = TurnResult(
         exit_code=0,
         succeeded=True,
+        completed=True,
         session_id="s",
         result_text="",
         cost_usd=0.0,
