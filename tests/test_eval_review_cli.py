@@ -14,11 +14,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from lithos_loom.evals.review import app as eval_app_mod
 from lithos_loom.evals.review import cli as eval_cli
 from lithos_loom.evals.review.case import Expected
 from lithos_loom.evals.review.cli import eval_app
 from lithos_loom.evals.review.harness import CaseResult
 from lithos_loom.evals.review.match import JudgeVerdict, MatchResult, RunScore
+from lithos_loom.evals.review.report import print_results_table
 from lithos_loom.evals.review.stats import wilson_interval
 
 runner = CliRunner()
@@ -35,6 +37,20 @@ def _plain(output: str) -> str:
     check passes only where colour happens to be off — locally, but not in CI.
     """
     return _ANSI.sub("", output)
+
+
+_BOX = re.compile(r"[│╭╮╰╯─]")
+
+
+def _unwrapped(output: str) -> str:
+    """CLI output with styling, box-drawing and line wrapping normalised away.
+
+    Rich renders an error inside a panel and hard-wraps the message at the panel
+    width, so a phrase that reads as one line to a human is split across two
+    rows with `│` borders between. Asserting a plain substring therefore fails
+    on exactly the long messages most worth pinning.
+    """
+    return " ".join(_BOX.sub(" ", _plain(output)).split())
 
 
 _TOML = """
@@ -210,7 +226,7 @@ def test_unknown_case_errors(monkeypatch: pytest.MonkeyPatch, cases_dir: Path) -
 
 def test_judge_on_by_default(monkeypatch: pytest.MonkeyPatch, cases_dir: Path) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     runner.invoke(
         eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
     )
@@ -221,7 +237,7 @@ def test_no_judge_flag_disables_it(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     runner.invoke(
         eval_app,
         ["review", "--cases-dir", str(cases_dir), "--case", "other-case", "--no-judge"],
@@ -233,7 +249,7 @@ def test_report_dir_passes_a_sink(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
 ) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     out = tmp_path / "reports"
     runner.invoke(
         eval_app,
@@ -254,7 +270,7 @@ def test_no_report_dir_means_no_sink(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
     seen = _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     runner.invoke(
         eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
     )
@@ -286,7 +302,7 @@ def test_summary_json_written_when_report_dir(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
 ) -> None:
     _stub_run_case(monkeypatch, catch_rate=0.8)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     out = tmp_path / "reports"
     runner.invoke(
         eval_app,
@@ -869,7 +885,7 @@ def test_judge_gets_an_explicit_model(
         seen.update(kwargs)
         return "JUDGE"
 
-    monkeypatch.setattr(eval_cli, "build_agent_judge", fake_judge)
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", fake_judge)
     result = runner.invoke(
         eval_app, ["review", "--cases-dir", str(cases_dir), "--case", "other-case"]
     )
@@ -912,7 +928,7 @@ def test_summary_json_records_the_judge(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
 ) -> None:
     _stub_run_case(monkeypatch)
-    monkeypatch.setattr(eval_cli, "build_agent_judge", lambda **k: "JUDGE")
+    monkeypatch.setattr(eval_app_mod, "build_agent_judge", lambda **k: "JUDGE")
     out = tmp_path / "reports"
     runner.invoke(
         eval_app,
@@ -1605,3 +1621,66 @@ def test_crossed_per_sample_disagreement_still_shows_the_struct_note(
     )
     result = _invoke(cases_dir)
     assert "struct 1/2" in _plain(result.output)
+
+
+# ── the extra-column seam slice 2b renders its stability cells through ───────
+
+
+def _one_result() -> CaseResult:
+    return CaseResult(
+        case_id="c",
+        n=2,
+        catch_rate=1.0,
+        severity_correctness=1.0,
+        false_positive_rate=0.0,
+        passed=True,
+        caught_per_sample=(True, True),
+        severity_per_sample=(True, True),
+        catch_rate_ci=wilson_interval(2, 2),
+        errored_per_sample=(False, False),
+    )
+
+
+def test_extra_columns_render_between_noise_and_result(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    r = _one_result()
+    print_results_table(
+        [("frontier", r)], extra_columns=[("flip", 7, lambda res: f"0/{res.n}")]
+    )
+    header, _, row = capsys.readouterr().out.splitlines()[:3]
+
+    assert "0/2" in row
+    assert header.index("noise") < header.index("flip") < header.index("result")
+
+
+def test_extra_columns_leave_the_core_columns_where_they_were(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report dirs get column-diffed, so one command's table must line up with
+    another's regardless of what it appends."""
+    r = _one_result()
+
+    print_results_table([("frontier", r)])
+    plain_header = capsys.readouterr().out.splitlines()[0]
+
+    print_results_table(
+        [("frontier", r)], extra_columns=[("flip", 7, lambda res: "0/2")]
+    )
+    extra_header = capsys.readouterr().out.splitlines()[0]
+
+    core = plain_header[: plain_header.index("  result")]
+    assert extra_header.startswith(core)
+
+
+def test_unsupported_judge_tool_message_is_pinned(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    """Operator-visible error text, pinned so an extraction cannot reword it."""
+    _stub_run_case(monkeypatch)
+    result = _invoke(cases_dir, None, "--judge-tool", "opencode")
+
+    assert result.exit_code != 0
+    assert "is not a supported agent tool (known: claude, codex)" in _unwrapped(
+        result.output
+    )

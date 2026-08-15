@@ -13,17 +13,24 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 |---|---|---:|---:|
 | `lithos_loom.evals` | XS | 0 | 0 |
 | `lithos_loom.evals.review` | XS | 0 | 0 |
+| `lithos_loom.evals.review.app` | XS | 0 | 3 |
 | `lithos_loom.evals.review.artifacts` | XS | 0 | 1 |
 | `lithos_loom.evals.review.case` | M | 2 | 3 |
-| `lithos_loom.evals.review.cli` | L | 0 | 1 |
-| `lithos_loom.evals.review.harness` | M | 1 | 3 |
+| `lithos_loom.evals.review.cli` | M | 0 | 1 |
+| `lithos_loom.evals.review.harness` | M | 1 | 4 |
 | `lithos_loom.evals.review.judge` | S | 1 | 1 |
 | `lithos_loom.evals.review.match` | S | 3 | 7 |
 | `lithos_loom.evals.review.overrides` | S | 0 | 2 |
 | `lithos_loom.evals.review.patch` | S | 0 | 1 |
+| `lithos_loom.evals.review.report` | S | 0 | 12 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
 
 ## Public API
+
+### `lithos_loom.evals.review.app`
+- def `discover_cases`
+- def `require_rate` — Reject a rate option that is not a finite fraction in ``[0, 1]``.
+- def `resolve_judge` — ``(judge_info, judge_fn)`` — validated **before** any paid work.
 
 ### `lithos_loom.evals.review.artifacts`
 - def `seed_case_artifacts` — Copy *case*'s artifacts for *head_sha* under ``config.artifacts_dir``.
@@ -41,6 +48,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 ### `lithos_loom.evals.review.harness`
 - class `CaseResult` — Aggregated metrics for one case over K runs.
 - def `count_valid` — ``(true count, number of valid samples)`` ignoring the errored ones.
+- def `aggregate_case` — Turn per-sample scores into a :class:`CaseResult`.
 - def `run_case` — Run *case* *k* times and aggregate the catch / severity / FP rates.
 - def `live_review` — Run review-only mode against *head_sha* and return its report JSON.
 
@@ -66,6 +74,20 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 
 ### `lithos_loom.evals.review.patch`
 - def `materialise_patch_heads` — Resolve a case's patch-defined head(s) to ephemeral-commit shas (#193).
+
+### `lithos_loom.evals.review.report`
+- def `ci_band`
+- def `err_suffix`
+- def `judge_err_suffix`
+- def `structured_tally` — ``(structured catches, valid samples)`` — ``(0, 0)`` when not recorded.
+- def `struct_disagrees` — Whether the judge and the structured matcher actually disagree.
+- def `struct_note` — ``struct N/M`` — but only when the judge-free matcher disagrees (#307).
+- def `noise_cell` — The known-good noise cell: how many runs said anything, how many blocked.
+- def `catch_cell` — The catch cell plus ``(caught, n_valid)`` for the roll-up tallies.
+- def `fp_cell`
+- def `print_results_table` — Print the results table + the two tier roll-ups.
+- def `print_rollups` — The two tier roll-up lines (RH-6): frontier headline, floor gate.
+- def `case_result_payload` — The rate / per-sample half of a case's ``summary.json``.
 
 ### `lithos_loom.evals.review.stats`
 - def `wilson_interval` — 95% Wilson score interval ``(lo, hi)`` in ``[0, 1]`` for ``successes`` / ``n``.

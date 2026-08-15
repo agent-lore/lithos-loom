@@ -633,3 +633,17 @@ def test_run_boots_when_task_graph_extension_present(
     result = runner.invoke(app, ["run", "--config", str(config)])
     assert result.exit_code == 0, result.output
     assert len(constructed) == 1  # boot gate passed → supervisor started
+
+
+def test_eval_group_is_mounted_with_its_commands() -> None:
+    """Registration goes through the REAL top-level app, not `review.cli`.
+
+    Importing `eval_app` from `review.cli` would register the commands as a side
+    effect of the import itself, so a test doing that proves nothing about
+    `main.py`. Since the group now lives in `review.app` and each command module
+    registers onto it on import, dropping the side-effect import from `main.py`
+    has to fail here.
+    """
+    result = runner.invoke(app, ["eval", "--help"])
+    assert result.exit_code == 0
+    assert "review" in result.output

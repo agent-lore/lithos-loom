@@ -147,6 +147,94 @@ def count_valid(flags: Sequence[bool], errored: Sequence[bool]) -> tuple[int, in
     return sum(valid), len(valid)
 
 
+def aggregate_case(
+    case_id: str,
+    buggy: Sequence[RunScore],
+    known_good: Sequence[RunScore] = (),
+    *,
+    k: int,
+    bar: float,
+) -> CaseResult:
+    """Turn per-sample scores into a :class:`CaseResult`.
+
+    Split from :func:`run_case` so the arithmetic has exactly one home (#307):
+    ``eval rescore`` scores stored reports rather than running reviewers, and if
+    it re-implemented the errored/valid denominators, the Wilson intervals and
+    the shared fp/noise denominator, the two would drift on the next change and
+    a re-score would stop being comparable to the run it re-scores.
+    """
+    caught_samples = [s.caught for s in buggy]
+    severity_samples = [s.severity_correct for s in buggy]
+    # A crashed reviewer (incomplete report) that didn't catch is errored: we
+    # can't tell a real miss from a crash-induced one, so exclude it. A genuine
+    # catch is always trusted, even if a panel peer crashed.
+    errored_samples = [(not s.caught) and s.incomplete for s in buggy]
+    judge_status_samples = [s.judge_status for s in buggy]
+    # The judge is the other half of the instrument, and it fails too (#307): a
+    # timeout or an unreadable reply is an ABSENCE of a verdict, so it is
+    # excluded exactly like a crashed reviewer rather than scoring as a miss.
+    excluded = _union(
+        k, errored_samples, [judge_status_errored(s) for s in judge_status_samples]
+    )
+
+    caught, n_valid = count_valid(caught_samples, excluded)
+    severity_ok, _ = count_valid(severity_samples, excluded)
+    catch_rate = caught / n_valid if n_valid else 0.0
+
+    fp_samples = [s.caught for s in known_good]
+    fp_errored_samples = [(not s.caught) and s.incomplete for s in known_good]
+    kg_findings_samples = [s.n_findings for s in known_good]
+    kg_judge_status_samples = [s.judge_status for s in known_good]
+    false_positive_rate = 0.0
+    fp_ci = (0.0, 0.0)
+    noise_rate = 0.0
+    noise_ci = (0.0, 0.0)
+    if known_good:
+        fp_excluded = _union(
+            len(known_good),
+            fp_errored_samples,
+            [judge_status_errored(s) for s in kg_judge_status_samples],
+        )
+        flagged, fp_valid = count_valid(fp_samples, fp_excluded)
+        false_positive_rate = flagged / fp_valid if fp_valid else 0.0
+        fp_ci = wilson_interval(flagged, fp_valid)
+        # #310: "reported anything at all", over the same valid denominator as
+        # the FP rate — an incomplete panel reports nothing, so counting it as
+        # quiet would flatter the arm. The denominator stays shared when the
+        # JUDGE fails too, so `fp` and `noise` never describe different runs.
+        noisy, _ = count_valid([n > 0 for n in kg_findings_samples], fp_excluded)
+        noise_rate = noisy / fp_valid if fp_valid else 0.0
+        noise_ci = wilson_interval(noisy, fp_valid)
+
+    return CaseResult(
+        case_id=case_id,
+        n=k,
+        catch_rate=catch_rate,
+        severity_correctness=severity_ok / caught if caught else 0.0,
+        false_positive_rate=false_positive_rate,
+        passed=n_valid > 0 and catch_rate >= bar,
+        caught_per_sample=tuple(caught_samples),
+        severity_per_sample=tuple(severity_samples),
+        catch_rate_ci=wilson_interval(caught, n_valid),
+        false_positive_per_sample=tuple(fp_samples),
+        false_positive_rate_ci=fp_ci,
+        errored_per_sample=tuple(errored_samples),
+        false_positive_errored_per_sample=tuple(fp_errored_samples),
+        findings_per_sample=tuple(s.n_findings for s in buggy),
+        blocked_per_sample=tuple(s.blocked for s in buggy),
+        known_good_findings_per_sample=tuple(kg_findings_samples),
+        known_good_blocked_per_sample=tuple(s.blocked for s in known_good),
+        noise_rate=noise_rate,
+        noise_rate_ci=noise_ci,
+        judge_status_per_sample=tuple(judge_status_samples),
+        false_positive_judge_status_per_sample=tuple(kg_judge_status_samples),
+        structured_caught_per_sample=tuple(s.structured_caught for s in buggy),
+        false_positive_structured_per_sample=tuple(
+            s.structured_caught for s in known_good
+        ),
+    )
+
+
 def run_case(
     case: Case,
     *,
@@ -185,100 +273,14 @@ def run_case(
                 judge_sink(case, variant, i, score)
             return score
 
-        caught_samples: list[bool] = []
-        severity_samples: list[bool] = []
-        errored_samples: list[bool] = []
-        findings_samples: list[int] = []
-        blocked_samples: list[bool] = []
-        judge_status_samples: list[str] = []
-        structured_samples: list[bool] = []
-        for i in range(k):
-            score = _score(case.head, "buggy", i)
-            caught_samples.append(score.caught)
-            severity_samples.append(score.severity_correct)
-            # A crashed reviewer (incomplete report) that didn't catch is errored:
-            # we can't tell a real miss from a crash-induced one, so exclude it. A
-            # genuine catch is always trusted, even if a panel peer crashed.
-            errored_samples.append((not score.caught) and score.incomplete)
-            findings_samples.append(score.n_findings)
-            blocked_samples.append(score.blocked)
-            judge_status_samples.append(score.judge_status)
-            structured_samples.append(score.structured_caught)
-
-        # The judge is the other half of the instrument, and it fails too (#307):
-        # a timeout or an unreadable reply is an ABSENCE of a verdict, so it is
-        # excluded exactly like a crashed reviewer rather than scoring as a miss.
-        judge_err_samples = [judge_status_errored(s) for s in judge_status_samples]
-        excluded = _union(k, errored_samples, judge_err_samples)
-
-        caught, n_valid = count_valid(caught_samples, excluded)
-        severity_ok, _ = count_valid(severity_samples, excluded)
-        catch_rate = caught / n_valid if n_valid else 0.0
-        severity_correctness = severity_ok / caught if caught else 0.0
-
-        fp_samples: list[bool] = []
-        fp_errored_samples: list[bool] = []
-        kg_findings_samples: list[int] = []
-        kg_blocked_samples: list[bool] = []
-        false_positive_rate = 0.0
-        fp_ci = (0.0, 0.0)
-        noise_rate = 0.0
-        noise_ci = (0.0, 0.0)
-        kg_judge_status_samples: list[str] = []
-        kg_structured_samples: list[bool] = []
-        fp_excluded: tuple[bool, ...] = ()
+        buggy = [_score(case.head, "buggy", i) for i in range(k)]
+        known_good: list[RunScore] = []
         if case.known_good_head:
             j = known_good_runs if known_good_runs is not None else k
-            for i in range(j):
-                score = _score(case.known_good_head, "known-good", i)
-                fp_samples.append(score.caught)
-                fp_errored_samples.append((not score.caught) and score.incomplete)
-                kg_findings_samples.append(score.n_findings)
-                kg_blocked_samples.append(score.blocked)
-                kg_judge_status_samples.append(score.judge_status)
-                kg_structured_samples.append(score.structured_caught)
-            fp_excluded = _union(
-                j,
-                fp_errored_samples,
-                [judge_status_errored(s) for s in kg_judge_status_samples],
-            )
-            flagged, fp_valid = count_valid(fp_samples, fp_excluded)
-            false_positive_rate = flagged / fp_valid if fp_valid else 0.0
-            fp_ci = wilson_interval(flagged, fp_valid)
-            # #310: "reported anything at all", over the same valid denominator
-            # as the FP rate — an incomplete panel reports nothing, so counting
-            # it as quiet would flatter the arm. The denominator stays shared
-            # when the JUDGE fails too, so `fp` and `noise` never describe
-            # different sets of runs (#307).
-            noisy, _ = count_valid([n > 0 for n in kg_findings_samples], fp_excluded)
-            noise_rate = noisy / fp_valid if fp_valid else 0.0
-            noise_ci = wilson_interval(noisy, fp_valid)
-
-        return CaseResult(
-            case_id=case.id,
-            n=k,
-            catch_rate=catch_rate,
-            severity_correctness=severity_correctness,
-            false_positive_rate=false_positive_rate,
-            passed=n_valid > 0 and catch_rate >= bar,
-            caught_per_sample=tuple(caught_samples),
-            severity_per_sample=tuple(severity_samples),
-            catch_rate_ci=wilson_interval(caught, n_valid),
-            false_positive_per_sample=tuple(fp_samples),
-            false_positive_rate_ci=fp_ci,
-            errored_per_sample=tuple(errored_samples),
-            false_positive_errored_per_sample=tuple(fp_errored_samples),
-            findings_per_sample=tuple(findings_samples),
-            blocked_per_sample=tuple(blocked_samples),
-            known_good_findings_per_sample=tuple(kg_findings_samples),
-            known_good_blocked_per_sample=tuple(kg_blocked_samples),
-            noise_rate=noise_rate,
-            noise_rate_ci=noise_ci,
-            judge_status_per_sample=tuple(judge_status_samples),
-            false_positive_judge_status_per_sample=tuple(kg_judge_status_samples),
-            structured_caught_per_sample=tuple(structured_samples),
-            false_positive_structured_per_sample=tuple(kg_structured_samples),
-        )
+            known_good = [
+                _score(case.known_good_head, "known-good", i) for i in range(j)
+            ]
+        return aggregate_case(case.id, buggy, known_good, k=k, bar=bar)
     finally:
         cleanup()
 
