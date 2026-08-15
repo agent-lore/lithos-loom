@@ -23,7 +23,7 @@ from ...plugins.story_develop.review_only import review_change
 from ...plugins.story_develop.review_resolve import ResolvedChange
 from .artifacts import seed_case_artifacts
 from .case import Case
-from .match import Judge, score_run
+from .match import Judge, RunScore, judge_status_errored, score_run
 from .patch import materialise_patch_heads
 from .stats import wilson_interval
 
@@ -58,6 +58,15 @@ class CaseResult:
     for both arms. The buggy arm is instrumented but deliberately **not** rated:
     an extra finding there may be a real second defect, whereas on the known-good
     head it is at best a distraction.
+
+    The **judge** fields (#307) close the other half of that gap. Scoring has two
+    halves — the reviewer produces findings, the judge rules on them — and either
+    can fail. ``errored_per_sample`` keeps its exact meaning (a crashed
+    *reviewer*); ``judge_status_per_sample`` records the *judge's* answer, whose
+    error statuses mean it gave none. Both are excluded from every denominator,
+    via ``excluded_per_sample``. ``structured_caught_per_sample`` is the free
+    judge-free counterfactual, so a judge/structured divergence is visible in the
+    result rather than only findable by re-scoring a report dir by hand.
     """
 
     case_id: str
@@ -79,9 +88,49 @@ class CaseResult:
     known_good_blocked_per_sample: tuple[bool, ...] = ()
     noise_rate: float = 0.0
     noise_rate_ci: tuple[float, float] = (0.0, 0.0)
+    judge_status_per_sample: tuple[str, ...] = ()
+    false_positive_judge_status_per_sample: tuple[str, ...] = ()
+    structured_caught_per_sample: tuple[bool, ...] = ()
+    false_positive_structured_per_sample: tuple[bool, ...] = ()
+
+    @property
+    def judge_errored_per_sample(self) -> tuple[bool, ...]:
+        return tuple(judge_status_errored(s) for s in self.judge_status_per_sample)
+
+    @property
+    def false_positive_judge_errored_per_sample(self) -> tuple[bool, ...]:
+        return tuple(
+            judge_status_errored(s) for s in self.false_positive_judge_status_per_sample
+        )
+
+    @property
+    def excluded_per_sample(self) -> tuple[bool, ...]:
+        """Reviewer-errored OR judge-errored — the denominator rule (#182 A3)."""
+        return _union(self.n, self.errored_per_sample, self.judge_errored_per_sample)
+
+    @property
+    def false_positive_excluded_per_sample(self) -> tuple[bool, ...]:
+        return _union(
+            len(self.false_positive_per_sample),
+            self.false_positive_errored_per_sample,
+            self.false_positive_judge_errored_per_sample,
+        )
+
+
+def _union(n: int, *flags: Sequence[bool]) -> tuple[bool, ...]:
+    """Elementwise OR over *flags*, padding short/absent tuples with ``False``.
+
+    Length-tolerant on purpose: a ``CaseResult`` built before these fields
+    existed (or by a test stub) carries empty tuples, and must not raise.
+    """
+    return tuple(any(f[i] for f in flags if i < len(f)) for i in range(n))
 
 
 ReportSink = Callable[[str, str, int, dict], None]
+# Receives every scored sample as (case, variant, index, score) so the judge's
+# verdicts can be persisted for audit. Takes the Case, not just its id: a verdict
+# is only meaningful next to the `expected` that prompted it (#307).
+JudgeSink = Callable[[Case, str, int, RunScore], None]
 
 
 def count_valid(flags: Sequence[bool], errored: Sequence[bool]) -> tuple[int, int]:
@@ -107,6 +156,7 @@ def run_case(
     review_fn: ReviewFn | None = None,
     known_good_runs: int | None = None,
     report_sink: ReportSink | None = None,
+    judge_sink: JudgeSink | None = None,
 ) -> CaseResult:
     """Run *case* *k* times and aggregate the catch / severity / FP rates.
 
@@ -129,13 +179,21 @@ def run_case(
                 report_sink(case.id, variant, i, report)
             return report
 
+        def _score(head: str, variant: str, i: int) -> RunScore:
+            score = score_run(case, _review(head, variant, i), judge=judge)
+            if judge_sink is not None:
+                judge_sink(case, variant, i, score)
+            return score
+
         caught_samples: list[bool] = []
         severity_samples: list[bool] = []
         errored_samples: list[bool] = []
         findings_samples: list[int] = []
         blocked_samples: list[bool] = []
+        judge_status_samples: list[str] = []
+        structured_samples: list[bool] = []
         for i in range(k):
-            score = score_run(case, _review(case.head, "buggy", i), judge=judge)
+            score = _score(case.head, "buggy", i)
             caught_samples.append(score.caught)
             severity_samples.append(score.severity_correct)
             # A crashed reviewer (incomplete report) that didn't catch is errored:
@@ -144,9 +202,17 @@ def run_case(
             errored_samples.append((not score.caught) and score.incomplete)
             findings_samples.append(score.n_findings)
             blocked_samples.append(score.blocked)
+            judge_status_samples.append(score.judge_status)
+            structured_samples.append(score.structured_caught)
 
-        caught, n_valid = count_valid(caught_samples, errored_samples)
-        severity_ok, _ = count_valid(severity_samples, errored_samples)
+        # The judge is the other half of the instrument, and it fails too (#307):
+        # a timeout or an unreadable reply is an ABSENCE of a verdict, so it is
+        # excluded exactly like a crashed reviewer rather than scoring as a miss.
+        judge_err_samples = [judge_status_errored(s) for s in judge_status_samples]
+        excluded = _union(k, errored_samples, judge_err_samples)
+
+        caught, n_valid = count_valid(caught_samples, excluded)
+        severity_ok, _ = count_valid(severity_samples, excluded)
         catch_rate = caught / n_valid if n_valid else 0.0
         severity_correctness = severity_ok / caught if caught else 0.0
 
@@ -158,25 +224,33 @@ def run_case(
         fp_ci = (0.0, 0.0)
         noise_rate = 0.0
         noise_ci = (0.0, 0.0)
+        kg_judge_status_samples: list[str] = []
+        kg_structured_samples: list[bool] = []
+        fp_excluded: tuple[bool, ...] = ()
         if case.known_good_head:
             j = known_good_runs if known_good_runs is not None else k
             for i in range(j):
-                score = score_run(
-                    case, _review(case.known_good_head, "known-good", i), judge=judge
-                )
+                score = _score(case.known_good_head, "known-good", i)
                 fp_samples.append(score.caught)
                 fp_errored_samples.append((not score.caught) and score.incomplete)
                 kg_findings_samples.append(score.n_findings)
                 kg_blocked_samples.append(score.blocked)
-            flagged, fp_valid = count_valid(fp_samples, fp_errored_samples)
+                kg_judge_status_samples.append(score.judge_status)
+                kg_structured_samples.append(score.structured_caught)
+            fp_excluded = _union(
+                j,
+                fp_errored_samples,
+                [judge_status_errored(s) for s in kg_judge_status_samples],
+            )
+            flagged, fp_valid = count_valid(fp_samples, fp_excluded)
             false_positive_rate = flagged / fp_valid if fp_valid else 0.0
             fp_ci = wilson_interval(flagged, fp_valid)
             # #310: "reported anything at all", over the same valid denominator
             # as the FP rate — an incomplete panel reports nothing, so counting
-            # it as quiet would flatter the arm.
-            noisy, _ = count_valid(
-                [n > 0 for n in kg_findings_samples], fp_errored_samples
-            )
+            # it as quiet would flatter the arm. The denominator stays shared
+            # when the JUDGE fails too, so `fp` and `noise` never describe
+            # different sets of runs (#307).
+            noisy, _ = count_valid([n > 0 for n in kg_findings_samples], fp_excluded)
             noise_rate = noisy / fp_valid if fp_valid else 0.0
             noise_ci = wilson_interval(noisy, fp_valid)
 
@@ -200,6 +274,10 @@ def run_case(
             known_good_blocked_per_sample=tuple(kg_blocked_samples),
             noise_rate=noise_rate,
             noise_rate_ci=noise_ci,
+            judge_status_per_sample=tuple(judge_status_samples),
+            false_positive_judge_status_per_sample=tuple(kg_judge_status_samples),
+            structured_caught_per_sample=tuple(structured_samples),
+            false_positive_structured_per_sample=tuple(kg_structured_samples),
         )
     finally:
         cleanup()

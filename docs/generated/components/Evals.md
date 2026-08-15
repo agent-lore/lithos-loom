@@ -16,9 +16,9 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.artifacts` | XS | 0 | 1 |
 | `lithos_loom.evals.review.case` | M | 2 | 3 |
 | `lithos_loom.evals.review.cli` | M | 0 | 1 |
-| `lithos_loom.evals.review.harness` | S | 1 | 3 |
-| `lithos_loom.evals.review.judge` | S | 0 | 1 |
-| `lithos_loom.evals.review.match` | S | 2 | 5 |
+| `lithos_loom.evals.review.harness` | M | 1 | 3 |
+| `lithos_loom.evals.review.judge` | S | 1 | 1 |
+| `lithos_loom.evals.review.match` | S | 3 | 7 |
 | `lithos_loom.evals.review.overrides` | S | 0 | 2 |
 | `lithos_loom.evals.review.patch` | S | 0 | 1 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
@@ -45,9 +45,13 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `live_review` — Run review-only mode against *head_sha* and return its report JSON.
 
 ### `lithos_loom.evals.review.judge`
+- class `JudgeUnavailable` — The judge agent produced no usable turn — infra, not a verdict.
 - def `build_agent_judge` — A :data:`~.match.Judge` backed by a host-direct agent call.
 
 ### `lithos_loom.evals.review.match`
+- class `JudgeVerdict` — One judge answer about one expected defect — the answer, and why (#307).
+- def `judge_status_errored` — Whether a recorded judge status means **no verdict was produced**.
+- def `worst_judge_status` — The worst status across a run's expecteds (``""`` when no judge ran).
 - class `MatchResult` — Whether one expected defect was surfaced, and how.
 - class `RunScore` — Score for one review run against a case (all expecteds must match).
 - def `match_expected` — Match one *expected* defect against the *produced* findings.

@@ -9,26 +9,85 @@ is over a single review run; the harness aggregates rates across K runs.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from typing import Literal
 
 from ...plugins.story_develop.handoff import severity_at_or_above
 from .case import Case, Expected
 
-# A judge takes (mechanism, produced_findings) and returns the finding_ids that
-# describe the SPECIFIC mechanism (empty = none). Injected so scoring stays
-# unit-testable. Returning ids (not a bool) keeps severity-correctness accurate.
-Judge = Callable[[str, list[dict]], list[str]]
+JudgeStatus = Literal["ok", "unparsed", "failed"]
+
+# Ordered worst-last: a case's status is the worst across its expecteds.
+_STATUS_RANK: dict[str, int] = {"ok": 0, "unparsed": 1, "failed": 2}
+_JUDGE_ERROR_STATUSES = frozenset({"unparsed", "failed"})
+
+
+@dataclass(frozen=True)
+class JudgeVerdict:
+    """One judge answer about one expected defect — the answer, and why (#307).
+
+    ``status`` separates the three things an empty ``matched_ids`` used to mean:
+    a genuine **veto** (``ok``), a reply whose verdict line could not be read
+    (``unparsed``), and a call that never produced one (``failed`` — a timeout,
+    a missing CLI). Only ``ok`` is a measurement; the other two are an ABSENCE
+    of one and must not score as a review miss. ``reply`` is retained so a veto
+    is auditable after the fact instead of invisible.
+    """
+
+    matched_ids: tuple[str, ...] = ()
+    status: JudgeStatus = "ok"
+    reply: str = ""
+    detail: str = ""
+
+    @property
+    def usable(self) -> bool:
+        return self.status == "ok"
+
+
+# A judge takes (mechanism, produced_findings) and answers which finding_ids
+# describe the SPECIFIC mechanism. Injected so scoring stays unit-testable.
+# Answering with ids (not a bool) keeps severity-correctness accurate.
+Judge = Callable[[str, list[dict]], JudgeVerdict]
+
+
+def judge_status_errored(status: str) -> bool:
+    """Whether a recorded judge status means **no verdict was produced**.
+
+    ``unparsed`` / ``failed`` are an absence of an answer, so a sample carrying
+    either is excluded from every rate denominator (#182 A3, #307) — unlike a
+    veto, which is an answer.
+    """
+    return status in _JUDGE_ERROR_STATUSES
+
+
+def worst_judge_status(statuses: Iterable[str]) -> str:
+    """The worst status across a run's expecteds (``""`` when no judge ran)."""
+    worst = ""
+    for status in statuses:
+        if not worst or _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(worst, 0):
+            worst = status
+    return worst
 
 
 @dataclass(frozen=True)
 class MatchResult:
-    """Whether one expected defect was surfaced, and how."""
+    """Whether one expected defect was surfaced, and how.
+
+    ``structured_caught`` is the judge-free answer, computed on **every** match
+    (#307). The structured matcher is pure over the already-in-memory findings,
+    so carrying its answer alongside the judge's costs no agent call and no
+    tokens — and a judge/structured divergence is exactly the signal that used
+    to be findable only by re-scoring a report dir by hand.
+    """
 
     caught: bool
     severity_correct: bool
     method: str  # "structured" | "judge" | "none"
     finding_id: str = ""
+    structured_caught: bool = False
+    structured_finding_id: str = ""
+    judge: JudgeVerdict | None = None  # None iff no judge ran
 
 
 # Reviewer statuses that mean the turn did NOT produce a verdict (always
@@ -56,6 +115,18 @@ class RunScore:
     incomplete: bool = False
     n_findings: int = 0
     blocked: bool = False
+    judge_status: str = ""  # worst across the expecteds; "" when no judge ran
+    structured_caught: bool = False
+
+    @property
+    def judge_errored(self) -> bool:
+        """The judge gave no usable answer, so this sample cannot be scored.
+
+        Kept **distinct** from ``incomplete`` (a crashed *reviewer*): conflating
+        them would hide which half of the instrument broke. Both are excluded
+        from rate denominators the same way (#182 A3).
+        """
+        return judge_status_errored(self.judge_status)
 
 
 def _haystack(finding: dict) -> str:
@@ -70,6 +141,14 @@ def _structured_match(expected: Expected, finding: dict) -> bool:
     return file_hit and keyword_hit
 
 
+def _structured_hit(expected: Expected, produced: list[dict]) -> dict | None:
+    """The first finding matching *expected* structurally (file + ≥1 keyword)."""
+    for finding in produced:
+        if _structured_match(expected, finding):
+            return finding
+    return None
+
+
 def match_expected(
     expected: Expected, produced: list[dict], *, judge: Judge | None = None
 ) -> MatchResult:
@@ -81,10 +160,18 @@ def match_expected(
     hit on a different defect) and **rescues** a correct finding worded without
     the keywords. Without a judge, the cheap structured match (file + ≥1 keyword)
     is used — deterministic, but topic-loose.
+
+    The structured answer is computed either way and carried on the result: it
+    is a pure function of *produced*, so recording what the judge-free matcher
+    would have said is free (#307).
     """
+    hit = _structured_hit(expected, produced)
+    structured_id = str(hit.get("finding_id", "")) if hit is not None else ""
+
     if judge is not None:
-        matched_ids = set(judge(expected.mechanism, produced))
-        matched = [f for f in produced if f.get("finding_id") in matched_ids]
+        verdict = judge(expected.mechanism, produced)
+        wanted = set(verdict.matched_ids)
+        matched = [f for f in produced if f.get("finding_id") in wanted]
         if matched:
             sev_ok = any(
                 severity_at_or_above(f.get("severity", "minor"), expected.min_severity)
@@ -95,19 +182,30 @@ def match_expected(
                 severity_correct=sev_ok,
                 method="judge",
                 finding_id=str(matched[0].get("finding_id", "")),
+                structured_caught=hit is not None,
+                structured_finding_id=structured_id,
+                judge=verdict,
             )
-        return MatchResult(caught=False, severity_correct=False, method="judge")
+        return MatchResult(
+            caught=False,
+            severity_correct=False,
+            method="judge",
+            structured_caught=hit is not None,
+            structured_finding_id=structured_id,
+            judge=verdict,
+        )
 
-    for finding in produced:
-        if _structured_match(expected, finding):
-            return MatchResult(
-                caught=True,
-                severity_correct=severity_at_or_above(
-                    finding.get("severity", "minor"), expected.min_severity
-                ),
-                method="structured",
-                finding_id=finding.get("finding_id", ""),
-            )
+    if hit is not None:
+        return MatchResult(
+            caught=True,
+            severity_correct=severity_at_or_above(
+                hit.get("severity", "minor"), expected.min_severity
+            ),
+            method="structured",
+            finding_id=structured_id,
+            structured_caught=True,
+            structured_finding_id=structured_id,
+        )
     return MatchResult(caught=False, severity_correct=False, method="none")
 
 
@@ -167,16 +265,24 @@ def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> R
         incomplete=review_incomplete(report_json),
         n_findings=len(produced),
         blocked=review_blocked(report_json),
+        judge_status=worst_judge_status(
+            m.judge.status for m in matches if m.judge is not None
+        ),
+        structured_caught=all(m.structured_caught for m in matches),
     )
 
 
 __all__ = [
     "Judge",
+    "JudgeStatus",
+    "JudgeVerdict",
     "MatchResult",
     "RunScore",
     "finding_count",
+    "judge_status_errored",
     "match_expected",
     "review_blocked",
     "review_incomplete",
     "score_run",
+    "worst_judge_status",
 ]

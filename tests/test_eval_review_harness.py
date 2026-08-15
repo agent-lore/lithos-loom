@@ -12,6 +12,7 @@ import pytest
 from lithos_loom.evals.review import harness as harness_mod
 from lithos_loom.evals.review.case import Case, Expected
 from lithos_loom.evals.review.harness import _base_for, live_review, run_case
+from lithos_loom.evals.review.match import JudgeVerdict
 from lithos_loom.plugins.story_develop.review_report import ReviewReport
 
 _EXPECTED = Expected(
@@ -755,3 +756,127 @@ def test_no_known_good_means_no_noise_measurement() -> None:
     assert result.known_good_blocked_per_sample == ()
     assert result.noise_rate == 0.0
     assert result.noise_rate_ci == (0.0, 0.0)
+
+
+# ── judge failure is its own signal (#307) ───────────────────────────────────
+
+
+def _scripted_judge(statuses: list[str]):
+    """A judge whose Nth call returns the Nth scripted status.
+
+    Markers: ``ok`` confirms every finding (so a `_caught()` report scores as a
+    catch), ``veto`` answers "none match", and ``failed`` / ``unparsed`` answer
+    nothing at all — which is the point: those must not read as a review miss.
+    """
+    calls = {"n": 0}
+
+    def judge(mechanism: str, findings: list[dict]) -> JudgeVerdict:
+        i = calls["n"]
+        calls["n"] += 1
+        marker = statuses[min(i, len(statuses) - 1)]
+        if marker == "veto":
+            return JudgeVerdict()
+        if marker != "ok":
+            return JudgeVerdict(status=marker)  # type: ignore[arg-type]
+        ids = tuple(str(f.get("finding_id", "")) for f in findings)
+        return JudgeVerdict(matched_ids=ids)
+
+    return judge
+
+
+def test_judge_errored_samples_are_excluded_from_the_catch_denominator() -> None:
+    """#307 defect 1: a judge timeout used to silently depress catch-rate.
+
+    Three runs judged cleanly and caught; two could not be judged at all. The
+    honest answer is 3/3, not 3/5.
+    """
+    fn = _review_fn([True] * 5)
+    result = run_case(
+        _case(known_good=False),
+        k=5,
+        review_fn=fn,
+        judge=_scripted_judge(["ok", "ok", "ok", "failed", "failed"]),
+    )
+
+    assert result.catch_rate == 1.0
+    assert result.judge_errored_per_sample == (False, False, False, True, True)
+    assert result.errored_per_sample == (False,) * 5  # the REVIEWERS were fine
+    assert result.excluded_per_sample == (False, False, False, True, True)
+
+
+def test_judge_errors_are_reported_separately_from_reviewer_errors() -> None:
+    fn = _seq_review_fn(["catch", "error", "catch"])
+    result = run_case(
+        _case(known_good=False),
+        k=3,
+        review_fn=fn,
+        judge=_scripted_judge(["ok", "ok", "unparsed"]),
+    )
+
+    # sample 1 crashed the reviewer; sample 2 crashed the judge — different halves
+    assert result.errored_per_sample == (False, True, False)
+    assert result.judge_errored_per_sample == (False, False, True)
+    assert result.excluded_per_sample == (False, True, True)
+    assert result.catch_rate == 1.0  # the one valid sample caught it
+
+
+def test_all_judge_errored_means_no_valid_samples_and_not_passed() -> None:
+    fn = _review_fn([True] * 3)
+    result = run_case(
+        _case(known_good=False), k=3, review_fn=fn, judge=_scripted_judge(["failed"])
+    )
+
+    assert result.catch_rate == 0.0
+    assert result.passed is False  # cannot pass on zero evidence
+    assert all(result.judge_errored_per_sample)
+
+
+def test_known_good_judge_errors_are_excluded_from_fp_and_noise() -> None:
+    # 2 buggy (judged ok), then 2 known-good whose judge fails on the second
+    fn = _review_fn([True, True], good_caught=False)
+    result = run_case(
+        _case(),
+        k=2,
+        review_fn=fn,
+        judge=_scripted_judge(["ok", "ok", "ok", "failed"]),
+    )
+
+    assert result.false_positive_judge_errored_per_sample == (False, True)
+    # fp and noise share one denominator, so they still describe the same runs
+    assert result.false_positive_rate == 0.0
+    assert result.noise_rate == 0.0
+
+
+def test_structured_caught_per_sample_records_the_judge_free_answer() -> None:
+    """The judge vetoes every sample; the structured matcher accepts every one."""
+    fn = _review_fn([True] * 4)
+    result = run_case(
+        _case(known_good=False), k=4, review_fn=fn, judge=_scripted_judge(["veto"])
+    )
+
+    assert result.catch_rate == 0.0
+    assert result.structured_caught_per_sample == (True,) * 4
+
+
+def test_judge_sink_receives_every_scored_sample() -> None:
+    seen: list[tuple[str, str, int, str]] = []
+
+    def sink(case, variant, i, score):
+        seen.append((case.id, variant, i, score.judge_status))
+
+    run_case(
+        _case(),
+        k=2,
+        review_fn=_review_fn([True, True]),
+        judge=_scripted_judge(["ok"]),
+        judge_sink=sink,
+    )
+
+    assert [(v, i) for _, v, i, _ in seen] == [
+        ("buggy", 0),
+        ("buggy", 1),
+        ("known-good", 0),
+        ("known-good", 1),
+    ]
+    assert all(case_id == "180-attach-delivery" for case_id, _, _, _ in seen)
+    assert all(status == "ok" for *_, status in seen)

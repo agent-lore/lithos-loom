@@ -32,6 +32,7 @@ from .harness import (
     DEFAULT_BAR,
     DEFAULT_K,
     CaseResult,
+    JudgeSink,
     ReportSink,
     ReviewFn,
     count_valid,
@@ -39,6 +40,7 @@ from .harness import (
     run_case,
 )
 from .judge import build_agent_judge
+from .match import RunScore
 from .overrides import parse_reviewer_overrides, resolve_panel
 from .stats import wilson_interval
 
@@ -203,6 +205,11 @@ def review(
     judge_info = {"tool": judge_tool, "model": judge_model} if judge else None
     judge_fn = build_agent_judge(tool=judge_tool, model=judge_model) if judge else None
     sink = _make_report_sink(report_dir) if report_dir is not None else None
+    verdict_sink = (
+        _make_judge_sink(report_dir, judge_info)
+        if report_dir is not None and judge
+        else None
+    )
 
     results: list[tuple[str, CaseResult]] = []
     for loaded, tier, eff_profile, panel in prepared:
@@ -227,6 +234,7 @@ def review(
             bar=bar,
             judge=judge_fn,
             report_sink=sink,
+            judge_sink=verdict_sink,
             review_fn=review_fn,
         )
         results.append((tier, result))
@@ -243,12 +251,18 @@ def review(
 
     _print_table(results)
     floor_regressed = any(t == "floor" and not r.passed for t, r in results)
-    no_valid = [r.case_id for _, r in results if r.n - sum(r.errored_per_sample) == 0]
+    no_valid = [
+        r.case_id
+        for _, r in results
+        if count_valid(r.caught_per_sample, r.excluded_per_sample)[1] == 0
+    ]
     if no_valid:
         typer.echo(
-            f"no valid samples (reviewer infra failure): {', '.join(no_valid)}",
+            "no valid samples (reviewer or judge infra failure): "
+            + ", ".join(no_valid),
             err=True,
         )
+    _report_judge_errors(results, report_dir)
     over, unjudgeable = _block_rate_gate(results, max_known_good_block_rate)
     if over:
         typer.echo(
@@ -309,7 +323,7 @@ def _block_rate_gate(
         if not r.known_good_blocked_per_sample:
             continue
         blocked, valid = count_valid(
-            r.known_good_blocked_per_sample, r.false_positive_errored_per_sample
+            r.known_good_blocked_per_sample, r.false_positive_excluded_per_sample
         )
         if not valid:
             unjudgeable.append(r.case_id)
@@ -432,12 +446,105 @@ def _write_summary(
         )[0],
         "findings_per_sample": list(r.findings_per_sample),
         "blocked_per_sample": list(r.blocked_per_sample),
+        # #307: which samples the JUDGE could not rule on (distinct from a
+        # crashed reviewer above), and what the free structured matcher said —
+        # so a judge/structured divergence is in the record, not just the table.
+        "judge_errored": sum(r.judge_errored_per_sample),
+        "judge_errored_per_sample": list(r.judge_errored_per_sample),
+        "judge_status_per_sample": list(r.judge_status_per_sample),
+        "false_positive_judge_errored": sum(r.false_positive_judge_errored_per_sample),
+        "false_positive_judge_status_per_sample": list(
+            r.false_positive_judge_status_per_sample
+        ),
+        "structured_caught_per_sample": list(r.structured_caught_per_sample),
+        "structured_caught": _structured_tally(r)[0],
+        "false_positive_structured_per_sample": list(
+            r.false_positive_structured_per_sample
+        ),
         "passed": r.passed,
     }
     if artifacts is not None:
         payload["artifacts"] = artifacts
     payload["judge"] = judge_info
     (out / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _make_judge_sink(report_dir: Path, judge_info: dict | None) -> JudgeSink:
+    """Persist each sample's judge verdicts to ``<case>/judge/<variant>-<i>.json``.
+
+    A **subdirectory**, deliberately: ``<case>/<variant>-<i>.json`` is the
+    reviewers' ``ReviewReport`` — a documented stable contract that offline
+    re-scoring globs — so the eval's own scorer must not write into that
+    namespace. A sibling ``buggy-0.judge.json`` would match ``buggy-*.json`` and
+    silently feed judge records to a finding counter; a subdir matches nothing.
+    Written per sample, so a run killed mid-sweep keeps the verdicts it has.
+    """
+
+    def sink(case: Case, variant: str, i: int, score: RunScore) -> None:
+        judged = [
+            (expected, m)
+            for expected, m in zip(case.expected, score.matches, strict=True)
+            if m.judge
+        ]
+        if not judged:
+            return  # no judge ran — absence of the file is meaningful
+        out = report_dir / case.id / "judge"
+        out.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "case": case.id,
+            "variant": variant,
+            "sample": i,
+            "judge": judge_info,
+            "caught": score.caught,
+            "structured_caught": score.structured_caught,
+            "judge_status": score.judge_status,
+            "expected": [
+                {
+                    "index": n,
+                    "file": expected.file,
+                    "mechanism": expected.mechanism,
+                    "status": m.judge.status if m.judge else "",
+                    "matched_ids": list(m.judge.matched_ids) if m.judge else [],
+                    "caught": m.caught,
+                    "method": m.method,
+                    "finding_id": m.finding_id,
+                    "structured_caught": m.structured_caught,
+                    "structured_finding_id": m.structured_finding_id,
+                    "detail": m.judge.detail if m.judge else "",
+                    "reply": m.judge.reply if m.judge else "",
+                }
+                for n, (expected, m) in enumerate(judged)
+            ],
+        }
+        (out / f"{variant}-{i}.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+
+    return sink
+
+
+def _report_judge_errors(
+    results: list[tuple[str, CaseResult]], report_dir: Path | None
+) -> None:
+    """Say when the *judge* — not the reviewer — failed to answer (#307)."""
+    hit = []
+    for _, r in results:
+        statuses = [
+            *r.judge_status_per_sample,
+            *r.false_positive_judge_status_per_sample,
+        ]
+        failed = sum(s == "failed" for s in statuses)
+        unparsed = sum(s == "unparsed" for s in statuses)
+        if failed or unparsed:
+            hit.append(f"{r.case_id} ({failed} failed, {unparsed} unparsed)")
+    if not hit:
+        return
+    where = f", see {report_dir}/<case>/judge/" if report_dir is not None else ""
+    typer.echo(
+        f"judge gave no verdict on some samples: {', '.join(hit)} — "
+        f"those samples are excluded{where}",
+        err=True,
+    )
 
 
 def _ci_band(lo: float, hi: float) -> str:
@@ -461,19 +568,19 @@ def _print_table(results: list[tuple[str, CaseResult]]) -> None:
         "frontier": [],
     }
     for tier, r in results:
-        # Denominators are the VALID (non-errored) samples; errored counts are
-        # shown separately so a crashed reviewer never deflates a rate (#182 A3).
+        # Denominators are the VALID samples — neither the reviewer nor the judge
+        # errored — so a crash on either half never deflates a rate (#182 A3, #307).
         n_err = sum(r.errored_per_sample)
-        n_valid = r.n - n_err
-        caught = sum(r.caught_per_sample)
+        caught, n_valid = count_valid(r.caught_per_sample, r.excluded_per_sample)
         tallies[tier].append((r, caught, n_valid))
         catch_cell = (
             f"{caught}/{n_valid} {_ci_band(*r.catch_rate_ci)}{_err_suffix(n_err)}"
+            f"{_judge_err_suffix(sum(r.judge_errored_per_sample))}"
         )
         if r.false_positive_per_sample:
             fp_err = sum(r.false_positive_errored_per_sample)
             flagged, fp_valid = count_valid(
-                r.false_positive_per_sample, r.false_positive_errored_per_sample
+                r.false_positive_per_sample, r.false_positive_excluded_per_sample
             )
             fp_cell = (
                 f"{flagged}/{fp_valid} "
@@ -491,9 +598,41 @@ def _print_table(results: list[tuple[str, CaseResult]]) -> None:
         typer.echo(
             f"{r.case_id:<28} {tier:<8} {r.n:>3} {catch_cell:>20} "
             f"{r.severity_correctness * 100:>4.0f}% {fp_cell:>20} "
-            f"{noise_cell:>12}  {mark}"
+            f"{noise_cell:>12}  {mark}{_struct_note(r, caught)}"
         )
     _print_rollups(tallies)
+
+
+def _judge_err_suffix(n: int) -> str:
+    return f" +{n}jerr" if n else ""
+
+
+def _structured_tally(r: CaseResult) -> tuple[int, int]:
+    """``(structured catches, valid samples)`` — ``(0, 0)`` when not recorded.
+
+    The denominator excludes reviewer errors only: the structured matcher is
+    pure over the stored findings and cannot itself fail, so an all-judge-errored
+    case still has its free counterfactual.
+    """
+    if not r.structured_caught_per_sample:
+        return (0, 0)
+    return count_valid(r.structured_caught_per_sample, r.errored_per_sample)
+
+
+def _struct_note(r: CaseResult, judged_caught: int) -> str:
+    """``struct N/M`` — but only when the judge-free matcher disagrees (#307).
+
+    Appended rather than given a column: the two agree on almost every row, and
+    a permanent column would repeat the catch cell and break column-diffing
+    against the pinned baseline's tables. The precedent is ``+Nerr``, likewise
+    silent at zero. The structured denominator excludes reviewer errors only —
+    the structured matcher cannot itself fail — so an all-judge-errored case
+    still prints its free counterfactual.
+    """
+    struct, struct_valid = _structured_tally(r)
+    if not struct_valid or struct == judged_caught:
+        return ""
+    return f"  struct {struct}/{struct_valid}"
 
 
 def _noise_cell(r: CaseResult) -> str:
@@ -505,7 +644,7 @@ def _noise_cell(r: CaseResult) -> str:
     """
     if not r.known_good_findings_per_sample:
         return "—"
-    errored = r.false_positive_errored_per_sample
+    errored = r.false_positive_excluded_per_sample
     noisy, valid = count_valid(
         [n > 0 for n in r.known_good_findings_per_sample], errored
     )

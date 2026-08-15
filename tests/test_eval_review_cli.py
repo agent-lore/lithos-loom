@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from lithos_loom.evals.review import cli as eval_cli
+from lithos_loom.evals.review.case import Expected
 from lithos_loom.evals.review.cli import eval_app
 from lithos_loom.evals.review.harness import CaseResult
+from lithos_loom.evals.review.match import JudgeVerdict, MatchResult, RunScore
 from lithos_loom.evals.review.stats import wilson_interval
 
 runner = CliRunner()
@@ -1300,3 +1303,196 @@ def test_help_exit_contract_names_the_block_gate() -> None:
     exit_sentence = doc[doc.index("Exit 1 iff") : doc.index("Exit 1 iff") + 400]
     assert "known-good" in exit_sentence
     assert "floor case" in exit_sentence
+
+
+# ── judge verdicts are auditable, and judge failure is its own signal (#307) ──
+
+
+def _stub_judging_run_case(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    statuses: tuple[str, ...] = ("ok",),
+    caught: tuple[bool, ...] = (True,),
+    structured: tuple[bool, ...] = (True,),
+    reply: str = "it doubles the margin\nMATCHED: f-001",
+):
+    """Drive the real judge sink through the CLI, without an agent.
+
+    `run_case` is stubbed but still calls the `judge_sink` the CLI handed it, so
+    the sink's on-disk layout is exercised through the public surface rather than
+    by reaching for a private helper (the `tests_private_imports` budget has one
+    slot spare).
+    """
+    expected = Expected(
+        file="cli/develop.py",
+        keywords=("delivery",),
+        min_severity="critical",
+        mechanism="exits before delivery",
+    )
+
+    def fake(case, **kwargs):
+        case = replace(case, expected=(expected,))
+        sink = kwargs.get("judge_sink")
+        if sink is not None:
+            for i, status in enumerate(statuses):
+                verdict = JudgeVerdict(
+                    matched_ids=("f-001",) if status == "ok" and caught[i] else (),
+                    status=status,  # type: ignore[arg-type]
+                    reply=reply,
+                )
+                sink(
+                    case,
+                    "buggy",
+                    i,
+                    RunScore(
+                        caught=caught[i],
+                        severity_correct=caught[i],
+                        matches=[
+                            MatchResult(
+                                caught=caught[i],
+                                severity_correct=caught[i],
+                                method="judge",
+                                finding_id="f-001" if caught[i] else "",
+                                structured_caught=structured[i],
+                                structured_finding_id="f-001",
+                                judge=verdict,
+                            )
+                        ],
+                        judge_status=status,
+                        structured_caught=structured[i],
+                    ),
+                )
+        n = len(statuses)
+        return CaseResult(
+            case_id=case.id,
+            n=n,
+            catch_rate=1.0,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=True,
+            caught_per_sample=caught,
+            severity_per_sample=caught,
+            catch_rate_ci=wilson_interval(sum(caught), n),
+            errored_per_sample=(False,) * n,
+            judge_status_per_sample=statuses,
+            structured_caught_per_sample=structured,
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+
+
+def _invoke(cases_dir: Path, out: Path | None = None, *extra: str):
+    args = ["review", "--cases-dir", str(cases_dir), "--case", "180-attach-delivery"]
+    if out is not None:
+        args += ["--report-dir", str(out)]
+    return runner.invoke(eval_app, [*args, *extra])
+
+
+def test_judge_verdicts_are_written_under_the_case_judge_dir(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_judging_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    result = _invoke(cases_dir, out)
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(
+        (out / "180-attach-delivery" / "judge" / "buggy-0.json").read_text()
+    )
+    assert payload["judge"] == {"tool": "claude", "model": "claude-test"}
+    assert payload["judge_status"] == "ok"
+    (record,) = payload["expected"]
+    assert record["matched_ids"] == ["f-001"]
+    assert record["mechanism"] == "exits before delivery"
+    # the whole point of #307: the reasoning behind a verdict survives the run
+    assert "doubles the margin" in record["reply"]
+
+
+def test_judge_records_never_pollute_the_review_report_namespace(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    """`<case>/<variant>-<i>.json` is the documented ReviewReport contract.
+
+    Offline re-scoring globs that namespace, so a sibling `buggy-0.judge.json`
+    would silently feed judge records to a finding counter. A subdirectory
+    matches no `*.json` glob in the case dir.
+    """
+    _stub_judging_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    _invoke(cases_dir, out)
+
+    case_dir = out / "180-attach-delivery"
+    assert [p.name for p in sorted(case_dir.glob("buggy-*.json"))] == []
+    assert sorted(p.name for p in case_dir.glob("*.json")) == ["summary.json"]
+    assert (case_dir / "judge" / "buggy-0.json").is_file()
+
+
+def test_no_judge_writes_no_judge_dir(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    # absence of the directory is meaningful: nothing was judged
+    _stub_judging_run_case(monkeypatch)
+    out = tmp_path / "reports"
+    _invoke(cases_dir, out, "--no-judge")
+
+    assert not (out / "180-attach-delivery" / "judge").exists()
+
+
+def test_summary_json_separates_judge_errors_from_reviewer_errors(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path, tmp_path: Path
+) -> None:
+    _stub_judging_run_case(
+        monkeypatch,
+        statuses=("ok", "failed", "unparsed"),
+        caught=(True, False, False),
+        structured=(True, True, True),
+    )
+    out = tmp_path / "reports"
+    _invoke(cases_dir, out)
+
+    data = json.loads((out / "180-attach-delivery" / "summary.json").read_text())
+    assert data["judge_errored"] == 2
+    assert data["judge_status_per_sample"] == ["ok", "failed", "unparsed"]
+    assert data["errored"] == 0  # the REVIEWERS were fine
+    assert data["structured_caught_per_sample"] == [True, True, True]
+    assert data["structured_caught"] == 3
+
+
+def test_table_shows_the_structured_delta_when_it_differs(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    # judge vetoes 2 of 3 that the structured matcher accepts — the #307 shape
+    _stub_judging_run_case(
+        monkeypatch,
+        statuses=("ok", "ok", "ok"),
+        caught=(True, False, False),
+        structured=(True, True, True),
+    )
+    result = _invoke(cases_dir)
+    assert "struct 3/3" in result.output
+
+
+def test_table_omits_the_structured_delta_when_it_agrees(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_judging_run_case(
+        monkeypatch, statuses=("ok",) * 3, caught=(True,) * 3, structured=(True,) * 3
+    )
+    result = _invoke(cases_dir)
+    assert "struct" not in result.output
+
+
+def test_judge_failures_are_named_on_stderr(
+    monkeypatch: pytest.MonkeyPatch, cases_dir: Path
+) -> None:
+    _stub_judging_run_case(
+        monkeypatch,
+        statuses=("ok", "failed"),
+        caught=(True, False),
+        structured=(True, True),
+    )
+    result = _invoke(cases_dir)
+    plain = _plain(result.output)
+    assert "judge gave no verdict" in plain
+    assert "1 failed" in plain
+    assert "+1jerr" in plain  # and it is visible in the catch cell too

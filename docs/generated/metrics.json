@@ -38,8 +38,8 @@
       },
       "Evals": {
         "functions_over_10": 6,
-        "max_complexity": 29,
-        "max_function": "lithos_loom.evals.review.case.load_case"
+        "max_complexity": 31,
+        "max_function": "lithos_loom.evals.review.cli.review"
       },
       "GitHub": {
         "functions_over_10": 1,
@@ -117,6 +117,10 @@
       },
       {
         "complexity": 31,
+        "qualname": "lithos_loom.evals.review.cli.review"
+      },
+      {
+        "complexity": 31,
         "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
       },
       {
@@ -128,10 +132,6 @@
         "qualname": "lithos_loom.evals.review.case.load_case"
       },
       {
-        "complexity": 29,
-        "qualname": "lithos_loom.evals.review.cli.review"
-      },
-      {
         "complexity": 28,
         "qualname": "lithos_loom.config._parse_obsidian_sync"
       },
@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.plugins.story_develop.pr_delivery._deliver_after_open"
       }
     ],
-    "total_functions": 972
+    "total_functions": 991
   },
   "domain": {
     "associations": 2,
@@ -400,14 +400,14 @@
         "sloc": 28
       },
       "Evals": {
-        "classes": 5,
-        "functions": 55,
-        "largest_module": "lithos_loom.evals.review.case",
-        "largest_module_lines": 549,
-        "lines": 2113,
+        "classes": 8,
+        "functions": 74,
+        "largest_module": "lithos_loom.evals.review.cli",
+        "largest_module_lines": 677,
+        "lines": 2508,
         "modules": 11,
-        "public_symbols": 23,
-        "sloc": 1711
+        "public_symbols": 27,
+        "sloc": 2030
       },
       "GitHub": {
         "classes": 12,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 38491,
+    "total_lines": 38886,
     "total_modules": 120,
-    "total_sloc": 30553
+    "total_sloc": 30872
   },
   "tests": {
     "ratio": 1.65,
-    "src_lines": 38491,
-    "test_lines": 63345
+    "src_lines": 38886,
+    "test_lines": 64005
   }
 }
