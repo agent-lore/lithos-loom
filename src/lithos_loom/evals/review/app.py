@@ -75,9 +75,13 @@ def resolve_judge(
     rather than one case into a sweep.
     """
     if judge and not engines.is_supported(judge_tool):
+        # Wording preserved verbatim from cli.py. `supported_tools_phrase()`
+        # would read more like the repo's other validation errors, but changing
+        # operator-visible text inside a no-behaviour-change extraction is how a
+        # refactor stops being one — that belongs in a change that says so.
         raise typer.BadParameter(
             f"--judge-tool {judge_tool!r} is not a supported agent tool "
-            f"(expected {engines.supported_tools_phrase()})"
+            f"(known: {', '.join(sorted(engines.supported_tools()))})"
         )
     judge_model = default_models.get(judge_tool)
     if judge and judge_model is None:

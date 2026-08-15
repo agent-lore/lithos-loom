@@ -13,7 +13,7 @@ shape depends on which command printed it breaks that.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import typer
 
@@ -21,9 +21,11 @@ from .harness import CaseResult, count_valid
 from .match import judge_status_errored
 from .stats import wilson_interval
 
-# Extra per-case cells a command can append after `result` (header, width, cell).
-# Used by `eval rescore` for its stability columns; `eval review` passes none.
-ExtraColumn = tuple[str, int, "object"]
+# Extra per-case cells a command can append after `result` (header, width, cell
+# function). Used by `eval rescore` for its stability columns; `eval review`
+# passes none. Typed as a real callable contract so a miswired column is a
+# typecheck error rather than a crash mid-render on a paid run.
+ExtraColumn = tuple[str, int, Callable[[CaseResult], str]]
 
 
 def ci_band(lo: float, hi: float) -> str:
@@ -138,7 +140,7 @@ def fp_cell(r: CaseResult) -> str:
 def print_results_table(
     results: Sequence[tuple[str, CaseResult]],
     *,
-    extra_columns: Sequence[tuple[str, int, object]] = (),
+    extra_columns: Sequence[ExtraColumn] = (),
 ) -> None:
     """Print the results table + the two tier roll-ups.
 
@@ -167,10 +169,7 @@ def print_results_table(
             mark = "ok" if r.passed else "REGRESSED"
         else:
             mark = "PASS" if r.passed else "FAIL"
-        extra_cells = "".join(
-            f" {fn(r):>{w}}"  # type: ignore[operator]
-            for _, w, fn in extra_columns
-        )
+        extra_cells = "".join(f" {fn(r):>{w}}" for _, w, fn in extra_columns)
         typer.echo(
             f"{r.case_id:<28} {tier:<8} {r.n:>3} {cell:>20} "
             f"{r.severity_correctness * 100:>4.0f}% {fp_cell(r):>20} "
