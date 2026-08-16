@@ -410,14 +410,37 @@ def _tree_of(repo: Path, sha: str) -> str:
     ).stdout.strip()
 
 
+def _blob_at(repo: Path, sha: str, path: str) -> str:
+    """The file's content at *sha*, or ``""`` when it does not exist there.
+
+    An empty *sha* is rejected rather than passed through: ``git show :path`` is
+    the **index** form, so an unresolved head (a case whose ``[known_good]`` was
+    dropped or never added) would silently yield the checkout's current content
+    — which for a fixture pinned against an already-merged fix is exactly the
+    text the assertions look for. A false green in the test that exists to stop
+    a fixture going invalid.
+    """
+    assert sha, f"no commit resolved for {path} — cannot pin a head that is not there"
+    done = subprocess.run(
+        ["git", "show", f"{sha}:{path}"], cwd=repo, capture_output=True, text=True
+    )
+    return done.stdout if done.returncode == 0 else ""
+
+
 def _css_at(repo: Path, sha: str) -> str:
-    return subprocess.run(
-        ["git", "show", f"{sha}:src/lithos_lens/static/lens.css"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    return _blob_at(repo, sha, "src/lithos_lens/static/lens.css")
+
+
+@pytest.mark.parametrize("read", [_css_at, lambda r, s: _blob_at(r, s, "any.py")])
+def test_fixture_blob_readers_reject_an_unresolved_ref(read, tmp_path: Path) -> None:
+    # PR #320 review: every semantic fixture pin resolves its known-good head as
+    # `resolved.known_good_head or ""`, so a dropped [known_good] hands the
+    # reader an empty ref. `git show :path` is the INDEX form and would answer
+    # with the working checkout — which, for a fixture pinned against a fix that
+    # has since merged upstream, is exactly the text the pin asserts. Both
+    # readers must fail loudly instead; one of them silently did not.
+    with pytest.raises(AssertionError, match="cannot pin a head that is not there"):
+        read(tmp_path, "")
 
 
 def _rule_body(css: str, selector: str) -> str:
@@ -457,23 +480,6 @@ def test_lens22_artifact_fixture_pins_its_buggy_and_fixed_css(
         assert "white-space: pre-wrap" in _rule_body(fixed_css, ".markdown-body pre")
     finally:
         cleanup()
-
-
-def _blob_at(repo: Path, sha: str, path: str) -> str:
-    """The file's content at *sha*, or ``""`` when it does not exist there.
-
-    An empty *sha* is rejected rather than passed through: ``git show :path`` is
-    the **index** form, so an unresolved head (a case whose ``[known_good]`` was
-    dropped or never added) would silently yield the checkout's current content
-    — which for a fixture pinned against an already-merged fix is exactly the
-    text the assertions look for. A false green in the test that exists to stop
-    a fixture going invalid.
-    """
-    assert sha, f"no commit resolved for {path} — cannot pin a head that is not there"
-    done = subprocess.run(
-        ["git", "show", f"{sha}:{path}"], cwd=repo, capture_output=True, text=True
-    )
-    return done.stdout if done.returncode == 0 else ""
 
 
 _STORY_DEVELOP = "src/lithos_loom/plugins/story_develop"

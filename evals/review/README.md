@@ -326,12 +326,16 @@ A real fix commit is rarely a defect-free tree, and two shipped cases prove it:
 289's merged head still carries a TOCTOU on its symlink guards ([#319](https://github.com/agent-lore/lithos-loom/issues/319))
 which every known-good sample found independently, and lens33's fix head still
 has the unrelated namespace-derivation and access-scope bugs the baseline panel
-filed. Both arms therefore run high on `noise` / `blk` while scoring `fp 0/5`,
-and that is correct, not a scoring bug: the panel is finding real defects. Two
-consequences when using such a case as a control — read `fp` as the FP number
-(it is the only one that isolates the seeded defect), and do **not** use "the
-known-good arm got no noisier" as a ship criterion where `blk` is already
-saturated; compare `known_good_findings_per_sample` arm-to-arm instead.
+filed. Such a case can therefore run high on `noise` / `blk` **and** score a clean
+`fp` at the same time, which is correct rather than a scoring bug: the panel is
+finding real defects that are simply not the seeded one. 289 measured exactly
+that — `fp 0/5` beside `blk 5/5` in both arms of the RH-1 A/B. (lens33's arm is
+newly paired and unmeasured; expect the same shape, but it is a prediction until
+it is run.) Two consequences when using such a case as a control — read `fp` as
+the FP number (it is the only one that isolates the seeded defect), and do
+**not** use "the known-good arm got no noisier" as a ship criterion where `blk`
+is already saturated; compare `known_good_findings_per_sample` arm-to-arm
+instead.
 
 Keywords are substring-matched (case-insensitive) against the finding's
 rationale + files, so keep them **discriminative**: prefer exact identifiers
