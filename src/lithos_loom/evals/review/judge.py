@@ -21,6 +21,12 @@ from .match import Judge, JudgeVerdict
 logger = logging.getLogger(__name__)
 
 DEFAULT_JUDGE_TIMEOUT = 300
+
+# How many agent invocations one verdict request can cost: the first attempt
+# plus one retry on infra failure. Lives here, next to the loop that spends
+# them, so a cost ceiling quoted elsewhere (`eval rescore`'s preflight) cannot
+# drift away from the policy it describes.
+MAX_ATTEMPTS_PER_REQUEST = 2
 _MATCHED_RE = re.compile(r"MATCHED:\s*(.+)", re.IGNORECASE)
 # "none", "none of the findings", "none — they all describe ..." — the prompt asks
 # for a bare "none", but a chatty veto is common and used to match every id in it.
@@ -69,20 +75,25 @@ def build_agent_judge(
             return JudgeVerdict()
         valid = {str(f.get("finding_id", "")) for f in findings if f.get("finding_id")}
         prompt = _judge_prompt(mechanism, findings)
-        verdict = attempt(prompt, valid)
-        if verdict.status == "failed":
-            # The reviewer sample this scores was already paid for, so one flaky
-            # subprocess must not discard it. An `unparsed` reply is NOT retried:
-            # re-rolling until the model answers readably would bias the sample.
-            logger.warning(
-                "judge agent call failed (%s); retrying once", verdict.detail
-            )
+        # Every attempt but the last is retryable: the reviewer sample this
+        # scores was already paid for, so one flaky subprocess must not discard
+        # it. An `unparsed` reply is NOT retried — re-rolling until the model
+        # answers readably would bias the sample.
+        for attempt_no in range(1, MAX_ATTEMPTS_PER_REQUEST):
             verdict = attempt(prompt, valid)
-            if verdict.status == "failed":
-                logger.warning(
-                    "judge agent call failed again (%s); sample excluded",
-                    verdict.detail,
-                )
+            if verdict.status != "failed":
+                return verdict
+            logger.warning(
+                "judge agent call failed (attempt %d/%d: %s); retrying",
+                attempt_no,
+                MAX_ATTEMPTS_PER_REQUEST,
+                verdict.detail,
+            )
+        verdict = attempt(prompt, valid)  # the last attempt's answer stands
+        if verdict.status == "failed":
+            logger.warning(
+                "judge agent gave no verdict (%s); sample excluded", verdict.detail
+            )
         return verdict
 
     return judge

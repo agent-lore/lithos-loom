@@ -335,8 +335,35 @@ def test_a_site_with_one_errored_repeat_is_excluded_and_counted(
     plain = _unwrapped(result.output)
 
     assert "0/1 judged sites flipped" in plain  # denominator excludes the errored site
-    assert "1 site(s) unmeasured" in plain
+    assert "1 site(s) hit a judge error (1 unmeasurable)" in plain
     assert "+1jerr" in plain  # and the row says which case carried it
+
+
+def test_a_site_that_flips_AND_errors_still_reports_its_judge_error(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """The flip keeps the site in the denominator, so keying the error count on
+    exclusion alone would drop the failed repeat out of every aggregate."""
+    # sample 0: confirm, veto, timeout — a real flip AND a real judge failure
+    _stub_judge(
+        monkeypatch,
+        verdicts=[
+            JudgeVerdict(matched_ids=("f-001",)),
+            JudgeVerdict(),
+            JudgeVerdict(status="failed", detail="boom"),
+            JudgeVerdict(matched_ids=("f-001",)),
+        ],
+    )
+    result = _run(report_dir, cases_dir, "--judge-repeats", "3")
+    plain = _unwrapped(result.output)
+
+    assert "1/2 judged sites flipped" in plain  # the flip counts
+    assert "1 site(s) hit a judge error (0 unmeasurable)" in plain  # so does the error
+    assert "+1jerr" in plain
+
+    (case,) = json.loads((report_dir / "rescore.json").read_text())["cases"]
+    assert case["stability"]["errored_sites"] == 1
+    assert case["stability"]["unmeasured_sites"] == 0
 
 
 def test_the_spread_denominator_tracks_each_repeats_valid_samples(
@@ -413,18 +440,36 @@ def test_a_case_missing_from_the_tree_aborts_before_any_call(
     assert calls["n"] == 0
 
 
+@pytest.mark.parametrize(
+    ("report", "message"),
+    [
+        ({"reviewers": [{"findings": [7]}]}, "is not an object"),
+        # `x in frozenset(...)` on a list raises TypeError inside the scorer
+        ({"reviewers": [{"status": ["invalid"], "findings": []}]}, "not a string"),
+        # never raises — silently inverts the noise instrumentation instead
+        ({"reviewers": [], "blocking": "false"}, "not a boolean"),
+    ],
+)
 def test_a_malformed_report_aborts_before_any_call(
-    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+    monkeypatch: pytest.MonkeyPatch,
+    report_dir: Path,
+    cases_dir: Path,
+    report: dict,
+    message: str,
 ) -> None:
-    """Even behind a valid case: the whole corpus is validated before paying."""
+    """Even behind a valid case: the whole corpus is validated before paying.
+
+    The valid case sorts first, so without load-time validation its judge
+    requests are bought before the malformed report is ever opened.
+    """
     other = report_dir / "zz-later"
     other.mkdir()
-    (other / "buggy-0.json").write_text(json.dumps({"reviewers": [{"findings": [7]}]}))
+    (other / "buggy-0.json").write_text(json.dumps(report))
     calls = _stub_judge(monkeypatch)
 
     result = _run(report_dir, cases_dir)
     assert result.exit_code != 0
-    assert "is not an object" in _unwrapped(result.output)
+    assert message in _unwrapped(result.output)
     assert calls["n"] == 0
 
 
@@ -465,6 +510,56 @@ def test_out_with_a_missing_parent_is_refused_pre_paid(
     assert result.exit_code != 0
     assert "no directory" in _unwrapped(result.output)
     assert calls["n"] == 0
+
+
+def test_out_naming_a_stray_file_inside_a_case_dir_is_refused(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """A SUCCESSFUL run must not leave the dir unloadable by the next one."""
+    calls = _stub_judge(monkeypatch)
+    stray = report_dir / "180-attach-delivery" / "custom.json"
+
+    result = _run(report_dir, cases_dir, "--out", str(stray))
+    assert result.exit_code != 0
+    assert "unloadable by the next rescore" in _unwrapped(result.output)
+    assert calls["n"] == 0
+
+
+def test_out_may_still_name_rescore_json_inside_a_case_dir(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """The one name the loader tolerates there — so a per-case payload is fine."""
+    _stub_judge(monkeypatch)
+    target = report_dir / "180-attach-delivery" / "rescore.json"
+
+    assert _run(report_dir, cases_dir, "--out", str(target)).exit_code == 0
+    assert target.is_file()
+    _stub_judge(monkeypatch)
+    assert _run(report_dir, cases_dir).exit_code == 0  # still loadable
+
+
+def test_the_payload_is_written_through_a_unique_temp_file(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """Concurrent invocations must not share one scratch file — the loser would
+    fail after paying for its whole measurement."""
+    seen: list[str] = []
+    real_replace = cli_rescore.os.replace
+
+    def spy(src, dst):
+        seen.append(Path(src).name)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cli_rescore.os, "replace", spy)
+    _stub_judge(monkeypatch)
+    _run(report_dir, cases_dir)
+    _stub_judge(monkeypatch)
+    _run(report_dir, cases_dir)
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert all(name.startswith(".rescore.json.tmp.") for name in seen)
+    assert not list(report_dir.glob(".rescore.json.tmp.*"))  # nothing left behind
 
 
 def test_out_pointing_at_a_directory_is_refused(

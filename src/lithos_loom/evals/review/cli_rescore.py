@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -32,9 +33,10 @@ from .app import (
 )
 from .case import Case, load_case
 from .harness import DEFAULT_BAR
+from .judge import MAX_ATTEMPTS_PER_REQUEST
 from .report import case_result_payload, judge_err_suffix, print_results_table
 from .rescore import (
-    MAX_ATTEMPTS_PER_REQUEST,
+    RESCORE_FILENAME,
     CaseReports,
     CaseRescore,
     JudgeSite,
@@ -238,8 +240,13 @@ def _resolve_out(
     input in exchange for a cheap one, and a missing parent directory would fail
     only once the whole measurement had been bought. Both are usage errors, so
     both belong in the preflight.
+
+    A case dir is also refused any name but ``rescore.json``: the loader accepts
+    exactly ``summary.json``, ``rescore.json`` and ``<variant>-<i>.json``, so a
+    stray file there would make a *successful* run leave the dir unloadable by
+    the next one — the command poisoning its own input.
     """
-    target = out or (report_dir / "rescore.json")
+    target = out or (report_dir / RESCORE_FILENAME)
     resolved = target.resolve()
     if resolved.is_dir():
         raise typer.BadParameter(f"--out {target} is a directory")
@@ -248,6 +255,13 @@ def _resolve_out(
         raise typer.BadParameter(
             f"--out {target} is one of the retained reports this command reads — "
             "refusing to overwrite a paid input with a re-score of it"
+        )
+    case_dirs = {r.case_dir.resolve() for r in reports if r.case_dir is not None}
+    if resolved.parent in case_dirs and resolved.name != RESCORE_FILENAME:
+        raise typer.BadParameter(
+            f"--out {target} would leave {resolved.parent.name} unloadable by the "
+            f"next rescore — inside a case dir the only allowed name is "
+            f"{RESCORE_FILENAME}"
         )
     if not resolved.parent.is_dir():
         raise typer.BadParameter(f"--out {target}: no directory {resolved.parent}")
@@ -282,12 +296,17 @@ def _stability_cell(scored: CaseRescore) -> str:
     A judged site whose repeats did not all answer is neither stable nor
     flipped; it is missing data, and folding it into the denominator would let
     an all-timed-out case report perfect stability.
+
+    The suffix counts every site that hit a judge error, not just the
+    unmeasurable ones — a site that flipped AND errored stays in the denominator
+    (the flip is real), so keying the suffix on exclusion alone would hide its
+    failed repeat from every aggregate.
     """
     if not scored.judged_sites:
         return "—"
     return (
         f"{scored.flipped_sites}/{scored.measured_sites}"
-        f"{judge_err_suffix(scored.unmeasured_sites)}"
+        f"{judge_err_suffix(scored.errored_sites)}"
     )
 
 
@@ -338,10 +357,11 @@ def _print_stability(results: list[CaseRescore], repeats: int) -> None:
     measured = sum(r.measured_sites for r in results)
     flipped = sum(r.flipped_sites for r in results)
     unmeasured = sum(r.unmeasured_sites for r in results)
+    errored = sum(r.errored_sites for r in results)
     if not measured:
         typer.echo(
             f"judge stability: UNMEASURED — no site answered all {repeats} repeats "
-            f"({unmeasured} site(s) errored)"
+            f"({errored} site(s) hit a judge error)"
         )
         return
     pct = 100 * (1 - flipped / measured)
@@ -349,8 +369,10 @@ def _print_stability(results: list[CaseRescore], repeats: int) -> None:
         f"judge stability: {flipped}/{measured} judged sites flipped over "
         f"{repeats} repeats ({pct:.1f}% stable)"
     )
-    if unmeasured:
-        line += f"; {unmeasured} site(s) unmeasured (the judge errored on a repeat)"
+    if errored:
+        # Both numbers, always: a site can flip AND error, so "unmeasured" alone
+        # would silently drop the failed repeats that still got an answer.
+        line += f"; {errored} site(s) hit a judge error ({unmeasured} unmeasurable)"
     typer.echo(line)
 
 
@@ -421,7 +443,9 @@ def _write(
 
     Temp file + ``os.replace`` so a re-score that dies mid-write cannot leave a
     truncated payload where a complete one was — the same rule the vault writers
-    follow, for the same reason.
+    follow, for the same reason. The temp name carries a random suffix: two
+    invocations writing the same target would otherwise share one scratch file,
+    and the loser would fail *after* paying for its whole measurement.
     """
     payload = {
         "schema_version": 1,
@@ -447,6 +471,7 @@ def _write(
                     "measured_sites": r.measured_sites,
                     "flipped_sites": r.flipped_sites,
                     "unmeasured_sites": r.unmeasured_sites,
+                    "errored_sites": r.errored_sites,
                     "catch_per_repeat": list(r.catch_per_repeat),
                     "valid_per_repeat": list(r.valid_per_repeat),
                     # Recorded even at one repeat: a site whose verdict matched
@@ -458,7 +483,11 @@ def _write(
             for r in results
         ],
     }
-    tmp = target.parent / f".{target.name}.tmp"
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    os.replace(tmp, target)
+    tmp = target.parent / f".{target.name}.tmp.{uuid.uuid4().hex[:8]}"
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     typer.echo(f"wrote {target}", err=True)

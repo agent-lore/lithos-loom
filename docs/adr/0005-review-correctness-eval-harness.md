@@ -497,9 +497,15 @@ runs no reviewers would gate on the judge's mood.
 
 **Fail-closed means the whole corpus, not the flags.** The command's usage errors
 must all precede the first paid call, so retained reports are structurally
-validated at load (every field the scorer reads) and the entire dir is loaded
-before any case is judged — otherwise a malformed report in the last case surfaces
-only after the first has been paid for. The `--out` target is resolved and refused
+validated at load (every field the scorer reads — which means *enumerating* them,
+since the guarantee is only as good as the shortest field list: a first pass
+covered findings but not `reviewers[].status`, and an unhashable status still
+crashed the scorer one paid request in) and the entire dir is loaded before any
+case is judged — otherwise a malformed report in the last case surfaces only after
+the first has been paid for. Not every gap crashes: `bool("false")` is `True`, so
+a string `blocking` silently inverts the noise instrumentation instead, which is
+why validation checks types rather than waiting for an exception to prove a field
+mattered. The `--out` target is resolved and refused
 up front for the same reason, including against every retained input: overwriting a
 paid artefact with a re-score of it is the one irreversible thing this command
 could do. And the printed cost is two numbers, not one — the verdict-request count

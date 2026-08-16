@@ -38,15 +38,15 @@ from .harness import DEFAULT_BAR, CaseResult, aggregate_case, count_valid
 from .match import Judge, JudgeVerdict, RunScore, produced_findings, score_run
 
 _VARIANTS = ("buggy", "known-good")
+
+# This command's own output. Named here because it is also the ONE extra file a
+# case dir may hold: writing anything else into one makes the dir unloadable on
+# the next run, so `--out` is checked against this too.
+RESCORE_FILENAME = "rescore.json"
 # Files a report dir may hold besides `<variant>-<i>.json`. `rescore.json` is in
 # the list so running this command twice against one dir does not trip its own
 # strict-filename check on its own output.
-_ALLOWED_FILES = frozenset({"summary.json", "rescore.json"})
-
-# `build_agent_judge` retries a FAILED call once, so one verdict request can cost
-# two agent invocations. The preflight prints both numbers: calling the request
-# count "exact" would understate a flaky sweep's real cost by up to 2x.
-MAX_ATTEMPTS_PER_REQUEST = 2
+_ALLOWED_FILES = frozenset({"summary.json", RESCORE_FILENAME})
 
 
 class RescoreError(Exception):
@@ -72,6 +72,7 @@ class CaseReports:
     known_good: tuple[SampleReport, ...] = ()
     summary: dict | None = None
     summary_path: Path | None = None
+    case_dir: Path | None = None
 
     def samples(self) -> tuple[SampleReport, ...]:
         return self.buggy + self.known_good
@@ -173,6 +174,17 @@ class CaseRescore:
     def unmeasured_sites(self) -> int:
         return sum(1 for s in self.sites if s.judged and not s.measured)
 
+    @property
+    def errored_sites(self) -> int:
+        """Judged sites where **any** repeat failed to answer.
+
+        Tracked apart from ``unmeasured_sites`` because a site can both flip and
+        error: the flip keeps it in the stability denominator (a disagreement
+        observed is real), which would otherwise make the failed repeat vanish
+        from every aggregate and leave it findable only by reading the JSON.
+        """
+        return sum(1 for s in self.sites if s.judged and s.errored)
+
 
 def _read_json(path: Path) -> dict:
     try:
@@ -222,15 +234,33 @@ def _validate_finding(where: str, finding: object) -> None:
 
 
 def _validate_report(path: Path, report: dict) -> None:
-    """Structurally check one retained report — **before** any judge call."""
+    """Structurally check one retained report — **before** any judge call.
+
+    Every field ``score_run`` reads is covered, each because of how it is read:
+    ``status`` is tested for membership in a frozenset (an unhashable value
+    raises ``TypeError``), and ``blocking`` is passed through ``bool()``, which
+    never raises but turns the string ``"false"`` into a block — silently
+    corrupting the noise instrumentation instead of failing. Both stay
+    **optional**: reports predating #310 have no ``blocking`` key at all, and
+    refusing them would make the retained corpus unrescorable.
+    """
     if "reviewers" not in report:
         raise RescoreError(f"{path}: not a ReviewReport (no 'reviewers' key)")
     reviewers = report["reviewers"]
     if not isinstance(reviewers, list):
         raise RescoreError(f"{path}: not a ReviewReport ('reviewers' is not a list)")
+    if "blocking" in report and not isinstance(report["blocking"], bool):
+        raise RescoreError(
+            f"{path}: blocking is not a boolean (got {report['blocking']!r})"
+        )
     for i, reviewer in enumerate(reviewers):
         if not isinstance(reviewer, dict):
             raise RescoreError(f"{path}: reviewers[{i}] is not an object")
+        if "status" in reviewer and not isinstance(reviewer["status"], str):
+            raise RescoreError(
+                f"{path}: reviewers[{i}].status is not a string "
+                f"(got {reviewer['status']!r})"
+            )
         findings = reviewer.get("findings", [])
         if not isinstance(findings, list):
             raise RescoreError(f"{path}: reviewers[{i}].findings is not a list")
@@ -254,9 +284,19 @@ def _validate_summary(path: Path, summary: dict) -> None:
     ``drift_vs_summary`` runs *after* the whole measurement is paid for, so a
     malformed per-sample array there would throw away the run it was comparing.
     """
-    for key in _DRIFT_KEYS:
-        if key in summary and not isinstance(summary[key], list):
+    for key, element in _DRIFT_KEYS.items():
+        if key not in summary:
+            continue
+        values = summary[key]
+        if not isinstance(values, list):
             raise RescoreError(f"{path}: {key} is not a list")
+        # Element types matter to the COMPARISON, not just to reading it:
+        # `[1] == [True]` in Python, so a recorded int array would compare equal
+        # to a rescored boolean one and report no drift where the corpus differs.
+        if any(not isinstance(v, element) for v in values):
+            raise RescoreError(
+                f"{path}: {key} must be a list of {element.__name__} (got {values!r})"
+            )
     fingerprint = summary.get("expected_fingerprint")
     if fingerprint is not None and not isinstance(fingerprint, str):
         raise RescoreError(f"{path}: expected_fingerprint is not a string")
@@ -311,6 +351,7 @@ def _load_case_reports(case_dir: Path) -> CaseReports:
         known_good=tuple(by_variant["known-good"]),
         summary=summary,
         summary_path=summary_path,
+        case_dir=case_dir,
     )
 
 
@@ -348,7 +389,7 @@ def judge_call_count(
     judge short-circuits a sample with no findings without calling an agent, so
     samples that produced nothing cost nothing here either. It is *not* the
     agent-invocation count — a failed call retries once, so the ceiling is
-    ``MAX_ATTEMPTS_PER_REQUEST`` times this.
+    ``judge.MAX_ATTEMPTS_PER_REQUEST`` times this.
     """
     total = 0
     for case_reports in reports:
@@ -489,19 +530,20 @@ def rescore_case(
     )
 
 
-# Per-sample arrays a rescore can compare against what the run recorded. Both
-# error arms are here deliberately: an original ok-veto and a rescore timeout
-# both leave `caught` False, so comparing verdicts alone would call a case
-# unchanged while its valid denominator silently dropped to zero.
-_DRIFT_KEYS = (
-    "caught_per_sample",
-    "severity_per_sample",
-    "false_positive_per_sample",
-    "errored_per_sample",
-    "false_positive_errored_per_sample",
-    "judge_status_per_sample",
-    "false_positive_judge_status_per_sample",
-)
+# Per-sample arrays a rescore can compare against what the run recorded, with
+# the element type each one must hold. Both error arms are here deliberately:
+# an original ok-veto and a rescore timeout both leave `caught` False, so
+# comparing verdicts alone would call a case unchanged while its valid
+# denominator silently dropped to zero.
+_DRIFT_KEYS: dict[str, type] = {
+    "caught_per_sample": bool,
+    "severity_per_sample": bool,
+    "false_positive_per_sample": bool,
+    "errored_per_sample": bool,
+    "false_positive_errored_per_sample": bool,
+    "judge_status_per_sample": str,
+    "false_positive_judge_status_per_sample": str,
+}
 
 _JUDGE_DRIFT_KEYS = frozenset(
     {"judge_status_per_sample", "false_positive_judge_status_per_sample"}

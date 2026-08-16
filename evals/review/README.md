@@ -92,7 +92,7 @@ Above one repeat the table gains two columns:
 
 | column | reads | means |
 |---|---|---|
-| `flip` | `FLIPPED/MEASURED +Njerr` | judged sites whose verdicts disagreed, over the sites that could be measured at all. Sites where the run produced no findings are excluded — the judge never saw them, and counting free unanimity as stability would flatter a quiet arm. |
+| `flip` | `FLIPPED/MEASURED +Njerr` | judged sites whose verdicts disagreed, over the sites that could be measured at all; `+Njerr` counts **every** site that hit a judge error, including one that flipped and stayed in the denominator. Sites where the run produced no findings are excluded — the judge never saw them, and counting free unanimity as stability would flatter a quiet arm. |
 | `spread` | `MIN-MAX/VALID` | catch count under each of the N universes, over each one's own valid denominator. `4-5/5` says the arm could have reported either. |
 
 **A judge error is not a verdict.** A timeout and a veto both match nothing, so a
@@ -109,7 +109,8 @@ says whether it is needed).
 
 `rescore.json` lands at the report-dir root (`--out` redirects it; it is refused if
 it names a retained report or `summary.json`, since that would overwrite a paid
-input with a re-score of it) and reuses `summary.json`'s field names so drift
+input with a re-score of it, or any other name inside a case dir, since the loader
+would then reject that dir on the next run) and reuses `summary.json`'s field names so drift
 compares field-for-field. Per-site verdicts are recorded even at one repeat, each
 with its status and raw reply: a site whose findings were produced and whose verdict
 matched nothing *is* a veto, named — and the status is what separates it from a call

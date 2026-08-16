@@ -244,6 +244,50 @@ def test_load_rejects_a_finding_field_the_scorer_would_choke_on(
         load_report_dir(root)
 
 
+def test_load_rejects_a_reviewer_status_that_is_not_a_string(tmp_path: Path) -> None:
+    """`review_incomplete` tests membership in a frozenset — an unhashable value
+    raises TypeError, and did so AFTER the first judge request was paid for."""
+    report = _report([_finding()])
+    report["reviewers"][0]["status"] = ["invalid"]
+    root = _dir(tmp_path, [report])
+    with pytest.raises(RescoreError, match="status is not a string"):
+        load_report_dir(root)
+
+
+def test_load_rejects_a_blocking_flag_that_is_not_a_boolean(tmp_path: Path) -> None:
+    """`bool("false")` is True: this one never crashes, it silently inverts the
+    noise instrumentation."""
+    report = {**_report([_finding()]), "blocking": "false"}
+    root = _dir(tmp_path, [report])
+    with pytest.raises(RescoreError, match="blocking is not a boolean"):
+        load_report_dir(root)
+
+
+def test_load_accepts_a_report_with_no_blocking_key(tmp_path: Path) -> None:
+    """Reports predating #310 have none — refusing them would strand the corpus."""
+    report = _report([_finding()])
+    report.pop("blocking")
+    assert load_report_dir(_dir(tmp_path, [report]))
+
+
+def test_load_rejects_a_summary_array_of_the_wrong_element_type(
+    tmp_path: Path,
+) -> None:
+    """`[1] == [True]` in Python, so an int array would compare equal to a
+    boolean one and report no drift where the corpus actually differs."""
+    root = _dir(tmp_path, [_report([_finding()])], summary={"caught_per_sample": [1]})
+    with pytest.raises(RescoreError, match="must be a list of bool"):
+        load_report_dir(root)
+
+
+def test_load_rejects_a_non_string_judge_status_array(tmp_path: Path) -> None:
+    root = _dir(
+        tmp_path, [_report([_finding()])], summary={"judge_status_per_sample": [True]}
+    )
+    with pytest.raises(RescoreError, match="must be a list of str"):
+        load_report_dir(root)
+
+
 def test_load_rejects_a_malformed_summary_array(tmp_path: Path) -> None:
     """Drift runs after the whole measurement is paid for — so it fails here."""
     root = _dir(
