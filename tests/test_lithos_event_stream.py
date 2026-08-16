@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -187,6 +187,30 @@ class _FakeClient:
         # No script set for refresh — return the bootstrap as a stable
         # fallback so well-known tasks remain enrichable.
         return list(self._bootstrap)
+
+
+async def _run_until(
+    source: Any,
+    predicate: Callable[[], bool],
+    timeout: float = 5.0,
+) -> None:
+    """Run ``source.run()`` until *predicate* holds, then cancel.
+
+    For assertions that count **reconnect cycles**. Those are paced by the
+    source's retry sleep, so how many fit in a fixed ``asyncio.sleep`` window is
+    a property of the machine, not the code — under CPU contention a short
+    window fits one where an idle host fits dozens. Waiting on the condition
+    makes the count deterministic and leaves *timeout* a genuine failure bound:
+    a source that never reconnects still fails, just after a wait not a race.
+    """
+    task = asyncio.create_task(source.run())
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate() and loop.time() < deadline:
+        await asyncio.sleep(0.001)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def _drain(sub: Subscription) -> list[tuple[str, dict[str, Any]]]:
@@ -728,11 +752,7 @@ async def test_stream_reconnects_with_last_event_id_after_transient_error() -> N
     )
     source = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await _run_until(source, lambda: len(aconnect.calls) >= 2)
 
     assert len(aconnect.calls) >= 2
     # First connect: no Last-Event-ID header.
@@ -1129,11 +1149,7 @@ async def test_bootstrap_skipped_on_reconnect_when_last_event_id_present() -> No
     )
     source = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await _run_until(source, lambda: len(aconnect.calls) >= 2)
 
     # Snapshot exactly once; the reconnect skipped bootstrap because
     # Last-Event-ID was set.
