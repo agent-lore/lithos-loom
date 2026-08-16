@@ -21,6 +21,21 @@ slice 1 at its first-push head 156a4a9). The security persona's target: textual
 path validation is not filesystem-boundary enforcement, and host-side writes
 into agent-writable directories cross the container trust boundary. Fixed in
 #289 (host-controlled artifacts dir + RO nested mount + followlinks=False walk).
+
+PAIRED CONTROL (RH-1, 2026-08-16). known-good.patch is the SAME feature at the
+merged head of that PR (git diff 78b650a..e052439) — i.e. the change after
+review closed both directions: collection moved to check_artifacts.py, which
+walks with followlinks=False, skips every is_symlink() entry, requires the
+artifacts root to resolve inside the tree, and writes under a host-controlled
+root. Without it this case measured catch alone: 289 is the only case fielding
+the security persona, so nothing anywhere in the benchmark could tell a
+sharper security reviewer from a trigger-happy one.
+
+It is NOT a minimal pair. The two heads differ by the whole review-round delta
+(the module extraction and its tests, 16 files), not by the defect alone, so a
+finding about code that exists only at the known-good head is not automatically
+a false positive — read the FP number as "does the reviewer still claim a
+symlink escape once both directions are closed", not as a diff-sized control.
 """
 ac_provenance = "synthetic"
 tier = "frontier"       # discriminating at the 2026-08 baseline — headline signal
@@ -30,6 +45,9 @@ head_patch = "feature-with-defect.patch"
 personas = ["security"]
 profile = "standard"
 acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
 
 [[expected]]
 file = "src/lithos_loom/plugins/story_develop/check_runner.py"

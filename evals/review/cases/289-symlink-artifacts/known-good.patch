@@ -1,0 +1,978 @@
+diff --git a/docs/SPECIFICATION.md b/docs/SPECIFICATION.md
+index fe07002..1a46115 100644
+--- a/docs/SPECIFICATION.md
++++ b/docs/SPECIFICATION.md
+@@ -721,7 +721,7 @@ uv run python -m lithos_loom.plugins.story_develop \
+ - `--repo` takes the runner's `{{repo}}` token (§5.1), resolved per task from `[projects.<slug>].repo` keyed by `metadata.project` — so one route serves every registered project. (An absolute path also works if you want a route pinned to one checkout.)
+ - The task (title, body, `metadata.acceptance_criteria`) comes from `task.json`; `--description` / `--task-id` / `--no-lithos` / `--complete-on-approval` / `--reviewer` / `--develop-config` are rejected in daemon mode.
+ - **Idempotency short-circuit (US-18).** `--idempotency-key KEY` dedups a daemon run (default: the task id from `task.json`). The first run under a key that ends `succeeded` records its `result.json` in a host-persistent store; a later run under the same key **replays that recorded payload verbatim and exits 0 without re-running** — no second agent loop, no second PR (checked before config resolution, the agent loop, and PR delivery). A record short-circuits only when it passes **all three** gates: (1) it claims success (`status == "succeeded"` **and** `exit_code == 0`); (2) it validates against the full `result.json` schema (`docs/result-schema.json`) — a record missing required fields like `schema_version` / `task_id`, or otherwise off-contract, is rejected even when it claims success, since replaying it would hand the runner an invalid result; (3) its `task_id` matches the task being run — so a reused key (or a tampered store) never replays one task's result into another's. A failed, interrupted, or malformed record is ignored so the task stays retriable (and only a succeeded run is ever recorded, so a failed/interrupted run leaves no marker). The recorder keys off the **explicit** `--idempotency-key` when given, not the task id. Store: one `<sha256(key)>.json` file per key under `$LITHOS_LOOM_IDEMPOTENCY_DIR`, else `$XDG_STATE_HOME/lithos-loom/story-develop/idempotency`, else `~/.local/state/lithos-loom/story-develop/idempotency` — on disk (not the per-task `work_dir`, which the runner overwrites each dispatch) so the short-circuit survives invocations and daemon restarts. The store is bounded: each write prunes it back to the newest `LITHOS_LOOM_IDEMPOTENCY_MAX_RECORDS` (default 10000) records, and evicting an old record just means a later dispatch under that key re-runs. **Trust boundary:** the store is plain JSON at operator-home privilege with no cryptographic integrity — write access to that directory is a trust boundary (the `task_id` binding blocks cross-task replay, but a local process that can write the dir can suppress/redirect a single named task's development). *Out of scope (follow-ups):* in-flight concurrent dedup (locking, while a first run is still going); uniform application across all plugins via the plugin SDK (US-14); the A2A-race path (US-37).
+-- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?, model?, effort?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool?, model?, effort?}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`, `develop_image` (the sandbox container image for **every** agent + the test gate, e.g. `"ghcr.io/acme/dev:2026-06"`; default `ralph-sandbox:latest`), `develop_test_command` (test-gate command, **trusted as-is** — no auto-detection or tool-probe), `develop_check_commands` (a `{check = command}` table letting the repo declare its OWN command for a **non-test** gate check — `lint` / `typecheck` / `sast` / `dep-audit` / `coverage` / `semgrep` — run **verbatim** (no `uv`-wrap, no tool-probe, like `develop_test_command`) instead of the catalog canonical; the fix for a canonical command that over-scopes vs the repo's real policy, e.g. `{ typecheck = "make typecheck" }` where a bare `uv run pyright` would scan a test tree full of pre-existing type debt — #273; a task table merges per-key on top; `test` / `format` keys and unknown checks are rejected loudly), `develop_test_gate` (bool; `false` excludes the **`test` check only** from the per-round check-set — it is a *test* escape hatch, not a whole-gate kill switch, so the deterministic `lint` floor still runs — #131/#132/ADR 0003 §10; **generalized by `develop_check_states` — `test_gate=false` ≡ `{ test = "off" }`**), `develop_check_states` (a `{check = state}` table setting a **non-format** gate check's blocking role — `required` / `informational` / `off` — #273 slice 2; `off` **drops** the check cleanly, distinct from a required-but-tool-absent check that still blocks; `required`/`informational` override the profile's declared state; `check_states["test"]` wins over `develop_test_gate`; a task table merges per-key; `format` and unknown checks are rejected loudly), `develop_parity_command` (the repo's **aggregate** verification command, e.g. `"make check"`, run once on the approval candidate as a required `repo-parity` gate check — #273 slice 3 / [ADR 0010](adr/0010-aggregate-repo-parity-check.md); trusted as-is / raw exit; closes "gate-green ≠ CI-green" and is the primary gate for an ecosystem the catalog can't model (C/C++); None → no parity check); `develop_review_profile` (the selected Review Profile name — #139; **also governs whether the `test` check blocks** — all canonical profiles declare it required, so a red test gate blocks by default. The legacy `develop_block_on_red` key is **removed** as of #140 — a lingering key is inert and emits a one-shot deprecation `[Friction]`). Per-task override: `task.metadata.reviewers` (names from the pool); `task.metadata.develop_model` / `task.metadata.develop_effort` (override the **coder's** model / reasoning effort for that one task — reviewer models stay project policy); `task.metadata.develop_image` (override the project's sandbox image for that one task — e.g. a task needing a heavier toolchain); `task.metadata.develop_test_command` / `develop_test_gate` (override the test gate for that one task); `task.metadata.develop_check_commands` (per-task per-check command overrides, merged per-key over the project table — #273); `task.metadata.develop_check_states` (per-task per-check state overrides — required/informational/off — merged per-key — #273 slice 2); `task.metadata.develop_parity_command` (per-task aggregate repo-parity command override — #273 slice 3); `task.metadata.develop_review_profile` (the per-task Review Profile — highest precedence, #139). With **no explicit reviewer selection** — no slug, no doc, no `develop_default_reviewers` / `task.metadata.reviewers`, or a populated pool without a default selection (pool membership does not auto-run) — the run's panel comes from the **resolved Review Profile** (#140 slice 2): the default `standard` yields its correctness + security personas, `thorough` all five (#137), and gate-only `minimal` keeps the built-in single `code-quality` reviewer + a `[Friction]` until the overrides slice wires a true zero-reviewer panel (the deterministic floor itself shipped in #140's floor slice). The one case that still degrades to the built-in single `code-quality` reviewer + a `[Friction]` is an **explicit** selection that resolves to **no known reviewers** (a name matching neither the pool nor a canonical persona) — a typo must not silently escalate to the profile panel. An explicit selection that *does* resolve wins outright.
++- **Config lookup.** Reviewer config is resolved from the project-context doc's metadata at `projects/<slug>/<slug>-project-context.md` (slug from `task.metadata.project`; fallback: lexicographically-smallest `project-context`-tagged doc under `projects/<slug>/`). Keys: `develop_reviewers` (pool of `{name, tool, block_threshold?, system_prompt?, fallback_chain?, model?, effort?}`), `develop_default_reviewers` (names that run when the task doesn't override), `develop_coder` (`{tool?, model?, effort?}`), `develop_fallback_chain`, `develop_max_rounds`, `develop_max_cost_usd`, `develop_image` (the sandbox container image for **every** agent + the test gate, e.g. `"ghcr.io/acme/dev:2026-06"`; default `ralph-sandbox:latest`), `develop_test_command` (test-gate command, **trusted as-is** — no auto-detection or tool-probe), `develop_check_commands` (a `{check = command}` table letting the repo declare its OWN command for a **non-test** gate check — `lint` / `typecheck` / `sast` / `dep-audit` / `coverage` / `semgrep` — run **verbatim** (no `uv`-wrap, no tool-probe, like `develop_test_command`) instead of the catalog canonical; the fix for a canonical command that over-scopes vs the repo's real policy, e.g. `{ typecheck = "make typecheck" }` where a bare `uv run pyright` would scan a test tree full of pre-existing type debt — #273; a task table merges per-key on top; `test` / `format` keys and unknown checks are rejected loudly), `develop_test_gate` (bool; `false` excludes the **`test` check only** from the per-round check-set — it is a *test* escape hatch, not a whole-gate kill switch, so the deterministic `lint` floor still runs — #131/#132/ADR 0003 §10; **generalized by `develop_check_states` — `test_gate=false` ≡ `{ test = "off" }`**), `develop_check_states` (a `{check = state}` table setting a **non-format** gate check's blocking role — `required` / `informational` / `off` — #273 slice 2; `off` **drops** the check cleanly, distinct from a required-but-tool-absent check that still blocks; `required`/`informational` override the profile's declared state; `check_states["test"]` wins over `develop_test_gate`; a task table merges per-key; `format` and unknown checks are rejected loudly), `develop_artifacts_path` (a repo-relative directory — e.g. lens's `e2e/artifacts` — that gate checks may write reviewable artifacts into; when set, the check runner snapshots that dir out of each check's isolated tree export **before** the export is deleted, unconditionally on the check's verdict — a RED e2e run's screenshots are precisely what a reviewer needs to see. Snapshots land in a **host-controlled** per-run artifacts dir (never the agent-writable handoff) at `round_NN/<check>/`, exposed to agent containers via a **read-only** nested mount at `.handoff/artifacts` — so agents can read but never forge or redirect them. The host-side copy **never follows symlinks** (the artifacts root must be a real directory resolving inside the export; only regular files are copied, anything else is skipped and counted) and each collection is an **exact snapshot**: files stage in a temp dir published over any prior `round_NN/<check>` (rmtree + rename — a brief missing-destination window, acceptable for the sequential panel workflow), stale files from an earlier execution never merge in, an execution that produced nothing **retires** the prior snapshot, a traversal error fails the whole collection rather than publishing a partial one, and a **failed** collection leaves the prior snapshot untouched (its state is unknown, not "no artifacts"). Absolute paths, `..` traversal, and `.` (the repo root) are rejected at parse; collection is best-effort and never blocks the check or its cleanup — #283 slice 1), `develop_parity_command` (the repo's **aggregate** verification command, e.g. `"make check"`, run once on the approval candidate as a required `repo-parity` gate check — #273 slice 3 / [ADR 0010](adr/0010-aggregate-repo-parity-check.md); trusted as-is / raw exit; closes "gate-green ≠ CI-green" and is the primary gate for an ecosystem the catalog can't model (C/C++); None → no parity check); `develop_review_profile` (the selected Review Profile name — #139; **also governs whether the `test` check blocks** — all canonical profiles declare it required, so a red test gate blocks by default. The legacy `develop_block_on_red` key is **removed** as of #140 — a lingering key is inert and emits a one-shot deprecation `[Friction]`). Per-task override: `task.metadata.reviewers` (names from the pool); `task.metadata.develop_model` / `task.metadata.develop_effort` (override the **coder's** model / reasoning effort for that one task — reviewer models stay project policy); `task.metadata.develop_image` (override the project's sandbox image for that one task — e.g. a task needing a heavier toolchain); `task.metadata.develop_test_command` / `develop_test_gate` (override the test gate for that one task); `task.metadata.develop_check_commands` (per-task per-check command overrides, merged per-key over the project table — #273); `task.metadata.develop_check_states` (per-task per-check state overrides — required/informational/off — merged per-key — #273 slice 2); `task.metadata.develop_parity_command` (per-task aggregate repo-parity command override — #273 slice 3); `task.metadata.develop_artifacts_path` (per-task gate-artifacts dir override — #283); `task.metadata.develop_review_profile` (the per-task Review Profile — highest precedence, #139). With **no explicit reviewer selection** — no slug, no doc, no `develop_default_reviewers` / `task.metadata.reviewers`, or a populated pool without a default selection (pool membership does not auto-run) — the run's panel comes from the **resolved Review Profile** (#140 slice 2): the default `standard` yields its correctness + security personas, `thorough` all five (#137), and gate-only `minimal` keeps the built-in single `code-quality` reviewer + a `[Friction]` until the overrides slice wires a true zero-reviewer panel (the deterministic floor itself shipped in #140's floor slice). The one case that still degrades to the built-in single `code-quality` reviewer + a `[Friction]` is an **explicit** selection that resolves to **no known reviewers** (a name matching neither the pool nor a canonical persona) — a typo must not silently escalate to the profile panel. An explicit selection that *does* resolve wins outright.
+ - **Model + reasoning effort (#93).** `model` (e.g. `"opus"`, `"sonnet"`, or a full id) and `effort` (a reasoning-effort **level**: `low` / `medium` / `high` / `xhigh` / `max`) are configurable per agent: project-wide on `develop_coder` and per-reviewer in the `develop_reviewers` pool; per-task on the coder via `task.metadata.develop_model` / `develop_effort`. `effort` is **not** a token budget (`MAX_THINKING_TOKENS` is legacy and ignored by current adaptive-reasoning models) and there is **no universal cross-tool effort vocabulary** — Loom adopts **Claude's `--effort` levels as canonical**; each wired tool maps the canonical level onto its own mechanism. Codex (#94) has no effort flag — depth follows the model choice, so `effort` is **ignored for codex agents** (`model` is still honoured via `codex -m`); a not-yet-wired OpenCode would use `--variant high/max/minimal`. Both default to **the agent's default** (no `--model`, no `--effort`) — the plugin deliberately does not hard-pin a model string, so an agent upgrade is picked up without a code release. Standalone flags: `--coder-model` / `--coder-effort` and `--reviewer-model` / `--reviewer-effort` (the latter apply to every `--reviewer`; per-reviewer values need `--develop-config`). In daemon mode the standalone `--coder-model` / `--coder-effort` flags act as a route-level fallback that project/task metadata overrides. Below all of these, daemon-mode runs consult one final layer: a **host-wide, per-tool default model** in the loom TOML's `[story_develop].default_models` table (§3.1), keyed by each agent's resolved `tool` (`claude` / `codex`) — the lowest-priority `model` source, just above the agent CLI's own default. It is per-tool, not per-role, so a heterogeneous panel (#94) gives a codex reviewer and a claude coder each the default for their own tool; a tool with no configured default leaves that agent on its CLI default. There is no global-default counterpart for `effort`. Invalid-value handling differs by surface: **standalone CLI** flags **error** (non-zero exit) on bad input (empty/whitespace model, or an off-canonical effort level); **project/task metadata and the daemon-mode CLI fallback** drop an invalid value with a `[Friction]` finding and continue — daemon-mode config resolution never fails the run (so the effort flags are validated by `parse_effort`, not argparse `choices`, which would otherwise reject a bad route fallback at parse time). A malformed route fallback is surfaced with friction **even when metadata already supplies that field** (so a route-config typo isn't silently masked); the valid fallback value is *applied* only where metadata left the field unset.
+ - **Container shared memory.** Every **workload** container the plugin launches — deterministic-gate checks, per-turn agent containers, and the isolated auto-format pass — runs with `--shm-size 1g`: Docker's 64MB `/dev/shm` default crashes chromium under page-heavy headless-browser e2e workloads (a `make e2e` parity step, or agents driving playwright). `1g` is a tmpfs **capacity limit**, not preallocated memory, and `--ipc=host` stays disabled (hardening preserved). This is a fixed host policy (`CONTAINER_SHM_SIZE`), not per-project config; the short-lived tool-probe container (`command -v` only) is deliberately outside the contract — it runs no workload. Operators sizing a host: a `thorough` run can hold a coder + several reviewer/check containers concurrently, each with this ceiling.
+ - **Agent tools (#94).** Each agent's `tool` is `claude` or `codex`, declarable independently per coder (`develop_coder.tool` / `--coder`) and per reviewer (`develop_reviewers[].tool`), so a heterogeneous panel (e.g. `code-quality = codex`, `security = claude`) and an engine-switching `fallback_chain` both work. Codex runs as `codex exec --json --dangerously-bypass-approvals-and-sandbox` (first turn) / `codex exec resume <thread_id> …` (later turns) inside the same hardened per-turn container model (ADR 0002). Two codex specifics: (1) the session handle is **minted by the tool** — the `thread_id` from the first turn's `thread.started` `--json` event is captured and reused for resumes (claude's is a caller-supplied uuid); (2) the per-run config/transcript dir is `CODEX_HOME` (under the work-dir, never `/tmp`) with a single `auth.json` bind-mounted from `~/.codex`, and codex has no skills concept (it honours the worktree `AGENTS.md`). **Cost gap:** codex reports token usage, not USD, so codex turns contribute `0.0` to the `max_cost_usd` ceiling — for codex agents the ceiling is unenforced (a run stays bounded by `max_rounds` + per-turn timeout); a token→USD pricing map is a follow-up. When `max_cost_usd` is set **and** any participating tool (coder, a reviewer, or a reachable `fallback_chain` entry) can't meter USD, story-develop logs a one-time startup WARNING naming exactly those tools — so an operator who set a ceiling learns it only bounds the USD-reporting participants. The message is **capability-driven** off the Engine adapter's `meters_cost_usd` (ARCH-2/E4/#102), so a future non-metering engine is named automatically without a code edit; the ceiling checks themselves are untouched. Codex usage-limit *strings* are not yet captured (feasibility-gate G4), so a codex limit currently classifies as a generic `agent_error` rather than `usage_limited` — an engine `fallback_chain` still switches *to* codex on a claude limit, but switching *off* codex on a codex limit awaits the captured strings.
+diff --git a/docs/generated/components/Plugins.md b/docs/generated/components/Plugins.md
+index 4a7946e..7a6b10d 100644
+--- a/docs/generated/components/Plugins.md
++++ b/docs/generated/components/Plugins.md
+@@ -20,10 +20,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
+ | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
+ | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
+ | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
++| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 1 |
+ | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
+ | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
+ | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
+-| `lithos_loom.plugins.story_develop.config` | M | 2 | 13 |
++| `lithos_loom.plugins.story_develop.config` | M | 2 | 14 |
+ | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
+ | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
+ | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
+@@ -73,6 +74,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
+ - def `resolve_formatters` — The runnable write-mode formatter commands for *wt*, probed once for the run.
+ - def `run_format_pass` — Format the coder's commit in isolation and commit any change separately.
+ 
++### `lithos_loom.plugins.story_develop.check_artifacts`
++- def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).
++
+ ### `lithos_loom.plugins.story_develop.check_catalog`
+ - class `CheckMapping` — One canonical check's command per ecosystem.
+ - class `DesiredCheck` — What a profile (or the default) *asks for* — the input to resolution.
+@@ -105,6 +109,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
+ - class `ReviewerSpec` — One named reviewer: its persona, strictness, and tooling (T6).
+ - def `parse_model` — Validate + normalise a ``model`` value: a non-empty string, or ``None``.
+ - def `parse_image` — Validate + normalise a sandbox container ``image`` value, or ``None``.
++- def `parse_artifacts_path` — Validate a repo-relative check-artifacts directory, or ``None``.
+ - def `parse_test_command` — Validate + normalise a gate ``test_command`` override, or ``None``.
+ - def `parse_check_commands` — Validate a per-check command override map (#273), or ``{}`` when absent.
+ - def `parse_check_command_pairs` — Parse repeatable CLI ``NAME=COMMAND`` items into a validated override map (#273).
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index c9298c6..5246750 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -52,7 +52,7 @@
+         "max_function": "lithos_loom.lithos_client._parse_note"
+       },
+       "Plugins": {
+-        "functions_over_10": 24,
++        "functions_over_10": 25,
+         "max_complexity": 94,
+         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
+       },
+@@ -97,7 +97,7 @@
+         "max_function": "lithos_loom.task_graph.build_plan"
+       }
+     },
+-    "functions_over_10": 74,
++    "functions_over_10": 75,
+     "top_functions": [
+       {
+         "complexity": 94,
+@@ -140,7 +140,7 @@
+         "qualname": "lithos_loom.cli.project.project_regenerate_done"
+       }
+     ],
+-    "total_functions": 927
++    "total_functions": 932
+   },
+   "domain": {
+     "associations": 2,
+@@ -431,13 +431,13 @@
+       },
+       "Plugins": {
+         "classes": 55,
+-        "functions": 326,
++        "functions": 331,
+         "largest_module": "lithos_loom.plugins.story_develop.__main__",
+-        "largest_module_lines": 1074,
+-        "lines": 12102,
+-        "modules": 39,
+-        "public_symbols": 204,
+-        "sloc": 9640
++        "largest_module_lines": 1075,
++        "lines": 12325,
++        "modules": 40,
++        "public_symbols": 206,
++        "sloc": 9834
+       },
+       "ProjectContext": {
+         "classes": 0,
+@@ -530,13 +530,13 @@
+       "lithos_loom.plugins.story_develop.__main__",
+       "lithos_loom.plugins.story_develop.pr_delivery"
+     ],
+-    "total_lines": 36397,
+-    "total_modules": 116,
+-    "total_sloc": 28848
++    "total_lines": 36620,
++    "total_modules": 117,
++    "total_sloc": 29042
+   },
+   "tests": {
+     "ratio": 1.6,
+-    "src_lines": 36397,
+-    "test_lines": 58138
++    "src_lines": 36620,
++    "test_lines": 58527
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 9860db8..8896b0e 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -44,7 +44,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Evals | 9 | 975 | 785 | 1 | 2 | 0.67 | 18 (`lithos_loom.evals.review.harness.run_case`) | 2 |
+ | GitHub | 1 | 796 | 616 | 5 | 1 | 0.17 | 14 (`lithos_loom.github_client._parse_pull_request`) | 1 |
+ | LithosClient | 1 | 2195 | 1841 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
+-| Plugins | 39 | 12102 | 9640 | 2 | 5 | 0.71 | 94 (`lithos_loom.plugins.story_develop.__main__.main`) | 24 |
++| Plugins | 40 | 12325 | 9834 | 2 | 5 | 0.71 | 94 (`lithos_loom.plugins.story_develop.__main__.main`) | 25 |
+ | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
+ | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
+ | Runners | 5 | 604 | 469 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
+@@ -56,7 +56,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ 
+ ## Size
+ 
+-- Modules: **116**, lines: **36397**, SLOC: **28848**
++- Modules: **117**, lines: **36620**, SLOC: **29042**
+ - Largest module: `lithos_loom.lithos_client` (2195 lines)
+ - Modules over 800 lines: **6**
+   - `lithos_loom.cli.develop`
+@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ 
+ ## Complexity
+ 
+-- Functions: **927**, cyclomatic > 10: **74**
++- Functions: **932**, cyclomatic > 10: **75**
+ 
+ Top 10 most complex functions:
+ 
+@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
+ ## Domain & tests
+ 
+ - Domain models: **17** (2 associations, 0 without docstrings)
+-- Test-to-source line ratio: **1.60** (58138 test lines / 36397 source lines)
++- Test-to-source line ratio: **1.60** (58527 test lines / 36620 source lines)
+diff --git a/src/lithos_loom/plugins/story_develop/__main__.py b/src/lithos_loom/plugins/story_develop/__main__.py
+index 3838a9c..a236c99 100644
+--- a/src/lithos_loom/plugins/story_develop/__main__.py
++++ b/src/lithos_loom/plugins/story_develop/__main__.py
+@@ -557,6 +557,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
+         # wins; the route-level --image flag (default DEFAULT_IMAGE) is the
+         # fallback when metadata pins nothing.
+         image=settings.image or args.image,
++        artifacts_path=settings.artifacts_path,
+         base_branch=args.branch,
+         notify_github_login=load_operator_github_login(),
+     )
+diff --git a/src/lithos_loom/plugins/story_develop/agent_session.py b/src/lithos_loom/plugins/story_develop/agent_session.py
+index cdbf318..63e39f1 100644
+--- a/src/lithos_loom/plugins/story_develop/agent_session.py
++++ b/src/lithos_loom/plugins/story_develop/agent_session.py
+@@ -54,12 +54,16 @@ def build_run_cmd(
+     ``AGENTS.md``). ``build_run_command`` stays engine-blind.
+     """
+     name = containers.container_name(config.run_id, agent)
++    # #283: the artifacts dir must exist at container-create time for the RO
++    # bind mount; contents appear as the host collector publishes snapshots.
++    config.artifacts_dir.mkdir(parents=True, exist_ok=True)
+     cmd = containers.build_run_command(
+         name=name,
+         image=config.image,
+         worktree=wt,
+         config_dir=config_dir,
+         handoff_dir=config.handoff_dir,
++        artifacts_dir=config.artifacts_dir,
+         config_mount=engine.config_mount,
+         config_env_var=engine.config_env_var,
+         auth_source_dir=engine.auth_source_dir(config),
+diff --git a/src/lithos_loom/plugins/story_develop/check_artifacts.py b/src/lithos_loom/plugins/story_develop/check_artifacts.py
+new file mode 100644
+index 0000000..5d849e9
+--- /dev/null
++++ b/src/lithos_loom/plugins/story_develop/check_artifacts.py
+@@ -0,0 +1,138 @@
++"""Gate-check artifact collection (#283 slice 1).
++
++Rescues a check's rendered artifacts (e.g. e2e screenshots) from its doomed
++per-check tree export into the run's host-controlled artifacts dir, as an
++exact, symlink-free snapshot. See :func:`collect_check_artifacts` for the
++threat model — the export's contents and the handoff are both untrusted, so
++the host-privileged copy neither follows symlinks nor writes anywhere an
++agent container can reach read-write.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++import shutil
++import uuid
++from pathlib import Path
++
++from .config import DevelopConfig
++
++logger = logging.getLogger(__name__)
++
++
++def _raise_walk_error(exc: OSError) -> None:
++    """``os.walk`` swallows traversal errors by default — an unreadable nested
++    dir would silently publish a PARTIAL snapshot logged as success (PR #289
++    round 2). Raising routes it to the failure path: nothing published."""
++    raise exc
++
++
++def collect_check_artifacts(
++    config: DevelopConfig, tree: Path, round_no: int, check_name: str
++) -> None:
++    """Rescue a check's artifacts dir from its doomed tree export (#283).
++
++    The per-check export is deleted right after the check runs (#282
++    isolation), destroying anything the check rendered there — e.g. the e2e
++    screenshots a repo-parity ``make e2e`` writes. When the project declares
++    ``develop_artifacts_path``, snapshot that dir into the HOST-CONTROLLED
++    ``config.artifacts_dir`` under ``round_NN/<check>/`` (agents see it via a
++    read-only mount at ``.handoff/artifacts`` — never a host-privileged write
++    into an agent-writable dir). Unconditional on the check's verdict — a RED
++    e2e run's screenshots are exactly what a reviewer needs.
++
++    Hardening (PR #289 review): the export's contents are repo/check-
++    controlled, so the copy NEVER follows symlinks — the artifacts root must
++    be a real directory resolving inside the export, and only regular,
++    non-symlink files are copied (anything else is skipped and counted); a
++    traversal error fails the whole collection rather than publishing a
++    partial snapshot as success.
++
++    Snapshot contract: after a SUCCESSFUL pass, ``round_NN/<check>`` reflects
++    exactly this execution — files staged in a temp dir are published over any
++    prior snapshot (rmtree + rename: a brief missing-destination window, fine
++    for the sequential panel workflow — not a stronger atomicity claim), and
++    an execution that produced nothing RETIRES the prior snapshot, so
++    reviewers never mistake an older execution's artifacts for the current
++    one. After a FAILED pass the prior snapshot is left untouched — its state
++    is "unknown", not "no artifacts" — and the failure is logged, never
++    fatal, never blocking the tree cleanup that follows.
++    """
++    if not config.artifacts_path:
++        return
++    src = tree / config.artifacts_path
++    dest = config.artifacts_dir / f"round_{round_no:02d}" / check_name
++    tmp: Path | None = None
++    try:
++        if src.is_symlink() or not src.is_dir():
++            _retire_prior(dest)
++            return
++        if not src.resolve().is_relative_to(tree.resolve()):
++            logger.warning(
++                "story-develop %s: round %d %s artifacts root resolves outside "
++                "the export (skipping): %s",
++                config.run_id,
++                round_no,
++                check_name,
++                src,
++            )
++            _retire_prior(dest)
++            return
++        config.artifacts_dir.mkdir(parents=True, exist_ok=True)
++        tmp = config.artifacts_dir / f".tmp-{check_name}-{uuid.uuid4().hex}"
++        copied = 0
++        skipped = 0
++        for dirpath, dirnames, filenames in os.walk(
++            src, onerror=_raise_walk_error, followlinks=False
++        ):
++            rel = Path(dirpath).relative_to(src)
++            for fname in filenames:
++                entry = Path(dirpath) / fname
++                if entry.is_symlink() or not entry.is_file():
++                    skipped += 1
++                    continue
++                target_dir = tmp / rel
++                target_dir.mkdir(parents=True, exist_ok=True)
++                shutil.copy2(entry, target_dir / fname)
++                copied += 1
++            # prune symlinked subdirs from the walk (followlinks=False stops
++            # descent, but they'd still be listed; count them as skipped)
++            links = [d for d in dirnames if (Path(dirpath) / d).is_symlink()]
++            skipped += len(links)
++            dirnames[:] = [d for d in dirnames if d not in links]
++        if copied == 0:
++            _retire_prior(dest)
++            return
++        dest.parent.mkdir(parents=True, exist_ok=True)
++        if dest.exists():
++            shutil.rmtree(dest)
++        os.rename(tmp, dest)
++        tmp = None
++        logger.info(
++            "story-develop %s: round %d %s artifacts collected to %s (%d files%s)",
++            config.run_id,
++            round_no,
++            check_name,
++            dest,
++            copied,
++            f", {skipped} non-regular entries skipped" if skipped else "",
++        )
++    except OSError as exc:
++        logger.warning(
++            "story-develop %s: round %d %s artifact collection failed (continuing): %s",
++            config.run_id,
++            round_no,
++            check_name,
++            exc,
++        )
++    finally:
++        if tmp is not None:
++            shutil.rmtree(tmp, ignore_errors=True)
++
++
++def _retire_prior(dest: Path) -> None:
++    """An execution that produced no artifacts must not leave a previous
++    execution's snapshot posing as current (PR #289 round 2)."""
++    if dest.exists():
++        shutil.rmtree(dest)
+diff --git a/src/lithos_loom/plugins/story_develop/check_runner.py b/src/lithos_loom/plugins/story_develop/check_runner.py
+index a770a19..362c03c 100644
+--- a/src/lithos_loom/plugins/story_develop/check_runner.py
++++ b/src/lithos_loom/plugins/story_develop/check_runner.py
+@@ -34,7 +34,14 @@ from pathlib import Path
+ from typing import Literal, cast
+ 
+ from ...runner import detection
+-from . import check_catalog, containers, gate_adapters, profiles, test_gate
++from . import (
++    check_artifacts,
++    check_catalog,
++    containers,
++    gate_adapters,
++    profiles,
++    test_gate,
++)
+ from .check_set import (
+     Check,
+     CheckResult,
+@@ -543,6 +550,7 @@ def run_check_set(
+             )
+             gate = None
+         finally:
++            check_artifacts.collect_check_artifacts(config, tree, round_no, check.name)
+             # Best-effort: an undeletable tree just stays on disk — it is never
+             # mounted again, so it cannot affect any later check — but loom is a
+             # long-running daemon, so a retained export (repo + venv, per check)
+diff --git a/src/lithos_loom/plugins/story_develop/config.py b/src/lithos_loom/plugins/story_develop/config.py
+index c46c186..62e7d68 100644
+--- a/src/lithos_loom/plugins/story_develop/config.py
++++ b/src/lithos_loom/plugins/story_develop/config.py
+@@ -11,7 +11,7 @@ import re
+ import secrets
+ from collections.abc import Sequence
+ from dataclasses import dataclass, field
+-from pathlib import Path
++from pathlib import Path, PurePosixPath
+ 
+ # A reviewer name becomes a Docker container name, a host dir, and a handoff
+ # filename, so it must be a safe slug (lowercase alphanumerics + hyphens,
+@@ -142,6 +142,38 @@ def parse_image(value: object, *, where: str) -> str | None:
+     return value.strip()
+ 
+ 
++def parse_artifacts_path(value: object, *, where: str) -> str | None:
++    """Validate a repo-relative check-artifacts directory, or ``None``.
++
++    #283 slice 1: the directory (relative to the repo root) that gate checks
++    may write reviewable artifacts into — e.g. lens's ``e2e/artifacts``
++    screenshot dir. The check runner copies it from each check's isolated tree
++    export into the run's handoff area before the export is deleted. The path
++    is joined onto the export tree, so it must stay inside it: absolute paths
++    and ``..`` traversal are rejected. Raises :class:`ValueError`.
++    """
++    if value is None:
++        return None
++    if not isinstance(value, str) or not value.strip():
++        raise ValueError(
++            f"{where}: artifacts path must be a non-empty string (got {value!r})"
++        )
++    text = value.strip()
++    parts = PurePosixPath(text).parts
++    if PurePosixPath(text).is_absolute() or ".." in parts:
++        raise ValueError(
++            f"{where}: artifacts path must be repo-relative without '..' "
++            f"(got {value!r})"
++        )
++    if not parts or parts == (".",):
++        # "." would snapshot the ENTIRE exported repo per check — reject.
++        raise ValueError(
++            f"{where}: artifacts path must name a subdirectory, not the repo "
++            f"root (got {value!r})"
++        )
++    return text
++
++
+ def parse_test_command(value: object, *, where: str) -> str | None:
+     """Validate + normalise a gate ``test_command`` override, or ``None``.
+ 
+@@ -502,6 +534,10 @@ class DevelopConfig:
+     coder_model: str | None = None
+     coder_effort: str | None = None
+     image: str = DEFAULT_IMAGE
++    # #283 slice 1: repo-relative dir whose contents each gate check's isolated
++    # tree export contributes to the run handoff (``develop_artifacts_path``,
++    # project-then-task). ``None`` = no collection.
++    artifacts_path: str | None = None
+     base_branch: str = "main"
+     # Single-reviewer convenience fields (the T2-era surface; still the
+     # default path). T6: `reviewers` holds full multi-reviewer specs and,
+@@ -627,6 +663,19 @@ class DevelopConfig:
+         """Per-run root for test-gate state (exported trees, output, cache)."""
+         return self.run_dir / "test_gate"
+ 
++    @property
++    def artifacts_dir(self) -> Path:
++        """Per-run HOST-CONTROLLED root for collected check artifacts (#283).
++
++        Deliberately a sibling of ``handoff_dir``, not inside it: the handoff
++        is mounted read-write into agent containers, so an agent could plant a
++        symlink at a predictable destination and redirect a host-privileged
++        copy (PR #289 review, critical). This dir is written only by the host
++        collector and exposed to agents via a separate READ-ONLY mount at
++        ``.handoff/artifacts`` in-container.
++        """
++        return self.run_dir / "artifacts"
++
+     @property
+     def failures_dir(self) -> Path:
+         """Per-run dir of failed-turn fixtures (the G4 capture harness)."""
+diff --git a/src/lithos_loom/plugins/story_develop/containers.py b/src/lithos_loom/plugins/story_develop/containers.py
+index 6e834b2..a2f3f41 100644
+--- a/src/lithos_loom/plugins/story_develop/containers.py
++++ b/src/lithos_loom/plugins/story_develop/containers.py
+@@ -48,6 +48,7 @@ def build_run_command(
+     skills_dir: Path | None = None,
+     read_only_worktree: bool = False,
+     git_common_dir: Path | None = None,
++    artifacts_dir: Path | None = None,
+ ) -> list[str]:
+     """Build the ``docker run`` argv for a long-lived idle agent container.
+ 
+@@ -63,6 +64,12 @@ def build_run_command(
+     * the worktree at ``/workspace`` (RW, or RO for reviewers);
+     * *handoff_dir* at ``/workspace/.handoff`` (RW) — a separate dir outside the
+       worktree, so the worktree stays git-clean;
++    * *artifacts_dir* at ``/workspace/.handoff/artifacts`` (**RO**) when
++      provided (#283) — collected gate-check artifacts (e2e screenshots). A
++      nested mount shadowing any same-named path in the RW handoff: the host
++      collector is the only writer, so an agent can neither forge artifacts
++      nor plant a symlink destination for the host-privileged copy (PR #289
++      review);
+     * *config_dir* (per-run) at *config_mount* (RW, holds the transcript) —
+       ``/claude_config`` exported as ``CLAUDE_CONFIG_DIR`` for claude,
+       ``/codex_home`` exported as ``CODEX_HOME`` for codex (#94);
+@@ -99,6 +106,13 @@ def build_run_command(
+         workspace_mount,
+         "-v",
+         f"{handoff_dir}:{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}",
++    ]
++    if artifacts_dir is not None:
++        cmd += [
++            "-v",
++            f"{artifacts_dir}:{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}/artifacts:ro",
++        ]
++    cmd += [
+         "-v",
+         f"{config_dir}:{config_mount}",
+     ]
+diff --git a/src/lithos_loom/plugins/story_develop/daemon_io.py b/src/lithos_loom/plugins/story_develop/daemon_io.py
+index c9c688c..255bd44 100644
+--- a/src/lithos_loom/plugins/story_develop/daemon_io.py
++++ b/src/lithos_loom/plugins/story_develop/daemon_io.py
+@@ -134,6 +134,8 @@ class ProjectDevelopSettings:
+     # per-task override (``task.metadata.develop_image``). ``None`` = "inherit
+     # the route-level ``--image`` flag / the built-in default".
+     image: str | None = None
++    # #283: repo-relative gate-artifacts dir (``develop_artifacts_path``).
++    artifacts_path: str | None = None
+     # Per-project test-gate overrides (#127), each ``None`` = "inherit the
+     # route-level flag" (``--test-command`` / ``--no-test-gate``).
+     # ``test_command`` is trusted as-is by the gate. (#140: the `test` check's
+@@ -312,6 +314,7 @@ def resolve_project_settings(
+         max_rounds=scalars.max_rounds,
+         max_cost_usd=scalars.max_cost_usd,
+         image=scalars.image,
++        artifacts_path=scalars.artifacts_path,
+         test_command=scalars.test_command,
+         test_gate=scalars.test_gate,
+         check_commands=scalars.check_commands,
+diff --git a/src/lithos_loom/plugins/story_develop/settings_resolver.py b/src/lithos_loom/plugins/story_develop/settings_resolver.py
+index 6c5de86..b5a61b9 100644
+--- a/src/lithos_loom/plugins/story_develop/settings_resolver.py
++++ b/src/lithos_loom/plugins/story_develop/settings_resolver.py
+@@ -27,6 +27,7 @@ from typing import Any
+ 
+ from .config import (
+     DEFAULT_CODER_TOOL,
++    parse_artifacts_path,
+     parse_bool_setting,
+     parse_check_commands,
+     parse_check_states,
+@@ -60,6 +61,7 @@ class ScalarSettings:
+     max_rounds: int | None = None
+     max_cost_usd: float | None = None
+     image: str | None = None
++    artifacts_path: str | None = None
+     test_command: str | None = None
+     test_gate: bool | None = None
+     review_profile_project: str | None = None
+@@ -110,6 +112,9 @@ class _ProjectThenTaskField:
+ # :func:`_resolve_coder` (which reuses the same :func:`_parse_or_friction` atom).
+ _PROJECT_THEN_TASK_FIELDS: tuple[_ProjectThenTaskField, ...] = (
+     _ProjectThenTaskField("image", "develop_image", parse_image),
++    _ProjectThenTaskField(
++        "artifacts_path", "develop_artifacts_path", parse_artifacts_path
++    ),
+     _ProjectThenTaskField("test_command", "develop_test_command", parse_test_command),
+     _ProjectThenTaskField("test_gate", "develop_test_gate", parse_bool_setting),
+ )
+@@ -365,6 +370,7 @@ def resolve_scalar_settings(
+         coder_model=coder_model,
+         coder_effort=coder_effort,
+         image=scalars["image"],
++        artifacts_path=scalars["artifacts_path"],
+         test_command=scalars["test_command"],
+         test_gate=scalars["test_gate"],
+         fallback_chain=fallback_chain,
+diff --git a/tests/test_story_develop_check_set.py b/tests/test_story_develop_check_set.py
+index 4f2378b..c5bcbd2 100644
+--- a/tests/test_story_develop_check_set.py
++++ b/tests/test_story_develop_check_set.py
+@@ -1497,3 +1497,323 @@ def test_export_failure_records_errored_but_later_checks_still_run(
+     assert by["lint"].gate is None
+     assert by["typecheck"].execution_outcome == "ran"
+     assert by["typecheck"].passed is True
++
++
++# --- gate artifact collection (#283 slice 1) ----------------------------------
++
++
++def test_check_artifacts_are_collected_before_tree_cleanup(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    # #283: the per-check tree export is deleted after the check runs (#284
++    # isolation), so anything a check renders there — e2e screenshots — is
++    # destroyed before any reviewer could see it. With ``artifacts_path`` set,
++    # the runner snapshots that directory into the host-controlled artifacts
++    # dir (agents see it read-only at .handoff/artifacts) before cleanup.
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path, artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++
++    parity = Check(
++        name="repo-parity",
++        command=(
++            "mkdir -p e2e/artifacts && printf 'png-bytes' > e2e/artifacts/note-320.png"
++        ),
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++
++    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (parity,), GateLedger())
++
++    assert cs is not None and cs.results[0].passed is True
++    dest = cfg.artifacts_dir / "round_01" / "repo-parity" / "note-320.png"
++    assert dest.read_text() == "png-bytes"
++    # cleanup still happened — no export trees left behind
++    round_dir = cfg.gate_dir / "round_01"
++    assert not [p for p in round_dir.iterdir() if p.name.startswith("tree-")]
++
++
++def test_red_check_artifacts_are_still_collected(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    # A RED e2e run's screenshots are exactly what a reviewer needs to see —
++    # collection is unconditional on verdict.
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path, artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++
++    parity = Check(
++        name="repo-parity",
++        command=(
++            "mkdir -p e2e/artifacts && printf 'broken-page' > e2e/artifacts/x.png"
++            " && exit 1"
++        ),
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++
++    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 2, (parity,), GateLedger())
++
++    assert cs is not None and cs.results[0].passed is False
++    dest = cfg.artifacts_dir / "round_02" / "repo-parity" / "x.png"
++    assert dest.read_text() == "broken-page"
++
++
++def test_no_artifacts_path_means_no_collection(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path)  # artifacts_path unset
++    _host_exec_gate(monkeypatch)
++
++    check = Check(
++        name="lint",
++        command="mkdir -p e2e/artifacts && touch e2e/artifacts/y.png",
++        state="required",
++        stage="fast",
++        raw_exit=True,
++    )
++
++    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
++
++    assert cs is not None
++    assert not cfg.artifacts_dir.exists()
++
++
++def test_absent_or_empty_artifacts_dir_collects_nothing(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    # A check that writes no artifacts (most of them) must not create empty
++    # per-check dirs in the handoff.
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path, artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++
++    lint = Check(
++        name="lint", command="true", state="required", stage="fast", raw_exit=True
++    )
++
++    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (lint,), GateLedger())
++
++    assert cs is not None
++    assert not cfg.artifacts_dir.exists()
++
++
++def test_source_symlinks_are_never_followed(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    # PR #289 review, critical: the collector runs on the HOST as the loom
++    # user; a committed or check-created symlink inside the artifacts dir must
++    # not let it read outside the exported tree. Regular files still collect.
++    secret = tmp_path / "host-secret.txt"
++    secret.write_text("host-only")
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++
++    check = Check(
++        name="repo-parity",
++        command=(
++            "mkdir -p e2e/artifacts && printf ok > e2e/artifacts/real.png"
++            f" && ln -s {secret} e2e/artifacts/leak.txt"
++        ),
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++
++    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
++
++    assert cs is not None
++    dest = cfg.artifacts_dir / "round_01" / "repo-parity"
++    assert (dest / "real.png").read_text() == "ok"
++    assert not (dest / "leak.txt").exists()
++    assert not list(dest.rglob("*host-secret*"))
++
++
++def test_symlinked_artifacts_root_collects_nothing(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    # The artifacts dir itself being a symlink must not redirect the collector
++    # outside the export.
++    outside = tmp_path / "outside-dir"
++    outside.mkdir()
++    (outside / "smuggled.png").write_text("outside")
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++
++    check = Check(
++        name="repo-parity",
++        command=f"mkdir -p e2e && ln -s {outside} e2e/artifacts",
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++
++    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
++
++    assert cs is not None
++    assert not (cfg.artifacts_dir / "round_01").exists()
++
++
++def test_collection_is_an_exact_snapshot_not_a_merge(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    # PR #289 review: a stale file from an earlier execution of the same
++    # round+check must not survive into the new snapshot.
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++    stale = cfg.artifacts_dir / "round_01" / "repo-parity"
++    stale.mkdir(parents=True)
++    (stale / "stale-old-shot.png").write_text("old")
++
++    check = Check(
++        name="repo-parity",
++        command="mkdir -p e2e/artifacts && printf new > e2e/artifacts/fresh.png",
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++
++    cs = check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (check,), GateLedger())
++
++    assert cs is not None
++    dest = cfg.artifacts_dir / "round_01" / "repo-parity"
++    assert (dest / "fresh.png").read_text() == "new"
++    assert not (dest / "stale-old-shot.png").exists()
++
++
++def test_collection_failure_is_logged_never_fatal_and_cleanup_still_runs(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_git_repo: Path,
++    tmp_path: Path,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++
++    def boom(*a: object, **kw: object) -> None:
++        raise OSError("disk full")
++
++    monkeypatch.setattr(check_runner.check_artifacts.shutil, "copy2", boom)
++
++    check = Check(
++        name="repo-parity",
++        command="mkdir -p e2e/artifacts && printf x > e2e/artifacts/a.png",
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++
++    with caplog.at_level("WARNING"):
++        cs = check_runner.run_check_set(
++            cfg, tmp_git_repo, sha, 1, (check,), GateLedger()
++        )
++
++    assert cs is not None and cs.results[0].passed is True
++    assert "artifact collection failed" in caplog.text
++    # no partial snapshot published, and the export tree is still cleaned up
++    assert not (cfg.artifacts_dir / "round_01" / "repo-parity").exists()
++    round_dir = cfg.gate_dir / "round_01"
++    assert not [p for p in round_dir.iterdir() if p.name.startswith("tree-")]
++
++
++def test_empty_rerun_retires_the_prior_snapshot(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    # PR #289 round 2: a rerun whose artifacts dir is EMPTY (or absent — the
++    # check failed before rendering anything) must not leave reviewers looking
++    # at the previous execution's screenshots as if they were current.
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++    stale = cfg.artifacts_dir / "round_01" / "repo-parity"
++    stale.mkdir(parents=True)
++    (stale / "old.png").write_text("old")
++
++    empty_producer = Check(
++        name="repo-parity",
++        command="mkdir -p e2e/artifacts",
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++    cs = check_runner.run_check_set(
++        cfg, tmp_git_repo, sha, 1, (empty_producer,), GateLedger()
++    )
++    assert cs is not None
++    assert not stale.exists()
++
++
++def test_missing_root_rerun_also_retires_the_prior_snapshot(
++    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
++) -> None:
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++    stale = cfg.artifacts_dir / "round_01" / "repo-parity"
++    stale.mkdir(parents=True)
++    (stale / "old.png").write_text("old")
++
++    no_artifacts = Check(
++        name="repo-parity",
++        command="true",
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++    cs = check_runner.run_check_set(
++        cfg, tmp_git_repo, sha, 1, (no_artifacts,), GateLedger()
++    )
++    assert cs is not None
++    assert not stale.exists()
++
++
++def test_unreadable_nested_dir_fails_collection_and_keeps_prior_snapshot(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_git_repo: Path,
++    tmp_path: Path,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    # PR #289 round 2: os.walk silently skipped unreadable dirs, publishing a
++    # PARTIAL snapshot logged as success. A traversal error must fail the
++    # collection (nothing published); a failed collection leaves the prior
++    # snapshot untouched — its state is unknown, not "no artifacts".
++    sha = _committed_sha(tmp_git_repo)
++    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
++    _host_exec_gate(monkeypatch)
++    prior = cfg.artifacts_dir / "round_01" / "repo-parity"
++    prior.mkdir(parents=True)
++    (prior / "previous-good.png").write_text("prior")
++
++    check = Check(
++        name="repo-parity",
++        command=(
++            "mkdir -p e2e/artifacts/locked && printf top > e2e/artifacts/top.png"
++            " && printf hidden > e2e/artifacts/locked/nested.png"
++            " && chmod 000 e2e/artifacts/locked"
++        ),
++        state="required",
++        stage="candidate",
++        raw_exit=True,
++    )
++    try:
++        with caplog.at_level("WARNING"):
++            cs = check_runner.run_check_set(
++                cfg, tmp_git_repo, sha, 1, (check,), GateLedger()
++            )
++    finally:
++        import subprocess as _sp
++
++        _sp.run(["chmod", "-R", "u+rwX", str(cfg.gate_dir)], capture_output=True)
++
++    assert cs is not None
++    assert "artifact collection failed" in caplog.text
++    # nothing partial published; the prior snapshot survives a FAILED pass
++    assert (prior / "previous-good.png").read_text() == "prior"
++    assert not (prior / "top.png").exists()
+diff --git a/tests/test_story_develop_config.py b/tests/test_story_develop_config.py
+index d97c247..f2898aa 100644
+--- a/tests/test_story_develop_config.py
++++ b/tests/test_story_develop_config.py
+@@ -17,6 +17,7 @@ from lithos_loom.plugins.story_develop.config import (
+     DevelopConfig,
+     ReviewerSpec,
+     load_develop_config,
++    parse_artifacts_path,
+     parse_check_commands,
+     parse_check_state_pairs,
+     parse_check_states,
+@@ -162,6 +163,35 @@ def test_parse_image_accepts_non_empty_strings(good: str) -> None:
+     assert parse_image(good, where="x") == good
+ 
+ 
++@pytest.mark.parametrize("good", ["e2e/artifacts", "artifacts", "out/shots "])
++def test_parse_artifacts_path_accepts_repo_relative_dirs(good: str) -> None:
++    assert parse_artifacts_path(good, where="x") == good.strip()
++
++
++def test_parse_artifacts_path_none_passes_through() -> None:
++    assert parse_artifacts_path(None, where="x") is None
++
++
++@pytest.mark.parametrize("bad", ["", "   ", 7, []])
++def test_parse_artifacts_path_rejects_non_strings(bad: object) -> None:
++    with pytest.raises(ValueError, match="artifacts path must be a non-empty string"):
++        parse_artifacts_path(bad, where="x")
++
++
++@pytest.mark.parametrize("escapes", ["/abs/path", "../outside", "a/../../b", "a/.."])
++def test_parse_artifacts_path_rejects_escaping_paths(escapes: str) -> None:
++    # The path is joined onto the check's tree export — it must not be able to
++    # point the collector at anything outside it.
++    with pytest.raises(ValueError, match="repo-relative without"):
++        parse_artifacts_path(escapes, where="x")
++
++
++def test_parse_artifacts_path_rejects_repo_root() -> None:
++    # "." would snapshot the entire exported repo for every check.
++    with pytest.raises(ValueError, match="must name a subdirectory"):
++        parse_artifacts_path(".", where="x")
++
++
+ def test_parse_image_none_passes_through() -> None:
+     assert parse_image(None, where="x") is None
+ 
+diff --git a/tests/test_story_develop_containers.py b/tests/test_story_develop_containers.py
+index f42ea45..3bbd91a 100644
+--- a/tests/test_story_develop_containers.py
++++ b/tests/test_story_develop_containers.py
+@@ -60,6 +60,28 @@ def test_container_shm_size_is_one_gigabyte() -> None:
+     assert CONTAINER_SHM_SIZE == "1g"
+ 
+ 
++def test_artifacts_dir_mounts_read_only_nested_under_handoff() -> None:
++    """#283: collected artifacts are host-written and agent-READ-ONLY — the
++    nested mount shadows any same-named path an agent creates in the RW
++    handoff, closing the planted-symlink destination route (PR #289)."""
++    cmd = containers.build_run_command(
++        name="c",
++        image="img",
++        worktree=Path("/w"),
++        config_dir=Path("/cfg"),
++        handoff_dir=Path("/h"),
++        config_mount="/claude_config",
++        config_env_var="CLAUDE_CONFIG_DIR",
++        auth_source_dir=Path("/auth"),
++        auth_files=(),
++        artifacts_dir=Path("/run/artifacts"),
++    )
++    assert "/run/artifacts:/workspace/.handoff/artifacts:ro" in cmd
++    # ordering: docker applies nested binds by target depth, but the RW handoff
++    # mount must still be present alongside
++    assert "/h:/workspace/.handoff" in cmd
++
++
+ def test_run_command_hardened_profile_and_mounts() -> None:
+     cmd = _run_cmd()
+     assert cmd[:3] == ["docker", "run", "-d"]
+diff --git a/tests/test_story_develop_settings_resolver.py b/tests/test_story_develop_settings_resolver.py
+index ab70b7b..ec7e235 100644
+--- a/tests/test_story_develop_settings_resolver.py
++++ b/tests/test_story_develop_settings_resolver.py
+@@ -99,6 +99,23 @@ def test_task_overrides_project_for_image_command_gate() -> None:
+     assert settings.test_gate is False
+ 
+ 
++def test_task_overrides_project_for_artifacts_path() -> None:
++    settings, _ = _resolve(
++        {"develop_artifacts_path": "e2e/artifacts"},
++        {"develop_artifacts_path": "out/shots"},
++    )
++    assert settings.artifacts_path == "out/shots"
++
++
++def test_bad_artifacts_path_frictions_and_keeps_default() -> None:
++    settings, frictions = _resolve({"develop_artifacts_path": "../escape"})
++    assert settings.artifacts_path is None
++    assert frictions == (
++        "develop_artifacts_path: artifacts path must be repo-relative without "
++        "'..' (got '../escape'); ignoring",
++    )
++
++
+ # ── the two-suffix friction contract ──────────────────────────────────
+ 
+ 

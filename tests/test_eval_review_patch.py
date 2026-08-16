@@ -457,3 +457,67 @@ def test_lens22_artifact_fixture_pins_its_buggy_and_fixed_css(
         assert "white-space: pre-wrap" in _rule_body(fixed_css, ".markdown-body pre")
     finally:
         cleanup()
+
+
+def _blob_at(repo: Path, sha: str, path: str) -> str:
+    """The file's content at *sha*, or ``""`` when it does not exist there."""
+    done = subprocess.run(
+        ["git", "show", f"{sha}:{path}"], cwd=repo, capture_output=True, text=True
+    )
+    return done.stdout if done.returncode == 0 else ""
+
+
+_STORY_DEVELOP = "src/lithos_loom/plugins/story_develop"
+
+
+def test_289_fixture_pins_both_symlink_directions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RH-1: 289's two [[expected]] defects are the two DIRECTIONS of one symlink
+    # escape, and the case's whole deficit is the write one — so the pairing is
+    # only a valid control if the known-good head closes both. known-good.patch
+    # is the merged PR head (978 lines across 16 files): it would apply cleanly,
+    # materialise, and differ in tree even if it were the wrong commit entirely.
+    # Assert the semantic state each head represents, per direction.
+    case_dir = _SHIPPED_CASES_DIR / "289-symlink-artifacts"
+    case = load_case(case_dir)
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        good_head = resolved.known_good_head or ""
+        runner_py = f"{_STORY_DEVELOP}/check_runner.py"
+        collector_py = f"{_STORY_DEVELOP}/check_artifacts.py"
+        buggy_runner = _blob_at(repo, resolved.head, runner_py)
+        good_collector = _blob_at(repo, good_head, collector_py)
+
+        # the defect, source side: a host-side copytree over check-controlled
+        # content, with symlinks left at their following default
+        assert "shutil.copytree(src, dest, dirs_exist_ok=True)" in buggy_runner
+        assert "symlinks=" not in buggy_runner
+        # the defect, destination side: the copy lands in the handoff dir, which
+        # is mounted READ-WRITE into agent containers
+        assert 'config.handoff_dir / "artifacts"' in buggy_runner
+        # ...and the collector at that head is unguarded in both directions
+        assert "is_symlink" not in buggy_runner
+        assert not _blob_at(repo, resolved.head, collector_py)
+
+        # the fix (#289 review), source side: no link is ever followed or copied
+        assert "followlinks=False" in good_collector
+        assert "src.is_symlink()" in good_collector
+        assert "entry.is_symlink()" in good_collector
+        assert "src.resolve().is_relative_to(tree.resolve())" in good_collector
+        # the fix, destination side: a HOST-controlled root, so there is no
+        # host-privileged write into a directory agents can pre-plant
+        assert "config.artifacts_dir" in good_collector
+        assert "handoff_dir" not in good_collector
+    finally:
+        cleanup()
