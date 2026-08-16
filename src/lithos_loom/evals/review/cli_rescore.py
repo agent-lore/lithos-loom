@@ -139,8 +139,13 @@ def rescore(
         return
 
     results: list[CaseRescore] = []
-    for case_reports in reports:
+    spent = 0
+    for n, case_reports in enumerate(reports, start=1):
         case_bar, bar_source = bars[case_reports.case_id]
+        if judge:
+            due = judge_call_count([case_reports], cases, judge_repeats)
+            _announce_case(n, len(reports), case_reports.case_id, due, spent, requests)
+            spent += due
         scored = rescore_case(
             cases[case_reports.case_id],
             case_reports,
@@ -286,6 +291,26 @@ def _announce(
         f"{head} — {requests} judge verdict request(s){detail}, up to "
         f"{requests * MAX_ATTEMPTS_PER_REQUEST} agent invocations "
         "(a failed call retries once)",
+        err=True,
+    )
+
+
+def _announce_case(
+    n: int, total: int, case_id: str, due: int, spent: int, requests: int
+) -> None:
+    """Name the case about to be judged, and how far in we are.
+
+    Without this the command is silent between the preflight and the final
+    table, so a 345-request sweep and a hung one look identical from outside —
+    on the first live run the only way to tell them apart was inspecting the
+    judge subprocess. Printed **before** the case is scored, since "which case
+    is in flight" is exactly the datum that was missing; the per-case count
+    comes from the same exact counter the preflight total does, so the two can
+    never disagree. A case that produced no findings prints ``0 request(s)``,
+    which is why it returns instantly.
+    """
+    typer.echo(
+        f"[{n}/{total}] {case_id} — {due} request(s), {spent}/{requests} done",
         err=True,
     )
 

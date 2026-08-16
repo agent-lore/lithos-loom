@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.cli.develop._outcome_line"
       }
     ],
-    "total_functions": 1044
+    "total_functions": 1045
   },
   "domain": {
     "associations": 2,
@@ -401,13 +401,13 @@
       },
       "Evals": {
         "classes": 13,
-        "functions": 127,
+        "functions": 128,
         "largest_module": "lithos_loom.evals.review.rescore",
         "largest_module_lines": 610,
-        "lines": 3832,
+        "lines": 3857,
         "modules": 15,
         "public_symbols": 57,
-        "sloc": 3106
+        "sloc": 3128
       },
       "GitHub": {
         "classes": 12,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 40234,
+    "total_lines": 40259,
     "total_modules": 124,
-    "total_sloc": 31953
+    "total_sloc": 31975
   },
   "tests": {
     "ratio": 1.64,
-    "src_lines": 40234,
-    "test_lines": 65948
+    "src_lines": 40259,
+    "test_lines": 65982
   }
 }
