@@ -23,6 +23,7 @@ import pytest
 from lithos_loom.bus import EventBus, Subscription
 from lithos_loom.lithos_client import NoteSummary
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
+from tests.support import run_until
 
 # ── Test helpers ────────────────────────────────────────────────────────
 
@@ -183,7 +184,13 @@ def _stream(
 
 async def _run_once(stream: LithosNoteStream, timeout: float = 0.5) -> None:
     """Run ``stream.run()`` until the scripted aconnect exhausts and
-    the source loops back to sleep, then cancel."""
+    the source loops back to sleep, then cancel.
+
+    Note the run window is the fixed 50 ms sleep below — ``timeout`` bounds only
+    the post-cancel wait. That is fine for asserting on a state the source
+    reaches once and then holds, but a test that needs *N* reconnect cycles is
+    racing the clock: use ``_run_until``.
+    """
     task = asyncio.create_task(stream.run())
     await asyncio.sleep(0.05)
     task.cancel()
@@ -538,7 +545,7 @@ async def test_stream_reconnects_with_last_event_id_after_transient_error() -> N
     )
     stream = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    await _run_once(stream, timeout=1.0)
+    await run_until(stream, lambda: len(aconnect.calls) >= 2)
 
     # Second connect attempt must include Last-Event-ID from the
     # last drained frame (evt-7).
@@ -552,9 +559,9 @@ async def test_stream_re_bootstraps_when_no_event_id_drained() -> None:
     """If the first connection drops before any SSE event with an id
     is drained, we have no resume cursor — re-bootstrap on the next
     attempt rather than silently losing whatever was buffered on
-    the dead subscription. The exact count depends on how many
-    reconnect cycles fit in the test window; we just assert
-    bootstrap ran more than once."""
+    the dead subscription. Waits for the second bootstrap rather than
+    sampling a fixed window, which is how many reconnect cycles fit in
+    50 ms — a property of the machine, not of the source."""
     bus = EventBus()
     # Plenty of empty responses so the source can re-bootstrap freely.
     client = _FakeClient(responses=[[] for _ in range(10)])
@@ -568,7 +575,7 @@ async def test_stream_re_bootstraps_when_no_event_id_drained() -> None:
     )
     stream = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    await _run_once(stream, timeout=1.0)
+    await run_until(stream, lambda: len(client.calls) >= 2)
 
     # Bootstrap ran at least twice — once on first attempt (failed
     # connect), again on the second attempt because no Last-Event-ID
