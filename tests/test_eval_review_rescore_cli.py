@@ -235,6 +235,40 @@ def test_dry_run_prints_the_request_count_and_makes_no_call(
     assert not (report_dir / "rescore.json").exists()
 
 
+def test_each_case_is_named_before_it_is_judged(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """A long sweep is otherwise silent between preflight and table, so a
+    working run and a hung one look identical from outside."""
+    (report_dir / "quiet-case").mkdir()
+    (report_dir / "quiet-case" / "buggy-0.json").write_text(json.dumps(_report()))
+    (cases_dir / "quiet-case").mkdir()
+    (cases_dir / "quiet-case" / "case.toml").write_text(
+        _TOML.format(id="quiet-case", mechanism="something else entirely")
+    )
+    (cases_dir / "quiet-case" / "ac.md").write_text("ac")
+    _stub_judge(monkeypatch)
+
+    result = _run(report_dir, cases_dir)
+    plain = _unwrapped(result.output)
+
+    assert "[1/2] 180-attach-delivery — 2 request(s), 0/2 done" in plain
+    # the running total advances, and a case that produced no findings costs 0
+    assert "[2/2] quiet-case — 0 request(s), 2/2 done" in plain
+
+
+def test_no_judge_prints_no_per_case_progress(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """Nothing to wait for — it would be 12 lines of noise on a sub-second run."""
+    _stub_judge(monkeypatch)
+    result = _run(report_dir, cases_dir, "--no-judge")
+
+    plain = _unwrapped(result.output)
+    assert "[1/1]" not in plain
+    assert "request(s)" not in plain
+
+
 def test_the_preflight_states_the_retry_ceiling_too(
     monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
 ) -> None:
