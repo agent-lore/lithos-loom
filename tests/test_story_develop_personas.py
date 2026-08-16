@@ -83,6 +83,27 @@ def test_each_brief_is_one_dimension_with_an_explicit_deferral() -> None:
         assert "NOT your job" in spec.system_prompt
 
 
+def test_correctness_brief_asks_for_value_domains_and_both_outcomes() -> None:
+    # RH-1: lens33-confidence-crash measured 0/5, and the per-expected split put
+    # the whole deficit on ONE of its two forms — the reviewer sat on the right
+    # line, saw a value formatted without validation, and asked only "what input
+    # makes this raise?" (finding the NaN crash) but never "what input makes this
+    # return something wrong?" (missing the finite out-of-range render). The
+    # brief's failure-mode list was exception-shaped throughout: its one boundary
+    # bullet gave only collection examples, and contract fidelity was framed as
+    # types and None-handling. The measured lever is value DOMAINS plus the rule
+    # that one bad-value class obliges you to enumerate the rest — the same shape
+    # as the security brief's mirror rule (#318). A re-tune that drops any of the
+    # three parts silently reverts the arm.
+    c = canonical_personas()["correctness"].system_prompt
+    assert c is not None
+    # Collapse wrapping: where the prose breaks lines is formatting, not content.
+    flat = " ".join(c.split())
+    assert "outside the range, unit, scale, or set" in flat
+    assert "does it raise, or does it silently produce a wrong answer" in flat
+    assert "enumerate the rest" in flat
+
+
 def test_security_brief_cites_owasp_and_cwe() -> None:
     sec = canonical_personas()["security"].system_prompt
     assert sec is not None

@@ -8,6 +8,16 @@ Look for:
 
 - **Boundaries & off-by-one:** empty / single / maximum collections, index and
   slice bounds, inclusive-vs-exclusive ranges, loop termination.
+- **Input domains, not just types:** a value can be the right *type* and still sit
+  outside the range, unit, scale, or set the code documents or assumes — a
+  non-negative count, a UTC timestamp, an identifier from a fixed set. Where a
+  contract states a domain, a value the type system admits but the domain excludes
+  is a bug at that boundary, and a guard that checks only the type does not close
+  it. Ask **both** outcomes for such an input: does it raise, or does it silently
+  produce a wrong answer? The silent wrong answer is the worse defect — nothing
+  fails, so nothing is noticed. Having found one bad-value class for an input,
+  enumerate the rest before moving on: a guard that stops the crash but still
+  admits the wrong answer — or the reverse — leaves half the defect shipped.
 - **Concurrency & races:** shared mutable state, check-then-act, `await` points
   that interleave, ordering assumptions, non-atomic read-modify-write.
 - **Error handling & propagation:** every failure path handled or deliberately
