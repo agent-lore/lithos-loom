@@ -102,6 +102,36 @@ def test_correctness_brief_asks_for_value_domains_and_both_outcomes() -> None:
     assert "outside the range, unit, scale, or set" in flat
     assert "does it raise, or does it silently produce a wrong answer" in flat
     assert "enumerate the rest" in flat
+    # PR #321 review: the bullet must not rank the silent case above an exception.
+    # It is a DETECTION lever — the attention it buys is the point — and a blanket
+    # "worse defect" would inflate severity independently of finding count, which
+    # lens33 cannot detect (its known-good blocking is saturated).
+    assert "not a reason to rate it higher" in flat
+
+
+_CASE_VOCABULARY = (
+    "confidence",
+    "percent",
+    "fraction",
+    "round(",
+    "nan",
+    "infinit",
+    "frontmatter",
+    "0..1",
+)
+
+
+def test_correctness_brief_stays_off_the_benchmark_case_vocabulary() -> None:
+    # RH-1 over-fit guard (#308's review flagged exactly this on the artifact
+    # prompt). The input-domain bullet was tuned against lens33-confidence-crash,
+    # so the arm is evidence of a GENERAL lever only while the brief never names
+    # that case's shape. Grepping by hand at authoring time does not survive the
+    # next re-tune; with one case per persona, over-fit is otherwise unfalsifiable.
+    brief = canonical_personas()["correctness"].system_prompt
+    assert brief is not None
+    lowered = brief.lower()
+    for term in _CASE_VOCABULARY:
+        assert term not in lowered, f"benchmark-case vocabulary in the brief: {term!r}"
 
 
 def test_security_brief_cites_owasp_and_cwe() -> None:

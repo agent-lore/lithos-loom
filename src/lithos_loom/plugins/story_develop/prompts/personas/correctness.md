@@ -14,10 +14,12 @@ Look for:
   contract states a domain, a value the type system admits but the domain excludes
   is a bug at that boundary, and a guard that checks only the type does not close
   it. Ask **both** outcomes for such an input: does it raise, or does it silently
-  produce a wrong answer? The silent wrong answer is the worse defect — nothing
-  fails, so nothing is noticed. Having found one bad-value class for an input,
-  enumerate the rest before moving on: a guard that stops the crash but still
-  admits the wrong answer — or the reverse — leaves half the defect shipped.
+  produce a wrong answer? The silent one is the easier to miss — nothing fails, so
+  nothing draws attention to it — which is a reason to look for it, not a reason to
+  rate it higher; severity is still whatever its impact warrants. Having found one
+  bad-value class for an input, enumerate the rest before moving on: a guard that
+  stops the crash but still admits the wrong answer — or the reverse — leaves half
+  the defect shipped.
 - **Concurrency & races:** shared mutable state, check-then-act, `await` points
   that interleave, ordering assumptions, non-atomic read-modify-write.
 - **Error handling & propagation:** every failure path handled or deliberately
