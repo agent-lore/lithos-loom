@@ -310,15 +310,28 @@ escape allows, and say in the `description` which it is:
 | shape | example | what the `fp` number means |
 |---|---|---|
 | **clean mirror** — known-good is the exact reverse of the defect pair | `180-attach-delivery` | FP is meaningful even without the judge: the two heads differ by the guard alone |
-| **defect + its authentic fix** — the same change plus the hunk that fixed it | `lens22-artifact-prewrap` | the defect is the only difference that matters, though the patch may be large |
+| **defect + its authentic fix** — the same change plus the hunk that fixed it | `lens22-artifact-prewrap`, `lens33-confidence-crash` | the defect is the only difference that matters, though the patch may be large |
 | **defect head vs merged head** — the feature as first pushed vs after review closed it | `289-symlink-artifacts` | valid, but **not minimal**: the heads also differ by everything else the review changed, so a finding about code that exists only at the known-good head is not automatically a false positive |
 
 Whatever the shape, the known-good must *actually* be known-good. The loader and
 the runtime only enforce that the two heads build **different** content — "it
 applied" is not "it is fixed". A case whose validity rests on specific hunks
-pins them in `tests/test_eval_review_patch.py` (see the `lens22` and `289`
-fixture tests), so re-generating a patch from the wrong ref fails `make check`
-rather than silently corrupting every later FP number.
+pins them in `tests/test_eval_review_patch.py` (see the `lens22`, `289` and
+`lens33` fixture tests), so re-generating a patch from the wrong ref fails
+`make check` rather than silently corrupting every later FP number.
+
+**"Known-good" means clean *of the measured defect*, not globally clean** — which
+is why `fp` is defect-specific (§ [Noise](#noise-what-the-fp-rate-cannot-see-310)).
+A real fix commit is rarely a defect-free tree, and two shipped cases prove it:
+289's merged head still carries a TOCTOU on its symlink guards ([#319](https://github.com/agent-lore/lithos-loom/issues/319))
+which every known-good sample found independently, and lens33's fix head still
+has the unrelated namespace-derivation and access-scope bugs the baseline panel
+filed. Both arms therefore run high on `noise` / `blk` while scoring `fp 0/5`,
+and that is correct, not a scoring bug: the panel is finding real defects. Two
+consequences when using such a case as a control — read `fp` as the FP number
+(it is the only one that isolates the seeded defect), and do **not** use "the
+known-good arm got no noisier" as a ship criterion where `blk` is already
+saturated; compare `known_good_findings_per_sample` arm-to-arm instead.
 
 Keywords are substring-matched (case-insensitive) against the finding's
 rationale + files, so keep them **discriminative**: prefer exact identifiers

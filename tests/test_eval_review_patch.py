@@ -460,7 +460,16 @@ def test_lens22_artifact_fixture_pins_its_buggy_and_fixed_css(
 
 
 def _blob_at(repo: Path, sha: str, path: str) -> str:
-    """The file's content at *sha*, or ``""`` when it does not exist there."""
+    """The file's content at *sha*, or ``""`` when it does not exist there.
+
+    An empty *sha* is rejected rather than passed through: ``git show :path`` is
+    the **index** form, so an unresolved head (a case whose ``[known_good]`` was
+    dropped or never added) would silently yield the checkout's current content
+    — which for a fixture pinned against an already-merged fix is exactly the
+    text the assertions look for. A false green in the test that exists to stop
+    a fixture going invalid.
+    """
+    assert sha, f"no commit resolved for {path} — cannot pin a head that is not there"
     done = subprocess.run(
         ["git", "show", f"{sha}:{path}"], cwd=repo, capture_output=True, text=True
     )
@@ -519,5 +528,63 @@ def test_289_fixture_pins_both_symlink_directions(
         # host-privileged write into a directory agents can pre-plant
         assert "config.artifacts_dir" in good_collector
         assert "handoff_dir" not in good_collector
+    finally:
+        cleanup()
+
+
+_LENS_METADATA = "src/lithos_lens/knowledge_metadata.py"
+
+
+def _format_confidence_body(module: str) -> str:
+    """The source of ``_format_confidence``, up to the next top-level def."""
+    start = module.index("def _format_confidence(")
+    rest = module[start:]
+    end = rest.index("\ndef ", 1)
+    return rest[:end]
+
+
+def test_lens33_fixture_pins_both_confidence_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RH-1: lens33's two [[expected]] defects are the two symptom forms of ONE
+    # unvalidated value — a finite out-of-range value renders "200%", a
+    # non-finite one makes round() raise mid-render — and its whole 0/5 deficit
+    # is the range form. The pairing is only a valid control if the known-good
+    # head closes BOTH, which lens 87c9560 does with a single comparison guard
+    # (NaN/inf fail `0 <= v <= 1` for free). Assert the semantic state of each
+    # head per form, scoped to the function: the module is 300+ lines and a
+    # module-wide substring search would pass on an unrelated range check.
+    case_dir = _SHIPPED_CASES_DIR / "lens33-confidence-crash"
+    case = load_case(case_dir)
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        buggy = _format_confidence_body(_blob_at(repo, resolved.head, _LENS_METADATA))
+        good = _format_confidence_body(
+            _blob_at(repo, resolved.known_good_head or "", _LENS_METADATA)
+        )
+
+        # the defect: the documented 0..1 domain is asserted in the docstring and
+        # enforced nowhere — the guard validates the TYPE and nothing else, so
+        # every finite float formats and NaN/inf reach round().
+        assert "``0..1``" in buggy
+        assert "isinstance(value, (int, float))" in buggy
+        assert "round(value * 100)" in buggy
+        assert "<= 1" not in buggy and "math.isfinite" not in buggy
+
+        # the fix (lens 87c9560): one comparison closes both forms. Pin the
+        # range guard AND that it precedes the round() the non-finite form
+        # crashes on — a guard added after it would still raise.
+        assert "not 0 <= value <= 1" in good
+        assert good.index("not 0 <= value <= 1") < good.index("round(value * 100)")
     finally:
         cleanup()
