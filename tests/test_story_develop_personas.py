@@ -88,3 +88,17 @@ def test_security_brief_cites_owasp_and_cwe() -> None:
     assert sec is not None
     assert "OWASP" in sec
     assert "CWE" in sec
+
+
+def test_security_brief_asks_for_both_boundary_directions() -> None:
+    # RH-1: the source -> sink template alone measured 3/5 on 289-symlink-artifacts,
+    # missing the write direction every time it missed — the reviewer traced what a
+    # privileged actor READS from an untrusted place and never asked who controls
+    # where it WRITES. The measured lever is this pair of questions plus the rule
+    # that finding one direction obliges you to state the other; a re-tune that
+    # drops either half silently reverts the arm.
+    sec = canonical_personas()["security"].system_prompt
+    assert sec is not None
+    assert "who controls each end" in sec
+    assert "inbound" in sec and "outbound" in sec
+    assert "state the mirror" in sec
