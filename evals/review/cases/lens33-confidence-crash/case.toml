@@ -25,6 +25,24 @@ partial catch; one comprehensive finding covering both satisfies both.
 CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
 diff as the panel approved it (base = lens main a429e8e post-K1-S2; patch =
 delivered head 1d190ba, pre-fix).
+
+PAIRED (RH-1) with the authentic fix: known-good.patch is
+`git diff a429e8e..87c9560`, and 87c9560 is the IMMEDIATE CHILD of the delivered
+head — so the two arms differ by that fix and nothing else (a two-line guard, a
+docstring, ten test lines, and the docs/generated metric drift the defect patch
+already carries). The tightest pair in the benchmark; contrast 289, whose
+known-good is a 16-file merged head. One comparison closes both forms:
+`not 0 <= value <= 1` rejects finite out-of-range values, and NaN/inf fail it
+for free (every comparison against NaN is False).
+
+KNOWN-GOOD IS CLEAN ON THE MEASURED DEFECT ONLY — not globally. At 87c9560,
+normalize_note() still drops the top-level raw["path"] (the CRITICAL namespace
+bug two baseline samples filed) and access_scope is still counted in has_chips
+unconditionally (a MAJOR shared-chip bug another sample filed). So expect this
+case's `noise` / `blk` to run high: the panel finds real defects there. `fp` is
+unaffected — it counts only known-good runs reporting THIS case's expected
+defect (harness.py) — but "the known-good arm got no noisier" is a weak ship
+criterion here; compare known_good_findings_per_sample arm-to-arm instead.
 """
 ac_provenance = "replay"
 tier = "frontier"       # discriminating at the 2026-08 baseline — headline signal
@@ -34,6 +52,9 @@ head_patch = "feature-with-defect.patch"
 personas = ["correctness"]
 profile = "standard"
 acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
 
 [[expected]]
 file = "src/lithos_lens/knowledge_metadata.py"

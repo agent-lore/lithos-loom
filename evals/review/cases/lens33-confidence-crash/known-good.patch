@@ -1,0 +1,851 @@
+diff --git a/docs/architecture.toml b/docs/architecture.toml
+index d339ad2..93553b7 100644
+--- a/docs/architecture.toml
++++ b/docs/architecture.toml
+@@ -33,7 +33,7 @@ LithosClient = "Lithos server clients — the real MCP-over-SSE client (health,
+ Config       = "Configuration and environment loading from lithos-lens.toml with env overrides."
+ Tasks        = "Tasks-dashboard data loading and normalization (task/claim/finding records + view models)."
+ TaskGraph    = "Task-graph transport records and normalizers (blocked-task rows + edges from the Lithos 0.4 graph reads)."
+-Knowledge    = "Knowledge-note rendering and normalization (safe server-side markdown + the related-panel neighborhood/view models)."
++Knowledge    = "Knowledge-note rendering and normalization (safe server-side markdown, the related-panel neighborhood/view models, and the frontmatter metadata chips + lede)."
+ Logging      = "Structured JSON logging setup (JsonFormatter)."
+ Telemetry    = "Optional OpenTelemetry hooks and request middleware."
+ Errors       = "Exception hierarchy rooted at LithosLensError."
+@@ -47,7 +47,7 @@ LithosClient = ["lithos_lens.lithos_client", "lithos_lens.fake_lithos", "lithos_
+ Config       = ["lithos_lens.config"]
+ Tasks        = ["lithos_lens.tasks"]
+ TaskGraph    = ["lithos_lens.task_graph"]
+-Knowledge    = ["lithos_lens.knowledge"]
++Knowledge    = ["lithos_lens.knowledge", "lithos_lens.knowledge_metadata"]
+ Logging      = ["lithos_lens.logging"]
+ Telemetry    = ["lithos_lens.telemetry"]
+ Errors       = ["lithos_lens.errors"]
+@@ -86,6 +86,7 @@ include_modules = [
+     "lithos_lens.tasks",
+     "lithos_lens.task_graph",
+     "lithos_lens.knowledge",
++    "lithos_lens.knowledge_metadata",
+     "lithos_lens.events",
+     "lithos_lens.state",
+     "lithos_lens.lithos_client",
+diff --git a/docs/generated/components/Knowledge.md b/docs/generated/components/Knowledge.md
+index a953882..6166f67 100644
+--- a/docs/generated/components/Knowledge.md
++++ b/docs/generated/components/Knowledge.md
+@@ -3,7 +3,7 @@
+ 
+ # Knowledge
+ 
+-Knowledge-note rendering and normalization (safe server-side markdown + the related-panel neighborhood/view models).
++Knowledge-note rendering and normalization (safe server-side markdown, the related-panel neighborhood/view models, and the frontmatter metadata chips + lede).
+ 
+ **Tier:** Foundation
+ 
+@@ -12,6 +12,7 @@ Knowledge-note rendering and normalization (safe server-side markdown + the rela
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+ | `lithos_lens.knowledge` | L | 9 | 5 |
++| `lithos_lens.knowledge_metadata` | S | 1 | 1 |
+ 
+ ## Public API
+ 
+@@ -31,6 +32,10 @@ Knowledge-note rendering and normalization (safe server-side markdown + the rela
+ - class `WikiResolverClientProtocol` — Subset of Lithos operations required by the wiki-link resolver.
+ - def `resolve_wiki_link` — Resolve a wiki-link ``target`` clicked from note ``from_id`` (§6.3).
+ 
++### `lithos_lens.knowledge_metadata`
++- class `NoteMetadata` — Frontmatter-derived chips, lede, supersedes link, and authorship (§6.4).
++- def `build_note_metadata` — Project a note's frontmatter into the §6.4 metadata view model.
++
+ ## Dependencies
+ 
+ - Depends on: [Tasks](Tasks.md)
+diff --git a/docs/generated/components/Web.md b/docs/generated/components/Web.md
+index 43eabc6..8bc2b8c 100644
+--- a/docs/generated/components/Web.md
++++ b/docs/generated/components/Web.md
+@@ -11,7 +11,7 @@ FastAPI application factory serving the server-rendered dashboard UI (Jinja2 tem
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.web` | M | 0 | 5 |
++| `lithos_lens.web` | M | 0 | 6 |
+ 
+ ## Public API
+ 
+@@ -20,6 +20,7 @@ FastAPI application factory serving the server-rendered dashboard UI (Jinja2 tem
+ - def `task_tag_url`
+ - def `task_detail_url`
+ - def `tasks_url`
++- def `knowledge_tag_url` — Link a note-page tag chip to the ``/knowledge`` list filtered by it (§6.4).
+ - def `tag_chip_class`
+ 
+ ## Dependencies
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 0d381eb..84fcba1 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -25,6 +25,19 @@ classDiagram
+ 
+ ```mermaid
+ classDiagram
++  class NoteMetadata {
++    +note_type str
++    +status str
++    +confidence str
++    +access_scope str
++    +namespace str
++    +lede str
++    +supersedes str
++    +author str
++    +contributors tuple[str, ...]
++    +created_at str
++    +updated_at str
++  }
+   class RelatedItem {
+     +id str
+     +title str
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index 88c5314..a567d15 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -105,11 +105,11 @@
+         "qualname": "lithos_lens.tasks.normalize_task_status"
+       }
+     ],
+-    "total_functions": 208
++    "total_functions": 218
+   },
+   "domain": {
+     "associations": 26,
+-    "models": 27,
++    "models": 28,
+     "models_without_docstrings": 16
+   },
+   "graph": {
+@@ -177,7 +177,7 @@
+       }
+     },
+     "cross_component_edges": 25,
+-    "cross_component_module_edges": 33,
++    "cross_component_module_edges": 35,
+     "longest_component_chain": 6,
+     "module_cycle_count": 0,
+     "module_cycles": [],
+@@ -246,14 +246,14 @@
+         "sloc": 180
+       },
+       "Knowledge": {
+-        "classes": 9,
+-        "functions": 34,
++        "classes": 10,
++        "functions": 43,
+         "largest_module": "lithos_lens.knowledge",
+-        "largest_module_lines": 715,
+-        "lines": 715,
+-        "modules": 1,
+-        "public_symbols": 14,
+-        "sloc": 543
++        "largest_module_lines": 716,
++        "lines": 856,
++        "modules": 2,
++        "public_symbols": 16,
++        "sloc": 658
+       },
+       "LithosClient": {
+         "classes": 7,
+@@ -317,25 +317,25 @@
+       },
+       "Web": {
+         "classes": 0,
+-        "functions": 18,
++        "functions": 19,
+         "largest_module": "lithos_lens.web",
+-        "largest_module_lines": 445,
+-        "lines": 445,
++        "largest_module_lines": 455,
++        "lines": 455,
+         "modules": 1,
+-        "public_symbols": 5,
+-        "sloc": 390
++        "public_symbols": 6,
++        "sloc": 398
+       }
+     },
+     "max_module": "lithos_lens.config",
+     "max_module_lines": 725,
+     "modules_over_800": [],
+-    "total_lines": 4486,
+-    "total_modules": 16,
+-    "total_sloc": 3681
++    "total_lines": 4637,
++    "total_modules": 17,
++    "total_sloc": 3804
+   },
+   "tests": {
+     "ratio": 1.51,
+-    "src_lines": 4486,
+-    "test_lines": 6762
++    "src_lines": 4637,
++    "test_lines": 7005
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 545d857..bb9e0cc 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -21,7 +21,7 @@ lower a budget after improving the code to lock in the gain.
+ 
+ ## Import graph
+ 
+-- Cross-component edges: **25** (33 module-level)
++- Cross-component edges: **25** (35 module-level)
+ - Component cycles: none
+ - Module cycles: none
+ - Tier-skipping edges (Entrypoints → Foundation): 7 (Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> Logging, Web -> Config, Web -> Knowledge, Web -> Tasks, Web -> Telemetry)
+@@ -38,24 +38,24 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Entrypoint | 2 | 74 | 52 | 0 | 4 | 1.00 | 4 (`lithos_lens.main.resolve_port`) | 0 |
+ | Errors | 1 | 15 | 9 | 2 | 0 | 0.00 | - | 0 |
+ | Events | 1 | 208 | 180 | 2 | 1 | 0.33 | 10 (`lithos_lens.events.parse_lithos_sse_frame`) | 0 |
+-| Knowledge | 1 | 715 | 543 | 2 | 1 | 0.33 | 13 (`lithos_lens.knowledge._gather_candidates`) | 2 |
++| Knowledge | 2 | 856 | 658 | 2 | 1 | 0.33 | 13 (`lithos_lens.knowledge._gather_candidates`) | 2 |
+ | LithosClient | 3 | 1354 | 1133 | 2 | 5 | 0.71 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 2 |
+ | Logging | 1 | 60 | 48 | 1 | 1 | 0.50 | 5 (`lithos_lens.logging.JsonFormatter.format`) | 0 |
+ | State | 1 | 71 | 56 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
+ | TaskGraph | 1 | 119 | 88 | 1 | 1 | 0.50 | 8 (`lithos_lens.task_graph.normalize_edge`) | 0 |
+ | Tasks | 1 | 668 | 543 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
+ | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
+-| Web | 1 | 445 | 390 | 1 | 6 | 0.86 | 11 (`lithos_lens.web.create_app.note`) | 1 |
++| Web | 1 | 455 | 398 | 1 | 6 | 0.86 | 11 (`lithos_lens.web.create_app.note`) | 1 |
+ 
+ ## Size
+ 
+-- Modules: **16**, lines: **4486**, SLOC: **3681**
++- Modules: **17**, lines: **4637**, SLOC: **3804**
+ - Largest module: `lithos_lens.config` (725 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **208**, cyclomatic > 10: **11**
++- Functions: **218**, cyclomatic > 10: **11**
+ 
+ Top 10 most complex functions:
+ 
+@@ -82,5 +82,5 @@ Private-name reaches across module seams. Both counts can be pinned as
+ 
+ ## Domain & tests
+ 
+-- Domain models: **27** (26 associations, 16 without docstrings)
+-- Test-to-source line ratio: **1.51** (6762 test lines / 4486 source lines)
++- Domain models: **28** (26 associations, 16 without docstrings)
++- Test-to-source line ratio: **1.51** (7005 test lines / 4637 source lines)
+diff --git a/pyproject.toml b/pyproject.toml
+index b95fa6d..d331032 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -64,6 +64,7 @@ source_modules = [
+     "lithos_lens.tasks",
+     "lithos_lens.task_graph",
+     "lithos_lens.knowledge",
++    "lithos_lens.knowledge_metadata",
+     "lithos_lens.config",
+     "lithos_lens.logging",
+     "lithos_lens.telemetry",
+diff --git a/src/lithos_lens/knowledge.py b/src/lithos_lens/knowledge.py
+index 1129497..74ece23 100644
+--- a/src/lithos_lens/knowledge.py
++++ b/src/lithos_lens/knowledge.py
+@@ -6,8 +6,9 @@ orchestrators with per-section state. K1 slice 1 introduced server-side
+ markdown rendering; K1-S4 adds the *related panel* — one ``lithos_related``
+ call turned into four scannable sections (outgoing links, back-links,
+ provenance, typed edges) with link/edge endpoints shown by title rather than
+-bare id. Later slices add the wiki-link tokenizer, metadata chips, and search
+-view models.
++bare id. The frontmatter-driven metadata chips + lede (K1-S3) live in the
++sibling ``knowledge_metadata`` module to keep this one under the god-module
++ceiling; later slices add the search view models.
+ """
+ 
+ from __future__ import annotations
+diff --git a/src/lithos_lens/knowledge_metadata.py b/src/lithos_lens/knowledge_metadata.py
+new file mode 100644
+index 0000000..ac3974a
+--- /dev/null
++++ b/src/lithos_lens/knowledge_metadata.py
+@@ -0,0 +1,140 @@
++"""Frontmatter-driven metadata chips + lede for the knowledge note view.
++
++Foundation companion to ``knowledge`` (split out to keep that module under the
++architecture god-module ceiling, the way ``task_graph`` sits beside ``tasks``).
++A note's frontmatter drives a row of scannable chips (note_type, status,
++access_scope, namespace, confidence), a ``summaries.short`` lede rendered above
++the body, a ``supersedes`` back-reference, and an authorship line
++(REQUIREMENTS.md §6.4). The view model is built purely from
++``NoteRecord.metadata`` so the ``/note/{id}`` route stays a thin orchestrator;
++every field degrades to empty when its frontmatter key is absent, so the
++template renders only the chips a note actually carries.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++from typing import Any
++
++from lithos_lens.tasks import NoteRecord
++
++# Anything outside this class-safe set collapses to ``-`` in a status slug.
++_NON_SLUG_RE = re.compile(r"[^a-z0-9]+")
++
++
++@dataclass(frozen=True)
++class NoteMetadata:
++    """Frontmatter-derived chips, lede, supersedes link, and authorship (§6.4)."""
++
++    note_type: str = ""
++    status: str = ""
++    confidence: str = ""
++    access_scope: str = ""
++    namespace: str = ""
++    lede: str = ""
++    supersedes: str = ""
++    author: str = ""
++    contributors: tuple[str, ...] = ()
++    created_at: str = ""
++    updated_at: str = ""
++
++    @property
++    def has_chips(self) -> bool:
++        return bool(
++            self.note_type
++            or self.status
++            or self.confidence
++            or self.access_scope
++            or self.namespace
++            or self.supersedes
++        )
++
++    @property
++    def has_authorship(self) -> bool:
++        return bool(
++            self.author or self.contributors or self.created_at or self.updated_at
++        )
++
++    @property
++    def status_slug(self) -> str:
++        """A class-safe slug of ``status`` for the ``note-status-<slug>`` CSS hook.
++
++        ``status`` is untrusted author frontmatter. The template interpolates it
++        as a *class suffix*, and Jinja autoescape leaves whitespace untouched, so
++        a raw value like ``open banner-warning`` would inject a second,
++        attacker-chosen class token onto the chip (UI/content spoofing — e.g.
++        recolouring a quarantined note to look benign). Lower-casing and
++        collapsing every non ``[a-z0-9]`` run to a single ``-`` yields exactly one
++        token, so no extra class can be smuggled in.
++        """
++        return _NON_SLUG_RE.sub("-", self.status.lower()).strip("-")
++
++
++def build_note_metadata(note: NoteRecord) -> NoteMetadata:
++    """Project a note's frontmatter into the §6.4 metadata view model."""
++    meta = note.metadata
++    return NoteMetadata(
++        note_type=_meta_str(meta, "note_type"),
++        status=_meta_str(meta, "status"),
++        confidence=_format_confidence(meta.get("confidence")),
++        access_scope=_meta_str(meta, "access_scope"),
++        namespace=_derive_namespace(meta),
++        lede=_summary_short(meta.get("summaries")),
++        supersedes=_meta_str(meta, "supersedes"),
++        author=_meta_str(meta, "author"),
++        contributors=_str_tuple(meta.get("contributors")),
++        created_at=_meta_str(meta, "created_at"),
++        updated_at=_meta_str(meta, "updated_at"),
++    )
++
++
++def _meta_str(meta: dict[str, Any], key: str) -> str:
++    """A trimmed string frontmatter value, or empty for a missing/non-string."""
++    value = meta.get(key)
++    return value.strip() if isinstance(value, str) else ""
++
++
++def _format_confidence(value: Any) -> str:
++    """Render a ``0..1`` confidence fraction as a whole percentage (§6.4).
++
++    Lithos stores confidence as a fraction; frontmatter is untrusted input, so
++    anything non-numeric (or a bool, which is an ``int`` subclass) and any
++    out-of-range value renders no chip rather than a nonsense/misleading one
++    (``2`` must not become a "200%" chip). The range check also rejects
++    NaN/inf, which would otherwise make ``round()`` raise mid-render.
++    """
++    if isinstance(value, bool) or not isinstance(value, (int, float)):
++        return ""
++    if not 0 <= value <= 1:
++        return ""
++    return f"{round(value * 100)}%"
++
++
++def _summary_short(summaries: Any) -> str:
++    """The ``summaries.short`` lede text, or empty when absent."""
++    if isinstance(summaries, dict):
++        short = summaries.get("short")
++        if isinstance(short, str):
++            return short.strip()
++    return ""
++
++
++def _str_tuple(value: Any) -> tuple[str, ...]:
++    """Normalize a ``contributors``-style value into a tuple of trimmed names."""
++    if isinstance(value, str):
++        return (value.strip(),) if value.strip() else ()
++    if isinstance(value, (list, tuple)):
++        return tuple(
++            item.strip() for item in value if isinstance(item, str) and item.strip()
++        )
++    return ()
++
++
++def _derive_namespace(meta: dict[str, Any]) -> str:
++    """Explicit ``namespace``, else the directory of a ``path`` frontmatter value."""
++    explicit = _meta_str(meta, "namespace")
++    if explicit:
++        return explicit
++    path = _meta_str(meta, "path")
++    return path.rsplit("/", 1)[0] if "/" in path else ""
+diff --git a/src/lithos_lens/static/lens.css b/src/lithos_lens/static/lens.css
+index f4a6bcc..1abd27e 100644
+--- a/src/lithos_lens/static/lens.css
++++ b/src/lithos_lens/static/lens.css
+@@ -448,6 +448,53 @@ button,
+   gap: 0.4rem;
+ }
+ 
++/* Metadata chips + lede (§6.4). Neutral chips by default; the status chip is
++   colour-coded so a quarantined note reads as quarantined at a glance. */
++.note-chips {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 0.4rem;
++}
++
++.chip {
++  border: 1px solid var(--line);
++  border-radius: 999px;
++  display: inline-flex;
++  font-size: 0.78rem;
++  gap: 0.3rem;
++  line-height: 1;
++  padding: 0.35rem 0.55rem;
++}
++
++.note-status-active {
++  border-color: rgba(53, 106, 77, 0.35);
++  color: var(--ok);
++}
++
++.note-status-archived {
++  border-color: rgba(65, 87, 111, 0.35);
++  color: var(--closed);
++}
++
++.note-status-quarantined {
++  background: rgba(189, 79, 43, 0.12);
++  border-color: rgba(189, 79, 43, 0.5);
++  color: var(--cancelled);
++  font-weight: 700;
++}
++
++.note-lede {
++  color: var(--muted);
++  font-size: 1.05rem;
++  font-style: italic;
++  margin: 0;
++}
++
++.note-authorship {
++  color: var(--muted);
++  font-size: 0.85rem;
++}
++
+ .claim-list {
+   grid-column: 1 / -1;
+ }
+diff --git a/src/lithos_lens/templates/note.html b/src/lithos_lens/templates/note.html
+index f65a4b8..4ef45c5 100644
+--- a/src/lithos_lens/templates/note.html
++++ b/src/lithos_lens/templates/note.html
+@@ -69,11 +69,44 @@
+       <header>
+         <p class="eyebrow">Knowledge note</p>
+         <h1>{{ note.title }}</h1>
++        {% if note_meta and note_meta.has_chips %}
++          <div class="note-chips">
++            {% if note_meta.note_type %}
++              <span class="chip note-type">{{ note_meta.note_type }}</span>
++            {% endif %}
++            {% if note_meta.status %}
++              <span class="chip note-status note-status-{{ note_meta.status_slug }}">{{ note_meta.status }}</span>
++            {% endif %}
++            {% if note_meta.access_scope %}
++              <span class="chip note-scope">{{ note_meta.access_scope }}</span>
++            {% endif %}
++            {% if note_meta.namespace %}
++              <span class="chip note-namespace">{{ note_meta.namespace }}</span>
++            {% endif %}
++            {% if note_meta.confidence %}
++              <span class="chip note-confidence">confidence {{ note_meta.confidence }}</span>
++            {% endif %}
++            {% if note_meta.supersedes %}
++              <span class="chip note-supersedes">replaces: <a href="/note/{{ note_meta.supersedes }}">{{ note_meta.supersedes }}</a></span>
++            {% endif %}
++          </div>
++        {% endif %}
++        {% if note_meta and note_meta.has_authorship %}
++          <div class="note-authorship detail-meta">
++            {% if note_meta.author %}<span>By {{ note_meta.author }}</span>{% endif %}
++            {% if note_meta.contributors %}<span>Contributors: {{ note_meta.contributors | join(", ") }}</span>{% endif %}
++            {% if note_meta.created_at %}<time datetime="{{ note_meta.created_at }}">Created {{ note_meta.created_at }}</time>{% endif %}
++            {% if note_meta.updated_at %}<time datetime="{{ note_meta.updated_at }}">Updated {{ note_meta.updated_at }}</time>{% endif %}
++          </div>
++        {% endif %}
+       </header>
++      {% if note_meta and note_meta.lede %}
++        <p class="note-lede">{{ note_meta.lede }}</p>
++      {% endif %}
+       {% if note.tags %}
+         <div class="tag-list">
+           {% for tag in note.tags %}
+-            <span>{{ tag | format_tag }}</span>
++            <a class="{{ tag_chip_class(tag) }}" href="{{ knowledge_tag_url(tag) }}">{{ tag | format_tag }}</a>
+           {% endfor %}
+         </div>
+       {% endif %}
+diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
+index 4578bf6..f605abf 100644
+--- a/src/lithos_lens/web.py
++++ b/src/lithos_lens/web.py
+@@ -26,6 +26,7 @@ from lithos_lens.knowledge import (
+     render_markdown,
+     resolve_wiki_link,
+ )
++from lithos_lens.knowledge_metadata import build_note_metadata
+ from lithos_lens.lithos_client import (
+     LithosClient,
+     LithosClientProtocol,
+@@ -101,6 +102,7 @@ def create_app(
+     templates.env.globals["task_detail_url"] = task_detail_url
+     templates.env.globals["tasks_url"] = tasks_url
+     templates.env.globals["tag_chip_class"] = tag_chip_class
++    templates.env.globals["knowledge_tag_url"] = knowledge_tag_url
+ 
+     @asynccontextmanager
+     async def lifespan(app: FastAPI):
+@@ -302,6 +304,7 @@ def create_app(
+     async def note(request: Request, knowledge_id: str) -> HTMLResponse:
+         snapshot = await state.refresh_health()
+         note_record = None
++        note_meta = None
+         task = None
+         related = None
+         error = ""
+@@ -324,6 +327,7 @@ def create_app(
+             if not_found or (note_record is None and not error):
+                 error = "Document not found."
+             if note_record is not None:
++                note_meta = build_note_metadata(note_record)
+                 related = await load_related_panel(
+                     state.lithos_client,
+                     knowledge_id,
+@@ -343,6 +347,7 @@ def create_app(
+                 "health": snapshot,
+                 "active_view": "knowledge",
+                 "note": note_record,
++                "note_meta": note_meta,
+                 "task": task,
+                 "related": related,
+                 "error": error,
+@@ -438,6 +443,11 @@ def tasks_url(request: Request) -> str:
+     return f"/tasks?{query}" if query else "/tasks"
+ 
+ 
++def knowledge_tag_url(tag: str) -> str:
++    """Link a note-page tag chip to the ``/knowledge`` list filtered by it (§6.4)."""
++    return f"/knowledge?{urlencode({'tag': tag})}"
++
++
+ def tag_chip_class(tag: str) -> str:
+     classes = ["tag-chip"]
+     if tag.startswith("project:"):
+diff --git a/tests/test_knowledge.py b/tests/test_knowledge.py
+index 8323997..f18b5ac 100644
+--- a/tests/test_knowledge.py
++++ b/tests/test_knowledge.py
+@@ -8,9 +8,10 @@ from pathlib import Path
+ import pytest
+ from fastapi.testclient import TestClient
+ 
+-from lithos_lens import knowledge
++from lithos_lens import knowledge, knowledge_metadata
+ from lithos_lens.config import load_config
+ from lithos_lens.knowledge import render_markdown
++from lithos_lens.knowledge_metadata import build_note_metadata
+ from lithos_lens.tasks import NoteRecord
+ from lithos_lens.web import create_app
+ from tests.test_tasks_mvp import TaskFakeLithosClient
+@@ -166,12 +167,254 @@ def test_markdown_parser_keeps_raw_html_and_linkify_disabled() -> None:
+     assert knowledge.MARKDOWN.options["linkify"] is False
+ 
+ 
++# ── Metadata chips + lede (K1-S3) ──────────────────────────────────────
++
++
++def _note(**metadata: object) -> NoteRecord:
++    return NoteRecord(id="n", title="T", content="body", metadata=dict(metadata))
++
++
++def test_build_note_metadata_projects_frontmatter_fields() -> None:
++    meta = build_note_metadata(
++        _note(
++            note_type="observation",
++            status="active",
++            confidence=0.85,
++            access_scope="shared",
++            namespace="runbooks",
++            supersedes="old-note-id",
++            author="agent-7",
++            contributors=["reviewer-a", "reviewer-b"],
++            created_at="2026-01-01T00:00:00+00:00",
++            updated_at="2026-02-01T00:00:00+00:00",
++            summaries={"short": "One-line lede."},
++        )
++    )
++    assert meta.note_type == "observation"
++    assert meta.status == "active"
++    assert meta.confidence == "85%"
++    assert meta.access_scope == "shared"
++    assert meta.namespace == "runbooks"
++    assert meta.supersedes == "old-note-id"
++    assert meta.author == "agent-7"
++    assert meta.contributors == ("reviewer-a", "reviewer-b")
++    assert meta.created_at == "2026-01-01T00:00:00+00:00"
++    assert meta.updated_at == "2026-02-01T00:00:00+00:00"
++    assert meta.lede == "One-line lede."
++    assert meta.has_chips
++    assert meta.has_authorship
++
++
++def test_build_note_metadata_empty_when_frontmatter_absent() -> None:
++    meta = build_note_metadata(_note())
++    assert meta == knowledge_metadata.NoteMetadata()
++    assert not meta.has_chips
++    assert not meta.has_authorship
++    assert meta.lede == ""
++
++
++def test_build_note_metadata_lede_only_from_summaries_short() -> None:
++    assert build_note_metadata(_note(summaries={"long": "not this"})).lede == ""
++    assert build_note_metadata(_note(summaries="oops")).lede == ""
++    trimmed = build_note_metadata(_note(summaries={"short": " trim me "}))
++    assert trimmed.lede == "trim me"
++
++
++@pytest.mark.parametrize(
++    ("value", "expected"),
++    [
++        (0.85, "85%"),
++        (0.0, "0%"),
++        (1, "100%"),
++        (0.333, "33%"),
++        (True, ""),
++        ("0.85", ""),
++        (None, ""),
++        # Out-of-range fractions are malformed frontmatter (untrusted input):
++        # no chip, rather than a misleading "200%" / "-50%".
++        (2, ""),
++        (1.5, ""),
++        (-0.5, ""),
++        (-1, ""),
++        # NaN/inf are out-of-range too (and would otherwise make round() raise
++        # mid-render); the range guard rejects them the same way.
++        (float("nan"), ""),
++        (float("inf"), ""),
++    ],
++)
++def test_build_note_metadata_confidence_formatting(
++    value: object, expected: str
++) -> None:
++    assert build_note_metadata(_note(confidence=value)).confidence == expected
++
++
++def test_build_note_metadata_namespace_falls_back_to_path_directory() -> None:
++    # Explicit namespace wins over the path.
++    assert (
++        build_note_metadata(_note(namespace="explicit", path="runbooks/x.md")).namespace
++        == "explicit"
++    )
++    # Otherwise the path's directory stands in as the namespace.
++    assert (
++        build_note_metadata(_note(path="runbooks/influx/x.md")).namespace
++        == "runbooks/influx"
++    )
++    # A bare (directory-less) path derives no namespace.
++    assert build_note_metadata(_note(path="x.md")).namespace == ""
++
++
++def test_build_note_metadata_contributors_accepts_scalar_and_drops_blanks() -> None:
++    assert build_note_metadata(_note(contributors="solo")).contributors == ("solo",)
++    assert build_note_metadata(
++        _note(contributors=["a", "", "  ", "b", 5])
++    ).contributors == ("a", "b")
++
++
++@pytest.mark.parametrize(
++    ("status", "expected_slug"),
++    [
++        ("quarantined", "quarantined"),
++        ("active", "active"),
++        ("archived", "archived"),
++        # The known states pass through unchanged, so their stylesheet hooks
++        # still match. A hostile status collapses whitespace/punctuation to a
++        # single token — no second CSS class can be smuggled in via the suffix.
++        ("open banner-warning", "open-banner-warning"),
++        ("a\tb\nc", "a-b-c"),
++        ("UPPER Case", "upper-case"),
++        ("--edge--", "edge"),
++    ],
++)
++def test_build_note_metadata_status_slug_is_a_single_class_token(
++    status: str, expected_slug: str
++) -> None:
++    slug = build_note_metadata(_note(status=status)).status_slug
++    assert slug == expected_slug
++    # The whole point: the slug is one whitespace-free class token.
++    assert " " not in slug and "\t" not in slug and "\n" not in slug
++
++
+ def _client(config_path: Path, fake: TaskFakeLithosClient) -> TestClient:
+     config = load_config(config_path)
+     app = create_app(config, lithos_client_factory=lambda _: fake)
+     return TestClient(app)
+ 
+ 
++def test_note_page_renders_metadata_chips_lede_and_tag_links(
++    lithos_lens_config_env: Path,
++) -> None:
++    fake = TaskFakeLithosClient()
++    fake.notes["meta-note"] = NoteRecord(
++        id="meta-note",
++        title="Metadata Note",
++        content="Body text.",
++        tags=("project:influx", "kind:plan"),
++        metadata={
++            "note_type": "summary",
++            "status": "active",
++            "confidence": 0.9,
++            "access_scope": "shared",
++            "namespace": "runbooks",
++            "supersedes": "prior-note",
++            "summaries": {"short": "The one-sentence gist."},
++        },
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/meta-note")
++
++    assert response.status_code == 200
++    body = response.text
++    # Chips for each frontmatter field.
++    assert "summary" in body
++    assert "shared" in body
++    assert "runbooks" in body
++    assert "90%" in body
++    # Lede rendered above the body.
++    assert 'class="note-lede"' in body
++    assert "The one-sentence gist." in body
++    # Supersedes renders a link to the superseded note.
++    assert 'href="/note/prior-note"' in body
++    # Tags link to the knowledge list filtered by that tag.
++    assert 'href="/knowledge?tag=project%3Ainflux"' in body
++    assert 'href="/knowledge?tag=kind%3Aplan"' in body
++
++
++def test_note_page_marks_quarantined_note_visibly(
++    lithos_lens_config_env: Path,
++) -> None:
++    fake = TaskFakeLithosClient()
++    fake.notes["bad-note"] = NoteRecord(
++        id="bad-note",
++        title="Quarantined Note",
++        content="Body.",
++        metadata={"status": "quarantined"},
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/bad-note")
++
++    assert response.status_code == 200
++    # The status chip carries a status-specific class the stylesheet colours,
++    # so a quarantined note is visibly quarantined (§6.4 acceptance).
++    assert "note-status-quarantined" in response.text
++    # ...and the class is not inert: the stylesheet actually styles it.
++    css = (
++        Path(__file__).parent.parent / "src" / "lithos_lens" / "static" / "lens.css"
++    ).read_text()
++    assert ".note-status-quarantined" in css
++
++
++def test_note_page_status_class_cannot_inject_a_second_token(
++    lithos_lens_config_env: Path,
++) -> None:
++    """A hostile ``status`` must not smuggle a second class onto the chip.
++
++    Jinja autoescape stops attribute breakout but leaves whitespace intact, so
++    without slugifying, ``status`` = ``quarantined banner-warning`` would render
++    ``class="chip note-status note-status-quarantined banner-warning"`` — an
++    attacker-chosen class (content spoofing). The slug collapses it to one token.
++    """
++    fake = TaskFakeLithosClient()
++    fake.notes["evil-note"] = NoteRecord(
++        id="evil-note",
++        title="Evil Note",
++        content="Body.",
++        metadata={"status": "quarantined banner-warning"},
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/evil-note")
++
++    assert response.status_code == 200
++    # The injected token never lands as a standalone class.
++    assert "note-status-quarantined banner-warning" not in response.text
++    assert (
++        'class="chip note-status note-status-quarantined-banner-warning"'
++        in response.text
++    )
++    # Display text is still the raw status (escaped as a text node).
++    assert "quarantined banner-warning" in response.text
++
++
++def test_note_page_omits_chips_when_no_frontmatter(
++    lithos_lens_config_env: Path,
++) -> None:
++    fake = TaskFakeLithosClient()
++    fake.notes["plain-note"] = NoteRecord(
++        id="plain-note",
++        title="Plain Note",
++        content="Just a body.",
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/note/plain-note")
++
++    assert response.status_code == 200
++    assert 'class="note-chips"' not in response.text
++    assert 'class="note-lede"' not in response.text
++
++
+ def test_note_page_renders_markdown_body_as_html(
+     lithos_lens_config_env: Path,
+ ) -> None:
