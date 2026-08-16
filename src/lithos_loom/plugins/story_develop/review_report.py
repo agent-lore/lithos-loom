@@ -33,12 +33,19 @@ class ReviewFinding:
         }
 
 
+# Every status a serialised reviewer may carry. Public because the on-disk
+# report is a stable contract that outlives the run: `eval rescore` reads
+# retained reports back months later and must be able to reject one that is not
+# a real ReviewerReport before spending anything on it.
+REVIEWER_STATUSES = ("LGTM", "FINDINGS", "invalid", "not-run")
+
+
 @dataclass(frozen=True)
 class ReviewerReport:
     """One reviewer's verdict on the change."""
 
     name: str
-    status: str  # LGTM | FINDINGS | invalid
+    status: str  # one of REVIEWER_STATUSES
     passed: bool  # by this reviewer's own block threshold
     findings: list[ReviewFinding] = field(default_factory=list)
 

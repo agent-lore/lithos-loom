@@ -32,7 +32,13 @@ from .app import (
     require_rate,
     resolve_judge,
 )
-from .case import Case, iter_artifact_files, load_case, resolve_artifacts_root
+from .case import (
+    Case,
+    expected_fingerprint,
+    iter_artifact_files,
+    load_case,
+    resolve_artifacts_root,
+)
 from .harness import (
     DEFAULT_BAR,
     DEFAULT_K,
@@ -207,6 +213,8 @@ def review(
         if report_dir is not None:
             _write_summary(
                 report_dir,
+                loaded,
+                bar,
                 result,
                 tier,
                 eff_profile,
@@ -337,6 +345,8 @@ def _panel_phrase(panel: tuple[ReviewerSpec, ...]) -> str:
 
 def _write_summary(
     report_dir: Path,
+    case: Case,
+    bar: float,
     r: CaseResult,
     tier: str,
     profile: str,
@@ -358,6 +368,10 @@ def _write_summary(
     payload = {
         "case": r.case_id,
         "tier": tier,
+        # Pins what the SCORER consumed, so a later `eval rescore` can refuse a
+        # comparison against a case whose [[expected]] has since changed (#307).
+        "expected_fingerprint": expected_fingerprint(case),
+        "bar": bar,
         "profile": profile,
         "panel": [
             {

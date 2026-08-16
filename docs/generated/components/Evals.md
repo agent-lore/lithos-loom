@@ -15,14 +15,16 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review` | XS | 0 | 0 |
 | `lithos_loom.evals.review.app` | XS | 0 | 3 |
 | `lithos_loom.evals.review.artifacts` | XS | 0 | 1 |
-| `lithos_loom.evals.review.case` | M | 2 | 3 |
+| `lithos_loom.evals.review.case` | M | 2 | 4 |
 | `lithos_loom.evals.review.cli` | M | 0 | 1 |
+| `lithos_loom.evals.review.cli_rescore` | M | 0 | 1 |
 | `lithos_loom.evals.review.harness` | M | 1 | 4 |
 | `lithos_loom.evals.review.judge` | S | 1 | 1 |
-| `lithos_loom.evals.review.match` | S | 3 | 7 |
+| `lithos_loom.evals.review.match` | S | 3 | 8 |
 | `lithos_loom.evals.review.overrides` | S | 0 | 2 |
 | `lithos_loom.evals.review.patch` | S | 0 | 1 |
 | `lithos_loom.evals.review.report` | S | 0 | 12 |
+| `lithos_loom.evals.review.rescore` | M | 5 | 6 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
 
 ## Public API
@@ -38,12 +40,16 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 ### `lithos_loom.evals.review.case`
 - class `Expected` — A defect a correct review MUST surface.
 - class `Case` — One seeded-defect benchmark case.
+- def `expected_fingerprint` — A hash of exactly what the SCORER consumes — the case's ``expected``.
 - def `load_case` — Load and validate the case in *case_dir* (``case.toml`` + the AC file).
 - def `resolve_artifacts_root` — Resolve + validate a case's artifact root — the ONE root check (#302 review).
 - def `iter_artifact_files` — Every artifact file under a *validated* root, fail-closed (#302 review).
 
 ### `lithos_loom.evals.review.cli`
 - def `review` — Measure the panel's catch-rate on the seeded-defect benchmark.
+
+### `lithos_loom.evals.review.cli_rescore`
+- def `rescore` — Re-score a retained report dir — no reviewer runs, judge calls only.
 
 ### `lithos_loom.evals.review.harness`
 - class `CaseResult` — Aggregated metrics for one case over K runs.
@@ -63,6 +69,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - class `MatchResult` — Whether one expected defect was surfaced, and how.
 - class `RunScore` — Score for one review run against a case (all expecteds must match).
 - def `match_expected` — Match one *expected* defect against the *produced* findings.
+- def `produced_findings` — Flatten every reviewer's findings out of a ReviewReport JSON.
 - def `review_incomplete` — Whether any reviewer's turn did not produce a verdict (#182 A3).
 - def `finding_count` — How many findings the run produced, across every reviewer (#310).
 - def `review_blocked` — Whether the run **held approval** — the report's own blocking rule (#310).
@@ -88,6 +95,19 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `print_results_table` — Print the results table + the two tier roll-ups.
 - def `print_rollups` — The two tier roll-up lines (RH-6): frontier headline, floor gate.
 - def `case_result_payload` — The rate / per-sample half of a case's ``summary.json``.
+
+### `lithos_loom.evals.review.rescore`
+- class `RescoreError` — A report dir cannot be scored as asked — always raised before paid work.
+- class `SampleReport` — One retained ``<variant>-<i>.json``.
+- class `CaseReports` — Every retained artefact for one case in a report dir.
+- class `JudgeSite` — One (sample × expected) decision point, and its verdict per repeat.
+- class `CaseRescore` — A case re-scored: the authoritative result plus what varied around it.
+- def `load_report_dir` — Every case in *report_dir*, parsed **and structurally validated** up front.
+- def `judge_call_count` — How many **verdict requests** a rescore will make — known before paying.
+- def `resolve_bar` — The bar to score at, and where it came from — flag, run, or default.
+- def `rescore_case` — Score *reports* against *case*, plus the free structured counterfactual.
+- def `drift_vs_summary` — Per-key comparison against what the run recorded, if anything.
+- def `identity_of` — ``verified`` | ``changed`` | ``unverifiable`` for a case's scoring inputs.
 
 ### `lithos_loom.evals.review.stats`
 - def `wilson_interval` — 95% Wilson score interval ``(lo, hi)`` in ``[0, 1]`` for ``successes`` / ``n``.

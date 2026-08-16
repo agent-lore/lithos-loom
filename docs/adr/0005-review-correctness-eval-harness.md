@@ -452,6 +452,84 @@ valid comparison target. Whether residual variance warrants repeat-and-vote is a
 question for measurement, not assertion — #307's own suggestion 3, held until the
 audit trail can answer it.
 
+## Update (2026-08-15, #307 slice 2) — scoring separated from the paid run
+
+The judge became auditable in slice 1, but the question #307 actually asks — *how
+often does it answer differently?* — still needed a fresh paid sweep to answer,
+which is why it went unanswered. `eval rescore` removes that cost.
+
+The enabling observation is that `score_run` was already pure over
+`(case.expected, stored report JSON, judge)`: no git, no worktree, no container.
+Nothing about scoring ever needed the run. So a retained `--report-dir` can be
+scored again for **judge calls alone** — 69 for the whole pinned baseline (70
+reports, 85 judge sites, 69 with findings, since the judge short-circuits an empty
+findings list) — against hours of container reviewer runs for a fresh sweep.
+
+Two consequences beyond the immediate measurement. A judge-prompt change stops
+invalidating a paid baseline and becomes a few dollars of re-scoring. And the
+structured counterfactual over a whole corpus is free (`--no-judge`, zero tokens).
+
+**Repeat 0 is authoritative under `--judge-repeats N`.** Taking a majority would
+change the estimator in the same command that measures whether the estimator needs
+changing; majority-of-N remains suggestion 3, conditional on this evidence.
+Stability is reported over sites the judge *actually saw* — a sample that produced
+no findings is not a unanimous verdict, and counting it would flatter a quiet arm.
+
+**A judge error is not a verdict, and stability is defined so it can never pose as
+one.** Slice 1 established that a timeout is an absence of an answer rather than a
+miss; the same fact bites harder here, because a timeout and a veto both match
+nothing, so a stability measure keyed on matched ids alone would report an
+all-failed sweep as 100% stable — the exact false confidence this command exists to
+remove. So a site is *stable* only when every repeat answered and they agreed;
+two repeats that answered differently *flip*, counted even if a third errored (a
+disagreement observed is a fact about the judge, and dropping the site for an
+unrelated timeout would hide the thing being measured); anything else judged is
+**unmeasured**, reported beside the ratio and never inside it. Each repeat's whole
+verdict — status, matched ids, detail, raw reply — is serialised, because "why did
+two identical asks differ?" is unanswerable from the ids alone. For the same reason
+the catch spread is reported over **each universe's own valid denominator**: a
+repeat where the judge errored has fewer scorable samples, and holding K fixed
+would render missing data as a drop in catches.
+
+**A measurement never sets the exit code.** A re-scored floor case reading
+`REGRESSED` is a finding about the judge, not a failure of the command; a gate that
+runs no reviewers would gate on the judge's mood.
+
+**Fail-closed means the whole corpus, not the flags.** The command's usage errors
+must all precede the first paid call, so retained reports are structurally
+validated at load (every field the scorer reads — which means *enumerating* them,
+since the guarantee is only as good as the shortest field list: a first pass
+covered findings but not `reviewers[].status`, and an unhashable status still
+crashed the scorer one paid request in) and the entire dir is loaded before any
+case is judged — otherwise a malformed report in the last case surfaces only after
+the first has been paid for. Not every gap crashes: `bool("false")` is `True`, so
+a string `blocking` silently inverts the noise instrumentation instead, which is
+why validation checks types rather than waiting for an exception to prove a field
+mattered. The `--out` target is resolved and refused
+up front for the same reason, including against every retained input: overwriting a
+paid artefact with a re-score of it is the one irreversible thing this command
+could do. And the printed cost is two numbers, not one — the verdict-request count
+is exact as a count of questions, but a failed call retries once, so quoting it
+alone would understate a flaky sweep by 2×.
+
+**The bar comes from the run, not the module default.** Re-scoring at 0.8 a run
+scored at `--bar 0.6` reports `REGRESSED` for a case whose numbers never moved: the
+comparison would be measuring its own flag. `summary.json` records the bar; `--bar`
+overrides and says so; a dir with none falls back loudly.
+
+The comparability hazard is that a re-score reads the case from the tree as it
+stands *now*. `summary.json` therefore records an **`expected_fingerprint`** over
+exactly what the scorer consumes — the case id and its `[[expected]]` blocks, with
+keyword and entry order normalised (neither changes scoring) but `mechanism` prose
+not (a reflow changes the judge's prompt). The id is in so a case renamed in place
+reads as changed rather than silently comparing across identities. `ac.md`,
+personas and profile are deliberately out:
+they change what the *reviewer* saw, which a re-score never revisits — that is
+#309's question, and naming this key for the scorer's inputs alone leaves #309 free
+to add its own. A mismatch aborts; an absent fingerprint warns and proceeds, since
+every dir written before the field lands there and refusing them would make the
+retained corpus — the entire point of the command — unrescorable.
+
 ## Deferred
 
 - A genuinely **clean known-good** (a synthetic minimal mutation: the defect and
