@@ -755,7 +755,7 @@ uv run python -m lithos_loom.plugins.story_develop \
   | persona | engine | threshold | focus (one dimension) |
   |---|---|---|---|
   | `correctness` | codex | major | boundaries, off-by-one, races, error handling / propagation, idempotency, resource cleanup |
-  | `security` | claude (xhigh) | minor | OWASP Top 10 (2025) + CWE: injection, broken access control / IDOR, secrets, SSRF, deserialization, crypto misuse |
+  | `security` | claude (xhigh) | minor | OWASP Top 10 (2025) + CWE: injection, broken access control / IDOR, secrets, SSRF, deserialization, crypto misuse; **both directions** of a privileged/unprivileged boundary — what is read *and* where the result lands (RH-1) |
   | `architecture` | codex | major | module boundaries per `AGENTS.md`, abstractions / coupling, public surface; reviews the full `base..HEAD` |
   | `test-quality` | codex | minor | edge cases, mocks that hide behaviour, determinism, AC↔test mapping |
   | `dependency-hygiene` | claude | minor | new-dependency justification, supply-chain reputation, pinning, license |
