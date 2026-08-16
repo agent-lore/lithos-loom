@@ -24,6 +24,7 @@ import pytest
 from lithos_loom.bus import EventBus, Subscription
 from lithos_loom.lithos_client import Task
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
+from tests.support import run_until
 
 # ── Test helpers ────────────────────────────────────────────────────────
 
@@ -728,11 +729,7 @@ async def test_stream_reconnects_with_last_event_id_after_transient_error() -> N
     )
     source = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await run_until(source, lambda: len(aconnect.calls) >= 2)
 
     assert len(aconnect.calls) >= 2
     # First connect: no Last-Event-ID header.
@@ -1088,12 +1085,15 @@ async def test_bootstrap_failure_triggers_reconnect_not_silent_death() -> None:
         _aconnect_sse=aconnect,
     )
 
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.1)
-    assert not task.done(), "run() exited unexpectedly — silent death not fixed"
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    # Wait for the RECOVERED EVENT, not merely for a second bootstrap call:
+    # the retry has not demonstrated anything until the re-bootstrap publishes.
+    # run_until also fails loudly if run() exits first, which is the silent
+    # death this test regressions — so no separate `not task.done()` check.
+    await run_until(
+        source,
+        lambda: listener.queue.qsize() >= 1,
+        what="the retried bootstrap to publish the recovered task",
+    )
 
     # Bootstrap was retried after the first failure.
     assert len(client.task_list_calls) >= 2
@@ -1129,11 +1129,7 @@ async def test_bootstrap_skipped_on_reconnect_when_last_event_id_present() -> No
     )
     source = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await run_until(source, lambda: len(aconnect.calls) >= 2)
 
     # Snapshot exactly once; the reconnect skipped bootstrap because
     # Last-Event-ID was set.
@@ -1167,11 +1163,15 @@ async def test_bootstrap_re_runs_on_reconnect_when_no_event_id_drained() -> None
     )
     source = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    # Both bootstraps must have PUBLISHED before this is meaningful — waiting on
+    # the second snapshot call alone would end one step early, before the second
+    # bootstrap emits. qsize() peeks without draining the queue the assertions
+    # below consume.
+    await run_until(
+        source,
+        lambda: listener.queue.qsize() >= 2,
+        what="both bootstraps to publish their created event",
+    )
 
     # Bootstrap re-ran on the reconnect because there was no cursor.
     snapshot_calls = [c for c in client.task_list_calls if c["with_claims"] is True]
@@ -1493,15 +1493,24 @@ async def test_bootstrap_resolved_passes_resolved_since_to_server() -> None:
         aconnect=aconnect,
         bootstrap_resolved_window=timedelta(days=7),
     )
-    task = asyncio.create_task(source.run())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
 
-    resolved_calls = [
-        c for c in client.task_list_calls if c["status"] in ("completed", "cancelled")
-    ]
+    def _resolved_calls() -> list[dict[str, Any]]:
+        return [
+            c
+            for c in client.task_list_calls
+            if c["status"] in ("completed", "cancelled")
+        ]
+
+    # Both calls land inside ONE bootstrap, so this is far less racy than a
+    # reconnect count — but it is still a sampled multi-count, and the predicate
+    # is just the assertion, so wait for it rather than hope.
+    await run_until(
+        source,
+        lambda: len(_resolved_calls()) >= 2,
+        what="the completed + cancelled resolved-bootstrap calls",
+    )
+
+    resolved_calls = _resolved_calls()
     assert len(resolved_calls) >= 2
     for call in resolved_calls:
         assert call["resolved_since"] is not None
