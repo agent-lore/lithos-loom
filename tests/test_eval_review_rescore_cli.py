@@ -385,6 +385,23 @@ def test_the_spread_denominator_tracks_each_repeats_valid_samples(
     assert "1-2/1-2" in _unwrapped(result.output)
 
 
+def test_a_corpus_with_no_findings_says_nothing_needed_judging(
+    monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
+) -> None:
+    """Nothing failed here — there were no questions, not missing answers."""
+    for i in range(2):
+        (report_dir / "180-attach-delivery" / f"buggy-{i}.json").write_text(
+            json.dumps(_report())
+        )
+    calls = _stub_judge(monkeypatch)
+    result = _run(report_dir, cases_dir, "--judge-repeats", "3")
+    plain = _unwrapped(result.output)
+
+    assert calls["n"] == 0  # the judge short-circuits an empty findings list
+    assert "no site required judging" in plain
+    assert "UNMEASURED" not in plain
+
+
 def test_repeats_with_no_judge_is_rejected_pre_paid(
     monkeypatch: pytest.MonkeyPatch, report_dir: Path, cases_dir: Path
 ) -> None:
@@ -443,9 +460,11 @@ def test_a_case_missing_from_the_tree_aborts_before_any_call(
 @pytest.mark.parametrize(
     ("report", "message"),
     [
-        ({"reviewers": [{"findings": [7]}]}, "is not an object"),
+        ({"reviewers": [{"status": "FINDINGS", "findings": [7]}]}, "is not an object"),
         # `x in frozenset(...)` on a list raises TypeError inside the scorer
-        ({"reviewers": [{"status": ["invalid"], "findings": []}]}, "not a string"),
+        ({"reviewers": [{"status": ["invalid"], "findings": []}]}, "status must be"),
+        # a typo reads as a CLEAN review and inflates the valid denominator
+        ({"reviewers": [{"status": "invald", "findings": []}]}, "status must be"),
         # never raises — silently inverts the noise instrumentation instead
         ({"reviewers": [], "blocking": "false"}, "not a boolean"),
     ],

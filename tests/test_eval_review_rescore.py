@@ -208,7 +208,7 @@ def test_load_rejects_a_reviewer_that_is_not_an_object(tmp_path: Path) -> None:
 def test_load_rejects_findings_that_are_not_a_list(tmp_path: Path) -> None:
     root = _dir(tmp_path, [_report([_finding()])])
     (root / "180-attach-delivery" / "buggy-1.json").write_text(
-        json.dumps({"reviewers": [{"findings": "nope"}]})
+        json.dumps({"reviewers": [{"status": "LGTM", "findings": "nope"}]})
     )
     with pytest.raises(RescoreError, match=r"findings is not a list"):
         load_report_dir(root)
@@ -218,7 +218,7 @@ def test_load_rejects_a_finding_that_is_not_an_object(tmp_path: Path) -> None:
     """The shape the scorer would crash on AFTER paying for earlier samples."""
     root = _dir(tmp_path, [_report([_finding()])])
     (root / "180-attach-delivery" / "buggy-1.json").write_text(
-        json.dumps({"reviewers": [{"findings": ["not-a-finding"]}]})
+        json.dumps({"reviewers": [{"status": "FINDINGS", "findings": ["nope"]}]})
     )
     with pytest.raises(RescoreError, match=r"findings\[0\] is not an object"):
         load_report_dir(root)
@@ -244,14 +244,28 @@ def test_load_rejects_a_finding_field_the_scorer_would_choke_on(
         load_report_dir(root)
 
 
-def test_load_rejects_a_reviewer_status_that_is_not_a_string(tmp_path: Path) -> None:
-    """`review_incomplete` tests membership in a frozenset — an unhashable value
-    raises TypeError, and did so AFTER the first judge request was paid for."""
+@pytest.mark.parametrize("status", [["invalid"], "invald", None])
+def test_load_rejects_a_status_that_is_not_a_real_reviewer_status(
+    tmp_path: Path, status: object
+) -> None:
+    """`review_incomplete` keys on the PRESENCE of an error status, so a typo or
+    an absent status reads as a clean review and inflates the valid denominator;
+    an unhashable one raised TypeError after a judge request was already paid."""
     report = _report([_finding()])
-    report["reviewers"][0]["status"] = ["invalid"]
+    if status is None:
+        report["reviewers"][0].pop("status")
+    else:
+        report["reviewers"][0]["status"] = status
     root = _dir(tmp_path, [report])
-    with pytest.raises(RescoreError, match="status is not a string"):
+    with pytest.raises(RescoreError, match="status must be one of"):
         load_report_dir(root)
+
+
+def test_load_accepts_every_canonical_reviewer_status(tmp_path: Path) -> None:
+    """All 407 reviewers in the retained corpus carry one of these."""
+    for i, status in enumerate(("LGTM", "FINDINGS", "invalid", "not-run")):
+        report = _report([_finding()], status=status)
+        assert load_report_dir(_dir(tmp_path / str(i), [report]))
 
 
 def test_load_rejects_a_blocking_flag_that_is_not_a_boolean(tmp_path: Path) -> None:
@@ -310,7 +324,9 @@ def test_load_validates_every_case_before_returning_any(tmp_path: Path) -> None:
     root = _dir(tmp_path, [_report([_finding()])])
     other = root / "zz-later-case"
     other.mkdir()
-    (other / "buggy-0.json").write_text(json.dumps({"reviewers": [{"findings": [1]}]}))
+    (other / "buggy-0.json").write_text(
+        json.dumps({"reviewers": [{"status": "FINDINGS", "findings": [1]}]})
+    )
 
     with pytest.raises(RescoreError, match="zz-later-case"):
         load_report_dir(root)

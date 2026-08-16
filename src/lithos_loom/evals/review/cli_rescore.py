@@ -354,6 +354,12 @@ def _print(
 
 
 def _print_stability(results: list[CaseRescore], repeats: int) -> None:
+    if not sum(r.judged_sites for r in results):
+        # Nothing failed here — the judge was never consulted, because no run
+        # produced a finding to rule on. Saying "UNMEASURED" would read as
+        # missing answers rather than an absence of questions.
+        typer.echo("judge stability: — no site required judging (no findings)")
+        return
     measured = sum(r.measured_sites for r in results)
     flipped = sum(r.flipped_sites for r in results)
     unmeasured = sum(r.unmeasured_sites for r in results)

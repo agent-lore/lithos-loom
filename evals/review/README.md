@@ -115,7 +115,9 @@ compares field-for-field. Per-site verdicts are recorded even at one repeat, eac
 with its status and raw reply: a site whose findings were produced and whose verdict
 matched nothing *is* a veto, named — and the status is what separates it from a call
 that never answered. Everything fails closed before the first judge call, including
-a structural check of every retained report the scorer reads. The printed count is
+a structural check of every retained report the scorer reads — a reviewer must
+carry a real `status` (`LGTM` / `FINDINGS` / `invalid` / `not-run`), since a typo
+would read as a clean review and inflate the valid denominator. The printed count is
 the number of **verdict requests**; a failed call retries once, so the same line
 gives the ceiling (`up to 2N agent invocations`).
 

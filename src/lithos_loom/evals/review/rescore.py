@@ -33,6 +33,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ...plugins.story_develop.review_report import REVIEWER_STATUSES
 from .case import SEVERITIES, Case, expected_fingerprint
 from .harness import DEFAULT_BAR, CaseResult, aggregate_case, count_valid
 from .match import Judge, JudgeVerdict, RunScore, produced_findings, score_run
@@ -236,13 +237,19 @@ def _validate_finding(where: str, finding: object) -> None:
 def _validate_report(path: Path, report: dict) -> None:
     """Structurally check one retained report — **before** any judge call.
 
-    Every field ``score_run`` reads is covered, each because of how it is read:
-    ``status`` is tested for membership in a frozenset (an unhashable value
-    raises ``TypeError``), and ``blocking`` is passed through ``bool()``, which
-    never raises but turns the string ``"false"`` into a block — silently
-    corrupting the noise instrumentation instead of failing. Both stay
-    **optional**: reports predating #310 have no ``blocking`` key at all, and
-    refusing them would make the retained corpus unrescorable.
+    Every field ``score_run`` reads is covered, each because of how it is read.
+    ``status`` decides whether a sample counts as a review at all, and
+    ``review_incomplete`` keys on the *presence* of an error status — so a
+    missing or misspelled one ("invald") reads as a clean review and inflates
+    the valid denominator, while an unhashable one raises ``TypeError`` inside a
+    frozenset test. It is therefore **required** and checked against the
+    contract's own list: every one of the 407 reviewers across the retained
+    corpus carries a canonical status, so nothing real is refused.
+
+    ``blocking`` is passed through ``bool()``, which never raises but turns the
+    string ``"false"`` into a block — silently corrupting the noise
+    instrumentation instead of failing. It stays **optional**, since reports
+    predating #310 have no such key and refusing them would strand the corpus.
     """
     if "reviewers" not in report:
         raise RescoreError(f"{path}: not a ReviewReport (no 'reviewers' key)")
@@ -256,10 +263,10 @@ def _validate_report(path: Path, report: dict) -> None:
     for i, reviewer in enumerate(reviewers):
         if not isinstance(reviewer, dict):
             raise RescoreError(f"{path}: reviewers[{i}] is not an object")
-        if "status" in reviewer and not isinstance(reviewer["status"], str):
+        if reviewer.get("status") not in REVIEWER_STATUSES:
             raise RescoreError(
-                f"{path}: reviewers[{i}].status is not a string "
-                f"(got {reviewer['status']!r})"
+                f"{path}: reviewers[{i}].status must be one of "
+                f"{', '.join(REVIEWER_STATUSES)} (got {reviewer.get('status')!r})"
             )
         findings = reviewer.get("findings", [])
         if not isinstance(findings, list):
