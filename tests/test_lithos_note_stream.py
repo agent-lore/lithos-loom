@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -23,6 +23,7 @@ import pytest
 from lithos_loom.bus import EventBus, Subscription
 from lithos_loom.lithos_client import NoteSummary
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
+from tests.support import run_until
 
 # ── Test helpers ────────────────────────────────────────────────────────
 
@@ -195,34 +196,6 @@ async def _run_once(stream: LithosNoteStream, timeout: float = 0.5) -> None:
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError, TimeoutError):
         await asyncio.wait_for(task, timeout=timeout)
-
-
-async def _run_until(
-    stream: LithosNoteStream,
-    predicate: Callable[[], bool],
-    timeout: float = 5.0,
-) -> None:
-    """Run ``stream.run()`` until *predicate* holds, then cancel.
-
-    The deterministic counterpart to ``_run_once`` for reconnect-cycle counts.
-    Those cycles are paced by the source's retry sleep, so how many fit in a
-    fixed window is a property of the *machine*, not the code — under CPU
-    contention a 50 ms window fits one where an idle host fits dozens, which is
-    exactly how the re-bootstrap test flaked (reproduced at 3/15 under load,
-    0/5 idle). Waiting on the condition makes the assertion deterministic and
-    turns *timeout* into a genuine failure bound instead of the measurement
-    window: a real regression still fails, just after a wait rather than a race.
-    """
-    task = asyncio.create_task(stream.run())
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    try:
-        while not predicate() and loop.time() < deadline:
-            await asyncio.sleep(0.001)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
-            await asyncio.wait_for(task, timeout=timeout)
 
 
 # ── Bootstrap ───────────────────────────────────────────────────────────
@@ -572,7 +545,7 @@ async def test_stream_reconnects_with_last_event_id_after_transient_error() -> N
     )
     stream = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    await _run_until(stream, lambda: len(aconnect.calls) >= 2)
+    await run_until(stream, lambda: len(aconnect.calls) >= 2)
 
     # Second connect attempt must include Last-Event-ID from the
     # last drained frame (evt-7).
@@ -602,7 +575,7 @@ async def test_stream_re_bootstraps_when_no_event_id_drained() -> None:
     )
     stream = _stream(client=client, bus=bus, aconnect=aconnect)
 
-    await _run_until(stream, lambda: len(client.calls) >= 2)
+    await run_until(stream, lambda: len(client.calls) >= 2)
 
     # Bootstrap ran at least twice — once on first attempt (failed
     # connect), again on the second attempt because no Last-Event-ID

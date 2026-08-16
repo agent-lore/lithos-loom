@@ -6,6 +6,7 @@ Not collected as tests (no ``test_*`` modules); imported via
 
 from __future__ import annotations
 
+from tests.support.async_source import run_until
 from tests.support.fake_lithos import (
     Call,
     FakeLithosClient,
@@ -13,4 +14,4 @@ from tests.support.fake_lithos import (
     make_task,
 )
 
-__all__ = ["Call", "FakeLithosClient", "make_note", "make_task"]
+__all__ = ["Call", "FakeLithosClient", "make_note", "make_task", "run_until"]
