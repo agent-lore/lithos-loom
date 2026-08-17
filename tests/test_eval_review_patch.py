@@ -661,6 +661,10 @@ def test_lens34_fixture_pins_both_read_skew_forms(
         assert good.index("partition = classify_open_tasks") < good.index(
             "contested_ids ="
         )
+        # ...and the third suppression path, which happens AFTER the partition
+        # so intersecting with it is not enough: hiding the Open status group
+        # blanks every open section (PR #327 re-review).
+        assert "if show_open and contested_shown:" in good
 
         # The synthetic fix has no upstream commit to re-assert it, so the
         # regression tests that pin its behaviour are themselves part of the
@@ -671,6 +675,7 @@ def test_lens34_fixture_pins_both_read_skew_forms(
             "test_load_dashboard_resolves_ready_blocked_overlap_conservatively",
             "test_overlap_warning_is_render_effective_for_a_claimed_task",
             "test_overlap_warning_is_render_effective_for_a_filtered_task",
+            "test_overlap_warning_is_render_effective_when_open_status_hidden",
         ):
             assert f"def {name}(" in good_tests, f"known-good lost its {name} pin"
         # ...including that the conservative reclassification keeps the chips.

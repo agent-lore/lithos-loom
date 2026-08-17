@@ -222,7 +222,7 @@ index 0d381eb..c1810d4 100644
    TaskDetailData "1" --> "0..1" TaskRecord : task
    TaskDetailData "1" --> "0..1" TaskStatusRecord : task_status
 diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
-index 88c5314..e8ceba0 100644
+index 88c5314..94094f8 100644
 --- a/docs/generated/metrics.json
 +++ b/docs/generated/metrics.json
 @@ -42,12 +42,12 @@
@@ -233,7 +233,7 @@ index 88c5314..e8ceba0 100644
 -        "max_complexity": 8,
 -        "max_function": "lithos_lens.task_graph.normalize_edge"
 +        "functions_over_10": 2,
-+        "max_complexity": 24,
++        "max_complexity": 25,
 +        "max_function": "lithos_lens.frontier.load_dashboard"
        },
        "Tasks": {
@@ -242,21 +242,25 @@ index 88c5314..e8ceba0 100644
          "max_complexity": 23,
          "max_function": "lithos_lens.tasks.normalize_task"
        },
-@@ -69,24 +69,28 @@
-         "qualname": "lithos_lens.config._apply_env_overrides"
-       },
-       {
--        "complexity": 23,
--        "qualname": "lithos_lens.tasks.normalize_task"
-+        "complexity": 24,
+@@ -64,6 +64,10 @@
+     },
+     "functions_over_10": 11,
+     "top_functions": [
++      {
++        "complexity": 25,
 +        "qualname": "lithos_lens.frontier.load_dashboard"
-       },
++      },
        {
+         "complexity": 24,
+         "qualname": "lithos_lens.config._apply_env_overrides"
+@@ -72,21 +76,21 @@
+         "complexity": 23,
+         "qualname": "lithos_lens.tasks.normalize_task"
+       },
+-      {
 -        "complexity": 20,
 -        "qualname": "lithos_lens.tasks.load_dashboard"
-+        "complexity": 23,
-+        "qualname": "lithos_lens.tasks.normalize_task"
-       },
+-      },
        {
          "complexity": 16,
          "qualname": "lithos_lens.fake_lithos.FakeLithosClient.list_tasks"
@@ -387,8 +391,8 @@ index 88c5314..e8ceba0 100644
 +        "classes": 4,
 +        "functions": 14,
 +        "largest_module": "lithos_lens.frontier",
-+        "largest_module_lines": 371,
-+        "lines": 490,
++        "largest_module_lines": 376,
++        "lines": 495,
 +        "modules": 2,
 +        "public_symbols": 9,
 +        "sloc": 377
@@ -432,7 +436,7 @@ index 88c5314..e8ceba0 100644
 -    "total_lines": 4486,
 -    "total_modules": 16,
 -    "total_sloc": 3681
-+    "total_lines": 4738,
++    "total_lines": 4743,
 +    "total_modules": 17,
 +    "total_sloc": 3852
    },
@@ -441,12 +445,12 @@ index 88c5314..e8ceba0 100644
 -    "src_lines": 4486,
 -    "test_lines": 6762
 +    "ratio": 1.54,
-+    "src_lines": 4738,
-+    "test_lines": 7274
++    "src_lines": 4743,
++    "test_lines": 7290
    }
  }
 diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
-index 545d857..ca9b52e 100644
+index 545d857..2671794 100644
 --- a/docs/generated/metrics.md
 +++ b/docs/generated/metrics.md
 @@ -12,19 +12,19 @@ lower a budget after improving the code to lock in the gain.
@@ -489,7 +493,7 @@ index 545d857..ca9b52e 100644
  | State | 1 | 71 | 56 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
 -| TaskGraph | 1 | 119 | 88 | 1 | 1 | 0.50 | 8 (`lithos_lens.task_graph.normalize_edge`) | 0 |
 -| Tasks | 1 | 668 | 543 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
-+| TaskGraph | 2 | 490 | 377 | 2 | 1 | 0.33 | 24 (`lithos_lens.frontier.load_dashboard`) | 2 |
++| TaskGraph | 2 | 495 | 377 | 2 | 1 | 0.33 | 25 (`lithos_lens.frontier.load_dashboard`) | 2 |
 +| Tasks | 1 | 528 | 413 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 3 |
  | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
 -| Web | 1 | 445 | 390 | 1 | 6 | 0.86 | 11 (`lithos_lens.web.create_app.note`) | 1 |
@@ -499,7 +503,7 @@ index 545d857..ca9b52e 100644
  
 -- Modules: **16**, lines: **4486**, SLOC: **3681**
 -- Largest module: `lithos_lens.config` (725 lines)
-+- Modules: **17**, lines: **4738**, SLOC: **3852**
++- Modules: **17**, lines: **4743**, SLOC: **3852**
 +- Largest module: `lithos_lens.config` (741 lines)
  - Modules over 800 lines: **0**
  
@@ -512,8 +516,8 @@ index 545d857..ca9b52e 100644
  
  | Complexity | Function |
  |---:|---|
++| 25 | `lithos_lens.frontier.load_dashboard` |
  | 24 | `lithos_lens.config._apply_env_overrides` |
-+| 24 | `lithos_lens.frontier.load_dashboard` |
  | 23 | `lithos_lens.tasks.normalize_task` |
 -| 20 | `lithos_lens.tasks.load_dashboard` |
  | 16 | `lithos_lens.fake_lithos.FakeLithosClient.list_tasks` |
@@ -534,7 +538,7 @@ index 545d857..ca9b52e 100644
 -- Domain models: **27** (26 associations, 16 without docstrings)
 -- Test-to-source line ratio: **1.51** (6762 test lines / 4486 source lines)
 +- Domain models: **28** (27 associations, 15 without docstrings)
-+- Test-to-source line ratio: **1.54** (7274 test lines / 4738 source lines)
++- Test-to-source line ratio: **1.54** (7290 test lines / 4743 source lines)
 diff --git a/e2e/tests/screenshots.spec.ts b/e2e/tests/screenshots.spec.ts
 index 504955a..2099b4d 100644
 --- a/e2e/tests/screenshots.spec.ts
@@ -651,10 +655,10 @@ index 34dad3a..7ebd324 100644
              "influx-backfill": (
 diff --git a/src/lithos_lens/frontier.py b/src/lithos_lens/frontier.py
 new file mode 100644
-index 0000000..0d33a64
+index 0000000..d1726e1
 --- /dev/null
 +++ b/src/lithos_lens/frontier.py
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,376 @@
 +"""Frontier join: partition the open task set into workable sections.
 +
 +The graph-native dashboard never re-derives readiness — Lithos owns the
@@ -914,21 +918,26 @@ index 0000000..0d33a64
 +
 +    # Independent reads can disagree: a task can come back on BOTH frontiers.
 +    # Say so rather than resolving it invisibly — but the message describes what
-+    # was RENDERED, so it is computed from the partition, not from the raw
-+    # responses. Raw overlap is not render-effective: a claimed row is In
-+    # progress (already decorated claimed_but_blocked), and a row filtered out
-+    # by the agent/tag query is not on the page at all. Warning about either
-+    # would describe a Blocked row the operator cannot see.
++    # was RENDERED, so it must survive every step between the raw responses and
++    # the page. There are exactly three, and raw overlap clears none of them
++    # reliably:
++    #   1. the agent/tag query      -> ``visible_open``, applied before classify;
++    #   2. claim classification     -> a claimed row is In progress instead,
++    #                                  already decorated ``claimed_but_blocked``;
++    #   3. the status-group toggle  -> ``show_open`` blanks EVERY open section.
++    # (1) and (2) are handled by intersecting with ``partition["blocked"]``;
++    # (3) happens after the partition, so it is checked separately below.
++    # Warning past any of them describes a Blocked row the operator cannot see.
 +    contested_ids = ready_ids & {record.task.id for record in blocked_records}
 +    shown_blocked = {row.task.id for row in partition["blocked"]}
 +    contested_shown = contested_ids & shown_blocked
-+    if contested_shown:
++    show_open = "open" in filters.statuses
++    if show_open and contested_shown:
 +        errors.append(
 +            f"{len(contested_shown)} task(s) came back on both the ready and "
 +            "blocked frontiers — those reads disagree; showing them as Blocked."
 +        )
 +
-+    show_open = "open" in filters.statuses
 +    sections: dict[str, tuple[SectionRow, ...]] = {}
 +    for section in WORKABLE_SECTIONS + ("unclassified",):
 +        sections[section] = partition[section] if show_open else ()
@@ -1666,10 +1675,10 @@ index 5b0fdd2..4f1e514 100644
      """The point of the fixture/behavior split: a test can hand the client its
 diff --git a/tests/test_frontier.py b/tests/test_frontier.py
 new file mode 100644
-index 0000000..9b48fd3
+index 0000000..496c224
 --- /dev/null
 +++ b/tests/test_frontier.py
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,360 @@
 +"""T1 slice 2 — frontier join (Ready / In progress / Blocked sections).
 +
 +``classify_open_tasks`` is the pure join between the master open list and the
@@ -1998,6 +2007,22 @@ index 0000000..9b48fd3
 +    assert _section_ids(data.sections, "in_progress") == ["c"]
 +    assert _section_ids(data.sections, "blocked") == []
 +    assert data.sections["in_progress"][0].claimed_but_blocked is True
++    assert not any("showing them as Blocked" in message for message in data.errors)
++
++
++def test_overlap_warning_is_render_effective_when_open_status_hidden() -> None:
++    """Hiding the whole Open status group blanks every open section, so the
++    contested row renders nowhere even though it survived the partition. The
++    third and last suppression path between the frontier reads and the page."""
++    contested = _task("c", claims=())
++    filters = TaskFilters(statuses=("completed",), tags=(), agent="", since="")
++    fake = _FrontierFake(
++        open_tasks=[contested],
++        ready=[contested],
++        blocked=[_blocked(contested, BlockerRecord(kind="task", task_id="p"))],
++    )
++    data = asyncio.run(load_dashboard(fake, filters=filters, frontier_limit=500))
++    assert all(_section_ids(data.sections, key) == [] for key in WORKABLE_SECTIONS)
 +    assert not any("showing them as Blocked" in message for message in data.errors)
 +
 +

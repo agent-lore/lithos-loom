@@ -55,15 +55,22 @@ describe them:
      elif ordering. A bare reorder would NOT close this expected, whose
      mechanism requires that overlap stop being "resolved silently" and stop
      leaving the operator with "no warning".
-     The message is RENDER-EFFECTIVE (PR #327 review): it is computed from the
-     partition, not the raw responses, because raw overlap is not what renders
-     — a claimed row stays In progress (already decorated claimed_but_blocked)
-     and a query-filtered row is not on the page at all, so warning about
-     either would describe a Blocked row the operator cannot see. The first
-     draft got this wrong, which is instructive: it is the same
+     The message is RENDER-EFFECTIVE (PR #327 review): raw overlap is not what
+     renders, and there are exactly THREE steps between the frontier responses
+     and the page — the agent/tag query (visible_open), claim classification (a
+     claimed row is In progress, already decorated claimed_but_blocked), and
+     the status-group toggle (show_open blanks every open section). The first
+     two are handled by intersecting with partition["blocked"]; the third
+     happens after the partition, so it is checked separately. Warning past any
+     of them describes a Blocked row the operator cannot see.
+     Both earlier drafts got this wrong — the first missed all three, the
+     second missed the status-group toggle. Instructive rather than
+     embarrassing: it is the same
      claims-something-about-rendering-without-checking-what-rendered class as
-     the seeded defects, and upstream's own fix commit is titled "claimed
-     overlap is render-effective skew".
+     the seeded defects (upstream's own fix commit is titled "claimed overlap
+     is render-effective skew"), and the second miss is precisely the failure
+     lens34 exists to measure — finding one instance of a class and not
+     enumerating the rest.
 
 Trade-off, recorded deliberately: the fix is not the project's own code, so the
 known-good head is not a historical artefact. In exchange the pair is minimal,
