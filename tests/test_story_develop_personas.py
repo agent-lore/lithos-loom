@@ -83,6 +83,57 @@ def test_each_brief_is_one_dimension_with_an_explicit_deferral() -> None:
         assert "NOT your job" in spec.system_prompt
 
 
+def test_correctness_brief_asks_for_value_domains_and_both_outcomes() -> None:
+    # RH-1: lens33-confidence-crash measured 0/5, and the per-expected split put
+    # the whole deficit on ONE of its two forms — the reviewer sat on the right
+    # line, saw a value formatted without validation, and asked only "what input
+    # makes this raise?" (finding the NaN crash) but never "what input makes this
+    # return something wrong?" (missing the finite out-of-range render). The
+    # brief's failure-mode list was exception-shaped throughout: its one boundary
+    # bullet gave only collection examples, and contract fidelity was framed as
+    # types and None-handling. The measured lever is value DOMAINS plus the rule
+    # that one bad-value class obliges you to enumerate the rest — the same shape
+    # as the security brief's mirror rule (#318). A re-tune that drops any of the
+    # three parts silently reverts the arm.
+    c = canonical_personas()["correctness"].system_prompt
+    assert c is not None
+    # Collapse wrapping: where the prose breaks lines is formatting, not content.
+    flat = " ".join(c.split())
+    assert "outside the range, unit, scale, or set" in flat
+    assert "does it raise, or does it silently produce a wrong answer" in flat
+    assert "enumerate the rest" in flat
+    # PR #321 review: the bullet must not rank the silent case above an exception.
+    # It is a DETECTION lever — the attention it buys is the point — and a blanket
+    # "worse defect" would inflate severity independently of finding count, which
+    # lens33 cannot detect (its known-good blocking is saturated).
+    assert "not a reason to rate it higher" in flat
+
+
+_CASE_VOCABULARY = (
+    "confidence",
+    "percent",
+    "fraction",
+    "round(",
+    "nan",
+    "infinit",
+    "frontmatter",
+    "0..1",
+)
+
+
+def test_correctness_brief_stays_off_the_benchmark_case_vocabulary() -> None:
+    # RH-1 over-fit guard (#308's review flagged exactly this on the artifact
+    # prompt). The input-domain bullet was tuned against lens33-confidence-crash,
+    # so the arm is evidence of a GENERAL lever only while the brief never names
+    # that case's shape. Grepping by hand at authoring time does not survive the
+    # next re-tune; with one case per persona, over-fit is otherwise unfalsifiable.
+    brief = canonical_personas()["correctness"].system_prompt
+    assert brief is not None
+    lowered = brief.lower()
+    for term in _CASE_VOCABULARY:
+        assert term not in lowered, f"benchmark-case vocabulary in the brief: {term!r}"
+
+
 def test_security_brief_cites_owasp_and_cwe() -> None:
     sec = canonical_personas()["security"].system_prompt
     assert sec is not None
