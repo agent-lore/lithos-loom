@@ -31,6 +31,42 @@ rounds after the panel approved this diff.
 CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
 diff as the panel approved it (base = lens main a429e8e post-K1-S2, the
 branch's true merge-base; patch = delivered head 5151c2b, pre-rebase).
+
+PAIRED (RH-1) with a SYNTHETIC minimal fix — a FOURTH pairing shape, and the
+first synthetic one in the benchmark. The authentic fix (92eb79e / d5012ae /
+37b343a) could not be used: the delivered head is PRE-REBASE, so those commits
+are not its descendants and share only the base, making the only authentic pair
+`a429e8e..37b343a` = 34 files / 1822 insertions spanning four external review
+rounds of unrelated work (claims-unknown state, SectionName typing,
+created-since labels, blocker chips, pending strip). That is far more
+contaminated than 289's pair and would leave `fp` the only readable signal.
+
+known-good.patch is therefore feature-with-defect.patch PLUS a hand-written
+minimal fix for the two seeded defects and nothing else — 66 lines over the
+defect patch, same file set. It closes both expecteds as their mechanisms
+describe them:
+  #0 truncation is derived from the LIMIT FACT (a frontier response actually
+     reached frontier_limit) instead of from the presence of unclassified rows,
+     so pure read-skew no longer renders a false accuracy warning. Note the
+     row COUNT is used, not len(ready_ids) — the limit applies to rows returned.
+  #1 ready/blocked overlap is detected EXPLICITLY and resolved conservatively
+     (Blocked, keeping blocker chips) with an operator-visible message, rather
+     than being decided silently by elif ordering. A bare reorder would NOT
+     close this expected, whose mechanism requires that overlap stop being
+     "resolved silently" and stop leaving the operator with "no warning".
+
+Trade-off, recorded deliberately: the fix is not the project's own code, so the
+known-good head is not a historical artefact. In exchange the pair is minimal,
+which makes BOTH `fp` and `noise` meaningful here (unlike 289 and lens33, where
+a noisy known-good is expected and only `fp` isolates the seeded defect). The
+fix is verified in the lens repo: 310 passed, ruff + ruff format + pyright
+clean. Its correctness matters directly — a mistake in it would surface as
+reviewer findings and inflate this case's noise.
+
+Note the defect head shipped a test ASSERTING the defect
+(test_load_dashboard_flags_truncation_when_frontier_hits_its_limit named the
+limit but used 1 ready row against a limit of 500), so the known-good corrects
+that fixture and adds red-first cases for read-skew and for overlap.
 """
 ac_provenance = "replay"
 tier = "frontier"       # discriminating at the 2026-08 baseline — headline signal
@@ -40,6 +76,9 @@ head_patch = "feature-with-defect.patch"
 personas = ["correctness"]
 profile = "standard"
 acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
 
 [[expected]]
 file = "src/lithos_lens/frontier.py"
