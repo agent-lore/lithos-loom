@@ -623,8 +623,9 @@ def test_lens34_fixture_pins_both_read_skew_forms(
 
     resolved, cleanup = patch.materialise_patch_heads(case)
     try:
+        good_head = resolved.known_good_head or ""
         buggy = _blob_at(repo, resolved.head, _LENS_FRONTIER)
-        good = _blob_at(repo, resolved.known_good_head or "", _LENS_FRONTIER)
+        good = _blob_at(repo, good_head, _LENS_FRONTIER)
 
         # defect #0: truncation inferred from unclassified rows, limit unchecked
         assert 'truncated=frontier_ok and bool(partition["unclassified"])' in buggy
@@ -647,6 +648,32 @@ def test_lens34_fixture_pins_both_read_skew_forms(
         overlap = "elif task.id in ready_ids and task.id in blocked_map:"
         assert overlap in good
         assert good.index(overlap) < good.index("elif task.id in ready_ids:")
-        assert "both the ready and blocked" in good
+        # substring chosen to survive the source's line wrapping
+        assert "came back on both the ready" in good
+        # PR #327 review: the warning must be RENDER-EFFECTIVE. Computed from
+        # the raw responses it fired for claimed rows (which render In progress)
+        # and for query-filtered rows (which render nowhere) — a fresh defect
+        # inside the control, of the same "claims something about rendering
+        # without checking what rendered" class as the seeded ones. Pin that it
+        # intersects the partition and is computed after it.
+        assert 'shown_blocked = {row.task.id for row in partition["blocked"]}' in good
+        assert "contested_ids & shown_blocked" in good
+        assert good.index("partition = classify_open_tasks") < good.index(
+            "contested_ids ="
+        )
+
+        # The synthetic fix has no upstream commit to re-assert it, so the
+        # regression tests that pin its behaviour are themselves part of the
+        # fixture: a regenerated patch that drops them must fail here.
+        good_tests = _blob_at(repo, good_head, "tests/test_frontier.py")
+        for name in (
+            "test_load_dashboard_does_not_call_read_skew_truncation",
+            "test_load_dashboard_resolves_ready_blocked_overlap_conservatively",
+            "test_overlap_warning_is_render_effective_for_a_claimed_task",
+            "test_overlap_warning_is_render_effective_for_a_filtered_task",
+        ):
+            assert f"def {name}(" in good_tests, f"known-good lost its {name} pin"
+        # ...including that the conservative reclassification keeps the chips.
+        assert "[chip.target_id for chip in row.blockers]" in good_tests
     finally:
         cleanup()
