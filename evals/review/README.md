@@ -304,7 +304,7 @@ mechanism = "prose describing the defect (the LLM-judge keys on this)"
 known-good); a patch file must exist in the case dir (fail-closed at load). See
 `cases/194-delivery-failure-status/` for a worked example.
 
-Three pairing shapes are in use, tightest first — pick the tightest one the
+Four pairing shapes are in use, tightest first — pick the tightest one the
 escape allows, and say in the `description` which it is:
 
 | shape | example | what the `fp` number means |
@@ -312,6 +312,25 @@ escape allows, and say in the `description` which it is:
 | **clean mirror** — known-good is the exact reverse of the defect pair | `180-attach-delivery` | FP is meaningful even without the judge: the two heads differ by the guard alone |
 | **defect + its authentic fix** — the same change plus the hunk that fixed it | `lens22-artifact-prewrap`, `lens33-confidence-crash` | the defect is the only difference that matters, though the patch may be large |
 | **defect head vs merged head** — the feature as first pushed vs after review closed it | `289-symlink-artifacts` | valid, but **not minimal**: the heads also differ by everything else the review changed, so a finding about code that exists only at the known-good head is not automatically a false positive |
+| **synthetic minimal fix** — a hand-written patch closing the seeded defects and nothing else | `lens34-truncation` | minimal by construction, so **both `fp` and `noise` are meaningful** — but the known-good is not a historical artefact, and a mistake in the hand-written fix becomes reviewer findings that inflate this case's noise |
+
+Reach for the **synthetic** shape only when no authentic fix is usable — for
+`lens34` the delivered head is pre-rebase, so the real fix commits are not its
+descendants and the only authentic pair spans 34 files of unrelated review
+work. When you do, the fix must close each expected **as its `mechanism` text
+describes it**, not merely change the behaviour: lens34's overlap expected
+requires that the ambiguity stop being resolved *silently*, so reordering the
+branches would not have closed it — explicit detection plus an operator-visible
+message does. Verify the fix in the target repo (lint, typecheck, full suite)
+before generating the patch; its correctness is now part of the benchmark.
+
+Two traps when generating a `known-good.patch` from a worktree: `git diff`
+**omits untracked files**, so a defect patch that ADDS a file (lens34 adds
+`frontier.py`) silently produces a known-good missing exactly the file you
+edited — stage with `git add -A` and use `git diff --cached`. And a defect head
+may ship a test that **asserts the defect**, which the fix must then correct
+(lens34's truncation test named the limit but never reached it), so run the
+target repo's suite rather than assuming a green fixture.
 
 Whatever the shape, the known-good must *actually* be known-good. The loader and
 the runtime only enforce that the two heads build **different** content — "it

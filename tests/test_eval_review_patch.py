@@ -594,3 +594,91 @@ def test_lens33_fixture_pins_both_confidence_forms(
         assert good.index("not 0 <= value <= 1") < good.index("round(value * 100)")
     finally:
         cleanup()
+
+
+_LENS_FRONTIER = "src/lithos_lens/frontier.py"
+
+
+def test_lens34_fixture_pins_both_read_skew_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RH-1: lens34's known-good is the benchmark's first SYNTHETIC fix — it is
+    # not the project's own commit, because the delivered head is pre-rebase and
+    # the authentic fix shares only the base with it (34 files / 1822 lines).
+    # That makes these pins load-bearing in a way the others are not: nothing
+    # upstream will ever re-assert this behaviour, so a regenerated patch that
+    # quietly drops a hunk would leave a known-good that still HAS the defect,
+    # and every false-positive number after it would be measuring the defect.
+    case_dir = _SHIPPED_CASES_DIR / "lens34-truncation"
+    case = load_case(case_dir)
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        good_head = resolved.known_good_head or ""
+        buggy = _blob_at(repo, resolved.head, _LENS_FRONTIER)
+        good = _blob_at(repo, good_head, _LENS_FRONTIER)
+
+        # defect #0: truncation inferred from unclassified rows, limit unchecked
+        assert 'truncated=frontier_ok and bool(partition["unclassified"])' in buggy
+        assert ">= frontier_limit" not in buggy
+        # defect #1: ready is tested before blocked, with no overlap branch, so
+        # a row on BOTH frontiers is silently Ready
+        assert "task.id in ready_ids and task.id in blocked_map" not in buggy
+        assert buggy.index("elif task.id in ready_ids:") < buggy.index(
+            "elif task.id in blocked_map:"
+        )
+
+        # fix #0: the limit fact gates the banner, and it is the ROW COUNT — a
+        # len(ready_ids) check would undercount a duplicated row.
+        assert "ready_rows >= frontier_limit" in good
+        assert "len(blocked_records) >= frontier_limit" in good
+        assert "ready_rows = len(ready_tasks)" in good
+        # fix #1: overlap is detected EXPLICITLY, ahead of the ready branch, and
+        # is reported — the expected requires it stop being resolved *silently*,
+        # so a bare reorder would not close it.
+        overlap = "elif task.id in ready_ids and task.id in blocked_map:"
+        assert overlap in good
+        assert good.index(overlap) < good.index("elif task.id in ready_ids:")
+        # substring chosen to survive the source's line wrapping
+        assert "came back on both the ready" in good
+        # PR #327 review: the warning must be RENDER-EFFECTIVE. Computed from
+        # the raw responses it fired for claimed rows (which render In progress)
+        # and for query-filtered rows (which render nowhere) — a fresh defect
+        # inside the control, of the same "claims something about rendering
+        # without checking what rendered" class as the seeded ones. Pin that it
+        # intersects the partition and is computed after it.
+        assert 'shown_blocked = {row.task.id for row in partition["blocked"]}' in good
+        assert "contested_ids & shown_blocked" in good
+        assert good.index("partition = classify_open_tasks") < good.index(
+            "contested_ids ="
+        )
+        # ...and the third suppression path, which happens AFTER the partition
+        # so intersecting with it is not enough: hiding the Open status group
+        # blanks every open section (PR #327 re-review).
+        assert "if show_open and contested_shown:" in good
+
+        # The synthetic fix has no upstream commit to re-assert it, so the
+        # regression tests that pin its behaviour are themselves part of the
+        # fixture: a regenerated patch that drops them must fail here.
+        good_tests = _blob_at(repo, good_head, "tests/test_frontier.py")
+        for name in (
+            "test_load_dashboard_does_not_call_read_skew_truncation",
+            "test_load_dashboard_resolves_ready_blocked_overlap_conservatively",
+            "test_overlap_warning_is_render_effective_for_a_claimed_task",
+            "test_overlap_warning_is_render_effective_for_a_filtered_task",
+            "test_overlap_warning_is_render_effective_when_open_status_hidden",
+        ):
+            assert f"def {name}(" in good_tests, f"known-good lost its {name} pin"
+        # ...including that the conservative reclassification keeps the chips.
+        assert "[chip.target_id for chip in row.blockers]" in good_tests
+    finally:
+        cleanup()

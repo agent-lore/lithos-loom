@@ -1,0 +1,2389 @@
+diff --git a/docs/architecture.toml b/docs/architecture.toml
+index d339ad2..9d65977 100644
+--- a/docs/architecture.toml
++++ b/docs/architecture.toml
+@@ -32,7 +32,7 @@ Events       = "Shared Lithos event subscription and browser fan-out over SSE (L
+ LithosClient = "Lithos server clients — the real MCP-over-SSE client (health, registration, tool calls) plus the in-memory fake that backs fake-Lithos app mode."
+ Config       = "Configuration and environment loading from lithos-lens.toml with env overrides."
+ Tasks        = "Tasks-dashboard data loading and normalization (task/claim/finding records + view models)."
+-TaskGraph    = "Task-graph transport records and normalizers (blocked-task rows + edges from the Lithos 0.4 graph reads)."
++TaskGraph    = "Task-graph transport records and normalizers (blocked-task rows + edges), plus the ready/blocked frontier join and dashboard assembly built on them."
+ Knowledge    = "Knowledge-note rendering and normalization (safe server-side markdown + the related-panel neighborhood/view models)."
+ Logging      = "Structured JSON logging setup (JsonFormatter)."
+ Telemetry    = "Optional OpenTelemetry hooks and request middleware."
+@@ -46,7 +46,7 @@ Events       = ["lithos_lens.events"]
+ LithosClient = ["lithos_lens.lithos_client", "lithos_lens.fake_lithos", "lithos_lens.fake_dataset"]
+ Config       = ["lithos_lens.config"]
+ Tasks        = ["lithos_lens.tasks"]
+-TaskGraph    = ["lithos_lens.task_graph"]
++TaskGraph    = ["lithos_lens.task_graph", "lithos_lens.frontier"]
+ Knowledge    = ["lithos_lens.knowledge"]
+ Logging      = ["lithos_lens.logging"]
+ Telemetry    = ["lithos_lens.telemetry"]
+@@ -69,7 +69,7 @@ Foundation  = ["Config", "Tasks", "TaskGraph", "Knowledge", "Logging", "Telemetr
+ # is deliberately NOT pinned to the exact current high-water mark. Ratchet the
+ # *count* of oversized modules down via modules_over_800_lines instead.
+ [budgets]
+-cross_component_edges  = 25   # +1 for the hermetic fake-mode event hub (fake_lithos -> events, inside LithosClient -> Events); direction: down
++cross_component_edges  = 26   # +1 for the hermetic fake-mode event hub (fake_lithos -> events, inside LithosClient -> Events); +1 for Web -> TaskGraph (the frontier dashboard assembly); direction: down
+ component_cycles       = 0    # no component-level cycles today; keep it that way
+ module_cycles          = 0    # no module-level cycles today; keep it that way
+ modules_over_800_lines = 0    # no god modules today; keep it that way
+diff --git a/docs/generated/architecture.md b/docs/generated/architecture.md
+index e27d30b..cdcde76 100644
+--- a/docs/generated/architecture.md
++++ b/docs/generated/architecture.md
+@@ -58,6 +58,7 @@ graph TD
+   Web --> Knowledge
+   Web --> LithosClient
+   Web --> State
++  Web --> TaskGraph
+   Web --> Tasks
+   Web --> Telemetry
+   linkStyle 0 stroke:#bbb
+@@ -79,4 +80,5 @@ graph TD
+   linkStyle 20 stroke:#999,stroke-dasharray:4
+   linkStyle 23 stroke:#999,stroke-dasharray:4
+   linkStyle 24 stroke:#999,stroke-dasharray:4
++  linkStyle 25 stroke:#999,stroke-dasharray:4
+ ```
+diff --git a/docs/generated/components/TaskGraph.md b/docs/generated/components/TaskGraph.md
+index 4add44f..9a5c31d 100644
+--- a/docs/generated/components/TaskGraph.md
++++ b/docs/generated/components/TaskGraph.md
+@@ -3,7 +3,7 @@
+ 
+ # TaskGraph
+ 
+-Task-graph transport records and normalizers (blocked-task rows + edges from the Lithos 0.4 graph reads).
++Task-graph transport records and normalizers (blocked-task rows + edges), plus the ready/blocked frontier join and dashboard assembly built on them.
+ 
+ **Tier:** Foundation
+ 
+@@ -11,10 +11,16 @@ Task-graph transport records and normalizers (blocked-task rows + edges from the
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
++| `lithos_lens.frontier` | M | 1 | 2 |
+ | `lithos_lens.task_graph` | S | 3 | 3 |
+ 
+ ## Public API
+ 
++### `lithos_lens.frontier`
++- class `FrontierLithosClient` — The client surface ``load_dashboard`` consumes (the five parallel calls).
++- def `classify_open_tasks` — Join the master open list against the ready/blocked frontier.
++- def `load_dashboard` — Assemble the dashboard from the parallel Lithos reads.
++
+ ### `lithos_lens.task_graph`
+ - class `BlockerRecord` — One structured reason a task is blocked, from a lithos_task_blocked row.
+ - class `EdgeRecord` — A task-graph edge as returned by lithos_task_edge_list.
+@@ -26,6 +32,6 @@ Task-graph transport records and normalizers (blocked-task rows + edges from the
+ ## Dependencies
+ 
+ - Depends on: [Tasks](Tasks.md)
+-- Used by: [LithosClient](LithosClient.md)
++- Used by: [LithosClient](LithosClient.md), [Web](Web.md)
+ 
+ [← all generated docs](../README.md)
+diff --git a/docs/generated/components/Tasks.md b/docs/generated/components/Tasks.md
+index 75769e1..768a68c 100644
+--- a/docs/generated/components/Tasks.md
++++ b/docs/generated/components/Tasks.md
+@@ -11,7 +11,7 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.tasks` | M | 15 | 16 |
++| `lithos_lens.tasks` | M | 16 | 17 |
+ 
+ ## Public API
+ 
+@@ -24,7 +24,8 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - class `AgentRecord`
+ - class `NoteRecord`
+ - class `NoteSummary` — A lightweight note row from ``lithos_list`` (no body).
+-- class `EnrichedTask`
++- class `BlockerChip` — One "waiting for" chip on a Blocked (or claimed-but-blocked) row.
++- class `SectionRow` — A task rendered in one dashboard section, with its display extras.
+ - class `TaskFilters`
+ - class `TaskSummary`
+ - class `DashboardData`
+@@ -32,7 +33,6 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - class `TaskDetailData`
+ - class `TaskLithosClientProtocol` — The subset of the Lithos client this module's loaders consume.
+ - def `parse_filters`
+-- def `load_dashboard`
+ - def `load_task_detail`
+ - def `find_task`
+ - def `resolve_finding_notes`
+@@ -47,6 +47,8 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - def `format_display_date`
+ - def `format_tag`
+ - def `parse_date`
++- def `matches_filters` — Client-side filter predicate shared by the dashboard sections.
++- def `int_stat`
+ 
+ ## Dependencies
+ 
+diff --git a/docs/generated/components/Web.md b/docs/generated/components/Web.md
+index 43eabc6..0821547 100644
+--- a/docs/generated/components/Web.md
++++ b/docs/generated/components/Web.md
+@@ -24,7 +24,7 @@ FastAPI application factory serving the server-rendered dashboard UI (Jinja2 tem
+ 
+ ## Dependencies
+ 
+-- Depends on: [Config](Config.md), [Knowledge](Knowledge.md), [LithosClient](LithosClient.md), [State](State.md), [Tasks](Tasks.md), [Telemetry](Telemetry.md)
++- Depends on: [Config](Config.md), [Knowledge](Knowledge.md), [LithosClient](LithosClient.md), [State](State.md), [TaskGraph](TaskGraph.md), [Tasks](Tasks.md), [Telemetry](Telemetry.md)
+ - Used by: [Entrypoint](Entrypoint.md)
+ 
+ [← all generated docs](../README.md)
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 0d381eb..c1810d4 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -134,21 +134,22 @@ classDiagram
+     +type str
+     +last_seen_at str
+   }
++  class BlockerChip {
++    +label str
++    +kind str
++    +target_id str
++  }
+   class ClaimRecord {
+     +agent str
+     +aspect str
+     +expires_at str
+   }
+   class DashboardData {
+-    +visible_cap int
++    +frontier_limit int
+     +open_total int
+-    +claim_cap_exceeded bool
+-    +claim_filter_limited bool
++    +truncated bool
+     +errors tuple[str, ...]
+   }
+-  class EnrichedTask {
+-    +claim_error str
+-  }
+   class FindingRecord {
+     +id str
+     +task_id str
+@@ -175,6 +176,9 @@ classDiagram
+     +updated str
+     +tags tuple[str, ...]
+   }
++  class SectionRow {
++    +claimed_but_blocked bool
++  }
+   class TaskDetailData {
+     +status_state SectionState
+     +findings_state SectionState
+@@ -183,7 +187,6 @@ classDiagram
+   }
+   class TaskFilters {
+     +statuses tuple[TaskStatusName, ...]
+-    +claimed_state ClaimedState
+     +tags tuple[str, ...]
+     +agent str
+     +since str
+@@ -209,22 +212,24 @@ classDiagram
+     +metadata dict[str, Any]
+   }
+   class TaskSummary {
+-    +open_tasks int
++    +in_progress int
++    +ready int
++    +blocked int
++    +unclassified int
++    +open_total int
+     +open_claims int
+-    +claimed_open_tasks int
+-    +unclaimed_open_tasks int
+-    +unknown_claim_open_tasks int
+     +recent_completed int
+     +recent_cancelled int
+     +agents int
+   }
+   DashboardData "1" --> "0..*" AgentRecord : agents
+-  DashboardData "1" --> "0..*" EnrichedTask : groups
++  DashboardData "1" --> "0..*" SectionRow : sections
+   DashboardData "1" --> "1" TaskFilters : filters
+   DashboardData "1" --> "1" TaskSummary : summary
+-  EnrichedTask "1" --> "1" TaskRecord : task
+-  EnrichedTask "1" --> "0..1" TaskStatusRecord : task_status
+   FindingView "1" --> "1" FindingRecord : finding
++  SectionRow "1" --> "0..*" BlockerChip : blockers
++  SectionRow "1" --> "0..*" ClaimRecord : claims
++  SectionRow "1" --> "1" TaskRecord : task
+   TaskDetailData "1" --> "0..*" FindingView : findings
+   TaskDetailData "1" --> "0..1" TaskRecord : task
+   TaskDetailData "1" --> "0..1" TaskStatusRecord : task_status
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index 88c5314..94094f8 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -42,12 +42,12 @@
+         "max_function": "lithos_lens.state.AppState.__init__"
+       },
+       "TaskGraph": {
+-        "functions_over_10": 0,
+-        "max_complexity": 8,
+-        "max_function": "lithos_lens.task_graph.normalize_edge"
++        "functions_over_10": 2,
++        "max_complexity": 25,
++        "max_function": "lithos_lens.frontier.load_dashboard"
+       },
+       "Tasks": {
+-        "functions_over_10": 5,
++        "functions_over_10": 3,
+         "max_complexity": 23,
+         "max_function": "lithos_lens.tasks.normalize_task"
+       },
+@@ -64,6 +64,10 @@
+     },
+     "functions_over_10": 11,
+     "top_functions": [
++      {
++        "complexity": 25,
++        "qualname": "lithos_lens.frontier.load_dashboard"
++      },
+       {
+         "complexity": 24,
+         "qualname": "lithos_lens.config._apply_env_overrides"
+@@ -72,21 +76,21 @@
+         "complexity": 23,
+         "qualname": "lithos_lens.tasks.normalize_task"
+       },
+-      {
+-        "complexity": 20,
+-        "qualname": "lithos_lens.tasks.load_dashboard"
+-      },
+       {
+         "complexity": 16,
+         "qualname": "lithos_lens.fake_lithos.FakeLithosClient.list_tasks"
+       },
++      {
++        "complexity": 13,
++        "qualname": "lithos_lens.frontier.classify_open_tasks"
++      },
+       {
+         "complexity": 13,
+         "qualname": "lithos_lens.knowledge._gather_candidates"
+       },
+       {
+         "complexity": 12,
+-        "qualname": "lithos_lens.tasks._matches_filters"
++        "qualname": "lithos_lens.tasks.matches_filters"
+       },
+       {
+         "complexity": 11,
+@@ -96,21 +100,17 @@
+         "complexity": 11,
+         "qualname": "lithos_lens.knowledge._normalize_edges"
+       },
+-      {
+-        "complexity": 11,
+-        "qualname": "lithos_lens.tasks._enrich_open_tasks"
+-      },
+       {
+         "complexity": 11,
+         "qualname": "lithos_lens.tasks.normalize_task_status"
+       }
+     ],
+-    "total_functions": 208
++    "total_functions": 214
+   },
+   "domain": {
+-    "associations": 26,
+-    "models": 27,
+-    "models_without_docstrings": 16
++    "associations": 27,
++    "models": 28,
++    "models_without_docstrings": 15
+   },
+   "graph": {
+     "component_cycles": [],
+@@ -156,9 +156,9 @@
+         "instability": 0.75
+       },
+       "TaskGraph": {
+-        "fan_in": 1,
++        "fan_in": 2,
+         "fan_out": 1,
+-        "instability": 0.5
++        "instability": 0.33
+       },
+       "Tasks": {
+         "fan_in": 5,
+@@ -172,12 +172,12 @@
+       },
+       "Web": {
+         "fan_in": 1,
+-        "fan_out": 6,
+-        "instability": 0.86
++        "fan_out": 7,
++        "instability": 0.88
+       }
+     },
+-    "cross_component_edges": 25,
+-    "cross_component_module_edges": 33,
++    "cross_component_edges": 26,
++    "cross_component_module_edges": 35,
+     "longest_component_chain": 6,
+     "module_cycle_count": 0,
+     "module_cycles": [],
+@@ -187,10 +187,11 @@
+       "Entrypoint -> Logging",
+       "Web -> Config",
+       "Web -> Knowledge",
++      "Web -> TaskGraph",
+       "Web -> Tasks",
+       "Web -> Telemetry"
+     ],
+-    "tier_skipping_edges": 7
++    "tier_skipping_edges": 8
+   },
+   "mcp": {
+     "tools": 0,
+@@ -209,11 +210,11 @@
+         "classes": 11,
+         "functions": 22,
+         "largest_module": "lithos_lens.config",
+-        "largest_module_lines": 725,
+-        "lines": 725,
++        "largest_module_lines": 741,
++        "lines": 741,
+         "modules": 1,
+         "public_symbols": 14,
+-        "sloc": 617
++        "sloc": 627
+       },
+       "Entrypoint": {
+         "classes": 0,
+@@ -260,10 +261,10 @@
+         "functions": 75,
+         "largest_module": "lithos_lens.lithos_client",
+         "largest_module_lines": 660,
+-        "lines": 1354,
++        "lines": 1362,
+         "modules": 3,
+         "public_symbols": 9,
+-        "sloc": 1133
++        "sloc": 1138
+       },
+       "Logging": {
+         "classes": 1,
+@@ -286,24 +287,24 @@
+         "sloc": 56
+       },
+       "TaskGraph": {
+-        "classes": 3,
+-        "functions": 3,
+-        "largest_module": "lithos_lens.task_graph",
+-        "largest_module_lines": 119,
+-        "lines": 119,
+-        "modules": 1,
+-        "public_symbols": 6,
+-        "sloc": 88
++        "classes": 4,
++        "functions": 14,
++        "largest_module": "lithos_lens.frontier",
++        "largest_module_lines": 376,
++        "lines": 495,
++        "modules": 2,
++        "public_symbols": 9,
++        "sloc": 377
+       },
+       "Tasks": {
+-        "classes": 15,
+-        "functions": 31,
++        "classes": 16,
++        "functions": 26,
+         "largest_module": "lithos_lens.tasks",
+-        "largest_module_lines": 668,
+-        "lines": 668,
++        "largest_module_lines": 528,
++        "lines": 528,
+         "modules": 1,
+-        "public_symbols": 31,
+-        "sloc": 543
++        "public_symbols": 33,
++        "sloc": 413
+       },
+       "Telemetry": {
+         "classes": 0,
+@@ -319,23 +320,23 @@
+         "classes": 0,
+         "functions": 18,
+         "largest_module": "lithos_lens.web",
+-        "largest_module_lines": 445,
+-        "lines": 445,
++        "largest_module_lines": 442,
++        "lines": 442,
+         "modules": 1,
+         "public_symbols": 5,
+-        "sloc": 390
++        "sloc": 387
+       }
+     },
+     "max_module": "lithos_lens.config",
+-    "max_module_lines": 725,
++    "max_module_lines": 741,
+     "modules_over_800": [],
+-    "total_lines": 4486,
+-    "total_modules": 16,
+-    "total_sloc": 3681
++    "total_lines": 4743,
++    "total_modules": 17,
++    "total_sloc": 3852
+   },
+   "tests": {
+-    "ratio": 1.51,
+-    "src_lines": 4486,
+-    "test_lines": 6762
++    "ratio": 1.54,
++    "src_lines": 4743,
++    "test_lines": 7290
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 545d857..2671794 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -12,19 +12,19 @@ lower a budget after improving the code to lock in the gain.
+ | Metric | Actual | Budget | Headroom |
+ |---|---:|---:|---:|
+ | `component_cycles` | 0 | 0 | 0 |
+-| `cross_component_edges` | 25 | 25 | 0 |
++| `cross_component_edges` | 26 | 26 | 0 |
+ | `cross_module_private_refs` | 0 | 0 | 0 |
+-| `max_module_lines` | 725 | 800 | 75 |
++| `max_module_lines` | 741 | 800 | 59 |
+ | `module_cycles` | 0 | 0 | 0 |
+ | `modules_over_800_lines` | 0 | 0 | 0 |
+ | `tests_private_imports` | 0 | 0 | 0 |
+ 
+ ## Import graph
+ 
+-- Cross-component edges: **25** (33 module-level)
++- Cross-component edges: **26** (35 module-level)
+ - Component cycles: none
+ - Module cycles: none
+-- Tier-skipping edges (Entrypoints → Foundation): 7 (Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> Logging, Web -> Config, Web -> Knowledge, Web -> Tasks, Web -> Telemetry)
++- Tier-skipping edges (Entrypoints → Foundation): 8 (Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> Logging, Web -> Config, Web -> Knowledge, Web -> TaskGraph, Web -> Tasks, Web -> Telemetry)
+ - Longest component dependency chain: 6
+ 
+ ## Components
+@@ -34,42 +34,42 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ 
+ | Component | Modules | Lines | SLOC | Fan-in | Fan-out | Instability | Max complexity | Functions > 10 |
+ |---|---:|---:|---:|---:|---:|---:|---|---:|
+-| Config | 1 | 725 | 617 | 7 | 2 | 0.22 | 24 (`lithos_lens.config._apply_env_overrides`) | 1 |
++| Config | 1 | 741 | 627 | 7 | 2 | 0.22 | 24 (`lithos_lens.config._apply_env_overrides`) | 1 |
+ | Entrypoint | 2 | 74 | 52 | 0 | 4 | 1.00 | 4 (`lithos_lens.main.resolve_port`) | 0 |
+ | Errors | 1 | 15 | 9 | 2 | 0 | 0.00 | - | 0 |
+ | Events | 1 | 208 | 180 | 2 | 1 | 0.33 | 10 (`lithos_lens.events.parse_lithos_sse_frame`) | 0 |
+ | Knowledge | 1 | 715 | 543 | 2 | 1 | 0.33 | 13 (`lithos_lens.knowledge._gather_candidates`) | 2 |
+-| LithosClient | 3 | 1354 | 1133 | 2 | 5 | 0.71 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 2 |
++| LithosClient | 3 | 1362 | 1138 | 2 | 5 | 0.71 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 2 |
+ | Logging | 1 | 60 | 48 | 1 | 1 | 0.50 | 5 (`lithos_lens.logging.JsonFormatter.format`) | 0 |
+ | State | 1 | 71 | 56 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
+-| TaskGraph | 1 | 119 | 88 | 1 | 1 | 0.50 | 8 (`lithos_lens.task_graph.normalize_edge`) | 0 |
+-| Tasks | 1 | 668 | 543 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 5 |
++| TaskGraph | 2 | 495 | 377 | 2 | 1 | 0.33 | 25 (`lithos_lens.frontier.load_dashboard`) | 2 |
++| Tasks | 1 | 528 | 413 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 3 |
+ | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
+-| Web | 1 | 445 | 390 | 1 | 6 | 0.86 | 11 (`lithos_lens.web.create_app.note`) | 1 |
++| Web | 1 | 442 | 387 | 1 | 7 | 0.88 | 11 (`lithos_lens.web.create_app.note`) | 1 |
+ 
+ ## Size
+ 
+-- Modules: **16**, lines: **4486**, SLOC: **3681**
+-- Largest module: `lithos_lens.config` (725 lines)
++- Modules: **17**, lines: **4743**, SLOC: **3852**
++- Largest module: `lithos_lens.config` (741 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **208**, cyclomatic > 10: **11**
++- Functions: **214**, cyclomatic > 10: **11**
+ 
+ Top 10 most complex functions:
+ 
+ | Complexity | Function |
+ |---:|---|
++| 25 | `lithos_lens.frontier.load_dashboard` |
+ | 24 | `lithos_lens.config._apply_env_overrides` |
+ | 23 | `lithos_lens.tasks.normalize_task` |
+-| 20 | `lithos_lens.tasks.load_dashboard` |
+ | 16 | `lithos_lens.fake_lithos.FakeLithosClient.list_tasks` |
++| 13 | `lithos_lens.frontier.classify_open_tasks` |
+ | 13 | `lithos_lens.knowledge._gather_candidates` |
+-| 12 | `lithos_lens.tasks._matches_filters` |
++| 12 | `lithos_lens.tasks.matches_filters` |
+ | 11 | `lithos_lens.fake_lithos.FakeLithosClient.list_notes` |
+ | 11 | `lithos_lens.knowledge._normalize_edges` |
+-| 11 | `lithos_lens.tasks._enrich_open_tasks` |
+ | 11 | `lithos_lens.tasks.normalize_task_status` |
+ 
+ ## Seams
+@@ -82,5 +82,5 @@ Private-name reaches across module seams. Both counts can be pinned as
+ 
+ ## Domain & tests
+ 
+-- Domain models: **27** (26 associations, 16 without docstrings)
+-- Test-to-source line ratio: **1.51** (6762 test lines / 4486 source lines)
++- Domain models: **28** (27 associations, 15 without docstrings)
++- Test-to-source line ratio: **1.54** (7290 test lines / 4743 source lines)
+diff --git a/e2e/tests/screenshots.spec.ts b/e2e/tests/screenshots.spec.ts
+index 504955a..2099b4d 100644
+--- a/e2e/tests/screenshots.spec.ts
++++ b/e2e/tests/screenshots.spec.ts
+@@ -42,7 +42,7 @@ const PAGES: ReadonlyArray<{
+     slug: "dashboard",
+     url: "/tasks?since=2026-08-01",
+     ready: async (page) => {
+-      await expect(page.locator('[data-task-group="open"]')).toBeVisible();
++      await expect(page.locator(".task-board")).toBeVisible();
+     },
+   },
+   {
+diff --git a/e2e/tests/smoke.spec.ts b/e2e/tests/smoke.spec.ts
+index ec46dea..bef7314 100644
+--- a/e2e/tests/smoke.spec.ts
++++ b/e2e/tests/smoke.spec.ts
+@@ -19,8 +19,10 @@ test("dashboard renders the task board with fixture rows", async ({ page }) => {
+ 
+   await expect(page.getByRole("heading", { level: 1, name: "Tasks" })).toBeVisible();
+ 
+-  // The open group and its flagship fixture task are present.
+-  await expect(page.locator('[data-task-group="open"]')).toBeVisible();
++  // The workable board and its flagship fixture task are present. Open tasks
++  // are partitioned into In progress / Ready / Blocked sections by the Lithos
++  // frontier, so the row lives in one of those rather than a flat "open" group.
++  await expect(page.locator(".task-board")).toBeVisible();
+   await expect(
+     page.locator('[data-task-row][data-task-id="influx-ingest-cutover"]'),
+   ).toBeVisible();
+diff --git a/pyproject.toml b/pyproject.toml
+index b95fa6d..743afec 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -63,6 +63,7 @@ source_modules = [
+     "lithos_lens.errors",
+     "lithos_lens.tasks",
+     "lithos_lens.task_graph",
++    "lithos_lens.frontier",
+     "lithos_lens.knowledge",
+     "lithos_lens.config",
+     "lithos_lens.logging",
+diff --git a/src/lithos_lens/config.py b/src/lithos_lens/config.py
+index 57c8a1e..0849c10 100644
+--- a/src/lithos_lens/config.py
++++ b/src/lithos_lens/config.py
+@@ -61,6 +61,7 @@ DEFAULT_LITHOS_SSE_EVENTS_PATH = "/events"
+ DEFAULT_LENS_AGENT_ID = "lithos-lens"
+ DEFAULT_TASKS_AUTO_REFRESH_INTERVAL_S = 120
+ DEFAULT_TASKS_VISIBLE_CAP = 50
++DEFAULT_TASKS_FRONTIER_LIMIT = 500
+ DEFAULT_TASKS_DEFAULT_TIME_RANGE_DAYS = 30
+ DEFAULT_LLM_MAX_TOKENS = 2048
+ DEFAULT_HEALTH_REFRESH_INTERVAL_S = 30
+@@ -101,7 +102,14 @@ class LithosConfig:
+ @dataclass(frozen=True)
+ class TasksConfig:
+     auto_refresh_interval_s: int = DEFAULT_TASKS_AUTO_REFRESH_INTERVAL_S
++    # Deprecated with the graph-native dashboard (T1): the per-row claim fan-out
++    # it capped is gone (claims arrive inline). Parsed for backward-compat but
++    # unused; ``frontier_limit`` is the live scale dial.
+     visible_cap: int = DEFAULT_TASKS_VISIBLE_CAP
++    # Cap sent to lithos_task_ready / lithos_task_blocked. Sized to clear the
++    # production frontier with headroom; truncation is survivable (a
++    # Not-classified tail) but should be rare.
++    frontier_limit: int = DEFAULT_TASKS_FRONTIER_LIMIT
+     default_time_range_days: int = DEFAULT_TASKS_DEFAULT_TIME_RANGE_DAYS
+     default_status_groups: tuple[TaskStatusName, ...] = TASK_STATUSES
+ 
+@@ -350,6 +358,14 @@ def _parse_tasks(data: Any, config_path: Path) -> TasksConfig:
+             "lithos-lens.tasks",
+             minimum=1,
+         ),
++        frontier_limit=_optional_int(
++            data,
++            "frontier_limit",
++            DEFAULT_TASKS_FRONTIER_LIMIT,
++            config_path,
++            "lithos-lens.tasks",
++            minimum=1,
++        ),
+         default_time_range_days=_optional_int(
+             data,
+             "default_time_range_days",
+diff --git a/src/lithos_lens/fake_dataset.py b/src/lithos_lens/fake_dataset.py
+index 34dad3a..7ebd324 100644
+--- a/src/lithos_lens/fake_dataset.py
++++ b/src/lithos_lens/fake_dataset.py
+@@ -228,12 +228,20 @@ def demo_dataset() -> FakeLithosDataset:
+             "runbooks/influx-rollback.md": "note-influx-rollback",
+         },
+         related_neighborhoods=related_neighborhoods,
+-        # Graph oracle: `influx-ingest-cutover` is the ready, claimed,
+-        # in-flight task (the only one carrying claims), so it must sit on the
+-        # ready frontier too; `influx-dashboards` / `lens-graph-view` are
+-        # ready and unclaimed; `influx-backfill` is blocked on the cutover.
++        # Graph oracle: every open workable task is placed on exactly one
++        # frontier so none falls into the Not-classified tail (a healthy corpus
++        # this small can never be limit-truncated). `influx-ingest-cutover` is
++        # the ready, claimed, in-flight task (the only one carrying claims), so
++        # it must sit on the ready frontier too; `influx-dashboards` /
++        # `lens-graph-view` / `influx-ingest-old` are ready and unclaimed;
++        # `influx-backfill` is blocked on the cutover.
+         ready_ids=frozenset(
+-            {"influx-ingest-cutover", "influx-dashboards", "lens-graph-view"}
++            {
++                "influx-ingest-cutover",
++                "influx-dashboards",
++                "lens-graph-view",
++                "influx-ingest-old",
++            }
+         ),
+         blocked={
+             "influx-backfill": (
+diff --git a/src/lithos_lens/frontier.py b/src/lithos_lens/frontier.py
+new file mode 100644
+index 0000000..d1726e1
+--- /dev/null
++++ b/src/lithos_lens/frontier.py
+@@ -0,0 +1,376 @@
++"""Frontier join: partition the open task set into workable sections.
++
++The graph-native dashboard never re-derives readiness — Lithos owns the
++ready/blocked frontier (``lithos_task_ready`` / ``lithos_task_blocked`` evaluate
++gate and timer state at query time). Lens joins the id-sets those calls return
++against the master open list: a workable open task is *In progress* when it
++carries an inline claim, else *Ready* or *Blocked* by frontier membership, else
++*Not classified* (only reachable under frontier-limit truncation). Epics and
++gates are excluded from both frontiers upstream, so they never enter the
++workable partition; their dedicated sections arrive in later T1 slices.
++
++``classify_open_tasks`` is the pure join; ``load_dashboard`` is the five-call
++assembly that feeds it. Both live here (not in ``tasks.py``) because they depend
++on the task-graph records in ``task_graph.py``.
++"""
++
++from __future__ import annotations
++
++import asyncio
++from collections.abc import Mapping, Sequence
++from typing import Any, Protocol, cast
++
++from lithos_lens.task_graph import BlockedTaskRecord, BlockerRecord
++from lithos_lens.tasks import (
++    AgentRecord,
++    BlockerChip,
++    ClaimRecord,
++    DashboardData,
++    SectionRow,
++    TaskFilters,
++    TaskRecord,
++    TaskStatusName,
++    TaskSummary,
++    int_stat,
++    matches_filters,
++)
++
++# Only ``task``-typed rows are workable. Epics and gates roll up / gate elsewhere
++# and are excluded from both Lithos frontiers, so they never classify here.
++WORKABLE_TASK_TYPE = "task"
++
++# The three workable sections plus the truncation tail, in render order.
++WORKABLE_SECTIONS: tuple[str, ...] = ("in_progress", "ready", "blocked")
++
++
++class FrontierLithosClient(Protocol):
++    """The client surface ``load_dashboard`` consumes (the five parallel calls)."""
++
++    async def list_tasks(
++        self,
++        *,
++        agent: str | None = None,
++        status: str | None = None,
++        tags: list[str] | None = None,
++        since: str | None = None,
++        with_claims: bool = False,
++    ) -> list[TaskRecord]: ...
++
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]: ...
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]: ...
++
++    async def stats(self) -> dict[str, Any]: ...
++
++    async def list_agents(self) -> list[AgentRecord]: ...
++
++
++def _blocker_chips(
++    blockers: Sequence[BlockerRecord],
++    index: Mapping[str, TaskRecord],
++) -> tuple[BlockerChip, ...]:
++    """Render a blocked row's structured blockers as display chips.
++
++    Each chip's label is the blocking task's title when it resolves against the
++    open snapshot; otherwise a legible fallback (the predecessor/gate id, or the
++    raw blocker message) so a chip is never blank. Gate-name/type polish and the
++    unsatisfiable/cycle promotion out of Blocked are later T1 slices.
++    """
++    chips: list[BlockerChip] = []
++    for blocker in blockers:
++        predecessor = index.get(blocker.task_id)
++        if predecessor is not None:
++            label = predecessor.title
++        else:
++            label = blocker.task_id or blocker.message or blocker.kind
++        chips.append(
++            BlockerChip(label=label, kind=blocker.kind, target_id=blocker.task_id)
++        )
++    return tuple(chips)
++
++
++def classify_open_tasks(
++    open_tasks: Sequence[TaskRecord],
++    *,
++    ready_ids: set[str],
++    blocked: Sequence[BlockedTaskRecord],
++    index: Mapping[str, TaskRecord] | None = None,
++) -> dict[str, tuple[SectionRow, ...]]:
++    """Join the master open list against the ready/blocked frontier.
++
++    Returns the three workable sections plus ``unclassified``. ``index`` (id →
++    task) resolves blocker-chip titles; it defaults to ``open_tasks`` but a
++    caller can pass the unfiltered snapshot so a filtered-out predecessor still
++    names its chip. Readiness is taken verbatim from ``ready_ids`` / ``blocked``
++    — never recomputed.
++    """
++    resolve = index if index is not None else {task.id: task for task in open_tasks}
++    blocked_map = {record.task.id: record.blockers for record in blocked}
++    buckets: dict[str, list[SectionRow]] = {
++        "in_progress": [],
++        "ready": [],
++        "blocked": [],
++        "unclassified": [],
++    }
++    for task in open_tasks:
++        if task.task_type != WORKABLE_TASK_TYPE:
++            continue
++        claims: tuple[ClaimRecord, ...] = task.claims or ()
++        chips = _blocker_chips(blocked_map.get(task.id, ()), resolve)
++        if claims:
++            # In progress wins over ready/blocked: a claim means an agent is on
++            # it. A claim on a blocked row is the anomaly flagged inline.
++            buckets["in_progress"].append(
++                SectionRow(
++                    task=task,
++                    claims=claims,
++                    blockers=chips,
++                    claimed_but_blocked=task.id in blocked_map,
++                )
++            )
++        elif task.id in ready_ids and task.id in blocked_map:
++            # Both frontiers returned this row. They are independent reads, not
++            # one snapshot, so this means the two disagree — not that the task
++            # is both. Resolve it EXPLICITLY and conservatively (Blocked, and
++            # keep the blocker evidence) rather than letting branch order pick
++            # Ready silently and present a contested row as workable now.
++            buckets["blocked"].append(SectionRow(task=task, blockers=chips))
++        elif task.id in ready_ids:
++            buckets["ready"].append(SectionRow(task=task))
++        elif task.id in blocked_map:
++            buckets["blocked"].append(SectionRow(task=task, blockers=chips))
++        else:
++            # A workable open task in neither frontier set. With healthy reads
++            # this only happens under frontier-limit truncation; ``load_dashboard``
++            # decides whether to label it truncation (vs. a failed frontier read).
++            buckets["unclassified"].append(SectionRow(task=task))
++    return {section: tuple(rows) for section, rows in buckets.items()}
++
++
++async def load_dashboard(
++    lithos: FrontierLithosClient,
++    *,
++    filters: TaskFilters,
++    frontier_limit: int,
++) -> DashboardData:
++    """Assemble the dashboard from the parallel Lithos reads.
++
++    Five calls fan out concurrently: the master open list (claims inline), the
++    ready and blocked frontiers, and the recently-resolved completed/cancelled
++    windows. Stats and the agent list ride along for the header and filter
++    dropdown.
++    """
++    errors: list[str] = []
++    query_tags = list(filters.tags) or None
++    query_agent = filters.agent or None
++
++    (
++        open_result,
++        ready_result,
++        blocked_result,
++        stats_result,
++        agents_result,
++    ) = await asyncio.gather(
++        # The master open set is the whole open list (PRD data contract):
++        # NO agent/tag/since filter is pushed. Open tasks are the live frontier,
++        # not a time window (``since`` scopes only the resolved completed/
++        # cancelled sections), and filtering client-side keeps one fetch serving
++        # every projection while leaving the snapshot whole — so a blocker chip
++        # can resolve a predecessor's title even when that predecessor is itself
++        # filtered out of, or older than, the visible sections.
++        lithos.list_tasks(status="open", with_claims=True),
++        lithos.task_ready(limit=frontier_limit, with_claims=False),
++        lithos.task_blocked(limit=frontier_limit),
++        lithos.stats(),
++        lithos.list_agents(),
++        return_exceptions=True,
++    )
++
++    async def load_closed(status: TaskStatusName) -> list[TaskRecord]:
++        return await lithos.list_tasks(
++            agent=query_agent,
++            status=status,
++            tags=query_tags,
++            since=filters.since,
++        )
++
++    closed_results = await asyncio.gather(
++        load_closed("completed"),
++        load_closed("cancelled"),
++        return_exceptions=True,
++    )
++
++    # The full open snapshot (unfiltered by agent/tag) resolves blocker-chip
++    # predecessor titles even when a predecessor is filtered out of the visible
++    # sections; ``visible_open`` is the agent/tag-filtered subset that the
++    # sections render.
++    open_snapshot = _sorted_or_error("open", open_result, errors)
++    open_index = {task.id: task for task in open_snapshot}
++    visible_open = [
++        task
++        for task in open_snapshot
++        if matches_filters(task, filters=filters, status="open")
++    ]
++
++    ready_ids: set[str] = set()
++    ready_rows = 0
++    frontier_ok = True
++    if isinstance(ready_result, BaseException):
++        errors.append("Could not load the ready frontier.")
++        frontier_ok = False
++    else:
++        ready_tasks = cast(list[TaskRecord], ready_result)
++        ready_ids = {task.id for task in ready_tasks}
++        # Row count, not len(ready_ids): the limit applies to rows returned.
++        ready_rows = len(ready_tasks)
++
++    blocked_records: list[BlockedTaskRecord] = []
++    if isinstance(blocked_result, BaseException):
++        errors.append("Could not load the blocked frontier.")
++        frontier_ok = False
++    else:
++        blocked_records = cast(list[BlockedTaskRecord], blocked_result)
++
++    closed: dict[str, list[TaskRecord]] = {}
++    for status, result in zip(("completed", "cancelled"), closed_results, strict=True):
++        closed[status] = _rows_for(status, result, filters, errors)
++
++    partition = classify_open_tasks(
++        visible_open,
++        ready_ids=ready_ids,
++        blocked=blocked_records,
++        index=open_index,
++    )
++
++    # Independent reads can disagree: a task can come back on BOTH frontiers.
++    # Say so rather than resolving it invisibly — but the message describes what
++    # was RENDERED, so it must survive every step between the raw responses and
++    # the page. There are exactly three, and raw overlap clears none of them
++    # reliably:
++    #   1. the agent/tag query      -> ``visible_open``, applied before classify;
++    #   2. claim classification     -> a claimed row is In progress instead,
++    #                                  already decorated ``claimed_but_blocked``;
++    #   3. the status-group toggle  -> ``show_open`` blanks EVERY open section.
++    # (1) and (2) are handled by intersecting with ``partition["blocked"]``;
++    # (3) happens after the partition, so it is checked separately below.
++    # Warning past any of them describes a Blocked row the operator cannot see.
++    contested_ids = ready_ids & {record.task.id for record in blocked_records}
++    shown_blocked = {row.task.id for row in partition["blocked"]}
++    contested_shown = contested_ids & shown_blocked
++    show_open = "open" in filters.statuses
++    if show_open and contested_shown:
++        errors.append(
++            f"{len(contested_shown)} task(s) came back on both the ready and "
++            "blocked frontiers — those reads disagree; showing them as Blocked."
++        )
++
++    sections: dict[str, tuple[SectionRow, ...]] = {}
++    for section in WORKABLE_SECTIONS + ("unclassified",):
++        sections[section] = partition[section] if show_open else ()
++    for status in ("completed", "cancelled"):
++        sections[status] = (
++            tuple(SectionRow(task=task) for task in closed[status])
++            if status in filters.statuses
++            else ()
++        )
++
++    stats: dict[str, Any] = {}
++    if isinstance(stats_result, BaseException):
++        errors.append("Could not load Lithos stats.")
++    else:
++        stats = cast(dict[str, Any], stats_result)
++
++    agents: tuple[AgentRecord, ...] = ()
++    if isinstance(agents_result, BaseException):
++        errors.append("Could not load agent list.")
++    else:
++        agents = tuple(cast(list[AgentRecord], agents_result))
++
++    open_total = sum(len(partition[section]) for section in WORKABLE_SECTIONS) + len(
++        partition["unclassified"]
++    )
++    summary = TaskSummary(
++        in_progress=len(partition["in_progress"]),
++        ready=len(partition["ready"]),
++        blocked=len(partition["blocked"]),
++        unclassified=len(partition["unclassified"]),
++        open_total=open_total,
++        open_claims=int_stat(stats, "open_claims"),
++        recent_completed=len(closed["completed"]),
++        recent_cancelled=len(closed["cancelled"]),
++        agents=int_stat(stats, "agents", default=len(agents)),
++    )
++    return DashboardData(
++        filters=filters,
++        summary=summary,
++        sections=sections,
++        agents=agents,
++        frontier_limit=frontier_limit,
++        open_total=open_total,
++        # Truncation means the frontier reads SUCCEEDED but hit their limit,
++        # leaving otherwise-classifiable rows in the tail. Unclassified rows from
++        # a failed frontier read are surfaced by the error banner instead, not
++        # mislabelled as truncation.
++        #
++        # Unclassified rows alone do NOT prove truncation: the three reads are
++        # independent, so a task created / completed / newly blocked between them
++        # is legitimately absent from both frontiers with no limit involved.
++        # Require the limit to have actually been reached before claiming it.
++        truncated=(
++            frontier_ok
++            and (ready_rows >= frontier_limit or len(blocked_records) >= frontier_limit)
++            and bool(partition["unclassified"])
++        ),
++        errors=tuple(errors),
++    )
++
++
++def _sorted_or_error(
++    status: TaskStatusName,
++    result: list[TaskRecord] | BaseException,
++    errors: list[str],
++) -> list[TaskRecord]:
++    """Sort one status group newest-first, recording a load error if any.
++
++    No filtering — the open snapshot must stay whole so it can resolve blocker
++    chips; the caller applies ``matches_filters`` to pick the visible subset.
++    """
++    if isinstance(result, BaseException):
++        errors.append(f"Could not load {status} tasks.")
++        return []
++    return sorted(
++        cast(list[TaskRecord], result),
++        key=lambda task: task.created_at,
++        reverse=True,
++    )
++
++
++def _rows_for(
++    status: TaskStatusName,
++    result: list[TaskRecord] | BaseException,
++    filters: TaskFilters,
++    errors: list[str],
++) -> list[TaskRecord]:
++    """Filter + sort one status group's rows, recording a load error if any."""
++    if isinstance(result, BaseException):
++        errors.append(f"Could not load {status} tasks.")
++        return []
++    rows = [
++        task
++        for task in cast(list[TaskRecord], result)
++        if matches_filters(task, filters=filters, status=status)
++    ]
++    return sorted(rows, key=lambda task: task.created_at, reverse=True)
+diff --git a/src/lithos_lens/tasks.py b/src/lithos_lens/tasks.py
+index 78d3e1f..3b196aa 100644
+--- a/src/lithos_lens/tasks.py
++++ b/src/lithos_lens/tasks.py
+@@ -9,7 +9,13 @@ from enum import StrEnum
+ from typing import Any, Literal, Protocol, cast
+ 
+ TaskStatusName = Literal["open", "completed", "cancelled"]
+-ClaimedState = Literal["any", "known_claimed", "known_unclaimed"]
++# Sections of the graph-native dashboard. The three workable sections are
++# computed by joining the master open list against the Lithos ready/blocked
++# frontier (see ``frontier.py``); ``unclassified`` only fills under frontier
++# truncation. Completed/cancelled window recently-resolved work.
++SectionName = Literal[
++    "in_progress", "ready", "blocked", "unclassified", "completed", "cancelled"
++]
+ # Known task types from the Lithos 0.4 task graph: "task" (workable), "epic",
+ # "gate". Transport records carry the raw server string so an unknown future
+ # type survives round-trip; only a MISSING task_type defaults to "task" (legacy
+@@ -109,28 +115,48 @@ class NoteSummary:
+ 
+ 
+ @dataclass(frozen=True)
+-class EnrichedTask:
+-    task: TaskRecord
+-    task_status: TaskStatusRecord | None = None
+-    claim_error: str = ""
++class BlockerChip:
++    """One "waiting for" chip on a Blocked (or claimed-but-blocked) row.
++
++    ``label`` is the display text — the blocking task's title when it resolves
++    against the open snapshot, else a fallback (the gate/predecessor id or the
++    raw blocker message). ``kind`` mirrors the source
++    :class:`~lithos_lens.task_graph.BlockerRecord` kind
++    (``task``/``gate``/``blocker_unsatisfiable``/``cycle``); ``target_id`` is
++    the blocking task/gate id, kept for the deep-links a later slice adds.
++    """
+ 
+-    @property
+-    def claims(self) -> tuple[ClaimRecord, ...]:
+-        return self.task_status.claims if self.task_status else ()
++    label: str
++    kind: str = "task"
++    target_id: str = ""
++
++
++@dataclass(frozen=True)
++class SectionRow:
++    """A task rendered in one dashboard section, with its display extras.
++
++    ``claims`` are the inline claims from the master open list (the frontier
++    calls don't carry them); ``blockers`` are the resolved blocker chips on a
++    blocked row. ``claimed_but_blocked`` flags a claimed row (In progress) that
++    Lithos also reports as blocked — an agent holding a claim on infeasible
++    work.
++    """
++
++    task: TaskRecord
++    claims: tuple[ClaimRecord, ...] = ()
++    blockers: tuple[BlockerChip, ...] = ()
++    claimed_but_blocked: bool = False
+ 
+     @property
+     def claim_state(self) -> str:
+         if self.task.status != "open":
+             return "not_applicable"
+-        if self.task_status is None:
+-            return "unknown"
+-        return "known_claimed" if self.task_status.claims else "known_unclaimed"
++        return "known_claimed" if self.claims else "known_unclaimed"
+ 
+ 
+ @dataclass(frozen=True)
+ class TaskFilters:
+     statuses: tuple[TaskStatusName, ...]
+-    claimed_state: ClaimedState
+     tags: tuple[str, ...]
+     agent: str
+     since: str
+@@ -138,11 +164,12 @@ class TaskFilters:
+ 
+ @dataclass(frozen=True)
+ class TaskSummary:
+-    open_tasks: int = 0
++    in_progress: int = 0
++    ready: int = 0
++    blocked: int = 0
++    unclassified: int = 0
++    open_total: int = 0
+     open_claims: int = 0
+-    claimed_open_tasks: int = 0
+-    unclaimed_open_tasks: int = 0
+-    unknown_claim_open_tasks: int = 0
+     recent_completed: int = 0
+     recent_cancelled: int = 0
+     agents: int = 0
+@@ -152,12 +179,11 @@ class TaskSummary:
+ class DashboardData:
+     filters: TaskFilters
+     summary: TaskSummary
+-    groups: dict[TaskStatusName, tuple[EnrichedTask, ...]]
++    sections: dict[str, tuple[SectionRow, ...]]
+     agents: tuple[AgentRecord, ...]
+-    visible_cap: int
++    frontier_limit: int
+     open_total: int
+-    claim_cap_exceeded: bool = False
+-    claim_filter_limited: bool = False
++    truncated: bool = False
+     errors: tuple[str, ...] = ()
+ 
+ 
+@@ -232,131 +258,21 @@ def parse_filters(
+     if not statuses:
+         statuses = TASK_STATUSES
+ 
+-    claimed_state_raw = (values.get("claimed_state") or ["any"])[0]
+-    claimed_state: ClaimedState = (
+-        claimed_state_raw
+-        if claimed_state_raw in {"any", "known_claimed", "known_unclaimed"}
+-        else "any"
+-    )  # type: ignore[assignment]
+-
++    # ``claimed_state`` was retired with the graph-native dashboard (T1). Legacy
++    # bookmarks that still carry it must degrade gracefully, so it is parsed
++    # away (never read) rather than rejected.
+     since = normalize_since_input(
+         (values.get("since") or [""])[0],
+         default_days=default_days,
+     )
+     return TaskFilters(
+         statuses=statuses,
+-        claimed_state=claimed_state,
+         tags=tuple(values.get("tag", [])),
+         agent=(values.get("agent") or [""])[0],
+         since=since,
+     )
+ 
+ 
+-async def load_dashboard(
+-    lithos: TaskLithosClientProtocol,
+-    *,
+-    filters: TaskFilters,
+-    visible_cap: int,
+-) -> DashboardData:
+-    errors: list[str] = []
+-    query_tags = list(filters.tags) or None
+-    query_agent = filters.agent or None
+-
+-    async def load_group(status: TaskStatusName) -> list[TaskRecord]:
+-        since = filters.since
+-        # Only the open group is enriched with per-task claim info downstream,
+-        # so we only ask lithos to inline claims for that group. Completed and
+-        # cancelled groups stay on the lighter payload.
+-        return await lithos.list_tasks(
+-            agent=query_agent,
+-            status=status,
+-            tags=query_tags,
+-            since=since,
+-            with_claims=(status == "open"),
+-        )
+-
+-    group_results = await asyncio.gather(
+-        *(load_group(status) for status in TASK_STATUSES),
+-        return_exceptions=True,
+-    )
+-    raw_groups: dict[TaskStatusName, list[TaskRecord]] = {}
+-    for status, result in zip(TASK_STATUSES, group_results, strict=True):
+-        if isinstance(result, BaseException):
+-            errors.append(f"Could not load {status} tasks.")
+-            raw_groups[status] = []
+-        else:
+-            task_records = cast(list[TaskRecord], result)
+-            task_records = [
+-                task
+-                for task in task_records
+-                if _matches_filters(task, filters=filters, status=status)
+-            ]
+-            raw_groups[status] = sorted(
+-                task_records, key=lambda task: task.created_at, reverse=True
+-            )
+-
+-    open_total = len(raw_groups["open"])
+-    enriched_open = await _enrich_open_tasks(
+-        lithos, raw_groups["open"], visible_cap, errors
+-    )
+-    filtered_open = _apply_claim_filter(enriched_open, filters.claimed_state)
+-
+-    stats_result, agents_result = await asyncio.gather(
+-        lithos.stats(),
+-        lithos.list_agents(),
+-        return_exceptions=True,
+-    )
+-    stats: dict[str, Any] = {}
+-    if isinstance(stats_result, BaseException):
+-        errors.append("Could not load Lithos stats.")
+-    else:
+-        stats = cast(dict[str, Any], stats_result)
+-
+-    agents: tuple[AgentRecord, ...] = ()
+-    if isinstance(agents_result, BaseException):
+-        errors.append("Could not load agent list.")
+-    else:
+-        agents = tuple(cast(list[AgentRecord], agents_result))
+-
+-    groups: dict[TaskStatusName, tuple[EnrichedTask, ...]] = {
+-        "open": tuple(filtered_open) if "open" in filters.statuses else (),
+-        "completed": tuple(EnrichedTask(task) for task in raw_groups["completed"])
+-        if "completed" in filters.statuses
+-        else (),
+-        "cancelled": tuple(EnrichedTask(task) for task in raw_groups["cancelled"])
+-        if "cancelled" in filters.statuses
+-        else (),
+-    }
+-    known_claimed = sum(
+-        1 for row in enriched_open if row.claim_state == "known_claimed"
+-    )
+-    known_unclaimed = sum(
+-        1 for row in enriched_open if row.claim_state == "known_unclaimed"
+-    )
+-    summary = TaskSummary(
+-        open_tasks=open_total,
+-        open_claims=_int_stat(stats, "open_claims"),
+-        claimed_open_tasks=known_claimed,
+-        unclaimed_open_tasks=known_unclaimed,
+-        unknown_claim_open_tasks=max(open_total - known_claimed - known_unclaimed, 0),
+-        recent_completed=len(raw_groups["completed"]),
+-        recent_cancelled=len(raw_groups["cancelled"]),
+-        agents=_int_stat(stats, "agents", default=len(agents)),
+-    )
+-    return DashboardData(
+-        filters=filters,
+-        summary=summary,
+-        groups=groups,
+-        agents=agents,
+-        visible_cap=visible_cap,
+-        open_total=open_total,
+-        claim_cap_exceeded=open_total > visible_cap,
+-        claim_filter_limited=open_total > visible_cap
+-        and filters.claimed_state != "any",
+-        errors=tuple(errors),
+-    )
+-
+-
+ async def load_task_detail(
+     lithos: TaskLithosClientProtocol,
+     task_id: str,
+@@ -577,74 +493,18 @@ def parse_date(value: str) -> date | None:
+         return None
+ 
+ 
+-async def _enrich_open_tasks(
+-    lithos: TaskLithosClientProtocol,
+-    open_tasks: list[TaskRecord],
+-    visible_cap: int,
+-    errors: list[str],
+-) -> list[EnrichedTask]:
+-    visible = open_tasks[:visible_cap]
+-
+-    # Tasks whose claims were already returned inline by the upstream
+-    # lithos_task_list(with_claims=True) call don't need a follow-up
+-    # task_status fetch. Anything missing inline claims (older lithos,
+-    # call made without with_claims, etc.) falls back to per-task fan-out.
+-    needs_fetch = [task for task in visible if task.claims is None]
+-    fetch_results: dict[str, TaskStatusRecord | None | BaseException] = {}
+-    if needs_fetch:
+-        results = await asyncio.gather(
+-            *(lithos.task_status(task.id) for task in needs_fetch),
+-            return_exceptions=True,
+-        )
+-        for task, result in zip(needs_fetch, results, strict=True):
+-            fetch_results[task.id] = (
+-                cast(TaskStatusRecord | None, result)
+-                if not isinstance(result, BaseException)
+-                else result
+-            )
+-
+-    enriched: list[EnrichedTask] = []
+-    for task in visible:
+-        if task.claims is not None:
+-            enriched.append(
+-                EnrichedTask(
+-                    task=task,
+-                    task_status=TaskStatusRecord(
+-                        id=task.id,
+-                        title=task.title,
+-                        status=task.status,
+-                        claims=task.claims,
+-                        metadata=task.metadata,
+-                    ),
+-                )
+-            )
+-            continue
+-        result = fetch_results[task.id]
+-        if isinstance(result, BaseException):
+-            errors.append(f"Could not load claims for task {task.id}.")
+-            enriched.append(EnrichedTask(task=task, claim_error="Claims unavailable."))
+-        else:
+-            enriched.append(EnrichedTask(task=task, task_status=result))
+-
+-    enriched.extend(EnrichedTask(task=task) for task in open_tasks[visible_cap:])
+-    return enriched
+-
+-
+-def _apply_claim_filter(
+-    tasks: list[EnrichedTask],
+-    claimed_state: ClaimedState,
+-) -> list[EnrichedTask]:
+-    if claimed_state == "any":
+-        return tasks
+-    return [task for task in tasks if task.claim_state == claimed_state]
+-
+-
+-def _matches_filters(
++def matches_filters(
+     task: TaskRecord,
+     *,
+     filters: TaskFilters,
+     status: TaskStatusName,
+ ) -> bool:
++    """Client-side filter predicate shared by the dashboard sections.
++
++    Public because the frontier join (``frontier.py``) re-applies it over the
++    joined snapshot; the guardrail forbids reaching for another module's
++    privates.
++    """
+     if task.status != status:
+         return False
+     if filters.agent and task.created_by != filters.agent:
+@@ -659,7 +519,7 @@ def _matches_filters(
+     return True
+ 
+ 
+-def _int_stat(stats: dict[str, Any], key: str, *, default: int = 0) -> int:
++def int_stat(stats: dict[str, Any], key: str, *, default: int = 0) -> int:
+     value = stats.get(key, default)
+     return value if isinstance(value, int) else default
+ 
+diff --git a/src/lithos_lens/templates/tasks/dashboard.html b/src/lithos_lens/templates/tasks/dashboard.html
+index 6475cf0..01a7214 100644
+--- a/src/lithos_lens/templates/tasks/dashboard.html
++++ b/src/lithos_lens/templates/tasks/dashboard.html
+@@ -32,30 +32,30 @@
+       {% endif %}
+ 
+       <section class="situation-grid" aria-label="Current situation">
+-        <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}">
+-          <span>Open tasks</span>
+-          <strong>{{ dashboard.summary.open_tasks }}</strong>
+-          <small>Matching current filters since {{ dashboard.filters.since }}</small>
+-        </a>
+-        <a class="metric-card" href="/tasks?status=open&claimed_state=known_claimed&since={{ dashboard.filters.since }}">
+-          <span>Known claimed</span>
+-          <strong>{{ dashboard.summary.claimed_open_tasks }}</strong>
++        <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-in_progress">
++          <span>In progress</span>
++          <strong>{{ dashboard.summary.in_progress }}</strong>
+           <small>{{ dashboard.summary.open_claims }} active claims</small>
+         </a>
+-        <a class="metric-card" href="/tasks?status=open&claimed_state=known_unclaimed&since={{ dashboard.filters.since }}">
+-          <span>Known unclaimed</span>
+-          <strong>{{ dashboard.summary.unclaimed_open_tasks }}</strong>
+-          <small>{{ dashboard.summary.unknown_claim_open_tasks }} unknown beyond cap/failures</small>
++        <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-ready">
++          <span>Ready</span>
++          <strong>{{ dashboard.summary.ready }}</strong>
++          <small>Unclaimed and workable now</small>
++        </a>
++        <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-blocked">
++          <span>Blocked</span>
++          <strong>{{ dashboard.summary.blocked }}</strong>
++          <small>Waiting on predecessors or gates</small>
+         </a>
+         <a class="metric-card" href="/tasks?status=completed&since={{ dashboard.filters.since }}">
+           <span>Recently completed</span>
+           <strong>{{ dashboard.summary.recent_completed }}</strong>
+-          <small>Created since {{ dashboard.filters.since }}</small>
++          <small>Resolved since {{ dashboard.filters.since }}</small>
+         </a>
+         <a class="metric-card" href="/tasks?status=cancelled&since={{ dashboard.filters.since }}">
+           <span>Recently cancelled</span>
+           <strong>{{ dashboard.summary.recent_cancelled }}</strong>
+-          <small>Created since {{ dashboard.filters.since }}</small>
++          <small>Resolved since {{ dashboard.filters.since }}</small>
+         </a>
+         <article class="metric-card">
+           <span>Agents</span>
+@@ -64,15 +64,10 @@
+         </article>
+       </section>
+ 
+-      {% if dashboard.claim_filter_limited %}
++      {% if dashboard.truncated %}
+         <section class="banner banner-warning" role="status">
+-          <strong>Claim filter is approximate.</strong>
+-          <span>Claim filter covers the first {{ dashboard.visible_cap }} open tasks; narrow filters for full accuracy.</span>
+-        </section>
+-      {% elif dashboard.claim_cap_exceeded %}
+-        <section class="banner" role="status">
+-          <strong>Claim detail is capped.</strong>
+-          <span>Showing claim detail for the first {{ dashboard.visible_cap }} of {{ dashboard.open_total }} open rows. Click a row to see claims for the rest.</span>
++          <strong>Section counts are approximate.</strong>
++          <span>The Lithos ready/blocked frontier truncated at {{ dashboard.frontier_limit }}; some open tasks are listed as Not classified below.</span>
+         </section>
+       {% endif %}
+ 
+@@ -86,14 +81,6 @@
+             </label>
+           {% endfor %}
+         </fieldset>
+-        <label>
+-          Claimed state
+-          <select name="claimed_state">
+-            <option value="any" {{ "selected" if dashboard.filters.claimed_state == "any" else "" }}>Any</option>
+-            <option value="known_claimed" {{ "selected" if dashboard.filters.claimed_state == "known_claimed" else "" }}>Known claimed</option>
+-            <option value="known_unclaimed" {{ "selected" if dashboard.filters.claimed_state == "known_unclaimed" else "" }}>Known unclaimed</option>
+-          </select>
+-        </label>
+         <label>
+           Tag
+           <input type="text" name="tag" value="{{ dashboard.filters.tags | join(',') }}" placeholder="project:influx">
+@@ -119,25 +106,49 @@
+         <a class="button-secondary" href="/tasks">Reset</a>
+       </form>
+ 
+-      <section class="task-board" aria-label="Task groups">
+-        {% for status in dashboard.filters.statuses %}
+-          {% set rows = dashboard.groups[status] %}
+-          <article class="task-group" id="task-group-{{ status }}" data-task-group="{{ status }}">
+-            <header>
+-              <h2>{{ status.title() }}</h2>
+-              <span>{{ rows | length }}</span>
+-            </header>
+-            {% if rows %}
+-              <div class="task-list" id="task-list-{{ status }}" data-task-list="{{ status }}">
+-                {% for row in rows %}
+-                  {% include "tasks/row.html" %}
+-                {% endfor %}
+-              </div>
+-            {% else %}
+-              <div class="task-list" id="task-list-{{ status }}" data-task-list="{{ status }}"></div>
+-              <p class="empty">No {{ status }} tasks match these filters.</p>
+-            {% endif %}
+-          </article>
++      {#
++        Section order derives from the ready/blocked frontier, not claim-state
++        inference. The three workable sections show when the "open" status is
++        selected; "Not classified" only appears under frontier truncation.
++      #}
++      {% set section_labels = {
++        "in_progress": "In progress",
++        "ready": "Ready",
++        "blocked": "Blocked",
++        "unclassified": "Not classified",
++        "completed": "Completed",
++        "cancelled": "Cancelled",
++      } %}
++      {% set workable = ("in_progress", "ready", "blocked") %}
++      {% set section_order = workable + ("unclassified", "completed", "cancelled") %}
++      <section class="task-board" aria-label="Task sections">
++        {% for section in section_order %}
++          {% set rows = dashboard.sections[section] %}
++          {% if section in ("completed", "cancelled") %}
++            {% set active = section in dashboard.filters.statuses %}
++          {% elif section == "unclassified" %}
++            {% set active = "open" in dashboard.filters.statuses and rows %}
++          {% else %}
++            {% set active = "open" in dashboard.filters.statuses %}
++          {% endif %}
++          {% if active %}
++            <article class="task-group" id="task-group-{{ section }}" data-task-group="{{ section }}">
++              <header>
++                <h2>{{ section_labels[section] }}</h2>
++                <span>{{ rows | length }}</span>
++              </header>
++              {% if rows %}
++                <div class="task-list" id="task-list-{{ section }}" data-task-list="{{ section }}">
++                  {% for row in rows %}
++                    {% include "tasks/row.html" %}
++                  {% endfor %}
++                </div>
++              {% else %}
++                <div class="task-list" id="task-list-{{ section }}" data-task-list="{{ section }}"></div>
++                <p class="empty">No {{ section_labels[section] | lower }} tasks match these filters.</p>
++              {% endif %}
++            </article>
++          {% endif %}
+         {% endfor %}
+       </section>
+     </div>
+diff --git a/src/lithos_lens/templates/tasks/row.html b/src/lithos_lens/templates/tasks/row.html
+index d09cf9c..1253fa3 100644
+--- a/src/lithos_lens/templates/tasks/row.html
++++ b/src/lithos_lens/templates/tasks/row.html
+@@ -24,8 +24,9 @@
+       <span class="claim-chip" data-claim-summary>{{ row.claims | length }} claim{{ "s" if (row.claims | length) != 1 else "" }}</span>
+     {% elif row.claim_state == "known_unclaimed" %}
+       <span class="claim-chip claim-chip-open" data-claim-summary>unclaimed</span>
+-    {% elif row.claim_state == "unknown" %}
+-      <span class="claim-chip claim-chip-unknown" data-claim-summary>claims unknown</span>
++    {% endif %}
++    {% if row.claimed_but_blocked %}
++      <span class="badge badge-blocked" data-claimed-but-blocked>blocked</span>
+     {% endif %}
+     <span class="finding-chip" data-finding-count hidden>0 new findings</span>
+   </div>
+@@ -36,7 +37,11 @@
+       {% endfor %}
+     {% endif %}
+   </div>
+-  {% if row.claim_error %}
+-    <small class="warning-text">{{ row.claim_error }}</small>
++  {% if row.blockers %}
++    <div class="blocker-list" data-blocker-list aria-label="Blocked by">
++      {% for blocker in row.blockers %}
++        <span class="blocker-chip blocker-chip-{{ blocker.kind }}" data-blocker-kind="{{ blocker.kind }}">{{ blocker.label }}</span>
++      {% endfor %}
++    </div>
+   {% endif %}
+ </article>
+diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
+index 4578bf6..f3daf8c 100644
+--- a/src/lithos_lens/web.py
++++ b/src/lithos_lens/web.py
+@@ -20,6 +20,7 @@ from lithos_lens.fake_lithos import (
+     FakeLithosClient,
+     fake_lithos_enabled,
+ )
++from lithos_lens.frontier import load_dashboard
+ from lithos_lens.knowledge import (
+     ResolveOutcome,
+     load_related_panel,
+@@ -37,7 +38,6 @@ from lithos_lens.tasks import (
+     find_task,
+     format_display_date,
+     format_tag,
+-    load_dashboard,
+     load_task_detail,
+     parse_filters,
+ )
+@@ -372,34 +372,31 @@ async def _render_tasks(
+                 "lens_route": str(request.url.path),
+                 "query_items": query_items,
+                 "statuses": list(filters.statuses),
+-                "claimed_state": filters.claimed_state,
+                 "tags": list(filters.tags),
+                 "agent": filters.agent,
+                 "since": filters.since,
+-                "visible_cap": state.config.tasks.visible_cap,
++                "frontier_limit": state.config.tasks.frontier_limit,
+             },
+         )
+         dashboard = await load_dashboard(
+             state.lithos_client,
+             filters=filters,
+-            visible_cap=state.config.tasks.visible_cap,
++            frontier_limit=state.config.tasks.frontier_limit,
+         )
+         logger.debug(
+             "tasks dashboard loaded",
+             extra={
+                 "lens_route": str(request.url.path),
+                 "statuses": list(filters.statuses),
+-                "claimed_state": filters.claimed_state,
+                 "tags": list(filters.tags),
+                 "agent": filters.agent,
+                 "since": filters.since,
+-                "visible_cap": dashboard.visible_cap,
++                "frontier_limit": dashboard.frontier_limit,
+                 "open_total": dashboard.open_total,
+-                "group_counts": {
+-                    status: len(rows) for status, rows in dashboard.groups.items()
++                "section_counts": {
++                    section: len(rows) for section, rows in dashboard.sections.items()
+                 },
+-                "claim_cap_exceeded": dashboard.claim_cap_exceeded,
+-                "claim_filter_limited": dashboard.claim_filter_limited,
++                "truncated": dashboard.truncated,
+                 "errors": list(dashboard.errors),
+             },
+         )
+@@ -417,7 +414,7 @@ async def _render_tasks(
+ 
+ 
+ def task_tag_url(request: Request, tag: str) -> str:
+-    preserved_keys = {"status", "claimed_state", "agent", "since"}
++    preserved_keys = {"status", "agent", "since"}
+     params: list[tuple[str, str]] = [
+         (key, value)
+         for key, value in request.query_params.multi_items()
+diff --git a/tests/test_fake_lithos.py b/tests/test_fake_lithos.py
+index 5b0fdd2..4f1e514 100644
+--- a/tests/test_fake_lithos.py
++++ b/tests/test_fake_lithos.py
+@@ -349,10 +349,19 @@ async def test_fake_client_task_ready_scoped_by_project_and_tags() -> None:
+     client = FakeLithosClient()
+ 
+     all_ids = {t.id for t in await client.task_ready()}
+-    assert all_ids == {"influx-ingest-cutover", "influx-dashboards", "lens-graph-view"}
++    assert all_ids == {
++        "influx-ingest-cutover",
++        "influx-dashboards",
++        "lens-graph-view",
++        "influx-ingest-old",
++    }
+ 
+     influx = {t.id for t in await client.task_ready(project="influx")}
+-    assert influx == {"influx-ingest-cutover", "influx-dashboards"}
++    assert influx == {
++        "influx-ingest-cutover",
++        "influx-dashboards",
++        "influx-ingest-old",
++    }
+ 
+     observability = {t.id for t in await client.task_ready(tags=["area:observability"])}
+     assert observability == {"influx-dashboards"}
+@@ -383,6 +392,21 @@ def test_demo_dataset_is_deterministic() -> None:
+     assert demo_dataset() == demo_dataset()
+ 
+ 
++def test_demo_dataset_classifies_every_open_workable_task() -> None:
++    """Regression (f-003): every open workable (task-typed) row in the demo set
++    must sit on exactly one frontier. A workable open task in neither ready_ids
++    nor blocked would land in the Not-classified tail and make the rendered
++    dashboard claim a false "frontier truncated at 500" on a five-task corpus."""
++    dataset = demo_dataset()
++    workable_open = {
++        task.id
++        for task in dataset.tasks
++        if task.status == "open" and task.task_type == "task"
++    }
++    classified = set(dataset.ready_ids) | set(dataset.blocked)
++    assert workable_open - classified == set()
++
++
+ @pytest.mark.anyio
+ async def test_fake_client_serves_a_composed_dataset() -> None:
+     """The point of the fixture/behavior split: a test can hand the client its
+diff --git a/tests/test_frontier.py b/tests/test_frontier.py
+new file mode 100644
+index 0000000..496c224
+--- /dev/null
++++ b/tests/test_frontier.py
+@@ -0,0 +1,360 @@
++"""T1 slice 2 — frontier join (Ready / In progress / Blocked sections).
++
++``classify_open_tasks`` is the pure join between the master open list and the
++Lithos ready/blocked frontier. These tests pin every classification branch and
++the blocker-chip resolution; readiness is supplied explicitly (the fake oracle
++pattern) because Lens must never recompute it.
++"""
++
++from __future__ import annotations
++
++import asyncio
++from typing import Any
++
++import pytest
++
++from lithos_lens.frontier import (
++    WORKABLE_SECTIONS,
++    classify_open_tasks,
++    load_dashboard,
++)
++from lithos_lens.task_graph import BlockedTaskRecord, BlockerRecord
++from lithos_lens.tasks import (
++    AgentRecord,
++    ClaimRecord,
++    TaskFilters,
++    TaskRecord,
++)
++
++
++def _task(
++    task_id: str,
++    *,
++    task_type: str = "task",
++    claims: Any = None,
++    tags: tuple[str, ...] = (),
++) -> TaskRecord:
++    return TaskRecord(
++        id=task_id,
++        title=f"Title {task_id}",
++        status="open",
++        task_type=task_type,
++        tags=tags,
++        claims=claims,
++    )
++
++
++def _blocked(task: TaskRecord, *blockers: BlockerRecord) -> BlockedTaskRecord:
++    return BlockedTaskRecord(task=task, blockers=tuple(blockers))
++
++
++def _section_ids(sections: dict[str, tuple[Any, ...]], key: str) -> list[str]:
++    return [row.task.id for row in sections[key]]
++
++
++def test_claim_makes_in_progress_beating_ready_and_blocked() -> None:
++    claimed = _task("c", claims=(ClaimRecord(agent="a", aspect="impl"),))
++    sections = classify_open_tasks(
++        [claimed],
++        ready_ids={"c"},
++        blocked=[_blocked(claimed, BlockerRecord(kind="task", task_id="x"))],
++    )
++    assert _section_ids(sections, "in_progress") == ["c"]
++    assert _section_ids(sections, "ready") == []
++    assert _section_ids(sections, "blocked") == []
++
++
++def test_ready_membership_classifies_ready() -> None:
++    task = _task("r", claims=())
++    sections = classify_open_tasks([task], ready_ids={"r"}, blocked=[])
++    assert _section_ids(sections, "ready") == ["r"]
++
++
++def test_blocked_membership_classifies_blocked_with_predecessor_title_chip() -> None:
++    predecessor = _task("pred", claims=())
++    blocked = _task("b", claims=())
++    sections = classify_open_tasks(
++        [blocked, predecessor],
++        ready_ids={"pred"},
++        blocked=[
++            _blocked(blocked, BlockerRecord(kind="task", task_id="pred", type="blocks"))
++        ],
++    )
++    assert _section_ids(sections, "blocked") == ["b"]
++    (row,) = sections["blocked"]
++    assert [chip.label for chip in row.blockers] == ["Title pred"]
++    assert row.blockers[0].kind == "task"
++    assert row.blockers[0].target_id == "pred"
++
++
++def test_blocker_chip_falls_back_when_predecessor_absent() -> None:
++    blocked = _task("b", claims=())
++    sections = classify_open_tasks(
++        [blocked],
++        ready_ids=set(),
++        blocked=[
++            _blocked(
++                blocked,
++                BlockerRecord(kind="gate", task_id="gate-9", message="Waiting on gate"),
++            )
++        ],
++    )
++    (row,) = sections["blocked"]
++    # No predecessor in the snapshot -> fall back to the id rather than a blank.
++    assert row.blockers[0].label == "gate-9"
++
++
++def test_unclassified_only_when_absent_from_both_frontiers() -> None:
++    task = _task("u", claims=())
++    sections = classify_open_tasks([task], ready_ids=set(), blocked=[])
++    assert _section_ids(sections, "unclassified") == ["u"]
++    assert _section_ids(sections, "ready") == []
++    assert _section_ids(sections, "blocked") == []
++
++
++@pytest.mark.parametrize("task_type", ["epic", "gate"])
++def test_epics_and_gates_never_enter_workable_sections(task_type: str) -> None:
++    non_workable = _task("e", task_type=task_type, claims=())
++    sections = classify_open_tasks([non_workable], ready_ids={"e"}, blocked=[])
++    assert all(sections[key] == () for key in sections)
++
++
++def test_claimed_but_blocked_is_flagged_in_progress() -> None:
++    claimed = _task("c", claims=(ClaimRecord(agent="a", aspect="impl"),))
++    sections = classify_open_tasks(
++        [claimed],
++        ready_ids=set(),
++        blocked=[_blocked(claimed, BlockerRecord(kind="task", task_id="x"))],
++    )
++    (row,) = sections["in_progress"]
++    assert row.claimed_but_blocked is True
++    assert row.blockers  # chips still attached for the anomaly
++
++
++# --- load_dashboard assembly ----------------------------------------------
++
++
++class _FrontierFake:
++    """Minimal client covering the five parallel calls load_dashboard makes."""
++
++    def __init__(
++        self,
++        *,
++        open_tasks: list[TaskRecord],
++        ready: list[TaskRecord],
++        blocked: list[BlockedTaskRecord],
++        completed: list[TaskRecord] | None = None,
++        cancelled: list[TaskRecord] | None = None,
++        fail_ready: bool = False,
++    ) -> None:
++        self._open = open_tasks
++        self._ready = ready
++        self._blocked = blocked
++        self._completed = completed or []
++        self._cancelled = cancelled or []
++        self._fail_ready = fail_ready
++
++    async def list_tasks(
++        self,
++        *,
++        agent: str | None = None,
++        status: str | None = None,
++        tags: list[str] | None = None,
++        since: str | None = None,
++        with_claims: bool = False,
++    ) -> list[TaskRecord]:
++        # Mirror the real server: agent/tag are filtered upstream when passed.
++        rows = {
++            "open": self._open,
++            "completed": self._completed,
++            "cancelled": self._cancelled,
++        }[status or "open"]
++        if agent:
++            rows = [task for task in rows if task.created_by == agent]
++        if tags:
++            rows = [task for task in rows if all(tag in task.tags for tag in tags)]
++        return rows
++
++    async def task_ready(
++        self,
++        *,
++        limit: int | None = None,
++        with_claims: bool = False,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[TaskRecord]:
++        if self._fail_ready:
++            raise RuntimeError("ready frontier unavailable")
++        return self._ready
++
++    async def task_blocked(
++        self,
++        *,
++        limit: int | None = None,
++        project: str | None = None,
++        tags: list[str] | None = None,
++    ) -> list[BlockedTaskRecord]:
++        return self._blocked
++
++    async def stats(self) -> dict[str, Any]:
++        return {"open_claims": 2, "agents": 3}
++
++    async def list_agents(self) -> list[AgentRecord]:
++        return [AgentRecord(id="a"), AgentRecord(id="b")]
++
++
++_FILTERS = TaskFilters(
++    statuses=("open", "completed", "cancelled"), tags=(), agent="", since=""
++)
++
++
++def test_load_dashboard_partitions_and_counts() -> None:
++    in_prog = _task("c", claims=(ClaimRecord(agent="a", aspect="impl"),))
++    ready = _task("r", claims=())
++    blocked = _task("b", claims=())
++    fake = _FrontierFake(
++        open_tasks=[in_prog, ready, blocked],
++        ready=[ready],
++        blocked=[_blocked(blocked, BlockerRecord(kind="task", task_id="c"))],
++    )
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++    assert _section_ids(data.sections, "in_progress") == ["c"]
++    assert _section_ids(data.sections, "ready") == ["r"]
++    assert _section_ids(data.sections, "blocked") == ["b"]
++    assert data.summary.in_progress == 1
++    assert data.summary.ready == 1
++    assert data.summary.blocked == 1
++    assert data.summary.open_total == 3
++    assert data.truncated is False
++    assert data.errors == ()
++
++
++def test_load_dashboard_resolves_blocker_title_when_predecessor_filtered_out() -> None:
++    """Regression (f-001): the blocker chip must render the predecessor's TITLE
++    even when a tag filter hides the predecessor from the visible sections. The
++    master open list is fetched unfiltered so the join can still resolve it."""
++    blocked = _task("blk", claims=(), tags=("project:a",))
++    pred = _task("pred", claims=(), tags=("project:b",))
++    fake = _FrontierFake(
++        open_tasks=[blocked, pred],
++        ready=[pred],
++        blocked=[
++            _blocked(blocked, BlockerRecord(kind="task", task_id="pred", type="blocks"))
++        ],
++    )
++    filters = TaskFilters(statuses=("open",), tags=("project:a",), agent="", since="")
++    data = asyncio.run(load_dashboard(fake, filters=filters, frontier_limit=500))
++
++    assert _section_ids(data.sections, "blocked") == ["blk"]
++    (row,) = data.sections["blocked"]
++    assert row.blockers[0].label == "Title pred"
++    assert row.blockers[0].target_id == "pred"
++    # The predecessor itself is filtered out of the visible sections.
++    assert _section_ids(data.sections, "ready") == []
++
++
++def test_load_dashboard_frontier_error_is_not_reported_as_truncation() -> None:
++    """Regression (f-002): a failed frontier read leaves rows unclassified, but
++    that is an error (surfaced by the banner), NOT frontier-limit truncation —
++    ``truncated`` must stay False so the dashboard doesn't claim a false cap."""
++    ready = _task("r", claims=())
++    fake = _FrontierFake(open_tasks=[ready], ready=[ready], blocked=[], fail_ready=True)
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++    # The ready call failed, so the row can't be placed on the frontier.
++    assert _section_ids(data.sections, "unclassified") == ["r"]
++    assert data.truncated is False
++    assert any("ready frontier" in message for message in data.errors)
++
++
++def test_load_dashboard_flags_truncation_when_frontier_hits_its_limit() -> None:
++    """When both frontier reads succeed but omit a workable open task AND a
++    frontier response actually reached its limit, the tail row IS truncation."""
++    ready = _task("r", claims=())
++    overflow = _task("o", claims=())
++    # The ready read returns as many rows as the limit allows, so the tail
++    # genuinely is overflow rather than read-skew.
++    fake = _FrontierFake(open_tasks=[ready, overflow], ready=[ready], blocked=[])
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=1))
++    assert _section_ids(data.sections, "unclassified") == ["o"]
++    assert data.truncated is True
++    assert data.errors == ()
++
++
++def test_load_dashboard_does_not_call_read_skew_truncation() -> None:
++    """An unclassified row with BOTH frontiers well under their limit is
++    read-skew (created/completed/blocked between the independent reads), not
++    truncation — the operator must not be shown a false accuracy warning."""
++    ready = _task("r", claims=())
++    skewed = _task("o", claims=())
++    fake = _FrontierFake(open_tasks=[ready, skewed], ready=[ready], blocked=[])
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++    assert _section_ids(data.sections, "unclassified") == ["o"]
++    assert data.truncated is False
++
++
++def test_load_dashboard_resolves_ready_blocked_overlap_conservatively() -> None:
++    """A task returned by BOTH frontiers means the independent reads disagree.
++    It must render Blocked (keeping its blocker evidence) and say so, not be
++    silently presented as workable-now by branch order."""
++    contested = _task("c", claims=())
++    fake = _FrontierFake(
++        open_tasks=[contested],
++        ready=[contested],
++        blocked=[_blocked(contested, BlockerRecord(kind="task", task_id="p"))],
++    )
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++    assert _section_ids(data.sections, "ready") == []
++    assert _section_ids(data.sections, "blocked") == ["c"]
++    # the blocker evidence must survive the conservative reclassification —
++    # discarding it is half of what made the defect invisible
++    (row,) = data.sections["blocked"]
++    assert [chip.target_id for chip in row.blockers] == ["p"]
++    assert any("both the ready and blocked" in message for message in data.errors)
++
++
++def test_overlap_warning_is_render_effective_for_a_claimed_task() -> None:
++    """A CLAIMED contested task stays In progress (a claim outranks the
++    frontier), so the warning must not claim it is shown as Blocked. The
++    existing claimed_but_blocked decoration is what surfaces the anomaly."""
++    contested = _task("c", claims=(ClaimRecord(agent="a", aspect="impl"),))
++    fake = _FrontierFake(
++        open_tasks=[contested],
++        ready=[contested],
++        blocked=[_blocked(contested, BlockerRecord(kind="task", task_id="p"))],
++    )
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++    assert _section_ids(data.sections, "in_progress") == ["c"]
++    assert _section_ids(data.sections, "blocked") == []
++    assert data.sections["in_progress"][0].claimed_but_blocked is True
++    assert not any("showing them as Blocked" in message for message in data.errors)
++
++
++def test_overlap_warning_is_render_effective_when_open_status_hidden() -> None:
++    """Hiding the whole Open status group blanks every open section, so the
++    contested row renders nowhere even though it survived the partition. The
++    third and last suppression path between the frontier reads and the page."""
++    contested = _task("c", claims=())
++    filters = TaskFilters(statuses=("completed",), tags=(), agent="", since="")
++    fake = _FrontierFake(
++        open_tasks=[contested],
++        ready=[contested],
++        blocked=[_blocked(contested, BlockerRecord(kind="task", task_id="p"))],
++    )
++    data = asyncio.run(load_dashboard(fake, filters=filters, frontier_limit=500))
++    assert all(_section_ids(data.sections, key) == [] for key in WORKABLE_SECTIONS)
++    assert not any("showing them as Blocked" in message for message in data.errors)
++
++
++def test_overlap_warning_is_render_effective_for_a_filtered_task() -> None:
++    """A contested task filtered out by the agent/tag query renders nowhere, so
++    a warning about it would describe a row the operator cannot see."""
++    contested = _task("c", claims=(), tags=("keep",))
++    filters = TaskFilters(statuses=("open",), tags=("other",), agent="", since="")
++    fake = _FrontierFake(
++        open_tasks=[contested],
++        ready=[contested],
++        blocked=[_blocked(contested, BlockerRecord(kind="task", task_id="p"))],
++    )
++    data = asyncio.run(load_dashboard(fake, filters=filters, frontier_limit=500))
++    assert all(_section_ids(data.sections, key) == [] for key in WORKABLE_SECTIONS)
++    assert not any("showing them as Blocked" in message for message in data.errors)
+diff --git a/tests/test_tasks_mvp.py b/tests/test_tasks_mvp.py
+index d82cb5e..4faab69 100644
+--- a/tests/test_tasks_mvp.py
++++ b/tests/test_tasks_mvp.py
+@@ -43,8 +43,11 @@ class TaskFakeLithosClient:
+         self.list_calls: list[dict[str, Any]] = []
+         # Task-graph oracle state (lithos 0.4). Lens never re-derives readiness,
+         # so the fake is the source of truth: ready_ids / blocked drive the
+-        # frontier, edges/children drive the detail surfaces. All default empty.
+-        self.ready_ids: set[str] = set()
++        # frontier, edges/children drive the detail surfaces. By default the two
++        # unclaimed workable open tasks sit on the ready frontier (open-claimed
++        # is claimed, so it classifies as In progress regardless); tests that
++        # exercise blocking override these.
++        self.ready_ids: set[str] = {"open-unclaimed", "open-old"}
+         self.blocked: dict[str, tuple[BlockerRecord, ...]] = {}
+         self.edges: dict[str, list[EdgeRecord]] = {}
+         self.children: dict[str, list[str]] = {}
+@@ -327,15 +330,18 @@ def test_dashboard_shows_current_situation_and_default_groups(
+         response = client.get("/tasks?since=2026-04-01")
+ 
+     assert response.status_code == 200
+-    assert "Open tasks" in response.text
++    assert "In progress" in response.text
++    assert "Ready" in response.text
++    assert "Blocked" in response.text
+     assert "Claimed open task" in response.text
+     assert "Unclaimed open task" in response.text
+-    assert "Old open task" not in response.text
++    # Open tasks are the live frontier and are NOT windowed by `since` (it scopes
++    # only the resolved completed/cancelled sections), so an old still-open task
++    # stays visible.
++    assert "Old open task" in response.text
+     assert "Recently completed task" in response.text
+     assert "Old completed task" not in response.text
+     assert "Recently cancelled task" in response.text
+-    assert "Known claimed" in response.text
+-    assert "Known unclaimed" in response.text
+     assert "implementation - worker-a" in response.text
+ 
+ 
+@@ -382,11 +388,13 @@ def test_dashboard_accepts_uk_created_since_date(
+     assert 'value="01/04/2026"' in response.text
+     assert 'data-native-date value="2026-04-01"' in response.text
+     assert 'data-open-date-picker aria-label="Open calendar"' in response.text
+-    open_call = next(call for call in fake.list_calls if call["status"] == "open")
+     completed_call = next(
+         call for call in fake.list_calls if call["status"] == "completed"
+     )
+-    assert open_call["since"] == "2026-04-01"
++    # `since` scopes only the resolved (completed/cancelled) windows; the master
++    # open call is unfiltered so it never carries a `since`.
++    open_call = next(call for call in fake.list_calls if call["status"] == "open")
++    assert open_call["since"] is None
+     assert completed_call["since"] == "2026-04-01"
+ 
+ 
+@@ -403,9 +411,9 @@ def test_task_list_tag_links_replace_tag_and_preserve_active_filters(
+     text = unescape(response.text)
+ 
+     assert response.status_code == 200
++    # claimed_state was retired, so it is no longer preserved in tag links.
+     assert (
+-        'href="/tasks?status=open&claimed_state=any&agent=planner&'
+-        'since=01%2F04%2F2026&tag=area%3Adocs"'
++        'href="/tasks?status=open&agent=planner&since=01%2F04%2F2026&tag=area%3Adocs"'
+     ) in text
+     assert 'class="tag-chip tag-chip-project"' in text
+     assert (
+@@ -434,11 +442,11 @@ def test_task_detail_tag_links_replace_tag_and_preserve_active_filters(
+     assert 'class="tag-chip tag-chip-project"' in text
+ 
+ 
+-def test_claimed_state_filter_does_not_classify_rows_beyond_cap(
++def test_legacy_claimed_state_url_is_ignored(
+     lithos_lens_config_env: Path,
+-    monkeypatch: pytest.MonkeyPatch,
+ ) -> None:
+-    monkeypatch.setenv("LITHOS_LENS_TASKS_VISIBLE_CAP", "1")
++    """A stale ``?claimed_state=`` bookmark must degrade gracefully (story 24):
++    it is parsed away, never rejected, and does not filter the sections."""
+     fake = TaskFakeLithosClient()
+ 
+     with _client(lithos_lens_config_env, fake) as client:
+@@ -447,17 +455,199 @@ def test_claimed_state_filter_does_not_classify_rows_beyond_cap(
+         )
+ 
+     assert response.status_code == 200
+-    assert "Claim filter covers the first 1 open tasks" in response.text
+-    assert "Claimed open task" not in response.text
+-    assert "Unclaimed open task" not in response.text
+-    assert "Old open task" not in response.text
+-    # Claims for the visible row arrive inline via lithos_task_list(with_claims=True),
+-    # so the per-task lithos_task_status fan-out is not used. Beyond-cap tasks are
+-    # not classified either way.
+-    assert fake.status_calls == []
+-    open_list_calls = [c for c in fake.list_calls if c["status"] == "open"]
+-    assert open_list_calls, "expected at least one list_tasks call for status=open"
+-    assert all(c["with_claims"] is True for c in open_list_calls)
++    # The claimed-state filter is gone, so the claimed row is not filtered out.
++    assert "Claimed open task" in response.text
++    assert "Unclaimed open task" in response.text
++
++
++def test_blocker_chip_resolves_predecessor_title_under_tag_filter(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Regression (f-001): with a project/tag filter active, a blocked row's
++    chip must still show the *title* of a predecessor that lives in a different
++    project (and is therefore filtered out of the visible sections). The master
++    open list is fetched unfiltered so the join can resolve it."""
++    fake = TaskFakeLithosClient()
++    fake.tasks.append(
++        TaskRecord(
++            id="blk",
++            title="Blocked in project A",
++            status="open",
++            created_by="planner",
++            created_at="2026-04-26T10:00:00+00:00",
++            tags=("project:a",),
++        )
++    )
++    fake.tasks.append(
++        TaskRecord(
++            id="pred",
++            title="Predecessor in project B",
++            status="open",
++            created_by="planner",
++            created_at="2026-04-26T09:00:00+00:00",
++            tags=("project:b",),
++        )
++    )
++    fake.ready_ids = {"pred"}
++    fake.blocked = {
++        "blk": (
++            BlockerRecord(
++                kind="task",
++                task_id="pred",
++                type="blocks",
++                status="open",
++                message="Waiting on predecessor pred to complete.",
++            ),
++        )
++    }
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?status=open&tag=project:a&since=2026-04-01")
++
++    assert response.status_code == 200
++    text = response.text
++    blocked_group = text[text.index('data-task-group="blocked"') :]
++    blocked_group = blocked_group[: blocked_group.index("</article>")]
++    assert "Blocked in project A" in blocked_group
++    # The chip carries the predecessor's title, resolved from the unfiltered
++    # snapshot, even though project:b is filtered out of the visible sections.
++    assert "Predecessor in project B" in blocked_group
++    # The predecessor is not itself rendered as a visible row.
++    ready_group = text[text.index('data-task-group="ready"') :]
++    ready_group = ready_group[: ready_group.index("</article>")]
++    assert "Predecessor in project B" not in ready_group
++
++
++def test_blocker_chip_resolves_older_predecessor_title_under_since_filter(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Regression (f-001): a still-open predecessor created *before* the `since`
++    date must still name the blocker chip. Open tasks are not windowed by
++    `since`, so the master open snapshot stays whole and the title resolves."""
++    fake = TaskFakeLithosClient()
++    fake.tasks.append(
++        TaskRecord(
++            id="blk",
++            title="Recent blocked work",
++            status="open",
++            created_by="planner",
++            created_at="2026-04-26T10:00:00+00:00",
++        )
++    )
++    fake.tasks.append(
++        TaskRecord(
++            id="pred",
++            title="Ancient predecessor",
++            status="open",
++            created_by="planner",
++            created_at="2025-01-01T10:00:00+00:00",
++        )
++    )
++    fake.ready_ids = {"pred"}
++    fake.blocked = {
++        "blk": (
++            BlockerRecord(
++                kind="task",
++                task_id="pred",
++                type="blocks",
++                status="open",
++                message="Waiting on predecessor pred to complete.",
++            ),
++        )
++    }
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?status=open&since=2026-04-01")
++
++    assert response.status_code == 200
++    text = response.text
++    blocked_group = text[text.index('data-task-group="blocked"') :]
++    blocked_group = blocked_group[: blocked_group.index("</article>")]
++    assert "Recent blocked work" in blocked_group
++    # The chip shows the predecessor's title, resolved from the whole open
++    # snapshot, despite the predecessor predating the `since` window.
++    assert "Ancient predecessor" in blocked_group
++
++
++def test_blocked_task_shows_predecessor_chip_then_moves_to_ready(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Slice-2 acceptance: an open-predecessor task renders in Blocked with the
++    predecessor's title chip; completing the predecessor (in the fake oracle)
++    moves it onto the ready frontier and into the Ready section."""
++    fake = TaskFakeLithosClient()
++    # open-unclaimed is blocked by open-claimed (an open predecessor). Only the
++    # predecessor stays ready until it completes.
++    fake.ready_ids = {"open-old"}
++    fake.blocked = {
++        "open-unclaimed": (
++            BlockerRecord(
++                kind="task",
++                task_id="open-claimed",
++                type="blocks",
++                status="open",
++                message="Waiting on predecessor open-claimed to complete.",
++            ),
++        )
++    }
++
++    with _client(lithos_lens_config_env, fake) as client:
++        blocked_view = client.get("/tasks?status=open&since=2026-04-01")
++
++    assert blocked_view.status_code == 200
++    board = blocked_view.text
++    blocked_group = board[board.index('data-task-group="blocked"') :]
++    blocked_group = blocked_group[: blocked_group.index("</article>")]
++    assert "Unclaimed open task" in blocked_group
++    # The chip carries the blocking predecessor's *title*, not its id.
++    assert 'class="blocker-chip blocker-chip-task"' in blocked_group
++    assert "Claimed open task" in blocked_group
++
++    # Complete the predecessor: the blocked task joins the ready frontier.
++    fake.blocked = {}
++    fake.ready_ids = {"open-old", "open-unclaimed"}
++
++    with _client(lithos_lens_config_env, fake) as client:
++        ready_view = client.get("/tasks?status=open&since=2026-04-01")
++
++    assert ready_view.status_code == 200
++    text = ready_view.text
++    ready_group = text[text.index('data-task-group="ready"') :]
++    ready_group = ready_group[: ready_group.index("</article>")]
++    assert "Unclaimed open task" in ready_group
++    # It left Blocked entirely: that section is now empty.
++    blocked_after = text[text.index('data-task-group="blocked"') :]
++    blocked_after = blocked_after[: blocked_after.index("</article>")]
++    assert "Unclaimed open task" not in blocked_after
++
++
++def test_claimed_but_blocked_row_is_decorated_in_progress(
++    lithos_lens_config_env: Path,
++) -> None:
++    """A claimed task that Lithos also reports blocked stays In progress but
++    carries a ``blocked`` decoration (story 13)."""
++    fake = TaskFakeLithosClient()
++    fake.blocked = {
++        "open-claimed": (
++            BlockerRecord(
++                kind="task",
++                task_id="open-unclaimed",
++                type="blocks",
++                status="open",
++                message="Waiting on predecessor open-unclaimed to complete.",
++            ),
++        )
++    }
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?status=open&since=2026-04-01")
++
++    assert response.status_code == 200
++    text = response.text
++    in_progress = text[text.index('data-task-group="in_progress"') :]
++    in_progress = in_progress[: in_progress.index("</article>")]
++    assert "Claimed open task" in in_progress
++    assert "data-claimed-but-blocked" in in_progress
+ 
+ 
+ def test_direct_task_detail_resolves_findings_and_note_links(
+@@ -529,52 +719,6 @@ def test_dashboard_uses_inline_claims_and_skips_task_status_fan_out(
+     assert all(c["with_claims"] is False for c in other_calls)
+ 
+ 
+-def test_dashboard_falls_back_to_task_status_when_claims_not_inline(
+-    lithos_lens_config_env: Path,
+-) -> None:
+-    """If the upstream lithos doesn't honour with_claims (older server, etc.),
+-    the dashboard still classifies open tasks correctly by falling back to
+-    the per-task lithos_task_status fan-out."""
+-
+-    class StripClaimsClient(TaskFakeLithosClient):
+-        async def list_tasks(  # type: ignore[override]
+-            self,
+-            *,
+-            agent: str | None = None,
+-            status: str | None = None,
+-            tags: list[str] | None = None,
+-            since: str | None = None,
+-            with_claims: bool = False,
+-        ) -> list[TaskRecord]:
+-            # Simulate a server that doesn't inline claims regardless of the flag.
+-            rows = await super().list_tasks(
+-                agent=agent,
+-                status=status,
+-                tags=tags,
+-                since=since,
+-                with_claims=False,
+-            )
+-            # Track the requested flag for assertion below.
+-            self.list_calls[-1]["with_claims"] = with_claims
+-            return rows
+-
+-    fake = StripClaimsClient()
+-
+-    with _client(lithos_lens_config_env, fake) as client:
+-        response = client.get("/tasks?since=2026-04-01")
+-
+-    assert response.status_code == 200
+-    assert "Claimed open task" in response.text
+-    # Lens still asked for inline claims …
+-    open_list_calls = [c for c in fake.list_calls if c["status"] == "open"]
+-    assert open_list_calls
+-    assert all(c["with_claims"] is True for c in open_list_calls)
+-    # … but since the server dropped them, lens fell back to lithos_task_status
+-    # for the visible open tasks.
+-    assert "open-claimed" in fake.status_calls
+-    assert "open-unclaimed" in fake.status_calls
+-
+-
+ def test_fake_task_get_raises_coded_not_found_like_the_real_client() -> None:
+     """The shared fake and the concrete client agree on the not-found contract:
+     a coded LithosToolError, never None (the PRD requires callers to be able to
