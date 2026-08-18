@@ -32,6 +32,38 @@ CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
 diff as the panel approved it (base = lens main a429e8e post-K1-S2, the
 branch's true merge-base; patch = delivered head 5151c2b, pre-rebase).
 
+NEGATIVE RESULT — a persona-prompt lever for this case was measured three ways
+and abandoned (PR #328, closed unmerged). Do not re-run the arc without new
+information; the diagnosis is sound and the fix is what failed.
+
+Diagnosis (still true): the miss samples are NOT blind to the race. They name
+the same hazard the catching samples name ("the master-open, ready and blocked
+calls run concurrently with no shared snapshot/version or reconciliation"),
+then pick ONE interleaving, describe ONE symptom, and stop. Catching samples
+enumerate two and say what each RENDERS — which is exactly the two expecteds.
+
+Three arms, each vs an IN-SESSION control:
+  A  general lever + "not a snapshot ... overlap ... gap"   5/5 vs 2/5, 180 blk 0/3
+     -> OVER-FIT: encodes both expected mechanisms nearly verbatim; also 2/5
+        per-expected FP on the FIXED head.
+  B  general lever alone                                    4/5 vs 2/5, 180 blk 2/3
+     -> OVER-GENERATES: invents interleavings on clean code (both FPs were the
+        same wrong story about a bound `attach` takes deliberately, #189).
+  C  general lever + general discriminator                  2/5 vs 3/5, 180 blk 0/3
+     -> OVER-SUPPRESSES: per-expected IDENTICAL to control (3/5, 3/5).
+
+Why no stable operating point: "enumerate the interleavings" needs a bound, and
+every bound fails differently. Contrast the two levers that DID ship — 289's
+mirror rule and lens33's enumerate-the-rest — where the discriminator is
+NATURAL because the set is CLOSED (a boundary has two directions; a value has a
+finite set of bad-value classes). Interleavings are an OPEN set, so there is
+nothing to finish enumerating, and any supplied bound either leaks the answer
+or removes the signal.
+
+Reviewer variance seen here, worth knowing before trusting any single K=5
+delta on this case: the control read 3/5 / 2/5 / 3/5 on an unchanged config
+across three sessions, and arm A read 4/5 then 5/5.
+
 PAIRED (RH-1) with a SYNTHETIC minimal fix — a FOURTH pairing shape, and the
 first synthetic one in the benchmark. The authentic fix (92eb79e / d5012ae /
 37b343a) could not be used: the delivered head is PRE-REBASE, so those commits
