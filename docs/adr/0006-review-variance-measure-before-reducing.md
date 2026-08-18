@@ -1,6 +1,6 @@
 # ADR 0006 — Review-panel variance: measure before reducing
 
-- **Status:** Proposed
+- **Status:** Accepted (RH-5 closed it — see the 2026-08-18 update: **no mechanism is bought**)
 - **Date:** 2026-06-25
 - **Deciders:** Dave Snowdon
 
@@ -126,3 +126,137 @@ For when a measured miss-rate justifies the K× reviewer cost. Leading candidate
   targets.
 - **#103** (codex usage-limit capture/classify) — Part A (`turns.parse_codex_result` retains the
   failure event) is independently actionable so the next codex limit is capturable.
+
+## Update (2026-08-18, RH-5): the variance decision — buy nothing, and fix the instrument
+
+This ADR deferred the choice of a reduction mechanism until RH-1 (prompt lenses) and RH-2 (the
+`thorough` panel) reported, "since either lever may incidentally close it". Both have now reported,
+and the deferred decision resolves: **no mechanism is bought, and the case that motivated the
+question is retired as a variance probe.**
+
+The whole decision came off **retained report JSON — no reviewer ran, no tokens were spent.** Scoring
+is a pure function of `(case.expected, stored report, judge)`, so five paid sweeps already on disk
+answered it (the `eval rescore` design, ADR 0005 / #307).
+
+### The numbers this was blocked on
+
+`291-artifact-verdict-file`, judged catch across every stored run of it:
+
+| run | image / panel | judged | findings/sample |
+|---|---|---|---|
+| `baseline-2026-08-09` | old image, `correctness` (model unrecorded) | 3/5 | 1.2 |
+| `post-299-floor-2026-08-11` | old image, `correctness` | 2/5 | 1.6 |
+| `rh2-thorough-2026-08-12` (**RH-2**) | old image, 5 personas, mixed engines | 4/5 | 5.8 |
+| `baseline-pinned-2026-08-13` (**canonical**) | new image, `correctness`/codex/`gpt-5.6-sol` | 0/5 | 2.0 |
+| `rh8-armA-2026-08-13` (**RH-8**) | new image, `correctness`/codex/`gpt-5.6-sol` | 2/5 | 2.2 |
+| **pooled** | | **11/25 — 44%, 95% CI 27–63%** | 2.56 |
+
+**1. The spread is sampling noise, in both directions.** An exact multi-way homogeneity test —
+conditioning on the 11/25 total, enumerating every allocation into five cells of five and summing the
+probability of tables no more likely than the observed — gives **p = 0.170**: the five runs are
+consistent with a *single* underlying rate. The two runs with an **identical resolved panel**
+(`baseline-pinned` and `rh8-armA` — same day, same image, same model) read **0/5 and 2/5**, Fisher
+p = 0.44. Even the widest pair (0/5 vs thorough's 4/5) is only p = 0.048, and that is the most extreme
+of ten pairwise comparisons.
+
+So two claims in the record are wrong and are corrected here: this task's premise that 291 "sits at
+3/5" was an artifact of one sample, and the pinned re-baseline's reading that its drop to 0/5 meant
+it was "no longer just variance" was the same artifact with the opposite sign. It is one rate near
+44%, observed five times.
+
+**2. K=5 cannot measure a lever on a case in this band.** Power of a two-sided Fisher A/B at the
+pooled 44% baseline:
+
+| true lift | K=5 | K=10 | K=20 | K=30 |
+|---|---|---|---|---|
+| 44% → 80% (a large lever) | **11%** | 20% | 56% | 76% |
+| 44% → 90% (near-total fix) | 18% | 40% | 85% | 97% |
+| 44% → 64% (real but modest) | 5% | 5% | 15% | 26% |
+
+At K=5 an arm has an **89% chance of missing a large real improvement**. Every 291 arm ever run was
+underpowered by roughly an order of magnitude, so their disagreement was never evidence about
+anything. Detecting even a near-total fix at 80% power needs K ≈ 20 per arm — 40 paid runs for one
+A/B, before any floor sweep.
+
+This retroactively explains why RH-1 *did* work at K=5: all three of its shipped lenses moved a case
+**near-totally** (0/5→5/5, 2/5→5/5, 4/5→5/5). K=5 is a fit instrument for that shape and for nothing
+weaker — which was luck, not design, and is now written down as a precondition.
+
+**3. The case measures ranking among real defects, not detection.** `ac.md` is a **conjunction of at
+least four independent requirements**, and the head violates all four:
+
+| # | AC requirement | how the head breaks it | declared? |
+|---|---|---|---|
+| a | the pass's verdict "must never be ignored in favour of an earlier assessment" | `review_file` is not forwarded into the initial `_review_turn`, so the pass parses the round's stale LGTM | **the one `[[expected]]`** |
+| b | prompts "must enumerate the gate-collected rendered-page artifacts" | `_NOTE_FILES_PER_CHECK = 12` / `_NOTE_TOTAL_FILE_BUDGET = 36`, the rest collapsed to `+N more` | no |
+| c | approval "must be HELD whenever the sealing round's candidate run collected artifacts no reviewer has seen" | unseen-ness is inferred by string-comparing two rendered notes that encode only directory names and counts | no |
+| d | "that pass's verdict controls the outcome" | the pass is evaluated through `ReviewOutcome.passed` (a severity threshold) rather than its literal verdict | no |
+
+(b) is verified against the patch and the AC text; it appears in nearly every sample. All four are
+real, AC-grounded, `critical`-rated findings — not false positives.
+
+`case.toml` declares **one** expected, and **all 25 stored samples blocked**. So the reviewer does
+detect and hold this diff every single time; the case's catch-rate records *which* of four real
+defects it ranked into a 1–3 finding budget. That is a lottery over genuine findings, not a
+measurement of review quality — and it is the trap #310 named (a metric that rewards reporting
+volume) wearing different clothes: the surest way to raise this number is to file more findings.
+
+The observation is consistent with that reading — caught samples averaged 3.36 findings against
+missed samples' 1.93 — but it is **not** established: the per-bucket rates are non-monotone (1 finding
+→ 38%, 2 → 22%, 3+ → 75%) on 8/9/8 samples, and the gap is carried by the thorough arm. Treat it as
+the hypothesis the structure predicts, not as a demonstrated mechanism.
+
+**The mixed-engine hypothesis has no support in this data.** RH-5 was filed expecting the
+union-of-panels argument (different personas catch different real issues) to favour a second-engine
+reviewer. But thorough's 4/5 sits inside the single-persona band (p = 0.048 at best, before
+multiplicity), costs 5× a standard panel, and its structurally-matching findings come from
+`correctness`, `test-quality` and `architecture` — **all codex**, the engine `standard` already runs.
+Attribution can go no further: this run predates the #313 judge sidecars, so which finding the judge
+actually credited is unrecoverable, and the structured matcher is topic-loose on a diff where words
+like "artifact" are everywhere. Nothing here isolates engine diversity as the lever.
+
+### Decision
+
+1. **Buy no variance-reduction mechanism.** Options 1–3 in the menu above stay recorded and deferred.
+   Nothing in RH-1 / RH-2 / RH-8 justifies K× or 2× reviewer cost. **No config change ships**: the
+   persona registry, `standard` / `thorough` profiles and the `develop()` loop are untouched, and no
+   default-panel change is made for loom-ecosystem projects.
+2. **The 291 class is reclassified.** It is neither a panel blind spot nor a variance defect. It is an
+   **under-declared case**: a realistic multi-defect diff with a single declared expected.
+3. **291 is retired as an A/B target and as *the* variance probe.** It stays `frontier` — it does
+   discriminate — but no arm may be justified by, or measured on, its rate until it is re-declared.
+4. **Minimum-detectable-effect precondition** (generalises this ADR's own "measure before reducing"):
+   before an arm is paid for, state the case's current rate and the lift the lever must produce, and
+   check K supports it. K=5 licenses only near-total movements; a case in the 30–70% band needs
+   K ≈ 20–30 per arm, which must be budgeted explicitly or the case is not an A/B target.
+5. **Case-authoring rule:** a case's `[[expected]]` set must cover the defects its diff actually
+   contains. Where a realistic diff breaks several AC requirements, declare them all (the harness's
+   all-expecteds-must-match rule then measures coverage, which is what a conjunctive AC asks for) or
+   document the case as a ranking probe. Recorded in `evals/review/README.md`.
+
+### Consequences
+
+- This ADR's first slice ("build difficulty, not just count") is **done, and partly misfired.**
+  Difficulty was delivered — but difficulty arrived with *multiplicity*: a realistic diff carries
+  several real defects, and a single-expected case over such a diff silently changes what is being
+  measured from detection to ranking. That is the lesson the difficulty push actually bought.
+- The benchmark's mid-band cases are **not** cheap A/B targets. The affordable arms are on cases that
+  are near-0 or near-saturated, where a lever's effect is near-total; that is a real constraint on
+  what the harness can be asked, and it now has a number attached.
+- **#182's question is answered, negatively and on evidence** rather than left open: with the panel's
+  own miss-rate on the motivating case indistinguishable across five configurations, there is no
+  measured lift for a reduction mechanism to buy.
+- Nothing about the panel got worse: the floor tier remains the regression gate, and the RH-1 lenses
+  that shipped did so on their own near-total evidence, not on this case.
+
+### Follow-up work
+
+- **Re-declare `291-artifact-verdict-file`** — add (b)/(c)/(d) as expecteds, or split the diff into
+  sibling cases with one expected each. Note the trade: with all four declared, catch requires all
+  four and the case reads ~0 for a long time (honest, and genuinely hard); split cases measure each
+  defect independently at 4× the run cost for one diff.
+- **Teach the harness to state its own detectable effect** — a case's stored rate plus K implies the
+  MDE; surfacing it (in the table, or as a pre-paid warning when an arm is requested on a mid-band
+  case at low K) would have prevented every underpowered 291 arm.
+- The `struct`-vs-judge divergence seen here (the structured matcher firing on three extra personas
+  from topic-looseness alone) is the same problem as **#326**; this is another instance for it.

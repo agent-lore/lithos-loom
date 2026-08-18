@@ -368,6 +368,61 @@ The LLM judge (the default, authoritative scorer per ADR 0005) keys on
 `mechanism` prose instead; keyword precision matters for `--no-judge` runs and
 offline re-scoring of stored reports.
 
+### Declare every defect the diff contains (RH-5)
+
+A case's `[[expected]]` set must cover the defects its head **actually** has — not
+just the escape you set out to measure. A realistic diff usually breaks more than
+one thing, and a single-expected case over a multi-defect head silently stops
+measuring *detection* and starts measuring **ranking**: reviewers file a handful
+of findings, all of them real, and the case scores on whether yours was among
+them.
+
+`291-artifact-verdict-file` is the worked example and the reason for this rule.
+Its `ac.md` is a conjunction of four independent requirements and the head
+violates all four (the stale-verdict escape, plus a `+N more` cap that defeats
+the enumerate-every-artifact criterion, unseen-ness inferred by comparing two
+rendered notes, and the pass's verdict routed through a severity threshold).
+`case.toml` declared one. Every one of its 25 stored samples **blocked**, on
+real AC-grounded criticals — so the panel detects that diff every single time,
+while the case reads 44%. Worse, the cheapest way to move such a number is to
+file *more* findings, which is the volume-rewards trap the
+[noise](#noise-what-the-fp-rate-cannot-see-310) instrument exists to expose.
+
+So when the head breaks several criteria: declare them all (catch then requires
+all of them, which is what a conjunctive AC actually asks for), or split the diff
+into sibling cases with one expected each, or — if neither is worth the cost —
+say in the `description` that the case is a **ranking probe** and must not be
+used to adjudicate a lever. Cross-check the AC clause by clause against the head
+while authoring; that is where the extra expecteds come from.
+
+### How many samples — what an A/B can actually detect (RH-5)
+
+`-k` is not just a precision knob, it decides **which levers are visible at all**.
+Power of a two-sided Fisher A/B (α = 0.05) against a case sitting at ~44%:
+
+| the lever's true effect | K=5 | K=10 | K=20 | K=30 |
+|---|---|---|---|---|
+| 44% → 80% (a large lever) | **11%** | 20% | 56% | 76% |
+| 44% → 90% (near-total fix) | 18% | 40% | 85% | 97% |
+| 44% → 64% (real but modest) | 5% | 5% | 15% | 26% |
+
+At the default K=5, an arm on a mid-band case misses a **large** real improvement
+about nine times in ten. That is why every 291 arm ever run disagreed with the
+last one while all five were statistically identical (exact homogeneity p = 0.17,
+including two runs on a byte-identical panel that read 0/5 and 2/5).
+
+The rule that follows, and the precondition ADR 0006 now sets: **before paying
+for an arm, state the case's current rate and the lift you need, and check K
+supports it.**
+
+- **Near-0 or near-saturated cases are the affordable A/B targets.** K=5 detects
+  near-total movements, which is exactly what the three shipped RH-1 lenses were
+  (0/5→5/5, 2/5→5/5, 4/5→5/5).
+- **A case in the 30–70% band needs K ≈ 20–30 per arm** — 40–60 paid runs for one
+  A/B before any floor sweep. Budget it explicitly or pick a different case.
+- A single K=5 delta on a mid-band case is **not** evidence, in either direction.
+  Neither is the difference between two of them.
+
 ### AC provenance — say what the criteria ARE
 
 A case's *patch* should always be the authentic historical diff, but its `ac.md`
