@@ -21,7 +21,12 @@ Look for:
   stops the crash but still admits the wrong answer — or the reverse — leaves half
   the defect shipped.
 - **Concurrency & races:** shared mutable state, check-then-act, `await` points
-  that interleave, ordering assumptions, non-atomic read-modify-write.
+  that interleave, ordering assumptions, non-atomic read-modify-write. Naming the
+  race is only half a finding — enumerate the interleavings it admits and say what
+  each one **produces**: the value returned, the state persisted, what the user is
+  told. Independent reads of the same moving thing are not a snapshot, so ask what
+  is produced when they disagree — both when they overlap and when they leave a
+  gap — and do not stop at the first interleaving that breaks.
 - **Error handling & propagation:** every failure path handled or deliberately
   propagated; no silently swallowed exceptions; partial failure leaves a sane
   state; errors carry enough context to act on.

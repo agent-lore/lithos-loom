@@ -109,7 +109,26 @@ def test_correctness_brief_asks_for_value_domains_and_both_outcomes() -> None:
     assert "not a reason to rate it higher" in flat
 
 
+def test_correctness_brief_asks_what_each_interleaving_produces() -> None:
+    # RH-1: lens34-truncation measured 3/5, and the miss samples were not blind
+    # to the race — sample 0 names the exact hazard the catching sample does
+    # ("no shared snapshot/version or reconciliation"), then picks ONE
+    # interleaving, describes ONE symptom, and stops. The catching sample
+    # enumerates two and says what each one renders. Same shape as the two
+    # levers that already measured positive: 289 found one boundary direction
+    # and didn't state the mirror, lens33 found one bad-value class and didn't
+    # enumerate the rest. The lever is carrying a named race through to its
+    # observable consequences, plural.
+    c = canonical_personas()["correctness"].system_prompt
+    assert c is not None
+    flat = " ".join(c.split())
+    assert "enumerate the interleavings" in flat
+    assert "are not a snapshot" in flat
+    assert "do not stop at the first interleaving" in flat
+
+
 _CASE_VOCABULARY = (
+    # lens33-confidence-crash
     "confidence",
     "percent",
     "fraction",
@@ -118,6 +137,13 @@ _CASE_VOCABULARY = (
     "infinit",
     "frontmatter",
     "0..1",
+    # lens34-truncation. NB "ready" is deliberately absent — "already" contains
+    # it, so guarding that substring would fail on ordinary prose.
+    "frontier",
+    "truncat",
+    "dashboard",
+    "banner",
+    "blocked",
 )
 
 
