@@ -17,6 +17,42 @@ da14441; the patch is the #283 slice-2 feature at its round-1-review head
 the review situation the escape occurred in. Caught by the codex external
 backstop reading the data flow write-site -> read-site; fixed in #291 (initial
 call forwards the override + non-stubbed conflicting-verdicts test).
+
+NOT AN A/B TARGET, and not the variance probe it was long used as (RH-5,
+2026-08-18; decision in ADR 0006). Two reasons, both measured off the five
+retained report dirs at zero token cost:
+
+(1) UNDER-DECLARED. ac.md is a conjunction of at least FOUR independent
+    requirements and this head violates all four — (a) the pass's verdict must
+    not be ignored in favour of an earlier assessment [the one [[expected]]
+    below]; (b) prompts must ENUMERATE the collected artifacts, vs
+    _NOTE_FILES_PER_CHECK=12 / _NOTE_TOTAL_FILE_BUDGET=36 collapsing the rest
+    to "+N more"; (c) approval must be held when the sealing round collected
+    unseen artifacts, vs inferring unseen-ness by string-comparing two rendered
+    notes that encode only directory names and counts; (d) the pass's verdict
+    must control the outcome, vs evaluating it through ReviewOutcome.passed (a
+    severity threshold). All four are real, AC-grounded, critical-rated
+    findings — reviewers file them constantly, and (b) appears in nearly every
+    sample. ALL 25 stored samples BLOCKED. So this case's catch-rate does not
+    record whether the panel detects the escape (it holds the diff every time);
+    it records WHICH of four real defects got ranked into a 1-3 finding budget.
+    That is a lottery over genuine findings, and the surest way to raise the
+    number is to file more findings — the #310 volume-rewards trap again.
+
+(2) UNDERPOWERED. Judged catch across the five stored runs is 3/5, 2/5, 4/5,
+    0/5, 2/5 — pooled 11/25 = 44% (95% CI 27-63%). An exact multi-way
+    homogeneity test gives p=0.170: all five are consistent with ONE underlying
+    rate, including the two runs on an IDENTICAL resolved panel that read 0/5
+    and 2/5 (same day, same image, same model; Fisher p=0.44). At a 44%
+    baseline, K=5 has 11% power to detect a 44%->80% lever — an arm here misses
+    a large real improvement ~9 times in 10. K~20/arm is the floor for a
+    near-total fix. Both the old "sits at 3/5, variance not blindness" reading
+    and the pinned baseline's "0/5, no longer just variance" reading were the
+    same single-sample artifact with opposite signs.
+
+Re-declaring the expecteds (add b/c/d, or split into sibling cases with one
+each) is the open follow-up; until then this case discriminates but cannot
+adjudicate a lever.
 """
 ac_provenance = "synthetic"
 tier = "frontier"       # discriminating at the 2026-08 baseline — headline signal
