@@ -68,8 +68,10 @@ answer it and which do not.
   Real value — the operator hit the module-budget breach twice *after* merging —
   but the fix still needs a human.
 - **S1's `dirty` case.** Knowing a PR conflicts is not resolving it.
-- **S2 without converge.** Reporting an external finding is strictly better than
-  losing it, which is today's behaviour — but the *fixing* is what gets removed.
+- **S2's detection half.** Reporting an external finding is strictly better than
+  losing it, which is today's behaviour. (S2's *remediation* half is back in the
+  eliminates-work column: converge is on by default per Decision 2, because a
+  fast-forward push is additive.)
 
 **Measured against the batch below, honestly:** neither #43 nor #46 would have
 auto-landed under any automation in this PRD. Both conflict in real source
@@ -403,7 +405,7 @@ history every sweep.
 | human reviews | never seen | seen |
 | blocks delivery | yes | no |
 | cost when nothing to do | a delivery-time stall | two extra paginated calls |
-| **fixes what it finds** | **yes — see below** | **no** |
+| **fixes what it finds** | yes, when the round does not starve | **yes — via converge, on by default** |
 
 **The regression this PRD must not hide.** The inline round is not a wait; it is
 a full remediation cycle (`pr_delivery.py:894` onward): Copilot's comments become
@@ -421,15 +423,17 @@ is the right shape for an external reviewer. So S2 ships as:
 
 1. **Always:** post `[ExternalReview]` with the findings. Detection is never
    optional and never blocks.
-2. **Opt-in per project** (`external_review_converge = true`, default **off**):
-   on a new blocking external review, dispatch `develop converge` against the
-   PR. Off by default because it spends money in response to a third party's
-   output, which the operator must choose deliberately.
+2. **Remediate by default** (`external_review_converge`, default **on**): on a
+   new blocking external review, dispatch `develop converge` against the PR.
+   Converge's push epilogue is a **fast-forward** onto the PR head ref and it
+   refuses to force (`MergeRaceDetected`), so this is additive work on the
+   branch — squarely inside Decision 2's automate-it half, and it *restores* the
+   remediation the inline round used to do rather than trading it away.
 
-With (2) off, the tradeoff is explicit and accepted: loom stops auto-fixing
-Copilot findings and starts *reliably telling you about all of them, from every
-reviewer, with no deadline*. Today it does neither reliably — the round that was
-supposed to fix them silently dropped both real findings on T1-S12.
+   It does spend tokens in response to a third party's output, so it remains a
+   config key an operator can turn off per project, and it inherits the run's
+   existing cost ceiling. But default-off would have made this PRD a net
+   regression on remediation, which is not the trade to make.
 
 **Open question for the operator.** Copilot reviewed all four lens PRs, but loom
 requested each one, so this data cannot tell us whether lens has GitHub's
@@ -522,27 +526,40 @@ edges would have prevented all of them.
 1. **The sweep, not the delivery path, owns everything post-PR.** Delivery ends
    at "PR is open". Anything with unbounded external latency belongs to a poll
    loop, not a budget.
-2. **Act where there is no judgement to exercise; report where there is.** The
-   earlier draft said "report before acting" as a blanket rule, and that was
-   over-cautious — it reasoned from a generic don't-rewrite-branches instinct
-   rather than from this workflow's facts. Graded instead:
+2. **Additive is automatic; destructive needs the operator.** This is an
+   operator policy (2026-08-23), and it is the line this PRD draws — not
+   "report before acting", which the earlier draft used as a blanket rule and
+   which was over-cautious.
 
-   - **`behind`, merges clean, gate green → do it.** Merge the base into the
-     branch and push. No judgement exists to exercise, and this is what the
-     operator does by hand every time.
-   - **Conflicts only in regenerable files → regenerate, gate, push.** Also
-     mechanical, and only reachable once S4 stops committing them at all — at
-     which point the case disappears rather than being automated.
-   - **Conflicts in real source, or a red gate → report.** These need judgement.
-     The evidence is `filters_narrow_the_board`: two individually-correct PRs
-     whose composition was wrong in a way no merge driver could see.
+   **Additive → automate, by default, no prompt.** Merge commits, fix commits,
+   and fast-forward pushes onto a delivered branch. None of these destroy
+   anything: the reviewer's line anchors survive, the per-round dialogue commits
+   survive, and history is only ever appended to. Concretely that authorises
+   S1's `behind` auto-update, S2's converge remediation, and any regenerate-
+   and-push of derived files.
 
-   **Merge, never rebase-and-force-push.** A merge commit is additive: it does
-   not invalidate the reviewer's line anchors, does not destroy the per-round
-   dialogue commits, and needs no force. It is also exactly what the operator
-   chose unprompted on #43 — *"kept as a merge so the per-round story-develop
-   commits survive"*. Rebase-and-force-push remains out of scope: the human IS
-   the reviewer in this flow, and they may be mid-read.
+   **Destructive → never without explicit approval.** A force push — including
+   `--force-with-lease` — rewrites what a human may be mid-review on, and no
+   automated path in loom may take it. This is not a new constraint so much as
+   a newly-written-down one: `src/` contains **zero** force pushes today,
+   `push_branch` is a plain `git push -u origin <branch>`, and converge already
+   models the correct behaviour in `MergeRaceDetected` — on a non-fast-forward
+   it *stops and reports* rather than clobbering the concurrent commit. Any
+   future need to rewrite a delivered branch is an operator action, surfaced as
+   a finding, never taken by the sweep.
+
+   **Implementation requirement:** add a guardrail test asserting no force-push
+   invocation exists in `src/` (alongside the existing `tests/guardrail/`
+   contracts), so the invariant is enforced rather than remembered. Test it
+   negatively — a guard that cannot fail is not a guard.
+
+   What still reports rather than acts, and why: **conflicts in real source, or
+   a red gate.** Those need judgement, and the evidence is
+   `filters_narrow_the_board` — two individually-correct PRs whose composition
+   was wrong in a way no merge driver could see. Rebase is not needed anywhere
+   in this design; a merge achieves the same landability additively, and it is
+   what the operator chose unprompted on #43 (*"kept as a merge so the per-round
+   story-develop commits survive"*).
 3. **Conflict resolution stays human or `converge`.** The evidence says these
    conflicts need judgement (`filters_narrow_the_board`), not a merge driver.
    When automation is wanted it belongs to `develop converge`
