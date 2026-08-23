@@ -63,6 +63,44 @@ def _write_task_json(path: Path, task: dict[str, Any]) -> Path:
     return path
 
 
+def test_the_published_payload_carries_everything_the_brief_needs(
+    tmp_path: Path,
+) -> None:
+    """Cross-module contract: what the event stream PUBLISHES must satisfy what
+    the daemon brief READS.
+
+    The route-runner writes the SSE payload verbatim as ``task.json``, so these
+    two ends are a pair — and every other test here hand-writes a payload with
+    a ``description`` the real projection did not emit. That fixture divergence
+    is exactly why the daemon shipped title-only briefs: both halves passed,
+    the relationship was never tested. Build the payload with the real
+    projection, not by hand.
+    """
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.sources.lithos_event_stream import _event_payload
+
+    body = "Render all four states. Acceptance: all four branches render."
+    payload = _event_payload(
+        Task(
+            id="t-1",
+            title="T1-S12: Empty/degraded states",
+            status="open",
+            tags=("trigger:story-develop",),
+            metadata={},
+            claims=(),
+            description=body,
+        )
+    )
+    ctx = read_task_payload(_write_task_json(tmp_path / "task.json", dict(payload)))
+
+    assert ctx.title == "T1-S12: Empty/degraded states"
+    assert ctx.description == body
+    # The brief the coder is handed — and, via effective_acceptance_criteria,
+    # the criteria the panel reviews against — must not collapse to the title.
+    assert ctx.task_text == f"T1-S12: Empty/degraded states\n\n{body}"
+    assert ctx.task_text != ctx.title
+
+
 def test_read_task_payload_extracts_context(tmp_path: Path) -> None:
     p = _write_task_json(
         tmp_path / "task.json",

@@ -325,7 +325,7 @@
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags"
     ],
-    "tests_private_imports": 98
+    "tests_private_imports": 99
   },
   "size": {
     "components": {
@@ -474,10 +474,10 @@
         "functions": 70,
         "largest_module": "lithos_loom.sources.github_issue_watcher",
         "largest_module_lines": 667,
-        "lines": 3101,
+        "lines": 3111,
         "modules": 7,
         "public_symbols": 14,
-        "sloc": 2332
+        "sloc": 2341
       },
       "State": {
         "classes": 4,
@@ -493,11 +493,11 @@
         "classes": 8,
         "functions": 114,
         "largest_module": "lithos_loom.subscriptions._obsidian_projection",
-        "largest_module_lines": 788,
-        "lines": 5791,
+        "largest_module_lines": 794,
+        "lines": 5797,
         "modules": 20,
         "public_symbols": 27,
-        "sloc": 4387
+        "sloc": 4393
       },
       "Supervisor": {
         "classes": 3,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 40259,
+    "total_lines": 40275,
     "total_modules": 124,
-    "total_sloc": 31975
+    "total_sloc": 31990
   },
   "tests": {
     "ratio": 1.65,
-    "src_lines": 40259,
-    "test_lines": 66451
+    "src_lines": 40275,
+    "test_lines": 66529
   }
 }

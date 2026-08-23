@@ -595,6 +595,15 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
     instead of receive-at time. ``task_type`` (Epic H) lets the projection
     tell a `pr` gate — which it must not render as an operator checkbox — from
     a real work task.
+
+    ``description`` is the task BODY, and it is load-bearing well beyond the
+    projection: RouteRunner writes this payload verbatim as a plugin's
+    ``task.json``, and story-develop derives both the coder's brief and (via
+    ``effective_acceptance_criteria``) the reviewers' acceptance criteria from
+    it. Omitting it here — while ``_enrich``'s ``task_list`` fetch had the body
+    in hand all along — silently reduced every daemon run to a one-line title,
+    so anything added to :class:`Task` that an agent needs must be projected
+    here too, not just the fields the vault renderer reads.
     """
     return MappingProxyType(
         {
@@ -607,6 +616,7 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
             "resolved_at": (
                 task.resolved_at.isoformat() if task.resolved_at is not None else None
             ),
+            "description": task.description,
             "task_type": task.task_type,
         }
     )
