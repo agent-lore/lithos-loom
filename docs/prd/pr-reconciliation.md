@@ -48,8 +48,10 @@ it picks up reviews loom never asked for.
 
 ## Evidence — the 2026-08-22 lithos-lens rollout
 
-Four stories delivered, four PRs, four manual interventions. All numbers below
-are from the run metadata, the PRs, and a reproduced rebase.
+Four stories delivered on the day, four PRs, four manual interventions; a fifth
+(#47, T1-S3) landed from the same queue while this PRD was being written and is
+included because it shows the pattern continuing. All numbers below are from the
+run metadata, the PRs, and a reproduced rebase.
 
 | PR | story | rounds | cost | panel findings | gate | outcome |
 |---|---|---|---|---|---|---|
@@ -228,7 +230,8 @@ currently empty. That is where this lives.
 
 Independent of the sweep, and the cheapest fix in this document.
 
-**SHIPPED — PR #333.** The design below was drafted before the cause was
+**Implemented in PR #333 (open at the time of writing — this section moves to
+"shipped" when it merges).** The design below was drafted before the cause was
 located, and the answer turned out simpler than either option it weighed.
 
 Neither a plugin-side re-fetch nor route-runner enrichment is needed, because
@@ -276,22 +279,36 @@ panel checked, without opening Lithos.
 
 ### S1 — PR landability
 
-`PullRequest` (`github_client.py:168`) gains `mergeable: bool | None` and
-`mergeable_state: str` from the same `GET /pulls/{n}` response already being
-fetched. On `still_open`, classify:
+`PullRequest` (`github_client.py:168`) gains **three** fields from the same
+`GET /pulls/{n}` response already being fetched — `mergeable: bool | None`,
+`mergeable_state: str`, and **`base_sha: str`**. The third is not decoration:
+without it the sweep cannot tell "the base moved" from "nothing changed", and
+today the dataclass carries `head_sha` / `base_ref` / `head_ref` but no base
+sha at all. On `still_open`, classify:
 
 - `clean` — nothing to do.
 - `behind` — the base moved, no conflict. Offer S3's re-gate; optionally
   `PUT /pulls/{n}/update-branch` (`allow_update_branch` is already on for lens).
-- `dirty` — real conflict. Post `[PRConflicted]` on the story naming the
-  conflicting paths.
+- `dirty` — real conflict. Post `[PRConflicted]` on the story.
 
-**Caveat that must be in the implementation, not discovered later:** GitHub
-computes `mergeable` lazily and returns `null` on a cold fetch — reproduced
-while researching this PRD. A `null` is "ask again", never "clean". De-dup via a
-gate-side marker scoped to `(pr_url, base_sha)` so a finding is posted once per
-base move, not once per sweep — the same shape as
-`metadata.develop_pr_merge_state`.
+**`[PRConflicted]` cannot name the conflicting paths.** GitHub reports
+`mergeable_state: dirty` and nothing more — the file list in this PRD's evidence
+section came from a local rebase in a throwaway clone, not from the API. So S1
+alone reports *that* a PR conflicts; the **paths come from S3's trial merge**,
+which has to run one anyway. Two consequences: `[PRConflicted]` is a thin
+finding when S3 is not enabled, and S1/S3 should be implemented in that order
+but read as one report.
+
+**Two caveats that must be in the implementation, not discovered later.**
+
+1. GitHub computes `mergeable` lazily and returns `null` on a cold fetch —
+   reproduced while researching this PRD. A `null` is "ask again", never
+   "clean".
+2. **The marker key is `(pr_url, base_sha, head_sha)`**, not `(pr_url,
+   base_sha)`. Pushing a conflict resolution moves the **head** without moving
+   the base, so a base-scoped marker would suppress the re-check that proves
+   the fix landed. Same shape as `metadata.develop_pr_merge_state`, one field
+   wider.
 
 ### S2 — external review ingestion, and no more triggering
 
@@ -309,19 +326,69 @@ review-comments each pass and surfaces anything new as a finding on the story:
   not a hardcoded login.
 - Human reviewers — currently invisible to loom entirely.
 
-De-dup on comment id in a gate-side marker. Post as `[ExternalReview]` (a fresh
-prefix; do not overload `[DevelopResult]`, which is a terminal run record).
+Post as `[ExternalReview]` (a fresh prefix; do not overload `[DevelopResult]`,
+which is a terminal run record).
 
-**Why this is strictly better than the inline round:**
+**De-dup needs more than comment ids, and the model needs three new fields.**
+`PullRequestReview` (`github_client.py:206`) is `{author, body}` today — no
+review id, no state, no timestamp. Comment-id de-dup therefore cannot represent
+a **summary-only** review: an `APPROVED` or `CHANGES_REQUESTED` with no inline
+comments has nothing to key on and would be reported forever or never. So:
 
-| | inline round (today) | sweep (proposed) |
+- `PullRequestReview` gains `review_id: int`, `state: str`
+  (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED` / `DISMISSED`), and
+  `submitted_at: datetime | None`.
+- The marker stores the highest-seen review id **and** the set of seen comment
+  ids — reviews and inline comments are separate streams and neither subsumes
+  the other.
+- **Policy per state, declared not implied:** `CHANGES_REQUESTED` posts a
+  finding; `COMMENTED` posts one only if it carries inline comments or a
+  non-empty body; `APPROVED` and `DISMISSED` are recorded in the marker and
+  post nothing (an approval is not an operator action item).
+
+**Cost — this is not free, and the earlier draft of this PRD said it was.**
+Reviews and review-comments are **two additional paginated endpoints** beyond
+the PR fetch (`github_client.py:582`). Both need bounded pagination with a
+stored cursor, or a long-lived PR with a large review history re-walks its whole
+history every sweep.
+
+**The honest comparison — the sweep is better on reach and worse on remedy:**
+
+| | inline round (today) | sweep alone |
 |---|---|---|
 | deadline | 600s shared budget, self-starving | none — polls until merge |
 | late review | lost, flagged INCOMPLETE | picked up next sweep |
 | reviews loom didn't request | never seen | seen |
 | human reviews | never seen | seen |
 | blocks delivery | yes | no |
-| cost when nothing to do | a delivery-time stall | one API call already being made |
+| cost when nothing to do | a delivery-time stall | two extra paginated calls |
+| **fixes what it finds** | **yes — see below** | **no** |
+
+**The regression this PRD must not hide.** The inline round is not a wait; it is
+a full remediation cycle (`pr_delivery.py:894` onward): Copilot's comments become
+a synthetic review handoff, go through the `FindingLedger`, drive **one coder fix
+turn on the resumed session**, `commit_round` the result, run
+`run_delivery_test_gate` on that commit, **push only if the gate is green**, and
+reply to each comment thread with the fixing sha. Deleting it without a
+replacement means **every external finding becomes manual work** — the exact
+cost this PRD exists to reduce.
+
+**Decision: the sweep detects, `converge` remediates.** `develop converge`
+(ADR 0009) already is this cycle — panel + gate + coder fixes on an existing PR
+until green, then fast-forward push — but on demand and unbounded in time, which
+is the right shape for an external reviewer. So S2 ships as:
+
+1. **Always:** post `[ExternalReview]` with the findings. Detection is never
+   optional and never blocks.
+2. **Opt-in per project** (`external_review_converge = true`, default **off**):
+   on a new blocking external review, dispatch `develop converge` against the
+   PR. Off by default because it spends money in response to a third party's
+   output, which the operator must choose deliberately.
+
+With (2) off, the tradeoff is explicit and accepted: loom stops auto-fixing
+Copilot findings and starts *reliably telling you about all of them, from every
+reviewer, with no deadline*. Today it does neither reliably — the round that was
+supposed to fix them silently dropped both real findings on T1-S12.
 
 **Open question for the operator.** Copilot reviewed all four lens PRs, but loom
 requested each one, so this data cannot tell us whether lens has GitHub's
@@ -333,15 +400,53 @@ setting and record it as an operator prerequisite** — with a config escape hat
 ### S3 — re-gate against current main
 
 The piece that closes Failure 3. On a base move, in a throwaway worktree:
-`git merge origin/<base>` (or rebase), then run the story's **check-set** on the
-merge result.
+`git merge origin/<base>`, then run a **check-set** on the merge result.
 
 - Clean + green → record it; the PR's own CI green is now meaningful.
 - Clean + red → `[MergeGateFailed]` naming the failing check. This is the module
   budget case, caught before the operator merges instead of after.
-- Conflict → S1 already reported it; no gate run.
+- Conflict → hand the conflicting paths to S1's `[PRConflicted]`; no gate run.
+  This trial merge is the **only** source of that path list — the API does not
+  provide it.
 
-Zero tokens — it is the existing deterministic check-set on a different tree.
+Zero tokens — it is a deterministic check-set on a different tree.
+
+**"The story's check-set" is not reconstructible, and the PRD must say which
+check-set it means.** A `pr` gate stores only `{gate_type, repo, pr_number,
+required_state, pr_url, project?}` (`gates.py:91`). Re-running the gate the
+story actually passed would need the resolved repo path, image, profile,
+commands, expected states, parity command, timeouts and per-task overrides —
+none of which the gate carries. Two options with genuinely different semantics:
+
+1. **Persist a resolved gate manifest at delivery** and replay it. Faithful to
+   "the gate this PR passed", but it goes stale the moment the project's config
+   moves, and it needs somewhere durable to live.
+2. **Re-resolve the project's *current* config at sweep time.**
+
+**Decision: (2), re-resolve current config.** The question S3 answers is *"will
+main break if I merge this?"*, and main is defended by today's gate, not by the
+one that ran a week ago. A story whose PR now fails a check the project has
+since tightened **should** be reported. This also keeps the gate free of a
+config snapshot that would silently rot.
+
+Consequences to implement, not discover:
+
+- **Gate creation must always record `project`**, not "if project" — the sweep
+  resolves the repo path and check-set config through the project-context doc,
+  and a gate without it is unresolvable. A gate that predates this, or whose
+  project has since been removed, is skipped with a one-shot `[Friction]`,
+  never silently.
+- **Result key is `(head_sha, base_sha, config fingerprint)`.** Without the
+  fingerprint a re-gate is not re-run when the project's check-set changes,
+  which is precisely the case option (2) exists to catch.
+- **Forks are out of scope for S3.** `PullRequest` already carries
+  `head_repo` / `base_repo` and converge refuses to push to a fork branch; the
+  sweep likewise skips a fork PR with a recorded reason rather than fetching a
+  third-party head into the operator's checkout.
+- **Concurrency.** The sweep runs inside the github-watcher child; a check-set
+  run is minutes, not milliseconds, so it must not block the merge poll. Fire
+  it on base-change detection only, bounded to one in-flight re-gate per
+  project.
 
 ### S4 — prevention
 
@@ -353,10 +458,20 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
   edges that would have serialised them. This is a planning fix, not a tooling
   one — and it is the cheapest intervention available.
 - **Take `docs/generated/` out of the per-story diff** in repos using the
-  guardrail kit — regenerate on main post-merge, or a union merge driver. It
-  would not have saved #43 (which conflicts in real source too), but it is the
-  difference between "clean rebase" and "conflict" for every genuinely disjoint
-  pair of stories.
+  guardrail kit. It would not have saved #43 (which conflicts in real source
+  too), but it is the difference between "clean rebase" and "conflict" for
+  every genuinely disjoint pair of stories.
+
+  **Not a union merge driver.** These files are *generated*, and CI fails when
+  the committed copy disagrees with what the generator produces — a union of two
+  branches' `metrics.json` is a file no generator would ever emit, so it
+  converts a merge conflict into a guaranteed drift-gate failure. Anything that
+  merges generated output textually is wrong for the same reason. The workable
+  shapes are **regenerate after the merge** (a merge driver that runs the
+  generator rather than combining text, or a post-merge hook), or stop
+  committing the outputs and have CI generate and compare. Both are repo-policy
+  changes for the consuming project, which is why this sits in prevention and
+  not in loom.
 
 ## Decisions
 
@@ -376,6 +491,15 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 5. **A fresh finding prefix per concern** — `[PRConflicted]`,
    `[ExternalReview]`, `[MergeGateFailed]` — per the house rule against
    overloading existing prefixes, since operators grep by prefix.
+6. **Retiring the inline Copilot round is a real loss of automatic remediation,
+   and it is accepted deliberately.** Detection always runs; fixing becomes
+   `develop converge`, opt-in per project and off by default. Trading a fix
+   cycle that reliably fires for one that reliably *detects* is the right way
+   round — but it is a trade, not a free upgrade, and S2 says so in full.
+7. **S3 re-resolves the project's current check-set rather than replaying the
+   one the story passed.** The question is "will main break", and main is
+   defended by today's config. The cost is that a gate must always carry its
+   `project` to be resolvable at all.
 
 ## Non-goals
 
@@ -389,26 +513,37 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 
 ## Testing
 
-- S0: a daemon-mode `task.json` **without** a `description` key must produce a
-  context carrying the task body — the regression test asserts the fallback
-  fires, since the existing daemon tests all pass a `description` the real event
-  payload never contains (`tests/test_story_develop_daemon.py:72`). That fixture
-  divergence is why this survived; pin the payload shape the runner actually
-  writes, not a convenient one.
-- S0: `effective_acceptance_criteria` must not silently degrade to the title —
-  assert it is the description when no explicit AC is set, and that a PR body
-  built from a real brief carries both `## What` and `## Acceptance criteria`.
+- S0 (as shipped — there is no fallback to test, the payload carries the body):
+  a **pair** test builds the payload with `_event_payload` and feeds it through
+  `read_task_payload`, asserting the brief does not collapse to the title. Every
+  pre-existing daemon fixture hand-writes a `description` the real projection
+  never emitted (`tests/test_story_develop_daemon.py:72`) — both halves passed
+  while the relationship was broken, so the guard has to be built from the real
+  projection, not a convenient dict.
+- S0: the published payload's exact key set is pinned by an equality assertion,
+  so a future field added to `Task` that agents need cannot be dropped silently
+  the same way.
 - Sweep classification is a pure function of a fetched `PullRequest` plus the
   stored marker — table-driven, no network, including the `mergeable == null`
   case (must re-ask, must never read as clean).
-- Marker scoping: a finding fires once per `(pr_url, base_sha)`, and **re-fires
-  when the base moves again**. The failure mode here is a marker that suppresses
-  forever, so it needs a negative test.
+- Marker scoping: a finding fires once per `(pr_url, base_sha, head_sha)`, and
+  **re-fires when either sha moves** — the negative test that matters is
+  *pushing a conflict resolution* (head moves, base does not), which a
+  base-only marker would wrongly suppress.
 - External-review de-dup: the same comment id across two sweeps posts once; a
-  new comment on an already-reported PR posts.
-- S3 runs the real check-set against a real merge result in a temp repo —
-  per the [ADR 0005](../adr/0005-review-correctness-eval-harness.md) posture,
-  hermetic and no live Lithos.
+  new comment on an already-reported PR posts; and a **summary-only** review
+  with zero inline comments (`CHANGES_REQUESTED`) posts exactly once — the case
+  comment-id de-dup alone cannot represent.
+- Review-state policy is table-driven: `APPROVED` / `DISMISSED` post nothing,
+  `CHANGES_REQUESTED` always posts, `COMMENTED` posts only with content.
+- S3 runs a real check-set against a real merge result in a temp repo — per the
+  [ADR 0005](../adr/0005-review-correctness-eval-harness.md) posture, hermetic
+  and no live Lithos. Also assert the **skip** paths are loud, not silent: a
+  gate with no `project`, a project since removed, and a fork PR each record a
+  reason.
+- S3 result keying: changing the project's check-set config must invalidate a
+  stored green for an unchanged `(head_sha, base_sha)` — otherwise option (2)'s
+  whole point (today's gate, not last week's) is unobservable.
 - Retiring the inline round deletes `pr_delivery`'s Copilot tests; the delivery
   budget (`delivery_budget_seconds`) loses its `copilot_timeout` term and its
   docstring contract test must be updated in the same diff.
@@ -417,7 +552,7 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 
 | # | slice | ships | cost |
 |---|---|---|---|
-| 0 | **S0 real task brief + PR body** — ✅ **SHIPPED (PR #333)** | the coder, the panel AC and the PR body all get the description | none |
+| 0 | **S0 real task brief + PR body** — implemented, PR #333 **open** | the coder, the panel AC and the PR body all get the description | none |
 | 1 | S1 landability + `[PRConflicted]` | two fields, one branch, one marker | none |
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
