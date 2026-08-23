@@ -13,11 +13,12 @@ labels: [needs-triage, lithos-loom, orchestrator, github]
 
 # Post-delivery PR reconciliation
 
-> **Status (2026-08-22).** Written from a live failure: the lithos-lens T1
+> **Status (2026-08-23).** Written from a live failure: the lithos-lens T1
 > rollout delivered four PRs in one day, and **every one of them needed manual
-> intervention to land**. Three distinct mechanisms were involved, none of them
-> the one that looked obvious. This PRD proposes one subscriber that covers all
-> three.
+> intervention to land**. Four distinct mechanisms were involved, none of them
+> the one that looked obvious — including one (S0) where the agents were never
+> given the task description at all. This PRD covers the post-delivery sweep
+> that closes three of them, plus the input fix that closes the fourth.
 
 ## Summary
 
@@ -32,6 +33,13 @@ The proposal is to widen the existing `pr`-gate sweep from a merge poll into a
 1. **Is it still landable?** (behind / conflicted / would-break-on-merge)
 2. **Did anyone review it?** (Copilot, code-quality bots, humans)
 3. **Does it still pass its own gate against *current* main?**
+
+Investigating the last of these turned up a separate, larger defect that this
+PRD also carries: **in daemon mode the agents never receive the task
+description** — the coder's brief and the reviewers' acceptance criteria are
+both the one-line task title. That is why the generated PR bodies say nothing
+about what the PR does, and it is fixed here (S0) because it is the same
+question — *is delivery doing its job?* — from the input side.
 
 And, per the operator's steer, **stop triggering Copilot inline**. Loom
 currently requests Copilot during delivery and blocks on it under a shared
@@ -50,6 +58,59 @@ are from the run metadata, the PRs, and a reproduced rebase.
 | #43 | T1-S12 | 5 | $66.45 | **0 critical / 0 major / 0 minor** | GREEN | conflicted + 3 real defects fixed by hand |
 | #46 | T1-S5 | 5 | $54.07 | **0 / 0 / 0** | GREEN | still conflicted |
 | #47 | T1-S3 | 4 | $55.49 | **0 / 0 / 0** | GREEN | open |
+
+### Failure 0 — in daemon mode the agents never see the task description
+
+Found while investigating why the generated PR bodies say nothing about what
+the PR does. The empty description is the *symptom*; the cause runs much deeper.
+
+`route_runner.py:402` writes the plugin's brief as
+`json.dumps({"task": dict(payload)})` — the **SSE event payload**. That payload
+has no `description` field. A real `task.json` retained from one of these runs:
+
+```
+KEYS: ['claims', 'id', 'metadata', 'resolved_at', 'status', 'tags', 'task_type', 'title']
+title      : 'T1-S7: Task detail rebase (text-first)'
+description: None
+```
+
+All four retained runs are identical — `description=None`,
+`metadata.acceptance_criteria=None`. So `TaskContext.task_text`
+(`lithos_io.py:62`) takes its `else self.title` branch, and everything
+downstream is fed a one-line title:
+
+- the **coder's brief** (`__main__.py:505`, `description=ctx.task_text`);
+- the **reviewers' acceptance criteria** —
+  `effective_acceptance_criteria` (`config.py:637`) is
+  `self.acceptance_criteria or self.description`, and both are the title;
+- the PR body's `## What`, with no `## Acceptance criteria` section at all.
+
+Meanwhile the description is sitting in Lithos, unread. T1-S12's is:
+
+> Render all four states: no tasks at all; all-clear (open sections empty);
+> Lithos unreachable (existing banner); frontier tools missing on an older
+> Lithos → graceful 'graph features need Lithos ≥ 0.4' notice with a flat-list
+> fallback. Acceptance: all four branches render. PRD slice 12.
+
+**Standalone mode is unaffected.** `__main__.py:744` builds its context from
+`fetch_task_context` — a real `lithos_task_get` — so the same story developed
+by hand gets the full brief. Only the daemon path reads the slim payload. Every
+dogfood run driven through the CLI has therefore been testing a different input
+than production.
+
+**What this plausibly explains — stated as a hypothesis, not a result.** The
+three delivered lens PRs each ran 4–5 rounds for $54–$66 and produced **zero
+findings at any severity**, and the two defects Copilot did find were both
+*contract* violations — `docs/REQUIREMENTS.md:1267` §14, and a healthy-stripe
+claim contradicted by the classifier. Contract violations are what an
+AC-grounded review is built to catch and what a title-only review structurally
+cannot. That is consistent with the review-strength thread already on record
+(#173 — "a persona panel isn't an AC auditor"; #208 — the per-criterion
+AC→evidence checklist; the US-18 dogfood conclusion that AC quality beats round
+budget). It is **not** established here: no A/B has been run with the
+description restored, and the review-hardening epic's own lesson is that a
+single arm is not evidence. Restoring the brief is worth doing on its own
+merits; measuring what it buys is separate work.
 
 ### Failure 1 — the inline Copilot round starves itself
 
@@ -162,6 +223,44 @@ One new subscriber concern, hung off the sweep that already exists.
 `_develop_pr_merge.py:153` fetches the PR object **every sweep** and classifies
 `merged` / `closed_unmerged` / `gone` / `still_open`. The `still_open` branch is
 currently empty. That is where this lives.
+
+### S0 — give the daemon path the real task
+
+Independent of the sweep, and the cheapest fix in this document.
+
+`load_task_context` (`daemon_io.py:100`) must not trust the event payload for
+the task body. Two options:
+
+1. **Plugin-side re-fetch (preferred).** When the payload has no `description`,
+   fall back to `fetch_task_context(lithos_url, task_id)` — the path standalone
+   mode already uses. The plugin has `--lithos-url`, so this needs no new
+   wiring, and it makes the two modes converge on one brief rather than two.
+2. **Route-runner enrichment.** Have the runner `lithos_task_get` before writing
+   `task.json`. Fixes every plugin at once, but puts a blocking Lithos call on
+   the dispatch path and leaves the plugin still trusting whatever it is handed.
+
+(1) is preferred: the plugin owns its own brief, and a fetch failure is already
+fatal-with-a-clear-error there. A Lithos round-trip is not free, but it happens
+once per run against a container loop costing tens of dollars.
+
+Then **PR body**: with a real description the existing `build_pr_body` renders
+`## What` and `## Acceptance criteria` correctly with no changes. Two things
+still want fixing:
+
+- The title is `config.description.strip().splitlines()[0][:90]`
+  (`pr_delivery.py:747`) — the first line of the brief. Once the brief is
+  title + body that still resolves to the title, but it is incidental rather
+  than intended; take the title from `ctx.title` explicitly.
+- `## What` currently re-prints the title as its first line, so the body opens
+  by repeating the PR title. Render the **body** under `## What` and let the
+  title be the title.
+
+**Also worth carrying into the body** — all of it already in hand at delivery
+time, and none of it available to the sweep later: the acceptance criteria, the
+per-round review verdicts, and the check-set result. The current body has the
+process metadata (rounds, cost, task id) but not the substance. A reviewer
+opening a loom PR should be able to see what it was asked to do and what the
+panel checked, without opening Lithos.
 
 ### S1 — PR landability
 
@@ -278,6 +377,15 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 
 ## Testing
 
+- S0: a daemon-mode `task.json` **without** a `description` key must produce a
+  context carrying the task body — the regression test asserts the fallback
+  fires, since the existing daemon tests all pass a `description` the real event
+  payload never contains (`tests/test_story_develop_daemon.py:72`). That fixture
+  divergence is why this survived; pin the payload shape the runner actually
+  writes, not a convenient one.
+- S0: `effective_acceptance_criteria` must not silently degrade to the title —
+  assert it is the description when no explicit AC is set, and that a PR body
+  built from a real brief carries both `## What` and `## Acceptance criteria`.
 - Sweep classification is a pure function of a fetched `PullRequest` plus the
   stored marker — table-driven, no network, including the `mergeable == null`
   case (must re-ask, must never read as clean).
@@ -297,13 +405,17 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 
 | # | slice | ships | cost |
 |---|---|---|---|
+| 0 | **S0 real task brief + PR body** | the coder, the panel AC and the PR body all get the description | none |
 | 1 | S1 landability + `[PRConflicted]` | two fields, one branch, one marker | none |
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
 
-Slice 2 is the one with an operator prerequisite (the repo-level Copilot
-setting). Slices 1 and 3 are independent of it and can land first.
+**S0 first, and it should not wait for the rest of this PRD.** It is a live
+correctness bug on every daemon run, it is a handful of lines, and every further
+measurement of review strength is confounded until it lands. Slice 2 is the one
+with an operator prerequisite (the repo-level Copilot setting); slices 1 and 3
+are independent of it.
 
 ## Open questions
 
