@@ -228,32 +228,44 @@ currently empty. That is where this lives.
 
 Independent of the sweep, and the cheapest fix in this document.
 
-`load_task_context` (`daemon_io.py:100`) must not trust the event payload for
-the task body. Two options:
+**SHIPPED — PR #333.** The design below was drafted before the cause was
+located, and the answer turned out simpler than either option it weighed.
 
-1. **Plugin-side re-fetch (preferred).** When the payload has no `description`,
-   fall back to `fetch_task_context(lithos_url, task_id)` — the path standalone
-   mode already uses. The plugin has `--lithos-url`, so this needs no new
-   wiring, and it makes the two modes converge on one brief rather than two.
-2. **Route-runner enrichment.** Have the runner `lithos_task_get` before writing
-   `task.json`. Fixes every plugin at once, but puts a blocking Lithos call on
-   the dispatch path and leaves the plugin still trusting whatever it is handed.
+Neither a plugin-side re-fetch nor route-runner enrichment is needed, because
+**nothing was missing upstream**. `lithos_task_list` returns `description`,
+loom's `Task` carries it (`lithos_client.py:160`) and the parser reads it
+(`:1801`) — `_enrich` had the body in hand the whole time. `_event_payload`
+(`lithos_event_stream.py:588`) is a hand-written eight-key projection that
+simply never published it. The fix is **one key**, no extra Lithos round-trip,
+and both modes converge on one brief.
 
-(1) is preferred: the plugin owns its own brief, and a fetch failure is already
-fatal-with-a-clear-error there. A Lithos round-trip is not free, but it happens
-once per run against a container loop costing tens of dollars.
+`_task_from_payload` reconstructs `description` too, so it stays the true
+inverse of `_event_payload` rather than a lossy subset — a partial inverse is
+how this class of bug hides.
+
+The guard is a **pair test**: every existing daemon fixture hand-wrote a payload
+containing a `description` the real projection did not emit, so both halves
+passed while the relationship between them was broken. The new test builds the
+payload with `_event_payload` and feeds it through `read_task_payload`.
 
 Then **PR body**: with a real description the existing `build_pr_body` renders
-`## What` and `## Acceptance criteria` correctly with no changes. Two things
-still want fixing:
+`## What` and `## Acceptance criteria` correctly with no changes at all — which
+is the whole fix for the reported symptom.
 
-- The title is `config.description.strip().splitlines()[0][:90]`
-  (`pr_delivery.py:747`) — the first line of the brief. Once the brief is
-  title + body that still resolves to the title, but it is incidental rather
-  than intended; take the title from `ctx.title` explicitly.
-- `## What` currently re-prints the title as its first line, so the body opens
-  by repeating the PR title. Render the **body** under `## What` and let the
-  title be the title.
+Two further body changes were drafted here and then **assessed and dropped**:
+
+- *Take the title from `ctx.title` rather than
+  `config.description.strip().splitlines()[0][:90]`* — with the brief restored
+  that expression **is** the title in every task-driven run, and it is the only
+  thing that works for standalone `--description` free text, which has no task.
+  A new `DevelopConfig.title` would compute the identical string at both call
+  sites.
+- *Stop `## What` repeating the title* — once the body is real, `## What` reads
+  title-then-body, which is a normal and useful PR body. The duplication was
+  only conspicuous while the body was empty.
+
+Recorded rather than silently dropped: both looked worth doing when the cause
+was unknown, and neither survives contact with the actual fix.
 
 **Also worth carrying into the body** — all of it already in hand at delivery
 time, and none of it available to the sweep later: the acceptance criteria, the
@@ -405,7 +417,7 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 
 | # | slice | ships | cost |
 |---|---|---|---|
-| 0 | **S0 real task brief + PR body** | the coder, the panel AC and the PR body all get the description | none |
+| 0 | **S0 real task brief + PR body** — ✅ **SHIPPED (PR #333)** | the coder, the panel AC and the PR body all get the description | none |
 | 1 | S1 landability + `[PRConflicted]` | two fields, one branch, one marker | none |
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
