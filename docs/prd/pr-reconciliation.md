@@ -46,6 +46,43 @@ currently requests Copilot during delivery and blocks on it under a shared
 budget. Checking asynchronously is strictly better: no deadline to starve, and
 it picks up reviews loom never asked for.
 
+## What this eliminates, and what it only makes visible
+
+The originating question was *"how do we land changes like this without manual
+intervention?"* — so this section has to be blunt about which parts of this PRD
+answer it and which do not.
+
+**Eliminates work outright:**
+
+- **S0** (shipped, #333). No reporting involved; the agents get a real brief.
+- **S4 prevention.** A conflict that never happens needs no resolution. This is
+  the *only* part of this document that would have removed the manual work in
+  the batch below, and it was drafted last, as an afterthought. Corrected: it is
+  the primary answer, and the cheapest.
+- **S1's auto-update** for the `behind`-and-clean case (below) — genuinely
+  zero-judgement.
+
+**Only makes a problem visible earlier:**
+
+- **S3.** `[MergeGateFailed]` turns a post-merge surprise into a pre-merge fact.
+  Real value — the operator hit the module-budget breach twice *after* merging —
+  but the fix still needs a human.
+- **S1's `dirty` case.** Knowing a PR conflicts is not resolving it.
+- **S2 without converge.** Reporting an external finding is strictly better than
+  losing it, which is today's behaviour — but the *fixing* is what gets removed.
+
+**Measured against the batch below, honestly:** neither #43 nor #46 would have
+auto-landed under any automation in this PRD. Both conflict in real source
+(`frontier.py`; `tasks.py` / `web.py` / `dashboard.html`) and one needed a
+semantic decision no merge driver could make (`filters_narrow_the_board`).
+Stripping `docs/generated/` from the diff removes 2 of 5 and 4 of 9 conflicting
+paths respectively — and **still leaves both conflicted**.
+
+What *would* have removed the work is that these four stories never being in
+flight together. That is S4's `blocks` edges, it costs nothing, and it is the
+honest headline: **the reconciliation sweep is damage control; the fix for this
+batch was scheduling.**
+
 ## Evidence — the 2026-08-22 lithos-lens rollout
 
 Four stories delivered on the day, four PRs, four manual interventions; a fifth
@@ -287,8 +324,12 @@ today the dataclass carries `head_sha` / `base_ref` / `head_ref` but no base
 sha at all. On `still_open`, classify:
 
 - `clean` — nothing to do.
-- `behind` — the base moved, no conflict. Offer S3's re-gate; optionally
-  `PUT /pulls/{n}/update-branch` (`allow_update_branch` is already on for lens).
+- `behind` — the base moved, no conflict. **Auto-update by default**: merge the
+  base in, run S3's gate, push if green (Decision 2). Non-destructive, no force,
+  zero tokens, no judgement. `PUT /pulls/{n}/update-branch` does exactly this
+  server-side and `allow_update_branch` is already on for lens; doing it in the
+  worktree instead is preferred only because the gate must run on the merge
+  result before the push, not after.
 - `dirty` — real conflict. Post `[PRConflicted]` on the story.
 
 **`[PRConflicted]` cannot name the conflicting paths.** GitHub reports
@@ -448,9 +489,12 @@ Consequences to implement, not discover:
   it on base-change detection only, bounded to one in-flight re-gate per
   project.
 
-### S4 — prevention
+### S4 — prevention (the part that actually removes the work)
 
-Neither of these is loom code, both reduce how often S1–S3 must fire.
+Neither of these is loom code. They are listed last only because they are not
+loom changes — by leverage they are **first**: nothing else in this PRD would
+have prevented a single manual intervention in the batch above, and `blocks`
+edges would have prevented all of them.
 
 - **`blocks` edges between stories on one surface.** T1-S5/S9/S10/S12 are four
   slices of one dashboard. They had no edges, so Lithos's ready queue offered
@@ -478,9 +522,27 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 1. **The sweep, not the delivery path, owns everything post-PR.** Delivery ends
    at "PR is open". Anything with unbounded external latency belongs to a poll
    loop, not a budget.
-2. **Report before acting.** S1 and S3 only post findings. Auto-`update-branch`
-   is opt-in; auto-rebase-and-force-push is explicitly **not** in this PRD — it
-   rewrites a branch a human may be mid-review on.
+2. **Act where there is no judgement to exercise; report where there is.** The
+   earlier draft said "report before acting" as a blanket rule, and that was
+   over-cautious — it reasoned from a generic don't-rewrite-branches instinct
+   rather than from this workflow's facts. Graded instead:
+
+   - **`behind`, merges clean, gate green → do it.** Merge the base into the
+     branch and push. No judgement exists to exercise, and this is what the
+     operator does by hand every time.
+   - **Conflicts only in regenerable files → regenerate, gate, push.** Also
+     mechanical, and only reachable once S4 stops committing them at all — at
+     which point the case disappears rather than being automated.
+   - **Conflicts in real source, or a red gate → report.** These need judgement.
+     The evidence is `filters_narrow_the_board`: two individually-correct PRs
+     whose composition was wrong in a way no merge driver could see.
+
+   **Merge, never rebase-and-force-push.** A merge commit is additive: it does
+   not invalidate the reviewer's line anchors, does not destroy the per-round
+   dialogue commits, and needs no force. It is also exactly what the operator
+   chose unprompted on #43 — *"kept as a merge so the per-round story-develop
+   commits survive"*. Rebase-and-force-push remains out of scope: the human IS
+   the reviewer in this flow, and they may be mid-read.
 3. **Conflict resolution stays human or `converge`.** The evidence says these
    conflicts need judgement (`filters_narrow_the_board`), not a merge driver.
    When automation is wanted it belongs to `develop converge`
@@ -557,6 +619,11 @@ Neither of these is loom code, both reduce how often S1–S3 must fire.
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
+
+**Order by leverage, not by number: S0, then S4, then the sweep.** S4 is last in
+the table and first in value — it is the only entry that removes manual work
+rather than reporting on it, and for the batch that motivated this PRD it is the
+only one that would have changed the outcome.
 
 **S0 first, and it should not wait for the rest of this PRD.** It is a live
 correctness bug on every daemon run, it is a handful of lines, and every further
