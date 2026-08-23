@@ -90,8 +90,9 @@ class EventStreamClient(Protocol):
     """Minimum surface the event-stream source depends on.
 
     Only ``task_list`` is required — it returns the full Task shape
-    (id, title, status, tags, metadata, claims) which downstream tag
-    filters need. ``task_status`` is deliberately NOT used for
+    (id, title, description, status, tags, metadata, claims) which the tag
+    filters and the agent-facing brief both need. ``task_status`` is
+    deliberately NOT used for
     enrichment because Lithos's implementation drops tags + metadata
     (see ``LithosClient.task_status`` docstring), which would make
     routed events unmatchable.

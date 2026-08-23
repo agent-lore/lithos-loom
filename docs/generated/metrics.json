@@ -474,10 +474,10 @@
         "functions": 70,
         "largest_module": "lithos_loom.sources.github_issue_watcher",
         "largest_module_lines": 667,
-        "lines": 3111,
+        "lines": 3112,
         "modules": 7,
         "public_symbols": 14,
-        "sloc": 2341
+        "sloc": 2342
       },
       "State": {
         "classes": 4,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 40275,
+    "total_lines": 40276,
     "total_modules": 124,
-    "total_sloc": 31990
+    "total_sloc": 31991
   },
   "tests": {
     "ratio": 1.65,
-    "src_lines": 40275,
+    "src_lines": 40276,
     "test_lines": 66529
   }
 }
