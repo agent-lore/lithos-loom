@@ -8,6 +8,7 @@ references:
   - docs/prd/orchestration.md (epic H — the `pr` gate this PRD extends)
   - docs/prd/archive/story-develop.md (T9 — the inline Copilot round this PRD retires)
   - docs/adr/0009-converge-pr-loop.md (`develop converge` — the paid loop this PRD feeds)
+  - docs/adr/0011-pr-maintenance-invariants.md (the four cross-cutting decisions, extracted)
 labels: [needs-triage, lithos-loom, orchestrator, github]
 ---
 
@@ -724,6 +725,17 @@ story is not claimed and waits.
   stories genuinely do not collide should not be throttled.
 - Counts **gates**, not claims — that is the distinction the existing knob
   misses.
+- **Escalated gates do not count** (operator decision, 2026-08-24). A gate in
+  `needs_human` is no longer loom's work-in-progress; it is waiting on a
+  decision, and counting it would convert operator latency into a full project
+  stop — a stuck decision could halt a project for days. So an escalated gate
+  is excluded from the admission count and dispatch continues.
+- **But stuck PRs cannot accumulate unboundedly**, so a second, looser cap
+  bounds *total* open delivered PRs per project (escalated ones included).
+  Reaching it stops dispatch and is itself worth surfacing: several PRs stuck
+  awaiting decisions is a signal about the decomposition, not just a queue
+  depth. Default meaningfully above the admission limit — the admission limit
+  is the steady-state shape, this is the backstop.
 - `blocks` edges remain the more precise tool where the decomposition knows
   which stories are safe to run together; admission is the backstop for when it
   does not.
@@ -1090,17 +1102,17 @@ automatic-review setting); nothing else waits on it.
 1. **Does lithos-lens have automatic Copilot code review enabled at the repo
    level?** Gates slice 2's default. Loom requested Copilot on all four PRs, so
    the observed reviews cannot distinguish the two causes. One settings check.
-2. **Does an escalated (`needs_human`) gate count toward S6's admission limit?**
-   Counting it means one stuck decision halts the project — arguably correct
-   (stop piling up work behind it), arguably a multi-day stall. Current lean:
-   **do not count it**, with a separate cap on total open PRs so stuck ones
-   cannot accumulate unboundedly.
-3. **Should the cross-cutting decisions become an ADR?** Four of them are
-   architectural rather than PRD-scoped — converge as the single pre-merge
-   remediation engine, reconciliation state living in Lithos, single-writer
-   concurrency, and the additive/destructive push invariant. The repo keeps
-   ADRs 0001–0010 for exactly this class. A PRD is a plan and gets archived;
-   these outlive it.
+2. ~~Does an escalated (`needs_human`) gate count toward S6's admission
+   limit?~~ **Decided 2026-08-24: no.** An escalated gate is waiting on the
+   operator, not on loom, and counting it would turn operator latency into a
+   project-wide stop. A separate looser cap on *total* open delivered PRs stops
+   stuck ones accumulating. Written into S6.
+3. ~~Should the cross-cutting decisions become an ADR?~~ **Decided
+   2026-08-24: yes, one ADR covering all four** —
+   [ADR 0011](../adr/0011-pr-maintenance-invariants.md): converge as the single
+   pre-merge remediation engine, reconciliation state in Lithos, single-writer
+   concurrency, and the additive-only push invariant. Decisions 1, 2, 7, 9 and
+   11 below are its PRD-side restatements; the ADR is authoritative.
 4. **Usage limits, not cost, are the resource constraint.** Coding agents run
    on a subscription, so dollar figures in this document are indicative only.
    The real risk is autonomous work consuming the same allowance the operator
