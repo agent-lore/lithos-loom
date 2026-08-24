@@ -597,6 +597,116 @@ restored the inputs for. If measurement shows the panel cannot judge composed
 trees, the fallback is check-set-only auto-push for **non-semantic** conflicts
 and escalation for the rest — a narrowing, not a redesign.
 
+### S5a — triage external claims before acting on them
+
+A trusted bot can be confidently wrong, and S2 hands its findings straight to a
+coder that then pushes. The reviewer least likely to catch a bogus fix is loom's
+own panel, which already approved this code. So **verify the claim before
+actioning it** (operator decision, 2026-08-24).
+
+**A separate triage step, not a "be sceptical" clause in the fixer prompt.**
+The fixer has been handed a job and is pulled toward doing it; asking one agent
+to both decide-if-real and fix biases toward acting. Triage is also cheap — one
+call against a named file, line and mechanism, no container fix loop — and it
+**produces an artifact**: a rejection is posted as a reply on the reviewer's own
+thread ("not reproducible because …"), which closes the loop honestly instead of
+ignoring it silently.
+
+**Default to acting when uncertain.** The costs are asymmetric: actioning a
+false positive is recoverable (the check-set and panel still run, and the result
+is an append-only commit that can be reverted), while ignoring a true positive
+is the failure that produced this whole PRD. So triage rejects only with cited
+evidence — the code that refutes the claim — and anything short of that proceeds
+to the fixer.
+
+**Why the lens34 negative result does not apply.** RH-1 measured a
+"discriminator" clause suppressing *true* findings (arm C: 2/5 vs a 3/5
+control), and the rule it produced was that enumerate-and-discriminate only
+works on a **closed** set. That result is about open-ended *detection*. Triage
+is the opposite shape: the claim is already made and localised to a file, a
+line and a mechanism, so checking it is a closed question. The risk of
+over-suppression is nonetheless the one to watch, which is what the
+default-to-act rule and the evidence requirement are for — and it is
+**measurable**: seed a known-false external finding in the eval harness and
+assert triage rejects it, alongside a true one it must pass through.
+
+### S5b — bound the external-remediation loop
+
+Loom pushes → GitHub fires `synchronize` → the external reviewer re-reviews the
+new head → new comments → loom fixes → pushes. Nothing terminates this.
+
+The inline round had an explicit bound (*"No Copilot re-request — one round is
+the bound"*, `pr_delivery.py:16`); retiring it removes the bound. And S5's
+"one attempt per `(base_sha, head_sha)`" **does not substitute** — every push
+mints a new head sha, so that counter resets on precisely the event that should
+stop it.
+
+**Budget: 2–3 external-triggered remediation rounds per PR, and it must survive
+head changes.** Concretely:
+
+- Counted per PR, on the gate, incrementing per *remediation round* (not per
+  finding, not per commit).
+- **Does not reset on a loom-authored push.** That is the bug being fixed.
+- **Resets on a human push to the branch** — the operator has taken ownership
+  and changed the situation — and on a merge, which ends the PR.
+- Separate from S5's conflict-attempt budget: a base move and a review comment
+  are different events and must not consume each other's allowance.
+- On exhaustion → S7 human gate. **Detection is never disabled**: new external
+  findings keep being reported as `[ExternalReview]`, they simply stop
+  triggering fixes. Going over budget must not blind loom.
+- Additionally: skip remediation of findings written against a `head_sha` loom
+  itself authored within the current round — they are almost always a
+  re-review of loom's own fix in flight.
+
+### S5c — make the range helpers merge-aware (prerequisite for S5)
+
+Merging the base into a story branch breaks an assumption baked into every
+range helper in `runner/git.py`. All three are **two-dot against a `base_sha`
+captured once at worktree creation** — and `base_sha`'s own docstring says it is
+recorded "immediately after worktree creation (before any agent commit)":
+
+```python
+rev-list --reverse f"{base_sha}..HEAD"   # commits_since
+log      --reverse f"{base}..{head}"     # log_between  → converge's {commit_log}
+diff     --stat    f"{base_sha}..HEAD"   # diff_stat    → the REVIEWER prompt (#136)
+```
+
+Once the branch absorbs a merge, that sha is no longer the fork point, and each
+helper degrades differently:
+
+- **`diff_stat` is the damaging one.** `git diff A..B` is a plain two-endpoint
+  tree diff, so after the merge the reviewer's orientation diff contains
+  **everything that landed on the base** as well as the story's own work. The
+  panel would be asked to review other people's merged PRs.
+- **`commits_since` over-counts** — the merged-in commits are reachable from
+  HEAD but not from the stale `base_sha`, so they are reported as round
+  commits. The `[DevelopResult]` "N commit(s) on branch" inflates, and any
+  round-detection keyed on commit count sees phantom work.
+- **`log_between`** feeds converge's cold-start `{commit_log}`; it gains the
+  base's history as if the PR author had narrated it.
+
+**Fix, per helper — the two-dot/three-dot distinction is exactly the tool:**
+
+- **Diffs → three-dot against the base *ref***: `git diff <base_ref>...HEAD`
+  diffs from the current merge-base, yielding the branch's own changes only.
+- **Commit enumeration → two-dot against the *current base ref***, not the
+  recorded start sha: `rev-list <base_ref>..HEAD` correctly excludes merged-in
+  commits because they *are* reachable from the base. Add `--first-parent`
+  where only the branch's own round commits are wanted.
+- **Stop treating the recorded `base_sha` as the fork point.** Where a sha is
+  genuinely needed, recompute it: `git merge-base HEAD <base_ref>`.
+
+**One deliberate exception.** S5's panel reviews the *composed tree*, and a
+conflict resolution is not visible in `base...HEAD` at all — a merge commit's
+resolution shows only against its parents. That review needs the merge-commit
+diff shape (`git show -m` / `--cc`, or a diff against each parent), which is a
+different prompt input and must be built as one rather than assumed.
+
+**Guard:** a test asserting that a branch which has absorbed a base merge
+produces the **same review diff** as before the merge, modulo the conflict
+resolution itself. That is a pair test — the two-dot helpers pass their own unit
+tests today precisely because no fixture has a merge commit in it.
+
 ### S6 — serial admission (make "serial by default" true, not advisory)
 
 S4's `blocks` edges are the precise mechanism but they rely on a planner adding
@@ -766,7 +876,20 @@ edges would have prevented all of them.
 10. **Serial admission counts open `pr` gates, not active claims**, defaulting
    to one per project + base branch. `blocks` edges stay the precise mechanism;
    admission is the backstop for decompositions that lack them.
-11. **S3 re-resolves the project's current check-set rather than replaying the
+11. **Loom is the single writer of a gate's reconciliation state.** Lithos has
+   no optimistic concurrency on task updates — `lithos_task_update` takes no
+   `expected_version`, unlike `lithos_write` for notes — so two writers can lose
+   an update on the same key. One reconciler owns a gate; webhooks and other
+   triggers *enqueue*, they do not write. Chosen over adding CAS upstream
+   because it is the smaller change and has no cross-repo dependency.
+12. **External claims are triaged before they are actioned**, by a separate
+   cheap step rather than a sceptical clause in the fixer prompt — and triage
+   defaults to *acting* when uncertain, because actioning a false positive is
+   recoverable and ignoring a true one is the failure this PRD exists to fix.
+13. **External-triggered remediation is bounded per PR (2–3 rounds), and the
+   budget survives head changes.** It resets on a human push, never on loom's
+   own. Exhaustion escalates and stops *fixing*; it never stops *reporting*.
+14. **S3 re-resolves the project's current check-set rather than replaying the
    one the story passed.** The question is "will main break", and main is
    defended by today's config. The cost is that a gate must always carry its
    `project` to be resolvable at all.
@@ -857,7 +980,10 @@ Reconciling explicitly, so the two do not drift:
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
-| 5 | **S5 conflict convergence** | routine conflicts resolved without the operator | tokens, capped, 1 attempt per sha pair |
+| 5a | **S5c merge-aware ranges** | prerequisite: reviewers stop seeing other people's work | none |
+| 5b | **S5a external-claim triage** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
+| 5c | **S5b remediation budget** | the two-bot loop terminates | none |
+| 5d | **S5 conflict convergence** | routine conflicts resolved without the operator | 1 attempt per sha pair |
 | 6 | **S6 serial admission** | concurrent delivered PRs bounded by config, not by hope | none |
 | 7 | **S7 escalation state** | a decision brief in Lithos, renderable by Lens | none |
 
