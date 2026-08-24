@@ -269,8 +269,8 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
     """Bootstrap-emitted events carry the full Task payload shape.
 
     The keys RouteRunner and the projection depend on (id, title, status,
-    tags, metadata, claims, resolved_at, task_type) so both contracts are
-    preserved across the source swap.
+    tags, metadata, claims, resolved_at, description, task_type) so both
+    contracts are preserved across the source swap.
     """
     bus = EventBus()
     listener = bus.subscribe(event_types=["lithos.task.created"])
@@ -306,8 +306,48 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
         "metadata": {"k": "v"},
         "claims": [],
         "resolved_at": None,
+        "description": None,
         "task_type": "task",
     }
+
+
+async def test_payload_carries_the_task_description() -> None:
+    """The published payload carries the task BODY, not just its title.
+
+    The route-runner writes this payload verbatim as the plugin's
+    ``task.json``, and story-develop derives BOTH the coder's brief and the
+    reviewers' acceptance criteria from it. Dropping ``description`` here
+    silently reduced every daemon run to a one-line title — the enrichment
+    fetch already had the body (``lithos_task_list`` returns it and
+    :class:`Task` carries it); only this projection omitted it.
+    """
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created"])
+    client = _FakeClient(
+        bootstrap=[
+            _task(
+                "abc",
+                title="T1-S12: Empty/degraded states",
+                description=(
+                    "Render all four states. Acceptance: all four branches render."
+                ),
+            )
+        ],
+    )
+    source = _stream(client=client, bus=bus, aconnect=_FakeAconnect(connections=[[]]))
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    drained = _drain(listener)
+    assert drained, "bootstrap published nothing"
+    _, payload = drained[0]
+    assert payload["description"] == (
+        "Render all four states. Acceptance: all four branches render."
+    )
 
 
 async def test_bootstrap_payload_carries_task_type_for_a_gate() -> None:

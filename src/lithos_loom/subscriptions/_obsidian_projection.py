@@ -604,9 +604,12 @@ def _task_from_payload(payload: Any) -> Task:
 
     The :class:`~lithos_loom.sources.lithos_event_stream.LithosEventStream`
     publishes the full Task shape (id, title, status, tags, metadata,
-    claims, resolved_at, task_type), so this is just dict-lookups, not a
-    re-fetch. ``task_type`` defaults to ``task`` so a payload from a source
-    that predates Epic H still reconstructs.
+    claims, resolved_at, description, task_type), so this is just dict-lookups,
+    not a re-fetch. ``task_type`` defaults to ``task`` so a payload from a
+    source that predates Epic H still reconstructs, and ``description``
+    defaults to ``None`` for the same reason — the projection does not render
+    a task body, but reconstructing it faithfully keeps this the inverse of
+    ``_event_payload`` rather than a lossy subset of it.
     """
     return Task(
         id=str(payload["id"]),
@@ -616,6 +619,9 @@ def _task_from_payload(payload: Any) -> Task:
         metadata=dict(payload.get("metadata") or {}),
         claims=tuple(payload.get("claims") or ()),
         resolved_at=_parse_resolved_at(payload.get("resolved_at")),
+        description=(
+            str(desc) if (desc := payload.get("description")) is not None else None
+        ),
         task_type=str(payload.get("task_type") or "task"),
     )
 
