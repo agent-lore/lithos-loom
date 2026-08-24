@@ -354,5 +354,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
 - [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
 - [ADR 0009 — On-demand PR review-convergence loop (`develop converge`)](../../adr/0009-converge-pr-loop.md)
+- [ADR 0011 — PR-maintenance invariants: one engine, one writer, state in Lithos, additive-only pushes](../../adr/0011-pr-maintenance-invariants.md)
 
 [← all generated docs](../README.md)

@@ -117,5 +117,6 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 - [ADR 0001 — Per-project GitHub-watch config in document metadata](../../adr/0001-github-watch-config-storage.md)
 - [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
+- [ADR 0011 — PR-maintenance invariants: one engine, one writer, state in Lithos, additive-only pushes](../../adr/0011-pr-maintenance-invariants.md)
 
 [← all generated docs](../README.md)
