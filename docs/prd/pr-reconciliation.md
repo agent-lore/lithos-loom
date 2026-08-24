@@ -27,12 +27,22 @@ A delivered PR enters a `pr` gate and loom stops looking at it, except to ask
 merge — the base moving underneath it, conflicts appearing, an external
 reviewer filing real defects — is invisible to loom and lands on the operator.
 
-The proposal is to widen the existing `pr`-gate sweep from a merge poll into a
-**reconciliation sweep**: same cadence, same PR fetch, three more questions.
+The proposal is to turn the `pr` gate from a merge poll into a **PR-maintenance
+state machine**: loom keeps its own delivered PRs merge-ready, deals with
+external review comments, resolves the conflicts it can, and escalates — as a
+first-class state, not a log line — only what genuinely needs the operator.
+
+The operating principle (2026-08-24): **mechanical cases are loom's job.** A
+conflict is evidence that judgement is needed; it is not evidence that
+*operator* judgement is needed. Loom should attempt agent judgement, review it
+independently, and escalate disputes, ambiguity, exhausted budgets and
+persistent red gates.
+
+The gate answers three questions each sweep, and acts on all three:
 
 1. **Is it still landable?** (behind / conflicted / would-break-on-merge)
 2. **Did anyone review it?** (Copilot, code-quality bots, humans)
-3. **Does it still pass its own gate against *current* main?**
+3. **Does it still pass a gate against its *current base*?**
 
 Investigating the last of these turned up a separate, larger defect that this
 PRD also carries: **in daemon mode the agents never receive the task
@@ -62,28 +72,39 @@ answer it and which do not.
 - **S1's auto-update** for the `behind`-and-clean case (below) — genuinely
   zero-judgement.
 
+- **S2 remediation** — external findings are injected into the fix loop, fixed,
+  verified by loom's own panel and gate, and pushed. On by default.
+- **S5 conflict convergence** — an agent attempts the merge resolution, loom's
+  panel reviews the *composed tree*, the project's current check-set runs, and
+  the result is pushed as an append-only merge commit.
+- **S6 serial admission** — the conflicts that never happen.
+
 **Only makes a problem visible earlier:**
 
-- **S3.** `[MergeGateFailed]` turns a post-merge surprise into a pre-merge fact.
-  Real value — the operator hit the module-budget breach twice *after* merging —
-  but the fix still needs a human.
-- **S1's `dirty` case.** Knowing a PR conflicts is not resolving it.
-- **S2's detection half.** Reporting an external finding is strictly better than
-  losing it, which is today's behaviour. (S2's *remediation* half is back in the
-  eliminates-work column: converge is on by default per Decision 2, because a
-  fast-forward push is additive.)
+- **S3's red-gate case.** `[MergeGateFailed]` turns a post-merge surprise into a
+  pre-merge fact. A broken merge still needs fixing, but S5's coder gets first
+  attempt at it.
+- **S7 escalation.** By construction: it is what happens when automation stops.
 
-**Measured against the batch below, honestly:** neither #43 nor #46 would have
-auto-landed under any automation in this PRD. Both conflict in real source
-(`frontier.py`; `tasks.py` / `web.py` / `dashboard.html`) and one needed a
-semantic decision no merge driver could make (`filters_narrow_the_board`).
-Stripping `docs/generated/` from the diff removes 2 of 5 and 4 of 9 conflicting
-paths respectively — and **still leaves both conflicted**.
+**Measured against the batch below, honestly.** Neither #43 nor #46 would have
+merged *untouched* — both conflict in real source (`frontier.py`; `tasks.py` /
+`web.py` / `dashboard.html`), and one needed a semantic decision
+(`filters_narrow_the_board`) that no merge driver could make. But "no merge
+driver" is not "no agent": that resolution is exactly the kind of reasoning
+S5's coder-plus-panel loop exists to attempt, and its correctness is
+independently checkable — the operator's own fix was verified by the slice's
+regression tests plus `check`, `diagrams` and `e2e`. So the honest claim is
+**not** "S5 would have landed them", but "S5 would have attempted them, proven
+its attempt against the same gate the operator used, and escalated only if that
+failed".
 
-What *would* have removed the work is that these four stories never being in
-flight together. That is S4's `blocks` edges, it costs nothing, and it is the
-honest headline: **the reconciliation sweep is damage control; the fix for this
-batch was scheduling.**
+Two things remain true regardless: stripping `docs/generated/` removes 2 of 5
+and 4 of 9 conflicting paths and leaves both conflicted, so **S4 is necessary
+and not sufficient**; and these four stories never being in flight together
+(S6) is the cheapest fix of all. Serial-by-default is the plan — but it is not
+the whole plan, because imported tasks, separate epics and imperfect
+decompositions will keep producing concurrent PRs, and the machinery has to
+handle them when they arrive.
 
 ## Evidence — the 2026-08-22 lithos-lens rollout
 
@@ -416,24 +437,61 @@ reply to each comment thread with the fixing sha. Deleting it without a
 replacement means **every external finding becomes manual work** — the exact
 cost this PRD exists to reduce.
 
-**Decision: the sweep detects, `converge` remediates.** `develop converge`
-(ADR 0009) already is this cycle — panel + gate + coder fixes on an existing PR
-until green, then fast-forward push — but on demand and unbounded in time, which
-is the right shape for an external reviewer. So S2 ships as:
+**Decision: the sweep detects, and converge remediates — but the findings must
+be INJECTED, not merely used as a trigger.**
 
-1. **Always:** post `[ExternalReview]` with the findings. Detection is never
-   optional and never blocks.
-2. **Remediate by default** (`external_review_converge`, default **on**): on a
-   new blocking external review, dispatch `develop converge` against the PR.
-   Converge's push epilogue is a **fast-forward** onto the PR head ref and it
-   refuses to force (`MergeRaceDetected`), so this is additive work on the
-   branch — squarely inside Decision 2's automate-it half, and it *restores* the
-   remediation the inline round used to do rather than trading it away.
+Dispatching `develop converge` on an external review does not work as the
+earlier draft assumed. Converge runs its **own local-panel intake** first
+(`converge.py:1`) and returns **`already_clean` without ever starting a coder**
+when that panel finds nothing (`converge.py:230`). Loom's panel is precisely the
+panel that missed the defect — it approved T1-S12 across five rounds. So
+"Copilot finds a real bug → loom notices → converge does nothing" is the
+default outcome, not an edge case.
 
-   It does spend tokens in response to a third party's output, so it remains a
-   config key an operator can turn off per project, and it inherits the run's
-   existing cost ceiling. But default-off would have made this PRD a net
-   regression on remediation, which is not the trade to make.
+S2 therefore adds an **external-findings input** to the convergence entry point,
+which seeds the coder directly and bypasses the intake gate:
+
+```
+ExternalFinding:
+  source          copilot | github-code-quality | human | <configured bot>
+  author          login
+  trust           trusted | untrusted        (see below)
+  review_id       int | None                 (summary-only reviews have no comment)
+  comment_id      int | None
+  thread_url      str                        (for the reply, and for the operator)
+  head_sha        str                        the EXACT sha the reviewer read
+  path / line     str | None
+  body            str
+  severity        mapped, default minor      (external reviewers state none)
+```
+
+`head_sha` is load-bearing: a finding written against a sha the branch has since
+moved past may already be fixed, and must be re-anchored or dropped rather than
+re-fixed blindly. The existing `comments_to_handoff_text` +`FindingLedger` path
+(`pr_delivery.py:157`) already renders findings into a synthetic review handoff
+and is the natural implementation seam — it is what the inline round used.
+
+**Then loom verifies.** The injected findings drive the coder; loom's own panel
+and the project's check-set review the *result*. The external reviewer proposes;
+loom's gate disposes. Thread replies ("Fixed in `<sha>` — …") are restored, since
+the thread url and comment id are carried through.
+
+**Trust policy (operator decision, 2026-08-24): allowlisted bots + repo write
+access.** External comment text reaching a coder that then pushes is a
+prompt-injection surface — anyone who can comment can attempt to inject
+instructions. So:
+
+- Configured bot logins (`copilot-pull-request-reviewer[bot]`,
+  `github-code-quality[bot]`, …) → **trusted**, seed the coder.
+- Human commenters with **write or admin** permission on the repo → trusted
+  (one permissions API call per unseen author, cached per sweep).
+- Everyone else → **reported to the operator, never fed to an agent.** The
+  finding still appears; only the automatic remediation is withheld.
+
+`external_review_converge` defaults **on** (Decision 6). It spends tokens in
+response to a third party's output, so it stays a per-project key and inherits
+converge's existing `--max-cost` ceiling; but default-off would make this PRD a
+net regression against the round it retires.
 
 **Open question for the operator.** Copilot reviewed all four lens PRs, but loom
 requested each one, so this data cannot tell us whether lens has GitHub's
@@ -493,6 +551,108 @@ Consequences to implement, not discover:
   it on base-change detection only, bounded to one in-flight re-gate per
   project.
 
+### S5 — automatic conflict convergence
+
+The reviewer's point, and the operator's: *routine conflict resolution should
+not require the operator.* A conflict means judgement is required; it does not
+mean **operator** judgement is required. Loom attempts agent judgement, reviews
+it independently, and escalates only what survives.
+
+```
+pr gate, base moved, merge is dirty
+  → fetch the EXACT current base sha and head sha
+  → attempt an additive merge in a throwaway worktree
+  → conflicted: coder resolves, given
+        - the story's brief and acceptance criteria (S0 made these real)
+        - the PR's own intent (title, body, its round history)
+        - what changed on the base since the merge-base, and why
+          (the landed PRs' titles/bodies — this is how a resolver learns that
+           `matches_filters` moved and that a project filter now exists)
+        - the conflicted hunks
+  → loom's PANEL reviews the COMPOSED TREE, not the resolution diff alone
+  → the project's CURRENT check-set runs on the merge result (S3)
+  → green + panel-approved → push the merge commit (append-only, ancestry-proved)
+  → otherwise → S7 human gate with a decision brief
+```
+
+Three things make this defensible rather than reckless:
+
+1. **The output is checkable.** The operator's own #43 resolution was validated
+   by the slice's regression tests plus `check`, `diagrams` and `e2e` — the same
+   gate loom would run. A resolution that passes the project's full check-set
+   and an independent panel is not a guess.
+2. **It is append-only.** A merge commit, ancestry-proved, pushed per
+   Decision 2. Nothing is rewritten; a bad attempt is visible in history and
+   revertible.
+3. **It escalates rather than persisting.** **One** convergence attempt per
+   `(base_sha, head_sha)`. A failure escalates to S7; it does not retry the same
+   inputs, and a later base move is a genuinely new attempt.
+
+**Deliberately harder than S2's case**, and the PRD says so: reviewing a
+composed tree is a different task from reviewing a diff, and loom's panel is the
+one that missed the original defects. Two mitigations: the check-set is
+deterministic and does not depend on panel quality, and semantic-conflict cases
+(`filters_narrow_the_board`) are exactly the AC-grounded reasoning that S0 just
+restored the inputs for. If measurement shows the panel cannot judge composed
+trees, the fallback is check-set-only auto-push for **non-semantic** conflicts
+and escalation for the rest — a narrowing, not a redesign.
+
+### S6 — serial admission (make "serial by default" true, not advisory)
+
+S4's `blocks` edges are the precise mechanism but they rely on a planner adding
+them. Imported tasks, separate epics and imperfect decompositions all still
+produce concurrent PRs, and `max_concurrent_tasks` (`orchestration.md:541`)
+bounds **running tasks, not delivered-but-unmerged PRs** — once delivery
+releases its claim, the next story starts while the first `pr` gate is still
+open. That is precisely how this batch happened.
+
+**Admission invariant:** before dispatching a story, count the project's **open
+`pr` gates on the same base branch**. Default limit **1**; over the limit, the
+story is not claimed and waits.
+
+- Configurable per project (`max_open_delivered_prs`), because a project whose
+  stories genuinely do not collide should not be throttled.
+- Counts **gates**, not claims — that is the distinction the existing knob
+  misses.
+- `blocks` edges remain the more precise tool where the decomposition knows
+  which stories are safe to run together; admission is the backstop for when it
+  does not.
+
+**Cost, stated plainly:** with a limit of 1, dispatch idles while a PR gate
+waits on a human merge. In this batch that would have been roughly nine hours.
+That is the trade for near-zero conflicts, it is why the limit is configurable,
+and it is a strong argument for S1/S2/S5 keeping PRs merge-ready so the gate is
+open for as little time as possible.
+
+### S7 — escalation as a first-class state
+
+`[PRConflicted]` and `[MergeGateFailed]` are audit history. They do not model
+*"loom needs a decision from you"*, and an append-only finding stream cannot
+answer *"what is the state of this PR right now?"*.
+
+**Reconciliation state lives in Lithos** (operator decision, 2026-08-24), on the
+`pr` gate plus claimed maintenance subtasks — so Lens renders it and findings
+stay history rather than doubling as a database. States:
+
+`awaiting_review` · `reconciling` · `behind` · `resolving_conflict` ·
+`gate_failed` · `needs_human` · `ready_to_merge`
+
+When automation stops, loom creates a **human gate** (`gate_type=human`) whose
+brief carries what a decision actually needs:
+
+- the PR, story, base/head shas and the affected files;
+- **why automation stopped** — dispute, ambiguity, exhausted budget, persistent
+  red gate;
+- the conflicting requirements or ADRs, where the resolver identified them;
+- **what was attempted** and the check-set / panel results of each attempt;
+- the choices the resolver considered, so the operator picks rather than
+  re-derives;
+- retry / approve / abandon as the available actions.
+
+This is the difference between "loom told me something went wrong" and "loom
+handed me a decision". It also gives the gate a real state machine rather than
+the current binary open/merged, which is what makes a Lens console possible.
+
 ### S4 — prevention (the part that actually removes the work)
 
 Neither of these is loom code. They are listed last only because they are not
@@ -538,20 +698,33 @@ edges would have prevented all of them.
    S1's `behind` auto-update, S2's converge remediation, and any regenerate-
    and-push of derived files.
 
-   **Destructive → never without explicit approval.** A force push — including
-   `--force-with-lease` — rewrites what a human may be mid-review on, and no
-   automated path in loom may take it. This is not a new constraint so much as
-   a newly-written-down one: `src/` contains **zero** force pushes today,
-   `push_branch` is a plain `git push -u origin <branch>`, and converge already
-   models the correct behaviour in `MergeRaceDetected` — on a non-fast-forward
-   it *stops and reports* rather than clobbering the concurrent commit. Any
-   future need to rewrite a delivered branch is an operator action, surfaced as
-   a finding, never taken by the sweep.
+   **Destructive → never without explicit approval.** The invariant is
+   **"never perform a non-fast-forward push or history rewrite"** — a property
+   of what happens to the ref, *not* of which git flag spells it.
 
-   **Implementation requirement:** add a guardrail test asserting no force-push
-   invocation exists in `src/` (alongside the existing `tests/guardrail/`
-   contracts), so the invariant is enforced rather than remembered. Test it
-   negatively — a guard that cannot fail is not a guard.
+   **Correction (2026-08-24).** An earlier revision of this PRD asserted that
+   `src/` contains zero force pushes and proposed a guardrail banning
+   `--force-with-lease`. Both were wrong. `push_to_pr_ref`
+   (`pr_delivery.py:360`) uses `--force-with-lease`, and it is **correct code**:
+   it first proves ancestry with `git merge-base --is-ancestor` and raises
+   `MergeRaceDetected` when the reviewed head does not descend from the expected
+   remote head, then uses the lease as an atomic compare-and-swap pinning
+   origin's ref to `expected_remote_sha`, closing the `ls-remote`→push TOCTOU
+   window. A deleted, advanced or rewound ref is rejected as "stale info"
+   instead of being silently overwritten. The proposed guardrail would have
+   **deleted a safety mechanism in the name of safety**.
+
+   So the rule is: an automated path may push only when the new tip **descends
+   from** the ref it replaces, and must prove that before pushing. A lease is
+   the right tool for that proof. Rewriting a delivered branch's history — a
+   non-descendant push, however spelled — is an operator action, surfaced for a
+   decision, never taken automatically.
+
+   **Implementation requirement:** a `tests/guardrail/` contract asserting every
+   push site in `src/` is ancestry-guarded — i.e. any `--force`/lease push is
+   preceded by an `--is-ancestor` check on the same refs — rather than grepping
+   for a flag. Test it negatively: a push site added without the guard must
+   fail the contract.
 
    What still reports rather than acts, and why: **conflicts in real source, or
    a red gate.** Those need judgement, and the evidence is
@@ -560,25 +733,72 @@ edges would have prevented all of them.
    in this design; a merge achieves the same landability additively, and it is
    what the operator chose unprompted on #43 (*"kept as a merge so the per-round
    story-develop commits survive"*).
-3. **Conflict resolution stays human or `converge`.** The evidence says these
-   conflicts need judgement (`filters_narrow_the_board`), not a merge driver.
-   When automation is wanted it belongs to `develop converge`
-   ([ADR 0009](../adr/0009-converge-pr-loop.md)) as a rebase mode, operator-
-   triggered — not to this sweep.
+3. **Conflict resolution is attempted automatically; only the residue is
+   human.** *(Revised 2026-08-24 — this previously read "stays human or
+   converge", which the operator rejected: mechanical cases are loom's job.)*
+   The evidence that these conflicts need **judgement** stands
+   (`filters_narrow_the_board` is not merge-driver territory) — but judgement is
+   not the operator's monopoly. S5 runs a coder resolution, has loom's panel
+   review the composed tree, runs the project's current check-set, and pushes
+   only on green. One attempt per `(base_sha, head_sha)`; failure escalates to
+   an S7 human gate rather than retrying.
 4. **The gate is never auto-resolved by this work.** Only a merge completes a
    `pr` gate, exactly as epic H specifies.
 5. **A fresh finding prefix per concern** — `[PRConflicted]`,
    `[ExternalReview]`, `[MergeGateFailed]` — per the house rule against
    overloading existing prefixes, since operators grep by prefix.
-6. **Retiring the inline Copilot round is a real loss of automatic remediation,
-   and it is accepted deliberately.** Detection always runs; fixing becomes
-   `develop converge`, opt-in per project and off by default. Trading a fix
-   cycle that reliably fires for one that reliably *detects* is the right way
-   round — but it is a trade, not a free upgrade, and S2 says so in full.
-7. **S3 re-resolves the project's current check-set rather than replaying the
+6. **Retiring the inline Copilot round must not lose automatic remediation.**
+   Detection always runs; fixing moves to the convergence path and is **on by
+   default** (`external_review_converge`), because a fast-forward push is
+   additive per Decision 2. Default-off would make this PRD a net regression
+   against the round it retires. *(Corrected 2026-08-24 — this decision
+   previously said "opt-in and off by default", contradicting S2.)*
+7. **External findings are injected into the fix loop, never used as a bare
+   trigger.** Converge's own intake returns `already_clean` when loom's panel
+   sees nothing — which is the panel that missed the defect. A trigger-only
+   design would reliably do nothing.
+8. **Untrusted comment text never reaches an agent.** Allowlisted bots plus
+   repo write/admin seed the coder; everyone else is reported to the operator
+   only. Comment bodies are third-party input on a prompt path.
+9. **Reconciliation state is persisted in Lithos, on the `pr` gate plus
+   maintenance subtasks** — not in loom logs, and not modelled by findings.
+   Findings are history; the gate is current state; Lens is the console.
+10. **Serial admission counts open `pr` gates, not active claims**, defaulting
+   to one per project + base branch. `blocks` edges stay the precise mechanism;
+   admission is the backstop for decompositions that lack them.
+11. **S3 re-resolves the project's current check-set rather than replaying the
    one the story passed.** The question is "will main break", and main is
    defended by today's config. The cost is that a gate must always carry its
    `project` to be resolvable at all.
+
+## Alignment with the other active PRDs
+
+This PRD now owns a chunk of behaviour the orchestration plan also describes.
+Reconciling explicitly, so the two do not drift:
+
+- **`story-fix` (`orchestration.md:355`) overlaps with external-review
+  convergence.** Resolution: **converge is the single pre-merge remediation
+  engine** — external findings, conflict resolution and re-gating all run
+  through it (operator decision, 2026-08-24). `story-fix` is either scoped to
+  *post-merge* failures, or reimplemented as a caller of the same loop. Two fix
+  loops is precisely what ADR 0004 §1 single-sources against.
+- **Webhooks (`orchestration.md:441`) currently cover only `pr`-gate merge
+  resolution.** They should wake **this same state machine** on `review`,
+  `review_comment`, `synchronize` and base-update events. Polling stays as the
+  recovery path — a missed webhook must degrade to "slower", never to "never".
+- **`merge-stories` (`orchestration.md:420`) introduces integration branches.**
+  Everything here must therefore say **"the PR's current base branch"**, never
+  "main". Any remaining "main" in this document is a bug; S3's re-gate, S6's
+  admission count and S1's behind-detection are all per-base-branch.
+- **The console is Lens, not loom.** `orchestration.md:469` proposes a loom CLI
+  dashboard and excludes a web UI. Keep the CLI as an operational/debug surface;
+  Lens is the authoritative console, which is exactly why S7's state is
+  persisted in Lithos rather than in loom.
+- **A9 (`orchestration.md:374`) is the right knowledge-feedback foundation** for
+  recording why a resolution was chosen; S5's decision briefs are a natural
+  producer of that.
+- **The capture-macro PRD is independent** — no material conflict. It is an
+  optional Obsidian capture adapter beside the primary Lens experience.
 
 ## Non-goals
 
@@ -586,8 +806,9 @@ edges would have prevented all of them.
   a merge queue serialises landing but does not resolve a conflict, and it is a
   repo-policy decision, not an orchestrator feature.
 - Rewriting delivered branches without an operator asking.
-- Reviewing the merge resolution with a panel. Worth doing, plausibly the next
-  PRD, but it is paid work and needs its own scope.
+- ~~Reviewing the merge resolution with a panel.~~ **Now in scope as S5** —
+  the operator's requirement is that routine conflicts do not reach them, and a
+  resolution nobody reviews is not one loom should push.
 - Fixing #288. Independent, still real, tracked separately.
 
 ## Testing
@@ -636,6 +857,9 @@ edges would have prevented all of them.
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
+| 5 | **S5 conflict convergence** | routine conflicts resolved without the operator | tokens, capped, 1 attempt per sha pair |
+| 6 | **S6 serial admission** | concurrent delivered PRs bounded by config, not by hope | none |
+| 7 | **S7 escalation state** | a decision brief in Lithos, renderable by Lens | none |
 
 **Order by leverage, not by number: S0, then S4, then the sweep.** S4 is last in
 the table and first in value — it is the only entry that removes manual work
