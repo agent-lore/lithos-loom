@@ -1,5 +1,5 @@
 ---
-title: Lithos Loom — Post-delivery PR reconciliation
+title: Lithos Loom — PR maintenance (post-delivery reconciliation)
 milestone: M-PR
 status: draft
 target_version: 0.9.0
@@ -11,7 +11,7 @@ references:
 labels: [needs-triage, lithos-loom, orchestrator, github]
 ---
 
-# Post-delivery PR reconciliation
+# PR maintenance — post-delivery reconciliation
 
 > **Status (2026-08-23).** Written from a live failure: the lithos-lens T1
 > rollout delivered four PRs in one day, and **every one of them needed manual
@@ -791,6 +791,43 @@ edges would have prevented all of them.
   changes for the consuming project, which is why this sits in prevention and
   not in loom.
 
+### S8 — measure the autonomous paths before trusting them
+
+This PRD proposes the largest autonomous mechanism loom has, and none of it is
+currently measurable. The review-correctness harness
+([ADR 0005](../adr/0005-review-correctness-eval-harness.md)) scores panel
+catch-rate on **seeded defects in a diff**; it has no notion of a composed tree,
+an injected external finding, or a merge resolution.
+
+That matters here more than it would elsewhere, because the whole
+review-hardening epic exists to stop shipping unmeasured review changes — and
+RH-5's conclusion was that a single unmeasured arm is not evidence. Shipping S5
+on the strength of "it seemed to work on one PR" is the same mistake at ten
+times the scale.
+
+Three case shapes, all buildable from material already on hand:
+
+- **Conflict resolution.** #43 is a ready-made fixture: base `61993963`, the
+  delivered head, the landed pair (#44 + #45), and **the operator's own
+  resolution as known-good**. Score whether an agent resolution passes the same
+  check-set, and whether the panel accepts a *deliberately wrong* resolution —
+  a plausible-looking merge that drops `projects` from
+  `filters_narrow_the_board` is the obvious seeded defect, since that is the
+  real one.
+- **Triage.** A known-false external finding must be rejected with cited
+  evidence; a known-true one must pass; an ambiguous one must proceed. The
+  over-suppression failure mode is the one to watch, per RH-1's lens34 result.
+- **Composed-tree review.** Whether the panel can find a defect that exists
+  only in the *combination* of two individually-correct branches — the
+  `filters_narrow_the_board` class. If it cannot, S5 narrows to check-set-only
+  auto-push for non-semantic conflicts, which is a narrowing rather than a
+  redesign.
+
+**Precondition on any A/B here, from RH-5:** state the minimum detectable effect
+before paying for an arm. These are near-0/near-saturated questions, which is
+the regime K=5 can actually resolve — unlike a mid-band case, which needs
+K≈20–30 per arm.
+
 ## Decisions
 
 1. **The sweep, not the delivery path, owns everything post-PR.** Delivery ends
@@ -933,6 +970,12 @@ Reconciling explicitly, so the two do not drift:
   the operator's requirement is that routine conflicts do not reach them, and a
   resolution nobody reviews is not one loom should push.
 - Fixing #288. Independent, still real, tracked separately.
+- **Webhooks.** Polling is the v1 trigger; webhooks wake the same machine later
+  (see Alignment). Deferred, not rejected — and polling must remain the
+  recovery path, so a missed webhook degrades to "slower", never to "never".
+- **Rebase as a landing strategy.** A merge achieves the same landability
+  additively; rebasing a delivered branch is a history rewrite and needs the
+  operator (Decision 2).
 
 ## Testing
 
@@ -967,9 +1010,37 @@ Reconciling explicitly, so the two do not drift:
 - S3 result keying: changing the project's check-set config must invalidate a
   stored green for an unchanged `(head_sha, base_sha)` — otherwise option (2)'s
   whole point (today's gate, not last week's) is unobservable.
-- Retiring the inline round deletes `pr_delivery`'s Copilot tests; the delivery
-  budget (`delivery_budget_seconds`) loses its `copilot_timeout` term and its
-  docstring contract test must be updated in the same diff.
+- Retiring the inline round deletes `pr_delivery`'s Copilot tests, and it also
+  moves an **on-disk contract**: `delivery_budget_seconds` loses its
+  `copilot_timeout` term, and `run_outcome.py:64` documents the composed budget
+  (`copilot 600 + coder 3600 + gate 900 + overhead 1800 = 6900s`) that `attach`
+  uses to decide a delivery is incomplete rather than slow. `run_outcome` is
+  pinned as a leaf on-disk-contract module (`test_run_outcome_leaf.py`), so the
+  budget change, its docstring contract test, and `attach`'s timeout behaviour
+  must all move in one diff — not discovered when a live run reports a false
+  delivery timeout.
+- **S5c (merge-aware ranges)** — the pair test: a branch that has absorbed a
+  base merge produces the **same review diff** as before the merge, modulo the
+  resolution itself. Every existing range test passes today only because no
+  fixture contains a merge commit; add one first, watch `diff_stat` fail, then
+  fix. Also assert `commits_since` does not count merged-in commits.
+- **S5a (triage)** — a known-false external finding is rejected **with cited
+  evidence**; a known-true one passes through; an ambiguous one **proceeds**
+  (the default-to-act rule is the property most likely to be silently
+  regressed by a prompt re-tune, so pin it). Natural home is the eval harness,
+  alongside the seeded-defect cases.
+- **S5b (budget)** — the loop terminates: N loom-authored pushes do **not**
+  reset the counter, a human push **does**, and exhaustion stops remediation
+  while `[ExternalReview]` findings keep being posted. The failure mode is a
+  budget that resets on the wrong event, so test the reset condition
+  negatively.
+- **S6 (admission)** — counts open `pr` gates, not claims; an escalated
+  (`needs_human`) gate does not block the project indefinitely; the limit is
+  per project **and base branch**, so two base branches do not starve each
+  other.
+- **S7 (state)** — single-writer discipline is testable: a second concurrent
+  reconciler must not transition a gate it does not own. Assert the state
+  machine's illegal transitions are rejected rather than silently applied.
 
 ## Slices
 
@@ -980,31 +1051,61 @@ Reconciling explicitly, so the two do not drift:
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
-| 5a | **S5c merge-aware ranges** | prerequisite: reviewers stop seeing other people's work | none |
-| 5b | **S5a external-claim triage** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
-| 5c | **S5b remediation budget** | the two-bot loop terminates | none |
-| 5d | **S5 conflict convergence** | routine conflicts resolved without the operator | 1 attempt per sha pair |
-| 6 | **S6 serial admission** | concurrent delivered PRs bounded by config, not by hope | none |
-| 7 | **S7 escalation state** | a decision brief in Lithos, renderable by Lens | none |
+| 5 | **S5c merge-aware ranges** | prerequisite: reviewers stop seeing other people's work | none |
+| 6 | **S5a external-claim triage** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
+| 7 | **S5b remediation budget** | the two-bot loop terminates | none |
+| 8 | **S5 conflict convergence** | routine conflicts resolved without the operator | 1 attempt per sha pair |
+| 9 | **S6 serial admission** | concurrent delivered PRs bounded by config, not by hope | none |
+| 10 | **S7 escalation state** | a decision brief in Lithos, renderable by Lens | none |
+| 11 | **S8 measurement** | the autonomous paths get an instrument before they get trusted | eval runs |
 
-**Order by leverage, not by number: S0, then S4, then the sweep.** S4 is last in
-the table and first in value — it is the only entry that removes manual work
-rather than reporting on it, and for the batch that motivated this PRD it is the
-only one that would have changed the outcome.
+*(Slice numbers are delivery order; `S<n>` labels name the design sections and
+are deliberately not renumbered, so review comments referring to "S5" keep
+meaning the same thing.)*
 
-**S0 first, and it should not wait for the rest of this PRD.** It is a live
-correctness bug on every daemon run, it is a handful of lines, and every further
-measurement of review strength is confounded until it lands. Slice 2 is the one
-with an operator prerequisite (the repo-level Copilot setting); slices 1 and 3
-are independent of it.
+**Delivery order and why:**
+
+1. **S0** — merged/queued already (#333). A live correctness bug, and every
+   measurement downstream is confounded until it lands.
+2. **S6 serial admission** — free, and it reduces how often everything else has
+   to fire. The cheapest intervention in the document.
+3. **S4 prevention** — also free, also reduces frequency; consuming-project
+   policy, so it can proceed in parallel.
+4. **S1 + S3** — detection and the merge-blindness fix. Independent of the
+   Copilot prerequisite, so they can land while that is confirmed.
+5. **S5c** — a hard prerequisite for anything that merges into a story branch.
+   Landing S5 without it means reviewers see other people's PRs.
+6. **S2 + S5a + S5b** — remediation, its triage guard and its bound. These
+   three ship together or not at all: S2 without S5a actions wrong claims, and
+   without S5b it does not terminate.
+7. **S5** — conflict convergence, the largest and least certain slice.
+8. **S7** — the Lithos half can accompany S5; the Lens console follows.
+9. **S8** — measurement should ideally precede trusting S5, not follow it.
+
+The one external dependency is slice 2's Copilot prerequisite (the repo-level
+automatic-review setting); nothing else waits on it.
 
 ## Open questions
 
-1. Does lithos-lens have automatic Copilot code review enabled at the repo
-   level? Gates slice 2's default.
-2. Should `[PRConflicted]` mark the story **needs-attention** in the Obsidian
-   projection, or is a finding enough? The gate already blocks the story; the
-   question is whether a stale PR should be visually distinct from a healthy one
-   awaiting merge.
-3. Sweep cadence for re-gating. S1 and S2 are one API call; S3 runs a check-set,
-   so it should fire on base-change detection only, not every sweep.
+1. **Does lithos-lens have automatic Copilot code review enabled at the repo
+   level?** Gates slice 2's default. Loom requested Copilot on all four PRs, so
+   the observed reviews cannot distinguish the two causes. One settings check.
+2. **Does an escalated (`needs_human`) gate count toward S6's admission limit?**
+   Counting it means one stuck decision halts the project — arguably correct
+   (stop piling up work behind it), arguably a multi-day stall. Current lean:
+   **do not count it**, with a separate cap on total open PRs so stuck ones
+   cannot accumulate unboundedly.
+3. **Should the cross-cutting decisions become an ADR?** Four of them are
+   architectural rather than PRD-scoped — converge as the single pre-merge
+   remediation engine, reconciliation state living in Lithos, single-writer
+   concurrency, and the additive/destructive push invariant. The repo keeps
+   ADRs 0001–0010 for exactly this class. A PRD is a plan and gets archived;
+   these outlive it.
+4. **Usage limits, not cost, are the resource constraint.** Coding agents run
+   on a subscription, so dollar figures in this document are indicative only.
+   The real risk is autonomous work consuming the same allowance the operator
+   is using interactively. story-develop has usage-limit reactions; the open
+   question is whether the *sweep* defers cleanly or retries into a wall.
+5. **Webhook enqueue mechanism.** The alignment section says webhooks should
+   wake this state machine, and Decision 11 says non-owners enqueue rather than
+   write. That queue does not exist yet; polling is the v1 trigger.
