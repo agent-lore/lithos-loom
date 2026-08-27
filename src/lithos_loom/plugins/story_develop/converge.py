@@ -53,6 +53,7 @@ ConvergeStatus = Literal[
     "converged",
     "not_converged",
     "fork_unsupported",
+    "merged",
     "merge_race",
     "failed",
 ]
@@ -72,6 +73,8 @@ class ConvergeResult:
       ``disputed`` / ``stalled`` / ``cost_exceeded``); the fixes are left in the
       local worktree, nothing pushed.
     * ``fork_unsupported`` — the PR head is on a fork loom cannot push to.
+    * ``merged`` — the PR has already landed; there is nothing to converge and
+      any fix commit would be unlandable on it.
     * ``merge_race`` — the PR head advanced remotely mid-run; converge refuses to
       ``--force`` over the contributor's history. Re-run to pick up the new tip.
     * ``failed`` — the intake review was **incomplete** (interrupted / invalid /
@@ -169,6 +172,23 @@ def converge_pr(
     # Fork guard, pre-loop: loom pushes fixes under origin credentials, so a PR
     # whose head lives on a fork can never be pushed back. Refuse before spending
     # any reviewer/coder containers on a run we could not deliver.
+    # Merged guard, before everything else: a landed PR has nothing to converge
+    # and no fix commit pushed to its branch can reach the base. Checked ahead of
+    # the fork guard because it is the more fundamental refusal — "push it from
+    # your fork" is useless advice for a PR that already merged. Observed
+    # 2026-08-27: 5 rounds and 6 fixer commits burned $29.78 against a merged PR
+    # because nothing looked. Reviewing a merged PR stays legitimate; only
+    # converge, which pushes, refuses.
+    if change.is_merged:
+        return ConvergeResult(
+            status="merged",
+            change=change,
+            message=(
+                f"PR {change.head_ref} is already merged; there is nothing to "
+                "converge and any fix commit would be unlandable on it"
+            ),
+        )
+
     if change.is_fork:
         return ConvergeResult(
             status="fork_unsupported",

@@ -35,7 +35,12 @@ _BASE = "b" * 40
 _HEAD = "h" * 40
 
 
-def _change(*, is_fork: bool = False, head_branch: str = "feature") -> ResolvedChange:
+def _change(
+    *,
+    is_fork: bool = False,
+    is_merged: bool = False,
+    head_branch: str = "feature",
+) -> ResolvedChange:
     return ResolvedChange(
         base_sha=_BASE,
         head_sha=_HEAD,
@@ -44,6 +49,7 @@ def _change(*, is_fork: bool = False, head_branch: str = "feature") -> ResolvedC
         body="do the thing",
         head_branch=head_branch,
         is_fork=is_fork,
+        is_merged=is_merged,
     )
 
 
@@ -233,6 +239,34 @@ def test_fork_pr_refused_before_spending_containers(
     assert result.status == "fork_unsupported"
     assert "intake_ran" not in captured  # refused pre-loop, no review spend
     assert "entry" not in captured
+
+
+def test_merged_pr_refused_before_spending_containers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A merged PR has nothing to converge and any fix is unlandable.
+
+    Observed 2026-08-27: converge ran 5 rounds and 6 fixer commits against an
+    already-merged PR for $29.78 and pushed nothing, because nothing checked.
+    Refuse BEFORE the intake, which is where the spend starts.
+    """
+    captured = _install(monkeypatch, blocking=True)
+    result = converge_pr(_config(tmp_path), _change(is_merged=True))
+    assert result.status == "merged"
+    assert not result.succeeded
+    assert "already merged" in result.message
+    assert "intake_ran" not in captured  # refused pre-intake, no review spend
+    assert "entry" not in captured
+
+
+def test_merged_check_precedes_the_fork_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A merged fork PR reports `merged`, the more fundamental refusal —
+    "push it from your fork" is useless advice for a PR that already landed."""
+    _install(monkeypatch, blocking=True)
+    result = converge_pr(_config(tmp_path), _change(is_merged=True, is_fork=True))
+    assert result.status == "merged"
 
 
 def test_merge_race_caught_not_force_pushed(

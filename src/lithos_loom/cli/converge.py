@@ -33,8 +33,11 @@ from lithos_loom.cli.review import (
 from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop import engines
 from lithos_loom.plugins.story_develop.config import (
+    DEFAULT_IMAGE,
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
+    parse_artifacts_path,
+    parse_image,
     parse_parity_command,
     parse_test_command,
 )
@@ -48,6 +51,7 @@ _EXIT_CODES = {
     "already_clean": 0,
     "converged": 0,
     "fork_unsupported": 2,
+    "merged": 2,
     "not_converged": 1,
     "merge_race": 1,
     "failed": 1,
@@ -109,6 +113,20 @@ def converge_command(
         "as a required `repo-parity` gate check so the converged tree passes what CI "
         "enforces beyond the structured check-set (diagram drift, codegen, docs lint). "
         "Primary gate for ecosystems the catalog doesn't model (C/C++).",
+    ),
+    image: str = typer.Option(
+        DEFAULT_IMAGE,
+        "--image",
+        help="Sandbox container image for the agents and the gate. Match the "
+        "project's develop_image — converge does not read project metadata, so "
+        "without this it runs the default image and a gate needing tooling that "
+        "image lacks (e.g. a browser) can never pass.",
+    ),
+    artifacts_path: str | None = typer.Option(
+        None,
+        "--artifacts-path",
+        help="Repo-relative dir a gate check writes rendered output to (the "
+        "project's develop_artifacts_path). Enables the artifact review pass.",
     ),
     coder: str | None = typer.Option(
         None, "--coder", help="Coder engine for the fix turns (claude / codex)."
@@ -197,6 +215,19 @@ def converge_command(
         )
         raise typer.Exit(2)
 
+    # Fail closed on a blank image before any spend: a whitespace value would
+    # reach `docker run` and die deep in the first container start.
+    try:
+        resolved_image = parse_image(image, where="--image") or DEFAULT_IMAGE
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
+        resolved_artifacts = parse_artifacts_path(
+            artifacts_path, where="--artifacts-path"
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     reviewers = resolve_reviewers(profile, reviewer)
 
     overrides: dict = {}
@@ -219,6 +250,8 @@ def converge_command(
         check_commands=check_commands,
         check_states=check_states,
         parity_command=parity_command,
+        image=resolved_image,
+        artifacts_path=resolved_artifacts,
         **overrides,
     )
     develop_config = apply_model_policy(

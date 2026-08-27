@@ -38,6 +38,10 @@ class ResolvedChange:
     branch spec); ``is_fork`` is set when the PR head lives on a fork. converge
     reads both to push fixes back to the PR branch, and to refuse a fork PR it
     cannot push to under origin credentials.
+
+    ``is_merged`` reports that the PR has already landed. It is a FLAG here, not
+    a refusal: reviewing a merged PR is a legitimate read-only operation, so only
+    converge — which would push fixes that could never land — acts on it.
     """
 
     base_sha: str
@@ -47,6 +51,7 @@ class ResolvedChange:
     body: str = ""
     head_branch: str = ""
     is_fork: bool = False
+    is_merged: bool = False
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -157,4 +162,5 @@ def _resolve_pr(
         body=pr.body,
         head_branch=pr.head_ref,
         is_fork=bool(pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo),
+        is_merged=pr.merged,
     )

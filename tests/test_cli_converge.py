@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from lithos_loom.cli import converge as converge_cli
 from lithos_loom.cli.develop import develop_app
+from lithos_loom.plugins.story_develop.config import DEFAULT_IMAGE
 from lithos_loom.plugins.story_develop.converge import ConvergeResult
 from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
 
@@ -236,6 +237,43 @@ def test_parity_command_threads_through(stubs: dict) -> None:
     )
     assert result.exit_code == 0, result.output
     assert stubs["config"].parity_command == "make check"
+
+
+def test_image_threads_through(stubs: dict) -> None:
+    """Without --image, converge silently ran DEFAULT_IMAGE regardless of the
+    project's develop_image — so a project whose gate needs a browser could
+    never pass one. The flag is the operator's way to match the delivering run."""
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--image", "ralph-sandbox:python-ui"],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].image == "ralph-sandbox:python-ui"
+
+
+def test_image_defaults_when_not_given(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].image == DEFAULT_IMAGE
+
+
+def test_blank_image_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--image", "   "]
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
+def test_artifacts_path_threads_through(stubs: dict) -> None:
+    """The artifact review pass only fires when a project declares where its
+    checks write rendered output; converge had no way to say so."""
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--artifacts-path", "e2e/artifacts"],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].artifacts_path == "e2e/artifacts"
 
 
 def test_whitespace_parity_command_fails_closed(stubs: dict) -> None:
