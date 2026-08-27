@@ -13,6 +13,7 @@ does not.
 ## Copilot's comments (as findings)
 
 {findings}
+{sandbox_facts}
 
 ## Your job
 

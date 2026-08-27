@@ -50,6 +50,7 @@ from . import (
     handoff,
     panel,
     run_outcome,
+    sandbox_facts,
 )
 from .config import (
     DevelopConfig,
@@ -365,6 +366,11 @@ def develop(
         config.reviewer_config_dir(spec.name).mkdir(parents=True, exist_ok=True)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     handoff.seed_handoff_dir(config.handoff_dir)
+    # Probe the sandbox once per run so the coder + reviewer prompts can state
+    # what the container actually has (SC-1). Failure is logged and injects
+    # nothing — never a false absence. The daemon entry point re-primes to post
+    # the friction to the task; that call is then a cache hit.
+    sandbox_facts.prime(config.image)
 
     wt = (
         entry.worktree_factory(config)

@@ -88,3 +88,23 @@ def loom_config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(config_path))
     return config_path
+
+
+@pytest.fixture(autouse=True)
+def no_sandbox_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the sandbox capability probe (SC-1) off docker in unit tests.
+
+    ``develop()`` and ``review_head()`` prime the probe at run start, which shells
+    out to ``docker inspect``. The gate must stay hermetic — CI may have no
+    docker at all, and a unit test has no business starting a container — so the
+    single I/O entry point is stubbed to "cannot tell". That is the fail-soft
+    path: prompts then carry no environment section, never a fabricated absence.
+
+    A test that wants the real resolution overrides ``resolve_image_id`` (and
+    ``probe_image``) at function scope, which wins over this fixture — see
+    ``tests/test_story_develop_sandbox_facts.py``.
+    """
+    from lithos_loom.plugins.story_develop import sandbox_facts
+
+    sandbox_facts.reset_cache()
+    monkeypatch.setattr(sandbox_facts, "resolve_image_id", lambda image: None)

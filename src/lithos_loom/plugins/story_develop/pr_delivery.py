@@ -38,6 +38,7 @@ from .check_runner import run_delivery_test_gate
 from .findings import FindingLedger
 from .github_access import github_call, repo_name_with_owner
 from .rounds import commit_round
+from .sandbox_facts import for_prompt as _sandbox_section
 
 logger = logging.getLogger(__name__)
 
@@ -911,6 +912,7 @@ def _deliver_after_open(
         acceptance_criteria=config.effective_acceptance_criteria,
         findings=handoff.render_findings(canonical),
         handoff_file=coder_handoff,
+        sandbox_facts=_sandbox_section(config.image, for_coder=True),
     )
     name, run_cmd = build_run_cmd(
         config,

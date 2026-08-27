@@ -3,6 +3,7 @@ the **same session** in which you last reviewed this work. This is round
 {round_no}. The coding agent has responded to your findings and may have pushed
 new commits.
 {reviewer_brief}
+{sandbox_facts}
 ## Acceptance criteria
 
 {acceptance_criteria}

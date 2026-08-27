@@ -3,6 +3,7 @@ checked out **read-only** at `/workspace`. A coding agent has implemented a task
 and committed its work; review its **full change for this run** against the
 acceptance criteria below.
 {reviewer_brief}
+{sandbox_facts}
 ## Acceptance criteria
 
 {acceptance_criteria}
