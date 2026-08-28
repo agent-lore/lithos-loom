@@ -45,8 +45,9 @@ from lithos_loom.errors import LithosClientError, PluginContractError
 from lithos_loom.gates import STORY_GATE_ID_KEY, create_pr_gate_best_effort
 from lithos_loom.plugin_runner import run_plugin
 from lithos_loom.subscriptions.dispatch_guards import (
-    LAST_ATTEMPT_KEY,
-    failed_attempt_for_route,
+    clear_superseded_failure,
+    declines_bootstrap_replay,
+    last_attempt_key,
     on_ready_frontier,
     record_failed_attempt,
 )
@@ -181,14 +182,12 @@ class RouteRunner:
         # lithos.task.released; that event hits this dedup check and is
         # silently skipped. The effect is "fail once per task per daemon
         # process" — deliberate, to avoid tight retry loops when a plugin
-        # is deterministically broken — and, since the failure also
-        # persists a `loom_last_attempt` marker that `_handle` checks on
-        # bootstrap-origin events, "fail once per task across restarts,
-        # until a live event or an operator edit asks for another run".
-        # A proper retry budget lives in follow-up issue #11. The
-        # lost-claim-race path below (claim_failed) deliberately does NOT
-        # add to this set, so a subsequent released event there does
-        # re-attempt the claim.
+        # is deterministically broken — extended across restarts by the
+        # persisted `loom_last_attempt:<route>` marker (dispatch_guards)
+        # until an edit or marker deletion asks for another run. A proper
+        # retry budget lives in follow-up issue #11. The lost-claim-race
+        # path below (claim_failed) deliberately does NOT add to this set,
+        # so a subsequent released event there does re-attempt the claim.
         self._processed_tasks: set[str] = set()
         # T10: pending usage-limit re-dispatches (task id → sleeper task)
         # and how many resumes each task has consumed. In-memory only:
@@ -235,31 +234,20 @@ class RouteRunner:
 
         metadata = payload.get("metadata") or {}
         # A bootstrap replay must not re-develop a story whose last attempt
-        # FAILED — every deliberate retry path arrives live and bypasses this
-        # by origin (rationale + residual crash-window leak: dispatch_guards
-        # docstring). Checked before `_is_ready`: the marker is already in
-        # the payload, while readiness costs a Lithos round trip.
-        if event.origin == "bootstrap":
-            last = failed_attempt_for_route(metadata, self.route.name)
-            if last is not None:
-                logger.info(
-                    "RouteRunner %s: declining bootstrap replay of %s — last "
-                    "attempt failed (%s). Edit the task (a live task.updated "
-                    "re-dispatches) or delete metadata.%s to run it again.",
-                    self.route.name,
-                    task_id,
-                    last.get("ended_at"),
-                    LAST_ATTEMPT_KEY,
-                )
-                return
+        # FAILED and that nobody edited since — deliberate retry paths arrive
+        # live or change the fingerprint (rationale + residual crash-window
+        # leak: dispatch_guards docstring). Before `_is_ready`: the marker is
+        # in the payload; readiness costs a Lithos round trip.
+        if event.origin == "bootstrap" and declines_bootstrap_replay(
+            metadata, self.route.name, payload, task_id=task_id
+        ):
+            return
 
-        # A delivered (completes_task=false) story is blocked by its `pr` gate
-        # (Epic H) and so is absent from `task_ready` — the readiness check
-        # below is what defers it, including across a restart's bootstrap
-        # replay that re-emits every open task as `created` (US11 retired the
-        # `loom_delivered` short-circuit that used to duplicate this check).
-        # FAILED stories are the `loom_last_attempt` decline above; readiness
-        # guards everything blocked or gated.
+        # A delivered (completes_task=false) story is blocked by its `pr`
+        # gate (Epic H) and so is absent from `task_ready` — the readiness
+        # check below defers it, including across a restart's bootstrap
+        # replay (US11 retired the `loom_delivered` short-circuit). FAILED
+        # stories are the decline above; readiness guards blocked + gated.
         if not await self._is_ready(task_id, metadata):
             logger.info(
                 "RouteRunner %s: deferring %s — not on Lithos's ready frontier",
@@ -386,7 +374,9 @@ class RouteRunner:
         except PluginContractError as exc:
             # Token present but unresolvable: release with a finding before
             # any work-dir / plugin spend, same as a contract violation.
-            await self._release_with_finding(task_id, f"route misconfigured: {exc}")
+            await self._release_with_finding(
+                task_id, f"route misconfigured: {exc}", payload=payload
+            )
             return
 
         work_dir = self.work_dir_base / task_id
@@ -412,11 +402,13 @@ class RouteRunner:
                 await self._release_with_finding(
                     task_id,
                     f"plugin contract violation: {exc}",
+                    payload=payload,
                 )
             except TimeoutError as exc:
                 await self._release_with_finding(
                     task_id,
                     f"plugin exceeded max runtime: {exc}",
+                    payload=payload,
                 )
             else:
                 succeeded = await self._apply_result(task_id, result, payload)
@@ -475,14 +467,24 @@ class RouteRunner:
         if status == "failed":
             err = result.get("error") or {}
             err_msg = err.get("message") if isinstance(err, dict) else None
-            run_id = result.get("run_id")
             await self._release_with_finding(
                 task_id,
                 f"plugin reported failure: {err_msg or 'no error message'}",
-                run_id=run_id if isinstance(run_id, str) else None,
+                payload=payload,
+                run_id=result.get("run_id"),
             )
             return False
         if status == "interrupted":
+            # An interrupted attempt supersedes an earlier failure — a stale
+            # failed marker must not veto interrupted's designed recovery,
+            # the restart bootstrap (see clear_superseded_failure).
+            await clear_superseded_failure(
+                self.lithos,
+                task_id=task_id,
+                route=self.route.name,
+                agent=self.agent_id,
+                payload=payload,
+            )
             # Release the claim either way: a shutdown signal frees the task
             # for a future run; a usage-limit checkpoint must not hold the
             # claim across the (potentially hours-long) wait. No
@@ -504,11 +506,11 @@ class RouteRunner:
             if isinstance(resume, Mapping):
                 await self._maybe_schedule_resume(task_id, resume)
             return False
-        run_id = result.get("run_id")
         await self._release_with_finding(
             task_id,
             f"plugin returned unknown status {status!r}",
-            run_id=run_id if isinstance(run_id, str) else None,
+            payload=payload,
+            run_id=result.get("run_id"),
         )
         return False
 
@@ -634,7 +636,12 @@ class RouteRunner:
             )
 
     async def _release_with_finding(
-        self, task_id: str, detail: str, *, run_id: str | None = None
+        self,
+        task_id: str,
+        detail: str,
+        *,
+        payload: Mapping[str, Any],
+        run_id: Any = None,
     ) -> None:
         summary = f"[BlockerFailed] route {self.route.name}: {detail}"
         logger.info(
@@ -648,7 +655,8 @@ class RouteRunner:
             task_id=task_id,
             route=self.route.name,
             agent=self.agent_id,
-            run_id=run_id,
+            payload=payload,
+            run_id=run_id if isinstance(run_id, str) else None,
         )
         try:
             await self.lithos.finding_post(
@@ -720,12 +728,11 @@ class RouteRunner:
         story_metadata: dict[str, Any] = {}
         if gate_id is not None:
             story_metadata[STORY_GATE_ID_KEY] = gate_id
-            # A delivery supersedes any earlier failed attempt: clear the
-            # bootstrap-decline marker (per-key delete) on the same write.
-            # Skipped when no gate exists — the loud [Friction] owns that
-            # state, and a leftover marker only declines *bootstrap* replay,
-            # the safe direction for an ungated delivered story.
-            story_metadata[LAST_ATTEMPT_KEY] = None
+            # A delivery supersedes any earlier failed attempt: per-key
+            # delete of the marker on the same write. Skipped when no gate
+            # exists — the loud [Friction] owns that state, and a leftover
+            # marker only declines bootstrap replay, the safe direction.
+            story_metadata[last_attempt_key(self.route.name)] = None
 
         marked = True
         if story_metadata:

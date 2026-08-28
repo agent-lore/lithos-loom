@@ -12,43 +12,89 @@ frontier, so without a persistent trace every daemon restart's bootstrap
 replay would re-dispatch it at full cost (T1-S7 was developed three times
 for $182.52 this way, the third run overrunning completed out-of-band
 remediation). The runner therefore records each failure as
-``metadata.loom_last_attempt`` on the task and declines a
+``metadata.loom_last_attempt:<route>`` on the task and declines a
 **bootstrap-origin** event whose marker records a failed last attempt for
 the same route — a restart is a process lifecycle event, not anyone asking
 for another run.
 
-Failure must stay retryable: the primary recovery loop is an operator
-sharpening the task, and that edit arrives as a live ``lithos.task.updated``
-which bypasses the decline by origin — as do a re-added trigger tag, the T10
-resume re-dispatch, and deleting the marker key. A later gated delivery
-clears the marker (see ``route_runner._gate_and_release``).
+One metadata key PER ROUTE (Lithos ``task_update`` merges per top-level
+key), so two routes failing on the same task each keep their own guard —
+a single shared key would let route B's write erase route A's protection.
 
-Route-scoped on purpose: a task carrying several trigger tags can be handled
-by different routes, and a failure under route A says nothing about route B.
+Failure must stay retryable. The marker stores a ``task_fingerprint`` of
+the title/description/tags the failed run saw, and the bootstrap decline
+applies only while that fingerprint still matches — so an operator who
+sharpened the task while the daemon was down (or whose same-process edit
+was absorbed by the in-process dedup, issue #11) gets the retry on the
+next restart, exactly the pre-guard operational flow minus the
+unconditional replay. Deleting the marker key retries likewise; a live
+``lithos.task.updated`` after the restart, a re-added trigger tag, and the
+T10 resume re-dispatch all bypass the decline by origin. A later gated
+delivery clears the marker (``route_runner._gate_and_release``), and an
+``interrupted`` run clears it too — interrupted's designed recovery IS the
+restart bootstrap, which a stale failure marker must not veto.
 
-Reserved namespace: plugins see ``loom_last_attempt`` in their ``task.json``
-metadata and must not repurpose it (SPECIFICATION §2.2).
+The fingerprint covers only operator-shaped fields (title, description,
+tags, order-insensitive) — plugin metadata writes cannot fake an edit.
+
+Reserved namespace: plugins see ``loom_last_attempt:*`` in their
+``task.json`` metadata and must not repurpose it (SPECIFICATION §2.2).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 __all__ = [
-    "LAST_ATTEMPT_KEY",
+    "LAST_ATTEMPT_KEY_PREFIX",
     "READY_QUERY_LIMIT",
+    "clear_superseded_failure",
     "failed_attempt_for_route",
+    "last_attempt_key",
     "on_ready_frontier",
     "record_failed_attempt",
+    "task_fingerprint",
 ]
 
 logger = logging.getLogger(__name__)
 
-# Task-metadata key: {"route", "status", "ended_at", "run_id"?}.
-LAST_ATTEMPT_KEY = "loom_last_attempt"
+# Per-route task-metadata key prefix; the full key is
+# ``loom_last_attempt:<route>`` and its value is
+# {"status", "ended_at", "task_fingerprint", "run_id"?}.
+LAST_ATTEMPT_KEY_PREFIX = "loom_last_attempt:"
+
+
+def last_attempt_key(route: str) -> str:
+    """The task-metadata key holding ``route``'s last failed attempt."""
+    return f"{LAST_ATTEMPT_KEY_PREFIX}{route}"
+
+
+def task_fingerprint(payload: Mapping[str, Any]) -> str:
+    """Fingerprint of the operator-shaped task fields (title, description,
+    tags — order-insensitive).
+
+    Stored in the failure marker and compared at bootstrap: a differing
+    fingerprint means the task was edited since the failure, which is the
+    operator's deliberate-retry gesture, so the decline does not apply.
+    Metadata is deliberately excluded — plugins write metadata at will
+    (``develop_*``, and the marker itself), and none of that is an operator
+    asking for another run.
+    """
+    material = json.dumps(
+        {
+            "title": payload.get("title") or "",
+            "description": payload.get("description") or "",
+            "tags": sorted(str(t) for t in (payload.get("tags") or ())),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
 
 # Page size for the `task_ready` membership query (US4). `task_ready` has no
 # per-task filter — the runner asks for the frontier and looks for its task on
@@ -131,14 +177,43 @@ def failed_attempt_for_route(
     metadata: Mapping[str, Any], route: str
 ) -> Mapping[str, Any] | None:
     """The task's last-attempt marker, iff it records a FAILURE for ``route``."""
-    last = metadata.get(LAST_ATTEMPT_KEY)
-    if (
-        isinstance(last, Mapping)
-        and last.get("status") == "failed"
-        and last.get("route") == route
-    ):
+    last = metadata.get(last_attempt_key(route))
+    if isinstance(last, Mapping) and last.get("status") == "failed":
         return last
     return None
+
+
+def declines_bootstrap_replay(
+    metadata: Mapping[str, Any],
+    route: str,
+    payload: Mapping[str, Any],
+    *,
+    task_id: str,
+) -> bool:
+    """True iff a bootstrap replay of this payload must be declined (logged).
+
+    Declines when ``route``'s last attempt failed AND the task is unchanged
+    since that failure (fingerprint match — a marker without a fingerprint,
+    e.g. from a partial write, is treated as unchanged: fail closed). An
+    edited task dispatches: the edit is the deliberate-retry gesture.
+    """
+    last = failed_attempt_for_route(metadata, route)
+    if last is None:
+        return False
+    recorded = last.get("task_fingerprint")
+    if recorded is not None and recorded != task_fingerprint(payload):
+        return False
+    logger.info(
+        "RouteRunner %s: declining bootstrap replay of %s — last attempt "
+        "failed (%s) and the task is unchanged since. Edit the task (re-runs "
+        "on the next restart, or live task.updated) or delete metadata.%s "
+        "to retry.",
+        route,
+        task_id,
+        last.get("ended_at"),
+        last_attempt_key(route),
+    )
+    return True
 
 
 async def record_failed_attempt(
@@ -147,6 +222,7 @@ async def record_failed_attempt(
     task_id: str,
     route: str,
     agent: str,
+    payload: Mapping[str, Any],
     run_id: str | None = None,
 ) -> None:
     """Best-effort persist the failed attempt on the task.
@@ -159,19 +235,47 @@ async def record_failed_attempt(
     plugin-written key.
     """
     marker: dict[str, Any] = {
-        "route": route,
         "status": "failed",
         "ended_at": datetime.now(UTC).isoformat(),
+        "task_fingerprint": task_fingerprint(payload),
     }
     if run_id:
         marker["run_id"] = run_id
+    key = last_attempt_key(route)
     try:
         await lithos.task_update(
             task_id=task_id,
             agent=agent,
-            metadata={LAST_ATTEMPT_KEY: marker},
+            metadata={key: marker},
         )
     except Exception:
-        logger.exception(
-            "route %s: recording %s on %s failed", route, LAST_ATTEMPT_KEY, task_id
+        logger.exception("route %s: recording %s on %s failed", route, key, task_id)
+
+
+async def clear_superseded_failure(
+    lithos: _GuardClient,
+    *,
+    task_id: str,
+    route: str,
+    agent: str,
+    payload: Mapping[str, Any],
+) -> None:
+    """Best-effort per-key delete of ``route``'s failed-attempt marker, iff
+    the dispatch-time ``payload`` carried one (no round trip otherwise).
+
+    Used when an ``interrupted`` run supersedes an earlier failure: the
+    restart bootstrap is interrupted's designed recovery path, and a stale
+    failure marker must not veto it. Failures are logged and swallowed —
+    same contract as :func:`record_failed_attempt`.
+    """
+    if failed_attempt_for_route(payload.get("metadata") or {}, route) is None:
+        return
+    key = last_attempt_key(route)
+    try:
+        await lithos.task_update(
+            task_id=task_id,
+            agent=agent,
+            metadata={key: None},
         )
+    except Exception:
+        logger.exception("route %s: clearing %s on %s failed", route, key, task_id)
