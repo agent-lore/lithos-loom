@@ -162,6 +162,29 @@ def test_reviewer_templates_carry_the_artifacts_note_slot() -> None:
     assert "{artifacts_note}" in load_prompt("reviewer_rereview.md")
 
 
+def test_every_agent_template_carries_the_sandbox_facts_slot() -> None:
+    """SC-1: the measured environment reaches EVERY agent, both families.
+
+    A coder that never sees the list can still claim a tool is absent, and a
+    reviewer that never sees it has no means to refuse the claim — which is
+    exactly what happened on lens T1-S11. The reseed template is included
+    deliberately: it is a FRESH session with no history, so it needs the facts
+    most, and it is the one prompt that historically got left out of shared
+    sections (it carries no gate summary, artifacts note or severity block).
+    """
+    for name in (
+        "reviewer_round.md",
+        "reviewer_rereview.md",
+        "reviewer_reseed.md",
+        "reviewer_artifacts.md",
+        "coder_init.md",
+        "coder_fix.md",
+        "converge_coder_init.md",
+        "copilot_fix.md",
+    ):
+        assert "{sandbox_facts}" in load_prompt(name), name
+
+
 # ── the artifact pass's semantics (RH-1 / #308 review) ────────────────────────
 # The pass returned ZERO findings over 20+ samples until these instructions
 # existed, so they are load-bearing behaviour, not prose. Each assertion below

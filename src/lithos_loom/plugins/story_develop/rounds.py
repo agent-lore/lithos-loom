@@ -58,6 +58,7 @@ from .check_set import Check, CheckSetResult, render_check_summary
 from .config import HANDOFF_DIRNAME, DevelopConfig
 from .gate_findings import GateLedger
 from .handoff import max_severity, render_prompt
+from .sandbox_facts import for_prompt as _sandbox_section
 from .test_gate import GateResult
 from .turns import TurnResult
 
@@ -259,6 +260,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                     ctx.intake_check_set, for_coder=True, gate_ledger=ctx.gate_ledger
                 ),
                 handoff_file=handoff.coder_handoff_name(1),
+                sandbox_facts=_sandbox_section(config.image, for_coder=True),
             )
         else:
             # T8: an EXPLICIT acceptance criteria (flag / task metadata) gets its
@@ -274,6 +276,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 description=config.description,
                 acceptance_criteria_section=ac_section,
                 handoff_file=handoff.coder_handoff_name(1),
+                sandbox_facts=_sandbox_section(config.image, for_coder=True),
             )
         coder_resume = False
     else:
@@ -297,6 +300,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
             ),
             review_files=review_files,
             handoff_file=handoff.coder_handoff_name(round_no),
+            sandbox_facts=_sandbox_section(config.image, for_coder=True),
         )
         coder_resume = True
 

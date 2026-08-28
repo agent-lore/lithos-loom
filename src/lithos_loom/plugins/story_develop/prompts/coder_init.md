@@ -6,6 +6,7 @@ worktree on a dedicated branch). Implement the task below.
 
 {description}
 {acceptance_criteria_section}
+{sandbox_facts}
 ## How to work
 
 Work **plan-first, then pragmatically test-first** — the discipline a careful

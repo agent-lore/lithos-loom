@@ -3,6 +3,7 @@ from a previous reviewer whose tool hit a provider usage limit. You are a fresh
 session: everything you need to know is below. This is round {round_no}. The
 project is checked out **read-only** at `/workspace`.
 {reviewer_brief}
+{sandbox_facts}
 ## Acceptance criteria
 
 {acceptance_criteria}
