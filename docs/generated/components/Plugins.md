@@ -326,7 +326,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `is_clean_success` — Whether the run reached the only success status (``approved``) **and** fully delivered.
 
 ### `lithos_loom.plugins.story_develop.sandbox_facts`
-- class `ToolFact` — One probed tool. ``path is None`` means probed and NOT present.
+- class `ToolFact` — One probed tool.
 - class `SandboxFacts` — What one probe of one image found. Only ever built from a probe.
 - def `build_image_id_command` — Resolve *image* to its content-addressed config digest.
 - def `build_capability_probe_command` — One-shot ``docker run`` printing ``key=value`` capability lines.
@@ -334,7 +334,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `render_sandbox_facts` — The ``{sandbox_facts}`` prompt section (empty when nothing was probed).
 - def `resolve_image_id` — The image's config digest, or ``None`` when docker cannot tell us.
 - def `probe_image` — Probe *image* once, or ``None`` if the probe could not be run.
-- def `prime` — Probe *image* once and cache it; returns a friction line on failure.
+- def `prime` — Probe *image* and cache it; returns a friction line on failure.
 - def `for_prompt` — The ``{sandbox_facts}`` section for *image* (pure — reads the cache).
 - def `reset_cache` — Drop the probe cache (tests; a long-lived process re-probes on rebuild).
 

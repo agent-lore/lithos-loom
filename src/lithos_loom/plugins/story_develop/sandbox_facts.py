@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 logger = logging.getLogger(__name__)
 
@@ -61,19 +61,31 @@ _CHROMIUM_GLOBS = (
 )
 _CHROMIUM_ON_PATH = ("chromium", "chromium-browser", "google-chrome", "chrome")
 
-# Agent and gate containers take docker's default bridge — ``--network none``
-# appears only in ``autoformat`` (the formatter, which reads no prompt). Loom
-# builds that argv, so egress is a fact it KNOWS rather than one it must probe;
-# probing it would mean a real outbound request from a throwaway container.
-# ``test_sandbox_facts.py`` pins the claim against ``build_run_command``.
-NETWORK_EGRESS_NOTE = (
-    "network egress — available (agent and gate containers run on the default bridge)"
+# What loom can honestly say about networking is what loom itself does: agent and
+# gate containers take docker's default bridge, and ``--network none`` appears
+# only in ``autoformat`` (the formatter, which reads no prompt).
+#
+# It must NOT say "egress is available". Not disabling networking does not
+# establish outbound reachability — the docker daemon's config, a host firewall,
+# DNS, or a proxy can each still block it, and none of that is visible from the
+# argv loom builds. That overclaim is the same defect this module exists to
+# prevent, pointed the other way. Probing it for real would mean a live outbound
+# request from a throwaway container, which is a side effect a capability probe
+# has no business having.
+NETWORK_NOTE = (
+    "container networking — not disabled by loom (agent and gate containers run "
+    "on docker's default bridge); outbound reachability was not probed"
 )
 
 
 @dataclass(frozen=True)
 class ToolFact:
-    """One probed tool. ``path is None`` means probed and NOT present."""
+    """One probed tool.
+
+    ``path is None`` means ``command -v`` did not find it — which is NOT the same
+    as "not installed". A tool outside ``PATH`` is invisible to the probe, so the
+    rendered line says where loom looked rather than asserting absence.
+    """
 
     name: str
     path: str | None
@@ -210,7 +222,7 @@ def render_sandbox_facts(
     lines: list[str] = []
     for tool in facts.tools:
         if tool.path is None:
-            lines.append(f"- `{tool.name}` — not present")
+            lines.append(f"- `{tool.name}` — not found on PATH")
         elif tool.version:
             lines.append(f"- `{tool.name}` — `{tool.path}` ({tool.version})")
         else:
@@ -218,10 +230,12 @@ def render_sandbox_facts(
     if facts.chromium:
         lines.append(f"- chromium binary — `{facts.chromium}`")
     else:
-        lines.append("- chromium binary — not present")
+        lines.append(
+            "- chromium binary — not found in the playwright browser dirs or on PATH"
+        )
     if facts.browsers_path:
         lines.append(f"- `PLAYWRIGHT_BROWSERS_PATH` — `{facts.browsers_path}`")
-    lines.append(f"- {NETWORK_EGRESS_NOTE}")
+    lines.append(f"- {NETWORK_NOTE}")
 
     out = [
         "## Sandbox environment",
@@ -234,9 +248,11 @@ def render_sandbox_facts(
     ]
     if for_coder:
         out += [
-            "Treat this list as authoritative for what the sandbox has. If a "
-            "capability is listed here, it is available to you — check before "
-            "reporting that something cannot be done for want of a tool.",
+            "Every line above carrying a path is **measured and present** — it "
+            "is available to you, so do not report that work could not be done "
+            "for want of it. A `not found` line records only where loom looked "
+            "(`PATH`, the playwright browser dirs) and is **not** proof of "
+            "absence: check for yourself before concluding a tool is missing.",
             "",
         ]
         if guidance:
@@ -301,28 +317,48 @@ _FAILED: set[str] = set()
 
 
 def prime(image: str) -> str | None:
-    """Probe *image* once and cache it; returns a friction line on failure.
+    """Probe *image* and cache it; returns a friction line on failure.
 
     **The only function here that touches docker.** Entry points call it at run
     start, where a failure still has somewhere to be reported; prompt rendering
     then reads the cache and performs no I/O — which is what keeps ``make check``
-    hermetic and means a forgotten stub can never start a container in a unit
-    test.
+    hermetic and means a forgotten stub can never start a container in a test.
 
-    An image that was never primed simply renders nothing, the same as a failed
-    probe: silence is the safe direction, an invented absence is not.
+    The image id is re-resolved on **every** call, and cached facts are reused
+    only when that id still matches. A tag is a mutable pointer: rebuilding
+    ``ralph-sandbox:python-ui`` in place moves it to new content under the same
+    name, and short-circuiting on the name alone kept serving the old facts —
+    stale environment claims stated as measured truth, which is the defect this
+    module exists to prevent. A ``docker inspect`` per run start is a cheap price
+    for that (the probe container it may skip is the expensive part).
+
+    A **failure**, by contrast, is sticky for the process. Two entry points prime
+    per run (``__main__`` to post the friction, then ``develop`` / ``review_head``
+    for the facts), and without this a probe that hangs would burn its timeout
+    twice over. The trade is explicit: an image whose probe failed is not retried
+    within the run, so a rebuild after a failure goes unnoticed until the next.
+    Silence is the safe direction — a missing section is not a false claim.
     """
-    if image in _FACTS_BY_IMAGE:
+    if image in _FAILED:
         return None
     image_id = resolve_image_id(image)
     if image_id is None:
-        return _fail_once(image, f"cannot inspect sandbox image {image!r}")
-    facts = _FACTS_BY_ID.get(image_id) or probe_image(image, image_id)
+        return _record_failure(image, f"cannot inspect sandbox image {image!r}")
+    cached = _FACTS_BY_ID.get(image_id)
+    if cached is not None:
+        # Same content, possibly a different tag. Re-label the copy bound to this
+        # name so the prompt states the image THIS run uses — the digest is what
+        # makes them the same, but naming the first tag probed would be needless
+        # confusion for a reader checking the environment against their config.
+        _FACTS_BY_IMAGE[image] = replace(cached, image=image)
+        return None
+    facts = probe_image(image, image_id)
     if facts is None:
-        return _fail_once(image, f"capability probe failed for sandbox image {image!r}")
+        return _record_failure(
+            image, f"capability probe failed for sandbox image {image!r}"
+        )
     _FACTS_BY_ID[image_id] = facts
     _FACTS_BY_IMAGE[image] = facts
-    _FAILED.discard(image)
     return None
 
 
@@ -337,16 +373,21 @@ def for_prompt(image: str, *, for_coder: bool, guidance: str | None = None) -> s
     )
 
 
-def _fail_once(image: str, message: str) -> str | None:
-    """Emit *message* the first time *image* fails; stay quiet after that."""
+def _record_failure(image: str, message: str) -> str:
+    """Mark *image* as un-probeable for this process and return the friction.
+
+    Reached at most once per image — :func:`prime` short-circuits on ``_FAILED``
+    before touching docker — so the caller gets exactly one breadcrumb and pays
+    the probe cost once.
+    """
     full = (
         f"sandbox capability probe: {message}; agent prompts will not state "
         "its capabilities"
     )
-    if image in _FAILED:
-        logger.debug("%s (already reported)", full)
-        return None
     _FAILED.add(image)
+    # Drop any facts held under this name: they describe an image we can no
+    # longer confirm, and a stale claim is worse than no claim.
+    _FACTS_BY_IMAGE.pop(image, None)
     logger.warning("%s", full)
     return full
 
