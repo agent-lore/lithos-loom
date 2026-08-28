@@ -36,7 +36,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 |---|---:|---:|---:|---:|---:|---:|---|---:|
 | Bus | 1 | 198 | 160 | 4 | 0 | 0.00 | 11 (`lithos_loom.bus._matches_struct`) | 1 |
 | Children | 6 | 1284 | 962 | 0 | 7 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 1 |
-| Cli | 12 | 5159 | 4300 | 2 | 8 | 0.80 | 49 (`lithos_loom.cli.project.import_project`) | 16 |
+| Cli | 12 | 5188 | 4326 | 2 | 8 | 0.80 | 49 (`lithos_loom.cli.project.import_project`) | 17 |
 | Config | 1 | 1044 | 875 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
 | Entrypoint | 2 | 622 | 492 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
@@ -56,7 +56,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **125**, lines: **40762**, SLOC: **32370**
+- Modules: **125**, lines: **40791**, SLOC: **32396**
 - Largest module: `lithos_loom.lithos_client` (2195 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1056**, cyclomatic > 10: **88**
+- Functions: **1056**, cyclomatic > 10: **89**
 
 Top 10 most complex functions:
 
@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **17** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.65** (67082 test lines / 40762 source lines)
+- Test-to-source line ratio: **1.65** (67120 test lines / 40791 source lines)
