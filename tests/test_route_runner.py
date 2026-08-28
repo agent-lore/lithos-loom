@@ -26,7 +26,12 @@ from lithos_loom.bus import Event, EventBus
 from lithos_loom.config import RouteConfig, RouteMatch
 from lithos_loom.errors import LithosClientError, PluginContractError
 from lithos_loom.lithos_client import Task
-from lithos_loom.subscriptions.route_runner import READY_QUERY_LIMIT, RouteRunner
+from lithos_loom.subscriptions.dispatch_guards import (
+    READY_QUERY_LIMIT,
+    last_attempt_key,
+    task_fingerprint,
+)
+from lithos_loom.subscriptions.route_runner import RouteRunner
 from tests.support import FakeLithosClient, make_task
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -72,11 +77,14 @@ def _payload(
 def _evt(
     type_: str = "lithos.task.created",
     payload: Mapping[str, Any] | None = None,
+    *,
+    origin: str = "live",
 ) -> Event:
     return Event(
         type=type_,
         timestamp=datetime.now(UTC),
         payload=payload if payload is not None else _payload(),
+        origin=origin,
     )
 
 
@@ -1368,6 +1376,7 @@ async def test_completes_task_false_creates_pr_gate(
     # Story pointed at its gate (provenance), then released.
     assert lithos.task_update.await_args.kwargs["metadata"] == {
         "pr_gate_id": "gate-1",
+        last_attempt_key("story-develop"): None,
     }
     lithos.task_release.assert_awaited_once()
 
@@ -1474,3 +1483,585 @@ async def test_gate_provenance_write_failure_posts_friction(tmp_path: Path) -> N
     summary = lithos.finding_post.await_args.kwargs["summary"]
     assert summary.startswith("[Friction]")
     assert "pr_gate_id" in summary and "gate already blocks" in summary
+
+
+# ── Failed-attempt bootstrap guard (6c4423a0) ──────────────────────────
+#
+# A story whose last attempt FAILED must not be re-dispatched by a restart's
+# bootstrap replay (a process lifecycle event, not anyone asking for a run) —
+# while every deliberate retry gesture keeps working: editing the task makes
+# the NEXT restart re-run it (fingerprint mismatch) and dispatches live once
+# the runner hasn't suppressed it in-process; deleting the marker key retries
+# at the next restart; T10 resume is unaffected. In-process re-attempts after
+# a failure remain suppressed by `_processed_tasks` (issue #11) — unchanged,
+# pre-existing behaviour this guard does not touch.
+
+
+def _marker_metadata(
+    route: str = "story-develop",
+    *,
+    fingerprint: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Metadata carrying a failed-attempt marker for ``route``.
+
+    ``fingerprint=None`` omits the field (a partial/legacy write — the guard
+    treats it as unchanged, i.e. fail closed).
+    """
+    marker: dict[str, Any] = {
+        "status": "failed",
+        "ended_at": "2026-08-28T08:00:00+00:00",
+    }
+    if fingerprint is not None:
+        marker["task_fingerprint"] = fingerprint
+    return {last_attempt_key(route): marker, **dict(extra or {})}
+
+
+def _failed_result(run_id: str | None = "run-abc") -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "task_id": "task-1",
+        "status": "failed",
+        "exit_code": 1,
+        "error": {"category": "agent", "message": "boom"},
+    }
+    if run_id is not None:
+        result["run_id"] = run_id
+    return result
+
+
+async def test_bootstrap_replay_of_failed_story_is_declined(tmp_path: Path) -> None:
+    """Acceptance (a): a bootstrap-replayed `created` for a story whose marker
+    records a failed last attempt for THIS route — and whose content is
+    unchanged since (fingerprint match) — is declined before any Lithos round
+    trip: no readiness query, no claim, no plugin run."""
+    bus = EventBus()
+    plugin_runner = AsyncMock()
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            payload=_payload(metadata=_marker_metadata(fingerprint=fp)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    assert plugin_runner.await_count == 0
+    lithos.task_claim.assert_not_called()
+    # The guard sits BEFORE the readiness check: the marker is already in the
+    # payload, while task_ready costs a Lithos round trip per declined task.
+    lithos.task_ready.assert_not_called()
+
+
+async def test_bootstrap_replay_declines_marker_without_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """A marker with no fingerprint (partial write) fails closed: the guard
+    cannot prove the task was edited, so the replay is declined."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    await bus.publish(
+        _evt(
+            payload=_payload(metadata=_marker_metadata(fingerprint=None)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()
+
+
+async def test_bootstrap_replay_of_edited_failed_story_dispatches(
+    tmp_path: Path,
+) -> None:
+    """Acceptance (b), the operational recovery flow: the operator sharpens
+    the task while the daemon is down (or their same-process edit was absorbed
+    by the in-process dedup, issue #11). The edit changes the fingerprint, so
+    the NEXT restart's bootstrap replay re-runs the story — the pre-guard flow
+    minus the unconditional replay."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    fp_at_failure = task_fingerprint(_payload())  # title "t" when it failed
+    edited = MappingProxyType(
+        {**_payload(metadata=_marker_metadata(fingerprint=fp_at_failure))}
+        | {"title": "t — sharpened acceptance criteria"}
+    )
+    await bus.publish(_evt(payload=edited, origin="bootstrap"))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+
+
+async def test_live_update_dispatches_despite_failed_marker(tmp_path: Path) -> None:
+    """Acceptance (b): a live `task.updated` reaching a runner that has not
+    suppressed the task in-process (i.e. after the restart where the decline
+    happened) dispatches even with the marker present and unchanged content —
+    the guard is bootstrap-only."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload(metadata=_marker_metadata(fingerprint=fp)),
+        )
+    )
+    await _run_for(runner)
+
+    assert plugin_runner.await_count == 1
+    lithos.task_claim.assert_awaited_once()
+
+
+async def test_same_process_edit_after_failure_stays_suppressed(
+    tmp_path: Path,
+) -> None:
+    """Boundary pin, NOT new behaviour: within one daemon process a failed
+    task stays suppressed by `_processed_tasks` even for a genuine operator
+    edit — "fail once per task per daemon process" (issue #11 owns lifting
+    this). The edit is not lost: it changes the fingerprint, so the next
+    restart's bootstrap re-runs the story (see
+    test_bootstrap_replay_of_edited_failed_story_dispatches)."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=_failed_result())
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await _run_for(runner)
+    assert plugin_runner.await_count == 1
+
+    edited = MappingProxyType({**_payload("task-1")} | {"title": "t — sharpened"})
+    await bus.publish(_evt(type_="lithos.task.updated", payload=edited))
+    await _run_for(runner)
+
+    assert plugin_runner.await_count == 1  # unchanged: in-process suppression
+    assert lithos.task_claim.await_count == 1
+
+
+async def test_bootstrap_replay_with_other_routes_marker_dispatches(
+    tmp_path: Path,
+) -> None:
+    """Markers are per-route keys: a failure under another route says nothing
+    about this one, so its marker does not decline this route's dispatch."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_marker_metadata(route="prd-decompose", fingerprint=fp)
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+
+
+async def test_failed_run_records_last_attempt_marker(tmp_path: Path) -> None:
+    """A plugin failure persists `metadata.loom_last_attempt:<route>` (status,
+    ended_at, fingerprint of the dispatched content, run_id) so the record
+    survives a daemon restart — written before the release so it exists by
+    the time the claim frees."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=_failed_result())
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    payload = _payload("task-1")
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+
+    lithos.task_release.assert_awaited_once()
+    update = lithos.task_update.await_args
+    marker = update.kwargs["metadata"][last_attempt_key("story-develop")]
+    assert marker["status"] == "failed"
+    assert marker["run_id"] == "run-abc"
+    assert marker["task_fingerprint"] == task_fingerprint(payload)
+    assert marker["ended_at"]  # ISO timestamp, value not pinned
+
+
+async def test_marker_write_failure_does_not_mask_release(tmp_path: Path) -> None:
+    """The marker write is best-effort: a Lithos hiccup recording it must not
+    prevent the [BlockerFailed] finding or the claim release."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=_failed_result())
+    lithos = _lithos_mock()
+    lithos.task_update.side_effect = RuntimeError("lithos unavailable")
+    runner, _ = _make_runner(
+        bus=bus, work_dir=tmp_path, lithos=lithos, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await _run_for(runner)
+
+    lithos.finding_post.assert_awaited_once()
+    lithos.task_release.assert_awaited_once()
+
+
+_INTERRUPTED_RESULT: dict[str, Any] = {
+    "schema_version": 1,
+    "task_id": "task-1",
+    "status": "interrupted",
+    "exit_code": 0,
+}
+
+
+async def test_interrupted_writes_no_marker(tmp_path: Path) -> None:
+    """`interrupted` is usage-limited / retriable and the restart bootstrap is
+    its DESIGNED recovery path — no failed-attempt marker, so a restart still
+    resumes it. With no prior marker in the payload there is nothing to clear
+    either, so no metadata write happens at all."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=dict(_INTERRUPTED_RESULT))
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await _run_for(runner)
+
+    lithos.task_release.assert_awaited_once()
+    lithos.task_update.assert_not_called()
+
+
+async def test_interrupted_clears_superseded_failure_marker(
+    tmp_path: Path,
+) -> None:
+    """An interrupted attempt supersedes an earlier failure: the old marker is
+    cleared (per-key delete), because interrupted's designed recovery is the
+    restart bootstrap and a stale failure marker would veto it."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=dict(_INTERRUPTED_RESULT))
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload(metadata=_marker_metadata(fingerprint=fp)),
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_release.assert_awaited_once()
+    assert lithos.task_update.await_args.kwargs["metadata"] == {
+        last_attempt_key("story-develop"): None,
+    }
+
+
+async def test_gated_success_clears_failed_marker(tmp_path: Path) -> None:
+    """A gated delivery after an earlier failure clears the stale marker by
+    piggybacking a per-key delete onto the existing gate-provenance write —
+    no extra round trip."""
+    bus = EventBus()
+    lithos = _lithos_mock()
+    lithos.task_create.return_value = "gate-1"
+    runner, _ = _make_runner(
+        bus=bus,
+        route=_develop_route(),
+        lithos=lithos,
+        work_dir=tmp_path,
+        succeeded_result=_delivered_result(),
+    )
+
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload(
+                tags=("trigger:story-develop",), metadata=_marker_metadata()
+            ),
+        )
+    )
+    await _run_for(runner)
+
+    assert lithos.task_update.await_args.kwargs["metadata"] == {
+        "pr_gate_id": "gate-1",
+        last_attempt_key("story-develop"): None,
+    }
+
+
+async def test_resume_dispatch_ignores_stale_marker(tmp_path: Path) -> None:
+    """The T10 resume path is a deliberate re-dispatch: it builds a live-origin
+    event, so a stale failed marker on the task must not decline it."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+    )
+    lithos = _lithos_mock()
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata=_marker_metadata(fingerprint=task_fingerprint(_payload())),
+        claims=(),
+    )
+    runner, _ = _make_runner(
+        bus=bus, work_dir=tmp_path, lithos=lithos, plugin_runner=plugin_runner
+    )
+
+    await runner._resume_dispatch("task-1", delay=0.0)
+
+    assert plugin_runner.await_count == 1
+
+
+async def test_two_routes_keep_independent_failure_markers(tmp_path: Path) -> None:
+    """Per-route keys under the real merge contract: routes A and B both fail
+    on the same task, and NEITHER write erases the other's guard — a fresh
+    runner for each route declines its bootstrap replay."""
+    fake = FakeLithosClient()
+    fake.add_task(
+        make_task(
+            "story-1",
+            status="open",
+            tags=("trigger:story-develop", "trigger:prd-decompose"),
+            metadata={"project": "loom"},
+        )
+    )
+    route_a = _route()
+    route_b = _route(name="prd-decompose", tags=("trigger:prd-decompose",))
+
+    def _runner(bus: EventBus, route: RouteConfig) -> RouteRunner:
+        return RouteRunner(
+            route=route,
+            bus=bus,
+            lithos=fake,
+            agent_id="lithos-orchestrator-test",
+            work_dir_base=tmp_path / route.name,
+            renew_interval_seconds=3600,
+            plugin_runner=AsyncMock(
+                return_value={
+                    "schema_version": 1,
+                    "task_id": "story-1",
+                    "status": "failed",
+                    "exit_code": 1,
+                    "error": {"category": "agent", "message": "boom"},
+                }
+            ),
+        )
+
+    async def _snapshot() -> Mapping[str, Any]:
+        task = await fake.task_get(task_id="story-1")
+        assert task is not None
+        return task.metadata
+
+    for route in (route_a, route_b):
+        bus = EventBus()
+        runner = _runner(bus, route)
+        await bus.publish(
+            _evt(
+                payload=_payload(
+                    "story-1",
+                    tags=("trigger:story-develop", "trigger:prd-decompose"),
+                    metadata=dict(await _snapshot()),
+                )
+            )
+        )
+        await _run_for(runner)
+
+    stored = await _snapshot()
+    assert stored[last_attempt_key("story-develop")]["status"] == "failed"
+    assert stored[last_attempt_key("prd-decompose")]["status"] == "failed"
+
+    # Restart: each route's fresh runner declines its own bootstrap replay.
+    claims_before = len(fake.calls_to("task_claim"))
+    for route in (route_a, route_b):
+        bus = EventBus()
+        runner = _runner(bus, route)
+        await bus.publish(
+            _evt(
+                payload=_payload(
+                    "story-1",
+                    tags=("trigger:story-develop", "trigger:prd-decompose"),
+                    metadata=dict(stored),
+                ),
+                origin="bootstrap",
+            )
+        )
+        await _run_for(runner)
+    assert len(fake.calls_to("task_claim")) == claims_before
+
+
+async def test_restart_roundtrip_declines_bootstrap_then_dispatches_on_edit(
+    tmp_path: Path,
+) -> None:
+    """Acceptance (c), through the real client contract: the marker written by
+    a failing run persists in Lithos metadata, a FRESH runner (empty
+    `_processed_tasks`, i.e. a restarted daemon) declines the bootstrap replay
+    off that persisted state, and a live task edit still dispatches."""
+    fake = FakeLithosClient()
+    fake.add_task(
+        make_task(
+            "story-1",
+            status="open",
+            tags=("trigger:story-develop",),
+            metadata={"project": "loom"},
+        )
+    )
+
+    def _runner(bus: EventBus, plugin_runner: Any) -> RouteRunner:
+        return RouteRunner(
+            route=_route(),
+            bus=bus,
+            lithos=fake,
+            agent_id="lithos-orchestrator-test",
+            work_dir_base=tmp_path,
+            renew_interval_seconds=3600,
+            plugin_runner=plugin_runner,
+        )
+
+    # Daemon #1: the plugin fails; the marker must land in Lithos metadata.
+    bus1 = EventBus()
+    failing = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "story-1",
+            "status": "failed",
+            "exit_code": 1,
+            "error": {"category": "agent", "message": "boom"},
+            "run_id": "run-1",
+        }
+    )
+    runner1 = _runner(bus1, failing)
+    await bus1.publish(_evt(payload=_payload("story-1", metadata={"project": "loom"})))
+    await _run_for(runner1)
+    stored = await fake.task_get(task_id="story-1")
+    assert stored is not None
+    marker = stored.metadata[last_attempt_key("story-develop")]
+    assert marker["status"] == "failed"
+
+    # Daemon #2 (restart): bootstrap replays the open story WITH the persisted
+    # marker and unchanged content; the fresh runner declines it.
+    bus2 = EventBus()
+    succeeding = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "story-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+    )
+    runner2 = _runner(bus2, succeeding)
+    claims_before = len(fake.calls_to("task_claim"))
+    await bus2.publish(
+        _evt(
+            payload=_payload("story-1", metadata=dict(stored.metadata)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner2)
+    assert len(fake.calls_to("task_claim")) == claims_before
+    assert succeeding.await_count == 0
+
+    # The operator sharpens the AC: a live task.updated dispatches the retry.
+    await bus2.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload("story-1", metadata=dict(stored.metadata)),
+        )
+    )
+    await _run_for(runner2)
+    assert len(fake.calls_to("task_claim")) == claims_before + 1
+    assert succeeding.await_count == 1
+
+
+async def test_bootstrap_replay_after_marker_deleted_dispatches(
+    tmp_path: Path,
+) -> None:
+    """The canonical retry gesture: the operator deletes
+    `loom_last_attempt:<route>`; the next restart's bootstrap dispatches —
+    no marker, no decline. This is the contract path for every edit the
+    fingerprint cannot see (see the two limit tests below)."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    await bus.publish(
+        _evt(payload=_payload(metadata={"project": "loom"}), origin="bootstrap")
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+
+
+async def test_metadata_only_edit_is_a_documented_fingerprint_blind_spot(
+    tmp_path: Path,
+) -> None:
+    """DOCUMENTED LIMIT, pinned so nobody "fixes" it by fingerprinting
+    metadata naively: a metadata-only edit (e.g. pointing `develop_image` at
+    a fixed image) does not change the fingerprint, so the bootstrap replay
+    is still declined. Metadata cannot be fingerprinted — the failed run
+    itself writes metadata (`develop_*`, the marker) before the marker
+    lands, so including it would make every decline fail open, and a
+    plugin-agnostic runner cannot tell operator inputs from plugin outputs
+    by key. The contract for this edit is deleting the marker key
+    (test above); the exact fix is Lithos `updated_at` (issue #339)."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_marker_metadata(
+                    fingerprint=fp,
+                    extra={"develop_image": "ralph-sandbox:fixed"},
+                )
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()
+
+
+async def test_reverted_tag_edit_is_a_documented_fingerprint_blind_spot(
+    tmp_path: Path,
+) -> None:
+    """DOCUMENTED LIMIT: removing and re-adding the same trigger tag restores
+    the original tag set, so the fingerprint matches and the bootstrap replay
+    is declined — no state fingerprint can detect a reverted edit. The
+    contract for this gesture is deleting the marker key; issue #339 tracks
+    the exact (`updated_at`-based) detection."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    original = _payload()  # the content the failed run saw
+    fp = task_fingerprint(original)
+    # Remove + re-add of the trigger tag ends at the same sorted tag set.
+    reverted = _payload(metadata=_marker_metadata(fingerprint=fp))
+    assert task_fingerprint(reverted) == fp
+
+    await bus.publish(_evt(payload=reverted, origin="bootstrap"))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()

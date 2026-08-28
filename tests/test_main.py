@@ -13,7 +13,7 @@ from lithos_loom import main as main_module
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import Task
 from lithos_loom.main import app
-from lithos_loom.subscriptions.route_runner import READY_QUERY_LIMIT
+from lithos_loom.subscriptions.dispatch_guards import READY_QUERY_LIMIT
 from tests.support import FakeLithosClient
 
 runner = CliRunner()
