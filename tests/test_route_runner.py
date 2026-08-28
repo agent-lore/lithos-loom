@@ -1992,3 +1992,76 @@ async def test_restart_roundtrip_declines_bootstrap_then_dispatches_on_edit(
     await _run_for(runner2)
     assert len(fake.calls_to("task_claim")) == claims_before + 1
     assert succeeding.await_count == 1
+
+
+async def test_bootstrap_replay_after_marker_deleted_dispatches(
+    tmp_path: Path,
+) -> None:
+    """The canonical retry gesture: the operator deletes
+    `loom_last_attempt:<route>`; the next restart's bootstrap dispatches —
+    no marker, no decline. This is the contract path for every edit the
+    fingerprint cannot see (see the two limit tests below)."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    await bus.publish(
+        _evt(payload=_payload(metadata={"project": "loom"}), origin="bootstrap")
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+
+
+async def test_metadata_only_edit_is_a_documented_fingerprint_blind_spot(
+    tmp_path: Path,
+) -> None:
+    """DOCUMENTED LIMIT, pinned so nobody "fixes" it by fingerprinting
+    metadata naively: a metadata-only edit (e.g. pointing `develop_image` at
+    a fixed image) does not change the fingerprint, so the bootstrap replay
+    is still declined. Metadata cannot be fingerprinted — the failed run
+    itself writes metadata (`develop_*`, the marker) before the marker
+    lands, so including it would make every decline fail open, and a
+    plugin-agnostic runner cannot tell operator inputs from plugin outputs
+    by key. The contract for this edit is deleting the marker key
+    (test above); the exact fix is Lithos `updated_at` (issue #339)."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_marker_metadata(
+                    fingerprint=fp,
+                    extra={"develop_image": "ralph-sandbox:fixed"},
+                )
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()
+
+
+async def test_reverted_tag_edit_is_a_documented_fingerprint_blind_spot(
+    tmp_path: Path,
+) -> None:
+    """DOCUMENTED LIMIT: removing and re-adding the same trigger tag restores
+    the original tag set, so the fingerprint matches and the bootstrap replay
+    is declined — no state fingerprint can detect a reverted edit. The
+    contract for this gesture is deleting the marker key; issue #339 tracks
+    the exact (`updated_at`-based) detection."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    original = _payload()  # the content the failed run saw
+    fp = task_fingerprint(original)
+    # Remove + re-add of the trigger tag ends at the same sorted tag set.
+    reverted = _payload(metadata=_marker_metadata(fingerprint=fp))
+    assert task_fingerprint(reverted) == fp
+
+    await bus.publish(_evt(payload=reverted, origin="bootstrap"))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()

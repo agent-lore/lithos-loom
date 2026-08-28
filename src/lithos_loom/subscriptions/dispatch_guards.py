@@ -21,21 +21,38 @@ One metadata key PER ROUTE (Lithos ``task_update`` merges per top-level
 key), so two routes failing on the same task each keep their own guard —
 a single shared key would let route B's write erase route A's protection.
 
-Failure must stay retryable. The marker stores a ``task_fingerprint`` of
-the title/description/tags the failed run saw, and the bootstrap decline
-applies only while that fingerprint still matches — so an operator who
-sharpened the task while the daemon was down (or whose same-process edit
-was absorbed by the in-process dedup, issue #11) gets the retry on the
-next restart, exactly the pre-guard operational flow minus the
-unconditional replay. Deleting the marker key retries likewise; a live
-``lithos.task.updated`` after the restart, a re-added trigger tag, and the
-T10 resume re-dispatch all bypass the decline by origin. A later gated
-delivery clears the marker (``route_runner._gate_and_release``), and an
-``interrupted`` run clears it too — interrupted's designed recovery IS the
-restart bootstrap, which a stale failure marker must not veto.
+Failure must stay retryable. Two retry gestures are guaranteed across a
+restart, and the operator contract is exactly these:
 
-The fingerprint covers only operator-shaped fields (title, description,
-tags, order-insensitive) — plugin metadata writes cannot fake an edit.
+1. **Delete the marker key** (``metadata.loom_last_attempt:<route>`` →
+   null) — the canonical, always-works signal: no marker, no decline.
+2. **Edit the task to a NEW state.** The marker stores a
+   ``task_fingerprint`` of the title/description/tags the failed run saw,
+   and the decline applies only while that fingerprint still matches — so
+   an operator who sharpened the task while the daemon was down (or whose
+   same-process edit was absorbed by the in-process dedup, issue #11) gets
+   the retry on the next restart, exactly the pre-guard operational flow
+   minus the unconditional replay.
+
+Two edits the fingerprint deliberately CANNOT see — for these, delete the
+marker (gesture 1):
+
+- **Metadata-only edits** (e.g. pointing ``develop_image`` at a fixed
+  image). Metadata is excluded because the failed run itself writes
+  metadata before the marker lands (``develop_*``, and the marker), so
+  including it would make every decline fail open, and a plugin-agnostic
+  runner cannot tell operator inputs from plugin outputs by key. An exact
+  guard needs Lithos to expose ``updated_at`` on tasks (follow-up #339).
+- **Reverted edits** (removing and re-adding the same trigger tag
+  restores the original fingerprint). No state fingerprint can detect a
+  revert; the explicit gesture exists for precisely this.
+
+A live ``lithos.task.updated`` reaching a runner that has not suppressed
+the task in-process, and the T10 resume re-dispatch, bypass the decline by
+origin. A later gated delivery clears the marker
+(``route_runner._gate_and_release``), and an ``interrupted`` run clears it
+too — interrupted's designed recovery IS the restart bootstrap, which a
+stale failure marker must not veto.
 
 Reserved namespace: plugins see ``loom_last_attempt:*`` in their
 ``task.json`` metadata and must not repurpose it (SPECIFICATION §2.2).
@@ -83,7 +100,10 @@ def task_fingerprint(payload: Mapping[str, Any]) -> str:
     operator's deliberate-retry gesture, so the decline does not apply.
     Metadata is deliberately excluded — plugins write metadata at will
     (``develop_*``, and the marker itself), and none of that is an operator
-    asking for another run.
+    asking for another run. The cost of that exclusion, and of state
+    comparison generally (metadata-only edits and reverted edits are
+    invisible), is documented in the module docstring: the marker-deletion
+    gesture is the contract for those.
     """
     material = json.dumps(
         {
@@ -205,9 +225,10 @@ def declines_bootstrap_replay(
         return False
     logger.info(
         "RouteRunner %s: declining bootstrap replay of %s — last attempt "
-        "failed (%s) and the task is unchanged since. Edit the task (re-runs "
-        "on the next restart, or live task.updated) or delete metadata.%s "
-        "to retry.",
+        "failed (%s) and the task's title/description/tags are unchanged "
+        "since. Delete metadata.%s to retry (always works — metadata-only "
+        "or reverted edits are not detected), or edit the task to a new "
+        "state.",
         route,
         task_id,
         last.get("ended_at"),

@@ -29,7 +29,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
-| `lithos_loom.subscriptions.dispatch_guards` | S | 0 | 7 |
+| `lithos_loom.subscriptions.dispatch_guards` | M | 0 | 7 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
