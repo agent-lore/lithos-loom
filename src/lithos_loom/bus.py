@@ -45,11 +45,20 @@ class Event:
     ``type`` is a dotted name like ``lithos.task.created`` or
     ``obsidian.task.toggled``. ``payload`` is event-type-specific; the bus
     treats it as opaque data passed by reference.
+
+    ``origin`` distinguishes a source's restart/reconnect snapshot replay
+    (``"bootstrap"``) from everything else (``"live"``, the default —
+    including Loom-synthetic events like resume re-dispatch). It lives on
+    the Event, not in the payload, so structural filters and payload
+    consumers (the plugin ``task.json``, the Obsidian projection) never
+    see it. Event *type* cannot carry this: a genuinely new task and a
+    bootstrap replay both arrive as ``lithos.task.created``.
     """
 
     type: str
     timestamp: datetime
     payload: Mapping[str, Any]
+    origin: str = "live"
 
 
 @dataclass(frozen=True)

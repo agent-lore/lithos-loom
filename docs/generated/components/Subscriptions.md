@@ -29,6 +29,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
+| `lithos_loom.subscriptions.dispatch_guards` | S | 0 | 3 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -94,6 +95,11 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
+
+### `lithos_loom.subscriptions.dispatch_guards`
+- def `on_ready_frontier` — Is ``task_id`` on Lithos's ready frontier for this route? (US4)
+- def `failed_attempt_for_route` — The task's last-attempt marker, iff it records a FAILURE for ``route``.
+- def `record_failed_attempt` — Best-effort persist the failed attempt on the task.
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.

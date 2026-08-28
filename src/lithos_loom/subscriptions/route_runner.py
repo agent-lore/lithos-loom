@@ -44,6 +44,12 @@ from lithos_loom.config import RouteConfig
 from lithos_loom.errors import LithosClientError, PluginContractError
 from lithos_loom.gates import STORY_GATE_ID_KEY, create_pr_gate_best_effort
 from lithos_loom.plugin_runner import run_plugin
+from lithos_loom.subscriptions.dispatch_guards import (
+    LAST_ATTEMPT_KEY,
+    failed_attempt_for_route,
+    on_ready_frontier,
+    record_failed_attempt,
+)
 
 __all__ = ["PluginRunFn", "RouteRunner"]
 
@@ -75,16 +81,6 @@ _HANDLED_EVENT_TYPES = (
 # for the operator. Distinct from the failure retry budget (issue #11):
 # resume is "try again after the limit lifts", not "retry a failure".
 MAX_RESUMES_PER_TASK = 3
-
-# Page size for the `task_ready` membership query (US4). `task_ready` has no
-# per-task filter — the runner asks for the frontier and looks for its task on
-# it — so the page must be big enough to hold a realistic frontier. The query
-# is already narrowed to one route's tags and one project, but that can still
-# be large: a decomposed PRD's parallel stories all carry the same trigger tag
-# and all become ready at once. The default limit of 50 would quietly truncate
-# such a frontier, so ask for far more and treat a full page as undetermined
-# rather than as "not ready" (see `_is_ready`).
-READY_QUERY_LIMIT = 500
 
 
 def _task_to_payload(task: Any) -> dict[str, Any]:
@@ -185,10 +181,14 @@ class RouteRunner:
         # lithos.task.released; that event hits this dedup check and is
         # silently skipped. The effect is "fail once per task per daemon
         # process" — deliberate, to avoid tight retry loops when a plugin
-        # is deterministically broken. A proper retry budget lives in
-        # follow-up issue #11. The lost-claim-race path below
-        # (claim_failed) deliberately does NOT add to this set, so a
-        # subsequent released event there does re-attempt the claim.
+        # is deterministically broken — and, since the failure also
+        # persists a `loom_last_attempt` marker that `_handle` checks on
+        # bootstrap-origin events, "fail once per task across restarts,
+        # until a live event or an operator edit asks for another run".
+        # A proper retry budget lives in follow-up issue #11. The
+        # lost-claim-race path below (claim_failed) deliberately does NOT
+        # add to this set, so a subsequent released event there does
+        # re-attempt the claim.
         self._processed_tasks: set[str] = set()
         # T10: pending usage-limit re-dispatches (task id → sleeper task)
         # and how many resumes each task has consumed. In-memory only:
@@ -234,11 +234,32 @@ class RouteRunner:
             return
 
         metadata = payload.get("metadata") or {}
+        # A bootstrap replay must not re-develop a story whose last attempt
+        # FAILED — every deliberate retry path arrives live and bypasses this
+        # by origin (rationale + residual crash-window leak: dispatch_guards
+        # docstring). Checked before `_is_ready`: the marker is already in
+        # the payload, while readiness costs a Lithos round trip.
+        if event.origin == "bootstrap":
+            last = failed_attempt_for_route(metadata, self.route.name)
+            if last is not None:
+                logger.info(
+                    "RouteRunner %s: declining bootstrap replay of %s — last "
+                    "attempt failed (%s). Edit the task (a live task.updated "
+                    "re-dispatches) or delete metadata.%s to run it again.",
+                    self.route.name,
+                    task_id,
+                    last.get("ended_at"),
+                    LAST_ATTEMPT_KEY,
+                )
+                return
+
         # A delivered (completes_task=false) story is blocked by its `pr` gate
-        # (Epic H) and so is absent from `task_ready` — the readiness check below
-        # is the sole re-dispatch guard, including across a restart's bootstrap
-        # replay that re-emits every open task as `created`. US11 retired the
-        # `loom_delivered` short-circuit that used to duplicate this check.
+        # (Epic H) and so is absent from `task_ready` — the readiness check
+        # below is what defers it, including across a restart's bootstrap
+        # replay that re-emits every open task as `created` (US11 retired the
+        # `loom_delivered` short-circuit that used to duplicate this check).
+        # FAILED stories are the `loom_last_attempt` decline above; readiness
+        # guards everything blocked or gated.
         if not await self._is_ready(task_id, metadata):
             logger.info(
                 "RouteRunner %s: deferring %s — not on Lithos's ready frontier",
@@ -274,42 +295,15 @@ class RouteRunner:
         await self._run_claimed_task(task_id, payload)
 
     async def _is_ready(self, task_id: str, metadata: Mapping[str, Any]) -> bool:
-        """Is ``task_id`` on Lithos's ready frontier for this route? (US4)
-
-        Readiness — every ``blocks`` predecessor completed, no unmet gate, no
-        cycle — is computed once, server-side, and shared with every other
-        agent. The runner no longer mirrors it from ``metadata.depends_on``.
-
-        ``task_ready`` has no per-task filter, so this is a membership test
-        over a frontier narrowed to the route's tags and (when the task
-        declares one) its project. A *full* page means the frontier was
-        truncated, which makes absence from it meaningless — so that case is
-        reported as not-ready-yet rather than trusted, and logged. Deferring
-        is the safe direction: the inverse mistake would dispatch a task whose
-        blocker is still open, which is exactly what this gate exists to stop.
-        """
-        project = metadata.get("project")
-        ready = await self.lithos.task_ready(
-            tags=list(self.route.match.tags),
-            project=project if isinstance(project, str) else None,
-            limit=READY_QUERY_LIMIT,
-            # Claims never exclude a task from the frontier (collision-safety
-            # comes from the atomic claim below), so don't pay to fetch them.
-            with_claims=False,
+        """Membership test on Lithos's ready frontier — see
+        ``dispatch_guards.on_ready_frontier`` (US4)."""
+        return await on_ready_frontier(
+            self.lithos,
+            task_id=task_id,
+            tags=self.route.match.tags,
+            metadata=metadata,
+            route=self.route.name,
         )
-        if any(task.id == task_id for task in ready):
-            return True
-        if len(ready) >= READY_QUERY_LIMIT:
-            logger.warning(
-                "RouteRunner %s: ready frontier for tags %s hit the %d-task query "
-                "limit, so %s's readiness is undetermined — deferring. Raise "
-                "READY_QUERY_LIMIT if a frontier this wide is expected.",
-                self.route.name,
-                list(self.route.match.tags),
-                READY_QUERY_LIMIT,
-                task_id,
-            )
-        return False
 
     async def _re_dispatch_unblocked(self, task_ids: Sequence[str]) -> None:
         """Re-evaluate route matching for tasks Lithos just unblocked (US6).
@@ -481,9 +475,11 @@ class RouteRunner:
         if status == "failed":
             err = result.get("error") or {}
             err_msg = err.get("message") if isinstance(err, dict) else None
+            run_id = result.get("run_id")
             await self._release_with_finding(
                 task_id,
                 f"plugin reported failure: {err_msg or 'no error message'}",
+                run_id=run_id if isinstance(run_id, str) else None,
             )
             return False
         if status == "interrupted":
@@ -508,9 +504,11 @@ class RouteRunner:
             if isinstance(resume, Mapping):
                 await self._maybe_schedule_resume(task_id, resume)
             return False
+        run_id = result.get("run_id")
         await self._release_with_finding(
             task_id,
             f"plugin returned unknown status {status!r}",
+            run_id=run_id if isinstance(run_id, str) else None,
         )
         return False
 
@@ -635,13 +633,22 @@ class RouteRunner:
                 task_id,
             )
 
-    async def _release_with_finding(self, task_id: str, detail: str) -> None:
+    async def _release_with_finding(
+        self, task_id: str, detail: str, *, run_id: str | None = None
+    ) -> None:
         summary = f"[BlockerFailed] route {self.route.name}: {detail}"
         logger.info(
             "RouteRunner %s: releasing %s with finding: %s",
             self.route.name,
             task_id,
             detail,
+        )
+        await record_failed_attempt(
+            self.lithos,
+            task_id=task_id,
+            route=self.route.name,
+            agent=self.agent_id,
+            run_id=run_id,
         )
         try:
             await self.lithos.finding_post(
@@ -713,6 +720,12 @@ class RouteRunner:
         story_metadata: dict[str, Any] = {}
         if gate_id is not None:
             story_metadata[STORY_GATE_ID_KEY] = gate_id
+            # A delivery supersedes any earlier failed attempt: clear the
+            # bootstrap-decline marker (per-key delete) on the same write.
+            # Skipped when no gate exists — the loud [Friction] owns that
+            # state, and a leftover marker only declines *bootstrap* replay,
+            # the safe direction for an ungated delivered story.
+            story_metadata[LAST_ATTEMPT_KEY] = None
 
         marked = True
         if story_metadata:

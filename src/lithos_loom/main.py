@@ -49,7 +49,7 @@ from lithos_loom.subscriptions import (
     build_runners,
 )
 from lithos_loom.subscriptions._noop import handle as _noop_handle
-from lithos_loom.subscriptions.route_runner import READY_QUERY_LIMIT
+from lithos_loom.subscriptions.dispatch_guards import READY_QUERY_LIMIT
 from lithos_loom.supervisor import Supervisor, default_categories
 
 app = typer.Typer(

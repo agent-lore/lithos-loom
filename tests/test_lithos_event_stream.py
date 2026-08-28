@@ -1749,3 +1749,39 @@ async def test_stream_without_cursor_store_still_works(tmp_path: Any) -> None:
 
     # No cursor file should exist anywhere in tmp_path.
     assert not list(tmp_path.rglob("sse_cursors.json"))
+
+
+# ── Event origin (6c4423a0) ─────────────────────────────────────────────
+
+
+async def test_event_origin_marks_bootstrap_vs_live() -> None:
+    """Bootstrap-replayed events carry ``Event.origin == "bootstrap"``; live
+    SSE-delivered events stay ``"live"``. The payload shape is untouched —
+    that is the point of marking provenance on the Event rather than in the
+    payload (see test_bootstrap_payload_matches_poller_shape)."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created", "lithos.task.updated"])
+    fresh = _task("u1", status="open", tags=("trigger:x",), title="refreshed")
+    client = _FakeClient(bootstrap=[_task("a")], refresh_responses=[[fresh]])
+    aconnect = _FakeAconnect(
+        connections=[
+            [_FakeSse(event="task.updated", data={"task_id": "u1"}, id="evt-1")]
+        ]
+    )
+    source = _stream(client=client, bus=bus, aconnect=aconnect)
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    events = []
+    while not listener.queue.empty():
+        events.append(listener.queue.get_nowait())
+    origins = {(ev.type, ev.origin) for ev in events}
+    assert ("lithos.task.created", "bootstrap") in origins
+    assert ("lithos.task.updated", "live") in origins
+    # Nothing on this script produces a live `created`, and the bootstrap
+    # replay must never masquerade as one.
+    assert ("lithos.task.created", "live") not in origins

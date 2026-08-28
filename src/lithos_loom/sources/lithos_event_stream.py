@@ -276,7 +276,7 @@ class LithosEventStream:
         )
         for task in open_tasks:
             self._known_tasks[task.id] = task
-            await self._publish("lithos.task.created", task)
+            await self._publish("lithos.task.created", task, origin="bootstrap")
             published += 1
 
         if self.bootstrap_resolved_window is not None:
@@ -341,7 +341,7 @@ class LithosEventStream:
                 # a refresh. _with_terminal_status is a no-op when the
                 # cached status already matches the event type.
                 self._known_tasks[task.id] = task
-                await self._publish(event_type, task)
+                await self._publish(event_type, task, origin="bootstrap")
                 published += 1
         return published
 
@@ -547,11 +547,14 @@ class LithosEventStream:
 
     # ── bus publish ──────────────────────────────────────────────────
 
-    async def _publish(self, event_type: str, task: Task) -> None:
+    async def _publish(
+        self, event_type: str, task: Task, *, origin: str = "live"
+    ) -> None:
         event = Event(
             type=event_type,
             timestamp=datetime.now(UTC),
             payload=_event_payload(task),
+            origin=origin,
         )
         await self.bus.publish(event)
         logger.info("LithosEventStream: published %s for %s", event_type, task.id)
