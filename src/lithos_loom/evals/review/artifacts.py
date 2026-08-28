@@ -11,8 +11,11 @@ regular files only, no symlinks, everything resolved inside the case dir.
 
 from __future__ import annotations
 
+import json
 import shutil
+from datetime import UTC, datetime
 
+from ...plugins.story_develop import check_artifacts
 from ...plugins.story_develop.config import DevelopConfig
 from .case import Case, iter_artifact_files, resolve_artifacts_root
 
@@ -46,11 +49,30 @@ def seed_case_artifacts(case: Case, config: DevelopConfig, *, head_sha: str) -> 
     files = iter_artifact_files(root, case.id, label=label)
 
     dest = config.artifacts_dir / _SEED_ROUND / _SEED_CHECK
+    count = 0
     for src in files:
         target = dest / src.relative_to(root)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target)
-    return len(files)
+        count += 1
+    # Provenance manifest (793edc9f): the seeded captures ARE the head under
+    # review, so the artifact pass labels them CURRENT — without this they
+    # would label UNKNOWN and the prompt would tell the reviewer not to treat
+    # them as evidence. Written last so a case file can never occupy the slot
+    # (iter_artifact_files yields regular files only; an overwrite here wins).
+    (dest / check_artifacts.CAPTURE_MANIFEST).write_text(
+        json.dumps(
+            {
+                "sha": head_sha,
+                "round": 1,
+                "check": _SEED_CHECK,
+                "captured_at": datetime.now(UTC).isoformat(),
+                "files": count,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return count
 
 
 def _variant_for(case: Case, head_sha: str) -> tuple[str, str]:

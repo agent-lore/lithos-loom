@@ -175,7 +175,9 @@ def review_head(
     container starts (an LGTM over zero artifacts would be a fabricated
     approval, not a review).
     """
-    if artifact_only and not check_artifacts.render_artifacts_note(config):
+    if artifact_only and not check_artifacts.render_artifacts_note(
+        config, current_sha=change.head_sha
+    ):
         raise ValueError(
             "artifact-only review: no artifacts to review under "
             f"{config.artifacts_dir} — seed them before the run"
@@ -257,6 +259,7 @@ def review_head(
             # artifact pass, which passes the empty string
             coder_summary="" if artifact_only else _REVIEW_ONLY_CODER_SUMMARY,
             artifact_pass=artifact_only,
+            head_sha=change.head_sha,
         )
     finally:
         for rstate in reviewers:

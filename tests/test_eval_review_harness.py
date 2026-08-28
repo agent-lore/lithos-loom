@@ -410,7 +410,10 @@ def test_live_review_seeds_artifacts_and_runs_artifact_only(
     monkeypatch.setattr(harness_mod, "review_change", fake_review_change)
     live_review(_artifact_case(tmp_path), "h")
     assert captured["artifact_only"] is True
-    assert captured["seeded"] == ["page-800.png"]
+    # the seeder also stamps the provenance manifest (793edc9f) so the
+    # artifact pass labels the seeded captures CURRENT for the head under
+    # review rather than UNKNOWN
+    assert captured["seeded"] == [".capture.json", "page-800.png"]
 
 
 def test_live_review_seeds_the_variant_matching_the_head(
