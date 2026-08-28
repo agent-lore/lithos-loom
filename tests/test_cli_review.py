@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from lithos_loom.cli import review as review_cli
 from lithos_loom.cli.develop import develop_app
+from lithos_loom.plugins.story_develop.config import DEFAULT_IMAGE
 from lithos_loom.plugins.story_develop.review_report import ReviewReport
 from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
 
@@ -290,6 +291,43 @@ def test_bad_check_state_fails_closed(stubs: dict) -> None:
     )
     assert result.exit_code == 2
     assert "config" not in stubs
+
+
+def test_image_threads_through(stubs: dict) -> None:
+    """Without --image, review silently ran DEFAULT_IMAGE regardless of the
+    project's develop_image — so a review of a project whose gate needs a
+    browser ran in an image without one, and the gate could never pass (#334)."""
+    result = runner.invoke(
+        develop_app,
+        ["review", "#142", "--ac", "x", "--image", "ralph-sandbox:python-ui"],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].image == "ralph-sandbox:python-ui"
+
+
+def test_image_defaults_when_not_given(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["review", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].image == DEFAULT_IMAGE
+
+
+def test_blank_image_fails_closed(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["review", "#142", "--ac", "x", "--image", "   "]
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
+def test_artifacts_path_threads_through(stubs: dict) -> None:
+    """The artifact review pass only fires when the run knows where a check
+    writes rendered output; review-only had no way to say so."""
+    result = runner.invoke(
+        develop_app,
+        ["review", "#142", "--ac", "x", "--artifacts-path", "e2e/artifacts"],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].artifacts_path == "e2e/artifacts"
 
 
 def test_parity_command_threads_through(stubs: dict) -> None:

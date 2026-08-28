@@ -20,11 +20,14 @@ import typer
 
 from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop.config import (
+    DEFAULT_IMAGE,
     DEFAULT_TEST_TIMEOUT,
     DevelopConfig,
     ReviewerSpec,
+    parse_artifacts_path,
     parse_check_command_pairs,
     parse_check_state_pairs,
+    parse_image,
     parse_parity_command,
     parse_test_command,
 )
@@ -95,6 +98,20 @@ def review_command(
         "enforces beyond the structured check-set. Primary gate for ecosystems the "
         "catalog doesn't model (C/C++).",
     ),
+    image: str = typer.Option(
+        DEFAULT_IMAGE,
+        "--image",
+        help="Sandbox container image for the reviewers and the gate. Match the "
+        "project's develop_image — review does not read project metadata, so "
+        "without this it runs the default image and a gate needing tooling that "
+        "image lacks (e.g. a browser) can never pass.",
+    ),
+    artifacts_path: str | None = typer.Option(
+        None,
+        "--artifacts-path",
+        help="Repo-relative dir a gate check writes rendered output to (the "
+        "project's develop_artifacts_path). Enables the artifact review pass.",
+    ),
     test_timeout: int = typer.Option(
         DEFAULT_TEST_TIMEOUT,
         "--test-timeout",
@@ -149,6 +166,16 @@ def review_command(
         )
         raise typer.Exit(2)
 
+    # Fail closed on a blank image before any spend: a whitespace value would
+    # reach `docker run` and die deep in the first container start.
+    try:
+        resolved_image = parse_image(image, where="--image") or DEFAULT_IMAGE
+        resolved_artifacts = parse_artifacts_path(
+            artifacts_path, where="--artifacts-path"
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     reviewers = resolve_reviewers(profile, reviewer)
 
     develop_config = DevelopConfig(
@@ -164,6 +191,8 @@ def review_command(
         check_commands=check_commands,
         check_states=check_states,
         parity_command=parity_command,
+        image=resolved_image,
+        artifacts_path=resolved_artifacts,
     )
     develop_config = apply_model_policy(
         develop_config,
