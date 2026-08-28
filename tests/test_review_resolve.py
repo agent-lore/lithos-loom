@@ -83,12 +83,17 @@ def test_unknown_ref_raises(tmp_git_repo: Path) -> None:
 # --- PR form (gh stubbed) ----------------------------------------------------
 
 
-def _stub_pr(number: str, *, head_repo: str = "agent-lore/lithos-loom") -> PullRequest:
+def _stub_pr(
+    number: str,
+    *,
+    head_repo: str = "agent-lore/lithos-loom",
+    merged: bool = False,
+) -> PullRequest:
     return PullRequest(
         repo="agent-lore/lithos-loom",
         number=int(number),
-        state="open",
-        merged=False,
+        state="closed" if merged else "open",
+        merged=merged,
         merged_at=None,
         merge_commit_sha=None,
         head_sha="h" * 40,
@@ -135,8 +140,30 @@ def test_resolves_pr_number(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     # the raw pushable branch + fork flag drive converge's push epilogue
     assert change.head_branch == "feature"
     assert change.is_fork is False
+    assert change.is_merged is False
     # the PR head was fetched so the commit is local
     assert fetches_for(stub_gh.fetches, "142")
+
+
+def test_resolve_pr_flags_merged_but_still_resolves(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A merged PR resolves normally and is FLAGGED, not refused.
+
+    Reviewing an already-merged PR is a legitimate read-only operation, so the
+    refusal belongs in converge (which pushes fixes that could never land), not
+    here. Resolution just reports the fact.
+    """
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, merged=True)
+    )
+    monkeypatch.setattr(review_resolve, "_git_fetch", lambda repo, *refs: None)
+    monkeypatch.setattr(review_resolve, "_merge_base", lambda repo, a, b: "m" * 40)
+
+    change = review_resolve.resolve_change(tmp_path, "#142")
+
+    assert change.is_merged is True
+    assert change.head_sha == "h" * 40  # still fully resolved
 
 
 def test_resolve_pr_flags_fork_when_head_repo_differs(
