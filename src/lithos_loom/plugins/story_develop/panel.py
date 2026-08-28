@@ -53,6 +53,7 @@ from .handoff import (
 )
 from .model_policy import active_model
 from .rounds import Services
+from .sandbox_facts import for_prompt as _sandbox_section
 from .turns import TurnResult
 
 logger = logging.getLogger(__name__)
@@ -542,6 +543,7 @@ def _run_reviewer_with_reaction(
                 handoff.load_prompt("reviewer_reseed.md"),
                 reviewer=name,
                 reviewer_brief=_reviewer_brief(rstate.spec),
+                sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
                 base_sha=base[:12],
@@ -679,6 +681,7 @@ def run_panel_round(
                 handoff.load_prompt("reviewer_artifacts.md"),
                 reviewer=name,
                 reviewer_brief=_artifact_reviewer_brief(rstate.spec),
+                sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
                 base_sha=base[:12],
@@ -700,6 +703,7 @@ def run_panel_round(
                 handoff.load_prompt("reviewer_round.md"),
                 reviewer=name,
                 reviewer_brief=_reviewer_brief(rstate.spec),
+                sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 acceptance_criteria=config.effective_acceptance_criteria,
                 coder_summary=coder_summary,
                 base_sha=base[:12],
@@ -717,6 +721,7 @@ def run_panel_round(
                 handoff.load_prompt("reviewer_rereview.md"),
                 reviewer=name,
                 reviewer_brief=_reviewer_brief(rstate.spec),
+                sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
                 base_sha=base[:12],

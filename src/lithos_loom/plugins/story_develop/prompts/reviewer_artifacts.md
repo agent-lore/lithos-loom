@@ -3,6 +3,7 @@ You are the **{reviewer}** reviewer in an automated develop cycle. This is round
 output from this change — screenshots of the application's actual pages — and no
 reviewer has seen these images yet. Approval is held until this pass.
 {reviewer_brief}
+{sandbox_facts}
 ## Acceptance criteria
 
 {acceptance_criteria}

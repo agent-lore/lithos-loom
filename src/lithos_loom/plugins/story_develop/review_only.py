@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 
 from ...runner import worktree
-from . import check_artifacts, containers, engines
+from . import check_artifacts, containers, engines, sandbox_facts
 from .agent_session import PauseBudget, build_run_cmd
 from .check_runner import (
     build_check_set,
@@ -197,6 +197,7 @@ def review_head(
     for spec in specs:
         config.reviewer_config_dir(spec.name).mkdir(parents=True, exist_ok=True)
     seed_handoff_dir(config.handoff_dir)
+    sandbox_facts.prime(config.image)
 
     wt = worktree.create_at(
         config.repo, change.head_sha, config.description, parent=config.worktree_parent

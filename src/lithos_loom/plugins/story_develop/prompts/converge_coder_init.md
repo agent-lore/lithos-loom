@@ -30,6 +30,7 @@ silently comply: **dispute it formally** (see below) so a human can weigh in.
 
 {findings}
 {gate_summary}
+{sandbox_facts}
 ## Your job
 
 You have a **single, non-interactive turn** — run every command synchronously

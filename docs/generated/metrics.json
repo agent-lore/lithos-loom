@@ -116,7 +116,7 @@
         "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
-        "complexity": 31,
+        "complexity": 32,
         "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
       },
       {
@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.cli.develop._outcome_line"
       }
     ],
-    "total_functions": 1045
+    "total_functions": 1056
   },
   "domain": {
     "associations": 2,
@@ -430,14 +430,14 @@
         "sloc": 1841
       },
       "Plugins": {
-        "classes": 55,
-        "functions": 343,
+        "classes": 57,
+        "functions": 354,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
-        "largest_module_lines": 1102,
-        "lines": 13027,
-        "modules": 41,
-        "public_symbols": 213,
-        "sloc": 10375
+        "largest_module_lines": 1112,
+        "lines": 13454,
+        "modules": 42,
+        "public_symbols": 224,
+        "sloc": 10707
       },
       "ProjectContext": {
         "classes": 0,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 40364,
-    "total_modules": 124,
-    "total_sloc": 32064
+    "total_lines": 40791,
+    "total_modules": 125,
+    "total_sloc": 32396
   },
   "tests": {
     "ratio": 1.65,
-    "src_lines": 40364,
-    "test_lines": 66666
+    "src_lines": 40791,
+    "test_lines": 67120
   }
 }

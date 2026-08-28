@@ -49,6 +49,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 4 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
+| `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
 | `lithos_loom.plugins.story_develop.turns` | XS | 0 | 1 |
@@ -323,6 +324,19 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `delivered_pr_url` — The delivered PR url for an approved run, or ``None`` (#188).
 - def `capture_outcome` — Snapshot the terminal outcome into *outcome* from the already-read *state*.
 - def `is_clean_success` — Whether the run reached the only success status (``approved``) **and** fully delivered.
+
+### `lithos_loom.plugins.story_develop.sandbox_facts`
+- class `ToolFact` — One probed tool.
+- class `SandboxFacts` — What one probe of one image found. Only ever built from a probe.
+- def `build_image_id_command` — Resolve *image* to its content-addressed config digest.
+- def `build_capability_probe_command` — One-shot ``docker run`` printing ``key=value`` capability lines.
+- def `parse_probe_output` — Fold probe stdout into :class:`SandboxFacts` (pure, table-driven).
+- def `render_sandbox_facts` — The ``{sandbox_facts}`` prompt section (empty when nothing was probed).
+- def `resolve_image_id` — The image's config digest, or ``None`` when docker cannot tell us.
+- def `probe_image` — Probe *image* once, or ``None`` if the probe could not be run.
+- def `prime` — Probe *image* and cache it; returns a friction line on failure.
+- def `for_prompt` — The ``{sandbox_facts}`` section for *image* (pure — reads the cache).
+- def `reset_cache` — Drop the probe cache (tests; a long-lived process re-probes on rebuild).
 
 ### `lithos_loom.plugins.story_develop.settings_resolver`
 - class `ScalarSettings` — The scalar develop settings resolved from metadata.

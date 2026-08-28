@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import cast
 
 from ...plugin_runner import write_result_atomically
-from . import check_runner, engines
+from . import check_runner, engines, sandbox_facts
 from .check_set import CheckState
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
@@ -562,6 +562,16 @@ def _daemon_main(args: argparse.Namespace) -> int:
         base_branch=args.branch,
         notify_github_login=load_operator_github_login(),
     )
+
+    # Probe the sandbox once here, where a failure still has somewhere to go:
+    # the coder and reviewer prompt sites read the cached result and cannot post
+    # a friction of their own. A failed probe injects NOTHING into the prompts —
+    # never a false absence, which is the defect this whole mechanism exists to
+    # prevent (SC-1).
+    probe_friction = sandbox_facts.prime(config.image)
+    if probe_friction:
+        print(f"[Friction] {probe_friction}", file=sys.stderr)
+        post_frictions(args.lithos_url, ctx.task_id, (probe_friction,))
 
     def _fail_payload(category: str, message: str, exit_code: int) -> int:
         write_result_atomically(
