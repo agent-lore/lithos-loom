@@ -246,6 +246,26 @@ def converge_pr(
     )
     intake_cost = intake.panel.cost if intake.panel is not None else 0.0
 
+    # Extract deferrals BEFORE the incomplete/budget exits below (PR #342
+    # re-review P2): one reviewer can defer a finding before another fails,
+    # and a completed intake can exhaust the ceiling — either way the deferral
+    # already happened and must ride out on the ConvergeResult, or it is lost.
+    # getattr-tolerant: converge tests stub the intake panel loosely, and a
+    # stub without findings simply contributes no deferrals.
+    intake_deferred = tuple(
+        DeferredFinding(
+            reviewer=outcome.reviewer,
+            finding_id=f.finding_id,
+            severity=f.severity,
+            rationale=f.rationale,
+            files=tuple(f.files),
+            deferral_reason=getattr(f, "deferral_reason", ""),
+        )
+        for outcome in (intake.panel.round_reviews if intake.panel else [])
+        for f in getattr(outcome, "findings", ())
+        if f.status == "out-of-scope"
+    )
+
     if intake.incomplete:
         # The panel produced no usable review (interrupted / invalid / absent).
         # There is nothing trustworthy to seed the fix loop from — surface it as a
@@ -257,6 +277,7 @@ def converge_pr(
             status="failed",
             change=change,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message="intake review did not complete (interrupted / invalid panel) "
             "— cannot seed the fix loop",
         )
@@ -276,24 +297,11 @@ def converge_pr(
             status="failed",
             change=change,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message=f"intake review spent ${intake_cost:.2f}, meeting the --max-cost "
             f"${config.max_cost_usd:.2f} ceiling before the fix loop",
         )
 
-    # getattr-tolerant: converge tests stub the intake panel loosely, and a
-    # stub without findings simply contributes no deferrals.
-    intake_deferred = tuple(
-        DeferredFinding(
-            reviewer=outcome.reviewer,
-            finding_id=f.finding_id,
-            severity=f.severity,
-            rationale=f.rationale,
-            files=tuple(f.files),
-        )
-        for outcome in (intake.panel.round_reviews if intake.panel else [])
-        for f in getattr(outcome, "findings", ())
-        if f.status == "out-of-scope"
-    )
     if not intake.blocking:
         logger.info(
             "converge %s: %s intake already clean", config.run_id, change.head_ref

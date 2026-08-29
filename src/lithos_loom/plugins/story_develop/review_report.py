@@ -27,6 +27,11 @@ class ReviewFinding:
     # `out-of-scope` findings are excluded from eval catch-matching
     # (match.actionable_findings) — a deferral is an escape, not a catch.
     status: str = "open"
+    # WHY an out-of-scope finding was deferred (819370e5, PR #342 re-review).
+    # `rationale` keeps describing the defect; this surface spawns no
+    # follow-up task, so losing either text would make the manual-filing
+    # instruction in `to_markdown` impossible to follow.
+    deferral_reason: str = ""
 
     def to_json(self) -> dict:
         return {
@@ -36,6 +41,7 @@ class ReviewFinding:
             "rationale": self.rationale,
             "finding_id": self.finding_id,
             "status": self.status,
+            "deferral_reason": self.deferral_reason,
         }
 
 
@@ -135,7 +141,14 @@ class ReviewReport:
                 where = ", ".join(f.files) if f.files else "—"
                 fid = f"{f.finding_id} " if f.finding_id else ""
                 mark = "" if f.status == "open" else f" `[{f.status}]`"
-                lines.append(f"- {fid}**[{f.severity}]**{mark} ({where}) {f.rationale}")
+                why = (
+                    f" — deferred because: {f.deferral_reason}"
+                    if f.deferral_reason
+                    else ""
+                )
+                lines.append(
+                    f"- {fid}**[{f.severity}]**{mark} ({where}) {f.rationale}{why}"
+                )
             lines.append("")
         if self.gate:
             lines.append("## Gate")

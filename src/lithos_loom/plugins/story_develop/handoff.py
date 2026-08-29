@@ -30,9 +30,11 @@ _SEVERITY_ORDER = {s: i for i, s in enumerate(_SEVERITIES)}
 # but not this story's to fix (pre-existing on the base, a harness/pipeline
 # fault, another story's agreed work): resolved — so it never blocks — and
 # spun out as its own Lithos task at run end (see lithos_io.spawn_deferred_tasks)
-# instead of burning the round budget. It REQUIRES a rationale saying why (the
-# parse rejects it otherwise): the disposition is a licence to not-block, and
-# the stated why is its counterweight.
+# instead of burning the round budget. It REQUIRES a `deferral_reason` saying
+# why (the parse rejects it otherwise): the disposition is a licence to
+# not-block, and the stated why is its counterweight. The why lives in its OWN
+# key — never in `rationale`, which keeps describing WHAT the defect is — so
+# the spawned task always carries both texts (PR #342 re-review P1).
 _OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
 _RESOLVED_STATES = frozenset(
     {"fixed", "accepted", "superseded", "merged", "out-of-scope"}
@@ -68,8 +70,12 @@ class Finding:
     severity: str  # critical | major | minor
     status: str  # open | fixed | accepted | disputed | needs-clarification | ...
     files: list[str] = field(default_factory=list)
-    rationale: str = ""
+    rationale: str = ""  # WHAT the defect is
     coder_response: str = ""
+    # WHY an out-of-scope finding is not this story's to fix (819370e5).
+    # A separate key — mandatory for that status — so the disposition text
+    # can never overwrite the defect description. Empty for other statuses.
+    deferral_reason: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -140,6 +146,8 @@ def render_findings(findings: list[Finding]) -> str:
         lines.append(f"  files: {files}")
         if f.rationale:
             lines.append(f"  rationale: {f.rationale}")
+        if f.deferral_reason:
+            lines.append(f"  deferral_reason: {f.deferral_reason}")
     return "\n".join(lines)
 
 
@@ -364,13 +372,28 @@ def _parse_findings(block: str) -> list[Finding]:
                 f"finding {idx}: invalid status {status!r} "
                 f"(allowed: {', '.join(sorted(_ALL_STATES))})"
             )
-        if status == "out-of-scope" and not raw.get("rationale", "").strip():
-            raise HandoffError(
-                f"finding {idx}: an out-of-scope disposition must state WHY the "
-                "finding is not this story's to fix in its rationale — e.g. "
-                "pre-existing on the base, a harness/pipeline fault, or another "
-                "story's agreed work"
-            )
+        if status == "out-of-scope":
+            if not raw.get("deferral_reason", "").strip():
+                raise HandoffError(
+                    f"finding {idx}: an out-of-scope disposition must carry a "
+                    "'deferral_reason:' stating WHY the finding is not this "
+                    "story's to fix — e.g. pre-existing on the base, a "
+                    "harness/pipeline fault, or another story's agreed work. "
+                    "Keep 'rationale:' describing WHAT the defect is."
+                )
+            is_new = not (raw.get("finding_id") or raw.get("id") or "").strip()
+            if is_new and not raw.get("rationale", "").strip():
+                # An existing id already has a defect description in the
+                # ledger; a first sighting has nowhere else to get one, and a
+                # deferral whose spawned task names only the why is
+                # unactionable (PR #342 re-review P1).
+                raise HandoffError(
+                    f"finding {idx}: a NEW finding deferred as out-of-scope "
+                    "must still describe the defect itself in 'rationale:' — "
+                    "that text is what the spawned follow-up task carries; "
+                    "'deferral_reason:' holds only why it is not this "
+                    "story's to fix"
+                )
         findings.append(
             Finding(
                 finding_id=(raw.get("finding_id") or raw.get("id") or "").strip(),
@@ -379,6 +402,7 @@ def _parse_findings(block: str) -> list[Finding]:
                 files=_split_files(raw.get("files", "")),
                 rationale=raw.get("rationale", ""),
                 coder_response=raw.get("coder_response", ""),
+                deferral_reason=raw.get("deferral_reason", ""),
             )
         )
     return findings

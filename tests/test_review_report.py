@@ -63,6 +63,7 @@ def test_to_json_has_stable_keys() -> None:
         "rationale",
         "finding_id",
         "status",
+        "deferral_reason",
     }
     assert finding["severity"] == "critical"
     assert finding["status"] == "open"  # 819370e5: additive default
@@ -137,6 +138,7 @@ def test_to_markdown_surfaces_deferred_findings_loudly() -> None:
                         rationale="tiled background seams",
                         finding_id="f-001",
                         status="out-of-scope",
+                        deferral_reason="pre-existing on the base",
                     )
                 ],
             )
@@ -148,3 +150,9 @@ def test_to_markdown_surfaces_deferred_findings_loudly() -> None:
     assert "deferred as **out-of-scope**" in md
     assert "file them manually" in md
     assert "`[out-of-scope]`" in md
+    # PR #342 re-review P1: manual filing needs BOTH texts — the defect and
+    # the why — on the page, and in the machine-readable report.
+    assert "tiled background seams" in md
+    assert "deferred because: pre-existing on the base" in md
+    finding_json = report.to_json()["reviewers"][0]["findings"][0]
+    assert finding_json["deferral_reason"] == "pre-existing on the base"

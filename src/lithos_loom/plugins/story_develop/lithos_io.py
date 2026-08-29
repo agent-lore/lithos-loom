@@ -238,13 +238,12 @@ def spawn_deferred_tasks(
         spawns: list[DeferredSpawn] = []
         async with LithosClient(url, agent_id=AGENT_ID) as client:
             for f in result.deferred_findings:
-                headline = (f.rationale or "").strip().splitlines()[0][:80]
+                headline = ((f.rationale or "").strip().splitlines() or [""])[0][:80]
                 title = f"[deferred {f.severity}] {headline or f.finding_id}"
                 files = "\n".join(f"- {path}" for path in f.files) or "(none listed)"
-                why = f.deferral_reason or (
-                    "(filed directly as out-of-scope; the defect text above "
-                    "carries the reviewer's reasoning)"
-                )
+                # The parse mandates deferral_reason for out-of-scope; empty
+                # only for entries predating the handoff key.
+                why = f.deferral_reason or "(not recorded)"
                 description = (
                     f"Deferred out-of-scope finding from story-develop run "
                     f"{result.run_id} (branch {result.branch}).\n\n"

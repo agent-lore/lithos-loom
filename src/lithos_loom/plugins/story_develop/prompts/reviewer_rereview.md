@@ -63,9 +63,10 @@ changed — and any points it disputes.
      `status: open`, `files:`, and `rationale:`.
    - A finding that is REAL but **not this change's to fix** — pre-existing on
      the base, a harness or pipeline fault, another story's agreed work — gets
-     `status: out-of-scope` with a rationale saying why: it stops blocking and
-     is filed as its own task instead of being lost. Never use it for a defect
-     this diff introduced or touched.
+     `status: out-of-scope`, keeping `rationale:` as the defect description
+     and stating why in `deferral_reason:`: it stops blocking and is filed as
+     its own task carrying both texts instead of being lost. Never use it for
+     a defect this diff introduced or touched.
 
 Record **every** remaining or new issue as a structured finding with an honest
 severity — do not pre-judge what should block. The orchestrator applies the

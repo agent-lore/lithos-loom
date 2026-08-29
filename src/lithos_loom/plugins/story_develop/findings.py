@@ -41,9 +41,9 @@ class LedgerEntry:
     last_updated_round: int = 0
     coder_disputed: bool = False  # the coder pushed back (its handoff)
     # 819370e5 (PR #342 review): WHY the reviewer deferred this out-of-scope,
-    # kept SEPARATE from `rationale` (what the defect is) — the disposition
-    # rationale is mandatory, so folding it into `rationale` would overwrite
-    # the defect description the spawned task exists to carry.
+    # kept SEPARATE from `rationale` (what the defect is). The handoff carries
+    # it in its own mandatory `deferral_reason:` key, so the why can never
+    # overwrite the defect description the spawned task exists to carry.
     deferral_reason: str = ""
     # consecutive rounds the reviewer kept this blocking AFTER the coder
     # disputed it; >= 2 triggers the dispute guard.
@@ -127,6 +127,7 @@ class FindingLedger:
                 status=f.status,
                 files=f.files,
                 rationale=f.rationale,
+                deferral_reason=f.deferral_reason,
                 first_round=round_no,
                 last_updated_round=round_no,
             )
@@ -139,6 +140,7 @@ class FindingLedger:
                     files=entry.files,
                     rationale=entry.rationale,
                     coder_response=entry.coder_response,
+                    deferral_reason=entry.deferral_reason,
                 )
             )
         return canonical
@@ -164,17 +166,13 @@ class FindingLedger:
                 entry.status = f.status
                 if f.files:
                     entry.files = f.files
-                if f.status == "out-of-scope" and entry.rationale:
-                    # The (mandatory) disposition rationale says WHY it is
-                    # deferred; the entry's rationale says WHAT the defect is.
-                    # Route the incoming text to deferral_reason so the defect
-                    # description survives into the spawned task (PR #342
-                    # review P1). A brand-new finding filed directly as
-                    # out-of-scope has no prior rationale and keeps the
-                    # combined text in `rationale` (the else-branch below).
-                    if f.rationale:
-                        entry.deferral_reason = f.rationale
-                elif f.rationale:
+                # The parse guarantees an out-of-scope finding's WHY arrives
+                # in `deferral_reason` (PR #342 re-review P1), so `rationale`
+                # — when present — is always a defect-text update and can
+                # never clobber the description the spawned task carries.
+                if f.deferral_reason:
+                    entry.deferral_reason = f.deferral_reason
+                if f.rationale:
                     entry.rationale = f.rationale
                 entry.last_updated_round = round_no
             else:
@@ -187,6 +185,7 @@ class FindingLedger:
                     status=f.status,
                     files=f.files,
                     rationale=f.rationale,
+                    deferral_reason=f.deferral_reason,
                     first_round=round_no,
                     last_updated_round=round_no,
                 )
@@ -199,6 +198,7 @@ class FindingLedger:
                     files=entry.files,
                     rationale=entry.rationale,
                     coder_response=entry.coder_response,
+                    deferral_reason=entry.deferral_reason,
                 )
             )
         # Track dispute persistence: a coder-disputed entry the reviewer just
@@ -280,8 +280,10 @@ class DeferredFinding:
     severity: str
     rationale: str  # WHAT the defect is (the finding's original rationale)
     files: tuple[str, ...] = ()
-    deferral_reason: str = ""  # WHY it was deferred (may be empty for a
-    # finding filed directly as out-of-scope, whose rationale carries both)
+    # WHY it was deferred. The parse mandates it for the out-of-scope status
+    # (PR #342 re-review P1), so it is only empty for entries predating the
+    # `deferral_reason:` handoff key.
+    deferral_reason: str = ""
 
 
 def collect_deferred(ledgers: Iterable[FindingLedger]) -> tuple[DeferredFinding, ...]:

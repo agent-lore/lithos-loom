@@ -2147,7 +2147,7 @@ _FINDINGS_DEFER_F001 = (
     "## Status: FINDINGS\n## Summary\nReal, but not this story's.\n## Findings\n"
     "- finding_id: f-001\n  severity: major\n  status: out-of-scope\n"
     '  files: ["greeting.txt:1"]\n'
-    "  rationale: pre-existing on the base; belongs to its own task\n"
+    "  deferral_reason: pre-existing on the base; belongs to its own task\n"
 )
 
 
