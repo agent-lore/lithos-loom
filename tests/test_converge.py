@@ -430,6 +430,7 @@ def test_converge_result_json_round_trips_the_documented_shape(
     # actually serialise (the old test never called json.dumps) and pin the shape
     data = json.loads(json.dumps(result.to_json()))
     assert data == {
+        "deferred_findings": [],  # 819370e5: out-of-scope deferrals (none here)
         "status": "converged",
         "head_ref": "#142 (feature)",
         "head_branch": "feature",

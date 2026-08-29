@@ -108,6 +108,20 @@ class ReviewReport:
             f"profile **{self.profile}** · **{verdict}**",
             "",
         ]
+        deferred = [
+            f for r in self.reviewers for f in r.findings if f.status == "out-of-scope"
+        ]
+        if deferred:
+            # 819370e5 (PR #342 review): a deferral is non-blocking, so
+            # without this a "clean" verdict would hide it — and this surface
+            # spawns no follow-up task, so an unnoticed deferral is LOST.
+            lines.append(
+                f"⚠ {len(deferred)} finding(s) deferred as **out-of-scope** — "
+                "real, but judged not this change's to fix. No follow-up task "
+                "is spawned on this surface: file them manually or they are "
+                "lost. Marked `[deferred]` below."
+            )
+            lines.append("")
         for reviewer in self.reviewers:
             mark = "PASS" if reviewer.passed else "FAIL"
             lines.append(f"## {reviewer.name} — {reviewer.status} ({mark})")
@@ -120,7 +134,8 @@ class ReviewReport:
             for f in reviewer.findings:
                 where = ", ".join(f.files) if f.files else "—"
                 fid = f"{f.finding_id} " if f.finding_id else ""
-                lines.append(f"- {fid}**[{f.severity}]** ({where}) {f.rationale}")
+                mark = "" if f.status == "open" else f" `[{f.status}]`"
+                lines.append(f"- {fid}**[{f.severity}]**{mark} ({where}) {f.rationale}")
             lines.append("")
         if self.gate:
             lines.append("## Gate")

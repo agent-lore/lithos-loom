@@ -284,4 +284,15 @@ def _render(result: ConvergeResult) -> str:
         )
     if result.pushed:
         lines.append(f"  pushed {result.pushed_sha[:10]} → {change.head_branch}")
+    for f in result.deferred_findings:
+        # 819370e5 (PR #342 review): converge has no Lithos source task, so
+        # nothing spawns — an unsurfaced deferral would be lost.
+        because = (
+            f" (deferred because: {f.deferral_reason})" if f.deferral_reason else ""
+        )
+        lines.append(
+            f"  deferred: [{f.reviewer}/{f.finding_id}] {f.severity} — "
+            f"out-of-scope; NO task spawned by converge, file manually: "
+            f"{f.rationale}{because}"
+        )
     return "\n".join(lines)

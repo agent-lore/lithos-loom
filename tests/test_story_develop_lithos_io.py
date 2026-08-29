@@ -426,3 +426,23 @@ def test_post_results_preserves_deferred_text_when_spawn_failed(
     assert "pre-existing CSS bug" in summary
     metadata = fake_client.calls_to("task_update")[0]["metadata"]
     assert "develop_deferred_tasks" not in metadata
+
+
+def test_spawn_description_carries_defect_and_deferral_reason(
+    fake_client: FakeLithosClient,
+) -> None:
+    # PR #342 review P1: the spawned task must say WHAT the defect is and WHY
+    # it was deferred — not just the disposition text.
+    result = _result(
+        deferred_findings=(
+            _deferred(
+                rationale="Button text overlaps the icon",
+                deferral_reason="pre-existing on the base",
+            ),
+        )
+    )
+    lithos_io.spawn_deferred_tasks("http://x", "task-1", result)
+    call = fake_client.calls_to("task_spawn")[0]
+    assert "Button text overlaps the icon" in call["description"]
+    assert "pre-existing on the base" in call["description"]
+    assert "Button text overlaps the icon" in call["title"]

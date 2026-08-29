@@ -2173,5 +2173,9 @@ def test_out_of_scope_deferral_approves_and_records(
     d = result.deferred_findings[0]
     assert d.finding_id == "f-001"
     assert d.severity == "major"
-    assert "pre-existing on the base" in d.rationale
+    # PR #342 review P1: the disposition rationale must not overwrite the
+    # defect description — the spawned task needs BOTH what the defect is
+    # (the round-1 rationale) and why it was deferred.
+    assert d.rationale == "needs work"
+    assert "pre-existing on the base" in d.deferral_reason
     assert d.files == ("greeting.txt:1",)

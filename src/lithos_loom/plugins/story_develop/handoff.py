@@ -38,6 +38,10 @@ _RESOLVED_STATES = frozenset(
     {"fixed", "accepted", "superseded", "merged", "out-of-scope"}
 )
 _ALL_STATES = _OPEN_STATES | _RESOLVED_STATES
+# Public alias: the eval harness validates retained-report finding statuses
+# against the canonical set (PR #342 review P2) without reaching for the
+# private name.
+ALL_FINDING_STATES = _ALL_STATES
 
 
 def severity_at_or_above(severity: str, threshold: str) -> bool:

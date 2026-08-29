@@ -165,9 +165,12 @@ def _deferred_section(spawns: Sequence[DeferredSpawn]) -> str:
             if d.task_id
             else "SPAWN FAILED — preserved here, file manually"
         )
+        because = (
+            f" — deferred because: {f.deferral_reason}" if f.deferral_reason else ""
+        )
         lines.append(
             f"- [{f.reviewer}/{f.finding_id}] {f.severity}: "
-            f"{f.rationale or '(no rationale recorded)'} -> {where}"
+            f"{f.rationale or '(no rationale recorded)'}{because} -> {where}"
         )
     return "\n".join(lines)
 
@@ -238,6 +241,10 @@ def spawn_deferred_tasks(
                 headline = (f.rationale or "").strip().splitlines()[0][:80]
                 title = f"[deferred {f.severity}] {headline or f.finding_id}"
                 files = "\n".join(f"- {path}" for path in f.files) or "(none listed)"
+                why = f.deferral_reason or (
+                    "(filed directly as out-of-scope; the defect text above "
+                    "carries the reviewer's reasoning)"
+                )
                 description = (
                     f"Deferred out-of-scope finding from story-develop run "
                     f"{result.run_id} (branch {result.branch}).\n\n"
@@ -247,7 +254,10 @@ def spawn_deferred_tasks(
                     f"severity: {f.severity}\n"
                     f"reviewer: {f.reviewer} (finding {f.finding_id})\n"
                     f"files/evidence:\n{files}\n\n"
-                    f"rationale (the reviewer's WHY, verbatim):\n{f.rationale}"
+                    f"the defect (original finding rationale, verbatim):\n"
+                    f"{f.rationale}\n\n"
+                    f"why it was deferred (the reviewer's disposition, "
+                    f"verbatim):\n{why}"
                 )
                 try:
                     spawned = await client.task_spawn(

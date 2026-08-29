@@ -30,7 +30,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.findings` | S | 3 | 1 |
+| `lithos_loom.plugins.story_develop.findings` | M | 3 | 1 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |

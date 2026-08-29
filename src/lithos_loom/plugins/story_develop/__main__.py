@@ -1069,6 +1069,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.open_pr:
         print("  pr:       skipped (run not approved)")
 
+    if args.task_id is None and result.deferred_findings:
+        # 819370e5 (PR #342 review): with no source task there is nothing to
+        # spawn from — say so loudly instead of letting the deferral vanish.
+        for f in result.deferred_findings:
+            print(
+                f"  deferred: [{f.reviewer}/{f.finding_id}] {f.severity} — "
+                "out-of-scope; NO Lithos task on this surface, file manually: "
+                f"{f.rationale}"
+            )
     if args.task_id is not None:
         deferred_spawns = spawn_deferred_tasks(args.lithos_url, args.task_id, result)
         for d in deferred_spawns:

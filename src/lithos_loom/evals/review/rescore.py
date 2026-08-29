@@ -33,6 +33,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ...plugins.story_develop.handoff import ALL_FINDING_STATES
 from ...plugins.story_develop.review_report import REVIEWER_STATUSES
 from .case import SEVERITIES, Case, expected_fingerprint
 from .harness import DEFAULT_BAR, CaseResult, aggregate_case, count_valid
@@ -226,6 +227,14 @@ def _validate_finding(where: str, finding: object) -> None:
         raise RescoreError(f"{where}.files is not a list of strings")
     if not isinstance(finding.get("finding_id", ""), str):
         raise RescoreError(f"{where}.finding_id is not a string")
+    status = finding.get("status", "open")
+    if not isinstance(status, str) or status.lower() not in ALL_FINDING_STATES:
+        # PR #342 review P2: actionable_findings keys catch-eligibility on
+        # this value — a malformed status (e.g. a list) would compare unequal
+        # to "out-of-scope" and silently credit a deferral as a catch in a
+        # PAID rescore. Optional for pre-status reports; canonical when
+        # present.
+        raise RescoreError(f"{where}.status is not a canonical finding status")
     severity = finding.get("severity", "minor")
     if not isinstance(severity, str) or severity.lower() not in SEVERITIES:
         raise RescoreError(

@@ -207,3 +207,30 @@ def test_collect_deferred_survives_a_later_lgtm_round() -> None:
     assert deferred[0].finding_id == "f-001"
     assert deferred[0].rationale == "harness fault"
     assert deferred[0].reviewer == "correctness"
+
+
+def test_deferral_preserves_the_defect_description() -> None:
+    # PR #342 review P1: the (mandatory) disposition rationale must not
+    # overwrite what the defect IS — the spawned task needs both texts.
+    from lithos_loom.plugins.story_develop.findings import collect_deferred
+
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(
+        _review(_f(severity="major", rationale="Button text overlaps the icon")),
+        round_no=1,
+    )
+    ledger.apply_review(
+        _review(
+            _f(
+                fid="f-001",
+                severity="major",
+                status="out-of-scope",
+                rationale="pre-existing on the base",
+            )
+        ),
+        round_no=2,
+    )
+
+    d = collect_deferred([ledger])[0]
+    assert d.rationale == "Button text overlaps the icon"
+    assert d.deferral_reason == "pre-existing on the base"

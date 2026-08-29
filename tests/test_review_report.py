@@ -116,3 +116,35 @@ def test_to_markdown_clean_report_reads_as_passed() -> None:
     assert "BLOCK" not in md.upper()
     # a non-blocking review communicates the all-clear
     assert "LGTM" in md or "PASS" in md.upper() or "APPROV" in md.upper()
+
+
+def test_to_markdown_surfaces_deferred_findings_loudly() -> None:
+    # PR #342 review P1: review-only/converge spawn nothing, so a deferral
+    # hidden behind a "clean" verdict would be LOST. The markdown must banner
+    # it and mark the finding's status.
+    report = _report(
+        blocking=False,
+        reviewers=[
+            ReviewerReport(
+                name="correctness",
+                status="FINDINGS",
+                passed=True,
+                findings=[
+                    ReviewFinding(
+                        reviewer="correctness",
+                        severity="major",
+                        files=["lens.css:20"],
+                        rationale="tiled background seams",
+                        finding_id="f-001",
+                        status="out-of-scope",
+                    )
+                ],
+            )
+        ],
+        gate=[],
+    )
+    md = report.to_markdown()
+    assert "✅ clean" in md  # still non-blocking — that is the point
+    assert "deferred as **out-of-scope**" in md
+    assert "file them manually" in md
+    assert "`[out-of-scope]`" in md
