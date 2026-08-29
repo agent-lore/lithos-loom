@@ -30,11 +30,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.findings` | M | 3 | 1 |
+| `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 11 |
+| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 12 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
@@ -172,6 +172,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.findings`
 - class `LedgerEntry` — One finding's life across rounds (mutable; owned by the ledger).
 - class `FindingLedger` — Per-reviewer finding registry with plugin-assigned monotonic ids.
+- def `reviewer_validator` — The lifecycle-validate callback for one reviewer turn.
 - class `DeferredFinding` — A finding the reviewer marked ``out-of-scope`` (819370e5): real, but not this story's to fix. Collected off the ledgers at run end and spun out as its own Lithos task (``lithos_io.spawn_deferred_tasks``) so the run can approve without the finding being lost.
 - def `collect_deferred` — Every ``out-of-scope`` entry across the panel's ledgers, in stable (reviewer, finding_id) order.
 
@@ -194,6 +195,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `HandoffError` — A handoff file was missing required structure or had invalid values.
 - class `Finding` — One addressable review finding (see ``prompts/FORMAT.md``).
 - class `ReviewHandoff` — A parsed reviewer handoff: a verdict plus structured findings.
+- def `check_findings_as_new` — Lifecycle check for a review whose findings are ALL committed as new.
 - def `load_prompt` — Read a packaged prompt template (e.g. ``coder_init.md``).
 - def `render_prompt` — Placeholder substitution that is safe against braces in the values.
 - def `render_findings` — Render a reviewer's findings as a compact block for the coder's prompt.

@@ -114,6 +114,30 @@ class ReviewHandoff:
         return top is None or not severity_at_or_above(top, threshold)
 
 
+def check_findings_as_new(parsed: ReviewHandoff) -> str | None:
+    """Lifecycle check for a review whose findings are ALL committed as new.
+
+    The artifact pass skips the ledger's id accounting (#291 round 3) and
+    ``apply_artifact_review`` remints every id it is handed — so an id the
+    reviewer carries over names NO existing entry, and the parse's
+    existing-id exemption from the first-sighting rules does not apply
+    (PR #342 re-review: an out-of-scope finding reusing a remembered id
+    would otherwise spawn a follow-up task with an empty defect
+    description). Same contract as ``FindingLedger.check``: ``None`` when
+    acceptable, else a correction message to re-prompt the reviewer with.
+    """
+    for idx, f in enumerate(parsed.findings, start=1):
+        if f.status == "out-of-scope" and not f.rationale.strip():
+            return (
+                f"finding {idx}: on this pass every finding is NEW (any "
+                "finding_id you carried over is ignored), so an out-of-scope "
+                "disposition must describe the defect itself in 'rationale:' "
+                "— 'deferral_reason:' holds only why it is not this story's "
+                "to fix"
+            )
+    return None
+
+
 # --- prompt + filename helpers ---------------------------------------------
 
 

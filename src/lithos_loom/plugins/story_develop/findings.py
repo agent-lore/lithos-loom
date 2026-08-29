@@ -16,10 +16,15 @@ blocking feeds the dispute guard in :mod:`develop`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
-from .handoff import Finding, ReviewHandoff, severity_at_or_above
+from .handoff import (
+    Finding,
+    ReviewHandoff,
+    check_findings_as_new,
+    severity_at_or_above,
+)
 
 # Open (= potentially blocking) states; mirrors handoff._OPEN_STATES.
 # (`out-of-scope` — 819370e5 — is a RESOLVED state: it never appears here.)
@@ -266,6 +271,24 @@ class FindingLedger:
             if e.coder_response:
                 lines.append(f"  coder response: {e.coder_response}")
         return "\n".join(lines)
+
+
+def reviewer_validator(
+    ledger: FindingLedger, *, findings_are_new: bool
+) -> Callable[[ReviewHandoff], str | None]:
+    """The lifecycle-validate callback for one reviewer turn.
+
+    A normal review is checked against the LEDGER (id accounting,
+    :meth:`FindingLedger.check`). An artifact pass sets *findings_are_new*:
+    it skips that check (#291 round 3 — it neither lists nor reassesses the
+    code review's open ids) but is NOT exempt from validation, because
+    :meth:`FindingLedger.apply_artifact_review` remints every id — each
+    finding must stand as a first sighting, which
+    :func:`~.handoff.check_findings_as_new` enforces (PR #342 re-review: an
+    out-of-scope finding reusing a remembered id must still describe the
+    defect it defers, or the spawned follow-up task has no defect text).
+    """
+    return check_findings_as_new if findings_are_new else ledger.check
 
 
 @dataclass(frozen=True)

@@ -262,3 +262,31 @@ def test_direct_out_of_scope_filing_preserves_both_texts() -> None:
     d = collect_deferred([ledger])[0]
     assert d.rationale == "Button text overlaps the icon"
     assert d.deferral_reason == "pre-existing on the base"
+
+
+def test_reviewer_validator_selects_first_sighting_rules_for_artifact_pass() -> None:
+    # PR #342 re-review: apply_artifact_review remints every id, so the
+    # artifact pass must not inherit the parse's existing-id exemption —
+    # skipping the LEDGER check swaps in check_findings_as_new (every finding
+    # validated as a first sighting), never no-validation. Without it an
+    # artifact reviewer reusing a remembered id could defer out-of-scope with
+    # an empty defect description.
+    from lithos_loom.plugins.story_develop.findings import reviewer_validator
+    from lithos_loom.plugins.story_develop.handoff import check_findings_as_new
+
+    ledger = FindingLedger("correctness")
+    assert reviewer_validator(ledger, findings_are_new=True) is check_findings_as_new
+    assert reviewer_validator(ledger, findings_are_new=False) == ledger.check
+
+    # The artifact-mode callback rejects the reproduced escape: an id'd
+    # out-of-scope finding carrying only the why.
+    bad = _review(
+        _f(
+            fid="f-001",
+            severity="major",
+            status="out-of-scope",
+            deferral_reason="pre-existing on the base",
+        )
+    )
+    err = reviewer_validator(ledger, findings_are_new=True)(bad)
+    assert err is not None and "rationale" in err

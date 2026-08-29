@@ -8,6 +8,7 @@ import pytest
 
 from lithos_loom.plugins.story_develop.handoff import (
     HandoffError,
+    check_findings_as_new,
     parse_review_handoff,
     reviewer_handoff_name,
     severity_at_or_above,
@@ -274,6 +275,37 @@ def test_new_out_of_scope_finding_without_rationale_is_rejected() -> None:
     )
     with pytest.raises(HandoffError, match="NEW finding.*rationale"):
         parse_review_handoff(bad)
+
+
+def test_check_findings_as_new_rejects_idd_out_of_scope_without_rationale() -> None:
+    # PR #342 re-review: the parse exempts an EXISTING id from the
+    # first-sighting rules (the ledger holds its defect text) — but the
+    # artifact pass remints every id, so a reviewer there can reuse a
+    # remembered f-001, supply only the why, pass parsing, and spawn a
+    # follow-up task with an empty defect description. check_findings_as_new
+    # closes that hole: on an all-findings-are-new surface the exemption
+    # never applies.
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-001\n  severity: major\n  status: out-of-scope\n"
+        "  deferral_reason: pre-existing on the base\n"
+    )
+    parsed = parse_review_handoff(text)  # the exemption lets this through
+    err = check_findings_as_new(parsed)
+    assert err is not None and "rationale" in err and "NEW" in err
+
+
+def test_check_findings_as_new_accepts_complete_deferrals_and_lgtm() -> None:
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-001\n  severity: major\n  status: out-of-scope\n"
+        "  rationale: Button text overlaps the icon\n"
+        "  deferral_reason: pre-existing on the base\n"
+        "- finding_id: f-002\n  severity: minor\n  status: open\n"
+        "  rationale: seam visible at tile boundary\n"
+    )
+    assert check_findings_as_new(parse_review_handoff(text)) is None
+    assert check_findings_as_new(parse_review_handoff(_LGTM)) is None
 
 
 def test_out_of_scope_parses_both_texts_separately() -> None:
