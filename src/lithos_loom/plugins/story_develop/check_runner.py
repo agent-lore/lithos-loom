@@ -550,7 +550,9 @@ def run_check_set(
             )
             gate = None
         finally:
-            check_artifacts.collect_check_artifacts(config, tree, round_no, check.name)
+            check_artifacts.collect_check_artifacts(
+                config, tree, round_no, check.name, sha=sha
+            )
             # Best-effort: an undeletable tree just stays on disk — it is never
             # mounted again, so it cannot affect any later check — but loom is a
             # long-running daemon, so a retained export (repo + venv, per check)

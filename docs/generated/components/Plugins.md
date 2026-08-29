@@ -20,7 +20,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
-| `lithos_loom.plugins.story_develop.check_artifacts` | S | 0 | 2 |
+| `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
@@ -78,6 +78,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.check_artifacts`
 - def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).
+- def `read_capture_manifest` — The snapshot's provenance manifest, or ``None`` when absent/corrupt.
+- def `capture_freshness` — Classify the artifacts dir against the tree under review (793edc9f).
+- def `stale_capture_hold` — The approval-hold notice when artifact evidence is stale, else ``None``.
 - def `render_artifacts_note` — The reviewer-prompt section enumerating collected artifacts (#283 s2).
 
 ### `lithos_loom.plugins.story_develop.check_catalog`

@@ -175,6 +175,11 @@ class RoundContext:
     final_reviews: list[ReviewOutcome] = field(default_factory=list)
     new_commit: str | None = None  # round-scoped: set by commit_phase
     rounds_completed: int = 0
+    # 793edc9f: set when approval was held because no capture from the current
+    # tree exists (stale/failed re-capture); appended to the next coder
+    # prompt's gate summary so the loop can fix the capture instead of
+    # stalling silently. Cleared once delivered.
+    artifact_capture_notice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -290,14 +295,25 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
             if (ctx.config.handoff_dir / art).is_file():
                 ref_names.append(art)
         review_files = ", ".join(f"`{n}`" for n in ref_names)
+        gate_summary_value = render_check_summary(
+            ctx.check_set, for_coder=True, gate_ledger=ctx.gate_ledger
+        )
+        if ctx.artifact_capture_notice:
+            # 793edc9f: approval was held on stale captures last round — tell
+            # the coder in the gate slot (no template change) so it can fix
+            # the capture instead of guessing why nothing sealed.
+            gate_summary_value = (
+                f"{gate_summary_value}\n\n{ctx.artifact_capture_notice}"
+                if gate_summary_value
+                else ctx.artifact_capture_notice
+            )
+            ctx.artifact_capture_notice = None
         coder_prompt = render_prompt(
             handoff.load_prompt("coder_fix.md"),
             round_no=str(round_no),
             acceptance_criteria=config.effective_acceptance_criteria,
             findings=ctx.render_panel_findings(ctx.final_reviews),
-            gate_summary=render_check_summary(
-                ctx.check_set, for_coder=True, gate_ledger=ctx.gate_ledger
-            ),
+            gate_summary=gate_summary_value,
             review_files=review_files,
             handoff_file=handoff.coder_handoff_name(round_no),
             sandbox_facts=_sandbox_section(config.image, for_coder=True),
@@ -575,6 +591,13 @@ def approval_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 config.run_id,
                 round_no,
             )
+        elif _hold_for_stale_captures(ctx, round_no):
+            # 793edc9f: captures exist but none is from the tree under review
+            # (the re-capture was skipped, errored, or produced nothing).
+            # Sealing here would let reviewers' "fixed" verdicts rest on an
+            # earlier round's pixels — a silent false-verify. Hold approval;
+            # the next coder round carries the notice.
+            return None
         else:
             exit_ = _artifact_review_pass(ctx, round_no, artifacts_seen_by_panel)
             if exit_ is not None:
@@ -585,6 +608,22 @@ def approval_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 return None
             return CycleExit(status="approved", failure_reason="", resume_after=None)
     return None
+
+
+def _hold_for_stale_captures(ctx: RoundContext, round_no: int) -> bool:
+    """793edc9f: hold approval when the artifact evidence does not describe
+    the tree under review — see :func:`check_artifacts.stale_capture_hold`.
+    Queues the coder-facing notice for the next round's gate summary."""
+    notice = check_artifacts.stale_capture_hold(
+        ctx.config,
+        gated_sha=ctx.gated_sha,
+        check_results=ctx.check_set.results if ctx.check_set is not None else (),
+        round_no=round_no,
+    )
+    if notice is None:
+        return False
+    ctx.artifact_capture_notice = notice
+    return True
 
 
 def _artifact_review_pass(

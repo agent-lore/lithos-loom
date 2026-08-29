@@ -7,6 +7,7 @@ is exercised via the existing ``test_gate`` seam in the core orchestration tests
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -1899,3 +1900,125 @@ def test_render_artifacts_note_bounds_total_size_favoring_newest_rounds(
     assert "listing omitted" in note
     listed = note.count(".png")
     assert listed <= 36
+
+
+# ── Capture provenance manifest (793edc9f) ─────────────────────────────
+
+
+def test_collector_stamps_capture_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # 793edc9f: every published snapshot records WHICH commit its pixels were
+    # rendered from, so the artifact pass can tell the tree under review from
+    # an earlier round's.
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path, artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+    parity = Check(
+        name="repo-parity",
+        command=(
+            "mkdir -p e2e/artifacts && printf 'png-bytes' > e2e/artifacts/note-320.png"
+        ),
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+
+    check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (parity,), GateLedger())
+
+    manifest = check_runner.check_artifacts.read_capture_manifest(
+        cfg.artifacts_dir / "round_01" / "repo-parity"
+    )
+    assert manifest is not None
+    assert manifest["sha"] == sha
+    assert manifest["round"] == 1
+    assert manifest["check"] == "repo-parity"
+    assert manifest["files"] == 1
+
+
+def test_collector_refuses_repo_forged_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # The provenance slot is loom's: a repo file that would land at the
+    # manifest path is skipped, and the published manifest carries the REAL
+    # capture sha, not whatever the repo staged there.
+    sha = _committed_sha(tmp_git_repo)
+    cfg = _config(tmp_path, artifacts_path="e2e/artifacts")
+    _host_exec_gate(monkeypatch)
+    parity = Check(
+        name="repo-parity",
+        command=(
+            "mkdir -p e2e/artifacts"
+            " && printf 'png' > e2e/artifacts/x.png"
+            ' && printf \'{"sha": "forged"}\' > e2e/artifacts/.capture.json'
+        ),
+        state="required",
+        stage="candidate",
+        raw_exit=True,
+    )
+
+    check_runner.run_check_set(cfg, tmp_git_repo, sha, 1, (parity,), GateLedger())
+
+    manifest = check_runner.check_artifacts.read_capture_manifest(
+        cfg.artifacts_dir / "round_01" / "repo-parity"
+    )
+    assert manifest is not None and manifest["sha"] == sha
+
+
+def _seed_snapshot(
+    cfg, round_name: str, *, sha: str | None, files: tuple[str, ...] = ("a.png",)
+) -> None:
+    d = cfg.artifacts_dir / round_name / "repo-parity"
+    d.mkdir(parents=True, exist_ok=True)
+    for name in files:
+        (d / name).write_text("png")
+    if sha is not None:
+        (d / check_runner.check_artifacts.CAPTURE_MANIFEST).write_text(
+            json.dumps(
+                {"sha": sha, "round": int(round_name[-2:]), "check": "repo-parity"}
+            )
+        )
+
+
+def test_render_artifacts_note_excludes_manifest_and_keeps_surface(
+    tmp_path: Path,
+) -> None:
+    # PR #340 split: the note's reviewer-visible surface stays byte-identical
+    # to the pre-manifest rendering (CURRENT/PRIOR labels were measured at
+    # 5/8 pooled catch vs the shipped prompt's 9/10 and deferred to their own
+    # lever). The manifest is plumbing: never listed, never counted — so the
+    # only trace of provenance in the prompt is the guard's behaviour, not
+    # its data.
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    _seed_snapshot(cfg, "round_01", sha="a" * 40)
+
+    note = check_runner.check_artifacts.render_artifacts_note(cfg)
+
+    assert ".capture.json" not in note
+    assert "1 file(s)" in note  # counts exclude the manifest
+    assert "[CURRENT" not in note and "[PRIOR" not in note and "UNKNOWN" not in note
+    assert "captured rendered output from this run" in note
+
+
+def test_capture_freshness_classification(tmp_path: Path) -> None:
+    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
+    freshness = check_runner.check_artifacts.capture_freshness
+    assert freshness(cfg, "b" * 40) == "no_artifacts"
+
+    # a manifest with no reviewable files alongside is still "no artifacts"
+    d = cfg.artifacts_dir / "round_00" / "repo-parity"
+    d.mkdir(parents=True)
+    (d / check_runner.check_artifacts.CAPTURE_MANIFEST).write_text(
+        json.dumps({"sha": "b" * 40})
+    )
+    assert freshness(cfg, "b" * 40) == "no_artifacts"
+
+    _seed_snapshot(cfg, "round_01", sha="a" * 40)
+    assert freshness(cfg, "b" * 40) == "stale"  # wrong sha
+    assert freshness(cfg, None) == "stale"  # no tree to compare = never current
+
+    _seed_snapshot(cfg, "round_02", sha=None)
+    assert freshness(cfg, "b" * 40) == "stale"  # manifest-less = unknown = stale
+
+    _seed_snapshot(cfg, "round_03", sha="b" * 40)
+    assert freshness(cfg, "b" * 40) == "current"
