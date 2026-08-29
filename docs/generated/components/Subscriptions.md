@@ -29,7 +29,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
-| `lithos_loom.subscriptions.dispatch_guards` | M | 0 | 7 |
+| `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 8 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -100,9 +100,11 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `last_attempt_key` — The task-metadata key holding ``route``'s last failed attempt.
 - def `task_fingerprint` — Fingerprint of the operator-shaped task fields (title, description, tags — order-insensitive).
 - def `on_ready_frontier` — Is ``task_id`` on Lithos's ready frontier for this route? (US4)
+- class `AttemptStampStore` — Loom-local store for each failed attempt's ``updated_at`` stamp (#339).
 - def `failed_attempt_for_route` — The task's last-attempt marker, iff it records a FAILURE for ``route``.
 - def `declines_bootstrap_replay` — True iff a bootstrap replay of this payload must be declined (logged).
 - def `record_failed_attempt` — Best-effort persist the failed attempt on the task.
+- def `release_with_failure` — The whole failure-path release: marker (+stamp), finding, release.
 - def `clear_superseded_failure` — Best-effort per-key delete of ``route``'s failed-attempt marker, iff the dispatch-time ``payload`` carried one (no round trip otherwise).
 
 ### `lithos_loom.subscriptions.retry`

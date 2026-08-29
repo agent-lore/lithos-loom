@@ -24,7 +24,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from lithos_loom.errors import LithosClientError
@@ -210,6 +210,7 @@ class FakeLithosClient:
         #: every call in order
         self.calls: list[Call] = []
         self._id_seq = 0
+        self._update_seq = 0  # lithos#415: mints monotonic updated_at stamps
 
     # ── seeding (post-construction) ────────────────────────────────────
     def add_task(self, task: Task) -> Task:
@@ -354,7 +355,7 @@ class FakeLithosClient:
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> datetime | None:
         self._record(
             "task_update",
             task_id=task_id,
@@ -366,7 +367,7 @@ class FakeLithosClient:
         )
         existing = self._tasks.get(task_id)
         if existing is None:
-            return
+            return None
         changes: dict[str, Any] = {}
         if title is not None:
             changes["title"] = title
@@ -378,7 +379,14 @@ class FakeLithosClient:
             # Lithos task_update metadata is an additive per-key merge; `{}` is a
             # no-op there (unlike note_write). _merge_metadata gives both.
             changes["metadata"] = _merge_metadata(existing.metadata, metadata)
+        # lithos#415: every task_update bumps the server stamp and returns it
+        # (measured 2026-08-29); the fake mints a monotonic one per write so
+        # guard tests can assert exact edited-since semantics.
+        self._update_seq += 1
+        stamp = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=self._update_seq)
+        changes["updated_at"] = stamp
         self._tasks[task_id] = dataclasses.replace(existing, **changes)
+        return stamp
 
     async def task_complete(
         self, *, task_id: str, agent: str | None = None

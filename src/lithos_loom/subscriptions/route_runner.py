@@ -45,11 +45,12 @@ from lithos_loom.errors import LithosClientError, PluginContractError
 from lithos_loom.gates import STORY_GATE_ID_KEY, create_pr_gate_best_effort
 from lithos_loom.plugin_runner import run_plugin
 from lithos_loom.subscriptions.dispatch_guards import (
+    AttemptStampStore,
     clear_superseded_failure,
     declines_bootstrap_replay,
     last_attempt_key,
     on_ready_frontier,
-    record_failed_attempt,
+    release_with_failure,
 )
 
 __all__ = ["PluginRunFn", "RouteRunner"]
@@ -161,6 +162,11 @@ class RouteRunner:
     project_repos: Mapping[str, Path] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # #339: per-(route, task) updated_at stamps for the exact
+        # failed-retry guard — beside the SSE cursor, same durability class.
+        self._attempt_stamps = AttemptStampStore(
+            self.work_dir_base / "route-runner" / "attempt_stamps"
+        )
         self._subscription: Subscription = self.bus.subscribe(
             event_types=_HANDLED_EVENT_TYPES,
             match={"tags": list(self.route.match.tags)},
@@ -239,7 +245,11 @@ class RouteRunner:
         # leak: dispatch_guards docstring). Before `_is_ready`: the marker is
         # in the payload; readiness costs a Lithos round trip.
         if event.origin == "bootstrap" and declines_bootstrap_replay(
-            metadata, self.route.name, payload, task_id=task_id
+            metadata,
+            self.route.name,
+            payload,
+            task_id=task_id,
+            stamps=self._attempt_stamps,
         ):
             return
 
@@ -484,6 +494,7 @@ class RouteRunner:
                 route=self.route.name,
                 agent=self.agent_id,
                 payload=payload,
+                stamps=self._attempt_stamps,
             )
             # Release the claim either way: a shutdown signal frees the task
             # for a future run; a usage-limit checkpoint must not hold the
@@ -643,41 +654,18 @@ class RouteRunner:
         payload: Mapping[str, Any],
         run_id: Any = None,
     ) -> None:
-        summary = f"[BlockerFailed] route {self.route.name}: {detail}"
-        logger.info(
-            "RouteRunner %s: releasing %s with finding: %s",
-            self.route.name,
-            task_id,
-            detail,
-        )
-        await record_failed_attempt(
+        # The failure-path contract (marker + stamp + finding + release)
+        # lives with its guards in dispatch_guards.release_with_failure.
+        await release_with_failure(
             self.lithos,
             task_id=task_id,
             route=self.route.name,
             agent=self.agent_id,
+            detail=detail,
             payload=payload,
-            run_id=run_id if isinstance(run_id, str) else None,
+            run_id=run_id,
+            stamps=self._attempt_stamps,
         )
-        try:
-            await self.lithos.finding_post(
-                task_id=task_id, summary=summary, agent=self.agent_id
-            )
-        except Exception:
-            logger.exception(
-                "RouteRunner %s: finding_post failed for %s",
-                self.route.name,
-                task_id,
-            )
-        try:
-            await self.lithos.task_release(
-                task_id=task_id, aspect=self.route.name, agent=self.agent_id
-            )
-        except Exception:
-            logger.exception(
-                "RouteRunner %s: task_release failed for %s",
-                self.route.name,
-                task_id,
-            )
 
     async def _gate_and_release(
         self,
@@ -742,6 +730,9 @@ class RouteRunner:
                     agent=self.agent_id,
                     metadata=story_metadata,
                 )
+                # The marker delete rode along on this write — retire its
+                # local stamp with it (#339).
+                self._attempt_stamps.clear(self.route.name, task_id)
             except Exception:
                 marked = False
                 logger.exception(

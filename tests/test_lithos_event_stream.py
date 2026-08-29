@@ -40,6 +40,7 @@ def _task(
     task_type: str = "task",
     description: str | None = None,
     resolved_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> Task:
     return Task(
         id=id_,
@@ -50,6 +51,7 @@ def _task(
         claims=claims,
         task_type=task_type,
         description=description,
+        updated_at=updated_at,
         resolved_at=resolved_at,
     )
 
@@ -308,7 +310,31 @@ async def test_bootstrap_payload_matches_poller_shape() -> None:
         "resolved_at": None,
         "description": None,
         "task_type": "task",
+        "updated_at": None,
     }
+
+
+async def test_bootstrap_payload_carries_updated_at_as_iso() -> None:
+    """lithos#415 / #339: the bootstrap payload projects the server's
+    last-modified stamp — the exact failed-retry guard compares it against
+    the stamp recorded at failure time, so dropping it here would silently
+    demote every decline to fingerprint semantics."""
+    bus = EventBus()
+    listener = bus.subscribe(event_types=["lithos.task.created"])
+    stamp = datetime(2026, 8, 29, 20, 2, 43, tzinfo=UTC)
+    client = _FakeClient(bootstrap=[_task("abc", updated_at=stamp)])
+    source = _stream(client=client, bus=bus, aconnect=_FakeAconnect(connections=[[]]))
+
+    task = asyncio.create_task(source.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    drained = _drain(listener)
+    assert drained, "bootstrap published nothing"
+    _, payload = drained[0]
+    assert payload["updated_at"] == "2026-08-29T20:02:43+00:00"
 
 
 async def test_payload_carries_the_task_description() -> None:

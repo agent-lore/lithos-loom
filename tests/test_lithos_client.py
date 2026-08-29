@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -416,6 +417,7 @@ async def test_lithos_client_task_get_returns_parsed_task() -> None:
                 "tags": ["a"],
                 "metadata": {"priority": "high"},
                 "outcome": None,
+                "updated_at": "2026-08-29T20:02:43.207019+00:00",
             }
         }
     )
@@ -426,6 +428,8 @@ async def test_lithos_client_task_get_returns_parsed_task() -> None:
     assert task.id == "abc"
     assert task.status == "open"
     assert task.metadata == {"priority": "high"}
+    # lithos#415: the server stamp rides the envelope into the model.
+    assert task.updated_at == datetime(2026, 8, 29, 20, 2, 43, 207019, tzinfo=UTC)
     # Claims default to an empty tuple — task_get never returns them.
     assert task.claims == ()
     fake_session.call_tool.assert_awaited_once_with(
@@ -840,6 +844,22 @@ async def test_task_update_omits_metadata_arg_when_none() -> None:
     await client.task_update(task_id="t-1", tags=["x"])  # no metadata
     args = session.call_tool.await_args.kwargs["arguments"]
     assert "metadata" not in args
+
+
+async def test_task_update_returns_the_new_updated_at() -> None:
+    """lithos#415: the update response carries the write's own ``updated_at``
+    — the stamp the failed-retry guard records, since the marker it just
+    wrote cannot contain the stamp its own write created (#339)."""
+    client, _ = _client_with_session(
+        _content({"success": True, "updated_at": "2026-08-29T20:02:44.676551+00:00"})
+    )
+    stamp = await client.task_update(task_id="t-1", metadata={"k": "v"})
+    assert stamp == datetime(2026, 8, 29, 20, 2, 44, 676551, tzinfo=UTC)
+
+
+async def test_task_update_returns_none_on_a_pre_415_server() -> None:
+    client, _ = _client_with_session(_content({"success": True}))
+    assert await client.task_update(task_id="t-1", metadata={"k": "v"}) is None
 
 
 async def test_task_update_metadata_alone_satisfies_at_least_one() -> None:

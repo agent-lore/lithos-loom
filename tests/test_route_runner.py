@@ -28,7 +28,11 @@ from lithos_loom.errors import LithosClientError, PluginContractError
 from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions.dispatch_guards import (
     READY_QUERY_LIMIT,
+    AttemptStampStore,
+    clear_superseded_failure,
+    declines_bootstrap_replay,
     last_attempt_key,
+    record_failed_attempt,
     task_fingerprint,
 )
 from lithos_loom.subscriptions.route_runner import RouteRunner
@@ -61,17 +65,19 @@ def _payload(
     tags: tuple[str, ...] = ("trigger:story-develop",),
     metadata: Mapping[str, Any] | None = None,
     claims: tuple[Mapping[str, Any], ...] = (),
+    updated_at: str | None = None,
 ) -> Mapping[str, Any]:
-    return MappingProxyType(
-        {
-            "id": task_id,
-            "title": "t",
-            "status": status,
-            "tags": list(tags),
-            "metadata": dict(metadata or {}),
-            "claims": [dict(c) for c in claims],
-        }
-    )
+    body: dict[str, Any] = {
+        "id": task_id,
+        "title": "t",
+        "status": status,
+        "tags": list(tags),
+        "metadata": dict(metadata or {}),
+        "claims": [dict(c) for c in claims],
+    }
+    if updated_at is not None:
+        body["updated_at"] = updated_at
+    return MappingProxyType(body)
 
 
 def _evt(
@@ -2022,8 +2028,11 @@ async def test_metadata_only_edit_is_a_documented_fingerprint_blind_spot(
     itself writes metadata (`develop_*`, the marker) before the marker
     lands, so including it would make every decline fail open, and a
     plugin-agnostic runner cannot tell operator inputs from plugin outputs
-    by key. The contract for this edit is deleting the marker key
-    (test above); the exact fix is Lithos `updated_at` (issue #339)."""
+    by key. This pins the STAMPLESS FALLBACK path (no recorded
+    `updated_at` stamp / a payload without one — pre-#415 marker or
+    server, wiped store); with a stamp the edit re-dispatches exactly
+    (#339, tests below). The fallback contract stays: delete the marker
+    key (test above)."""
     bus = EventBus()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
 
@@ -2049,9 +2058,11 @@ async def test_reverted_tag_edit_is_a_documented_fingerprint_blind_spot(
 ) -> None:
     """DOCUMENTED LIMIT: removing and re-adding the same trigger tag restores
     the original tag set, so the fingerprint matches and the bootstrap replay
-    is declined — no state fingerprint can detect a reverted edit. The
-    contract for this gesture is deleting the marker key; issue #339 tracks
-    the exact (`updated_at`-based) detection."""
+    is declined — no state fingerprint can detect a reverted edit. Pins the
+    STAMPLESS FALLBACK path; with a recorded stamp the revert re-dispatches
+    (every Lithos write bumps `updated_at`, so remove + re-add lands on a
+    new stamp — #339, tests below). The fallback contract stays: delete
+    the marker key."""
     bus = EventBus()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
 
@@ -2065,3 +2076,302 @@ async def test_reverted_tag_edit_is_a_documented_fingerprint_blind_spot(
     await _run_for(runner)
 
     lithos.task_claim.assert_not_called()
+
+
+# ── #339: exact edited-since detection via the updated_at stamp ────────
+
+
+def _stamps(work_dir: Path) -> AttemptStampStore:
+    return AttemptStampStore(work_dir / "route-runner" / "attempt_stamps")
+
+
+async def test_failed_run_records_the_marker_writes_own_stamp(
+    tmp_path: Path,
+) -> None:
+    """The failure path records the `updated_at` the marker write's response
+    returned — the stamp of the failure path's LAST bumping mutation, which
+    the marker itself cannot contain (its write is what mints it)."""
+    fake = FakeLithosClient()
+    fake.add_task(
+        make_task(
+            "story-1",
+            status="open",
+            tags=("trigger:story-develop",),
+            metadata={"project": "loom"},
+        )
+    )
+    bus = EventBus()
+    failing = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "story-1",
+            "status": "failed",
+            "exit_code": 1,
+            "error": {"category": "agent", "message": "boom"},
+        }
+    )
+    runner = RouteRunner(
+        route=_route(),
+        bus=bus,
+        lithos=fake,
+        agent_id="lithos-orchestrator-test",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=failing,
+    )
+    await bus.publish(_evt(payload=_payload("story-1", metadata={"project": "loom"})))
+    await _run_for(runner)
+
+    stored = await fake.task_get(task_id="story-1")
+    assert stored is not None and stored.updated_at is not None
+    stamp = _stamps(tmp_path).read("story-develop", "story-1")
+    assert stamp == stored.updated_at.isoformat()
+
+
+async def test_stamp_equal_bootstrap_replay_is_declined(tmp_path: Path) -> None:
+    """Unchanged since the failure = the payload's `updated_at` still equals
+    the recorded stamp — declined, without touching the fingerprint."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    _stamps(tmp_path).record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_marker_metadata(fingerprint=fp),
+                updated_at="2026-01-01T00:00:01+00:00",
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()
+
+
+async def test_stamp_mismatch_dispatches_a_metadata_only_edit(
+    tmp_path: Path,
+) -> None:
+    """#339 closes the first fingerprint blind spot: a metadata-only edit
+    (same fingerprint) bumps `updated_at`, so the stamp mismatches and the
+    replay DISPATCHES — no marker deletion needed."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    _stamps(tmp_path).record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_marker_metadata(
+                    fingerprint=fp,
+                    extra={"develop_image": "ralph-sandbox:fixed"},
+                ),
+                updated_at="2026-01-01T00:00:07+00:00",  # the edit's bump
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+
+
+async def test_stamp_mismatch_dispatches_a_reverted_edit(tmp_path: Path) -> None:
+    """#339 closes the second blind spot: remove + re-add of the same trigger
+    tag restores the fingerprint but lands on a NEW `updated_at` (every
+    write bumps), so the replay dispatches."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    _stamps(tmp_path).record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+
+    original = _payload()
+    fp = task_fingerprint(original)
+    reverted = _payload(
+        metadata=_marker_metadata(fingerprint=fp),
+        updated_at="2026-01-01T00:00:09+00:00",
+    )
+    assert task_fingerprint(reverted) == fp  # the fingerprint cannot see it
+
+    await bus.publish(_evt(payload=reverted, origin="bootstrap"))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+
+
+async def test_stampless_payload_falls_back_to_fingerprint(tmp_path: Path) -> None:
+    """A recorded stamp with no `updated_at` on the payload (pre-#415 server)
+    must not fail open: the fingerprint rules apply and the unchanged task
+    is still declined."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    _stamps(tmp_path).record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            payload=_payload(metadata=_marker_metadata(fingerprint=fp)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_called()
+
+
+class _StampProbeClient:
+    """Minimal guard-client stub with a scriptable task_update return."""
+
+    def __init__(self, result: Any = None, *, raises: bool = False) -> None:
+        self._result = result
+        self._raises = raises
+        self.updates: list[dict[str, Any]] = []
+
+    async def task_update(self, **kwargs: Any) -> Any:
+        self.updates.append(kwargs)
+        if self._raises:
+            raise RuntimeError("boom")
+        return self._result
+
+    async def task_ready(self, **kwargs: Any) -> Any:  # protocol completeness
+        return []
+
+    async def finding_post(self, **kwargs: Any) -> Any:  # protocol completeness
+        return None
+
+    async def task_release(self, **kwargs: Any) -> Any:  # protocol completeness
+        return None
+
+
+async def test_record_failed_attempt_stores_datetime_and_str_stamps(
+    tmp_path: Path,
+) -> None:
+    stamps = _stamps(tmp_path)
+    when = datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC)
+    await record_failed_attempt(
+        _StampProbeClient(when),
+        task_id="task-1",
+        route="story-develop",
+        agent="a",
+        payload=_payload(),
+        stamps=stamps,
+    )
+    assert stamps.read("story-develop", "task-1") == when.isoformat()
+
+
+async def test_record_failed_attempt_without_a_stamp_drops_the_stale_one(
+    tmp_path: Path,
+) -> None:
+    """A pre-#415 server returns no stamp: any stamp a PREVIOUS failure left
+    must be dropped, or it would speak for this one — a stale stamp always
+    mismatches, nullifying the guard into a dispatch every restart."""
+    stamps = _stamps(tmp_path)
+    stamps.record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+    await record_failed_attempt(
+        _StampProbeClient(None),
+        task_id="task-1",
+        route="story-develop",
+        agent="a",
+        payload=_payload(),
+        stamps=stamps,
+    )
+    assert stamps.read("story-develop", "task-1") is None
+
+
+async def test_record_failed_attempt_write_failure_keeps_the_old_stamp(
+    tmp_path: Path,
+) -> None:
+    """A failed marker write leaves Lithos holding the OLD marker — so the
+    old stamp still describes it and must survive (best-effort contract)."""
+    stamps = _stamps(tmp_path)
+    stamps.record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+    await record_failed_attempt(
+        _StampProbeClient(raises=True),
+        task_id="task-1",
+        route="story-develop",
+        agent="a",
+        payload=_payload(),
+        stamps=stamps,
+    )
+    assert stamps.read("story-develop", "task-1") == "2026-01-01T00:00:01+00:00"
+
+
+async def test_clear_superseded_failure_clears_the_stamp_too(
+    tmp_path: Path,
+) -> None:
+    stamps = _stamps(tmp_path)
+    stamps.record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+    fp = task_fingerprint(_payload())
+    await clear_superseded_failure(
+        _StampProbeClient(None),
+        task_id="task-1",
+        route="story-develop",
+        agent="a",
+        payload=_payload(metadata=_marker_metadata(fingerprint=fp)),
+        stamps=stamps,
+    )
+    assert stamps.read("story-develop", "task-1") is None
+
+
+def test_stamp_beats_fingerprint_in_both_directions(tmp_path: Path) -> None:
+    """Unit pin on precedence: with both stamps present the comparison is the
+    stamp's alone — equal declines even though a fingerprint is recorded,
+    different dispatches even though the fingerprint matches."""
+    stamps = _stamps(tmp_path)
+    stamps.record("story-develop", "task-1", "2026-01-01T00:00:01+00:00")
+    fp = task_fingerprint(_payload())
+    metadata = _marker_metadata(fingerprint=fp)
+
+    unchanged = _payload(metadata=metadata, updated_at="2026-01-01T00:00:01+00:00")
+    assert declines_bootstrap_replay(
+        dict(metadata), "story-develop", unchanged, task_id="task-1", stamps=stamps
+    )
+
+    edited = _payload(metadata=metadata, updated_at="2026-01-01T00:00:02+00:00")
+    assert not declines_bootstrap_replay(
+        dict(metadata), "story-develop", edited, task_id="task-1", stamps=stamps
+    )
+
+
+def test_attempt_stamp_store_round_trip(tmp_path: Path) -> None:
+    stamps = _stamps(tmp_path)
+    assert stamps.read("r", "t") is None  # missing store dir reads clean
+    stamps.record("r", "t", "s1")
+    assert stamps.read("r", "t") == "s1"
+    stamps.record("r", "t", "s2")  # a new failure overwrites
+    assert stamps.read("r", "t") == "s2"
+    stamps.clear("r", "t")
+    assert stamps.read("r", "t") is None
+    stamps.clear("r", "t")  # clearing a cleared stamp is a no-op
+
+
+def test_attempt_stamp_store_survives_a_pathy_route_name(tmp_path: Path) -> None:
+    """PR #343 review: a route name is ANY non-empty string (config validates
+    nothing more), so `team/story` is legal — inserted raw into a filename it
+    made every write fail with a swallowed FileNotFoundError, silently
+    demoting the exact guard to fingerprint semantics. Keys are encoded now:
+    the round trip must just work."""
+    stamps = _stamps(tmp_path)
+    stamps.record("team/story", "task-1", "s1")
+    assert stamps.read("team/story", "task-1") == "s1"
+    stamps.clear("team/story", "task-1")
+    assert stamps.read("team/story", "task-1") is None
+
+
+def test_attempt_stamp_store_keys_cannot_escape_or_collide(tmp_path: Path) -> None:
+    stamps = _stamps(tmp_path)
+    # Traversal-shaped and absolute-shaped names stay confined to the root.
+    for route in ("../escape", "/etc/passwd", "..", ".hidden"):
+        stamps.record(route, "t", "s")
+        assert stamps.read(route, "t") == "s"
+    written = list(stamps.root.iterdir())
+    assert len(written) == 4  # distinct keys stayed distinct
+    for f in written:
+        assert f.parent == stamps.root  # one component, under the root
+        assert not f.name.startswith(".")  # never a dotfile / dot component
+    # Sanitizer collisions are disambiguated by the raw-pair digest.
+    stamps.record("a/b", "t", "left")
+    stamps.record("a_b", "t", "right")
+    assert stamps.read("a/b", "t") == "left"
+    assert stamps.read("a_b", "t") == "right"
