@@ -2344,3 +2344,34 @@ def test_attempt_stamp_store_round_trip(tmp_path: Path) -> None:
     stamps.clear("r", "t")
     assert stamps.read("r", "t") is None
     stamps.clear("r", "t")  # clearing a cleared stamp is a no-op
+
+
+def test_attempt_stamp_store_survives_a_pathy_route_name(tmp_path: Path) -> None:
+    """PR #343 review: a route name is ANY non-empty string (config validates
+    nothing more), so `team/story` is legal — inserted raw into a filename it
+    made every write fail with a swallowed FileNotFoundError, silently
+    demoting the exact guard to fingerprint semantics. Keys are encoded now:
+    the round trip must just work."""
+    stamps = _stamps(tmp_path)
+    stamps.record("team/story", "task-1", "s1")
+    assert stamps.read("team/story", "task-1") == "s1"
+    stamps.clear("team/story", "task-1")
+    assert stamps.read("team/story", "task-1") is None
+
+
+def test_attempt_stamp_store_keys_cannot_escape_or_collide(tmp_path: Path) -> None:
+    stamps = _stamps(tmp_path)
+    # Traversal-shaped and absolute-shaped names stay confined to the root.
+    for route in ("../escape", "/etc/passwd", "..", ".hidden"):
+        stamps.record(route, "t", "s")
+        assert stamps.read(route, "t") == "s"
+    written = list(stamps.root.iterdir())
+    assert len(written) == 4  # distinct keys stayed distinct
+    for f in written:
+        assert f.parent == stamps.root  # one component, under the root
+        assert not f.name.startswith(".")  # never a dotfile / dot component
+    # Sanitizer collisions are disambiguated by the raw-pair digest.
+    stamps.record("a/b", "t", "left")
+    stamps.record("a_b", "t", "right")
+    assert stamps.read("a/b", "t") == "left"
+    assert stamps.read("a_b", "t") == "right"

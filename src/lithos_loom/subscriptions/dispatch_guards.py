@@ -65,6 +65,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -206,6 +207,15 @@ async def on_ready_frontier(
     return False
 
 
+def _fs_slug(value: str, *, max_len: int = 60) -> str:
+    """A filename-safe, human-readable rendering of *value* (NOT unique —
+    always pair with a digest of the raw value). Strips leading dots so a
+    name can neither hide as a dotfile (the vault convention reserves those
+    for temp files) nor read as a ``.``/``..`` component."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", value)[:max_len].lstrip(".")
+    return slug or "_"
+
+
 class AttemptStampStore:
     """Loom-local store for each failed attempt's ``updated_at`` stamp (#339).
 
@@ -227,17 +237,26 @@ class AttemptStampStore:
         self.root = root
 
     def _path(self, route: str, task_id: str) -> Path:
-        # Route names are TOML identifiers and task ids are UUIDs — both
-        # filename-safe; the separator just keeps the pairing readable.
-        return self.root / f"{route}--{task_id}"
+        # Neither half is filename-safe by contract: a route name is any
+        # non-empty string (config validates nothing more — "team/story" is
+        # legal and would silently break every write via a nonexistent
+        # subdir), and a task id arrives off an event payload. Sanitized
+        # prefixes keep the store inspectable; the digest of the RAW pair
+        # keeps distinct keys distinct however the sanitizer collides them,
+        # and confines every name to one component under the root.
+        digest = hashlib.sha256(f"{route}\x00{task_id}".encode()).hexdigest()[:12]
+        return self.root / f"{_fs_slug(route)}--{_fs_slug(task_id)}--{digest}"
 
     def record(self, route: str, task_id: str, stamp: str) -> None:
         """Persist *stamp* atomically (tmp + rename, the repo convention)."""
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-            tmp = self._path(route, task_id).with_suffix(".tmp")
+            final = self._path(route, task_id)
+            # Not .with_suffix(): a dot in a sanitized name would make it
+            # REPLACE the tail, colliding two keys' staging files.
+            tmp = final.with_name(final.name + ".tmp")
             tmp.write_text(stamp, encoding="utf-8")
-            os.replace(tmp, self._path(route, task_id))
+            os.replace(tmp, final)
         except OSError:
             logger.exception(
                 "route %s: recording attempt stamp for %s failed", route, task_id
