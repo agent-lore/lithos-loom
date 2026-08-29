@@ -222,6 +222,27 @@ def produced_findings(report_json: dict) -> list[dict]:
     return findings
 
 
+def actionable_findings(report_json: dict) -> list[dict]:
+    """:func:`produced_findings` minus ``out-of-scope`` deferrals (819370e5).
+
+    A deferred finding did not block and hands the defect to another queue —
+    for catch purposes that is an ESCAPE, not a catch, so neither the
+    structured matcher nor the judge may credit it. This is what makes the
+    floor sweep the mis-defer detector: a panel that wrongly defers a seeded
+    in-scope defect drops that case's catch (``REGRESSED``) instead of
+    silently passing. Reports predating the status field carry no ``status``
+    key, so old report dirs score identically.
+
+    Noise instrumentation (:func:`finding_count`) deliberately still counts
+    deferred findings — a deferral on a known-good head is still "reported
+    something", and hiding it would flatter exactly the failure mode the
+    escape must not develop.
+    """
+    return [
+        f for f in produced_findings(report_json) if f.get("status") != "out-of-scope"
+    ]
+
+
 def review_incomplete(report_json: dict) -> bool:
     """Whether any reviewer's turn did not produce a verdict (#182 A3).
 
@@ -259,7 +280,7 @@ def review_blocked(report_json: dict) -> bool:
 
 def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> RunScore:
     """Score one review run: the case is caught iff EVERY expected matches."""
-    produced = produced_findings(report_json)
+    produced = actionable_findings(report_json)
     matches = [match_expected(e, produced, judge=judge) for e in case.expected]
     caught = all(m.caught for m in matches)
     severity_correct = caught and all(m.severity_correct for m in matches)
@@ -268,7 +289,7 @@ def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> R
         severity_correct=severity_correct,
         matches=matches,
         incomplete=review_incomplete(report_json),
-        n_findings=len(produced),
+        n_findings=finding_count(report_json),
         blocked=review_blocked(report_json),
         judge_status=worst_judge_status(
             m.judge.status for m in matches if m.judge is not None
@@ -279,6 +300,7 @@ def score_run(case: Case, report_json: dict, *, judge: Judge | None = None) -> R
 
 __all__ = [
     "Judge",
+    "actionable_findings",
     "JudgeStatus",
     "JudgeVerdict",
     "MatchResult",

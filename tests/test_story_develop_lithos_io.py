@@ -15,6 +15,7 @@ import pytest
 from lithos_loom.lithos_client import Task
 from lithos_loom.plugins.story_develop import lithos_io
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
+from lithos_loom.plugins.story_develop.findings import DeferredFinding
 from lithos_loom.plugins.story_develop.gate_findings import GateFinding
 from lithos_loom.plugins.story_develop.handoff import Finding
 from tests.support import FakeLithosClient, make_task
@@ -316,3 +317,112 @@ def test_complete_task_calls_client(fake_client: FakeLithosClient) -> None:
 def test_complete_task_failure_returns_false(fake_client: FakeLithosClient) -> None:
     fake_client.raise_on["task_complete"] = RuntimeError("down")
     assert lithos_io.complete_task("http://x", "task-1", _result()) is False
+
+
+# ── deferred out-of-scope findings (819370e5) ──────────────────────────
+
+
+def _deferred(**overrides: Any) -> DeferredFinding:
+    base: dict[str, Any] = dict(
+        reviewer="cq",
+        finding_id="f-003",
+        severity="major",
+        rationale="pre-existing CSS bug on the base; not this story's diff",
+        files=("static/lens.css:20",),
+    )
+    base.update(overrides)
+    return DeferredFinding(**base)
+
+
+def test_spawn_deferred_tasks_creates_linked_untriggered_tasks(
+    fake_client: FakeLithosClient,
+) -> None:
+    result = _result(deferred_findings=(_deferred(),))
+
+    spawns = lithos_io.spawn_deferred_tasks("http://x", "task-1", result)
+
+    assert len(spawns) == 1 and spawns[0].task_id
+    call = fake_client.calls_to("task_spawn")[0]
+    assert call["source_task_id"] == "task-1"
+    assert call["relation_type"] == "discovered_from"
+    # LOAD-BEARING: inheriting tags would copy the story's trigger:* tag onto
+    # the spawned task and auto-dispatch it — the escape hands the finding to
+    # a human queue, it must never recurse.
+    assert call["inherit_tags"] is False
+    assert call["metadata"]["deferred_from_task"] == "task-1"
+    assert call["metadata"]["deferred_by_reviewer"] == "cq"
+    assert call["metadata"]["deferred_finding_id"] == "f-003"
+    assert "pre-existing CSS bug" in call["description"]
+    assert "static/lens.css:20" in call["description"]
+
+
+def test_spawn_deferred_tasks_is_best_effort_per_finding(
+    fake_client: FakeLithosClient,
+) -> None:
+    # One spawn failing must not lose the other finding, and the failed one
+    # degrades to task_id=None (its text stays in the [DevelopResult]).
+    result = _result(
+        deferred_findings=(
+            _deferred(finding_id="f-003"),
+            _deferred(finding_id="f-004", rationale="harness fault, not the diff"),
+        )
+    )
+    calls = {"n": 0}
+    original = fake_client.task_spawn
+
+    async def flaky(**kw: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("lithos hiccup")
+        return await original(**kw)
+
+    fake_client.task_spawn = flaky  # type: ignore[method-assign]
+
+    spawns = lithos_io.spawn_deferred_tasks("http://x", "task-1", result)
+
+    assert [s.task_id is None for s in spawns] == [True, False]
+    assert spawns[1].finding.finding_id == "f-004"
+
+
+def test_spawn_deferred_tasks_no_findings_no_calls(
+    fake_client: FakeLithosClient,
+) -> None:
+    assert lithos_io.spawn_deferred_tasks("http://x", "task-1", _result()) == []
+    assert not fake_client.called("task_spawn")
+
+
+def test_post_results_records_deferred_findings_and_task_ids(
+    fake_client: FakeLithosClient,
+) -> None:
+    # The summary must carry deferred findings explicitly: the open-findings
+    # section filters on is_open, so a resolved (deferred) finding would
+    # otherwise vanish from the [DevelopResult] record.
+    result = _result(deferred_findings=(_deferred(),))
+    spawns = [lithos_io.DeferredSpawn(finding=_deferred(), task_id="spawned-1")]
+
+    ok = lithos_io.post_results("http://x", "task-1", result, deferred_spawns=spawns)
+
+    assert ok is True
+    summary = fake_client.calls_to("finding_post")[0]["summary"]
+    assert "deferred out-of-scope findings" in summary
+    assert "[cq/f-003] major" in summary
+    assert "spawned task spawned-1 (discovered_from)" in summary
+    metadata = fake_client.calls_to("task_update")[0]["metadata"]
+    assert metadata["develop_deferred_tasks"] == ["spawned-1"]
+
+
+def test_post_results_preserves_deferred_text_when_spawn_failed(
+    fake_client: FakeLithosClient,
+) -> None:
+    # A failed spawn (or a caller that never attempted one) degrades to the
+    # finding text preserved loudly in the summary — never silently dropped.
+    result = _result(deferred_findings=(_deferred(),))
+
+    ok = lithos_io.post_results("http://x", "task-1", result)  # no spawns given
+
+    assert ok is True
+    summary = fake_client.calls_to("finding_post")[0]["summary"]
+    assert "SPAWN FAILED — preserved here, file manually" in summary
+    assert "pre-existing CSS bug" in summary
+    metadata = fake_client.calls_to("task_update")[0]["metadata"]
+    assert "develop_deferred_tasks" not in metadata

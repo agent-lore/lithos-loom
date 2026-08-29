@@ -56,8 +56,16 @@ def test_to_json_has_stable_keys() -> None:
     }
     assert data["blocking"] is True
     finding = data["reviewers"][0]["findings"][0]
-    assert set(finding) == {"reviewer", "severity", "files", "rationale", "finding_id"}
+    assert set(finding) == {
+        "reviewer",
+        "severity",
+        "files",
+        "rationale",
+        "finding_id",
+        "status",
+    }
     assert finding["severity"] == "critical"
+    assert finding["status"] == "open"  # 819370e5: additive default
     assert data["gate"][0] == {"name": "lint", "outcome": "ran", "blocked": False}
 
 

@@ -230,3 +230,31 @@ def test_conversation_log_omits_absent_artifact_handoffs(tmp_path: Path) -> None
     log = h.conversation_log(d, 1, ["correctness"])
 
     assert "artifact pass" not in log
+
+
+# ── out-of-scope disposition (819370e5) ────────────────────────────────
+
+
+def test_out_of_scope_does_not_block() -> None:
+    # The escape's whole point: a REAL finding that is not this story's to fix
+    # is resolved — it never counts toward the reviewer's block threshold.
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: critical\n  status: out-of-scope\n"
+        "  rationale: pre-existing on the base; filed as its own task\n"
+    )
+    h = parse_review_handoff(text)
+    assert h.max_open_severity is None
+    assert h.passes("minor") is True
+
+
+def test_out_of_scope_without_rationale_is_rejected() -> None:
+    # The disposition is a licence to not-block; the stated WHY is its
+    # counterweight (819370e5's guardrail). No rationale -> malformed handoff
+    # -> the reviewer is re-prompted, same as an invalid status.
+    bad = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: major\n  status: out-of-scope\n"
+    )
+    with pytest.raises(HandoffError, match="out-of-scope.*WHY"):
+        parse_review_handoff(bad)

@@ -57,6 +57,7 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
 )
+from .findings import DeferredFinding, collect_deferred
 from .gate_findings import GateFinding
 from .handoff import HandoffError
 from .panel import (
@@ -124,6 +125,11 @@ class DevelopResult:
     # time, or now + a fixed delay when no hint was parseable (T10 — the
     # daemon schedules a re-dispatch at this instant)
     resume_after: datetime | None = None
+    # findings the panel marked `out-of-scope` (819370e5) — real, deferred to
+    # their own Lithos task at the __main__ seam. Off the LEDGERS, not the
+    # final round's outcomes (a deferral round earlier than the seal would
+    # otherwise vanish from the record).
+    deferred_findings: tuple[DeferredFinding, ...] = ()
 
     @property
     def review(self) -> ReviewOutcome | None:
@@ -631,4 +637,5 @@ def develop(
         conversation_log=log_path,
         review_profile=config.review_profile,
         resume_after=resume_after,
+        deferred_findings=collect_deferred(r.ledger for r in reviewers),
     )

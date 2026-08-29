@@ -36,7 +36,7 @@ from pathlib import Path
 from ...plugins.story_develop.review_report import REVIEWER_STATUSES
 from .case import SEVERITIES, Case, expected_fingerprint
 from .harness import DEFAULT_BAR, CaseResult, aggregate_case, count_valid
-from .match import Judge, JudgeVerdict, RunScore, produced_findings, score_run
+from .match import Judge, JudgeVerdict, RunScore, actionable_findings, score_run
 
 _VARIANTS = ("buggy", "known-good")
 
@@ -402,7 +402,7 @@ def judge_call_count(
     for case_reports in reports:
         n_expected = len(cases[case_reports.case_id].expected)
         for sample in case_reports.samples():
-            if produced_findings(sample.report):
+            if actionable_findings(sample.report):
                 total += n_expected * repeats
     return total
 
@@ -431,7 +431,7 @@ def _record_sites(
     """
     recorded: dict[tuple[str, int], list[list[JudgeVerdict]]] = {}
     for sample in reports.samples():
-        produced = produced_findings(sample.report)
+        produced = actionable_findings(sample.report)
         per_expected: list[list[JudgeVerdict]] = []
         for expected in case.expected:
             if not produced:
@@ -503,7 +503,7 @@ def rescore_case(
     recorded = _record_sites(case, reports, judge=judge, repeats=repeats)
     for sample in reports.samples():
         per_expected = recorded[(sample.variant, sample.index)]
-        produced = produced_findings(sample.report)
+        produced = actionable_findings(sample.report)
         ids = tuple(str(f.get("finding_id", "")) for f in produced)
         for idx, verdicts in enumerate(per_expected):
             sites.append(

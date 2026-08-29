@@ -22,6 +22,11 @@ class ReviewFinding:
     files: list[str] = field(default_factory=list)
     rationale: str = ""
     finding_id: str = ""
+    # Lifecycle status at report time (819370e5). Additive to the contract:
+    # reports predating it carry no key, and consumers default to "open".
+    # `out-of-scope` findings are excluded from eval catch-matching
+    # (match.actionable_findings) — a deferral is an escape, not a catch.
+    status: str = "open"
 
     def to_json(self) -> dict:
         return {
@@ -30,6 +35,7 @@ class ReviewFinding:
             "files": list(self.files),
             "rationale": self.rationale,
             "finding_id": self.finding_id,
+            "status": self.status,
         }
 
 

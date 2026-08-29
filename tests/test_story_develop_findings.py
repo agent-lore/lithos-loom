@@ -130,3 +130,80 @@ def test_render_open_lists_ids_and_context() -> None:
     assert "why it matters" in text
     assert "coder response: nope" in text
     assert FindingLedger("x").render_open() == "(none)"
+
+
+# ── out-of-scope disposition (819370e5) ────────────────────────────────
+
+
+def test_out_of_scope_resolves_in_the_ledger() -> None:
+    # Reviewer defers an open finding: it leaves the blocking signature (so
+    # the stall guard sees progress) and open_entries, like any resolved state.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(severity="major")), round_no=1)
+    assert ledger.blocking_signature("major")
+
+    deferred = ReviewHandoff(
+        status="FINDINGS",
+        summary="s",
+        findings=[
+            Finding(
+                finding_id="f-001",
+                severity="major",
+                status="out-of-scope",
+                rationale="pre-existing on the base",
+            )
+        ],
+    )
+    assert ledger.check(deferred) is None  # accounts for the open id
+    ledger.apply_review(deferred, round_no=2)
+    assert ledger.blocking_signature("major") == frozenset()
+    assert ledger.open_entries() == []
+    assert ledger.entries["f-001"].status == "out-of-scope"
+
+
+def test_coder_cannot_defer_a_finding_out_of_scope() -> None:
+    # The disposition is reviewer-owned (819370e5): the coder's handoff cannot
+    # move a reviewer-owned status, so a coder claiming "out of scope" changes
+    # nothing about blocking — its route is the dispute flag, as before.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(severity="major")), round_no=1)
+
+    coder_says = [
+        Finding(
+            finding_id="f-001",
+            severity="major",
+            status="out-of-scope",
+            rationale="coder thinks it is not its problem",
+        )
+    ]
+    ledger.record_coder_updates(coder_says, round_no=2)
+    assert ledger.entries["f-001"].status == "open"  # unchanged
+    assert ledger.blocking_signature("major")  # still blocks
+
+
+def test_collect_deferred_survives_a_later_lgtm_round() -> None:
+    # The reason collection reads the LEDGERS: a finding deferred in round 2
+    # produces no trace in round 3's LGTM outcome, and the summary's
+    # open-findings section filters on is_open — either view would lose it.
+    from lithos_loom.plugins.story_develop.findings import collect_deferred
+
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(severity="major")), round_no=1)
+    ledger.apply_review(
+        _review(
+            _f(
+                fid="f-001",
+                severity="major",
+                status="out-of-scope",
+                rationale="harness fault",
+            )
+        ),
+        round_no=2,
+    )
+    ledger.apply_review(_review(lgtm=True), round_no=3)
+
+    deferred = collect_deferred([ledger])
+    assert len(deferred) == 1
+    assert deferred[0].finding_id == "f-001"
+    assert deferred[0].rationale == "harness fault"
+    assert deferred[0].reviewer == "correctness"

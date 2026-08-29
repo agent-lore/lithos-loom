@@ -298,6 +298,7 @@ def _build_report(
                 files=list(f.files),
                 rationale=f.rationale,
                 finding_id=f.finding_id,
+                status=f.status,
             )
             for f in outcome.findings
         ]

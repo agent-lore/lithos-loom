@@ -94,6 +94,7 @@ from .lithos_io import (
     complete_task,
     fetch_task_context,
     post_results,
+    spawn_deferred_tasks,
 )
 from .model_policy import resolve_config_models
 from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver_guarded
@@ -658,7 +659,16 @@ def _daemon_main(args: argparse.Namespace) -> int:
     if delivery_error is not None:
         print(f"pr delivery failed: {delivery_error}", file=sys.stderr)
 
-    post_results(args.lithos_url, ctx.task_id, result, delivery=delivery)
+    # 819370e5: spin out-of-scope findings into their own tasks BEFORE the
+    # results post, so the [DevelopResult] can say where each one went.
+    deferred_spawns = spawn_deferred_tasks(args.lithos_url, ctx.task_id, result)
+    post_results(
+        args.lithos_url,
+        ctx.task_id,
+        result,
+        delivery=delivery,
+        deferred_spawns=deferred_spawns,
+    )
     payload, exit_code = build_result_payload(
         result,
         task_id=ctx.task_id,
@@ -667,6 +677,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
         run_dir=config.run_dir,
         delivery=delivery,
         delivery_error=delivery_error,
+        spawned_task_ids=[d.task_id for d in deferred_spawns if d.task_id],
     )
     write_result_atomically(result_file, payload)
     # Record the completion under the run's idempotency key so a later dispatch
@@ -1059,11 +1070,17 @@ def main(argv: list[str] | None = None) -> int:
         print("  pr:       skipped (run not approved)")
 
     if args.task_id is not None:
+        deferred_spawns = spawn_deferred_tasks(args.lithos_url, args.task_id, result)
+        for d in deferred_spawns:
+            f = d.finding
+            where = d.task_id or "SPAWN FAILED — file manually"
+            print(f"  deferred: [{f.reviewer}/{f.finding_id}] {f.severity} -> {where}")
         posted = post_results(
             args.lithos_url,
             args.task_id,
             result,
             delivery=delivery,
+            deferred_spawns=deferred_spawns,
         )
         print(
             f"  lithos:   {'results posted to' if posted else 'POSTING FAILED for'} "

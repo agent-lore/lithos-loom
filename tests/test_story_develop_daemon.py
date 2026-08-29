@@ -2071,3 +2071,29 @@ def test_daemon_mode_missing_agent_model_fails_closed(
     assert payload["error"]["category"] == "config"
     assert "[story_develop.default_models]" in payload["error"]["message"]
     validate_result_schema(payload)
+
+
+def test_build_result_payload_records_spawned_deferred_tasks(tmp_path: Path) -> None:
+    # 819370e5: tasks spun out of out-of-scope findings land in the schema's
+    # (previously producer-less) spawned_tasks field — declarative, the runner
+    # validates and ignores it, but the on-disk contract carries the deferral.
+    payload, _ = build_result_payload(
+        _result("approved", tmp_path),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+        spawned_task_ids=["deferred-task-1", "deferred-task-2"],
+    )
+    assert payload["spawned_tasks"] == ["deferred-task-1", "deferred-task-2"]
+    validate_result_schema(payload)
+
+    bare, _ = build_result_payload(
+        _result("approved", tmp_path),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert "spawned_tasks" not in bare  # absent, not empty, when nothing spawned
+    validate_result_schema(bare)

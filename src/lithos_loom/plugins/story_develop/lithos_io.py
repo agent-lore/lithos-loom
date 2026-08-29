@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from .develop import DevelopResult
+    from .findings import DeferredFinding
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +149,29 @@ def _result_summary(result: DevelopResult) -> str:
     return "\n".join(lines)
 
 
+def _deferred_section(spawns: Sequence[DeferredSpawn]) -> str:
+    """The ``[DevelopResult]`` block naming every deferred finding (819370e5).
+
+    Needed because ``_result_summary``'s open-findings section filters on
+    ``is_open`` — a deferred (resolved) finding would otherwise vanish from
+    the record. Each line says where the finding went, so the operator can
+    disagree with the deferral by reopening the spawned task.
+    """
+    lines = ["deferred out-of-scope findings (spun out, non-blocking):"]
+    for d in spawns:
+        f = d.finding
+        where = (
+            f"spawned task {d.task_id} (discovered_from)"
+            if d.task_id
+            else "SPAWN FAILED — preserved here, file manually"
+        )
+        lines.append(
+            f"- [{f.reviewer}/{f.finding_id}] {f.severity}: "
+            f"{f.rationale or '(no rationale recorded)'} -> {where}"
+        )
+    return "\n".join(lines)
+
+
 def _delivery_section(delivery: Any) -> str:
     """The Copilot-round block of the ``[DevelopResult]`` finding."""
     lines = [f"pull request: {delivery.pr_url}"]
@@ -167,6 +192,108 @@ def _delivery_section(delivery: Any) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class DeferredSpawn:
+    """One deferred finding's spawn outcome (819370e5).
+
+    ``task_id`` is the created Lithos task (linked ``discovered_from`` the
+    story), or ``None`` when the spawn failed — the finding text then stays
+    preserved in the ``[DevelopResult]`` summary with a loud note, so a
+    Lithos hiccup degrades to exactly the pre-escape record rather than
+    losing the finding.
+    """
+
+    finding: DeferredFinding
+    task_id: str | None
+
+
+def spawn_deferred_tasks(
+    url: str,
+    task_id: str,
+    result: DevelopResult,
+) -> list[DeferredSpawn]:
+    """Spin each ``out-of-scope`` finding into its own Lithos task (819370e5).
+
+    One task per deferred finding, created via ``task_spawn`` so the
+    ``discovered_from`` edge (non-blocking, "found while executing the
+    story") lands atomically with it. ``inherit_tags=False`` is load-bearing:
+    inheriting would copy the story's ``trigger:*`` tag onto the spawned task
+    and auto-dispatch it — the disposition exists to hand the finding to a
+    HUMAN queue, not to recurse. Best-effort per finding, same
+    never-fail-a-finished-run policy as :func:`post_results`.
+
+    Deliberately not de-duplicated across runs: a retried run whose reviewer
+    defers the same defect again files a second task. The tasks are cheap,
+    both carry ``deferred_from_task`` provenance for an operator query, and
+    any content-based dedup would silently drop a genuinely new finding that
+    happens to share wording.
+    """
+    if not result.deferred_findings:
+        return []
+
+    async def _spawn() -> list[DeferredSpawn]:
+        spawns: list[DeferredSpawn] = []
+        async with LithosClient(url, agent_id=AGENT_ID) as client:
+            for f in result.deferred_findings:
+                headline = (f.rationale or "").strip().splitlines()[0][:80]
+                title = f"[deferred {f.severity}] {headline or f.finding_id}"
+                files = "\n".join(f"- {path}" for path in f.files) or "(none listed)"
+                description = (
+                    f"Deferred out-of-scope finding from story-develop run "
+                    f"{result.run_id} (branch {result.branch}).\n\n"
+                    f"The {f.reviewer} reviewer judged this REAL but not the "
+                    f"story's to fix, and the run approved without it "
+                    f"(status out-of-scope, 819370e5).\n\n"
+                    f"severity: {f.severity}\n"
+                    f"reviewer: {f.reviewer} (finding {f.finding_id})\n"
+                    f"files/evidence:\n{files}\n\n"
+                    f"rationale (the reviewer's WHY, verbatim):\n{f.rationale}"
+                )
+                try:
+                    spawned = await client.task_spawn(
+                        source_task_id=task_id,
+                        title=title,
+                        description=description,
+                        relation_type="discovered_from",
+                        inherit_project=True,
+                        inherit_tags=False,
+                        metadata={
+                            "deferred_from_task": task_id,
+                            "deferred_from_run": result.run_id,
+                            "deferred_by_reviewer": f.reviewer,
+                            "deferred_finding_id": f.finding_id,
+                            "deferred_severity": f.severity,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[Friction] story-develop %s: spawning deferred task for "
+                        "%s/%s failed (%s); the finding text stays in the "
+                        "[DevelopResult] summary — file it manually",
+                        result.run_id,
+                        f.reviewer,
+                        f.finding_id,
+                        exc,
+                    )
+                    spawns.append(DeferredSpawn(finding=f, task_id=None))
+                else:
+                    spawns.append(DeferredSpawn(finding=f, task_id=spawned))
+        return spawns
+
+    try:
+        return asyncio.run(_spawn())
+    except Exception as exc:
+        logger.warning(
+            "[Friction] story-develop %s: deferred-task spawning failed "
+            "wholesale (%s); finding text stays in the [DevelopResult] summary",
+            result.run_id,
+            exc,
+        )
+        return [
+            DeferredSpawn(finding=f, task_id=None) for f in result.deferred_findings
+        ]
+
+
 def post_results(
     url: str,
     task_id: str,
@@ -174,6 +301,7 @@ def post_results(
     *,
     pr_url: str | None = None,
     delivery: Any = None,
+    deferred_spawns: Sequence[DeferredSpawn] | None = None,
 ) -> bool:
     """Post the run outcome back to the task. Returns True when fully posted.
 
@@ -181,10 +309,18 @@ def post_results(
     reported spend: the Copilot fix round happens AFTER ``develop()`` returns,
     so the result object alone would understate cost and omit the round.
 
+    *deferred_spawns* (from :func:`spawn_deferred_tasks`) records where each
+    ``out-of-scope`` finding went; without it, any deferred findings still
+    render in the summary as unspawned (the record is never lost, 819370e5).
+
     A post failure must NOT fail the run — the work exists on the branch
     regardless — so errors are logged as friction and ``False`` is returned
     for the caller to surface.
     """
+    if deferred_spawns is None:
+        deferred_spawns = [
+            DeferredSpawn(finding=f, task_id=None) for f in result.deferred_findings
+        ]
     total_cost = result.total_cost_usd + (
         delivery.extra_cost_usd if delivery is not None else 0.0
     )
@@ -196,6 +332,8 @@ def post_results(
     async def _post() -> None:
         async with LithosClient(url, agent_id=AGENT_ID) as client:
             summary = _result_summary(result)
+            if deferred_spawns:
+                summary += "\n\n" + _deferred_section(deferred_spawns)
             if delivery is not None:
                 summary += "\n\n" + _delivery_section(delivery)
                 if delivery.extra_cost_usd:
@@ -229,6 +367,9 @@ def post_results(
             }
             if result.review_profile:
                 metadata["develop_review_profile_used"] = result.review_profile
+            spawned_ids = [d.task_id for d in deferred_spawns if d.task_id]
+            if spawned_ids:
+                metadata["develop_deferred_tasks"] = spawned_ids
             if result.test_gate is not None:
                 metadata["develop_test_gate_verdict"] = result.test_gate.verdict
             effective_pr_url = delivery.pr_url if delivery is not None else pr_url

@@ -2139,3 +2139,39 @@ def test_develop_without_entry_uses_fresh_worktree_off_base(
     assert result.status == "approved"
     assert "did not author" not in state["coder_prompts"][0]
     assert "Add a greeting file" in state["coder_prompts"][0]  # coder_init description
+
+
+# ── out-of-scope deferral (819370e5) ───────────────────────────────────
+
+_FINDINGS_DEFER_F001 = (
+    "## Status: FINDINGS\n## Summary\nReal, but not this story's.\n## Findings\n"
+    "- finding_id: f-001\n  severity: major\n  status: out-of-scope\n"
+    '  files: ["greeting.txt:1"]\n'
+    "  rationale: pre-existing on the base; belongs to its own task\n"
+)
+
+
+def test_out_of_scope_deferral_approves_and_records(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """The escape end-to-end (819370e5): round 1 files a major finding; round 2
+    the reviewer marks it out-of-scope (with the required rationale). The run
+    APPROVES — the deferral does not count toward the threshold — and the
+    finding is carried on DevelopResult.deferred_findings off the LEDGER, not
+    the final round's outcomes (where a resolved finding would be invisible
+    to the summary's is_open filter)."""
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_DEFER_F001}],
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    assert result.rounds == 2
+    assert len(result.deferred_findings) == 1
+    d = result.deferred_findings[0]
+    assert d.finding_id == "f-001"
+    assert d.severity == "major"
+    assert "pre-existing on the base" in d.rationale
+    assert d.files == ("greeting.txt:1",)

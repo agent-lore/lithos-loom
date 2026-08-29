@@ -26,8 +26,17 @@ _SEVERITIES = ("minor", "major", "critical")
 _SEVERITY_ORDER = {s: i for i, s in enumerate(_SEVERITIES)}
 
 # Finding lifecycle states (T7 enforces transitions; T2 only parses/validates).
+# `out-of-scope` (819370e5) is the reviewer's escape for a finding that is REAL
+# but not this story's to fix (pre-existing on the base, a harness/pipeline
+# fault, another story's agreed work): resolved — so it never blocks — and
+# spun out as its own Lithos task at run end (see lithos_io.spawn_deferred_tasks)
+# instead of burning the round budget. It REQUIRES a rationale saying why (the
+# parse rejects it otherwise): the disposition is a licence to not-block, and
+# the stated why is its counterweight.
 _OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
-_RESOLVED_STATES = frozenset({"fixed", "accepted", "superseded", "merged"})
+_RESOLVED_STATES = frozenset(
+    {"fixed", "accepted", "superseded", "merged", "out-of-scope"}
+)
 _ALL_STATES = _OPEN_STATES | _RESOLVED_STATES
 
 
@@ -350,6 +359,13 @@ def _parse_findings(block: str) -> list[Finding]:
             raise HandoffError(
                 f"finding {idx}: invalid status {status!r} "
                 f"(allowed: {', '.join(sorted(_ALL_STATES))})"
+            )
+        if status == "out-of-scope" and not raw.get("rationale", "").strip():
+            raise HandoffError(
+                f"finding {idx}: an out-of-scope disposition must state WHY the "
+                "finding is not this story's to fix in its rationale — e.g. "
+                "pre-existing on the base, a harness/pipeline fault, or another "
+                "story's agreed work"
             )
         findings.append(
             Finding(

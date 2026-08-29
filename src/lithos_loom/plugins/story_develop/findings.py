@@ -16,11 +16,13 @@ blocking feeds the dispute guard in :mod:`develop`.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from .handoff import Finding, ReviewHandoff, severity_at_or_above
 
 # Open (= potentially blocking) states; mirrors handoff._OPEN_STATES.
+# (`out-of-scope` — 819370e5 — is a RESOLVED state: it never appears here.)
 _OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
 
 
@@ -88,7 +90,8 @@ class FindingLedger:
             return (
                 f"these open finding ids were not accounted for: "
                 f"{', '.join(dropped)} — every open finding must appear with an "
-                "updated status (fixed / accepted / open / superseded / merged)"
+                "updated status (fixed / accepted / open / superseded / merged / "
+                "out-of-scope)"
             )
         return None
 
@@ -248,3 +251,40 @@ class FindingLedger:
             if e.coder_response:
                 lines.append(f"  coder response: {e.coder_response}")
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class DeferredFinding:
+    """A finding the reviewer marked ``out-of-scope`` (819370e5): real, but
+    not this story's to fix. Collected off the ledgers at run end and spun
+    out as its own Lithos task (``lithos_io.spawn_deferred_tasks``) so the
+    run can approve without the finding being lost."""
+
+    reviewer: str
+    finding_id: str
+    severity: str
+    rationale: str
+    files: tuple[str, ...] = ()
+
+
+def collect_deferred(ledgers: Iterable[FindingLedger]) -> tuple[DeferredFinding, ...]:
+    """Every ``out-of-scope`` entry across the panel's ledgers, in stable
+    (reviewer, finding_id) order.
+
+    Read off the LEDGERS, not the final round's outcomes: a finding deferred
+    in round 3 does not appear in round 4's review outcome at all (an LGTM
+    round returns no findings), and ``_result_summary``'s open-findings
+    section filters on ``is_open`` — either would silently drop the record.
+    """
+    return tuple(
+        DeferredFinding(
+            reviewer=ledger.reviewer,
+            finding_id=entry.finding_id,
+            severity=entry.severity,
+            rationale=entry.rationale,
+            files=tuple(entry.files),
+        )
+        for ledger in ledgers
+        for entry in sorted(ledger.entries.values(), key=lambda e: e.finding_id)
+        if entry.status == "out-of-scope"
+    )

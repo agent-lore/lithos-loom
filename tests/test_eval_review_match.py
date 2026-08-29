@@ -765,3 +765,44 @@ def test_judged_happy_path_verdict_is_unchanged() -> None:
         "judge",
         "f-007",
     )
+
+
+# ── out-of-scope deferrals are escapes, not catches (819370e5) ─────────
+
+
+def test_deferred_finding_does_not_count_as_a_catch() -> None:
+    # THE mis-defer detector: a panel that wrongly defers a seeded in-scope
+    # defect must drop that case's catch (floor -> REGRESSED) instead of
+    # silently passing — a deferral did not block, so it is an escape.
+    finding = _finding("critical", ["cli/develop.py"], "approved before delivery")
+    finding["status"] = "out-of-scope"
+    score = score_run(_case(), _report([finding]))
+    assert score.caught is False
+    # ...but the noise instrumentation still counts it: a deferral on a
+    # known-good head is still "reported something".
+    assert score.n_findings == 1
+
+
+def test_deferred_finding_is_hidden_from_the_judge() -> None:
+    # The judge sees only actionable findings, so it cannot rescue a deferral.
+    seen: list[list[dict]] = []
+
+    def judge(mechanism: str, produced: list[dict]) -> JudgeVerdict:
+        seen.append(produced)
+        return JudgeVerdict(matched_ids=())
+
+    finding = _finding("critical", ["cli/develop.py"], "approved before delivery")
+    finding["status"] = "out-of-scope"
+    score = score_run(_case(), _report([finding]), judge=judge)
+    assert score.caught is False
+    assert seen == [[]]
+
+
+def test_status_less_findings_score_as_before() -> None:
+    # Back-compat: report dirs predating the status field carry no key and
+    # score identically (default "open" semantics).
+    report = _report(
+        [_finding("critical", ["cli/develop.py"], "approved before delivery")]
+    )
+    assert "status" not in report["reviewers"][0]["findings"][0]
+    assert score_run(_case(), report).caught is True

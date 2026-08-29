@@ -16,7 +16,7 @@ One short paragraph. The coder also reports test results here.
 (only when Status is FINDINGS — structured, one block per finding)
 - finding_id: <assigned by the orchestrator; reference existing ones, do not invent>
   severity: critical | major | minor
-  status: open | fixed | accepted | disputed | needs-clarification
+  status: open | fixed | accepted | disputed | needs-clarification | out-of-scope
   files: ["path:line", ...]
   rationale: <why>
   coder_response: <what changed, or why disputed>
@@ -28,6 +28,14 @@ severity — the orchestrator applies the project's severity threshold to decide
 which findings block, and sub-threshold findings are recorded without
 blocking. An issue mentioned only in the summary prose is invisible to the
 rest of the pipeline.
+
+**Out-of-scope (reviewers only):** a finding that is REAL but not this
+change's to fix — pre-existing on the base, a harness or pipeline fault, or
+another story's agreed work — may be marked `status: out-of-scope` instead of
+being left open. It stops blocking, and the orchestrator files it as its own
+task so it is not lost. The `rationale:` must state WHY it is out of scope
+(the handoff is rejected otherwise). This is never for a defect this change
+introduced or touched — those stay `open`.
 
 **Finding identity:** ids are orchestrator-assigned. Leave `finding_id:` blank
 for a NEW finding; on re-review, account for EVERY id you were given (update
