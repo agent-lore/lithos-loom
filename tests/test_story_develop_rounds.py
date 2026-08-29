@@ -410,26 +410,28 @@ def test_manifest_less_captures_hold_approval(tmp_path: Path) -> None:
     assert ctx.artifact_capture_notice is not None
 
 
-def test_errored_artifact_candidate_check_holds_approval(tmp_path: Path) -> None:
-    # S4: an `errored` candidate check is non-blocking for the floor by design
-    # (infra skip) — but when the project declares an artifacts_path, an
-    # errored candidate means the capture never ran, and sealing would rest on
-    # the previous round's pixels. This was the enabling hole in T1-S11.
-    ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
-    _stale_snapshot(ctx, sha=ctx.gated_sha)  # even a current-looking snapshot
+def _errored_candidate_services(ctx, check_name: str):
+    """Services whose candidate run reports one ERRORED candidate check."""
 
     def errored_run_check_set(cfg, wt, sha, round_no, checks, ledger):
+        errored_check = Check(
+            name=check_name,
+            command="x",
+            state="required",
+            stage="candidate",
+            raw_exit=True,
+        )
         return CheckSetResult(
             (
                 CheckResult(
-                    check=checks[0],
+                    check=errored_check,
                     execution_outcome="errored",
                     gate=None,
                 ),
             )
         )
 
-    ctx.services = rounds_mod.Services(
+    return rounds_mod.Services(
         run_turn=ctx.services.run_turn,
         sleep=ctx.services.sleep,
         start_container=ctx.services.start_container,
@@ -437,12 +439,56 @@ def test_errored_artifact_candidate_check_holds_approval(tmp_path: Path) -> None
         run_check_set=errored_run_check_set,
     )
 
+
+def test_errored_capture_check_holds_via_freshness(tmp_path: Path) -> None:
+    # S4, the T1-S11 shape: the artifact-producing candidate check errors, so
+    # nothing re-captures and the previous round's snapshot stays newest. The
+    # freshness classification alone holds (an errored check publishes no
+    # snapshot, so the sealing sha can have no CURRENT capture) — no separate
+    # errored-check trigger needed. The notice names the errored check as the
+    # likely cause.
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    _stale_snapshot(ctx, sha="0" * 40)  # the previous round's capture
+    ctx.services = _errored_candidate_services(ctx, "repo-parity")
+
     exit_ = rounds_mod.approval_phase(ctx, 2)
 
     assert exit_ is None
     assert panel_calls == []
     assert ctx.artifact_capture_notice is not None
-    assert "errored" in ctx.artifact_capture_notice
+    assert "repo-parity" in ctx.artifact_capture_notice
+
+
+def test_errored_nonartifact_candidate_does_not_hold_current_capture(
+    tmp_path: Path,
+) -> None:
+    # PR #340 review (P1): the thorough profile candidate-stages dep-audit /
+    # coverage / semgrep, which produce no artifacts. An unrelated errored
+    # candidate check must NOT hold approval when the actual capture is
+    # CURRENT — that would stall the loop on infrastructure noise.
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    _stale_snapshot(ctx, sha=ctx.gated_sha)  # capture IS current
+    ctx.services = _errored_candidate_services(ctx, "dep-audit")
+
+    exit_ = rounds_mod.approval_phase(ctx, 2)
+
+    assert exit_ is not None and exit_.status == "approved"
+    assert ctx.artifact_capture_notice is None
+
+
+def test_errored_candidate_with_no_captures_seals(tmp_path: Path) -> None:
+    # Documented residual (spec §5.5): a first-round errored capture check
+    # with NO snapshots at all classifies no_artifacts and seals — there are
+    # no stale pixels to falsely verify, and holding would livelock repos
+    # whose artifacts path legitimately produces nothing. The floor's
+    # errored-passes semantics are out of scope for this guard.
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.services = _errored_candidate_services(ctx, "repo-parity")
+
+    exit_ = rounds_mod.approval_phase(ctx, 2)
+
+    assert exit_ is not None and exit_.status == "approved"
+    assert ctx.artifact_capture_notice is None
 
 
 def test_current_captures_still_seal_through_artifact_pass(tmp_path: Path) -> None:

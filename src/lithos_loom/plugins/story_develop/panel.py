@@ -641,7 +641,6 @@ def run_panel_round(
     coder_summary: str,
     services: Services | None = None,
     artifact_pass: bool = False,
-    head_sha: str | None = None,
 ) -> PanelRoundResult:
     """Drive the reviewer panel for a single round — the one shared primitive.
 
@@ -662,10 +661,7 @@ def run_panel_round(
     """
     resolved = services if services is not None else Services.live()
     # #283 slice 2: computed once per panel invocation, not per reviewer.
-    # `head_sha` labels each snapshot CURRENT vs PRIOR (793edc9f).
-    artifacts_note_value = check_artifacts.render_artifacts_note(
-        config, current_sha=head_sha
-    )
+    artifacts_note_value = check_artifacts.render_artifacts_note(config)
     round_reviews: list[ReviewOutcome] = []
     cost = 0.0
     interrupted = False

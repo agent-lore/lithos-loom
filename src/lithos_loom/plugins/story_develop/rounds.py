@@ -527,7 +527,6 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         reviewer_timeout=ctx.reviewer_timeout,
         coder_summary=ctx.coder_summary(config, 1) if round_no == 1 else "",
         services=ctx.services,
-        head_sha=ctx.gated_sha,
     )
     ctx.review_cost += panel.cost
     ctx.final_reviews = panel.round_reviews
@@ -564,9 +563,7 @@ def approval_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         # anything they collect (e2e screenshots) would otherwise seal unseen.
         # Snapshot the artifacts view the panel saw; if the candidate run
         # changes it, approval is held for one panel-only artifact pass below.
-        artifacts_seen_by_panel = check_artifacts.render_artifacts_note(
-            config, current_sha=ctx.gated_sha
-        )
+        artifacts_seen_by_panel = check_artifacts.render_artifacts_note(config)
         if (
             ctx.candidate_checks
             and ctx.gated_sha is not None
@@ -649,9 +646,7 @@ def _artifact_review_pass(
     round) and mirrors ``panel_phase``'s interrupted/invalid exits.
     """
     config = ctx.config
-    artifacts_now = check_artifacts.render_artifacts_note(
-        config, current_sha=ctx.gated_sha
-    )
+    artifacts_now = check_artifacts.render_artifacts_note(config)
     if not artifacts_now or artifacts_now == artifacts_seen_by_panel:
         return None
     logger.info(
@@ -673,7 +668,6 @@ def _artifact_review_pass(
         coder_summary="",
         services=ctx.services,
         artifact_pass=True,
-        head_sha=ctx.gated_sha,
     )
     ctx.review_cost += panel.cost
     # #291 round 4: COMBINE each reviewer's regular and artifact outcomes —

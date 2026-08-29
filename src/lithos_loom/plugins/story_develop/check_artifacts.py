@@ -225,20 +225,24 @@ def stale_capture_hold(
     """The approval-hold notice when artifact evidence is stale, else ``None``.
 
     793edc9f: called by ``rounds.approval_phase`` once every reviewer passed.
-    Two triggers, both meaning "the artifact evidence does not describe the
-    tree under review":
+    One trigger: :func:`capture_freshness` says ``stale`` — snapshots exist,
+    none from ``gated_sha`` (a skipped candidate run, an empty/failed/ERRORED
+    re-capture, missing manifests). ``no_artifacts`` never holds — a repo
+    whose ``artifacts_path`` legitimately produces nothing must not livelock —
+    and ``current`` proceeds to the artifact pass.
 
-    - :func:`capture_freshness` says ``stale``: snapshots exist, none from
-      ``gated_sha`` (a skipped candidate run, an empty/failed re-capture,
-      missing manifests). ``no_artifacts`` never holds — a repo whose
-      ``artifacts_path`` legitimately produces nothing must not livelock —
-      and ``current`` proceeds to the artifact pass.
-    - An artifact-bearing candidate check ERRORED this round (T1-S11's S4):
-      its ``errored`` outcome is non-blocking for the floor by design (infra
-      skip), but for the artifact contract it means the capture never ran —
-      without this, an errored parity check would seal over the previous
-      round's pixels. (``timed_out`` already blocks via the floor; included
-      defensively.)
+    An errored capture check is deliberately NOT its own trigger (PR #340
+    review): it is subsumed — an errored check publishes no snapshot, so the
+    sealing sha has no current capture and the freshness classification holds
+    by itself (T1-S11's round 5: parity errored, ``round_04`` stayed newest →
+    ``stale``). Triggering on *any* errored candidate check would falsely
+    hold runs whose candidate set carries non-artifact checks (thorough's
+    dep-audit / coverage / semgrep), including errored results an earlier
+    round's ``merge_check_sets`` carried forward. Errored candidate checks
+    are still NAMED in the notice as the likely cause when stale. Residual,
+    accepted: a first-round errored capture with no snapshots at all
+    classifies ``no_artifacts`` and seals — the floor's errored-passes
+    semantics are out of scope here.
 
     The returned notice is coder-facing (appended to the next round's gate
     summary): it names the stale commit and the failed capture so the loop
@@ -248,25 +252,23 @@ def stale_capture_hold(
     """
     if not config.artifacts_path:
         return None
-    freshness = capture_freshness(config, gated_sha)
+    if capture_freshness(config, gated_sha) != "stale":
+        return None
     errored = [
         r.check.name
         for r in check_results
         if r.check.stage == "candidate"
         and r.execution_outcome in ("errored", "timed_out")
     ]
-    if freshness in ("current", "no_artifacts") and not errored:
-        return None
     sha12 = (gated_sha or "?")[:12]
+    cause = (
+        "no artifact snapshot was captured from this commit — the newest "
+        "captures pre-date it"
+    )
     if errored:
-        cause = (
-            f"the candidate check(s) {', '.join(errored)} errored, "
-            "so no rendered-output capture exists for this commit"
-        )
-    else:
-        cause = (
-            "no artifact snapshot was captured from this commit — the newest "
-            "captures pre-date it"
+        cause += (
+            f" (candidate check(s) {', '.join(errored)} errored, "
+            "likely why no fresh capture exists)"
         )
     logger.warning(
         "story-develop %s: round %d reviews passed but the artifact capture "
@@ -288,23 +290,6 @@ def stale_capture_hold(
     )
 
 
-def _provenance_label(check_dir: Path, current_sha: str | None) -> str:
-    """The bracketed provenance tag for one snapshot line (793edc9f)."""
-    manifest = read_capture_manifest(check_dir)
-    if manifest is None:
-        return "[UNKNOWN provenance — do not treat as current]"
-    sha = str(manifest.get("sha") or "")[:12] or "?"
-    if current_sha is None:
-        return f"[captured from commit {sha}]"
-    if manifest.get("sha") == current_sha:
-        return f"[CURRENT — captured from commit {sha}, the tree under review]"
-    return (
-        f"[PRIOR — captured from commit {sha} in an earlier round; pre-dates "
-        "the tree under review: before/after comparison only, NOT evidence "
-        "about the current tree]"
-    )
-
-
 # How many filenames to spell out per check dir in the reviewer note; the rest
 # collapse to "+N more" (a 4-page x 4-width screenshot matrix is 16 files —
 # enumerable, but a long suite must not drown the prompt).
@@ -316,9 +301,7 @@ _NOTE_FILES_PER_CHECK = 12
 _NOTE_TOTAL_FILE_BUDGET = 36
 
 
-def render_artifacts_note(
-    config: DevelopConfig, *, current_sha: str | None = None
-) -> str:
+def render_artifacts_note(config: DevelopConfig) -> str:
     """The reviewer-prompt section enumerating collected artifacts (#283 s2).
 
     Empty string when nothing was collected (the template slot renders blank).
@@ -330,12 +313,15 @@ def render_artifacts_note(
     with per-dir listings additionally capped — dirs beyond the budget render
     as count-only lines so nothing is silently hidden.
 
-    Every snapshot line carries a provenance label from its manifest
-    (793edc9f): with ``current_sha``, CURRENT (rendered from the tree under
-    review) vs PRIOR (an earlier round's tree — comparison material, not
-    evidence); without it, the recorded commit alone. A snapshot with no
-    manifest labels UNKNOWN. The manifest file itself is excluded from
-    listings and counts.
+    The :data:`CAPTURE_MANIFEST` provenance file is plumbing, not a
+    reviewable artifact — excluded from listings and counts, so the rendered
+    note is byte-identical to the pre-manifest surface. Reviewer-visible
+    CURRENT/PRIOR provenance labels were built and then SPLIT OUT of PR #340:
+    on the RH-3 measured surface the labelled arm read 5/8 pooled catch
+    against the shipped prompt's 9/10 historical, so the labels + prompt
+    truth-fix are deferred to their own control+arm measured lever. The
+    stale-capture false-verify is closed code-side by
+    :func:`stale_capture_hold` regardless.
     """
     root = config.artifacts_dir
     if not root.is_dir():
@@ -356,17 +342,16 @@ def render_artifacts_note(
                 f"{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}/artifacts/"
                 f"{round_dir.name}/{check_dir.name}"
             )
-            label = _provenance_label(check_dir, current_sha)
             cap = min(_NOTE_FILES_PER_CHECK, remaining)
             shown = files[:cap]
             remaining -= len(shown)
             if shown:
                 extra = len(files) - len(shown)
                 listing = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
-                lines.append(f"- `{mount}/` — {len(files)} file(s) {label}: {listing}")
+                lines.append(f"- `{mount}/` — {len(files)} file(s): {listing}")
             else:
                 lines.append(
-                    f"- `{mount}/` — {len(files)} file(s) {label} "
+                    f"- `{mount}/` — {len(files)} file(s) "
                     "(listing omitted — prompt budget; older round)"
                 )
     if not lines:
@@ -374,15 +359,11 @@ def render_artifacts_note(
     return (
         "## Rendered-page artifacts\n"
         "\n"
-        "Gate checks captured rendered output — screenshots of the "
-        "application's actual pages. Each directory below is labelled with "
-        "the commit it was captured from: only entries marked CURRENT were "
-        "rendered from the tree under review; PRIOR entries are earlier "
-        "rounds' output, kept for before/after comparison. **Open and look "
-        "at these image files** (they are readable in-container at the paths "
-        "below) and evaluate the rendered result alongside the diff: layout "
-        "and hierarchy at each width, interaction and degraded states, "
-        "obvious visual breakage. Artifacts from a RED e2e check show the "
-        "failing state.\n"
+        "Gate checks captured rendered output from this run — screenshots of "
+        "the application's actual pages. **Open and look at these image files** "
+        "(they are readable in-container at the paths below) and evaluate the "
+        "rendered result alongside the diff: layout and hierarchy at each "
+        "width, interaction and degraded states, obvious visual breakage. "
+        "Artifacts from a RED e2e check show the failing state.\n"
         "\n" + "\n".join(lines) + "\n"
     )

@@ -1980,43 +1980,24 @@ def _seed_snapshot(
         )
 
 
-def test_render_artifacts_note_labels_current_and_prior(tmp_path: Path) -> None:
-    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
-    _seed_snapshot(cfg, "round_01", sha="a" * 40)
-    _seed_snapshot(cfg, "round_02", sha="b" * 40)
-
-    note = check_runner.check_artifacts.render_artifacts_note(cfg, current_sha="b" * 40)
-
-    assert f"[CURRENT — captured from commit {'b' * 12}, the tree under review]" in note
-    assert f"[PRIOR — captured from commit {'a' * 12}" in note
-    assert "NOT evidence about the current tree" in note
-    # the manifest itself is plumbing, not a reviewable artifact
-    assert ".capture.json" not in note
-    assert "1 file(s)" in note  # counts exclude the manifest
-
-
-def test_render_artifacts_note_labels_missing_manifest_unknown(
+def test_render_artifacts_note_excludes_manifest_and_keeps_surface(
     tmp_path: Path,
 ) -> None:
-    cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
-    _seed_snapshot(cfg, "round_01", sha=None)
-
-    note = check_runner.check_artifacts.render_artifacts_note(cfg, current_sha="b" * 40)
-
-    assert "[UNKNOWN provenance — do not treat as current]" in note
-
-
-def test_render_artifacts_note_without_current_sha_names_commit_only(
-    tmp_path: Path,
-) -> None:
+    # PR #340 split: the note's reviewer-visible surface stays byte-identical
+    # to the pre-manifest rendering (CURRENT/PRIOR labels were measured at
+    # 5/8 pooled catch vs the shipped prompt's 9/10 and deferred to their own
+    # lever). The manifest is plumbing: never listed, never counted — so the
+    # only trace of provenance in the prompt is the guard's behaviour, not
+    # its data.
     cfg = _config(tmp_path / "run", artifacts_path="e2e/artifacts")
     _seed_snapshot(cfg, "round_01", sha="a" * 40)
 
     note = check_runner.check_artifacts.render_artifacts_note(cfg)
 
-    assert f"[captured from commit {'a' * 12}]" in note
-    # the header explains the label vocabulary; no LINE judges current/prior
-    assert "[CURRENT" not in note and "[PRIOR" not in note
+    assert ".capture.json" not in note
+    assert "1 file(s)" in note  # counts exclude the manifest
+    assert "[CURRENT" not in note and "[PRIOR" not in note and "UNKNOWN" not in note
+    assert "captured rendered output from this run" in note
 
 
 def test_capture_freshness_classification(tmp_path: Path) -> None:

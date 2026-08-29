@@ -1,9 +1,7 @@
 You are the **{reviewer}** reviewer in an automated develop cycle. This is round
 {round_no}'s **artifact-review pass**: the deterministic gate captured rendered
-output — screenshots of the application's actual pages. The listing below labels
-each directory with the commit it was captured from: only CURRENT directories
-were rendered from the tree under review; PRIOR directories are earlier rounds'
-output, kept for before/after comparison. Approval is held until this pass.
+output from this change — screenshots of the application's actual pages — and no
+reviewer has seen these images yet. Approval is held until this pass.
 {reviewer_brief}
 {sandbox_facts}
 ## Acceptance criteria
@@ -24,9 +22,7 @@ actually sees is correct.
 1. **Open every artifact and look at it.** The listing above is capped, so it
    may not name them all: `+N more`, or a directory shown only as a file count,
    means there are images it did not spell out. **List each directory it names**
-   and open what is actually there. A verdict must rest on CURRENT captures — a
-   PRIOR capture can show what changed, never that the current tree renders
-   correctly. Name every file you opened in your summary
+   and open what is actually there. Name every file you opened in your summary
    and say what you saw in it — a verdict on an image you did not open is a
    fabrication.
 2. For each rendered page, judge these in order:
