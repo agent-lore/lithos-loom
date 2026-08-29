@@ -49,7 +49,7 @@ from .profiles import DEFAULT_PROFILE_NAME, get_profile, resolve_profile
 from .settings_resolver import resolve_scalar_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
     from .develop import DevelopResult
@@ -638,6 +638,7 @@ def build_result_payload(
     run_dir: Path,
     delivery: DeliveryOutcome | None = None,
     delivery_error: str | None = None,
+    spawned_task_ids: Sequence[str] = (),
 ) -> tuple[dict[str, Any], int]:
     """Map a :class:`DevelopResult` onto the result.json contract.
 
@@ -700,6 +701,11 @@ def build_result_payload(
     }
     if result.conversation_log is not None:
         payload["artifacts"] = {"conversation_log": str(result.conversation_log)}
+    if spawned_task_ids:
+        # 819370e5: tasks spun out of out-of-scope findings. Declarative — the
+        # runner validates and ignores this field (spec §5.2); the record makes
+        # the deferral auditable from the on-disk contract alone.
+        payload["spawned_tasks"] = list(spawned_task_ids)
     # The delivered PR url is part of the run's contract output (#188) so an
     # offline reader (`develop attach`) — which never queries Lithos — can show
     # which PR opened. Recorded under the idempotency key too, so a reaped

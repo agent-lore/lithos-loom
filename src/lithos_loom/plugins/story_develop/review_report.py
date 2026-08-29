@@ -22,6 +22,16 @@ class ReviewFinding:
     files: list[str] = field(default_factory=list)
     rationale: str = ""
     finding_id: str = ""
+    # Lifecycle status at report time (819370e5). Additive to the contract:
+    # reports predating it carry no key, and consumers default to "open".
+    # `out-of-scope` findings are excluded from eval catch-matching
+    # (match.actionable_findings) — a deferral is an escape, not a catch.
+    status: str = "open"
+    # WHY an out-of-scope finding was deferred (819370e5, PR #342 re-review).
+    # `rationale` keeps describing the defect; this surface spawns no
+    # follow-up task, so losing either text would make the manual-filing
+    # instruction in `to_markdown` impossible to follow.
+    deferral_reason: str = ""
 
     def to_json(self) -> dict:
         return {
@@ -30,6 +40,8 @@ class ReviewFinding:
             "files": list(self.files),
             "rationale": self.rationale,
             "finding_id": self.finding_id,
+            "status": self.status,
+            "deferral_reason": self.deferral_reason,
         }
 
 
@@ -102,6 +114,20 @@ class ReviewReport:
             f"profile **{self.profile}** · **{verdict}**",
             "",
         ]
+        deferred = [
+            f for r in self.reviewers for f in r.findings if f.status == "out-of-scope"
+        ]
+        if deferred:
+            # 819370e5 (PR #342 review): a deferral is non-blocking, so
+            # without this a "clean" verdict would hide it — and this surface
+            # spawns no follow-up task, so an unnoticed deferral is LOST.
+            lines.append(
+                f"⚠ {len(deferred)} finding(s) deferred as **out-of-scope** — "
+                "real, but judged not this change's to fix. No follow-up task "
+                "is spawned on this surface: file them manually or they are "
+                "lost. Marked `[deferred]` below."
+            )
+            lines.append("")
         for reviewer in self.reviewers:
             mark = "PASS" if reviewer.passed else "FAIL"
             lines.append(f"## {reviewer.name} — {reviewer.status} ({mark})")
@@ -114,7 +140,15 @@ class ReviewReport:
             for f in reviewer.findings:
                 where = ", ".join(f.files) if f.files else "—"
                 fid = f"{f.finding_id} " if f.finding_id else ""
-                lines.append(f"- {fid}**[{f.severity}]** ({where}) {f.rationale}")
+                mark = "" if f.status == "open" else f" `[{f.status}]`"
+                why = (
+                    f" — deferred because: {f.deferral_reason}"
+                    if f.deferral_reason
+                    else ""
+                )
+                lines.append(
+                    f"- {fid}**[{f.severity}]**{mark} ({where}) {f.rationale}{why}"
+                )
             lines.append("")
         if self.gate:
             lines.append("## Gate")

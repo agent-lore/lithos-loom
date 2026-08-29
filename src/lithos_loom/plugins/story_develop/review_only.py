@@ -298,6 +298,8 @@ def _build_report(
                 files=list(f.files),
                 rationale=f.rationale,
                 finding_id=f.finding_id,
+                status=f.status,
+                deferral_reason=f.deferral_reason,
             )
             for f in outcome.findings
         ]

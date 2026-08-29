@@ -42,7 +42,7 @@ from .agent_session import (
 )
 from .check_set import CheckSetResult, render_check_summary
 from .config import DevelopConfig
-from .findings import FindingLedger
+from .findings import FindingLedger, reviewer_validator
 from .gate_findings import GateLedger
 from .handoff import (
     Finding,
@@ -470,6 +470,9 @@ def _run_reviewer_with_reaction(
     calls ``containers.*`` directly (ARCH-1.S5).
     """
     name = rstate.spec.name
+    validate = reviewer_validator(
+        rstate.ledger, findings_are_new=skip_lifecycle_validation
+    )
     review, rev_failed, rstate.session = _review_turn(
         config,
         services=services,
@@ -486,7 +489,7 @@ def _run_reviewer_with_reaction(
         # usage-limit tool switch, spec.model is another provider's id.
         model=active_model(rstate.spec, rstate.engine_now.name, config.default_models),
         effort=rstate.spec.effort,
-        validate=(None if skip_lifecycle_validation else rstate.ledger.check),
+        validate=validate,
         # PR #291 re-review (High): the override MUST reach the initial turn
         # too — reading the round's stale regular LGTM here while the reviewer
         # wrote its visual verdict to the artifact file silently defeated the
@@ -572,7 +575,7 @@ def _run_reviewer_with_reaction(
                     rstate.spec, rstate.engine_now.name, config.default_models
                 ),
                 effort=rstate.spec.effort,
-                validate=(None if skip_lifecycle_validation else rstate.ledger.check),
+                validate=validate,
                 review_file=review_file,
             )
             cost += review.cost_usd
@@ -616,7 +619,7 @@ def _run_reviewer_with_reaction(
             engine=rstate.engine_now,
             model=rstate.spec.model,
             effort=rstate.spec.effort,
-            validate=(None if skip_lifecycle_validation else rstate.ledger.check),
+            validate=validate,
             review_file=review_file,
         )
         cost += review.cost_usd

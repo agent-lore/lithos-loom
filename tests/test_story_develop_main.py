@@ -1124,7 +1124,7 @@ def test_main_open_pr_passes_issue_link_to_delivery(
         captured["deliver_kwargs"] = kw
         return DeliveryOutcome(pr_url="https://github.com/o/r/pull/12", pr_number=12)
 
-    def fake_post(url, task_id, result, *, pr_url=None, delivery=None):
+    def fake_post(url, task_id, result, *, pr_url=None, delivery=None, **kw):
         captured["posted_pr_url"] = delivery.pr_url if delivery else pr_url
         return True
 

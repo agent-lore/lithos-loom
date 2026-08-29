@@ -40,6 +40,7 @@ from ...runner import git, worktree
 from . import review_only
 from .config import DevelopConfig
 from .develop import DevelopResult, develop
+from .findings import DeferredFinding
 from .pr_delivery import ForkPushUnsupported, MergeRaceDetected, push_to_pr_ref
 from .review_resolve import ResolvedChange
 from .rounds import LoopEntry
@@ -95,6 +96,27 @@ class ConvergeResult:
     pushed_sha: str = ""
     intake_cost_usd: float = 0.0
     message: str = ""
+    # 819370e5 (PR #342 review): out-of-scope findings the INTAKE panel filed.
+    # Converge has no Lithos source task, so nothing spawns — these must be
+    # surfaced or they are lost. Loop-phase deferrals live on
+    # ``develop_result.deferred_findings``; see :attr:`deferred_findings`.
+    intake_deferred: tuple[DeferredFinding, ...] = ()
+
+    @property
+    def deferred_findings(self) -> tuple[DeferredFinding, ...]:
+        """Every out-of-scope deferral this command produced (intake + loop).
+
+        Both halves are needed: intake outcomes never enter the fix loop's
+        ledgers, and an ``already_clean`` exit has no ``develop_result`` at
+        all. May contain near-duplicates when the loop's fresh panel re-defers
+        an intake finding — operator-visible, deliberately un-deduplicated.
+        """
+        loop = (
+            self.develop_result.deferred_findings
+            if self.develop_result is not None
+            else ()
+        )
+        return self.intake_deferred + loop
 
     @property
     def succeeded(self) -> bool:
@@ -110,7 +132,18 @@ class ConvergeResult:
     def to_json(self) -> dict:
         """Structured summary for ``--json`` / machine consumption."""
         dev = self.develop_result
+        deferred = [
+            {
+                "reviewer": f.reviewer,
+                "finding_id": f.finding_id,
+                "severity": f.severity,
+                "rationale": f.rationale,
+                "deferral_reason": f.deferral_reason,
+            }
+            for f in self.deferred_findings
+        ]
         return {
+            "deferred_findings": deferred,
             "status": self.status,
             "head_ref": self.change.head_ref,
             "head_branch": self.change.head_branch,
@@ -213,6 +246,26 @@ def converge_pr(
     )
     intake_cost = intake.panel.cost if intake.panel is not None else 0.0
 
+    # Extract deferrals BEFORE the incomplete/budget exits below (PR #342
+    # re-review P2): one reviewer can defer a finding before another fails,
+    # and a completed intake can exhaust the ceiling — either way the deferral
+    # already happened and must ride out on the ConvergeResult, or it is lost.
+    # getattr-tolerant: converge tests stub the intake panel loosely, and a
+    # stub without findings simply contributes no deferrals.
+    intake_deferred = tuple(
+        DeferredFinding(
+            reviewer=outcome.reviewer,
+            finding_id=f.finding_id,
+            severity=f.severity,
+            rationale=f.rationale,
+            files=tuple(f.files),
+            deferral_reason=getattr(f, "deferral_reason", ""),
+        )
+        for outcome in (intake.panel.round_reviews if intake.panel else [])
+        for f in getattr(outcome, "findings", ())
+        if f.status == "out-of-scope"
+    )
+
     if intake.incomplete:
         # The panel produced no usable review (interrupted / invalid / absent).
         # There is nothing trustworthy to seed the fix loop from — surface it as a
@@ -224,6 +277,7 @@ def converge_pr(
             status="failed",
             change=change,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message="intake review did not complete (interrupted / invalid panel) "
             "— cannot seed the fix loop",
         )
@@ -243,6 +297,7 @@ def converge_pr(
             status="failed",
             change=change,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message=f"intake review spent ${intake_cost:.2f}, meeting the --max-cost "
             f"${config.max_cost_usd:.2f} ceiling before the fix loop",
         )
@@ -255,6 +310,7 @@ def converge_pr(
             status="already_clean",
             change=change,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message="intake review is already clean — nothing to converge",
         )
 
@@ -300,6 +356,7 @@ def converge_pr(
             develop_result=result,
             fixer_commits=fixer_commits,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message=result.message,
         )
 
@@ -311,6 +368,7 @@ def converge_pr(
             develop_result=result,
             fixer_commits=fixer_commits,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message="converged — push skipped (--no-push)",
         )
     try:
@@ -327,6 +385,7 @@ def converge_pr(
             develop_result=result,
             fixer_commits=fixer_commits,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message=str(exc),
         )
     except ForkPushUnsupported as exc:  # defensive — forks are guarded pre-loop
@@ -336,6 +395,7 @@ def converge_pr(
             develop_result=result,
             fixer_commits=fixer_commits,
             intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
             message=str(exc),
         )
     logger.info(
@@ -352,5 +412,6 @@ def converge_pr(
         pushed=True,
         pushed_sha=pushed_sha,
         intake_cost_usd=intake_cost,
+        intake_deferred=intake_deferred,
         message=f"converged and pushed to {change.head_branch}",
     )

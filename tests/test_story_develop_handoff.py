@@ -8,6 +8,7 @@ import pytest
 
 from lithos_loom.plugins.story_develop.handoff import (
     HandoffError,
+    check_findings_as_new,
     parse_review_handoff,
     reviewer_handoff_name,
     severity_at_or_above,
@@ -230,3 +231,92 @@ def test_conversation_log_omits_absent_artifact_handoffs(tmp_path: Path) -> None
     log = h.conversation_log(d, 1, ["correctness"])
 
     assert "artifact pass" not in log
+
+
+# ── out-of-scope disposition (819370e5) ────────────────────────────────
+
+
+def test_out_of_scope_does_not_block() -> None:
+    # The escape's whole point: a REAL finding that is not this story's to fix
+    # is resolved — it never counts toward the reviewer's block threshold.
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: critical\n  status: out-of-scope\n"
+        "  deferral_reason: pre-existing on the base; filed as its own task\n"
+    )
+    h = parse_review_handoff(text)
+    assert h.max_open_severity is None
+    assert h.passes("minor") is True
+
+
+def test_out_of_scope_without_deferral_reason_is_rejected() -> None:
+    # The disposition is a licence to not-block; the stated WHY is its
+    # counterweight (819370e5's guardrail). It lives in its OWN key so it can
+    # never displace the defect description (PR #342 re-review P1). Missing ->
+    # malformed handoff -> the reviewer is re-prompted, same as an invalid
+    # status — even when a rationale is present (the why must not hide there).
+    bad = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: major\n  status: out-of-scope\n"
+        "  rationale: pre-existing on the base\n"
+    )
+    with pytest.raises(HandoffError, match="deferral_reason.*WHY"):
+        parse_review_handoff(bad)
+
+
+def test_new_out_of_scope_finding_without_rationale_is_rejected() -> None:
+    # PR #342 re-review P1: a FIRST-sighting deferral has no ledger entry to
+    # supply the defect text — without a rationale the spawned follow-up task
+    # would say only why it was deferred, never what is broken.
+    bad = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id:\n  severity: major\n  status: out-of-scope\n"
+        "  deferral_reason: pre-existing on the base\n"
+    )
+    with pytest.raises(HandoffError, match="NEW finding.*rationale"):
+        parse_review_handoff(bad)
+
+
+def test_check_findings_as_new_rejects_idd_out_of_scope_without_rationale() -> None:
+    # PR #342 re-review: the parse exempts an EXISTING id from the
+    # first-sighting rules (the ledger holds its defect text) — but the
+    # artifact pass remints every id, so a reviewer there can reuse a
+    # remembered f-001, supply only the why, pass parsing, and spawn a
+    # follow-up task with an empty defect description. check_findings_as_new
+    # closes that hole: on an all-findings-are-new surface the exemption
+    # never applies.
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-001\n  severity: major\n  status: out-of-scope\n"
+        "  deferral_reason: pre-existing on the base\n"
+    )
+    parsed = parse_review_handoff(text)  # the exemption lets this through
+    err = check_findings_as_new(parsed)
+    assert err is not None and "rationale" in err and "NEW" in err
+
+
+def test_check_findings_as_new_accepts_complete_deferrals_and_lgtm() -> None:
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-001\n  severity: major\n  status: out-of-scope\n"
+        "  rationale: Button text overlaps the icon\n"
+        "  deferral_reason: pre-existing on the base\n"
+        "- finding_id: f-002\n  severity: minor\n  status: open\n"
+        "  rationale: seam visible at tile boundary\n"
+    )
+    assert check_findings_as_new(parse_review_handoff(text)) is None
+    assert check_findings_as_new(parse_review_handoff(_LGTM)) is None
+
+
+def test_out_of_scope_parses_both_texts_separately() -> None:
+    # The two-key contract end-to-end: rationale carries WHAT, deferral_reason
+    # carries WHY, and neither displaces the other.
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id:\n  severity: major\n  status: out-of-scope\n"
+        "  rationale: Button text overlaps the icon\n"
+        "  deferral_reason: pre-existing on the base\n"
+    )
+    (f,) = parse_review_handoff(text).findings
+    assert f.rationale == "Button text overlaps the icon"
+    assert f.deferral_reason == "pre-existing on the base"

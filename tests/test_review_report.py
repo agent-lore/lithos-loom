@@ -56,8 +56,17 @@ def test_to_json_has_stable_keys() -> None:
     }
     assert data["blocking"] is True
     finding = data["reviewers"][0]["findings"][0]
-    assert set(finding) == {"reviewer", "severity", "files", "rationale", "finding_id"}
+    assert set(finding) == {
+        "reviewer",
+        "severity",
+        "files",
+        "rationale",
+        "finding_id",
+        "status",
+        "deferral_reason",
+    }
     assert finding["severity"] == "critical"
+    assert finding["status"] == "open"  # 819370e5: additive default
     assert data["gate"][0] == {"name": "lint", "outcome": "ran", "blocked": False}
 
 
@@ -108,3 +117,42 @@ def test_to_markdown_clean_report_reads_as_passed() -> None:
     assert "BLOCK" not in md.upper()
     # a non-blocking review communicates the all-clear
     assert "LGTM" in md or "PASS" in md.upper() or "APPROV" in md.upper()
+
+
+def test_to_markdown_surfaces_deferred_findings_loudly() -> None:
+    # PR #342 review P1: review-only/converge spawn nothing, so a deferral
+    # hidden behind a "clean" verdict would be LOST. The markdown must banner
+    # it and mark the finding's status.
+    report = _report(
+        blocking=False,
+        reviewers=[
+            ReviewerReport(
+                name="correctness",
+                status="FINDINGS",
+                passed=True,
+                findings=[
+                    ReviewFinding(
+                        reviewer="correctness",
+                        severity="major",
+                        files=["lens.css:20"],
+                        rationale="tiled background seams",
+                        finding_id="f-001",
+                        status="out-of-scope",
+                        deferral_reason="pre-existing on the base",
+                    )
+                ],
+            )
+        ],
+        gate=[],
+    )
+    md = report.to_markdown()
+    assert "✅ clean" in md  # still non-blocking — that is the point
+    assert "deferred as **out-of-scope**" in md
+    assert "file them manually" in md
+    assert "`[out-of-scope]`" in md
+    # PR #342 re-review P1: manual filing needs BOTH texts — the defect and
+    # the why — on the page, and in the machine-readable report.
+    assert "tiled background seams" in md
+    assert "deferred because: pre-existing on the base" in md
+    finding_json = report.to_json()["reviewers"][0]["findings"][0]
+    assert finding_json["deferral_reason"] == "pre-existing on the base"

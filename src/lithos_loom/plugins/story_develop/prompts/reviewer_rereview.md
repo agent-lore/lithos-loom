@@ -36,7 +36,9 @@ changed — and any points it disputes.
    - `git -C /workspace show HEAD` — the most recent commit.
 2. For each open finding above, decide its new status and include it **by its
    exact id** in your handoff: `fixed` / `accepted` (incl. accepting a coder
-   dispute) / still `open` / `superseded` / `merged`. Do not drop, renumber,
+   dispute) / still `open` / `superseded` / `merged` / `out-of-scope` (real,
+   but not this change's to fix — the rationale must say why; it is filed as
+   its own task instead of blocking). Do not drop, renumber,
    or invent ids — genuinely NEW findings get a blank `finding_id:` and the
    orchestrator assigns one.
    - Do **not** limit yourself to the open list. Re-scan the current change for
@@ -59,6 +61,12 @@ changed — and any points it disputes.
      `## Findings` block listing only the issues that remain open (plus any
      genuinely new ones), each with `severity:` (critical | major | minor),
      `status: open`, `files:`, and `rationale:`.
+   - A finding that is REAL but **not this change's to fix** — pre-existing on
+     the base, a harness or pipeline fault, another story's agreed work — gets
+     `status: out-of-scope`, keeping `rationale:` as the defect description
+     and stating why in `deferral_reason:`: it stops blocking and is filed as
+     its own task carrying both texts instead of being lost. Never use it for
+     a defect this diff introduced or touched.
 
 Record **every** remaining or new issue as a structured finding with an honest
 severity — do not pre-judge what should block. The orchestrator applies the

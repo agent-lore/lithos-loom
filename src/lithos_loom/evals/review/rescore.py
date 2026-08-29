@@ -33,10 +33,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ...plugins.story_develop.handoff import ALL_FINDING_STATES
 from ...plugins.story_develop.review_report import REVIEWER_STATUSES
 from .case import SEVERITIES, Case, expected_fingerprint
 from .harness import DEFAULT_BAR, CaseResult, aggregate_case, count_valid
-from .match import Judge, JudgeVerdict, RunScore, produced_findings, score_run
+from .match import Judge, JudgeVerdict, RunScore, actionable_findings, score_run
 
 _VARIANTS = ("buggy", "known-good")
 
@@ -226,6 +227,14 @@ def _validate_finding(where: str, finding: object) -> None:
         raise RescoreError(f"{where}.files is not a list of strings")
     if not isinstance(finding.get("finding_id", ""), str):
         raise RescoreError(f"{where}.finding_id is not a string")
+    status = finding.get("status", "open")
+    if not isinstance(status, str) or status.lower() not in ALL_FINDING_STATES:
+        # PR #342 review P2: actionable_findings keys catch-eligibility on
+        # this value — a malformed status (e.g. a list) would compare unequal
+        # to "out-of-scope" and silently credit a deferral as a catch in a
+        # PAID rescore. Optional for pre-status reports; canonical when
+        # present.
+        raise RescoreError(f"{where}.status is not a canonical finding status")
     severity = finding.get("severity", "minor")
     if not isinstance(severity, str) or severity.lower() not in SEVERITIES:
         raise RescoreError(
@@ -402,7 +411,7 @@ def judge_call_count(
     for case_reports in reports:
         n_expected = len(cases[case_reports.case_id].expected)
         for sample in case_reports.samples():
-            if produced_findings(sample.report):
+            if actionable_findings(sample.report):
                 total += n_expected * repeats
     return total
 
@@ -431,7 +440,7 @@ def _record_sites(
     """
     recorded: dict[tuple[str, int], list[list[JudgeVerdict]]] = {}
     for sample in reports.samples():
-        produced = produced_findings(sample.report)
+        produced = actionable_findings(sample.report)
         per_expected: list[list[JudgeVerdict]] = []
         for expected in case.expected:
             if not produced:
@@ -503,7 +512,7 @@ def rescore_case(
     recorded = _record_sites(case, reports, judge=judge, repeats=repeats)
     for sample in reports.samples():
         per_expected = recorded[(sample.variant, sample.index)]
-        produced = produced_findings(sample.report)
+        produced = actionable_findings(sample.report)
         ids = tuple(str(f.get("finding_id", "")) for f in produced)
         for idx, verdicts in enumerate(per_expected):
             sites.append(

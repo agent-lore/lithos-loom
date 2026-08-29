@@ -16,11 +16,18 @@ blocking feeds the dispute guard in :mod:`develop`.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
-from .handoff import Finding, ReviewHandoff, severity_at_or_above
+from .handoff import (
+    Finding,
+    ReviewHandoff,
+    check_findings_as_new,
+    severity_at_or_above,
+)
 
 # Open (= potentially blocking) states; mirrors handoff._OPEN_STATES.
+# (`out-of-scope` — 819370e5 — is a RESOLVED state: it never appears here.)
 _OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
 
 
@@ -38,6 +45,11 @@ class LedgerEntry:
     first_round: int = 0
     last_updated_round: int = 0
     coder_disputed: bool = False  # the coder pushed back (its handoff)
+    # 819370e5 (PR #342 review): WHY the reviewer deferred this out-of-scope,
+    # kept SEPARATE from `rationale` (what the defect is). The handoff carries
+    # it in its own mandatory `deferral_reason:` key, so the why can never
+    # overwrite the defect description the spawned task exists to carry.
+    deferral_reason: str = ""
     # consecutive rounds the reviewer kept this blocking AFTER the coder
     # disputed it; >= 2 triggers the dispute guard.
     blocked_while_disputed: int = 0
@@ -88,7 +100,8 @@ class FindingLedger:
             return (
                 f"these open finding ids were not accounted for: "
                 f"{', '.join(dropped)} — every open finding must appear with an "
-                "updated status (fixed / accepted / open / superseded / merged)"
+                "updated status (fixed / accepted / open / superseded / merged / "
+                "out-of-scope)"
             )
         return None
 
@@ -119,6 +132,7 @@ class FindingLedger:
                 status=f.status,
                 files=f.files,
                 rationale=f.rationale,
+                deferral_reason=f.deferral_reason,
                 first_round=round_no,
                 last_updated_round=round_no,
             )
@@ -131,6 +145,7 @@ class FindingLedger:
                     files=entry.files,
                     rationale=entry.rationale,
                     coder_response=entry.coder_response,
+                    deferral_reason=entry.deferral_reason,
                 )
             )
         return canonical
@@ -156,6 +171,12 @@ class FindingLedger:
                 entry.status = f.status
                 if f.files:
                     entry.files = f.files
+                # The parse guarantees an out-of-scope finding's WHY arrives
+                # in `deferral_reason` (PR #342 re-review P1), so `rationale`
+                # — when present — is always a defect-text update and can
+                # never clobber the description the spawned task carries.
+                if f.deferral_reason:
+                    entry.deferral_reason = f.deferral_reason
                 if f.rationale:
                     entry.rationale = f.rationale
                 entry.last_updated_round = round_no
@@ -169,6 +190,7 @@ class FindingLedger:
                     status=f.status,
                     files=f.files,
                     rationale=f.rationale,
+                    deferral_reason=f.deferral_reason,
                     first_round=round_no,
                     last_updated_round=round_no,
                 )
@@ -181,6 +203,7 @@ class FindingLedger:
                     files=entry.files,
                     rationale=entry.rationale,
                     coder_response=entry.coder_response,
+                    deferral_reason=entry.deferral_reason,
                 )
             )
         # Track dispute persistence: a coder-disputed entry the reviewer just
@@ -248,3 +271,63 @@ class FindingLedger:
             if e.coder_response:
                 lines.append(f"  coder response: {e.coder_response}")
         return "\n".join(lines)
+
+
+def reviewer_validator(
+    ledger: FindingLedger, *, findings_are_new: bool
+) -> Callable[[ReviewHandoff], str | None]:
+    """The lifecycle-validate callback for one reviewer turn.
+
+    A normal review is checked against the LEDGER (id accounting,
+    :meth:`FindingLedger.check`). An artifact pass sets *findings_are_new*:
+    it skips that check (#291 round 3 — it neither lists nor reassesses the
+    code review's open ids) but is NOT exempt from validation, because
+    :meth:`FindingLedger.apply_artifact_review` remints every id — each
+    finding must stand as a first sighting, which
+    :func:`~.handoff.check_findings_as_new` enforces (PR #342 re-review: an
+    out-of-scope finding reusing a remembered id must still describe the
+    defect it defers, or the spawned follow-up task has no defect text).
+    """
+    return check_findings_as_new if findings_are_new else ledger.check
+
+
+@dataclass(frozen=True)
+class DeferredFinding:
+    """A finding the reviewer marked ``out-of-scope`` (819370e5): real, but
+    not this story's to fix. Collected off the ledgers at run end and spun
+    out as its own Lithos task (``lithos_io.spawn_deferred_tasks``) so the
+    run can approve without the finding being lost."""
+
+    reviewer: str
+    finding_id: str
+    severity: str
+    rationale: str  # WHAT the defect is (the finding's original rationale)
+    files: tuple[str, ...] = ()
+    # WHY it was deferred. The parse mandates it for the out-of-scope status
+    # (PR #342 re-review P1), so it is only empty for entries predating the
+    # `deferral_reason:` handoff key.
+    deferral_reason: str = ""
+
+
+def collect_deferred(ledgers: Iterable[FindingLedger]) -> tuple[DeferredFinding, ...]:
+    """Every ``out-of-scope`` entry across the panel's ledgers, in stable
+    (reviewer, finding_id) order.
+
+    Read off the LEDGERS, not the final round's outcomes: a finding deferred
+    in round 3 does not appear in round 4's review outcome at all (an LGTM
+    round returns no findings), and ``_result_summary``'s open-findings
+    section filters on ``is_open`` — either would silently drop the record.
+    """
+    return tuple(
+        DeferredFinding(
+            reviewer=ledger.reviewer,
+            finding_id=entry.finding_id,
+            severity=entry.severity,
+            rationale=entry.rationale,
+            files=tuple(entry.files),
+            deferral_reason=entry.deferral_reason,
+        )
+        for ledger in ledgers
+        for entry in sorted(ledger.entries.values(), key=lambda e: e.finding_id)
+        if entry.status == "out-of-scope"
+    )

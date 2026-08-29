@@ -729,3 +729,23 @@ def test_fingerprint_ignores_what_the_scorer_never_reads() -> None:
     assert expected_fingerprint(base) == expected_fingerprint(
         replace(base, acceptance_criteria="totally different", personas=("security",))
     )
+
+
+def test_load_rejects_non_canonical_finding_status(tmp_path: Path) -> None:
+    # PR #342 review P2: actionable_findings keys catch-eligibility on the
+    # status value — a malformed one (e.g. a list) compares unequal to
+    # "out-of-scope" and would silently credit a deferral as a catch in a
+    # PAID rescore. Optional for pre-status reports; canonical when present.
+    ok = _finding()
+    ok["status"] = "out-of-scope"
+    load_report_dir(_dir(tmp_path, [_report([ok])]))  # canonical: accepted
+
+    bad = _finding()
+    bad["status"] = ["out-of-scope"]
+    with pytest.raises(RescoreError, match="status"):
+        load_report_dir(_dir(tmp_path / "b", [_report([bad])]))
+
+    bogus = _finding()
+    bogus["status"] = "bogus"
+    with pytest.raises(RescoreError, match="status"):
+        load_report_dir(_dir(tmp_path / "c", [_report([bogus])]))

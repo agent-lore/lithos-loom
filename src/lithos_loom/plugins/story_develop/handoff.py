@@ -26,9 +26,24 @@ _SEVERITIES = ("minor", "major", "critical")
 _SEVERITY_ORDER = {s: i for i, s in enumerate(_SEVERITIES)}
 
 # Finding lifecycle states (T7 enforces transitions; T2 only parses/validates).
+# `out-of-scope` (819370e5) is the reviewer's escape for a finding that is REAL
+# but not this story's to fix (pre-existing on the base, a harness/pipeline
+# fault, another story's agreed work): resolved — so it never blocks — and
+# spun out as its own Lithos task at run end (see lithos_io.spawn_deferred_tasks)
+# instead of burning the round budget. It REQUIRES a `deferral_reason` saying
+# why (the parse rejects it otherwise): the disposition is a licence to
+# not-block, and the stated why is its counterweight. The why lives in its OWN
+# key — never in `rationale`, which keeps describing WHAT the defect is — so
+# the spawned task always carries both texts (PR #342 re-review P1).
 _OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
-_RESOLVED_STATES = frozenset({"fixed", "accepted", "superseded", "merged"})
+_RESOLVED_STATES = frozenset(
+    {"fixed", "accepted", "superseded", "merged", "out-of-scope"}
+)
 _ALL_STATES = _OPEN_STATES | _RESOLVED_STATES
+# Public alias: the eval harness validates retained-report finding statuses
+# against the canonical set (PR #342 review P2) without reaching for the
+# private name.
+ALL_FINDING_STATES = _ALL_STATES
 
 
 def severity_at_or_above(severity: str, threshold: str) -> bool:
@@ -55,8 +70,12 @@ class Finding:
     severity: str  # critical | major | minor
     status: str  # open | fixed | accepted | disputed | needs-clarification | ...
     files: list[str] = field(default_factory=list)
-    rationale: str = ""
+    rationale: str = ""  # WHAT the defect is
     coder_response: str = ""
+    # WHY an out-of-scope finding is not this story's to fix (819370e5).
+    # A separate key — mandatory for that status — so the disposition text
+    # can never overwrite the defect description. Empty for other statuses.
+    deferral_reason: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -95,6 +114,30 @@ class ReviewHandoff:
         return top is None or not severity_at_or_above(top, threshold)
 
 
+def check_findings_as_new(parsed: ReviewHandoff) -> str | None:
+    """Lifecycle check for a review whose findings are ALL committed as new.
+
+    The artifact pass skips the ledger's id accounting (#291 round 3) and
+    ``apply_artifact_review`` remints every id it is handed — so an id the
+    reviewer carries over names NO existing entry, and the parse's
+    existing-id exemption from the first-sighting rules does not apply
+    (PR #342 re-review: an out-of-scope finding reusing a remembered id
+    would otherwise spawn a follow-up task with an empty defect
+    description). Same contract as ``FindingLedger.check``: ``None`` when
+    acceptable, else a correction message to re-prompt the reviewer with.
+    """
+    for idx, f in enumerate(parsed.findings, start=1):
+        if f.status == "out-of-scope" and not f.rationale.strip():
+            return (
+                f"finding {idx}: on this pass every finding is NEW (any "
+                "finding_id you carried over is ignored), so an out-of-scope "
+                "disposition must describe the defect itself in 'rationale:' "
+                "— 'deferral_reason:' holds only why it is not this story's "
+                "to fix"
+            )
+    return None
+
+
 # --- prompt + filename helpers ---------------------------------------------
 
 
@@ -127,6 +170,8 @@ def render_findings(findings: list[Finding]) -> str:
         lines.append(f"  files: {files}")
         if f.rationale:
             lines.append(f"  rationale: {f.rationale}")
+        if f.deferral_reason:
+            lines.append(f"  deferral_reason: {f.deferral_reason}")
     return "\n".join(lines)
 
 
@@ -351,6 +396,28 @@ def _parse_findings(block: str) -> list[Finding]:
                 f"finding {idx}: invalid status {status!r} "
                 f"(allowed: {', '.join(sorted(_ALL_STATES))})"
             )
+        if status == "out-of-scope":
+            if not raw.get("deferral_reason", "").strip():
+                raise HandoffError(
+                    f"finding {idx}: an out-of-scope disposition must carry a "
+                    "'deferral_reason:' stating WHY the finding is not this "
+                    "story's to fix — e.g. pre-existing on the base, a "
+                    "harness/pipeline fault, or another story's agreed work. "
+                    "Keep 'rationale:' describing WHAT the defect is."
+                )
+            is_new = not (raw.get("finding_id") or raw.get("id") or "").strip()
+            if is_new and not raw.get("rationale", "").strip():
+                # An existing id already has a defect description in the
+                # ledger; a first sighting has nowhere else to get one, and a
+                # deferral whose spawned task names only the why is
+                # unactionable (PR #342 re-review P1).
+                raise HandoffError(
+                    f"finding {idx}: a NEW finding deferred as out-of-scope "
+                    "must still describe the defect itself in 'rationale:' — "
+                    "that text is what the spawned follow-up task carries; "
+                    "'deferral_reason:' holds only why it is not this "
+                    "story's to fix"
+                )
         findings.append(
             Finding(
                 finding_id=(raw.get("finding_id") or raw.get("id") or "").strip(),
@@ -359,6 +426,7 @@ def _parse_findings(block: str) -> list[Finding]:
                 files=_split_files(raw.get("files", "")),
                 rationale=raw.get("rationale", ""),
                 coder_response=raw.get("coder_response", ""),
+                deferral_reason=raw.get("deferral_reason", ""),
             )
         )
     return findings

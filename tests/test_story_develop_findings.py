@@ -130,3 +130,163 @@ def test_render_open_lists_ids_and_context() -> None:
     assert "why it matters" in text
     assert "coder response: nope" in text
     assert FindingLedger("x").render_open() == "(none)"
+
+
+# ── out-of-scope disposition (819370e5) ────────────────────────────────
+
+
+def test_out_of_scope_resolves_in_the_ledger() -> None:
+    # Reviewer defers an open finding: it leaves the blocking signature (so
+    # the stall guard sees progress) and open_entries, like any resolved state.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(severity="major")), round_no=1)
+    assert ledger.blocking_signature("major")
+
+    deferred = ReviewHandoff(
+        status="FINDINGS",
+        summary="s",
+        findings=[
+            Finding(
+                finding_id="f-001",
+                severity="major",
+                status="out-of-scope",
+                deferral_reason="pre-existing on the base",
+            )
+        ],
+    )
+    assert ledger.check(deferred) is None  # accounts for the open id
+    ledger.apply_review(deferred, round_no=2)
+    assert ledger.blocking_signature("major") == frozenset()
+    assert ledger.open_entries() == []
+    assert ledger.entries["f-001"].status == "out-of-scope"
+
+
+def test_coder_cannot_defer_a_finding_out_of_scope() -> None:
+    # The disposition is reviewer-owned (819370e5): the coder's handoff cannot
+    # move a reviewer-owned status, so a coder claiming "out of scope" changes
+    # nothing about blocking — its route is the dispute flag, as before.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(severity="major")), round_no=1)
+
+    coder_says = [
+        Finding(
+            finding_id="f-001",
+            severity="major",
+            status="out-of-scope",
+            rationale="coder thinks it is not its problem",
+        )
+    ]
+    ledger.record_coder_updates(coder_says, round_no=2)
+    assert ledger.entries["f-001"].status == "open"  # unchanged
+    assert ledger.blocking_signature("major")  # still blocks
+
+
+def test_collect_deferred_survives_a_later_lgtm_round() -> None:
+    # The reason collection reads the LEDGERS: a finding deferred in round 2
+    # produces no trace in round 3's LGTM outcome, and the summary's
+    # open-findings section filters on is_open — either view would lose it.
+    from lithos_loom.plugins.story_develop.findings import collect_deferred
+
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(severity="major")), round_no=1)
+    ledger.apply_review(
+        _review(
+            _f(
+                fid="f-001",
+                severity="major",
+                status="out-of-scope",
+                deferral_reason="harness fault",
+            )
+        ),
+        round_no=2,
+    )
+    ledger.apply_review(_review(lgtm=True), round_no=3)
+
+    deferred = collect_deferred([ledger])
+    assert len(deferred) == 1
+    assert deferred[0].finding_id == "f-001"
+    assert deferred[0].deferral_reason == "harness fault"
+    assert deferred[0].reviewer == "correctness"
+
+
+def test_deferral_preserves_the_defect_description() -> None:
+    # PR #342 review P1: the (mandatory) disposition text must not overwrite
+    # what the defect IS — the spawned task needs both texts. The why arrives
+    # in its own `deferral_reason` key (the parse mandates it), so a deferral
+    # that names no new rationale leaves the round-1 defect text untouched.
+    from lithos_loom.plugins.story_develop.findings import collect_deferred
+
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(
+        _review(_f(severity="major", rationale="Button text overlaps the icon")),
+        round_no=1,
+    )
+    ledger.apply_review(
+        _review(
+            _f(
+                fid="f-001",
+                severity="major",
+                status="out-of-scope",
+                deferral_reason="pre-existing on the base",
+            )
+        ),
+        round_no=2,
+    )
+
+    d = collect_deferred([ledger])[0]
+    assert d.rationale == "Button text overlaps the icon"
+    assert d.deferral_reason == "pre-existing on the base"
+
+
+def test_direct_out_of_scope_filing_preserves_both_texts() -> None:
+    # PR #342 re-review P1: a NEW finding filed directly as out-of-scope (the
+    # common shape — a pre-existing defect first noticed mid-review) carries
+    # the defect in `rationale` and the why in `deferral_reason`; the ledger
+    # must keep them separate all the way to the spawned task.
+    from lithos_loom.plugins.story_develop.findings import collect_deferred
+
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(
+        _review(
+            _f(
+                severity="major",
+                status="out-of-scope",
+                rationale="Button text overlaps the icon",
+                deferral_reason="pre-existing on the base",
+            )
+        ),
+        round_no=1,
+    )
+
+    assert ledger.blocking_signature("major") == frozenset()
+    d = collect_deferred([ledger])[0]
+    assert d.rationale == "Button text overlaps the icon"
+    assert d.deferral_reason == "pre-existing on the base"
+
+
+def test_reviewer_validator_selects_first_sighting_rules_for_artifact_pass() -> None:
+    # PR #342 re-review: apply_artifact_review remints every id, so the
+    # artifact pass must not inherit the parse's existing-id exemption —
+    # skipping the LEDGER check swaps in check_findings_as_new (every finding
+    # validated as a first sighting), never no-validation. Without it an
+    # artifact reviewer reusing a remembered id could defer out-of-scope with
+    # an empty defect description.
+    from lithos_loom.plugins.story_develop.findings import reviewer_validator
+    from lithos_loom.plugins.story_develop.handoff import check_findings_as_new
+
+    ledger = FindingLedger("correctness")
+    assert reviewer_validator(ledger, findings_are_new=True) is check_findings_as_new
+    assert reviewer_validator(ledger, findings_are_new=False) == ledger.check
+
+    # The artifact-mode callback rejects the reproduced escape: an id'd
+    # out-of-scope finding carrying only the why.
+    bad = _review(
+        _f(
+            fid="f-001",
+            severity="major",
+            status="out-of-scope",
+            deferral_reason="pre-existing on the base",
+        )
+    )
+    err = reviewer_validator(ledger, findings_are_new=True)(bad)
+    assert err is not None and "rationale" in err

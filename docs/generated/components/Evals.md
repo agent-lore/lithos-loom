@@ -20,7 +20,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.cli_rescore` | M | 0 | 1 |
 | `lithos_loom.evals.review.harness` | M | 1 | 4 |
 | `lithos_loom.evals.review.judge` | S | 1 | 1 |
-| `lithos_loom.evals.review.match` | S | 3 | 8 |
+| `lithos_loom.evals.review.match` | M | 3 | 9 |
 | `lithos_loom.evals.review.overrides` | S | 0 | 2 |
 | `lithos_loom.evals.review.patch` | S | 0 | 1 |
 | `lithos_loom.evals.review.report` | S | 0 | 12 |
@@ -70,6 +70,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - class `RunScore` — Score for one review run against a case (all expecteds must match).
 - def `match_expected` — Match one *expected* defect against the *produced* findings.
 - def `produced_findings` — Flatten every reviewer's findings out of a ReviewReport JSON.
+- def `actionable_findings` — :func:`produced_findings` minus ``out-of-scope`` deferrals (819370e5).
 - def `review_incomplete` — Whether any reviewer's turn did not produce a verdict (#182 A3).
 - def `finding_count` — How many findings the run produced, across every reviewer (#310).
 - def `review_blocked` — Whether the run **held approval** — the report's own blocking rule (#310).

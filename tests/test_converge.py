@@ -366,6 +366,68 @@ def test_already_clean_intake_exhausting_budget_is_failed_not_clean(
     assert result.intake_cost_usd == 6.0
 
 
+def _deferring_panel(cost: float) -> SimpleNamespace:
+    """An intake panel whose one review deferred a finding out-of-scope."""
+    finding = SimpleNamespace(
+        finding_id="f-001",
+        severity="major",
+        status="out-of-scope",
+        rationale="Button text overlaps the icon",
+        files=["ui.py:10"],
+        deferral_reason="pre-existing on the base",
+    )
+    outcome = SimpleNamespace(reviewer="correctness", findings=[finding])
+    return SimpleNamespace(round_reviews=[outcome], cost=cost)
+
+
+def test_incomplete_intake_still_carries_deferrals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #342 re-review P2: one reviewer can defer a finding before another
+    fails the intake — the deferral already happened, and the `failed` exit
+    must surface it or it is lost (converge spawns no follow-up tasks)."""
+    _install(
+        monkeypatch,
+        blocking=True,
+        incomplete=True,
+        panel=_deferring_panel(0.4),
+        intake_cost=0.4,
+    )
+    result = converge_pr(_config(tmp_path), _change())
+    assert result.status == "failed"
+    (d,) = result.deferred_findings
+    assert d.reviewer == "correctness"
+    assert d.rationale == "Button text overlaps the icon"
+    assert d.deferral_reason == "pre-existing on the base"
+
+
+def test_budget_exhausted_intake_still_carries_deferrals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #342 re-review P2: a COMPLETED intake that exhausts --max-cost exits
+    `failed` — but its review happened in full, deferrals included."""
+    _install(monkeypatch, blocking=True, panel=_deferring_panel(6.0), intake_cost=6.0)
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=5.0)
+    result = converge_pr(config, _change())
+    assert result.status == "failed"
+    (d,) = result.deferred_findings
+    assert d.finding_id == "f-001"
+    assert d.deferral_reason == "pre-existing on the base"
+
+
+def test_already_clean_intake_carries_deferrals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A deferral is exactly what can make a blocking finding non-blocking —
+    the `already_clean` short-circuit must still report it."""
+    _install(monkeypatch, blocking=False, panel=_deferring_panel(0.4), intake_cost=0.4)
+    result = converge_pr(_config(tmp_path), _change())
+    assert result.status == "already_clean"
+    (d,) = result.deferred_findings
+    assert d.rationale == "Button text overlaps the icon"
+    assert d.deferral_reason == "pre-existing on the base"
+
+
 def test_converge_pr_rejects_invalid_numeric_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -430,6 +492,7 @@ def test_converge_result_json_round_trips_the_documented_shape(
     # actually serialise (the old test never called json.dumps) and pin the shape
     data = json.loads(json.dumps(result.to_json()))
     assert data == {
+        "deferred_findings": [],  # 819370e5: out-of-scope deferrals (none here)
         "status": "converged",
         "head_ref": "#142 (feature)",
         "head_branch": "feature",
