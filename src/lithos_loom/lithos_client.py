@@ -162,6 +162,11 @@ class Task:
     created_at: datetime | None = None
     outcome: str | None = None
     task_type: str = "task"
+    # Server-side last-modified stamp (lithos#415): bumped by any mutation
+    # (task_update, cancel/complete) but NOT by finding_post or claim/release
+    # (measured 2026-08-29). ``None`` on a pre-#415 server that omits it —
+    # consumers (the failed-retry guard, #339) must fall back, not fail.
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -363,7 +368,7 @@ class TaskClient(Protocol):
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None: ...
+    ) -> datetime | None: ...
 
     async def task_complete(
         self, *, task_id: str, agent: str | None = None
@@ -1253,7 +1258,7 @@ class LithosClient:
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> datetime | None:
         """Update mutable task fields.
 
         At least one of ``title`` / ``description`` / ``tags`` /
@@ -1266,6 +1271,12 @@ class LithosClient:
         passes through to Lithos as a no-op; if you want to skip
         sending metadata at all, leave the kwarg at its default
         ``None``.
+
+        Returns the task's new ``updated_at`` from the response
+        (lithos#415) — the authoritative stamp of THIS write, which the
+        failed-retry guard (#339) records because the marker it just
+        wrote cannot contain the stamp its own write created. ``None``
+        on a pre-#415 server.
         """
         if title is None and description is None and tags is None and metadata is None:
             raise LithosClientError(
@@ -1284,7 +1295,10 @@ class LithosClient:
             arguments["tags"] = tags
         if metadata is not None:
             arguments["metadata"] = metadata
-        await self._call("lithos_task_update", arguments)
+        payload = await self._call("lithos_task_update", arguments)
+        if isinstance(payload, dict):
+            return _parse_iso_datetime(payload.get("updated_at"))
+        return None
 
     async def task_status(self, *, task_id: str) -> Task | None:
         """Return the full record of a single task, including its
@@ -1813,6 +1827,7 @@ def _parse_task(raw: Any) -> Task:
             created_at=_parse_iso_datetime(raw.get("created_at")),
             outcome=str(outcome_raw) if outcome_raw is not None else None,
             task_type=str(raw.get("task_type") or "task"),
+            updated_at=_parse_iso_datetime(raw.get("updated_at")),
         )
     except KeyError as exc:
         raise LithosClientError(

@@ -622,5 +622,12 @@ def _event_payload(task: Task) -> Mapping[str, Any]:
             ),
             "description": task.description,
             "task_type": task.task_type,
+            # lithos#415 / #339: the server's last-modified stamp. The
+            # failed-retry guard compares a bootstrap payload's stamp against
+            # the one recorded at failure time — exact edited-since detection
+            # where the fingerprint is blind. None on a pre-#415 server.
+            "updated_at": (
+                task.updated_at.isoformat() if task.updated_at is not None else None
+            ),
         }
     )
