@@ -340,3 +340,98 @@ async def test_reconcile_still_open_skips_ingestion_by_default() -> None:
 
     assert outcome == "still_open"
     github.list_pull_request_reviews.assert_not_called()
+
+
+# ── remediation wiring (slice C — detail in test_external_remediation) ──
+
+
+def _remediation(tmp_path, *, budget: int = 2, spawn=None):
+    from lithos_loom.subscriptions.external_remediation import (
+        ExternalRemediation,
+        RemediationSettings,
+    )
+
+    async def _no_spawn(cmd):  # pragma: no cover — dispatch not expected
+        raise AssertionError("spawn must not be called")
+
+    return ExternalRemediation(
+        RemediationSettings(
+            trusted_bots=("copilot-pull-request-reviewer[bot]",),
+            budget=budget,
+            projects={"p": tmp_path / "repo"},
+            work_dir=tmp_path / "work",
+        ),
+        spawn=spawn if spawn is not None else _no_spawn,
+    )
+
+
+async def test_reconcile_still_open_dispatches_remediation(tmp_path) -> None:
+    """The full still-open chain: head observed, batch ingested, converge
+    dispatched, budget incremented on the gate."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from lithos_loom.subscriptions.external_remediation import REMEDIATION_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_open_pr())
+    github.get_collaborator_permission.return_value = "write"  # trusted human
+
+    calls: list[list[str]] = []
+
+    async def spawn(cmd):
+        calls.append(cmd)
+        path = _Path(cmd[cmd.index("--json") + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({"status": "triage_rejected", "pushed": False}))
+        return 0, ""
+
+    rem = _remediation(tmp_path, spawn=spawn)
+    outcome = await reconcile_pr_gate(
+        gate, github, _ctx(client), ingest_reviews=True, remediation=rem
+    )
+
+    assert outcome == "still_open"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 1
+    marker = (await _get(client, gate.id)).metadata[REMEDIATION_KEY]
+    assert marker["rounds_used"] == 1
+    assert marker["last_seen_head_sha"] == "e" * 40  # observed pre-ingest
+
+
+async def test_reconcile_exhausted_budget_states_it_in_the_finding(
+    tmp_path,
+) -> None:
+    """Exhaustion stops dispatch, never detection — and the operator reads it
+    off the [ExternalReview] finding itself."""
+    from lithos_loom.subscriptions.external_remediation import REMEDIATION_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": _PR_URL,
+                "rounds_used": 2,
+                "last_loom_pushed_sha": "",
+                "last_seen_head_sha": "e" * 40,
+            }
+        },
+    )
+    gate = await _get(client, gate.id)
+    github = _review_github(_open_pr())
+    rem = _remediation(tmp_path, budget=2)
+
+    outcome = await reconcile_pr_gate(
+        gate, github, _ctx(client), ingest_reviews=True, remediation=rem
+    )
+
+    assert outcome == "still_open"
+    findings = [f["summary"] for f in client._findings]
+    (finding,) = findings
+    assert finding.startswith("[ExternalReview]")
+    assert "remediation budget exhausted" in finding
+    assert rem._task is None  # nothing dispatched

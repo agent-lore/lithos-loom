@@ -1,0 +1,552 @@
+"""Tests for ``lithos_loom.subscriptions.external_remediation`` (PRD S2
+slice C: autonomous dispatch + the S5b budget).
+
+The github-watcher sweep, having posted an ``[ExternalReview]`` batch, may
+dispatch ``develop converge --from-github`` as a subprocess — bounded by the
+S5b budget on the gate. The load-bearing properties, pinned hardest here:
+
+- **The budget never resets on a loom-authored push** (the two-bot ping-pong
+  S5b exists to bound) and **resets on a human push** (head moved to a sha
+  loom didn't push — the operator took ownership).
+- **One in-flight remediation globally**; detection is never paused, dispatch
+  is deferred to a later sweep.
+- **Exhaustion stops dispatch, never detection**, and is stated in the
+  finding body (rendered by the ingestion module; the note text is minted
+  here).
+- Only **trusted** authors' material dispatches, and material at loom's own
+  pushed sha is reported-not-remediated (own-sha skip).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
+from lithos_loom.gates import create_pr_gate, parse_pr_gate
+from lithos_loom.github_client import PullRequestReview, PullRequestReviewComment
+from lithos_loom.subscriptions import SubscriptionContext
+from lithos_loom.subscriptions.external_remediation import (
+    REMEDIATION_KEY,
+    ExternalRemediation,
+    RemediationBudget,
+    RemediationSettings,
+    read_budget,
+)
+from lithos_loom.subscriptions.external_reviews import IngestResult
+from tests.support import FakeLithosClient
+
+_PR_URL = "https://github.com/agent-lore/lithos-lens/pull/62"
+_REPO = "agent-lore/lithos-lens"
+_HEAD = "h" * 40
+_LOOM_SHA = "a1" * 20
+_BOT = "copilot-pull-request-reviewer[bot]"
+
+
+def _ctx(lithos: Any) -> SubscriptionContext:
+    return SubscriptionContext(
+        lithos=lithos,
+        logger=logging.getLogger("test-external-remediation"),
+        agent_id="lithos-loom-agent",
+    )
+
+
+async def _gate_with_story(
+    client: FakeLithosClient, *, project: str | None = "p"
+) -> tuple[str, Any]:
+    story = await client.task_create(title="US7", metadata={"project": "p"})
+    gate_id = await create_pr_gate(
+        client,
+        story_id=story,
+        story_title="US7",
+        pr_url=_PR_URL,
+        project=project,
+        agent="a",
+    )
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None
+    return story, gate
+
+
+def _settings(tmp_path: Path, **overrides: Any) -> RemediationSettings:
+    defaults: dict[str, Any] = {
+        "trusted_bots": (_BOT,),
+        "budget": 2,
+        "projects": {"p": tmp_path / "repo"},
+        "work_dir": tmp_path / "work",
+    }
+    defaults.update(overrides)
+    return RemediationSettings(**defaults)
+
+
+def _review(
+    review_id: int = 500,
+    *,
+    author: str = _BOT,
+    commit_id: str = _HEAD,
+) -> PullRequestReview:
+    return PullRequestReview(
+        author=author,
+        body="two problems",
+        review_id=review_id,
+        state="CHANGES_REQUESTED",
+        commit_id=commit_id,
+    )
+
+
+def _comment(
+    comment_id: int = 7,
+    *,
+    author: str = "reviewer-human",
+    commit_id: str = _HEAD,
+) -> PullRequestReviewComment:
+    return PullRequestReviewComment(
+        comment_id=comment_id,
+        author=author,
+        path="src/x.py",
+        line=12,
+        body="leaks a handle",
+        in_reply_to_id=None,
+        commit_id=commit_id,
+    )
+
+
+def _ingest(**kw: Any) -> IngestResult:
+    defaults: dict[str, Any] = {
+        "posted": True,
+        "actionable_reviews": [_review()],
+        "actionable_comments": [],
+    }
+    defaults.update(kw)
+    return IngestResult(**defaults)
+
+
+def _github(permission: str = "write") -> AsyncMock:
+    github = AsyncMock()
+    github.get_collaborator_permission.return_value = permission
+    return github
+
+
+def _spawner(payload: dict | None, rc: int = 0) -> tuple[Any, list[list[str]]]:
+    """A fake spawn: records the argv, optionally writes the --json payload."""
+    calls: list[list[str]] = []
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        calls.append(cmd)
+        if payload is not None:
+            path = Path(cmd[cmd.index("--json") + 1])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        return rc, "converge output"
+
+    return spawn, calls
+
+
+def _pr(head_sha: str = _HEAD) -> SimpleNamespace:
+    return SimpleNamespace(head_sha=head_sha)
+
+
+async def _marker(client: FakeLithosClient, gate_id: str) -> Any:
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None
+    return gate.metadata.get(REMEDIATION_KEY)
+
+
+def _findings(client: FakeLithosClient) -> list[str]:
+    return [f["summary"] for f in client._findings]
+
+
+# ── the budget marker ──────────────────────────────────────────────────
+
+
+def test_read_budget_fresh_and_url_scoped() -> None:
+    gate = SimpleNamespace(
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": "https://example/other/1",
+                "rounds_used": 2,
+                "last_loom_pushed_sha": "x",
+                "last_seen_head_sha": "y",
+            }
+        }
+    )
+    # Foreign url → fresh budget (a replacement PR re-evaluates from scratch).
+    fresh = read_budget(gate, _PR_URL)
+    assert fresh == RemediationBudget(pr_url=_PR_URL)
+    same = read_budget(gate, "https://example/other/1")
+    assert same.rounds_used == 2
+    assert same.last_loom_pushed_sha == "x"
+
+
+async def test_observe_head_records_first_sighting() -> None:
+    client = FakeLithosClient()
+    _story, gate = await _gate_with_story(client)
+    rem = ExternalRemediation(_settings(Path("/tmp/x")), spawn=_spawner(None)[0])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+
+    assert budget.last_seen_head_sha == _HEAD
+    marker = await _marker(client, gate.id)
+    assert marker["last_seen_head_sha"] == _HEAD
+
+
+async def test_human_push_resets_rounds_but_loom_push_does_not() -> None:
+    """THE S5b property: rounds never reset on loom's own push (the ping-pong
+    bound) and do reset when a human pushes (operator took ownership)."""
+    client = FakeLithosClient()
+    _story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": _PR_URL,
+                "rounds_used": 2,
+                "last_loom_pushed_sha": _LOOM_SHA,
+                "last_seen_head_sha": "old" + "0" * 37,
+            }
+        },
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    rem = ExternalRemediation(_settings(Path("/tmp/x")), spawn=_spawner(None)[0])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    # Head moved to loom's own pushed sha: NOT a reset.
+    budget = await rem.observe_head(gate, spec, _pr(_LOOM_SHA), _ctx(client))
+    assert budget.rounds_used == 2
+    assert budget.last_seen_head_sha == _LOOM_SHA
+
+    # Head moved to a sha loom did not push: the operator took over — reset.
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    human_sha = "b2" * 20
+    budget = await rem.observe_head(gate, spec, _pr(human_sha), _ctx(client))
+    assert budget.rounds_used == 0
+    assert budget.last_seen_head_sha == human_sha
+
+
+async def test_observe_head_is_inert_while_a_run_is_in_flight() -> None:
+    """While loom's own converge may push at any moment, head attribution is
+    ambiguous — the observer must neither reset nor write."""
+    client = FakeLithosClient()
+    _story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": _PR_URL,
+                "rounds_used": 1,
+                "last_loom_pushed_sha": "",
+                "last_seen_head_sha": _HEAD,
+            }
+        },
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    rem = ExternalRemediation(_settings(Path("/tmp/x")), spawn=_spawner(None)[0])
+    rem._task = asyncio.create_task(asyncio.sleep(30))  # a run in flight
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    try:
+        budget = await rem.observe_head(gate, spec, _pr("c3" * 20), _ctx(client))
+        assert budget.rounds_used == 1  # no reset
+        marker = await _marker(client, gate.id)
+        assert marker["last_seen_head_sha"] == _HEAD  # no write
+    finally:
+        rem._task.cancel()
+
+
+def test_exhaustion_note_only_at_or_over_budget() -> None:
+    rem = ExternalRemediation(_settings(Path("/tmp/x")), spawn=_spawner(None)[0])
+    under = RemediationBudget(pr_url=_PR_URL, rounds_used=1)
+    at = RemediationBudget(pr_url=_PR_URL, rounds_used=2)
+    assert rem.exhaustion_note(under) is None
+    note = rem.exhaustion_note(at)
+    assert note is not None and "budget exhausted" in note
+    # budget == 0 disables dispatch deliberately — no exhaustion noise.
+    disabled = ExternalRemediation(
+        _settings(Path("/tmp/x"), budget=0), spawn=_spawner(None)[0]
+    )
+    assert disabled.exhaustion_note(under) is None
+
+
+# ── the dispatch decision ──────────────────────────────────────────────
+
+
+async def _consider(
+    client: FakeLithosClient,
+    gate: Any,
+    story: str | None,
+    rem: ExternalRemediation,
+    *,
+    ingest: IngestResult | None = None,
+    github: AsyncMock | None = None,
+    rounds_used: int = 0,
+) -> str:
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(pr_url=_PR_URL, rounds_used=rounds_used)
+    return await rem.consider(
+        gate,
+        spec,
+        story,
+        budget,
+        ingest if ingest is not None else _ingest(),
+        github if github is not None else _github(),
+        _ctx(client),
+    )
+
+
+async def test_dispatch_happy_path_runs_converge_and_records_outcome(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    pushed = "e5" * 20
+    spawn, calls = _spawner(
+        {
+            "status": "converged",
+            "pushed": True,
+            "pushed_sha": pushed,
+            "rounds": 2,
+            "total_cost_usd": 3.5,
+            "external_outcomes": [
+                {
+                    "finding_id": "f-001",
+                    "author": _BOT,
+                    "disposition": "fixed",
+                    "detail": "guarded it",
+                }
+            ],
+            "message": "converged and pushed",
+        }
+    )
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    label = await _consider(client, gate, story, rem)
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    # The subprocess argv: converge on this PR, external mode, right repo.
+    (cmd,) = calls
+    assert cmd[:2] == [sys.executable, "-m"]
+    assert "lithos_loom" in cmd
+    assert "converge" in cmd and "62" in cmd and "--from-github" in cmd
+    assert str(tmp_path / "repo") in cmd
+
+    # Budget: incremented at dispatch; the push recorded as loom's own sha.
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1
+    assert marker["last_loom_pushed_sha"] == pushed
+    assert marker["last_seen_head_sha"] == pushed
+
+    # Outcome finding on the story.
+    outcome = next(f for f in _findings(client) if "remediation" in f)
+    assert "[ExternalReview]" in outcome
+    assert "converged" in outcome
+    assert "f-001" in outcome and "fixed" in outcome
+
+
+async def test_second_dispatch_defers_while_one_is_in_flight(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await release.wait()
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path), spawn=slow_spawn)
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await started.wait()
+    # Detection has posted another batch; dispatch defers, never queues.
+    assert await _consider(client, gate, story, rem) == "deferred_busy"
+    release.set()
+    assert rem._task is not None
+    await rem._task
+
+
+async def test_untrusted_only_material_never_dispatches(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    label = await _consider(
+        client,
+        gate,
+        story,
+        rem,
+        ingest=_ingest(
+            actionable_reviews=[_review(author="drive-by")],
+            actionable_comments=[_comment(author="drive-by")],
+        ),
+        github=_github(permission="read"),
+    )
+
+    assert label == "no_trusted"
+    assert calls == []
+    assert await _marker(client, gate.id) is None  # nothing incremented
+
+
+async def test_own_sha_material_is_reported_not_remediated(tmp_path: Path) -> None:
+    """A re-review of loom's own in-flight fix must not trigger another fix."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=1, last_loom_pushed_sha=_LOOM_SHA
+    )
+
+    label = await rem.consider(
+        gate,
+        spec,
+        story,
+        budget,
+        _ingest(actionable_reviews=[_review(commit_id=_LOOM_SHA)]),
+        _github(),
+        _ctx(client),
+    )
+
+    assert label == "own_sha_only"
+    assert calls == []
+
+
+async def test_exhausted_budget_stops_dispatch(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    label = await _consider(client, gate, story, rem, rounds_used=2)
+
+    assert label == "exhausted"
+    assert calls == []
+
+
+async def test_budget_zero_disables_dispatch(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path, budget=0), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "disabled"
+    assert calls == []
+
+
+async def test_unmapped_project_skips_with_friction(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path, projects={}), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "no_project"
+    assert calls == []
+
+
+async def test_gate_without_project_falls_back_to_story_metadata(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client, project=None)
+    spawn, _calls = _spawner({"status": "triage_rejected", "pushed": False})
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    label = await _consider(client, gate, story, rem)
+
+    assert label == "dispatched"  # story metadata carries project="p"
+    assert rem._task is not None
+    await rem._task
+
+
+async def test_project_can_disable_converge_via_context_doc(
+    tmp_path: Path,
+) -> None:
+    """Per-project ``develop_external_review_converge = false`` (default on,
+    ADR 0011 decision 6) stops dispatch; detection is untouched."""
+    client = FakeLithosClient()
+    await client.note_write(
+        title="p project context",
+        content="ctx",
+        path="projects/p/p-project-context.md",
+        metadata={"develop_external_review_converge": False},
+    )
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "project_disabled"
+    assert calls == []
+
+
+# ── run completion ─────────────────────────────────────────────────────
+
+
+async def test_nothing_to_ingest_gives_the_round_back(tmp_path: Path) -> None:
+    """converge exiting 0 without a JSON result means it found nothing live
+    to ingest (suppression drift between sweep and CLI) — no agent time was
+    spent, so the round is returned to the budget."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(None, rc=0)  # exit 0, no json written
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 0  # incremented at dispatch, given back
+
+
+async def test_failed_run_keeps_the_round_and_posts_friction(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(None, rc=1)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # the round is spent
+    friction = next(f for f in _findings(client) if "[Friction]" in f)
+    assert "converge" in friction
+
+
+async def test_unpushed_result_does_not_record_a_loom_sha(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        {"status": "not_converged", "pushed": False, "message": "stalled"}
+    )
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1
+    assert marker["last_loom_pushed_sha"] == ""
+    outcome = next(f for f in _findings(client) if "remediation" in f)
+    assert "not_converged" in outcome

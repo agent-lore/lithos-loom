@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 
+from lithos_loom.children.github_watcher import _run_reconcile_pass
+
 
 def _no_watcher_config(tmp_path: Path) -> Path:
     cfg = tmp_path / "config.toml"
@@ -118,7 +120,6 @@ async def test_reconcile_pass_redispatches_gh_linked_tasks() -> None:
     from typing import Any
     from unittest.mock import AsyncMock
 
-    from lithos_loom.children.github_watcher import _run_reconcile_pass
     from lithos_loom.lithos_client import Task
     from lithos_loom.subscriptions import SubscriptionContext
 
@@ -194,7 +195,6 @@ async def test_reconcile_pass_skips_terminal_scan_when_window_disabled() -> None
     from typing import Any
     from unittest.mock import AsyncMock
 
-    from lithos_loom.children.github_watcher import _run_reconcile_pass
     from lithos_loom.lithos_client import Task
     from lithos_loom.subscriptions import SubscriptionContext
 
@@ -240,7 +240,6 @@ async def test_reconcile_pass_resolves_open_pr_gates_when_enabled() -> None:
     import logging
     from unittest.mock import AsyncMock
 
-    from lithos_loom.children.github_watcher import _run_reconcile_pass
     from lithos_loom.github_client import PullRequest
     from lithos_loom.lithos_client import Task
     from lithos_loom.subscriptions import SubscriptionContext
@@ -293,7 +292,6 @@ async def test_reconcile_pass_skips_gates_when_pr_poll_disabled() -> None:
     import logging
     from unittest.mock import AsyncMock
 
-    from lithos_loom.children.github_watcher import _run_reconcile_pass
     from lithos_loom.lithos_client import Task
     from lithos_loom.subscriptions import SubscriptionContext
 
@@ -331,7 +329,6 @@ async def test_reconcile_pass_ignores_bare_develop_pr_url_task() -> None:
     import logging
     from unittest.mock import AsyncMock
 
-    from lithos_loom.children.github_watcher import _run_reconcile_pass
     from lithos_loom.lithos_client import Task
     from lithos_loom.subscriptions import SubscriptionContext
 
@@ -373,7 +370,6 @@ async def test_reconcile_pass_threads_external_review_ingestion() -> None:
     import logging
     from unittest.mock import AsyncMock
 
-    from lithos_loom.children.github_watcher import _run_reconcile_pass
     from lithos_loom.github_client import PullRequest
     from lithos_loom.lithos_client import Task
     from lithos_loom.subscriptions import SubscriptionContext
@@ -430,3 +426,83 @@ async def test_reconcile_pass_threads_external_review_ingestion() -> None:
         assert github.list_pull_request_reviews.await_count == (
             1 if expect_review_fetch else 0
         ), f"external_reviews_enabled={enabled}"
+
+
+async def test_reconcile_pass_threads_remediation_to_the_gate_branch() -> None:
+    """Slice C: when a remediation dispatcher is supplied, the still-open gate
+    branch observes the PR head through it (the S5b budget seam). Dispatch
+    detail lives in test_external_remediation.py."""
+    import logging
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.github_client import PullRequest
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.subscriptions import SubscriptionContext
+    from lithos_loom.subscriptions.external_remediation import (
+        ExternalRemediation,
+        RemediationSettings,
+    )
+
+    gate = Task(
+        id="gate-1",
+        title="Awaiting merge: US9",
+        status="open",
+        tags=(),
+        metadata={
+            "gate_type": "pr",
+            "repo": "o/r",
+            "pr_number": 9,
+            "pr_url": "https://github.com/o/r/pull/9",
+        },
+        claims=(),
+        task_type="gate",
+    )
+    lithos = AsyncMock()
+    lithos.task_list = AsyncMock(return_value=[gate])
+    lithos.task_edge_list = AsyncMock(return_value=[])
+    github = AsyncMock()
+    github.get_pull_request = AsyncMock(
+        return_value=PullRequest(
+            repo="o/r",
+            number=9,
+            state="open",
+            merged=False,
+            merged_at=None,
+            merge_commit_sha=None,
+            head_sha="e" * 40,
+        )
+    )
+    github.list_pull_request_reviews = AsyncMock(return_value=[])
+    github.list_pull_request_review_comments = AsyncMock(return_value=[])
+    ctx = SubscriptionContext(
+        lithos=lithos, logger=logging.getLogger("test-gate"), agent_id="a"
+    )
+
+    observed: list[str] = []
+    rem = ExternalRemediation(
+        RemediationSettings(
+            trusted_bots=(), budget=2, projects={}, work_dir=Path("/tmp/x")
+        )
+    )
+
+    original = rem.observe_head
+
+    async def spying_observe(gate, spec, pr, ctx):
+        observed.append(pr.head_sha)
+        return await original(gate, spec, pr, ctx)
+
+    rem.observe_head = spying_observe  # type: ignore[method-assign]
+
+    await _run_reconcile_pass(
+        lithos=lithos,
+        push_handler=AsyncMock(),
+        ctx=ctx,
+        resolved_window=None,
+        github=github,
+        pr_merge_enabled=True,
+        external_reviews_enabled=True,
+        remediation=rem,
+    )
+
+    assert observed == ["e" * 40]

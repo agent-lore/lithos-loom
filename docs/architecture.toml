@@ -94,7 +94,7 @@ max_module_lines       = 2210 # stop-loss; lithos_client is 2195 (Epic G US3 add
                                # wire-types/parsers extraction — tracked as a follow-up;
                                # do that (not another bump) before it grows further.
 cross_module_private_refs = 8   # measured 2026-07; children._boot x3, story_develop seam constants; goal: 0
-tests_private_imports     = 98  # 99->98: github_models extraction made the issue/PR parsers public; cli.develop helpers dominate; direction: down
+tests_private_imports     = 93  # 98->93: test_github_watcher_child's seven per-test _run_reconcile_pass imports consolidated to one; cli.develop helpers dominate; direction: down
 
 # Domain class diagram: the GitHub/task data types are the domain entities.
 # Everything else (config/settings, plugin-internal working types, eval

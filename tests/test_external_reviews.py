@@ -696,3 +696,54 @@ async def test_later_summary_review_not_hidden_by_old_handled_roots() -> None:
     assert len(posted) == 1
     assert "two new problems" in posted[0]
     assert "generated 1 comment" not in posted[0]
+
+
+# ── slice C seams: the returned batch + the exhaustion note ────────────
+
+
+async def test_ingest_returns_the_actionable_batch() -> None:
+    """Remediation (slice C) dispatches off what ingestion just posted — the
+    result carries the actionable material so the dispatch decision (trust,
+    own-sha) never re-fetches or re-filters."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500)], comments=[_comment(1)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+    assert result.posted
+    assert [r.review_id for r in result.actionable_reviews] == [500]
+    assert [c.comment_id for c in result.actionable_comments] == [1]
+
+
+async def test_ingest_returns_empty_batch_when_nothing_posts() -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500, state="APPROVED", body="")])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+    assert not result.posted
+    assert result.actionable_reviews == []
+    assert result.actionable_comments == []
+
+
+async def test_extra_note_lands_in_the_finding_body() -> None:
+    """S5b: budget exhaustion is stated in the [ExternalReview] body itself —
+    going over budget must not blind the operator to new activity."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    await ingest_external_reviews(
+        gate,
+        spec,
+        story,
+        github,
+        _ctx(client),
+        extra_note="remediation budget exhausted — findings will be reported "
+        "but not auto-fixed until a human pushes or merges",
+    )
+    (finding,) = _findings(client)
+    assert "remediation budget exhausted" in finding

@@ -22,6 +22,7 @@ import logging
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -52,6 +53,10 @@ from lithos_loom.subscriptions._github_issue_sync import (
 from lithos_loom.subscriptions._github_issue_sync import (
     make_handler as make_github_issue_sync_handler,
 )
+from lithos_loom.subscriptions.external_remediation import (
+    ExternalRemediation,
+    RemediationSettings,
+)
 from lithos_loom.subscriptions.retry import run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -81,6 +86,7 @@ async def _run_reconcile_pass(
     github: GitHubClient,
     pr_merge_enabled: bool,
     external_reviews_enabled: bool = False,
+    remediation: ExternalRemediation | None = None,
 ) -> None:
     """Single pass of the periodic Lithos→GH reconciliation sweep.
 
@@ -151,7 +157,11 @@ async def _run_reconcile_pass(
         """Resolve one open ``pr`` gate (Epic H). Same defensive wrap."""
         try:
             outcome = await reconcile_pr_gate(
-                gate, github, ctx, ingest_reviews=external_reviews_enabled
+                gate,
+                github,
+                ctx,
+                ingest_reviews=external_reviews_enabled,
+                remediation=remediation,
             )
         except Exception as exc:  # defensive — the reconcile catches its own
             logger.warning(
@@ -218,8 +228,13 @@ async def _run_reconcile_pass(
     )
 
 
-async def _amain(cfg: LoomConfig) -> int:
-    """Body of the child. Returns the exit code."""
+async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
+    """Body of the child. Returns the exit code.
+
+    ``config_path`` (the ``--config`` the supervisor passed, may be ``None``)
+    is forwarded to remediation subprocesses so a dispatched ``develop
+    converge`` loads the same host config this child did.
+    """
     if cfg.github_watcher is None or not cfg.github_watcher.enabled:
         # Defensive: the supervisor gate is the same condition. If we
         # land here, config drift removed the gate underneath us.
@@ -398,6 +413,20 @@ async def _amain(cfg: LoomConfig) -> int:
 
             reconcile_seconds = gh_cfg.reconcile_interval_minutes * 60
 
+            # Slice C: the autonomous remediation dispatcher — one per child,
+            # its in-flight task IS the global single-flight slot. Built even
+            # when the budget is 0 (consider() then reports "disabled") so
+            # the head-observation seam still tracks pushes for S5b.
+            remediation = ExternalRemediation(
+                RemediationSettings(
+                    trusted_bots=gh_cfg.trusted_bots,
+                    budget=gh_cfg.external_remediation_budget,
+                    projects={slug: pc.repo for slug, pc in cfg.projects.items()},
+                    work_dir=cfg.orchestrator.work_dir,
+                    config_path=config_path,
+                )
+            )
+
             async def periodic_reconcile() -> None:
                 """Re-dispatch every GH-linked Lithos task through the push handler.
 
@@ -443,6 +472,7 @@ async def _amain(cfg: LoomConfig) -> int:
                             github=github,
                             pr_merge_enabled=gh_cfg.pr_merge_poll_enabled,
                             external_reviews_enabled=gh_cfg.external_reviews_enabled,
+                            remediation=remediation,
                         )
                     except Exception:
                         logger.exception(
@@ -474,7 +504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg = load_config(args.config)
     _boot.configure_logging(cfg.orchestrator.log_level)
     try:
-        return asyncio.run(_amain(cfg))
+        return asyncio.run(_amain(cfg, config_path=args.config))
     except KeyboardInterrupt:
         return 0
 

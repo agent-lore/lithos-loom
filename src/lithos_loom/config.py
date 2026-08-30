@@ -300,6 +300,16 @@ class GitHubWatcherConfig:
     remediation slices may hand to a coder — comment bodies are third-party
     text on a prompt path.
     """
+    external_remediation_budget: int = 2
+    """PRD S5b: max autonomous ``develop converge --from-github`` dispatches
+    per delivered PR. The sweep-owned counter on the gate never resets on a
+    loom-authored push (the two-bot ping-pong this bounds) and resets when a
+    human pushes (head moved to a sha loom didn't push — the operator took
+    ownership). Exhaustion stops *dispatch* only — ``[ExternalReview]``
+    detection keeps posting, with the exhaustion stated in the finding. ``0``
+    disables autonomous dispatch entirely (operator-triggered converge is
+    unaffected).
+    """
 
 
 @dataclass(frozen=True)
@@ -759,6 +769,7 @@ _GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
         "pr_merge_poll_enabled",
         "external_reviews_enabled",
         "trusted_bots",
+        "external_remediation_budget",
     }
 )
 
@@ -856,6 +867,20 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
             f"non-empty strings (bot logins)"
         )
 
+    external_remediation_budget = _optional_int(
+        data,
+        "external_remediation_budget",
+        GitHubWatcherConfig.external_remediation_budget,
+        config_path,
+        "github_watcher",
+    )
+    if external_remediation_budget < 0:
+        raise ConfigError(
+            f"{config_path}: github_watcher.external_remediation_budget must be "
+            f">= 0 (0 disables autonomous dispatch; got "
+            f"{external_remediation_budget})"
+        )
+
     return GitHubWatcherConfig(
         enabled=enabled,
         poll_interval_seconds=poll_interval,
@@ -865,6 +890,7 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
         pr_merge_poll_enabled=pr_merge_poll_enabled,
         external_reviews_enabled=external_reviews_enabled,
         trusted_bots=tuple(trusted_bots_raw),
+        external_remediation_budget=external_remediation_budget,
     )
 
 
