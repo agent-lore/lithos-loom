@@ -17,7 +17,11 @@ from unittest.mock import AsyncMock
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import create_pr_gate
-from lithos_loom.github_client import GitHubError, PullRequest
+from lithos_loom.github_client import (
+    GitHubError,
+    PullRequest,
+    PullRequestReview,
+)
 from lithos_loom.lithos_client import Task
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._develop_pr_merge import (
@@ -284,3 +288,55 @@ async def test_orphan_gate_merged_completes_gate_without_a_finding() -> None:
     assert outcome == "merged"
     assert (await _get(client, gate_id)).status == "completed"
     assert client._findings == []
+
+
+# ── external-review ingestion wiring (PRD S2 — detail in test_external_reviews) ──
+
+
+def _open_pr() -> PullRequest:
+    return PullRequest(
+        repo="agent-lore/lithos-loom",
+        number=7,
+        state="open",
+        merged=False,
+        merged_at=None,
+        merge_commit_sha=None,
+        head_sha="e" * 40,
+    )
+
+
+def _review_github(pr: PullRequest) -> AsyncMock:
+    github = _github(pr)
+    github.list_pull_request_reviews.return_value = [
+        PullRequestReview(
+            author="reviewer-human",
+            body="two problems here",
+            review_id=500,
+            state="CHANGES_REQUESTED",
+        )
+    ]
+    github.list_pull_request_review_comments.return_value = []
+    return github
+
+
+async def test_reconcile_still_open_ingests_reviews_when_enabled() -> None:
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_open_pr())
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+
+    assert outcome == "still_open"
+    findings = [f["summary"] for f in client._findings]
+    assert len(findings) == 1 and findings[0].startswith("[ExternalReview]")
+
+
+async def test_reconcile_still_open_skips_ingestion_by_default() -> None:
+    client = FakeLithosClient(agent_id="a")
+    _story, gate = await _gate_with_story(client)
+    github = _review_github(_open_pr())
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome == "still_open"
+    github.list_pull_request_reviews.assert_not_called()

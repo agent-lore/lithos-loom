@@ -671,6 +671,59 @@ def test_github_watcher_full_parses(
     assert cfg.github_watcher.coord_doc_path == "projects/_internal/gh-state.md"
 
 
+def test_github_watcher_external_reviews_defaults_and_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD S2: ingestion defaults on with the Copilot login trusted; both are
+    operator-tunable."""
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.external_reviews_enabled is True
+    assert cfg.github_watcher.trusted_bots == ("copilot-pull-request-reviewer[bot]",)
+
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            external_reviews_enabled = false
+            trusted_bots = ["github-code-quality[bot]"]
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.external_reviews_enabled is False
+    assert cfg.github_watcher.trusted_bots == ("github-code-quality[bot]",)
+
+
+def test_github_watcher_trusted_bots_must_be_string_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            trusted_bots = [""]
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="trusted_bots"):
+        load_config()
+
+
 def test_github_watcher_rejects_unknown_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

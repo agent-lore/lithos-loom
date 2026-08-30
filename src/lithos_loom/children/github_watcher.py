@@ -80,6 +80,7 @@ async def _run_reconcile_pass(
     resolved_window: timedelta | None,
     github: GitHubClient,
     pr_merge_enabled: bool,
+    external_reviews_enabled: bool = False,
 ) -> None:
     """Single pass of the periodic Lithos→GH reconciliation sweep.
 
@@ -149,7 +150,9 @@ async def _run_reconcile_pass(
     async def _pr_gate_one(gate: Any) -> None:
         """Resolve one open ``pr`` gate (Epic H). Same defensive wrap."""
         try:
-            outcome = await reconcile_pr_gate(gate, github, ctx)
+            outcome = await reconcile_pr_gate(
+                gate, github, ctx, ingest_reviews=external_reviews_enabled
+            )
         except Exception as exc:  # defensive — the reconcile catches its own
             logger.warning(
                 "[Friction] github-watcher: gate resolve for %s failed: %s: %s",
@@ -439,6 +442,7 @@ async def _amain(cfg: LoomConfig) -> int:
                             resolved_window=window,
                             github=github,
                             pr_merge_enabled=gh_cfg.pr_merge_poll_enabled,
+                            external_reviews_enabled=gh_cfg.external_reviews_enabled,
                         )
                     except Exception:
                         logger.exception(

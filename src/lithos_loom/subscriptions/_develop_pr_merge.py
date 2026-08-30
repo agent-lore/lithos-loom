@@ -32,6 +32,7 @@ from lithos_loom.gates import (
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 
 __all__ = [
     "DELIVERED_PR_CLOSED",
@@ -93,7 +94,11 @@ def _pr_merge_state(pr: Any) -> str:
 
 
 async def reconcile_pr_gate(
-    gate: Any, github: GitHubClient, ctx: SubscriptionContext
+    gate: Any,
+    github: GitHubClient,
+    ctx: SubscriptionContext,
+    *,
+    ingest_reviews: bool = False,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -111,6 +116,11 @@ async def reconcile_pr_gate(
     finding is posted on the story, and a url-scoped marker on the GATE stops the
     dead PR being re-polled. A still-open PR re-polls next sweep; a transient
     GitHub failure retries.
+
+    ``ingest_reviews`` additionally runs the external-review ingestion
+    (:mod:`.external_reviews`, PRD S2) on the still-open branch — the one place
+    that has the fetched PR, the parsed spec and the waiting story all in
+    hand. It never changes the merge outcome.
     """
     spec = parse_pr_gate(gate)
     if spec is None:
@@ -179,7 +189,9 @@ async def reconcile_pr_gate(
         await _gate_closed(gate, story_id, spec.pr_url, "closed_unmerged", ctx)
         return "closed_unmerged"
 
-    # state == "open" — still in flight; re-poll next sweep (no marker).
+    # state == "open" — still in flight; re-poll next sweep (no merge marker).
+    if ingest_reviews:
+        await ingest_external_reviews(gate, spec, story_id, github, ctx)
     return "still_open"
 
 

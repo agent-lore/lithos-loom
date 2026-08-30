@@ -11,27 +11,34 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.github_client` | L | 12 | 4 |
+| `lithos_loom.github_client` | M | 7 | 0 |
+| `lithos_loom.github_models` | M | 5 | 8 |
 
 ## Public API
 
 ### `lithos_loom.github_client`
-- class `GitHubRef` — A parsed reference to a GitHub issue or pull request.
-- def `parse_github_ref` — Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
 - class `GitHubError` — Base for GitHub-watcher errors. Subclasses carry actionable context.
 - class `GitHubAuthError` — Raised when GitHub auth fails (401, 403, or missing/broken gh CLI).
 - class `GitHubRepoNotFoundError` — Raised when a watched repo returns 404.
 - class `GitHubIssueNotFoundError` — Raised when an issue-level endpoint returns 404 (the issue is gone).
 - class `GitHubRateLimitError` — Raised when a rate-limit retry exhausts (currently only on a second 403).
 - class `GitHubTransportError` — Raised when the HTTP request itself fails (connect/read/reset/timeout).
+- class `GitHubClient` — Async client for the slice-7.1 subset of the GitHub REST API.
+
+### `lithos_loom.github_models`
+- class `GitHubRef` — A parsed reference to a GitHub issue or pull request.
+- def `parse_github_ref` — Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
 - class `Issue` — The slice of GitHub's issue payload the watcher cares about.
 - class `PullRequest` — The pull-request payload two consumers share off the single-PR endpoint.
 - class `PullRequestReview` — A single PR review: the reviewer login + the review-summary body.
 - class `PullRequestReviewComment` — A single inline review comment on a PR.
+- def `parse_issues_response` — Convert a GitHub ``/issues`` response into typed Issues, dropping PRs.
+- def `parse_pull_request` — Convert a GitHub ``GET /pulls/{n}`` response row into a typed PullRequest.
+- def `parse_pull_request_review`
+- def `parse_pull_request_review_comment`
 - def `parse_marker` — Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
 - def `apply_marker` — Return ``body`` with a canonical marker appended at the end.
 - def `strip_marker` — Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.
-- class `GitHubClient` — Async client for the slice-7.1 subset of the GitHub REST API.
 
 ## Dependencies
 

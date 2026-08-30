@@ -61,7 +61,7 @@ Bus            = ["lithos_loom.bus"]
 Config         = ["lithos_loom.config"]
 Errors         = ["lithos_loom.errors"]
 LithosClient   = ["lithos_loom.lithos_client"]
-GitHub         = ["lithos_loom.github_client"]
+GitHub         = ["lithos_loom.github_client", "lithos_loom.github_models"]
 Tasks          = ["lithos_loom.task_graph", "lithos_loom.task_line_parser", "lithos_loom.task_line", "lithos_loom.gates"]
 State          = ["lithos_loom.cursor_store", "lithos_loom.sync_state"]
 Runners        = ["lithos_loom.runner", "lithos_loom.plugin_runner"]
@@ -94,7 +94,7 @@ max_module_lines       = 2210 # stop-loss; lithos_client is 2195 (Epic G US3 add
                                # wire-types/parsers extraction — tracked as a follow-up;
                                # do that (not another bump) before it grows further.
 cross_module_private_refs = 8   # measured 2026-07; children._boot x3, story_develop seam constants; goal: 0
-tests_private_imports     = 99  # 97->99: Epic H gate-resolver tests reach _develop_pr_merge internals; cli.develop helpers dominate; direction: down
+tests_private_imports     = 98  # 99->98: github_models extraction made the issue/PR parsers public; cli.develop helpers dominate; direction: down
 
 # Domain class diagram: the GitHub/task data types are the domain entities.
 # Everything else (config/settings, plugin-internal working types, eval
@@ -103,6 +103,7 @@ tests_private_imports     = 99  # 97->99: Epic H gate-resolver tests reach _deve
 [domain]
 include_modules = [
     "lithos_loom.github_client",
+    "lithos_loom.github_models",
     "lithos_loom.gates",
     "lithos_loom.task_graph",
     "lithos_loom.task_line_parser",
