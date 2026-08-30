@@ -68,6 +68,7 @@ classDiagram
     +commit_id str
     +original_commit_id str
     +updated_at datetime | None
+    +pull_request_review_id int | None
   }
 ```
 

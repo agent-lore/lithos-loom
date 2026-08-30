@@ -12,7 +12,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.github_client` | M | 7 | 0 |
-| `lithos_loom.github_models` | M | 5 | 8 |
+| `lithos_loom.github_models` | M | 5 | 11 |
 
 ## Public API
 
@@ -39,6 +39,9 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - def `parse_marker` — Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
 - def `apply_marker` — Return ``body`` with a canonical marker appended at the end.
 - def `strip_marker` — Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.
+- def `is_automated_reply` — True for loom's own automated PR replies (never re-ingested).
+- def `is_landed_fix_reply` — True for the reply shape that proves a fix landed (see the constants).
+- def `review_is_actionable` — The per-state external-review policy (PRD S2).
 
 ## Dependencies
 

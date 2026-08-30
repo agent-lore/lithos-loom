@@ -502,8 +502,222 @@ def test_converge_result_json_round_trips_the_documented_shape(
         "develop_status": "approved",
         "fixer_commits": 1,
         "pushed": True,
+        "external_outcomes": [],
         "pushed_sha": "p" * 40,
         "intake_cost_usd": 1.5,
         "total_cost_usd": 2.5,  # 1.5 intake + 1.0 loop (0.6 coder + 0.4 review)
         "message": "converged and pushed to feature",
     }
+
+
+# --- external mode (PRD S2 slice B: triage-then-inject, no local intake) -----
+
+
+def _ext_finding(comment_id: int = 7, body: str = "leaks a handle"):
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
+
+    return ExternalFinding(
+        author="dave",
+        source="human",
+        trusted=True,
+        review_id=None,
+        comment_id=comment_id,
+        thread_url=f"https://example/thread/{comment_id}",
+        head_sha=_HEAD,
+        path="src/x.py",
+        line=12,
+        body=body,
+    )
+
+
+def _install_triage(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict,
+    *,
+    proceed: tuple[str, ...],
+    rejections: dict[str, str] | None = None,
+    cost: float = 0.1,
+):
+    from lithos_loom.plugins.story_develop.external_triage import TriageVerdicts
+
+    def fake_triage(config, change, outcome, *, timeout=1800):
+        captured["triage_findings"] = [f.finding_id for f in outcome.findings]
+        return TriageVerdicts(
+            proceed=proceed, rejections=rejections or {}, cost_usd=cost
+        )
+
+    monkeypatch.setattr(converge_mod, "triage_external_findings", fake_triage)
+
+
+def test_external_mode_skips_intake_and_seeds_surviving_findings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=("f-002",),
+        rejections={"f-001": "src/x.py:12 refutes it"},
+    )
+    config = _config(tmp_path)
+
+    # A CONFORMING external-mode coder handoff (PR #345 re-review 1): the
+    # injected prompt mandates a `## External findings` section with one
+    # FIXED/DISPUTED line per injected id — the per-id half of the fixed
+    # evidence (the loop's approval is the other half).
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-002: guarded the handle.\n"
+        "## External findings\n- f-002: FIXED — guarded the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(
+            _ext_finding(7, body="claim one"),
+            _ext_finding(8, body="claim two"),
+        ),
+    )
+
+    assert "intake_ran" not in captured  # the local panel never runs
+    assert captured["triage_findings"] == ["f-001", "f-002"]
+    entry = captured["entry"]
+    (outcome,) = entry.intake_reviews
+    assert [f.finding_id for f in outcome.findings] == ["f-002"]  # survivor only
+    assert entry.intake_check_set is None
+    # The acknowledgement contract rides into the round-1 coder prompt via the
+    # entry, naming exactly the surviving ids.
+    assert "## External findings" in entry.external_ack
+    assert "f-002" in entry.external_ack
+    assert result.status == "converged" and result.pushed
+    assert result.intake_cost_usd == 0.1  # the triage spend
+
+    by_id = {o.finding_id: o for o in result.external_outcomes}
+    assert by_id["f-001"].disposition == "rejected"
+    assert "refutes" in by_id["f-001"].detail
+    assert by_id["f-002"].disposition == "fixed"  # acked FIXED + approved loop
+    assert by_id["f-001"].finding.comment_id == 7
+
+
+def test_external_mode_all_rejected_builds_no_coder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=(),
+        rejections={"f-001": "evidence one", "f-002": "evidence two"},
+    )
+
+    result = converge_pr(
+        _config(tmp_path),
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+
+    assert result.status == "triage_rejected"
+    assert result.succeeded  # nothing left for the operator to do
+    assert "entry" not in captured  # develop() never ran
+    assert "push" not in captured
+    assert {o.disposition for o in result.external_outcomes} == {"rejected"}
+
+
+def test_external_mode_triage_spend_meets_budget_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",), cost=5.0)
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=5.0)
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(),))
+
+    assert result.status == "failed" and "entry" not in captured
+
+
+def test_external_mode_rejects_empty_findings(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        converge_pr(_config(tmp_path), _change(), external_findings=())
+
+
+def test_external_mode_dispute_and_unapproved_dispositions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A coder dispute (the one case the prompt DOES put in a Findings block)
+    survives as `disputed`; an unapproved loop yields `unaddressed`, never a
+    false `fixed`."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001 disputed; f-002 addressed.\n"
+        "## Findings\n"
+        "- finding_id: f-001\n  severity: minor\n  status: disputed\n"
+        "  rationale: r\n  coder_response: deliberate decision\n"
+        "## External findings\n- f-002: FIXED — closed the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+    by_id = {o.finding_id: o for o in result.external_outcomes}
+    assert by_id["f-001"].disposition == "disputed"
+    assert by_id["f-001"].detail == "deliberate decision"
+    assert by_id["f-002"].disposition == "fixed"
+
+    # Unapproved loop: same handoff, but the loop stops without approval.
+    captured2 = _install(monkeypatch, blocking=True)
+    captured2["develop_status"] = "stalled"
+    _install_triage(monkeypatch, captured2, proceed=("f-001", "f-002"))
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+    assert result.status == "not_converged"
+    assert {o.disposition for o in result.external_outcomes} == {
+        "disputed",
+        "unaddressed",
+    }
+
+
+def test_external_mode_unacked_finding_stays_unaddressed_when_approved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #345 re-review 1, end-to-end: two findings survive triage, the coder
+    acknowledges only one, and the panel (which never saw the original
+    external text) approves the tree. The omitted finding must stay
+    `unaddressed` — its thread gets no "Fixed in" reply — instead of riding
+    the blanket approval to a false `fixed`."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001: guarded the handle.\n"
+        "## External findings\n- f-001: FIXED — guarded the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+
+    assert result.status == "converged"  # the loop itself approved + pushed
+    by_id = {o.finding_id: o for o in result.external_outcomes}
+    assert by_id["f-001"].disposition == "fixed"
+    assert by_id["f-002"].disposition == "unaddressed"

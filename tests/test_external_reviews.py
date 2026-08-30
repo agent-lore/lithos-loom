@@ -97,6 +97,7 @@ def _comment(
     in_reply_to_id: int | None = None,
     path: str = "src/x.py",
     line: int | None = 12,
+    pull_request_review_id: int | None = None,
 ) -> PullRequestReviewComment:
     return PullRequestReviewComment(
         comment_id=comment_id,
@@ -108,6 +109,7 @@ def _comment(
         html_url=f"https://github.com/{_REPO}/pull/62#discussion_r{comment_id}",
         commit_id="d" * 40,
         updated_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
+        pull_request_review_id=pull_request_review_id,
     )
 
 
@@ -410,7 +412,12 @@ async def test_first_sweep_skips_roots_already_handled_by_the_inline_round() -> 
             )
         ],
         comments=[
-            _comment(111, author="copilot-pull-request-reviewer[bot]", body="handled"),
+            _comment(
+                111,
+                author="copilot-pull-request-reviewer[bot]",
+                body="handled",
+                pull_request_review_id=500,
+            ),
             _comment(
                 112,
                 author="operator",
@@ -643,3 +650,49 @@ async def test_permission_is_checked_once_per_author() -> None:
 
     assert _findings(client) == []  # both roots proven handled
     assert github.get_collaborator_permission.await_count == 1
+
+
+async def test_later_summary_review_not_hidden_by_old_handled_roots() -> None:
+    """PR #345 review F3 (sweep parity): suppression binds a handled root to
+    its OWNING review — a bot's later COMMENTED summary (no inline comments
+    yet) still posts even though an older root of the same bot was fixed and
+    replied to by the inline round."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        reviews=[
+            _review(
+                500,
+                author="copilot-pull-request-reviewer[bot]",
+                state="COMMENTED",
+                body="generated 1 comment",
+            ),
+            _review(
+                510,
+                author="copilot-pull-request-reviewer[bot]",
+                state="COMMENTED",
+                body="two new problems",
+            ),
+        ],
+        comments=[
+            _comment(
+                111,
+                author="copilot-pull-request-reviewer[bot]",
+                body="old handled",
+                pull_request_review_id=500,
+            ),
+            _comment(
+                112,
+                author="operator",
+                body=_real_reply(fixed=True, sha="abc123def4567890"),
+                in_reply_to_id=111,
+            ),
+        ],
+    )
+
+    await _run(client, gate, story, github)
+
+    posted = _findings(client)
+    assert len(posted) == 1
+    assert "two new problems" in posted[0]
+    assert "generated 1 comment" not in posted[0]

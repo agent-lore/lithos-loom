@@ -50,6 +50,9 @@ def test_converge_prompt_carries_intent_transfer_and_slots() -> None:
         "{findings}",
         "{gate_summary}",
         "{handoff_file}",
+        # external mode's per-id acknowledgement contract (PR #345 re-review
+        # 1); rendered empty on the local-panel path
+        "{external_ack}",
     ):
         assert slot in raw
 
@@ -181,6 +184,7 @@ def test_every_agent_template_carries_the_sandbox_facts_slot() -> None:
         "coder_fix.md",
         "converge_coder_init.md",
         "copilot_fix.md",
+        "external_triage.md",
     ):
         assert "{sandbox_facts}" in load_prompt(name), name
 
@@ -244,3 +248,19 @@ def test_artifact_prompt_guards_against_taste_findings() -> None:
     # trigger-happy one (the known-good arm measures this for real)
     body = load_prompt("reviewer_artifacts.md")
     assert "not what you would have designed differently" in body
+
+
+def test_external_triage_prompt_defaults_to_act_and_demands_evidence() -> None:
+    """S5a's load-bearing steering (PRD): triage may reject only with cited
+    code evidence, defaults to PROCEED when unsure, and never fixes anything
+    itself — a prompt re-tune that loses any of these regresses the
+    over-suppression guard."""
+    raw = load_prompt("external_triage.md")
+    text = " ".join(raw.lower().split())
+    assert "when in doubt, proceed" in text
+    assert "reject a claim **only**" in text or "reject" in text and "cite" in text
+    assert "read-only" in text
+    assert "you do not fix anything" in text
+    assert "a reject without evidence is treated as proceed" in text
+    assert "{findings}" in raw and "{handoff_file}" in raw
+    assert "non-interactive turn" in text and "never background" in text

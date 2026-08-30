@@ -33,13 +33,24 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 from ...runner import git, worktree
-from . import review_only
+from . import handoff, review_only
 from .config import DevelopConfig
 from .develop import DevelopResult, develop
+from .external_reviews import (
+    CoderAck,
+    ExternalFinding,
+    ExternalOutcome,
+    ack_instruction,
+    external_intake_reviews,
+    outcomes_after_loop,
+    parse_coder_acks,
+)
+from .external_triage import triage_external_findings
 from .findings import DeferredFinding
 from .pr_delivery import ForkPushUnsupported, MergeRaceDetected, push_to_pr_ref
 from .review_resolve import ResolvedChange
@@ -52,6 +63,7 @@ logger = logging.getLogger(__name__)
 ConvergeStatus = Literal[
     "already_clean",
     "converged",
+    "triage_rejected",
     "not_converged",
     "fork_unsupported",
     "merged",
@@ -79,8 +91,12 @@ class ConvergeResult:
     * ``merge_race`` — the PR head advanced remotely mid-run; converge refuses to
       ``--force`` over the contributor's history. Re-run to pick up the new tip.
     * ``failed`` — the intake review was **incomplete** (interrupted / invalid /
-      absent panel), or the intake spend already exhausted ``--max-cost`` — there
-      was no trustworthy review to seed the fix loop from.
+      absent panel), or the pre-loop spend (intake review, or external-mode
+      triage) already exhausted ``--max-cost`` — there was no trustworthy
+      review to seed the fix loop from.
+    * ``triage_rejected`` — external mode only: every injected finding was
+      rejected by triage with cited evidence; no coder ran, nothing pushed.
+      The rejections ride on ``external_outcomes`` for the caller's replies.
 
     ``fixer_commits`` counts only the coder's commits (PR head → HEAD), NOT
     ``develop_result.commits`` — converge enters at the PR head with the base set
@@ -101,6 +117,10 @@ class ConvergeResult:
     # surfaced or they are lost. Loop-phase deferrals live on
     # ``develop_result.deferred_findings``; see :attr:`deferred_findings`.
     intake_deferred: tuple[DeferredFinding, ...] = ()
+    # External mode (PRD S2): per-injected-finding dispositions — triage
+    # rejections (with evidence) + the coder's round-1 claims — for the
+    # caller's thread-reply epilogue. Empty on the local-panel path.
+    external_outcomes: tuple[ExternalOutcome, ...] = ()
 
     @property
     def deferred_findings(self) -> tuple[DeferredFinding, ...]:
@@ -121,7 +141,7 @@ class ConvergeResult:
     @property
     def succeeded(self) -> bool:
         """True when the PR is ready for the human merge gate (nothing left to do)."""
-        return self.status in ("already_clean", "converged")
+        return self.status in ("already_clean", "converged", "triage_rejected")
 
     @property
     def total_cost_usd(self) -> float:
@@ -142,8 +162,21 @@ class ConvergeResult:
             }
             for f in self.deferred_findings
         ]
+        external = [
+            {
+                "finding_id": o.finding_id,
+                "author": o.finding.author,
+                "source": o.finding.source,
+                "comment_id": o.finding.comment_id,
+                "thread_url": o.finding.thread_url,
+                "disposition": o.disposition,
+                "detail": o.detail,
+            }
+            for o in self.external_outcomes
+        ]
         return {
             "deferred_findings": deferred,
+            "external_outcomes": external,
             "status": self.status,
             "head_ref": self.change.head_ref,
             "head_branch": self.change.head_branch,
@@ -167,6 +200,7 @@ def converge_pr(
     no_push: bool = False,
     coder_timeout: int = 3600,
     reviewer_timeout: int = 3600,
+    external_findings: tuple[ExternalFinding, ...] | None = None,
 ) -> ConvergeResult:
     """Run the review-convergence loop against an existing PR *change*.
 
@@ -230,6 +264,110 @@ def converge_pr(
                 f"PR {change.head_ref} head is on a fork; converge cannot push "
                 "fixes back under origin credentials"
             ),
+        )
+
+    if external_findings is not None:
+        # --- external mode (PRD S2): triage-then-inject, no local intake ---
+        # The local panel's already_clean short-circuit is exactly the panel
+        # that missed the defects an external reviewer then found (ADR 0011
+        # decisions 1/7) — so external findings SKIP intake entirely and seed
+        # the coder directly; the loop's own panel + gate judge the RESULT.
+        if not external_findings:
+            raise ValueError("external_findings must be non-empty when provided")
+        seed, id_map = external_intake_reviews(
+            external_findings, current_head_sha=change.head_sha
+        )
+        triage = triage_external_findings(
+            config, change, seed[0], timeout=reviewer_timeout
+        )
+        if config.max_cost_usd is not None and triage.cost_usd >= config.max_cost_usd:
+            return ConvergeResult(
+                status="failed",
+                change=change,
+                intake_cost_usd=triage.cost_usd,
+                external_outcomes=outcomes_after_loop(
+                    id_map, triage.rejections, {}, {}, loop_approved=False
+                ),
+                message=f"triage spent ${triage.cost_usd:.2f}, meeting the "
+                f"--max-cost ${config.max_cost_usd:.2f} ceiling before the fix loop",
+            )
+        surviving = [f for f in seed[0].findings if f.finding_id in set(triage.proceed)]
+        if not surviving:
+            # Every claim refuted with cited evidence: no coder, nothing
+            # pushed; the rejections ride out for the caller's thread replies.
+            logger.info(
+                "converge %s: triage rejected all %d external finding(s)",
+                config.run_id,
+                len(id_map),
+            )
+            return ConvergeResult(
+                status="triage_rejected",
+                change=change,
+                intake_cost_usd=triage.cost_usd,
+                external_outcomes=outcomes_after_loop(
+                    id_map, triage.rejections, {}, {}, loop_approved=False
+                ),
+                message="triage rejected every external finding with cited "
+                "evidence — nothing to converge"
+                + (f" ({triage.note})" if triage.note else ""),
+            )
+        logger.info(
+            "converge %s: %d/%d external finding(s) survive triage — entering fix loop",
+            config.run_id,
+            len(surviving),
+            len(id_map),
+        )
+        surviving_ids = [f.finding_id for f in surviving]
+        entry = LoopEntry(
+            worktree_factory=lambda cfg: worktree.create_on_branch(
+                cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent
+            ),
+            base_override=change.base_sha,
+            intake_reviews=[dataclasses.replace(seed[0], findings=surviving)],
+            intake_check_set=None,
+            # The per-id acknowledgement contract (PR #345 re-review 1): the
+            # coder must state FIXED/DISPUTED for every injected id, and the
+            # epilogue below refuses a `fixed` disposition without that ack.
+            external_ack=ack_instruction(surviving_ids),
+        )
+
+        def _external_epilogue(result: DevelopResult) -> tuple[ExternalOutcome, ...]:
+            # The coder's round-1 handoff carries its per-id claims about the
+            # injected findings — the mandated `## External findings` acks
+            # plus any `## Findings` dispute block. A later round's ids belong
+            # to the loop's own panel, not to the injection.
+            coder_claims: dict[str, handoff.Finding] = {}
+            acks: dict[str, CoderAck] = {}
+            coder_path = config.handoff_dir / handoff.coder_handoff_name(1)
+            try:
+                text = coder_path.read_text(encoding="utf-8")
+            except OSError:
+                text = ""  # loop died before round 1's handoff → unaddressed
+            if text:
+                acks = parse_coder_acks(text, surviving_ids)
+                try:
+                    parsed = handoff.parse_review_handoff(text)
+                    coder_claims = {f.finding_id: f for f in parsed.findings}
+                except ValueError:
+                    pass  # unparseable handoff: acks (line-scoped) may still hold
+            return outcomes_after_loop(
+                id_map,
+                triage.rejections,
+                coder_claims,
+                acks,
+                loop_approved=result.approved,
+            )
+
+        return _loop_and_deliver(
+            config,
+            change,
+            entry,
+            no_push=no_push,
+            coder_timeout=coder_timeout,
+            reviewer_timeout=reviewer_timeout,
+            pre_loop_cost=triage.cost_usd,
+            intake_deferred=(),
+            external_epilogue=_external_epilogue,
         )
 
     # --- intake: one panel + gate pass at the PR head ---
@@ -314,15 +452,6 @@ def converge_pr(
             message="intake review is already clean — nothing to converge",
         )
 
-    # Carry the intake spend into the loop budget so --max-cost bounds the WHOLE
-    # command, not just the loop. The exhaustion check above guarantees the
-    # remainder is > 0 here.
-    loop_config = config
-    if config.max_cost_usd is not None:
-        loop_config = dataclasses.replace(
-            config, max_cost_usd=config.max_cost_usd - intake_cost
-        )
-
     # --- fix loop: enter develop() on the PR branch, seeded from the intake ---
     logger.info(
         "converge %s: %s intake blocks — entering fix loop",
@@ -338,11 +467,56 @@ def converge_pr(
         intake_reviews=intake.panel.round_reviews,
         intake_check_set=intake.check_set,
     )
+    return _loop_and_deliver(
+        config,
+        change,
+        entry,
+        no_push=no_push,
+        coder_timeout=coder_timeout,
+        reviewer_timeout=reviewer_timeout,
+        pre_loop_cost=intake_cost,
+        intake_deferred=intake_deferred,
+        external_epilogue=None,
+    )
+
+
+def _loop_and_deliver(
+    config: DevelopConfig,
+    change: ResolvedChange,
+    entry: LoopEntry,
+    *,
+    no_push: bool,
+    coder_timeout: int,
+    reviewer_timeout: int,
+    pre_loop_cost: float,
+    intake_deferred: tuple[DeferredFinding, ...],
+    external_epilogue: Callable[[DevelopResult], tuple[ExternalOutcome, ...]] | None,
+) -> ConvergeResult:
+    """The shared fix-loop + push tail (single-sourced across both modes).
+
+    ``pre_loop_cost`` is whatever was spent before the loop — the local-panel
+    intake, or external mode's triage turn — and lands in the result's
+    ``intake_cost_usd`` slot either way (the budget carry treats them
+    identically). ``external_epilogue``, when set, computes the per-injected-
+    finding dispositions once the loop has run.
+    """
+    # Carry the pre-loop spend into the loop budget so --max-cost bounds the
+    # WHOLE command, not just the loop. The callers' exhaustion checks
+    # guarantee the remainder is > 0 here.
+    loop_config = config
+    if config.max_cost_usd is not None:
+        loop_config = dataclasses.replace(
+            config, max_cost_usd=config.max_cost_usd - pre_loop_cost
+        )
+
     result = develop(
         loop_config,
         coder_timeout=coder_timeout,
         reviewer_timeout=reviewer_timeout,
         entry=entry,
+    )
+    external_outcomes = (
+        external_epilogue(result) if external_epilogue is not None else ()
     )
 
     # Only the fixer's commits (PR head → HEAD), never develop()'s own span
@@ -355,8 +529,9 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
-            intake_cost_usd=intake_cost,
+            intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
+            external_outcomes=external_outcomes,
             message=result.message,
         )
 
@@ -367,8 +542,9 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
-            intake_cost_usd=intake_cost,
+            intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
+            external_outcomes=external_outcomes,
             message="converged — push skipped (--no-push)",
         )
     try:
@@ -384,8 +560,9 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
-            intake_cost_usd=intake_cost,
+            intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
+            external_outcomes=external_outcomes,
             message=str(exc),
         )
     except ForkPushUnsupported as exc:  # defensive — forks are guarded pre-loop
@@ -394,8 +571,9 @@ def converge_pr(
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,
-            intake_cost_usd=intake_cost,
+            intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
+            external_outcomes=external_outcomes,
             message=str(exc),
         )
     logger.info(
@@ -411,7 +589,8 @@ def converge_pr(
         fixer_commits=fixer_commits,
         pushed=True,
         pushed_sha=pushed_sha,
-        intake_cost_usd=intake_cost,
+        intake_cost_usd=pre_loop_cost,
         intake_deferred=intake_deferred,
+        external_outcomes=external_outcomes,
         message=f"converged and pushed to {change.head_branch}",
     )

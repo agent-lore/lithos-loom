@@ -31,6 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from lithos_loom.github_client import GitHubError, parse_github_ref
+from lithos_loom.github_models import (
+    AUTOMATED_REPLY_MARKER,
+    FIXED_REPLY_PREFIX,
+)
 
 from . import containers, engines, handoff, run_outcome, turns
 from .agent_session import build_run_cmd
@@ -46,7 +50,9 @@ COPILOT_LOGIN = "copilot-pull-request-reviewer[bot]"
 # Copilot's reviewer slug for the requested_reviewers POST (the display name
 # "Copilot" silently no-ops — learned the hard way on this repo).
 COPILOT_REVIEWER = "copilot-pull-request-reviewer[bot]"
-AUTOMATED_MARKER = "_(automated reply by story-develop)_"
+# Alias of the shared vocabulary (github_models is the single source; the
+# sweep and the converge external-findings fetch read the same constants).
+AUTOMATED_MARKER = AUTOMATED_REPLY_MARKER
 DEFAULT_COPILOT_TIMEOUT = 600  # seconds; observed turnaround is ~2-4 min
 COPILOT_POLL_SECONDS = 15
 
@@ -202,7 +208,7 @@ def reply_body(
             f"comment). Intended change: {response}"
         )
     elif fixed and sha:
-        head = f"Fixed in {sha[:10]} — {response}"
+        head = f"{FIXED_REPLY_PREFIX}{sha[:10]} — {response}"
     elif fixed:
         head = f"Addressed — {response}"
     else:

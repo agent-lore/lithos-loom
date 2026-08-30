@@ -1263,6 +1263,7 @@ async def test_review_comment_parse_carries_urls_shas_and_updated_at() -> None:
                     "commit_id": "d" * 40,
                     "original_commit_id": "c" * 40,
                     "updated_at": "2026-08-30T10:30:00Z",
+                    "pull_request_review_id": 4242,
                 }
             ],
         )
@@ -1275,6 +1276,7 @@ async def test_review_comment_parse_carries_urls_shas_and_updated_at() -> None:
     assert comment.commit_id == "d" * 40
     assert comment.original_commit_id == "c" * 40
     assert comment.updated_at == datetime(2026, 8, 30, 10, 30, tzinfo=UTC)
+    assert comment.pull_request_review_id == 4242
 
 
 @pytest.mark.asyncio

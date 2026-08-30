@@ -468,6 +468,7 @@ def develop(
         coder_handoff_nudge=_coder_handoff_nudge,
         intake_reviews=entry.intake_reviews if entry is not None else None,
         intake_check_set=entry.intake_check_set if entry is not None else None,
+        external_ack=entry.external_ack if entry is not None else "",
     )
 
     # The default outcome is "max_rounds" — the exit the loop lands on when it

@@ -30,6 +30,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
+| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 7 |
+| `lithos_loom.plugins.story_develop.external_triage` | S | 1 | 2 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
@@ -168,6 +170,23 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `is_supported` — Whether the container/exec layer can run *tool* (claude + codex, #94).
 - def `supported_tools` — The registered tool names, in registry order.
 - def `supported_tools_phrase` — Registry-derived ``'a' or 'b'`` list of tools, for operator error messages.
+
+### `lithos_loom.plugins.story_develop.external_reviews`
+- class `ExternalFinding` — One external review finding, with enough provenance to reply to it.
+- def `fetch_external_findings` — Fetch a PR's live external findings, split ``(trusted, untrusted)``.
+- def `findings_to_handoff_text` — Render external findings as a synthetic review handoff.
+- def `external_intake_reviews` — Build the synthetic intake that seeds converge's coder, plus the ``finding_id → ExternalFinding`` map the reply epilogue threads back on.
+- class `ExternalOutcome` — What happened to one injected external finding, for the reply epilogue.
+- class `CoderAck` — One line of the coder's ``## External findings`` acknowledgement.
+- def `ack_instruction` — The prompt block that makes the coder's per-id acknowledgement a hard contract, appended to the external-mode round-1 coder prompt.
+- def `parse_coder_acks` — Parse the coder handoff's ``## External findings`` acknowledgements.
+- def `outcomes_after_loop` — Fold triage rejections + the coder's per-id claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
+- def `pr_number_from_spec` — PR number from a converge change spec (``142`` / ``#142`` / a PR URL).
+
+### `lithos_loom.plugins.story_develop.external_triage`
+- class `TriageVerdicts` — Parsed per-finding verdicts (also the container step's result shape).
+- def `parse_triage_verdicts` — Parse the verdict file, applying default-to-act per finding.
+- def `triage_external_findings` — Run the one-turn read-only triage pass over *outcome*'s findings.
 
 ### `lithos_loom.plugins.story_develop.findings`
 - class `LedgerEntry` — One finding's life across rounds (mutable; owned by the ledger).

@@ -1,0 +1,418 @@
+"""External review findings → converge's fix loop (PRD S2, slice B).
+
+The fetch + injection seam for ``develop converge --from-github``: pull a
+delivered PR's external review material (reviews + inline comments), split it
+by the ADR 0011 trust line, and render the trusted findings as a synthetic
+``external`` reviewer outcome that seeds converge's coder via
+``LoopEntry.intake_reviews`` — bypassing the local-panel intake whose
+``already_clean`` short-circuit is exactly the panel that missed the defects
+(ADR 0011 decision 1 / 7).
+
+**Trust (decision 8):** allowlisted bot logins and humans with repo
+write/admin may seed the coder; everyone else's findings are returned in the
+*untrusted* list — reported to the operator, never placed on a prompt path.
+An author whose permission cannot be verified is untrusted (fail closed for
+the prompt path).
+
+**Suppression parity with the sweep:** a root comment already proven handled
+by an *authenticated* landed-fix reply (``github_models.is_landed_fix_reply``
++ the reply author holds write/admin — PR #344 re-reviews 1+2) is excluded,
+as is a non-``CHANGES_REQUESTED`` summary review by a handled author, so the
+operator-triggered path and the watcher sweep agree on what is still live.
+
+**Severity:** external reviewers state none; every finding enters at
+``minor`` (the loop's own panel and gate judge the *result* — the external
+reviewer proposes, loom's gate disposes).
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from lithos_loom.github_client import GitHubClient, GitHubError
+from lithos_loom.github_models import (
+    is_automated_reply,
+    is_landed_fix_reply,
+    parse_github_ref,
+    review_is_actionable,
+)
+
+from . import handoff
+from .findings import FindingLedger
+from .github_access import github_call
+from .panel import ReviewOutcome
+
+__all__ = [
+    "CoderAck",
+    "ExternalFinding",
+    "ExternalOutcome",
+    "GitHubError",  # re-export: the CLI seam catches it without a GitHub-tier import
+    "ack_instruction",
+    "external_intake_reviews",
+    "fetch_external_findings",
+    "findings_to_handoff_text",
+    "outcomes_after_loop",
+    "parse_coder_acks",
+    "pr_number_from_spec",
+]
+
+_TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
+
+
+@dataclass(frozen=True)
+class ExternalFinding:
+    """One external review finding, with enough provenance to reply to it.
+
+    ``head_sha`` is the commit the reviewer actually read (load-bearing: a
+    finding written against a sha the branch has moved past may already be
+    fixed and must be re-anchored, never re-fixed blindly). ``comment_id`` is
+    ``None`` for a summary-only review — the reply epilogue can only thread a
+    reply onto comment-backed findings.
+    """
+
+    author: str
+    source: str  # "bot" | "human"
+    trusted: bool
+    review_id: int | None
+    comment_id: int | None
+    thread_url: str
+    head_sha: str
+    path: str = ""
+    line: int | None = None
+    body: str = ""
+    severity: str = "minor"
+
+
+def fetch_external_findings(
+    repo: str, pr_number: int, *, trusted_bots: Sequence[str]
+) -> tuple[list[ExternalFinding], list[ExternalFinding]]:
+    """Fetch a PR's live external findings, split ``(trusted, untrusted)``.
+
+    One sync bridge call (``github_call``) covering the review + comment
+    listings and the per-author permission probes. Raises ``GitHubError`` on
+    a listing failure — unlike the retired ``fetch_copilot_comments``, which
+    swallowed it to ``[]``, the caller here must be able to distinguish "no
+    findings" from "could not look".
+    """
+    bots = frozenset(trusted_bots)
+
+    async def _op(
+        client: GitHubClient,
+    ) -> tuple[list[ExternalFinding], list[ExternalFinding]]:
+        reviews = await client.list_pull_request_reviews(repo, pr_number)
+        comments = await client.list_pull_request_review_comments(repo, pr_number)
+
+        permissions: dict[str, str] = {}
+
+        async def _permission(author: str) -> str:
+            cached = permissions.get(author)
+            if cached is not None:
+                return cached
+            try:
+                value = await client.get_collaborator_permission(repo, author)
+            except Exception:  # noqa: BLE001 — any probe failure = unverified
+                value = "none"
+            permissions[author] = value
+            return value
+
+        # Roots proven handled: an authenticated landed-fix reply (the same
+        # two-part proof the sweep applies — PR #344 re-reviews 1+2).
+        handled_roots: set[int] = set()
+        for c in comments:
+            if c.in_reply_to_id is None or not is_landed_fix_reply(c.body):
+                continue
+            if c.author in bots or await _permission(c.author) in _TRUSTED_PERMISSIONS:
+                handled_roots.add(c.in_reply_to_id)
+        # Bind suppression to the review that OWNS the handled roots (PR #345
+        # review F3) — never to the author across the whole PR, which would
+        # hide a later summary re-review behind an ancient fixed root.
+        review_roots: dict[int, list[int]] = {}
+        for c in comments:
+            if c.in_reply_to_id is None and c.pull_request_review_id is not None:
+                review_roots.setdefault(c.pull_request_review_id, []).append(
+                    c.comment_id
+                )
+        handled_review_ids = frozenset(
+            rid
+            for rid, roots in review_roots.items()
+            if roots and all(r in handled_roots for r in roots)
+        )
+
+        trusted: list[ExternalFinding] = []
+        untrusted: list[ExternalFinding] = []
+
+        async def _classify(author: str) -> tuple[str, bool]:
+            if author in bots:
+                return "bot", True
+            return "human", await _permission(author) in _TRUSTED_PERMISSIONS
+
+        for review in reviews:
+            if not review_is_actionable(review):
+                continue
+            # A non-blocking summary review ALL of whose own roots were
+            # handled is part of that handled history; a
+            # CHANGES_REQUESTED is never suppressed — a reply does not prove
+            # the requested changes were accepted.
+            if (
+                review.state != "CHANGES_REQUESTED"
+                and review.review_id in handled_review_ids
+            ):
+                continue
+            source, is_trusted = await _classify(review.author)
+            finding = ExternalFinding(
+                author=review.author,
+                source=source,
+                trusted=is_trusted,
+                review_id=review.review_id,
+                comment_id=None,
+                thread_url=(
+                    f"https://github.com/{repo}/pull/{pr_number}"
+                    f"#pullrequestreview-{review.review_id}"
+                ),
+                head_sha=review.commit_id,
+                body=review.body,
+            )
+            (trusted if is_trusted else untrusted).append(finding)
+
+        for c in comments:
+            if c.in_reply_to_id is not None or is_automated_reply(c.body):
+                continue
+            if c.comment_id in handled_roots:
+                continue
+            source, is_trusted = await _classify(c.author)
+            finding = ExternalFinding(
+                author=c.author,
+                source=source,
+                trusted=is_trusted,
+                review_id=None,
+                comment_id=c.comment_id,
+                thread_url=c.html_url,
+                head_sha=c.commit_id or c.original_commit_id,
+                path=c.path,
+                line=c.line,
+                body=c.body,
+            )
+            (trusted if is_trusted else untrusted).append(finding)
+
+        return trusted, untrusted
+
+    return github_call(_op)
+
+
+def findings_to_handoff_text(
+    findings: Sequence[ExternalFinding], *, current_head_sha: str
+) -> str:
+    """Render external findings as a synthetic review handoff.
+
+    Generalises the retired inline round's ``comments_to_handoff_text``:
+    blank ids (the ``external`` ledger assigns them), author attribution in
+    the rationale, and — when a finding was written against an older sha — a
+    re-anchor note telling the coder to verify it still applies before
+    changing anything (never re-fix blindly).
+    """
+    lines = [
+        "## Status: FINDINGS",
+        "## Summary",
+        f"{len(findings)} external review finding(s) fetched from the PR.",
+        "## Findings",
+    ]
+    for f in findings:
+        rationale = f"[{f.author}] " + " ".join(f.body.split())
+        if f.head_sha and f.head_sha != current_head_sha:
+            rationale += (
+                f" (written against {f.head_sha[:12]}, older than the current "
+                f"head — verify it still applies before changing anything)"
+            )
+        lines += [
+            "- finding_id:",
+            f"  severity: {f.severity}",
+            "  status: open",
+        ]
+        if f.path:
+            loc = f"{f.path}:{f.line}" if f.line else f.path
+            lines.append(f'  files: ["{loc}"]')
+        lines.append(f"  rationale: {rationale}")
+    return "\n".join(lines) + "\n"
+
+
+def external_intake_reviews(
+    findings: Sequence[ExternalFinding], *, current_head_sha: str
+) -> tuple[list[ReviewOutcome], dict[str, ExternalFinding]]:
+    """Build the synthetic intake that seeds converge's coder, plus the
+    ``finding_id → ExternalFinding`` map the reply epilogue threads back on.
+
+    The inline round's recipe: render → ``parse_review_handoff`` → a fresh
+    ``FindingLedger("external")`` assigns canonical ids — bound positionally
+    to their source findings (``zip(strict=True)``, the id↔thread binding).
+    """
+    text = findings_to_handoff_text(findings, current_head_sha=current_head_sha)
+    parsed = handoff.parse_review_handoff(text)
+    ledger = FindingLedger("external")
+    canonical = ledger.apply_review(parsed, 1)
+    id_map = {f.finding_id: ext for f, ext in zip(canonical, findings, strict=True)}
+    severities = [f.severity for f in canonical if f.is_open]
+    outcome = ReviewOutcome(
+        reviewer="external",
+        status="FINDINGS",
+        passed=False,
+        max_severity=handoff.max_severity(severities),
+        findings=canonical,
+        cost_usd=0.0,
+    )
+    return [outcome], id_map
+
+
+@dataclass(frozen=True)
+class ExternalOutcome:
+    """What happened to one injected external finding, for the reply epilogue.
+
+    ``disposition``: ``rejected`` (triage refuted it, ``detail`` = the cited
+    evidence), ``fixed`` / ``disputed`` (the coder's per-id acknowledgement,
+    ``detail`` = its one-line response), or ``unaddressed`` (no validated
+    claim — the loop stopped early, or the coder never acknowledged the id).
+    The epilogue only *asserts* a fix in a thread reply when the branch was
+    actually pushed; dispositions here are claims.
+    """
+
+    finding_id: str
+    finding: ExternalFinding
+    disposition: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class CoderAck:
+    """One line of the coder's ``## External findings`` acknowledgement."""
+
+    verdict: str  # "fixed" | "disputed"
+    detail: str = ""
+
+
+# The dedicated handoff section the external-mode coder prompt mandates
+# (PR #345 re-review 1). Distinct from `## Findings` (the shared dispute
+# contract) so `parse_review_handoff`'s exact "findings" section key never
+# sees it, and scoped parsing below never reads the Summary's per-id prose
+# ("- f-001: fixed the guard") as an acknowledgement.
+ACK_SECTION = "## External findings"
+
+_ACK_SECTION_RE = re.compile(
+    r"^##[ \t]*External findings[ \t]*:?[ \t]*$(?P<body>.*?)(?=^##[ \t]|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+# One ack per LINE (the same anchoring rule as the triage verdict regex — an
+# unanchored pattern would let one line's detail swallow the next).
+_ACK_RE = re.compile(
+    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>FIXED|DISPUTED)"
+    r"[ \t]*(?:[—–:-]+[ \t]*(?P<detail>.*\S))?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def ack_instruction(finding_ids: Sequence[str]) -> str:
+    """The prompt block that makes the coder's per-id acknowledgement a hard
+    contract, appended to the external-mode round-1 coder prompt.
+
+    Every injected id is named explicitly so the coder cannot conform while
+    silently dropping one — an omitted id parses to no ack and the finding
+    lands ``unaddressed`` (its thread gets no "Fixed in" reply).
+    """
+    ids = ", ".join(finding_ids)
+    return f"""
+## External-finding acknowledgements (required)
+
+The findings above come from EXTERNAL reviewers on the PR's own threads, and
+each thread is answered from your handoff. In addition to the normal format,
+your handoff MUST contain a `{ACK_SECTION.lstrip("# ")}` section (header
+exactly `{ACK_SECTION}`) with exactly one line per finding id — every one of:
+{ids} — stating what you did:
+
+- f-001: FIXED — <one line: what you changed, and where>
+- f-002: DISPUTED — <one line: why the finding is wrong>
+
+Use FIXED only for a finding you actually resolved in the code this turn. An
+id you omit is treated as NOT addressed and its thread gets no answer — never
+omit one silently.
+"""
+
+
+def parse_coder_acks(text: str, finding_ids: Sequence[str]) -> dict[str, CoderAck]:
+    """Parse the coder handoff's ``## External findings`` acknowledgements.
+
+    Only lines inside that dedicated section count — the mandated per-id
+    Summary prose never does. Ids outside *finding_ids* are ignored; a missing
+    section returns ``{}`` (every finding then ``unaddressed`` — the safe
+    direction: an unparseable handoff can under-claim, never over-claim).
+    """
+    section = _ACK_SECTION_RE.search(text)
+    if section is None:
+        return {}
+    known = set(finding_ids)
+    acks: dict[str, CoderAck] = {}
+    for line in _ACK_RE.finditer(section.group("body")):
+        fid = line.group("fid")
+        if fid not in known:
+            continue
+        acks[fid] = CoderAck(
+            verdict=line.group("verdict").lower(),
+            detail=(line.group("detail") or "").strip(),
+        )
+    return acks
+
+
+def outcomes_after_loop(
+    id_map: dict[str, ExternalFinding],
+    rejections: dict[str, str],
+    coder_findings: dict[str, handoff.Finding],
+    acks: dict[str, CoderAck],
+    *,
+    loop_approved: bool = False,
+) -> tuple[ExternalOutcome, ...]:
+    """Fold triage rejections + the coder's per-id claims into per-finding
+    outcomes, in the injection order (``id_map`` preserves it).
+
+    ``fixed`` requires BOTH halves of the evidence (PR #345 re-review 1): the
+    coder's explicit ``FIXED`` acknowledgement for that id (*acks*, from the
+    mandated ``## External findings`` section — the loop's approval alone is
+    evidence the TREE passed, not evidence of each disposition, so a silent
+    partial fix must never earn a per-thread claim) AND ``loop_approved``
+    (the panel + gate accepted the tree the acknowledgement is about — an
+    acked fix in an unapproved loop was never validated). A dispute counts
+    from either channel: the shared ``## Findings`` block contract, or a
+    ``DISPUTED`` acknowledgement line. Everything else is ``unaddressed``.
+    """
+    out: list[ExternalOutcome] = []
+    for fid, ext in id_map.items():
+        if fid in rejections:
+            out.append(ExternalOutcome(fid, ext, "rejected", detail=rejections[fid]))
+            continue
+        claim = coder_findings.get(fid)
+        ack = acks.get(fid)
+        if (claim is not None and claim.status == "disputed") or (
+            ack is not None and ack.verdict == "disputed"
+        ):
+            detail = (
+                claim.coder_response
+                if claim is not None and claim.coder_response
+                else (ack.detail if ack is not None else "")
+            )
+            out.append(ExternalOutcome(fid, ext, "disputed", detail=detail))
+            continue
+        if ack is not None and ack.verdict == "fixed" and loop_approved:
+            out.append(ExternalOutcome(fid, ext, "fixed", detail=ack.detail))
+            continue
+        detail = ack.detail if ack is not None else ""
+        out.append(ExternalOutcome(fid, ext, "unaddressed", detail=detail))
+    return tuple(out)
+
+
+def pr_number_from_spec(change_spec: str) -> int | None:
+    """PR number from a converge change spec (``142`` / ``#142`` / a PR URL)."""
+    raw = change_spec.strip().lstrip("#")
+    if raw.isdigit():
+        return int(raw)
+    ref = parse_github_ref(change_spec)
+    if ref is not None and ref.kind == "pull":
+        return ref.number
+    return None
