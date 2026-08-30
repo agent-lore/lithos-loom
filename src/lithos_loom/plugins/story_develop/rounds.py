@@ -163,6 +163,10 @@ class RoundContext:
     # review + the PR's own commit log instead of coder_init.md. See LoopEntry.
     intake_reviews: list[ReviewOutcome] | None = None
     intake_check_set: CheckSetResult | None = None
+    # extra block appended to the converge round-1 coder prompt — external
+    # mode's per-id acknowledgement contract (PR #345 re-review 1); empty on
+    # the local-panel path.
+    external_ack: str = ""
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -201,6 +205,10 @@ class LoopEntry:
     base_override: str
     intake_reviews: list[ReviewOutcome]
     intake_check_set: CheckSetResult | None
+    # External mode (PRD S2): the per-id acknowledgement contract block for
+    # the round-1 coder prompt's `{external_ack}` slot. Empty (the default)
+    # renders nothing — the local-panel converge path is unchanged.
+    external_ack: str = ""
 
 
 def _combine_review_outcomes(
@@ -266,6 +274,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 ),
                 handoff_file=handoff.coder_handoff_name(1),
                 sandbox_facts=_sandbox_section(config.image, for_coder=True),
+                external_ack=ctx.external_ack,
             )
         else:
             # T8: an EXPLICIT acceptance criteria (flag / task metadata) gets its

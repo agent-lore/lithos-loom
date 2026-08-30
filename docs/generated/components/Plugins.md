@@ -30,7 +30,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 12 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.external_reviews` | M | 2 | 5 |
+| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.external_triage` | S | 1 | 2 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -177,7 +177,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `findings_to_handoff_text` — Render external findings as a synthetic review handoff.
 - def `external_intake_reviews` — Build the synthetic intake that seeds converge's coder, plus the ``finding_id → ExternalFinding`` map the reply epilogue threads back on.
 - class `ExternalOutcome` — What happened to one injected external finding, for the reply epilogue.
-- def `outcomes_after_loop` — Fold triage rejections + the coder's claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
+- class `CoderAck` — One line of the coder's ``## External findings`` acknowledgement.
+- def `ack_instruction` — The prompt block that makes the coder's per-id acknowledgement a hard contract, appended to the external-mode round-1 coder prompt.
+- def `parse_coder_acks` — Parse the coder handoff's ``## External findings`` acknowledgements.
+- def `outcomes_after_loop` — Fold triage rejections + the coder's per-id claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
 - def `pr_number_from_spec` — PR number from a converge change spec (``142`` / ``#142`` / a PR URL).
 
 ### `lithos_loom.plugins.story_develop.external_triage`

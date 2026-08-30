@@ -58,13 +58,16 @@ _VERDICT_RE = re.compile(
 )
 
 
-# What counts as CITED evidence (PR #345 review F2): the rejection must name a
-# location — a dotted file path (src/util.py, optionally :line) or a
-# file:line token (Makefile:12). Prose alone ("nope", "seems fine", "the
-# reviewer misread it") is not evidence and the claim proceeds; the rule
-# lives in the parser, not just the prompt, so a vague model rejection can
-# never silently discard a true defect.
-_CITATION_RE = re.compile(r"[\w./-]+\.[A-Za-z0-9]{1,6}(?::\d+)?|[\w./-]+:\d+")
+# What counts as CITED evidence (PR #345 reviews F2 + re-review 2): the
+# rejection must name a checkable source location — a ``file:line`` token
+# whose file part contains a letter (``src/util.py:42``, ``Makefile:12``).
+# A dotted token alone is NOT a citation: ``v1.2`` is version prose and a
+# bare ``README.md`` names no line whose behaviour could refute anything —
+# both were reproduced slipping through the earlier extension-based pattern;
+# an all-digit ``12:30`` is a clock, not a file. The rule lives in the
+# parser, not just the prompt, so a vague model rejection can never silently
+# discard a true defect.
+_CITATION_RE = re.compile(r"(?=[\w./-]*[A-Za-z])[\w./-]+:\d+")
 
 
 @dataclass(frozen=True)
@@ -81,9 +84,9 @@ def parse_triage_verdicts(text: str, finding_ids: list[str]) -> TriageVerdicts:
     """Parse the verdict file, applying default-to-act per finding.
 
     A finding is rejected only by an explicit ``REJECT`` line whose evidence
-    cites a location (``_CITATION_RE`` — a file, optionally ``:line``);
-    everything else — PROCEED, bare REJECT, uncited prose, unmentioned,
-    garbled — proceeds. Ids the output invents are ignored.
+    cites a ``file:line`` location (``_CITATION_RE``); everything else —
+    PROCEED, bare REJECT, uncited prose, unmentioned, garbled — proceeds.
+    Ids the output invents are ignored.
     """
     known = set(finding_ids)
     rejections: dict[str, str] = {}

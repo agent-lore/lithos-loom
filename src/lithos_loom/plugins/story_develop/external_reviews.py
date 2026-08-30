@@ -27,6 +27,7 @@ reviewer proposes, loom's gate disposes).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -44,13 +45,16 @@ from .github_access import github_call
 from .panel import ReviewOutcome
 
 __all__ = [
+    "CoderAck",
     "ExternalFinding",
     "ExternalOutcome",
     "GitHubError",  # re-export: the CLI seam catches it without a GitHub-tier import
+    "ack_instruction",
     "external_intake_reviews",
     "fetch_external_findings",
     "findings_to_handoff_text",
     "outcomes_after_loop",
+    "parse_coder_acks",
     "pr_number_from_spec",
 ]
 
@@ -265,10 +269,11 @@ class ExternalOutcome:
     """What happened to one injected external finding, for the reply epilogue.
 
     ``disposition``: ``rejected`` (triage refuted it, ``detail`` = the cited
-    evidence), ``fixed`` / ``disputed`` (the coder's round-1 claim, ``detail``
-    = its response), or ``unaddressed`` (no coder claim recorded — e.g. the
-    loop stopped early). The epilogue only *asserts* a fix in a thread reply
-    when the branch was actually pushed; dispositions here are claims.
+    evidence), ``fixed`` / ``disputed`` (the coder's per-id acknowledgement,
+    ``detail`` = its one-line response), or ``unaddressed`` (no validated
+    claim — the loop stopped early, or the coder never acknowledged the id).
+    The epilogue only *asserts* a fix in a thread reply when the branch was
+    actually pushed; dispositions here are claims.
     """
 
     finding_id: str
@@ -277,22 +282,105 @@ class ExternalOutcome:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CoderAck:
+    """One line of the coder's ``## External findings`` acknowledgement."""
+
+    verdict: str  # "fixed" | "disputed"
+    detail: str = ""
+
+
+# The dedicated handoff section the external-mode coder prompt mandates
+# (PR #345 re-review 1). Distinct from `## Findings` (the shared dispute
+# contract) so `parse_review_handoff`'s exact "findings" section key never
+# sees it, and scoped parsing below never reads the Summary's per-id prose
+# ("- f-001: fixed the guard") as an acknowledgement.
+ACK_SECTION = "## External findings"
+
+_ACK_SECTION_RE = re.compile(
+    r"^##[ \t]*External findings[ \t]*:?[ \t]*$(?P<body>.*?)(?=^##[ \t]|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+# One ack per LINE (the same anchoring rule as the triage verdict regex — an
+# unanchored pattern would let one line's detail swallow the next).
+_ACK_RE = re.compile(
+    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>FIXED|DISPUTED)"
+    r"[ \t]*(?:[—–:-]+[ \t]*(?P<detail>.*\S))?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def ack_instruction(finding_ids: Sequence[str]) -> str:
+    """The prompt block that makes the coder's per-id acknowledgement a hard
+    contract, appended to the external-mode round-1 coder prompt.
+
+    Every injected id is named explicitly so the coder cannot conform while
+    silently dropping one — an omitted id parses to no ack and the finding
+    lands ``unaddressed`` (its thread gets no "Fixed in" reply).
+    """
+    ids = ", ".join(finding_ids)
+    return f"""
+## External-finding acknowledgements (required)
+
+The findings above come from EXTERNAL reviewers on the PR's own threads, and
+each thread is answered from your handoff. In addition to the normal format,
+your handoff MUST contain a `{ACK_SECTION.lstrip("# ")}` section (header
+exactly `{ACK_SECTION}`) with exactly one line per finding id — every one of:
+{ids} — stating what you did:
+
+- f-001: FIXED — <one line: what you changed, and where>
+- f-002: DISPUTED — <one line: why the finding is wrong>
+
+Use FIXED only for a finding you actually resolved in the code this turn. An
+id you omit is treated as NOT addressed and its thread gets no answer — never
+omit one silently.
+"""
+
+
+def parse_coder_acks(text: str, finding_ids: Sequence[str]) -> dict[str, CoderAck]:
+    """Parse the coder handoff's ``## External findings`` acknowledgements.
+
+    Only lines inside that dedicated section count — the mandated per-id
+    Summary prose never does. Ids outside *finding_ids* are ignored; a missing
+    section returns ``{}`` (every finding then ``unaddressed`` — the safe
+    direction: an unparseable handoff can under-claim, never over-claim).
+    """
+    section = _ACK_SECTION_RE.search(text)
+    if section is None:
+        return {}
+    known = set(finding_ids)
+    acks: dict[str, CoderAck] = {}
+    for line in _ACK_RE.finditer(section.group("body")):
+        fid = line.group("fid")
+        if fid not in known:
+            continue
+        acks[fid] = CoderAck(
+            verdict=line.group("verdict").lower(),
+            detail=(line.group("detail") or "").strip(),
+        )
+    return acks
+
+
 def outcomes_after_loop(
     id_map: dict[str, ExternalFinding],
     rejections: dict[str, str],
     coder_findings: dict[str, handoff.Finding],
+    acks: dict[str, CoderAck],
     *,
     loop_approved: bool = False,
 ) -> tuple[ExternalOutcome, ...]:
-    """Fold triage rejections + the coder's claims into per-finding outcomes,
-    in the injection order (``id_map`` preserves it).
+    """Fold triage rejections + the coder's per-id claims into per-finding
+    outcomes, in the injection order (``id_map`` preserves it).
 
-    The coder's handoff contract (PR #345 review F1) puts a ``## Findings``
-    block in only for **disputes** — a conforming successful fix leaves no
-    parsed finding at all. So ``fixed`` is derived from the LOOP's approval:
-    a non-rejected, non-disputed finding in an approved run was addressed
-    (the panel + gate accepted the tree containing its remediation); in an
-    unapproved run it stays ``unaddressed`` — never a false ``fixed``.
+    ``fixed`` requires BOTH halves of the evidence (PR #345 re-review 1): the
+    coder's explicit ``FIXED`` acknowledgement for that id (*acks*, from the
+    mandated ``## External findings`` section — the loop's approval alone is
+    evidence the TREE passed, not evidence of each disposition, so a silent
+    partial fix must never earn a per-thread claim) AND ``loop_approved``
+    (the panel + gate accepted the tree the acknowledgement is about — an
+    acked fix in an unapproved loop was never validated). A dispute counts
+    from either channel: the shared ``## Findings`` block contract, or a
+    ``DISPUTED`` acknowledgement line. Everything else is ``unaddressed``.
     """
     out: list[ExternalOutcome] = []
     for fid, ext in id_map.items():
@@ -300,14 +388,22 @@ def outcomes_after_loop(
             out.append(ExternalOutcome(fid, ext, "rejected", detail=rejections[fid]))
             continue
         claim = coder_findings.get(fid)
-        if claim is not None and claim.status == "disputed":
-            out.append(
-                ExternalOutcome(fid, ext, "disputed", detail=claim.coder_response)
+        ack = acks.get(fid)
+        if (claim is not None and claim.status == "disputed") or (
+            ack is not None and ack.verdict == "disputed"
+        ):
+            detail = (
+                claim.coder_response
+                if claim is not None and claim.coder_response
+                else (ack.detail if ack is not None else "")
             )
+            out.append(ExternalOutcome(fid, ext, "disputed", detail=detail))
             continue
-        detail = claim.coder_response if claim is not None else ""
-        disposition = "fixed" if loop_approved else "unaddressed"
-        out.append(ExternalOutcome(fid, ext, disposition, detail=detail))
+        if ack is not None and ack.verdict == "fixed" and loop_approved:
+            out.append(ExternalOutcome(fid, ext, "fixed", detail=ack.detail))
+            continue
+        detail = ack.detail if ack is not None else ""
+        out.append(ExternalOutcome(fid, ext, "unaddressed", detail=detail))
     return tuple(out)
 
 

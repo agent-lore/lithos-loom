@@ -50,6 +50,9 @@ def test_converge_prompt_carries_intent_transfer_and_slots() -> None:
         "{findings}",
         "{gate_summary}",
         "{handoff_file}",
+        # external mode's per-id acknowledgement contract (PR #345 re-review
+        # 1); rendered empty on the local-panel path
+        "{external_ack}",
     ):
         assert slot in raw
 

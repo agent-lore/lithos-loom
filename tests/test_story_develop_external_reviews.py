@@ -24,10 +24,14 @@ from lithos_loom.github_client import (
 )
 from lithos_loom.plugins.story_develop import external_reviews as ext_mod
 from lithos_loom.plugins.story_develop.external_reviews import (
+    CoderAck,
     ExternalFinding,
+    ack_instruction,
     external_intake_reviews,
     fetch_external_findings,
     findings_to_handoff_text,
+    outcomes_after_loop,
+    parse_coder_acks,
 )
 from lithos_loom.plugins.story_develop.handoff import parse_review_handoff
 from lithos_loom.plugins.story_develop.pr_delivery import reply_body
@@ -328,3 +332,71 @@ def test_later_summary_review_is_not_hidden_by_old_handled_roots(
     # Review 500 (all of its roots handled) is suppressed; review 510 is new
     # material and survives.
     assert [(f.review_id, f.body) for f in trusted] == [(510, "two new problems")]
+
+
+# --- per-id coder acknowledgements (PR #345 re-review 1) ---------------------
+
+
+_ACK_HANDOFF = (
+    "## Status: LGTM\n"
+    "## Summary\n"
+    "- f-001: fixed the guard properly.\n"  # summary prose must NOT count
+    "## External findings\n"
+    "- f-001: FIXED — added the None guard in src/x.py\n"
+    "- f-002: DISPUTED — deliberate: the handle closes in __exit__\n"
+    "- f-099: FIXED — invented id\n"
+)
+
+
+def test_parse_coder_acks_reads_only_the_ack_section() -> None:
+    acks = parse_coder_acks(_ACK_HANDOFF, ["f-001", "f-002", "f-003"])
+    assert acks["f-001"].verdict == "fixed"
+    assert "None guard" in acks["f-001"].detail
+    assert acks["f-002"].verdict == "disputed"
+    assert "f-003" not in acks  # omitted id: no ack, never invented
+    assert "f-099" not in acks  # invented id: ignored
+
+
+def test_prose_outside_the_ack_section_is_never_an_ack() -> None:
+    # The Summary is REQUIRED to address each finding by id, so a bare
+    # "- f-001: fixed ..." line exists in every conforming handoff; only the
+    # dedicated section is authoritative.
+    text = "## Status: LGTM\n## Summary\n- f-001: FIXED — did the thing\n"
+    assert parse_coder_acks(text, ["f-001"]) == {}
+
+
+def test_outcomes_approval_alone_is_never_fixed() -> None:
+    # The reviewer's direct probe (PR #345 re-review 1): two ids, no per-id
+    # claims, loop approved. Approval is evidence the TREE passed the loop,
+    # not evidence of each external disposition — a silent partial fix must
+    # not earn a per-thread "Fixed in" claim.
+    id_map = {"f-001": _finding(comment_id=1), "f-002": _finding(comment_id=2)}
+    out = outcomes_after_loop(id_map, {}, {}, {}, loop_approved=True)
+    assert [o.disposition for o in out] == ["unaddressed", "unaddressed"]
+
+
+def test_outcomes_fixed_needs_ack_and_approval() -> None:
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="fixed", detail="guarded it")}
+    (approved,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=True)
+    assert approved.disposition == "fixed"
+    assert approved.detail == "guarded it"
+    # The other half: an acknowledged fix in an UNAPPROVED loop is a claim the
+    # panel + gate never validated — stays unaddressed.
+    (unapproved,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=False)
+    assert unapproved.disposition == "unaddressed"
+
+
+def test_outcomes_ack_dispute_counts_without_findings_block() -> None:
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="disputed", detail="deliberate design")}
+    (o,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=True)
+    assert o.disposition == "disputed"
+    assert o.detail == "deliberate design"
+
+
+def test_ack_instruction_names_every_id_and_the_section() -> None:
+    text = ack_instruction(["f-001", "f-002"])
+    assert "## External findings" in text
+    assert "f-001" in text and "f-002" in text
+    assert "omit" in text.lower()  # the never-omit-silently steering

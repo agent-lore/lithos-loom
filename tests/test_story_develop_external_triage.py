@@ -217,8 +217,8 @@ def test_missing_verdict_file_defaults_to_act(
 def test_reject_with_uncited_prose_proceeds() -> None:
     """PR #345 review F2: the cited-evidence rule is enforced by the PARSER,
     not just the prompt — a vague rejection ("nope", "seems fine") must not
-    silently discard a claim. Evidence counts only when it cites a location
-    (a file, optionally :line)."""
+    silently discard a claim. Evidence counts only when it cites a
+    ``file:line`` location."""
     text = (
         "- f-001: REJECT — nope\n"
         "- f-002: REJECT — the reviewer misread the intent, this is fine\n"
@@ -228,3 +228,19 @@ def test_reject_with_uncited_prose_proceeds() -> None:
     verdicts = parse_triage_verdicts(text, ["f-001", "f-002", "f-003", "f-004"])
     assert verdicts.proceed == ("f-001", "f-002")
     assert set(verdicts.rejections) == {"f-003", "f-004"}
+
+
+def test_reject_with_dotted_prose_or_lineless_file_proceeds() -> None:
+    """PR #345 re-review 2: a dotted token is not a citation. ``v1.2`` is
+    version prose, and a bare filename (``README.md``) names no line whose
+    behaviour could refute anything — both were reproduced slipping through
+    the extension-based pattern. Only a ``file:line`` token counts."""
+    text = (
+        "- f-001: REJECT — reviewer misunderstood version v1.2\n"
+        "- f-002: REJECT — README.md says nothing about this behavior\n"
+        "- f-003: REJECT — 12:30 is when the cron fires, not a race\n"
+        "- f-004: REJECT — external_triage.py:67 anchors the verdict lines\n"
+    )
+    verdicts = parse_triage_verdicts(text, ["f-001", "f-002", "f-003", "f-004"])
+    assert verdicts.proceed == ("f-001", "f-002", "f-003")
+    assert set(verdicts.rejections) == {"f-004"}

@@ -561,16 +561,16 @@ def test_external_mode_skips_intake_and_seeds_surviving_findings(
     )
     config = _config(tmp_path)
 
-    # A CONFORMING successful coder handoff (PR #345 review F1): the prompt
-    # mandates `## Status: LGTM` + a per-id Summary, with a Findings block only
-    # for disputes — so a successful fix leaves NO parsed findings. The fixed
-    # disposition must come from the loop's approval, not from bookkeeping the
-    # prompt never asks for.
+    # A CONFORMING external-mode coder handoff (PR #345 re-review 1): the
+    # injected prompt mandates a `## External findings` section with one
+    # FIXED/DISPUTED line per injected id — the per-id half of the fixed
+    # evidence (the loop's approval is the other half).
     config.handoff_dir.mkdir(parents=True, exist_ok=True)
     from lithos_loom.plugins.story_develop import handoff as handoff_mod
 
     (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
-        "## Status: LGTM\n## Summary\nf-002: guarded the handle.\n",
+        "## Status: LGTM\n## Summary\nf-002: guarded the handle.\n"
+        "## External findings\n- f-002: FIXED — guarded the handle\n",
         encoding="utf-8",
     )
 
@@ -589,13 +589,17 @@ def test_external_mode_skips_intake_and_seeds_surviving_findings(
     (outcome,) = entry.intake_reviews
     assert [f.finding_id for f in outcome.findings] == ["f-002"]  # survivor only
     assert entry.intake_check_set is None
+    # The acknowledgement contract rides into the round-1 coder prompt via the
+    # entry, naming exactly the surviving ids.
+    assert "## External findings" in entry.external_ack
+    assert "f-002" in entry.external_ack
     assert result.status == "converged" and result.pushed
     assert result.intake_cost_usd == 0.1  # the triage spend
 
     by_id = {o.finding_id: o for o in result.external_outcomes}
     assert by_id["f-001"].disposition == "rejected"
     assert "refutes" in by_id["f-001"].detail
-    assert by_id["f-002"].disposition == "fixed"  # approved loop = fixed
+    assert by_id["f-002"].disposition == "fixed"  # acked FIXED + approved loop
     assert by_id["f-001"].finding.comment_id == 7
 
 
@@ -656,7 +660,8 @@ def test_external_mode_dispute_and_unapproved_dispositions(
         "## Status: LGTM\n## Summary\nf-001 disputed; f-002 addressed.\n"
         "## Findings\n"
         "- finding_id: f-001\n  severity: minor\n  status: disputed\n"
-        "  rationale: r\n  coder_response: deliberate decision\n",
+        "  rationale: r\n  coder_response: deliberate decision\n"
+        "## External findings\n- f-002: FIXED — closed the handle\n",
         encoding="utf-8",
     )
 
@@ -684,3 +689,35 @@ def test_external_mode_dispute_and_unapproved_dispositions(
         "disputed",
         "unaddressed",
     }
+
+
+def test_external_mode_unacked_finding_stays_unaddressed_when_approved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #345 re-review 1, end-to-end: two findings survive triage, the coder
+    acknowledges only one, and the panel (which never saw the original
+    external text) approves the tree. The omitted finding must stay
+    `unaddressed` — its thread gets no "Fixed in" reply — instead of riding
+    the blanket approval to a false `fixed`."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001: guarded the handle.\n"
+        "## External findings\n- f-001: FIXED — guarded the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+
+    assert result.status == "converged"  # the loop itself approved + pushed
+    by_id = {o.finding_id: o for o in result.external_outcomes}
+    assert by_id["f-001"].disposition == "fixed"
+    assert by_id["f-002"].disposition == "unaddressed"

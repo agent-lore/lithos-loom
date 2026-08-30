@@ -42,10 +42,13 @@ from . import handoff, review_only
 from .config import DevelopConfig
 from .develop import DevelopResult, develop
 from .external_reviews import (
+    CoderAck,
     ExternalFinding,
     ExternalOutcome,
+    ack_instruction,
     external_intake_reviews,
     outcomes_after_loop,
+    parse_coder_acks,
 )
 from .external_triage import triage_external_findings
 from .findings import DeferredFinding
@@ -283,7 +286,7 @@ def converge_pr(
                 change=change,
                 intake_cost_usd=triage.cost_usd,
                 external_outcomes=outcomes_after_loop(
-                    id_map, triage.rejections, {}, loop_approved=False
+                    id_map, triage.rejections, {}, {}, loop_approved=False
                 ),
                 message=f"triage spent ${triage.cost_usd:.2f}, meeting the "
                 f"--max-cost ${config.max_cost_usd:.2f} ceiling before the fix loop",
@@ -302,7 +305,7 @@ def converge_pr(
                 change=change,
                 intake_cost_usd=triage.cost_usd,
                 external_outcomes=outcomes_after_loop(
-                    id_map, triage.rejections, {}, loop_approved=False
+                    id_map, triage.rejections, {}, {}, loop_approved=False
                 ),
                 message="triage rejected every external finding with cited "
                 "evidence — nothing to converge"
@@ -314,6 +317,7 @@ def converge_pr(
             len(surviving),
             len(id_map),
         )
+        surviving_ids = [f.finding_id for f in surviving]
         entry = LoopEntry(
             worktree_factory=lambda cfg: worktree.create_on_branch(
                 cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent
@@ -321,25 +325,36 @@ def converge_pr(
             base_override=change.base_sha,
             intake_reviews=[dataclasses.replace(seed[0], findings=surviving)],
             intake_check_set=None,
+            # The per-id acknowledgement contract (PR #345 re-review 1): the
+            # coder must state FIXED/DISPUTED for every injected id, and the
+            # epilogue below refuses a `fixed` disposition without that ack.
+            external_ack=ack_instruction(surviving_ids),
         )
 
         def _external_epilogue(result: DevelopResult) -> tuple[ExternalOutcome, ...]:
-            # The coder's round-1 handoff carries its per-id claims (fixed /
-            # disputed) about the injected findings — a later round's ids
-            # belong to the loop's own panel, not to the injection.
+            # The coder's round-1 handoff carries its per-id claims about the
+            # injected findings — the mandated `## External findings` acks
+            # plus any `## Findings` dispute block. A later round's ids belong
+            # to the loop's own panel, not to the injection.
             coder_claims: dict[str, handoff.Finding] = {}
+            acks: dict[str, CoderAck] = {}
             coder_path = config.handoff_dir / handoff.coder_handoff_name(1)
             try:
-                parsed = handoff.parse_review_handoff(
-                    coder_path.read_text(encoding="utf-8")
-                )
-                coder_claims = {f.finding_id: f for f in parsed.findings}
-            except (OSError, ValueError):
-                pass  # loop died before/round-1 handoff unusable → unaddressed
+                text = coder_path.read_text(encoding="utf-8")
+            except OSError:
+                text = ""  # loop died before round 1's handoff → unaddressed
+            if text:
+                acks = parse_coder_acks(text, surviving_ids)
+                try:
+                    parsed = handoff.parse_review_handoff(text)
+                    coder_claims = {f.finding_id: f for f in parsed.findings}
+                except ValueError:
+                    pass  # unparseable handoff: acks (line-scoped) may still hold
             return outcomes_after_loop(
                 id_map,
                 triage.rejections,
                 coder_claims,
+                acks,
                 loop_approved=result.approved,
             )
 
