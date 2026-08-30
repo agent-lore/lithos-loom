@@ -60,9 +60,12 @@ Rules:
 - `PROCEED` needs no justification.
 - `REJECT` **must** carry the refuting evidence after an em-dash — a
   `file:line` citation (like `src/util.py:14`) plus what the code there
-  actually does. A REJECT without evidence is treated as PROCEED, and so is
-  one whose evidence names no `file:line` (a bare filename or version number
-  is not a citation).
+  actually does. The cited path must be a **real file in this repository**
+  — a protocol code (`HTTP:404`), a spec number (`RFC:7231`), or a config
+  key (`timeout:30`) is not a citation. A REJECT without evidence is
+  treated as PROCEED, and so is one whose evidence names no `file:line`
+  resolving to a repo file (a bare filename or version number is not a
+  citation).
 - Every claim must get a verdict line. A claim you are unsure about gets
   `PROCEED`.
 - Do not invent verdicts for finding ids that are not in the list above.
