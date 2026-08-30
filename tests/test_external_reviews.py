@@ -13,7 +13,7 @@ stubbed exactly as in ``test_develop_pr_merge``.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -353,3 +353,105 @@ async def test_nothing_new_writes_no_marker() -> None:
     client.task_update = spy  # type: ignore[method-assign]
     await _run(client, gate, story, github)
     assert spy.await_count == 0
+
+
+# ── PR #344 review round 1 ─────────────────────────────────────────────
+
+
+async def test_comment_since_cursor_overlaps_one_second() -> None:
+    """GitHub's `since` is strictly-after with second precision: a comment
+    landing in the same second as the stored boundary would be excluded
+    forever (the id mark can't save a row that is never returned). The sweep
+    queries one second BEFORE the boundary; the id high-water removes the
+    repeats that overlap re-fetches."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    stamp = datetime(2026, 8, 30, 12, 0, 7, tzinfo=UTC)
+    github = _github(comments=[_comment(111)])
+    github.list_pull_request_review_comments.return_value = [
+        PullRequestReviewComment(
+            comment_id=111,
+            author="reviewer-human",
+            path="src/x.py",
+            line=12,
+            body="b",
+            in_reply_to_id=None,
+            updated_at=stamp,
+        )
+    ]
+    await _run(client, gate, story, github)
+
+    gate = await _refresh(client, gate)
+    github2 = _github()
+    await _run(client, gate, story, github2)
+
+    _, kwargs = github2.list_pull_request_review_comments.call_args
+    assert kwargs["since"] == stamp - timedelta(seconds=1)
+
+
+async def test_first_sweep_skips_roots_already_handled_by_the_inline_round() -> None:
+    """Backfill guard: until the inline Copilot round is retired, delivery
+    remediates root comments and replies with the AUTOMATED_MARKER before the
+    gate exists. A markerless gate's first sweep must not re-report those
+    handled roots — nor the handled author's summary review — while still
+    posting anything the round did NOT get to (the settle-starvation case)."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        reviews=[
+            _review(
+                500,
+                author="copilot-pull-request-reviewer[bot]",
+                state="COMMENTED",
+                body="generated 2 comments",
+            )
+        ],
+        comments=[
+            _comment(111, author="copilot-pull-request-reviewer[bot]", body="handled"),
+            _comment(
+                112,
+                author="operator",
+                body="Fixed in abc123.\n\n_(automated reply by story-develop)_",
+                in_reply_to_id=111,
+            ),
+            _comment(
+                113, author="copilot-pull-request-reviewer[bot]", body="starved out"
+            ),
+        ],
+    )
+
+    await _run(client, gate, story, github)
+
+    posted = _findings(client)
+    assert len(posted) == 1
+    assert "starved out" in posted[0]  # the unhandled root IS reported
+    assert "handled" not in posted[0]  # the remediated root is not
+    assert "generated 2 comments" not in posted[0]  # nor the summary review
+    marker = await _marker(client, gate.id)
+    assert marker["last_comment_id"] == 113 and marker["last_review_id"] == 500
+
+
+async def test_changes_requested_review_survives_handled_comment_suppression() -> None:
+    """The handled-author suppression must stay narrow: a CHANGES_REQUESTED
+    review still posts even when some of its author's roots carry automated
+    replies — the requested changes are not proven addressed by a reply."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        reviews=[_review(500, author="reviewer-human", state="CHANGES_REQUESTED")],
+        comments=[
+            _comment(111, author="reviewer-human", body="handled"),
+            _comment(
+                112,
+                author="operator",
+                body="Fixed in abc123.\n\n_(automated reply by story-develop)_",
+                in_reply_to_id=111,
+            ),
+        ],
+    )
+
+    await _run(client, gate, story, github)
+
+    posted = _findings(client)
+    assert len(posted) == 1
+    assert "CHANGES_REQUESTED" in posted[0]

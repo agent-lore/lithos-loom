@@ -33,7 +33,7 @@ follow-up slice; this module only detects and reports.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from lithos_loom.gates import PrGateSpec
@@ -105,12 +105,22 @@ def _read_seen(gate: Any, pr_url: str) -> _Seen:
 
 
 def _since(seen: _Seen) -> datetime | None:
+    """The stored boundary minus a one-second overlap.
+
+    GitHub's ``since`` is strictly-after with second precision (PR #344
+    review, finding 1): a comment that becomes visible in the same second as
+    the stored maximum would be excluded forever — the id high-water mark
+    cannot rescue a row that is never returned. Querying one second early
+    re-fetches at most a second's worth of rows, and the id mark drops the
+    repeats.
+    """
     if seen.last_comment_at is None:
         return None
     try:
-        return datetime.fromisoformat(seen.last_comment_at)
+        boundary = datetime.fromisoformat(seen.last_comment_at)
     except ValueError:
         return None  # corrupt cursor → unbounded fetch; ids still de-dup
+    return boundary - timedelta(seconds=1)
 
 
 def _review_posts(review: PullRequestReview) -> bool:
@@ -124,10 +134,32 @@ def _review_posts(review: PullRequestReview) -> bool:
     return bool(review.body.strip())
 
 
-def _comment_posts(comment: PullRequestReviewComment) -> bool:
+def _comment_posts(
+    comment: PullRequestReviewComment, handled_roots: frozenset[int]
+) -> bool:
     if comment.in_reply_to_id is not None:
         return False  # thread replies ride on their root comment
+    if comment.comment_id in handled_roots:
+        return False  # the inline round already remediated + replied to it
     return _AUTOMATED_REPLY_MARKER not in comment.body
+
+
+def _handled_roots(comments: list[PullRequestReviewComment]) -> frozenset[int]:
+    """Root-comment ids proven handled by one of loom's own automated replies.
+
+    Backfill guard (PR #344 review, finding 2): until the inline Copilot
+    round is retired (slice D), delivery remediates root comments, pushes the
+    fix and replies with the ``AUTOMATED_MARKER`` — all *before* the ``pr``
+    gate exists. A markerless gate's first sweep would otherwise re-report
+    that already-handled history as fresh ``[ExternalReview]`` findings. On
+    later sweeps this is naturally inert: handled roots sit below the id
+    high-water mark anyway.
+    """
+    return frozenset(
+        c.in_reply_to_id
+        for c in comments
+        if c.in_reply_to_id is not None and _AUTOMATED_REPLY_MARKER in c.body
+    )
 
 
 def _excerpt(body: str) -> str:
@@ -231,8 +263,22 @@ async def ingest_external_reviews(
     if not new_reviews and not new_comments:
         return  # idle PR: no fetch produced news, write nothing
 
-    actionable_reviews = [r for r in new_reviews if _review_posts(r)]
-    actionable_comments = [c for c in new_comments if _comment_posts(c)]
+    handled_roots = _handled_roots(comments)
+    # A non-blocking summary review whose author had roots the inline round
+    # already remediated is part of that same handled history — suppressing
+    # it keeps the round's Copilot review out of the first sweep. Narrow on
+    # purpose: CHANGES_REQUESTED always posts (_review_posts) — a reply does
+    # not prove the requested changes were accepted.
+    handled_authors = frozenset(
+        c.author for c in comments if c.comment_id in handled_roots
+    )
+    actionable_reviews = [
+        r
+        for r in new_reviews
+        if _review_posts(r)
+        and not (r.state != "CHANGES_REQUESTED" and r.author in handled_authors)
+    ]
+    actionable_comments = [c for c in new_comments if _comment_posts(c, handled_roots)]
     marker = {REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)}
 
     if not actionable_reviews and not actionable_comments:
