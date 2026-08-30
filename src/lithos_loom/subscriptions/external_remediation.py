@@ -13,14 +13,19 @@ The guard rails, all sweep-owned (ADR 0011 decision 3 — single writer):
   url-scoped like every other gate marker (a replacement PR re-evaluates).
   The counter **never resets on a loom-authored push** (head moved to
   ``last_loom_pushed_sha`` — the two-bot ping-pong this exists to bound) and
-  **resets on a human push** (head moved to any other sha: the operator took
-  ownership). Exhaustion stops *dispatch only* — detection keeps posting,
+  **resets on a human push** (head moved to any sha other than loom's
+  recorded push; an empty previous sighting is first-time initialization
+  only, so a PR whose spending rounds never pushed still resets — PR #346
+  review F2). Exhaustion stops *dispatch only* — detection keeps posting,
   with the exhaustion stated inside the finding body
   (:meth:`ExternalRemediation.exhaustion_note`).
 - **Single-flight** — one in-flight remediation globally (the serial-runner
-  philosophy); while one runs, later batches are deferred to a later sweep,
-  and :meth:`~ExternalRemediation.observe_head` goes inert (a head move while
-  loom's own converge may push at any moment cannot be attributed).
+  philosophy); while one runs, a batch that would have dispatched parks a
+  durable **pending trigger** on the gate (its high-water marks are consumed
+  when it posts, so a later quiet sweep must resume it explicitly — PR #346
+  review F1), and :meth:`~ExternalRemediation.observe_head` goes inert (a
+  head move while loom's own converge may push at any moment cannot be
+  attributed).
 - **Own-sha skip** — material reviewing loom's own pushed sha is reported,
   never auto-remediated (it is almost always a re-review of the fix in
   flight).
@@ -34,12 +39,16 @@ Failure economics: a converge run that produced a JSON result spent agent
 time and keeps its budget round (``triage_rejected`` included); an exit-0
 run with no JSON found nothing live to ingest (suppression drift between the
 sweep's view and the CLI's re-fetch) and gives the round back; a non-zero
-exit with no JSON posts a ``[Friction]`` finding and keeps the round.
+exit with no JSON posts a ``[Friction]`` finding and keeps the round. The
+pre-run reservation is **strict** (PR #346 review F3): a budget write that
+did not demonstrably land never spawns — the bound only exists if the
+increment does.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import sys
 from collections.abc import Awaitable, Callable, Mapping
@@ -56,17 +65,26 @@ from lithos_loom.subscriptions.external_reviews import EXTERNAL_REVIEW, IngestRe
 
 __all__ = [
     "CONVERGE_SETTING",
+    "PENDING_KEY",
     "REMEDIATION_KEY",
     "ExternalRemediation",
     "RemediationBudget",
     "RemediationSettings",
     "read_budget",
+    "spawn_converge",
 ]
 
 # Gate-metadata key holding the S5b budget state (see the module docstring).
 # A separate key from `external_review_seen` and the merge marker — no marker
 # may trip another's skip logic.
 REMEDIATION_KEY = "external_remediation"
+
+# Gate-metadata key parking a batch deferred behind the busy single-flight
+# slot (PR #346 review F1): ingestion's high-water marks consume the batch,
+# so without a durable trigger a deferred dispatch would never happen if the
+# PR then went quiet. Url-scoped; consumed atomically with the budget
+# reservation on dispatch; survives restarts.
+PENDING_KEY = "external_remediation_pending"
 
 # Project-context metadata key: per-project dial for autonomous dispatch.
 CONVERGE_SETTING = "develop_external_review_converge"
@@ -131,11 +149,27 @@ class RemediationSettings:
     config_path: Path | None = None
 
 
-async def _spawn_subprocess(cmd: list[str]) -> tuple[int, str]:
+async def _end_process(proc: asyncio.subprocess.Process) -> None:
+    """Terminate → grace → kill; tolerant of an already-exited child."""
+    if proc.returncode is not None:
+        return
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+
+
+async def spawn_converge(cmd: list[str]) -> tuple[int, str]:
     """Default spawn: run the converge CLI, return ``(returncode, output)``.
 
-    A run past :data:`RUN_TIMEOUT_SECONDS` is killed and reported as rc -1 —
-    the single-flight slot must never be held by a hung container.
+    A run past :data:`RUN_TIMEOUT_SECONDS` is ended and reported as rc -1 —
+    the single-flight slot must never be held by a hung container. And a
+    **cancellation** (watcher shutdown, PR #346 review F5) ends the child
+    too before re-raising: an orphaned converge could keep fixing and
+    pushing after loom stopped, and a restarted watcher would violate the
+    global single-flight against it.
     """
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -145,9 +179,11 @@ async def _spawn_subprocess(cmd: list[str]) -> tuple[int, str]:
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT_SECONDS)
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _end_process(proc)
         return -1, f"converge run exceeded {RUN_TIMEOUT_SECONDS}s and was killed"
+    except asyncio.CancelledError:
+        await _end_process(proc)
+        raise
     return proc.returncode if proc.returncode is not None else -1, out.decode(
         "utf-8", errors="replace"
     )
@@ -164,7 +200,7 @@ class ExternalRemediation:
 
     def __init__(self, settings: RemediationSettings, *, spawn: Spawn | None = None):
         self._settings = settings
-        self._spawn: Spawn = spawn if spawn is not None else _spawn_subprocess
+        self._spawn: Spawn = spawn if spawn is not None else spawn_converge
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -187,13 +223,18 @@ class ExternalRemediation:
         head = getattr(pr, "head_sha", "") or ""
         if self.busy or not head or head == budget.last_seen_head_sha:
             return budget
-        if budget.last_loom_pushed_sha and head != budget.last_loom_pushed_sha:
+        # A moved head is a HUMAN push unless it matches loom's own recorded
+        # push; an empty previous sighting is first-time initialization only
+        # (PR #346 review F2 — gating the reset on a non-empty
+        # last_loom_pushed_sha left a PR whose spending rounds never pushed
+        # permanently exhausted: a human push could then never reset it).
+        if budget.last_seen_head_sha and head != budget.last_loom_pushed_sha:
             ctx.logger.info(
                 "external-remediation: head of %s moved to %s (not loom's %s) — "
                 "human push, resetting budget (was %d round(s) used)",
                 spec.pr_url,
                 head[:12],
-                budget.last_loom_pushed_sha[:12],
+                budget.last_loom_pushed_sha[:12] or "(never pushed)",
                 budget.rounds_used,
             )
             budget = dataclasses.replace(budget, rounds_used=0, last_seen_head_sha=head)
@@ -235,18 +276,18 @@ class ExternalRemediation:
         """Decide whether the just-posted batch dispatches a converge run.
 
         Returns a label for the sweep log; ``"dispatched"`` means the budget
-        was incremented and the run task started. Never raises.
+        reservation landed and the run task started. Never raises.
+
+        The busy check runs AFTER the trust / own-sha filter and writes a
+        **pending trigger** (:data:`PENDING_KEY`) on the gate: ingestion's
+        high-water marks consume the batch, so a batch merely *deferred*
+        would otherwise never be seen again (PR #346 review F1) — a later
+        quiet sweep resumes it via :meth:`resume_pending`. The trigger is
+        only parked for a batch that would actually have dispatched.
         """
         settings = self._settings
         if settings.budget <= 0:
             return "disabled"
-        if self.busy:
-            ctx.logger.info(
-                "external-remediation: a run is already in flight; deferring "
-                "%s to a later sweep (detection continues)",
-                spec.pr_url,
-            )
-            return "deferred_busy"
         if budget.rounds_used >= settings.budget:
             return "exhausted"  # the note already rode out on the finding
         if story_id is None:
@@ -256,6 +297,69 @@ class ExternalRemediation:
         if dispatchable != "yes":
             return dispatchable
 
+        if self.busy:
+            ctx.logger.info(
+                "external-remediation: a run is already in flight; parking a "
+                "pending trigger for %s (detection continues; a later sweep "
+                "resumes it)",
+                spec.pr_url,
+            )
+            await write_marker(
+                ctx,
+                task_id=gate.id,
+                marker={PENDING_KEY: {"pr_url": spec.pr_url}},
+                subsystem="external-remediation",
+            )
+            return "deferred_busy"
+
+        return await self._dispatch(gate, spec, story_id, budget, ctx)
+
+    async def resume_pending(
+        self,
+        gate: Any,
+        spec: PrGateSpec,
+        story_id: str | None,
+        budget: RemediationBudget,
+        github: GitHubClient,
+        ctx: SubscriptionContext,
+    ) -> str | None:
+        """Fire a parked pending trigger on a sweep with no new batch.
+
+        ``None`` when no trigger is parked for this PR url. The resumed
+        dispatch skips the batch pre-filter (the material is gone — its marks
+        were advanced when it posted); converge re-fetches the PR's live
+        findings and re-applies the trust line itself, and a run that finds
+        nothing live exits 0-without-JSON, refunding the round. The trigger
+        survives a busy slot and an exhausted budget (a human push resets the
+        budget and the trigger then fires) and is consumed atomically with
+        the budget reservation on dispatch.
+        """
+        raw = gate.metadata.get(PENDING_KEY)
+        if not isinstance(raw, dict) or raw.get("pr_url") != spec.pr_url:
+            return None
+        if self._settings.budget <= 0:
+            return "disabled"
+        if self.busy:
+            return "deferred_busy"  # trigger stays parked
+        if budget.rounds_used >= self._settings.budget:
+            return "exhausted"  # trigger stays parked for after a reset
+        if story_id is None:
+            return "no_story"
+        ctx.logger.info(
+            "external-remediation: resuming the pending trigger for %s",
+            spec.pr_url,
+        )
+        return await self._dispatch(gate, spec, story_id, budget, ctx)
+
+    async def _dispatch(
+        self,
+        gate: Any,
+        spec: PrGateSpec,
+        story_id: str,
+        budget: RemediationBudget,
+        ctx: SubscriptionContext,
+    ) -> str:
+        """The shared dispatch tail: project resolve → reserve → spawn."""
         repo_path = await self._project_repo(gate, story_id, ctx)
         if repo_path is None:
             ctx.logger.warning(
@@ -275,27 +379,52 @@ class ExternalRemediation:
             )
             return "project_disabled"
 
-        # Increment BEFORE the run (crash-safe: a lost decrement wastes one
-        # round; a lost increment would allow an unbounded retry loop).
+        # Reserve the round BEFORE the run (crash-safe: a lost refund wastes
+        # one round; a lost increment would allow an unbounded retry loop) —
+        # and STRICTLY (PR #346 review F3): write_marker swallows failures,
+        # so the bound only exists if this write demonstrably landed. The
+        # same update consumes any pending trigger (per-key merge: None
+        # deletes), so trigger and reservation move together.
         budget = dataclasses.replace(budget, rounds_used=budget.rounds_used + 1)
-        await write_marker(
-            ctx,
-            task_id=gate.id,
-            marker={REMEDIATION_KEY: budget.as_marker()},
-            subsystem="external-remediation",
-        )
+        try:
+            await ctx.lithos.task_update(
+                task_id=gate.id,
+                metadata={REMEDIATION_KEY: budget.as_marker(), PENDING_KEY: None},
+            )
+        except LithosClientError as exc:
+            ctx.logger.warning(
+                "[Friction] external-remediation: budget reservation for gate "
+                "%s failed (%s); not dispatching — will retry next sweep",
+                gate.id,
+                exc,
+            )
+            return "reservation_failed"
         ctx.logger.info(
             "external-remediation: dispatching converge --from-github for %s "
             "(round %d/%d)",
             spec.pr_url,
             budget.rounds_used,
-            settings.budget,
+            self._settings.budget,
         )
         self._task = asyncio.create_task(
             self._run(gate.id, story_id, spec, repo, budget, ctx),
             name=f"external-remediation-{spec.pr_number}",
         )
         return "dispatched"
+
+    async def shutdown(self) -> None:
+        """Cancel + await the in-flight run (PR #346 review F5).
+
+        The cancellation-safe spawn terminates the converge subprocess, so
+        loom's stop never orphans a child that could keep pushing — and a
+        restarted watcher's single-flight slot starts truly empty.
+        """
+        task = self._task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     # ── decision helpers ───────────────────────────────────────────────
 

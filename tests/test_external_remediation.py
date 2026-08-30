@@ -20,6 +20,7 @@ S5b budget on the gate. The load-bearing properties, pinned hardest here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sys
@@ -42,7 +43,6 @@ from lithos_loom.subscriptions.external_reviews import IngestResult
 from tests.support import FakeLithosClient
 
 _PR_URL = "https://github.com/agent-lore/lithos-lens/pull/62"
-_REPO = "agent-lore/lithos-lens"
 _HEAD = "h" * 40
 _LOOM_SHA = "a1" * 20
 _BOT = "copilot-pull-request-reviewer[bot]"
@@ -550,3 +550,247 @@ async def test_unpushed_result_does_not_record_a_loom_sha(tmp_path: Path) -> Non
     assert marker["last_loom_pushed_sha"] == ""
     outcome = next(f for f in _findings(client) if "remediation" in f)
     assert "not_converged" in outcome
+
+
+# ── PR #346 review round 1 (five blocking findings) ────────────────────
+
+
+async def test_human_push_resets_even_before_any_loom_push() -> None:
+    """PR #346 review F2: a PR whose spending rounds never pushed
+    (triage_rejected / not_converged) has last_loom_pushed_sha == "" — a
+    human push must still reset; only the FIRST sighting is initialization."""
+    client = FakeLithosClient()
+    _story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": _PR_URL,
+                "rounds_used": 2,  # exhausted without ever pushing
+                "last_loom_pushed_sha": "",
+                "last_seen_head_sha": _HEAD,
+            }
+        },
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    rem = ExternalRemediation(_settings(Path("/tmp/x")), spawn=_spawner(None)[0])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    human_sha = "c4" * 20
+    budget = await rem.observe_head(gate, spec, _pr(human_sha), _ctx(client))
+
+    assert budget.rounds_used == 0  # the operator took ownership
+    assert budget.last_seen_head_sha == human_sha
+
+
+async def test_failed_budget_reservation_blocks_dispatch(tmp_path: Path) -> None:
+    """PR #346 review F3: the increment-before-run rule only bounds anything
+    if the increment actually LANDED — a failed reservation must not spawn."""
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    original = client.task_update
+
+    async def failing_update(**kwargs: Any) -> Any:
+        if REMEDIATION_KEY in (kwargs.get("metadata") or {}):
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_update = failing_update  # type: ignore[method-assign]
+
+    label = await _consider(client, gate, story, rem)
+
+    assert label == "reservation_failed"
+    assert calls == []
+    assert rem._task is None
+
+
+async def test_busy_batch_leaves_a_pending_trigger_that_resumes(
+    tmp_path: Path,
+) -> None:
+    """PR #346 review F1: ingestion's high-water marks consume the batch, so
+    a deferred_busy dispatch must persist a pending trigger the NEXT sweep
+    can act on even with zero new review activity."""
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    resumed: list[list[str]] = []
+
+    async def slow_spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await release.wait()
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path), spawn=slow_spawn)
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await started.wait()
+
+    # Second batch while busy: deferred AND persisted.
+    assert await _consider(client, gate, story, rem) == "deferred_busy"
+    parked = await client.task_get(task_id=gate.id)
+    assert parked is not None
+    assert parked.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+
+    release.set()
+    assert rem._task is not None
+    await rem._task
+
+    # A later quiet sweep (no new material) resumes off the pending trigger.
+    async def resume_spawn(cmd: list[str]) -> tuple[int, str]:
+        resumed.append(cmd)
+        return 0, ""
+
+    rem._spawn = resume_spawn
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(pr_url=_PR_URL, rounds_used=1)
+    label = await rem.resume_pending(gate, spec, story, budget, _github(), _ctx(client))
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(resumed) == 1
+    # The trigger is consumed on dispatch.
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert PENDING_KEY not in refreshed.metadata
+
+
+async def test_resume_pending_is_a_noop_without_a_trigger(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(pr_url=_PR_URL)
+
+    label = await rem.resume_pending(gate, spec, story, budget, _github(), _ctx(client))
+
+    assert label is None
+    assert rem._task is None
+
+
+async def test_resume_pending_respects_the_budget_and_keeps_the_trigger(
+    tmp_path: Path,
+) -> None:
+    """An exhausted budget stops a pending resume too — but keeps the trigger,
+    so a human push (which resets the budget) lets it fire later."""
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(pr_url=_PR_URL, rounds_used=2)
+
+    label = await rem.resume_pending(gate, spec, story, budget, _github(), _ctx(client))
+
+    assert label == "exhausted"
+    assert calls == []
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert PENDING_KEY in refreshed.metadata  # kept for after a reset
+
+
+async def test_untrusted_batch_leaves_no_pending_even_while_busy(
+    tmp_path: Path,
+) -> None:
+    """The trust check runs BEFORE the busy check: a batch that would never
+    dispatch must not park a pending trigger."""
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    rem._task = asyncio.create_task(asyncio.sleep(30))
+    try:
+        label = await _consider(
+            client,
+            gate,
+            story,
+            rem,
+            ingest=_ingest(actionable_reviews=[_review(author="drive-by")]),
+            github=_github(permission="read"),
+        )
+        assert label == "no_trusted"
+        refreshed = await client.task_get(task_id=gate.id)
+        assert refreshed is not None
+        assert PENDING_KEY not in refreshed.metadata
+    finally:
+        rem._task.cancel()
+
+
+async def test_shutdown_cancels_the_inflight_run(tmp_path: Path) -> None:
+    """PR #346 review F5: watcher shutdown must own the in-flight run."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+
+    async def hanging_spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await asyncio.sleep(3600)
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path), spawn=hanging_spawn)
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await started.wait()
+
+    await rem.shutdown()
+
+    assert rem._task is not None and rem._task.done()
+    assert not rem.busy
+
+
+async def test_default_spawn_terminates_the_child_on_cancel(
+    tmp_path: Path,
+) -> None:
+    """PR #346 review F5: cancelling the spawn must terminate the subprocess,
+    not orphan it to keep running after loom stopped."""
+    import os
+
+    from lithos_loom.subscriptions.external_remediation import spawn_converge
+
+    pid_file = tmp_path / "child.pid"
+    child_src = (
+        "import os, sys, time; "
+        "open(sys.argv[1], 'w').write(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    task = asyncio.create_task(
+        spawn_converge([sys.executable, "-c", child_src, str(pid_file)])
+    )
+    for _ in range(100):  # wait for the child to record its pid
+        if pid_file.exists() and pid_file.read_text():
+            break
+        await asyncio.sleep(0.05)
+    pid = int(pid_file.read_text())
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    for _ in range(100):  # the child must die promptly
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError(f"child {pid} still alive after cancellation")

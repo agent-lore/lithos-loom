@@ -381,7 +381,7 @@ async def ingest_external_reviews(
         )
         return IngestResult()
 
-    await post_finding_then_mark(
+    landed = await post_finding_then_mark(
         ctx,
         task_id=story_id,
         summary=_render_summary(
@@ -397,6 +397,12 @@ async def ingest_external_reviews(
         retry_hint="will retry next sweep",
         marker_task_id=gate.id,
     )
+    if not landed:
+        # PR #346 review F4: the finding or the de-dup mark did not land —
+        # the batch retries next sweep and must NOT dispatch remediation now
+        # (either the operator breadcrumb is missing, or an unmarked batch
+        # would double-dispatch when it re-posts).
+        return IngestResult()
     ctx.logger.info(
         "external-reviews: posted %s for %s (%d review(s), %d comment(s)) on story %s",
         EXTERNAL_REVIEW,

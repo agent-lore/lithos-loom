@@ -16,7 +16,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._blocked_snapshot` | S | 1 | 0 |
 | `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 1 |
-| `lithos_loom.subscriptions._findings` | XS | 0 | 2 |
+| `lithos_loom.subscriptions._findings` | S | 0 | 2 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
 | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |
 | `lithos_loom.subscriptions._human_actionable` | S | 0 | 3 |
@@ -30,7 +30,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 8 |
-| `lithos_loom.subscriptions.external_remediation` | M | 3 | 1 |
+| `lithos_loom.subscriptions.external_remediation` | M | 3 | 2 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
@@ -113,6 +113,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - class `RemediationBudget` — The gate's parsed S5b budget state (fresh when absent / foreign-url).
 - def `read_budget` — Parse the gate's budget marker; fresh state for a foreign / absent url.
 - class `RemediationSettings` — Host-side knobs the watcher child threads in from its config.
+- def `spawn_converge` — Default spawn: run the converge CLI, return ``(returncode, output)``.
 - class `ExternalRemediation` — Owns the single-flight dispatch of ``develop converge --from-github``.
 
 ### `lithos_loom.subscriptions.external_reviews`

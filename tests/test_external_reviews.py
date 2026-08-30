@@ -747,3 +747,49 @@ async def test_extra_note_lands_in_the_finding_body() -> None:
     )
     (finding,) = _findings(client)
     assert "remediation budget exhausted" in finding
+
+
+async def test_failed_finding_post_reports_not_posted() -> None:
+    """PR #346 review F4: `posted` must be the truth — a batch whose finding
+    (or de-dup marker) never landed must not claim to have posted, or
+    remediation dispatches without the promised operator breadcrumb."""
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def failing_post(**kwargs: Any) -> Any:
+        raise LithosClientError("server_error", "boom")
+
+    client.finding_post = failing_post  # type: ignore[method-assign]
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    assert not result.posted
+
+
+async def test_failed_marker_write_reports_not_posted() -> None:
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    original = client.task_update
+
+    async def failing_update(**kwargs: Any) -> Any:
+        if REVIEW_SEEN_KEY in (kwargs.get("metadata") or {}):
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_update = failing_update  # type: ignore[method-assign]
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    # The finding itself posted (breadcrumb exists) but the de-dup mark did
+    # not land — the batch will re-post next sweep, so it must not dispatch.
+    assert not result.posted

@@ -493,6 +493,10 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                 for t in tasks:
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # PR #346 review F5: own the in-flight remediation run too —
+                # its cancellation-safe spawn terminates the converge child,
+                # so a stopped loom never leaves an orphan pushing to PRs.
+                await remediation.shutdown()
     finally:
         _boot.remove_stop_signals(loop, installed)
         logger.info("github-watcher child stopping")
