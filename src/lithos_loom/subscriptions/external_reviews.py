@@ -82,6 +82,10 @@ _AUTOMATED_REPLY_MARKER = "_(automated reply by story-develop)_"
 # their replies through the real reply_body.
 _FIXED_REPLY_PREFIX = "Fixed in "
 
+# Repo permission levels whose holders' landed-fix replies count as proof —
+# the ADR 0011 trust line (allowlisted bots aside, which never post replies).
+_TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
+
 # Rendering bounds: a finding is a breadcrumb, not a transcript.
 _EXCERPT_CHARS = 160
 _MAX_LISTED = 20
@@ -153,8 +157,31 @@ def _comment_posts(
     return _AUTOMATED_REPLY_MARKER not in comment.body
 
 
-def _handled_roots(comments: list[PullRequestReviewComment]) -> frozenset[int]:
-    """Root-comment ids proven handled by a landed-fix automated reply.
+def _fixed_reply_candidates(
+    comments: list[PullRequestReviewComment],
+) -> list[tuple[int, str]]:
+    """``(root_id, reply_author)`` pairs whose reply *claims* a landed fix.
+
+    A claim, not proof: the marker and the ``Fixed in`` head are public body
+    strings any commenter can copy. :func:`_proven_handled` authenticates the
+    author before the claim may suppress anything.
+    """
+    return [
+        (c.in_reply_to_id, c.author)
+        for c in comments
+        if c.in_reply_to_id is not None
+        and _AUTOMATED_REPLY_MARKER in c.body
+        and c.body.startswith(_FIXED_REPLY_PREFIX)
+    ]
+
+
+async def _proven_handled(
+    candidates: list[tuple[int, str]],
+    repo: str,
+    github: GitHubClient,
+    ctx: SubscriptionContext,
+) -> frozenset[int]:
+    """Root-comment ids proven handled by an authenticated landed-fix reply.
 
     Backfill guard (PR #344 review, finding 2): until the inline Copilot
     round is retired (slice D), delivery remediates root comments, pushes the
@@ -163,19 +190,44 @@ def _handled_roots(comments: list[PullRequestReviewComment]) -> frozenset[int]:
     as fresh ``[ExternalReview]`` findings. On later sweeps this is naturally
     inert: handled roots sit below the id high-water mark anyway.
 
-    Proof means **landed** (PR #344 re-review): only the ``Fixed in <sha>``
-    reply shape counts. Held-back (red gate) and "Not changed" replies carry
-    the same ``AUTOMATED_MARKER`` while the root is still unresolved — and
-    "Addressed" (fixed, no sha) records no landed commit — so none of those
-    suppress.
+    Proof has two halves, both required:
+
+    - **Landed** (PR #344 re-review 1): only the ``Fixed in <sha>`` reply
+      shape counts. Held-back (red gate) and "Not changed" replies carry the
+      same ``AUTOMATED_MARKER`` while the root is still unresolved — and
+      "Addressed" (fixed, no sha) records no landed commit.
+    - **Authenticated** (PR #344 re-review 2): the reply's author must hold
+      write/admin on the repo — the ADR 0011 trust line, and the identity
+      loom's own replies post under (the operator's ``gh`` login). Body
+      strings are forgeable; without this, any outside commenter could hide a
+      trusted reviewer's root forever by copying the two tokens. One
+      permission call per unseen author; a probe failure counts as untrusted
+      (fail closed for *suppression*: a duplicate report is recoverable, a
+      hidden root is not).
     """
-    return frozenset(
-        c.in_reply_to_id
-        for c in comments
-        if c.in_reply_to_id is not None
-        and _AUTOMATED_REPLY_MARKER in c.body
-        and c.body.startswith(_FIXED_REPLY_PREFIX)
-    )
+    handled: set[int] = set()
+    author_trusted: dict[str, bool] = {}
+    for root_id, author in candidates:
+        trusted = author_trusted.get(author)
+        if trusted is None:
+            try:
+                permission = await github.get_collaborator_permission(repo, author)
+            except GitHubError as exc:
+                ctx.logger.warning(
+                    "[Friction] external-reviews: permission probe for reply "
+                    "author %r on %s failed (%s: %s); treating their "
+                    "landed-fix replies as unproven this sweep",
+                    author,
+                    repo,
+                    type(exc).__name__,
+                    exc,
+                )
+                permission = "none"
+            trusted = permission in _TRUSTED_PERMISSIONS
+            author_trusted[author] = trusted
+        if trusted:
+            handled.add(root_id)
+    return frozenset(handled)
 
 
 def _excerpt(body: str) -> str:
@@ -279,7 +331,9 @@ async def ingest_external_reviews(
     if not new_reviews and not new_comments:
         return  # idle PR: no fetch produced news, write nothing
 
-    handled_roots = _handled_roots(comments)
+    handled_roots = await _proven_handled(
+        _fixed_reply_candidates(comments), spec.repo, github, ctx
+    )
     # A non-blocking summary review whose author had roots the inline round
     # already remediated is part of that same handled history — suppressing
     # it keeps the round's Copilot review out of the first sweep. Narrow on

@@ -67,6 +67,9 @@ def _github(
     github = AsyncMock()
     github.list_pull_request_reviews.return_value = reviews or []
     github.list_pull_request_review_comments.return_value = comments or []
+    # Default: reply authors are collaborators, so landed-fix replies count
+    # as proof. Forgery tests override this per author.
+    github.get_collaborator_permission.return_value = "write"
     return github
 
 
@@ -545,3 +548,98 @@ async def test_fixed_in_sha_reply_built_by_the_real_producer_suppresses() -> Non
     assert _findings(client) == []
     marker = await _marker(client, gate.id)
     assert marker["last_comment_id"] == 112
+
+
+# ── PR #344 re-review 2: the landed-fix reply must be AUTHENTICATED ─────
+
+
+async def test_forged_fixed_reply_by_an_outsider_does_not_suppress() -> None:
+    """PR #344 re-review 2: both suppression tokens are public body strings —
+    any commenter can copy them. A "Fixed in <sha>" + marker reply from an
+    author WITHOUT write/admin on the repo must not suppress its root; the
+    root still posts and is not lost behind the advanced id mark."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        comments=[
+            _comment(111, author="trusted-reviewer", body="real defect"),
+            _comment(
+                112,
+                author="outside-user",
+                body=_real_reply(fixed=True, sha="deadbeefca11ab1e"),
+                in_reply_to_id=111,
+            ),
+        ]
+    )
+    github.get_collaborator_permission.return_value = "read"
+
+    await _run(client, gate, story, github)
+
+    posted = _findings(client)
+    assert len(posted) == 1 and "real defect" in posted[0]
+    github.get_collaborator_permission.assert_awaited_once_with(_REPO, "outside-user")
+
+
+async def test_permission_check_failure_reports_rather_than_hides() -> None:
+    """Fail closed on suppression: if the permission probe errors, the reply
+    proves nothing and the root posts — a duplicate report is recoverable, a
+    hidden root is not."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        comments=[
+            _comment(111, body="real defect"),
+            _comment(
+                112,
+                author="operator",
+                body=_real_reply(fixed=True, sha="abc123def4567890"),
+                in_reply_to_id=111,
+            ),
+        ]
+    )
+    github.get_collaborator_permission.side_effect = GitHubError("boom")
+
+    await _run(client, gate, story, github)
+
+    posted = _findings(client)
+    assert len(posted) == 1 and "real defect" in posted[0]
+
+
+async def test_no_candidate_replies_means_no_permission_calls() -> None:
+    """The permission probe is per unseen candidate author only — an ordinary
+    batch with no landed-fix replies must not spend API calls on it."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500)], comments=[_comment(111)])
+
+    await _run(client, gate, story, github)
+
+    github.get_collaborator_permission.assert_not_called()
+
+
+async def test_permission_is_checked_once_per_author() -> None:
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        comments=[
+            _comment(111, body="one"),
+            _comment(
+                112,
+                author="operator",
+                body=_real_reply(fixed=True, sha="abc123def4567890"),
+                in_reply_to_id=111,
+            ),
+            _comment(113, body="two"),
+            _comment(
+                114,
+                author="operator",
+                body=_real_reply(fixed=True, sha="cafebabe12345678"),
+                in_reply_to_id=113,
+            ),
+        ]
+    )
+
+    await _run(client, gate, story, github)
+
+    assert _findings(client) == []  # both roots proven handled
+    assert github.get_collaborator_permission.await_count == 1
