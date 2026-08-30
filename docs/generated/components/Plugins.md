@@ -177,7 +177,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `findings_to_handoff_text` — Render external findings as a synthetic review handoff.
 - def `external_intake_reviews` — Build the synthetic intake that seeds converge's coder, plus the ``finding_id → ExternalFinding`` map the reply epilogue threads back on.
 - class `ExternalOutcome` — What happened to one injected external finding, for the reply epilogue.
-- def `outcomes_after_loop` — Fold triage rejections + the coder's round-1 claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
+- def `outcomes_after_loop` — Fold triage rejections + the coder's claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
 - def `pr_number_from_spec` — PR number from a converge change spec (``142`` / ``#142`` / a PR URL).
 
 ### `lithos_loom.plugins.story_develop.external_triage`

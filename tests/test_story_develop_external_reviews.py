@@ -63,6 +63,7 @@ def _comment(
     path: str = "src/x.py",
     line: int | None = 12,
     commit_id: str = _HEAD,
+    pull_request_review_id: int | None = None,
 ) -> PullRequestReviewComment:
     return PullRequestReviewComment(
         comment_id=comment_id,
@@ -73,6 +74,7 @@ def _comment(
         in_reply_to_id=in_reply_to_id,
         html_url=f"https://github.com/{_REPO}/pull/62#discussion_r{comment_id}",
         commit_id=commit_id,
+        pull_request_review_id=pull_request_review_id,
     )
 
 
@@ -217,7 +219,7 @@ def test_review_policy_and_handled_author_suppression(
             _review(502, author="dave", state="CHANGES_REQUESTED", body="blockers"),
         ],
         comments=[
-            _comment(1, author=_BOT, body="handled"),
+            _comment(1, author=_BOT, body="handled", pull_request_review_id=500),
             _comment(2, author="operator", body=handled_reply, in_reply_to_id=1),
         ],
         permissions={"dave": "write", "operator": "admin"},
@@ -296,3 +298,33 @@ def test_external_intake_reviews_builds_outcome_and_id_map() -> None:
     assert id_map["f-001"].comment_id == 7
     assert id_map["f-002"].comment_id == 8
     assert outcome.cost_usd == 0.0
+
+
+def test_later_summary_review_is_not_hidden_by_old_handled_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #345 review F3: suppression must bind a handled root to its OWNING
+    review, never to the author across the whole PR — a bot's new COMMENTED
+    summary (a later re-review, no inline comments yet) must still ingest even
+    though an older root of the same bot was fixed and replied to."""
+    handled_reply = reply_body(
+        fixed=True, sha="abc123def4567890", coder_response="done"
+    )
+    _install_github(
+        monkeypatch,
+        reviews=[
+            _review(500, author=_BOT, state="COMMENTED", body="generated 1 comment"),
+            _review(510, author=_BOT, state="COMMENTED", body="two new problems"),
+        ],
+        comments=[
+            _comment(1, author=_BOT, body="old handled", pull_request_review_id=500),
+            _comment(2, author="operator", body=handled_reply, in_reply_to_id=1),
+        ],
+        permissions={"operator": "admin"},
+    )
+
+    trusted, _untrusted = fetch_external_findings(_REPO, 62, trusted_bots=(_BOT,))
+
+    # Review 500 (all of its roots handled) is suppressed; review 510 is new
+    # material and survives.
+    assert [(f.review_id, f.body) for f in trusted] == [(510, "two new problems")]

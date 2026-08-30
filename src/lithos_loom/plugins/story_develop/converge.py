@@ -282,7 +282,9 @@ def converge_pr(
                 status="failed",
                 change=change,
                 intake_cost_usd=triage.cost_usd,
-                external_outcomes=outcomes_after_loop(id_map, triage.rejections, {}),
+                external_outcomes=outcomes_after_loop(
+                    id_map, triage.rejections, {}, loop_approved=False
+                ),
                 message=f"triage spent ${triage.cost_usd:.2f}, meeting the "
                 f"--max-cost ${config.max_cost_usd:.2f} ceiling before the fix loop",
             )
@@ -299,7 +301,9 @@ def converge_pr(
                 status="triage_rejected",
                 change=change,
                 intake_cost_usd=triage.cost_usd,
-                external_outcomes=outcomes_after_loop(id_map, triage.rejections, {}),
+                external_outcomes=outcomes_after_loop(
+                    id_map, triage.rejections, {}, loop_approved=False
+                ),
                 message="triage rejected every external finding with cited "
                 "evidence — nothing to converge"
                 + (f" ({triage.note})" if triage.note else ""),
@@ -332,7 +336,12 @@ def converge_pr(
                 coder_claims = {f.finding_id: f for f in parsed.findings}
             except (OSError, ValueError):
                 pass  # loop died before/round-1 handoff unusable → unaddressed
-            return outcomes_after_loop(id_map, triage.rejections, coder_claims)
+            return outcomes_after_loop(
+                id_map,
+                triage.rejections,
+                coder_claims,
+                loop_approved=result.approved,
+            )
 
         return _loop_and_deliver(
             config,

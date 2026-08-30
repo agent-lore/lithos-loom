@@ -52,7 +52,7 @@ def test_reject_without_evidence_proceeds() -> None:
 def test_unmentioned_and_garbled_ids_proceed() -> None:
     """Default-to-act: a finding the triage output never mentions (or mangles)
     is seeded, not dropped."""
-    text = "- f-001: REJECT — cited evidence here\n- something unparseable\n"
+    text = "- f-001: REJECT — src/x.py:12 refutes it\n- something unparseable\n"
     verdicts = parse_triage_verdicts(text, ["f-001", "f-002", "f-003"])
     assert verdicts.proceed == ("f-002", "f-003")
     assert set(verdicts.rejections) == {"f-001"}
@@ -212,3 +212,19 @@ def test_missing_verdict_file_defaults_to_act(
 
     assert result.proceed == ("f-001", "f-002")
     assert result.note != ""
+
+
+def test_reject_with_uncited_prose_proceeds() -> None:
+    """PR #345 review F2: the cited-evidence rule is enforced by the PARSER,
+    not just the prompt — a vague rejection ("nope", "seems fine") must not
+    silently discard a claim. Evidence counts only when it cites a location
+    (a file, optionally :line)."""
+    text = (
+        "- f-001: REJECT — nope\n"
+        "- f-002: REJECT — the reviewer misread the intent, this is fine\n"
+        "- f-003: REJECT — src/util.py:14 already guards the None case\n"
+        "- f-004: REJECT — Makefile:12 sets the flag before the target runs\n"
+    )
+    verdicts = parse_triage_verdicts(text, ["f-001", "f-002", "f-003", "f-004"])
+    assert verdicts.proceed == ("f-001", "f-002")
+    assert set(verdicts.rejections) == {"f-003", "f-004"}

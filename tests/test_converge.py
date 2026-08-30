@@ -561,14 +561,16 @@ def test_external_mode_skips_intake_and_seeds_surviving_findings(
     )
     config = _config(tmp_path)
 
-    # The fake coder's round-1 handoff claims f-002 fixed.
+    # A CONFORMING successful coder handoff (PR #345 review F1): the prompt
+    # mandates `## Status: LGTM` + a per-id Summary, with a Findings block only
+    # for disputes — so a successful fix leaves NO parsed findings. The fixed
+    # disposition must come from the loop's approval, not from bookkeeping the
+    # prompt never asks for.
     config.handoff_dir.mkdir(parents=True, exist_ok=True)
     from lithos_loom.plugins.story_develop import handoff as handoff_mod
 
     (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
-        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
-        "- finding_id: f-002\n  severity: minor\n  status: fixed\n"
-        "  rationale: r\n  coder_response: guarded the handle\n",
+        "## Status: LGTM\n## Summary\nf-002: guarded the handle.\n",
         encoding="utf-8",
     )
 
@@ -593,8 +595,7 @@ def test_external_mode_skips_intake_and_seeds_surviving_findings(
     by_id = {o.finding_id: o for o in result.external_outcomes}
     assert by_id["f-001"].disposition == "rejected"
     assert "refutes" in by_id["f-001"].detail
-    assert by_id["f-002"].disposition == "fixed"
-    assert by_id["f-002"].detail == "guarded the handle"
+    assert by_id["f-002"].disposition == "fixed"  # approved loop = fixed
     assert by_id["f-001"].finding.comment_id == 7
 
 
@@ -637,3 +638,49 @@ def test_external_mode_triage_spend_meets_budget_fails(
 def test_external_mode_rejects_empty_findings(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-empty"):
         converge_pr(_config(tmp_path), _change(), external_findings=())
+
+
+def test_external_mode_dispute_and_unapproved_dispositions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A coder dispute (the one case the prompt DOES put in a Findings block)
+    survives as `disputed`; an unapproved loop yields `unaddressed`, never a
+    false `fixed`."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001 disputed; f-002 addressed.\n"
+        "## Findings\n"
+        "- finding_id: f-001\n  severity: minor\n  status: disputed\n"
+        "  rationale: r\n  coder_response: deliberate decision\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+    by_id = {o.finding_id: o for o in result.external_outcomes}
+    assert by_id["f-001"].disposition == "disputed"
+    assert by_id["f-001"].detail == "deliberate decision"
+    assert by_id["f-002"].disposition == "fixed"
+
+    # Unapproved loop: same handoff, but the loop stops without approval.
+    captured2 = _install(monkeypatch, blocking=True)
+    captured2["develop_status"] = "stalled"
+    _install_triage(monkeypatch, captured2, proceed=("f-001", "f-002"))
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+    assert result.status == "not_converged"
+    assert {o.disposition for o in result.external_outcomes} == {
+        "disputed",
+        "unaddressed",
+    }

@@ -74,6 +74,7 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 | `--max-cost USD` | **Soft** phase-boundary ceiling on whole-command spend (intake + loop): converge stops before the next phase once recorded spend reaches it (validated finite and `> 0`). Not a hard cap — an in-flight turn may overshoot and a same-round approval is delivered even if it crossed the ceiling. |
 | `--test-timeout N` | Max seconds for one gate check run — the `test` check, other check-set checks, and autoformat (default 900, validated `≥ 1`). Raise it for a repo whose non-integration suite exceeds the default; otherwise the gate floor never clears and converge **stalls** with green reviewers. |
 | `--no-push` | Converge locally but do not push to the PR branch. |
+| `--from-github` | Ingest the PR's **external review findings** instead of running the local-panel intake (see "Two intake modes"): trusted findings are triaged (S5a) and, if they survive, seed the fix loop directly; untrusted authors are printed but never fed to an agent; thread replies are posted afterwards. |
 | `--repo PATH` | Repository to converge in (default: current directory). |
 | `--json PATH` | Write the structured JSON summary. |
 | `-c`, `--config` | Host config path. |
@@ -81,8 +82,8 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 ## Output
 
 - **Plain-text summary** to stdout: the status line, the message, the round + fixer-commit count, and (on a push) the pushed sha → PR branch.
-- **JSON** (`--json`): a stable object — `status`, `head_ref`, `head_branch`, `base_sha`, `head_sha`, `rounds`, `develop_status`, `fixer_commits` (only the coder's commits, PR head → HEAD — **not** the PR's original commits), `pushed`, `pushed_sha`, `intake_cost_usd`, `total_cost_usd`, `message`.
-- **Statuses / exit codes:** `already_clean` (intake didn't block; reports the *pre-intake snapshot*) and `converged` → **0**; `not_converged` (loop stopped unapproved), `merge_race` (PR head advanced remotely), and `failed` (incomplete intake panel, or intake spend exhausted `--max-cost`) → **1**; `fork_unsupported` and `merged` (the PR already landed) → **2**.
+- **JSON** (`--json`): a stable object — `status`, `head_ref`, `head_branch`, `base_sha`, `head_sha`, `rounds`, `develop_status`, `fixer_commits` (only the coder's commits, PR head → HEAD — **not** the PR's original commits), `pushed`, `pushed_sha`, `intake_cost_usd` (in external mode: the triage spend), `total_cost_usd`, `message`, `deferred_findings`, and `external_outcomes` (external mode: per injected finding — `finding_id`, `author`, `source`, `comment_id`, `thread_url`, `disposition` `rejected`/`disputed`/`fixed`/`unaddressed`, `detail`).
+- **Statuses / exit codes:** `already_clean` (intake didn't block; reports the *pre-intake snapshot*), `converged`, and `triage_rejected` (external mode: every injected finding rejected with cited evidence; no coder built, rejection replies posted) → **0**; `not_converged` (loop stopped unapproved), `merge_race` (PR head advanced remotely), and `failed` (incomplete intake panel, or pre-loop spend — intake review or triage — exhausted `--max-cost`) → **1**; `fork_unsupported` and `merged` (the PR already landed) → **2**.
 
 > **Intake exceptions propagate.** An *unexpected* error while producing the intake review (e.g. a container crash, a bad config) is raised, not silently mapped to `failed` — a traceback is the honest signal for an internal fault. `failed` is reserved for the *expected* incomplete-review and budget-exhausted cases.
 

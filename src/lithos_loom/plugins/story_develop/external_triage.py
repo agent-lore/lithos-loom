@@ -58,6 +58,15 @@ _VERDICT_RE = re.compile(
 )
 
 
+# What counts as CITED evidence (PR #345 review F2): the rejection must name a
+# location — a dotted file path (src/util.py, optionally :line) or a
+# file:line token (Makefile:12). Prose alone ("nope", "seems fine", "the
+# reviewer misread it") is not evidence and the claim proceeds; the rule
+# lives in the parser, not just the prompt, so a vague model rejection can
+# never silently discard a true defect.
+_CITATION_RE = re.compile(r"[\w./-]+\.[A-Za-z0-9]{1,6}(?::\d+)?|[\w./-]+:\d+")
+
+
 @dataclass(frozen=True)
 class TriageVerdicts:
     """Parsed per-finding verdicts (also the container step's result shape)."""
@@ -71,8 +80,9 @@ class TriageVerdicts:
 def parse_triage_verdicts(text: str, finding_ids: list[str]) -> TriageVerdicts:
     """Parse the verdict file, applying default-to-act per finding.
 
-    A finding is rejected only by an explicit ``REJECT`` line carrying
-    non-empty evidence; everything else — PROCEED, bare REJECT, unmentioned,
+    A finding is rejected only by an explicit ``REJECT`` line whose evidence
+    cites a location (``_CITATION_RE`` — a file, optionally ``:line``);
+    everything else — PROCEED, bare REJECT, uncited prose, unmentioned,
     garbled — proceeds. Ids the output invents are ignored.
     """
     known = set(finding_ids)
@@ -82,7 +92,11 @@ def parse_triage_verdicts(text: str, finding_ids: list[str]) -> TriageVerdicts:
         if fid not in known:
             continue
         evidence = (match.group("evidence") or "").strip()
-        if match.group("verdict").upper() == "REJECT" and evidence:
+        if (
+            match.group("verdict").upper() == "REJECT"
+            and evidence
+            and _CITATION_RE.search(evidence)
+        ):
             rejections[fid] = evidence
     proceed = tuple(fid for fid in finding_ids if fid not in rejections)
     return TriageVerdicts(proceed=proceed, rejections=rejections)

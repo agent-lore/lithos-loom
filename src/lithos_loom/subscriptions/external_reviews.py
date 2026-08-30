@@ -307,19 +307,28 @@ async def ingest_external_reviews(
     handled_roots = await _proven_handled(
         _fixed_reply_candidates(comments), spec.repo, github, ctx
     )
-    # A non-blocking summary review whose author had roots the inline round
+    # A non-blocking summary review ALL of whose own roots the inline round
     # already remediated is part of that same handled history — suppressing
-    # it keeps the round's Copilot review out of the first sweep. Narrow on
-    # purpose: CHANGES_REQUESTED always posts (_review_posts) — a reply does
-    # not prove the requested changes were accepted.
-    handled_authors = frozenset(
-        c.author for c in comments if c.comment_id in handled_roots
+    # it keeps the round's Copilot review out of the first sweep. Bound to
+    # the review that OWNS the handled roots (PR #345 review F3) — an
+    # author-wide rule would hide a later summary re-review behind an
+    # ancient fixed root. Narrow on purpose: CHANGES_REQUESTED always posts
+    # (review_is_actionable) — a reply does not prove the requested changes
+    # were accepted.
+    review_roots: dict[int, list[int]] = {}
+    for c in comments:
+        if c.in_reply_to_id is None and c.pull_request_review_id is not None:
+            review_roots.setdefault(c.pull_request_review_id, []).append(c.comment_id)
+    handled_review_ids = frozenset(
+        rid
+        for rid, roots in review_roots.items()
+        if roots and all(r in handled_roots for r in roots)
     )
     actionable_reviews = [
         r
         for r in new_reviews
         if review_is_actionable(r)
-        and not (r.state != "CHANGES_REQUESTED" and r.author in handled_authors)
+        and not (r.state != "CHANGES_REQUESTED" and r.review_id in handled_review_ids)
     ]
     actionable_comments = [c for c in new_comments if _comment_posts(c, handled_roots)]
     marker = {REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)}

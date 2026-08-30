@@ -196,6 +196,7 @@ class PullRequestReviewComment:
     commit_id: str = ""
     original_commit_id: str = ""
     updated_at: datetime | None = None
+    pull_request_review_id: int | None = None
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────
@@ -286,6 +287,7 @@ def parse_pull_request_review_comment(row: dict[str, Any]) -> PullRequestReviewC
         commit_id=str(row.get("commit_id") or ""),
         original_commit_id=str(row.get("original_commit_id") or ""),
         updated_at=_parse_iso(str(updated_raw)) if updated_raw else None,
+        pull_request_review_id=row.get("pull_request_review_id"),
     )
 
 

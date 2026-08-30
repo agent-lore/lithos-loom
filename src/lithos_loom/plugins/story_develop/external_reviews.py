@@ -121,8 +121,19 @@ def fetch_external_findings(
                 continue
             if c.author in bots or await _permission(c.author) in _TRUSTED_PERMISSIONS:
                 handled_roots.add(c.in_reply_to_id)
-        handled_authors = frozenset(
-            c.author for c in comments if c.comment_id in handled_roots
+        # Bind suppression to the review that OWNS the handled roots (PR #345
+        # review F3) — never to the author across the whole PR, which would
+        # hide a later summary re-review behind an ancient fixed root.
+        review_roots: dict[int, list[int]] = {}
+        for c in comments:
+            if c.in_reply_to_id is None and c.pull_request_review_id is not None:
+                review_roots.setdefault(c.pull_request_review_id, []).append(
+                    c.comment_id
+                )
+        handled_review_ids = frozenset(
+            rid
+            for rid, roots in review_roots.items()
+            if roots and all(r in handled_roots for r in roots)
         )
 
         trusted: list[ExternalFinding] = []
@@ -136,11 +147,14 @@ def fetch_external_findings(
         for review in reviews:
             if not review_is_actionable(review):
                 continue
-            # A non-blocking summary review by an author whose roots were all
-            # handled is part of that handled history (sweep parity); a
+            # A non-blocking summary review ALL of whose own roots were
+            # handled is part of that handled history; a
             # CHANGES_REQUESTED is never suppressed — a reply does not prove
             # the requested changes were accepted.
-            if review.state != "CHANGES_REQUESTED" and review.author in handled_authors:
+            if (
+                review.state != "CHANGES_REQUESTED"
+                and review.review_id in handled_review_ids
+            ):
                 continue
             source, is_trusted = await _classify(review.author)
             finding = ExternalFinding(
@@ -267,27 +281,33 @@ def outcomes_after_loop(
     id_map: dict[str, ExternalFinding],
     rejections: dict[str, str],
     coder_findings: dict[str, handoff.Finding],
+    *,
+    loop_approved: bool = False,
 ) -> tuple[ExternalOutcome, ...]:
-    """Fold triage rejections + the coder's round-1 claims into per-finding
-    outcomes, in the injection order (``id_map`` preserves it)."""
+    """Fold triage rejections + the coder's claims into per-finding outcomes,
+    in the injection order (``id_map`` preserves it).
+
+    The coder's handoff contract (PR #345 review F1) puts a ``## Findings``
+    block in only for **disputes** — a conforming successful fix leaves no
+    parsed finding at all. So ``fixed`` is derived from the LOOP's approval:
+    a non-rejected, non-disputed finding in an approved run was addressed
+    (the panel + gate accepted the tree containing its remediation); in an
+    unapproved run it stays ``unaddressed`` — never a false ``fixed``.
+    """
     out: list[ExternalOutcome] = []
     for fid, ext in id_map.items():
         if fid in rejections:
             out.append(ExternalOutcome(fid, ext, "rejected", detail=rejections[fid]))
             continue
         claim = coder_findings.get(fid)
-        if claim is None:
-            out.append(ExternalOutcome(fid, ext, "unaddressed"))
-        elif claim.status == "disputed":
+        if claim is not None and claim.status == "disputed":
             out.append(
                 ExternalOutcome(fid, ext, "disputed", detail=claim.coder_response)
             )
-        elif claim.status in ("fixed", "accepted"):
-            out.append(ExternalOutcome(fid, ext, "fixed", detail=claim.coder_response))
-        else:
-            out.append(
-                ExternalOutcome(fid, ext, "unaddressed", detail=claim.coder_response)
-            )
+            continue
+        detail = claim.coder_response if claim is not None else ""
+        disposition = "fixed" if loop_approved else "unaddressed"
+        out.append(ExternalOutcome(fid, ext, disposition, detail=detail))
     return tuple(out)
 
 
