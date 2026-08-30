@@ -62,9 +62,10 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
 
     monkeypatch.setattr(converge_cli, "resolve_change", fake_resolve)
 
-    def fake_converge_pr(config, change, *, no_push=False):
+    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
         captured["config"] = config
         captured["no_push"] = no_push
+        captured["external_findings"] = external_findings
         return ConvergeResult(
             status=captured.get("status", "converged"),
             change=change,
@@ -397,3 +398,192 @@ def test_exit_code_follows_status(stubs: dict, status: str, code: int) -> None:
     stubs["status"] = status
     result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
     assert result.exit_code == code, result.output
+
+
+# --- --from-github (PRD S2 slice B) ------------------------------------------
+
+
+def _ext(comment_id, *, author="dave", trusted=True, body="a claim"):
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
+
+    return ExternalFinding(
+        author=author,
+        source="human",
+        trusted=trusted,
+        review_id=None,
+        comment_id=comment_id,
+        thread_url=f"https://example/t/{comment_id}",
+        head_sha="h" * 40,
+        path="src/x.py",
+        line=12,
+        body=body,
+    )
+
+
+@pytest.fixture
+def github_stubs(monkeypatch: pytest.MonkeyPatch, stubs: dict) -> dict:
+    stubs["replies"] = []
+    monkeypatch.setattr(converge_cli, "repo_name_with_owner", lambda repo: "o/r")
+
+    def fake_fetch(repo, pr_number, *, trusted_bots):
+        stubs["fetch"] = {"repo": repo, "pr": pr_number, "bots": tuple(trusted_bots)}
+        return stubs.get("trusted", []), stubs.get("untrusted", [])
+
+    monkeypatch.setattr(converge_cli, "fetch_external_findings", fake_fetch)
+    monkeypatch.setattr(
+        converge_cli,
+        "post_thread_reply",
+        lambda repo, pr, cid, body: stubs["replies"].append((cid, body)) or True,
+    )
+    return stubs
+
+
+def test_from_github_threads_findings_and_replies(
+    github_stubs: dict, tmp_path: Path
+) -> None:
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    trusted = [_ext(7), _ext(8)]
+    github_stubs["trusted"] = trusted
+    github_stubs["untrusted"] = [_ext(9, author="stranger", trusted=False)]
+
+    # converge_pr stub returns per-finding outcomes: one fixed, one rejected.
+    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+        github_stubs["external_findings"] = external_findings
+        return ConvergeResult(
+            status="converged",
+            change=change,
+            pushed=True,
+            pushed_sha="p" * 40,
+            external_outcomes=(
+                ExternalOutcome("f-001", trusted[0], "fixed", detail="guarded it"),
+                ExternalOutcome("f-002", trusted[1], "rejected", detail="x.py:12"),
+            ),
+            message="converged and pushed to feature",
+        )
+
+    import lithos_loom.cli.converge as cli_mod
+
+    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            ["converge", "#142", "--repo", str(tmp_path), "--ac", "do it"],
+            catch_exceptions=False,
+        )
+    finally:
+        cli_mod.converge_pr = saved
+    assert result.exit_code == 0  # no --from-github: fetch untouched
+    assert "fetch" not in github_stubs
+
+    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            [
+                "converge",
+                "#142",
+                "--repo",
+                str(tmp_path),
+                "--ac",
+                "do it",
+                "--from-github",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        cli_mod.converge_pr = saved
+
+    assert result.exit_code == 0
+    assert github_stubs["fetch"] == {
+        "repo": "o/r",
+        "pr": 142,
+        "bots": ("copilot-pull-request-reviewer[bot]",),
+    }
+    assert github_stubs["external_findings"] == tuple(trusted)
+    assert "stranger" in result.output  # untrusted reported, and…
+    # …the fixed reply carries the pushed sha; the rejection replies too.
+    bodies = dict(github_stubs["replies"])
+    assert "Fixed in pppppppppp" in bodies[7]
+    assert "triage: x.py:12" in bodies[8]
+
+
+def test_from_github_nothing_to_ingest_exits_clean(
+    github_stubs: dict, tmp_path: Path
+) -> None:
+    github_stubs["trusted"] = []
+    github_stubs["untrusted"] = [_ext(9, author="stranger", trusted=False)]
+
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--repo",
+            str(tmp_path),
+            "--ac",
+            "do it",
+            "--from-github",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "nothing to ingest" in result.output
+    assert "config" not in github_stubs  # converge_pr never ran
+
+
+def test_from_github_unpushed_fix_asserts_nothing_on_the_thread(
+    github_stubs: dict, tmp_path: Path
+) -> None:
+    """A fix that never landed must not claim to have (reply only on push)."""
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    trusted = [_ext(7)]
+    github_stubs["trusted"] = trusted
+
+    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+        return ConvergeResult(
+            status="not_converged",
+            change=change,
+            pushed=False,
+            external_outcomes=(
+                ExternalOutcome("f-001", trusted[0], "fixed", detail="tried"),
+            ),
+            message="loop ended not_converged",
+        )
+
+    import lithos_loom.cli.converge as cli_mod
+
+    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            [
+                "converge",
+                "#142",
+                "--repo",
+                str(tmp_path),
+                "--ac",
+                "do it",
+                "--from-github",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        cli_mod.converge_pr = saved
+
+    assert result.exit_code == 1
+    assert github_stubs["replies"] == []
+
+
+def test_triage_rejected_exits_zero(stubs: dict, tmp_path: Path) -> None:
+    stubs["status"] = "triage_rejected"
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--repo", str(tmp_path), "--ac", "do it"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0

@@ -502,8 +502,138 @@ def test_converge_result_json_round_trips_the_documented_shape(
         "develop_status": "approved",
         "fixer_commits": 1,
         "pushed": True,
+        "external_outcomes": [],
         "pushed_sha": "p" * 40,
         "intake_cost_usd": 1.5,
         "total_cost_usd": 2.5,  # 1.5 intake + 1.0 loop (0.6 coder + 0.4 review)
         "message": "converged and pushed to feature",
     }
+
+
+# --- external mode (PRD S2 slice B: triage-then-inject, no local intake) -----
+
+
+def _ext_finding(comment_id: int = 7, body: str = "leaks a handle"):
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
+
+    return ExternalFinding(
+        author="dave",
+        source="human",
+        trusted=True,
+        review_id=None,
+        comment_id=comment_id,
+        thread_url=f"https://example/thread/{comment_id}",
+        head_sha=_HEAD,
+        path="src/x.py",
+        line=12,
+        body=body,
+    )
+
+
+def _install_triage(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict,
+    *,
+    proceed: tuple[str, ...],
+    rejections: dict[str, str] | None = None,
+    cost: float = 0.1,
+):
+    from lithos_loom.plugins.story_develop.external_triage import TriageVerdicts
+
+    def fake_triage(config, change, outcome, *, timeout=1800):
+        captured["triage_findings"] = [f.finding_id for f in outcome.findings]
+        return TriageVerdicts(
+            proceed=proceed, rejections=rejections or {}, cost_usd=cost
+        )
+
+    monkeypatch.setattr(converge_mod, "triage_external_findings", fake_triage)
+
+
+def test_external_mode_skips_intake_and_seeds_surviving_findings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=("f-002",),
+        rejections={"f-001": "src/x.py:12 refutes it"},
+    )
+    config = _config(tmp_path)
+
+    # The fake coder's round-1 handoff claims f-002 fixed.
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-002\n  severity: minor\n  status: fixed\n"
+        "  rationale: r\n  coder_response: guarded the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(
+            _ext_finding(7, body="claim one"),
+            _ext_finding(8, body="claim two"),
+        ),
+    )
+
+    assert "intake_ran" not in captured  # the local panel never runs
+    assert captured["triage_findings"] == ["f-001", "f-002"]
+    entry = captured["entry"]
+    (outcome,) = entry.intake_reviews
+    assert [f.finding_id for f in outcome.findings] == ["f-002"]  # survivor only
+    assert entry.intake_check_set is None
+    assert result.status == "converged" and result.pushed
+    assert result.intake_cost_usd == 0.1  # the triage spend
+
+    by_id = {o.finding_id: o for o in result.external_outcomes}
+    assert by_id["f-001"].disposition == "rejected"
+    assert "refutes" in by_id["f-001"].detail
+    assert by_id["f-002"].disposition == "fixed"
+    assert by_id["f-002"].detail == "guarded the handle"
+    assert by_id["f-001"].finding.comment_id == 7
+
+
+def test_external_mode_all_rejected_builds_no_coder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=(),
+        rejections={"f-001": "evidence one", "f-002": "evidence two"},
+    )
+
+    result = converge_pr(
+        _config(tmp_path),
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+
+    assert result.status == "triage_rejected"
+    assert result.succeeded  # nothing left for the operator to do
+    assert "entry" not in captured  # develop() never ran
+    assert "push" not in captured
+    assert {o.disposition for o in result.external_outcomes} == {"rejected"}
+
+
+def test_external_mode_triage_spend_meets_budget_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",), cost=5.0)
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=5.0)
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(),))
+
+    assert result.status == "failed" and "entry" not in captured
+
+
+def test_external_mode_rejects_empty_findings(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        converge_pr(_config(tmp_path), _change(), external_findings=())

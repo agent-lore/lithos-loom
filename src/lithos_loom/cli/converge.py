@@ -30,7 +30,7 @@ from lithos_loom.cli.review import (
     resolve_check_states,
     resolve_reviewers,
 )
-from lithos_loom.config import load_config
+from lithos_loom.config import GitHubWatcherConfig, load_config
 from lithos_loom.plugins.story_develop import engines
 from lithos_loom.plugins.story_develop.config import (
     DEFAULT_IMAGE,
@@ -42,6 +42,16 @@ from lithos_loom.plugins.story_develop.config import (
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
+from lithos_loom.plugins.story_develop.external_reviews import (
+    GitHubError,
+    fetch_external_findings,
+    pr_number_from_spec,
+)
+from lithos_loom.plugins.story_develop.github_access import repo_name_with_owner
+from lithos_loom.plugins.story_develop.pr_delivery import (
+    post_thread_reply,
+    reply_body,
+)
 from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_profile
 from lithos_loom.plugins.story_develop.review_resolve import resolve_change
 
@@ -50,6 +60,7 @@ from lithos_loom.plugins.story_develop.review_resolve import resolve_change
 _EXIT_CODES = {
     "already_clean": 0,
     "converged": 0,
+    "triage_rejected": 0,
     "fork_unsupported": 2,
     "merged": 2,
     "not_converged": 1,
@@ -151,6 +162,16 @@ def converge_command(
     no_push: bool = typer.Option(
         False, "--no-push", help="Converge locally but do not push to the PR branch."
     ),
+    from_github: bool = typer.Option(
+        False,
+        "--from-github",
+        help="Ingest the PR's external review findings (reviews + inline "
+        "comments) instead of running the local-panel intake: trusted ones "
+        "(allowlisted bots + write/admin humans) are triaged and, if they "
+        "survive, seed the fix loop directly; untrusted ones are printed but "
+        "never fed to an agent. Thread replies are posted for what was fixed "
+        "or rejected.",
+    ),
     repo: Path | None = typer.Option(
         None, "--repo", help="Repository to converge in (default: current directory)."
     ),
@@ -230,6 +251,49 @@ def converge_command(
 
     reviewers = resolve_reviewers(profile, reviewer)
 
+    external_findings = None
+    gh_repo: str | None = None
+    pr_number: int | None = None
+    if from_github:
+        gh_repo = repo_name_with_owner(repo)
+        pr_number = pr_number_from_spec(change)
+        if pr_number is None:
+            raise typer.BadParameter(
+                f"--from-github needs a PR number/URL; {change!r} has none"
+            )
+        watcher = getattr(host, "github_watcher", None)
+        trusted_bots = (
+            watcher.trusted_bots
+            if watcher is not None
+            else GitHubWatcherConfig.trusted_bots
+        )
+        try:
+            trusted, untrusted = fetch_external_findings(
+                gh_repo, pr_number, trusted_bots=trusted_bots
+            )
+        except GitHubError as exc:
+            typer.secho(
+                f"error: fetching external reviews for {gh_repo}#{pr_number} "
+                f"failed: {exc}",
+                err=True,
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(1) from exc
+        for f in untrusted:
+            # ADR 0011 decision 8: reported, never fed to an agent.
+            typer.secho(
+                f"untrusted (reported only, not remediated): {f.author} — "
+                f"{' '.join(f.body.split())[:120]} ({f.thread_url})",
+                fg=typer.colors.YELLOW,
+            )
+        if not trusted:
+            typer.echo(
+                "nothing to ingest — no live trusted external findings on "
+                f"{gh_repo}#{pr_number}"
+            )
+            raise typer.Exit(0)
+        external_findings = tuple(trusted)
+
     overrides: dict = {}
     if coder is not None:
         overrides["coder"] = coder
@@ -261,7 +325,15 @@ def converge_command(
         include_coder=True,
     )
 
-    result = converge_pr(develop_config, resolved, no_push=no_push)
+    result = converge_pr(
+        develop_config,
+        resolved,
+        no_push=no_push,
+        external_findings=external_findings,
+    )
+
+    if from_github and gh_repo is not None and pr_number is not None:
+        _post_external_replies(result, repo=gh_repo, pr_number=pr_number)
 
     typer.echo(_render(result))
     if json_out is not None:
@@ -284,6 +356,13 @@ def _render(result: ConvergeResult) -> str:
         )
     if result.pushed:
         lines.append(f"  pushed {result.pushed_sha[:10]} → {change.head_branch}")
+    for o in result.external_outcomes:
+        where = f" ({o.finding.path}:{o.finding.line})" if o.finding.path else ""
+        detail = f" — {o.detail}" if o.detail else ""
+        lines.append(
+            f"  external [{o.finding_id}] by {o.finding.author}{where}: "
+            f"{o.disposition}{detail}"
+        )
     for f in result.deferred_findings:
         # 819370e5 (PR #342 review): converge has no Lithos source task, so
         # nothing spawns — an unsurfaced deferral would be lost.
@@ -296,3 +375,37 @@ def _render(result: ConvergeResult) -> str:
             f"{f.rationale}{because}"
         )
     return "\n".join(lines)
+
+
+def _post_external_replies(
+    result: ConvergeResult, *, repo: str, pr_number: int
+) -> None:
+    """Thread a reply onto each comment-backed external finding's thread.
+
+    Only what actually happened is asserted: a *fixed* reply is posted only
+    when the branch was pushed (its sha is the proof — an unpushed fix must
+    not claim to have landed); rejections and disputes reply regardless.
+    Summary-only findings (no ``comment_id``) have no thread to reply on and
+    are left to the rendered summary. Best-effort: a failed reply logs via
+    ``post_thread_reply`` and the rest continue.
+    """
+    posted = 0
+    for o in result.external_outcomes:
+        if o.finding.comment_id is None:
+            continue
+        if o.disposition == "rejected":
+            body = reply_body(
+                fixed=False, sha=None, coder_response=f"triage: {o.detail}"
+            )
+        elif o.disposition == "disputed":
+            body = reply_body(fixed=False, sha=None, coder_response=o.detail)
+        elif o.disposition == "fixed" and result.pushed:
+            body = reply_body(
+                fixed=True, sha=result.pushed_sha, coder_response=o.detail
+            )
+        else:
+            continue  # unaddressed, or a fix that never landed — assert nothing
+        if post_thread_reply(repo, pr_number, o.finding.comment_id, body):
+            posted += 1
+    if posted:
+        typer.echo(f"posted {posted} thread repl(ies) on {repo}#{pr_number}")

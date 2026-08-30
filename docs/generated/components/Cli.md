@@ -16,7 +16,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, â€
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
-| `lithos_loom.cli.converge` | S | 0 | 1 |
+| `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |

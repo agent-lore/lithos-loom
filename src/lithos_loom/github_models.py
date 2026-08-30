@@ -17,6 +17,9 @@ from datetime import datetime
 from typing import Any, Literal
 
 __all__ = [
+    "AUTOMATED_REPLY_MARKER",
+    "FIXED_REPLY_PREFIX",
+    "SILENT_REVIEW_STATES",
     "GitHubRef",
     "Issue",
     "PullRequest",
@@ -30,6 +33,9 @@ __all__ = [
     "parse_pull_request_review",
     "parse_pull_request_review_comment",
     "strip_marker",
+    "is_automated_reply",
+    "is_landed_fix_reply",
+    "review_is_actionable",
 ]
 
 # Regex matches both canonical and operator-edited shapes:
@@ -323,3 +329,55 @@ def strip_marker(body: str | None) -> str:
     if not body:
         return ""
     return _MARKER_RE.sub("", body).strip()
+
+
+# ── loom's PR-reply vocabulary + the external-review policy ───────────
+#
+# Single-sourced here (Foundation) because three consumers need them and no
+# two share a tier-safe import path otherwise: story-develop's delivery
+# (produces the replies), the github-watcher sweep (must not re-ingest them,
+# and may suppress roots they prove handled), and the converge external-
+# findings fetch (same suppression, plugin-side).
+
+# Every automated PR thread reply loom posts ends with this marker.
+AUTOMATED_REPLY_MARKER = "_(automated reply by story-develop)_"
+
+# The one reply head that proves a fix actually LANDED (a pushed commit).
+# The marker also rides on "A fix was prepared but NOT pushed …" (red
+# regression gate) and "Not changed — …" (coder pushback) replies, where the
+# root comment is still unresolved — those must never count as proof.
+FIXED_REPLY_PREFIX = "Fixed in "
+
+# Review states recorded but never actionable: an approval is not an operator
+# action item, and a dismissal has already had its say.
+SILENT_REVIEW_STATES = frozenset({"APPROVED", "DISMISSED"})
+
+
+def is_automated_reply(body: str) -> bool:
+    """True for loom's own automated PR replies (never re-ingested)."""
+    return AUTOMATED_REPLY_MARKER in body
+
+
+def is_landed_fix_reply(body: str) -> bool:
+    """True for the reply shape that proves a fix landed (see the constants).
+
+    Callers that use this to *suppress* another comment must additionally
+    authenticate the reply's author — both tokens are public body strings any
+    commenter can copy (PR #344 re-review 2).
+    """
+    return is_automated_reply(body) and body.startswith(FIXED_REPLY_PREFIX)
+
+
+def review_is_actionable(review: PullRequestReview) -> bool:
+    """The per-state external-review policy (PRD S2).
+
+    ``CHANGES_REQUESTED`` is always actionable; ``APPROVED`` / ``DISMISSED``
+    never are; ``COMMENTED`` — and any state GitHub adds later — only with a
+    non-empty body (conservative for unknown states, silent-drop only for the
+    two known non-actionable ones).
+    """
+    if review.state == "CHANGES_REQUESTED":
+        return True
+    if review.state in SILENT_REVIEW_STATES:
+        return False
+    return bool(review.body.strip())

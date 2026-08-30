@@ -43,6 +43,11 @@ from lithos_loom.github_client import (
     PullRequestReview,
     PullRequestReviewComment,
 )
+from lithos_loom.github_models import (
+    is_automated_reply,
+    is_landed_fix_reply,
+    review_is_actionable,
+)
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 
@@ -62,25 +67,6 @@ EXTERNAL_REVIEW = "[ExternalReview]"
 # the exact de-dup; last_comment_at (ISO) feeds the bounded `since` cursor on
 # the comment fetch so a long-lived PR isn't re-paginated every sweep.
 REVIEW_SEEN_KEY = "external_review_seen"
-
-# Review states that are recorded but never posted: an approval is not an
-# operator action item, and a dismissal has already had its say.
-_SILENT_REVIEW_STATES = frozenset({"APPROVED", "DISMISSED"})
-
-# Loom's own PR thread replies end with this marker
-# (plugins.story_develop.pr_delivery.AUTOMATED_MARKER — duplicated as a
-# literal so the subscriptions tier doesn't import plugin internals; a
-# lockstep test pins the two strings together).
-_AUTOMATED_REPLY_MARKER = "_(automated reply by story-develop)_"
-
-# The one reply head that proves a fix actually LANDED
-# (pr_delivery.reply_body's pushed case). The same AUTOMATED_MARKER also
-# rides on "A fix was prepared but NOT pushed …" (red regression gate) and
-# "Not changed — …" (coder pushback) replies, where the root is still
-# unresolved (PR #344 re-review) — those must never suppress it. Duplicated
-# literal, same lockstep policy as the marker: the suppression tests build
-# their replies through the real reply_body.
-_FIXED_REPLY_PREFIX = "Fixed in "
 
 # Repo permission levels whose holders' landed-fix replies count as proof —
 # the ADR 0011 trust line (allowlisted bots aside, which never post replies).
@@ -136,17 +122,6 @@ def _since(seen: _Seen) -> datetime | None:
     return boundary - timedelta(seconds=1)
 
 
-def _review_posts(review: PullRequestReview) -> bool:
-    """Per-state posting policy. Unrecognised states fall to the COMMENTED
-    rule (post only with content) — conservative for states GitHub adds
-    later, silent-drop only for the two states known to be non-actionable."""
-    if review.state == "CHANGES_REQUESTED":
-        return True
-    if review.state in _SILENT_REVIEW_STATES:
-        return False
-    return bool(review.body.strip())
-
-
 def _comment_posts(
     comment: PullRequestReviewComment, handled_roots: frozenset[int]
 ) -> bool:
@@ -154,7 +129,7 @@ def _comment_posts(
         return False  # thread replies ride on their root comment
     if comment.comment_id in handled_roots:
         return False  # the inline round already remediated + replied to it
-    return _AUTOMATED_REPLY_MARKER not in comment.body
+    return not is_automated_reply(comment.body)
 
 
 def _fixed_reply_candidates(
@@ -169,9 +144,7 @@ def _fixed_reply_candidates(
     return [
         (c.in_reply_to_id, c.author)
         for c in comments
-        if c.in_reply_to_id is not None
-        and _AUTOMATED_REPLY_MARKER in c.body
-        and c.body.startswith(_FIXED_REPLY_PREFIX)
+        if c.in_reply_to_id is not None and is_landed_fix_reply(c.body)
     ]
 
 
@@ -345,7 +318,7 @@ async def ingest_external_reviews(
     actionable_reviews = [
         r
         for r in new_reviews
-        if _review_posts(r)
+        if review_is_actionable(r)
         and not (r.state != "CHANGES_REQUESTED" and r.author in handled_authors)
     ]
     actionable_comments = [c for c in new_comments if _comment_posts(c, handled_roots)]

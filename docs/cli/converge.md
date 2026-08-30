@@ -37,9 +37,17 @@ lithos-loom develop converge #142 --ac "the leak must close the handle on error"
 3. **Fix loop.** If the intake blocks, enters `develop()` on a committable worktree at the PR head (base = the PR merge-base), seeded from the intake findings + the PR's own commit log. Round 1's coder is a **cold-start** turn: *"you are picking up a PR you did not author — read the acceptance criteria, the commit history, and the code to reconstruct intent, then address the findings to satisfy that intent; dispute (don't silently comply with) a finding that undoes a deliberate decision."* Rounds ≥2 are the normal `coder_fix` path. Termination is `develop()`'s own — `approved` / `disputed` / `stalled` / `cost_exceeded` / `max_rounds`.
 4. **Push epilogue.** On **approval** (and unless `--no-push`), pushes the fixed branch onto the PR head ref **only if the PR head is still exactly the resolved head** — an atomic lease (`git push --force-with-lease=<ref>:<expected>`) plus a local append-only ancestry check. A head **deleted**, **advanced**, or **force-rewound** mid-run is refused as `merge_race` (never silently recreated or overwritten), while a successful update stays a pure fast-forward — not a blind `--force`. A fork ref (absent on origin) is refused; auth / hook / branch-protection failures stay generic errors.
 
-## Local panel only (v1)
+## Two intake modes
 
-converge converges against loom's **in-container codex/claude panel + check-floor** — fast, local, no GitHub round-trip. It does **not** yet ingest the GitHub review bots' comments (github-code-quality / Copilot); that is a deferred slice. The intake reviewers are **cold** by design (no coder-summary to anchor on); only the fixer is given the PR's intent.
+**Default (local panel).** converge converges against loom's **in-container codex/claude panel + check-floor** — fast, local, no GitHub round-trip. The intake reviewers are **cold** by design (no coder-summary to anchor on); only the fixer is given the PR's intent.
+
+**`--from-github` (external findings — PRD S2 slice B).** Instead of the local-panel intake, converge ingests the PR's **external review material** — reviews and inline comments left by bots or humans:
+
+- **Trust line (ADR 0011 d8):** allowlisted bot logins (`[github_watcher] trusted_bots`) and humans with **write/admin** on the repo may seed the coder. Everyone else's findings are printed (`untrusted (reported only)`) and never placed on a prompt path. Roots already proven handled by an authenticated `Fixed in <sha>` reply are skipped.
+- **Triage (S5a):** one cheap read-only container turn checks each claim against the code before any fixing. It may **REJECT only with cited evidence**; anything short of that — including a failed triage turn — **proceeds** (actioning a false positive is recoverable; suppressing a true one is not). All findings rejected → status `triage_rejected`, exit 0, no coder built.
+- **Injection:** surviving findings seed the coder directly via the same `LoopEntry` seam, **bypassing the local intake** — dispatching converge on an external finding without injection would return `already_clean` from the very panel that missed the defect (ADR 0011 d1/d7). The loop's own panel and check-set then judge the *result*: the external reviewer proposes, loom's gate disposes.
+- **Thread replies:** after the run, each comment-backed finding gets a reply — `Fixed in <sha>` **only when the branch was actually pushed**, `Not changed — triage: <evidence>` for rejections, the coder's reasoning for disputes. Summary-only reviews (no inline comment) have no thread and appear in the rendered summary instead.
+- A finding written against an older head sha is injected with a re-anchor note (verify before re-fixing); severities enter at `minor` (external reviewers state none).
 
 ## Acceptance criteria (the reviewer's + fixer's brief)
 
