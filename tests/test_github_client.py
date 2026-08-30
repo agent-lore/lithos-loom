@@ -36,12 +36,12 @@ from lithos_loom.github_client import (
     PullRequest,
     PullRequestReview,
     PullRequestReviewComment,
-    _parse_issues_response,
-    _parse_pull_request,
     _resolve_gh_token,
     apply_marker,
     parse_github_ref,
+    parse_issues_response,
     parse_marker,
+    parse_pull_request,
 )
 
 # ── Issue parsing ─────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ def test_parse_issues_response_returns_typed_issues() -> None:
             "html_url": "https://github.com/agent-lore/lithos-loom/issues/42",
         },
     ]
-    issues = _parse_issues_response(raw, repo="agent-lore/lithos-loom")
+    issues = parse_issues_response(raw, repo="agent-lore/lithos-loom")
     assert len(issues) == 1
     iss = issues[0]
     assert isinstance(iss, Issue)
@@ -107,7 +107,7 @@ def test_parse_issues_response_filters_pull_requests() -> None:
             "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/2"},
         },
     ]
-    issues = _parse_issues_response(raw, repo="x/y")
+    issues = parse_issues_response(raw, repo="x/y")
     assert [i.number for i in issues] == [1]
 
 
@@ -126,7 +126,7 @@ def test_parse_issues_response_handles_null_body() -> None:
             "html_url": "u",
         }
     ]
-    issues = _parse_issues_response(raw, repo="x/y")
+    issues = parse_issues_response(raw, repo="x/y")
     assert issues[0].body == ""
 
 
@@ -155,7 +155,7 @@ def test_parse_issues_response_closed_state_reasons() -> None:
             "html_url": "u",
         },
     ]
-    issues = _parse_issues_response(raw, repo="x/y")
+    issues = parse_issues_response(raw, repo="x/y")
     assert issues[0].state == "closed" and issues[0].state_reason == "completed"
     assert issues[1].state == "closed" and issues[1].state_reason == "not_planned"
 
@@ -579,7 +579,7 @@ async def test_get_issue_404_returns_none() -> None:
 
 
 def test_parse_pull_request_merged() -> None:
-    pr = _parse_pull_request(
+    pr = parse_pull_request(
         {
             "number": 7,
             "state": "closed",
@@ -600,7 +600,7 @@ def test_parse_pull_request_merged() -> None:
 
 
 def test_parse_pull_request_open_has_no_merge_fields() -> None:
-    pr = _parse_pull_request(
+    pr = parse_pull_request(
         {"number": 7, "state": "open", "merged": False, "merged_at": None}, repo="x/y"
     )
     assert pr.merged is False and pr.merged_at is None and pr.merge_commit_sha is None
@@ -906,7 +906,7 @@ def test_parse_pull_request_includes_refs_title_body() -> None:
     """The single-PR endpoint carries head/base refs + title/body — the review-only
     resolver (review_resolve) reads these off the same typed PullRequest the merge
     watcher uses for state/merged."""
-    pr = _parse_pull_request(
+    pr = parse_pull_request(
         {
             "number": 142,
             "state": "open",
@@ -929,7 +929,7 @@ def test_parse_pull_request_includes_refs_title_body() -> None:
 def test_parse_pull_request_tolerates_missing_ref_fields() -> None:
     """A minimal row (the merge-watcher's older test shape) still parses — the new
     ref/title/body/repo fields default to empty rather than KeyError-ing."""
-    pr = _parse_pull_request(
+    pr = parse_pull_request(
         {"number": 7, "state": "closed", "merged": True, "merged_at": None}, repo=_REPO
     )
     assert pr.head_sha == "" and pr.base_ref == "" and pr.title == "" and pr.body == ""
@@ -939,7 +939,7 @@ def test_parse_pull_request_tolerates_missing_ref_fields() -> None:
 def test_parse_pull_request_captures_head_and_base_repos() -> None:
     """head/base repo full-names distinguish a fork PR (they differ) from a
     same-repo PR — review_resolve reads these to flag forks for converge."""
-    pr = _parse_pull_request(
+    pr = parse_pull_request(
         {
             "number": 9,
             "state": "open",
@@ -965,7 +965,7 @@ def test_parse_pull_request_captures_head_and_base_repos() -> None:
 def test_parse_pull_request_tolerates_null_head_repo() -> None:
     """A deleted fork leaves ``head.repo`` null; that must parse to an empty
     head_repo (converge then can't confirm same-repo → the push guard backstops)."""
-    pr = _parse_pull_request(
+    pr = parse_pull_request(
         {
             "number": 9,
             "state": "open",
@@ -1206,3 +1206,112 @@ async def test_transport_error_on_a_post_is_wrapped() -> None:
         client = GitHubClient(http=http, token="fake")
         with pytest.raises(GitHubTransportError):
             await client.request_reviewers(_REPO, 7, ["dave"])
+
+
+# ── external-review fields + permission endpoint (PRD S2, detection) ───
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_review_parse_carries_id_state_and_submitted_at() -> None:
+    """A summary-only review (no inline comments) has no comment id to de-dup
+    on — the review id is the only stable key, and the state drives the
+    per-state posting policy (PRD S2)."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/reviews").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 4242,
+                    "user": {"login": "reviewer-human"},
+                    "body": "two problems",
+                    "state": "CHANGES_REQUESTED",
+                    "submitted_at": "2026-08-30T09:00:00Z",
+                    "commit_id": "e" * 40,
+                }
+            ],
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        reviews = await client.list_pull_request_reviews(_REPO, 9)
+    (review,) = reviews
+    assert review.review_id == 4242
+    assert review.state == "CHANGES_REQUESTED"
+    assert review.submitted_at == datetime(2026, 8, 30, 9, 0, tzinfo=UTC)
+    assert review.commit_id == "e" * 40
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_review_comment_parse_carries_urls_shas_and_updated_at() -> None:
+    """``html_url`` is the thread link for replies/operator; ``commit_id`` is
+    the sha the reviewer actually read (re-anchor input); ``updated_at`` feeds
+    the sweep's bounded ``since`` cursor."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/comments").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 111,
+                    "user": {"login": "reviewer-human"},
+                    "path": "src/x.py",
+                    "line": 12,
+                    "body": "leaks a handle",
+                    "in_reply_to_id": None,
+                    "html_url": "https://github.com/o/r/pull/9#discussion_r111",
+                    "commit_id": "d" * 40,
+                    "original_commit_id": "c" * 40,
+                    "updated_at": "2026-08-30T10:30:00Z",
+                }
+            ],
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        comments = await client.list_pull_request_review_comments(_REPO, 9)
+    (comment,) = comments
+    assert comment.html_url.endswith("discussion_r111")
+    assert comment.commit_id == "d" * 40
+    assert comment.original_commit_id == "c" * 40
+    assert comment.updated_at == datetime(2026, 8, 30, 10, 30, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_review_comments_pass_since_when_given() -> None:
+    route = respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/comments").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.list_pull_request_review_comments(
+            _REPO, 9, since=datetime(2026, 8, 30, tzinfo=UTC)
+        )
+    # Same rendering convention as list_issues_since (_isoformat_utc).
+    assert route.calls[0].request.url.params["since"] == "2026-08-30T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collaborator_permission_maps_the_payload() -> None:
+    respx.get(
+        f"https://api.github.com/repos/{_REPO}/collaborators/dave/permission"
+    ).mock(return_value=httpx.Response(200, json={"permission": "admin"}))
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        assert await client.get_collaborator_permission(_REPO, "dave") == "admin"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_collaborator_permission_404_means_none_not_repo_gone() -> None:
+    """On this endpoint 404 means "not a collaborator" — it must short-circuit
+    BEFORE _raise_for_status, whose unconditional 404→GitHubRepoNotFoundError
+    mapping would make an outside commenter look like a deleted repo."""
+    respx.get(
+        f"https://api.github.com/repos/{_REPO}/collaborators/stranger/permission"
+    ).mock(return_value=httpx.Response(404, json={"message": "Not Found"}))
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        assert await client.get_collaborator_permission(_REPO, "stranger") == "none"

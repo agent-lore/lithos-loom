@@ -285,6 +285,21 @@ class GitHubWatcherConfig:
     cadence. Set ``false`` to run the watcher for issue sync only without the
     gate resolver.
     """
+    external_reviews_enabled: bool = True
+    """Whether the sweep also ingests external review activity on still-open
+    ``pr`` gates (PRD S2 detection): new PR reviews and inline review comments
+    post a one-shot ``[ExternalReview]`` finding on the blocked story, de-duped
+    by high-water marks on the gate. Requires ``pr_merge_poll_enabled`` (it
+    rides the same per-gate pass). Set ``false`` to keep the merge poll without
+    review ingestion.
+    """
+    trusted_bots: tuple[str, ...] = ("copilot-pull-request-reviewer[bot]",)
+    """Bot logins whose review findings may seed automated remediation
+    (ADR 0011 decision 8). Detection ingests *every* reviewer's activity; this
+    allowlist (plus humans with repo write/admin) only gates which findings the
+    remediation slices may hand to a coder — comment bodies are third-party
+    text on a prompt path.
+    """
 
 
 @dataclass(frozen=True)
@@ -742,6 +757,8 @@ _GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
         "resolved_replay_days",
         "reconcile_interval_minutes",
         "pr_merge_poll_enabled",
+        "external_reviews_enabled",
+        "trusted_bots",
     }
 )
 
@@ -826,6 +843,19 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
         data, "pr_merge_poll_enabled", True, config_path, "github_watcher"
     )
 
+    external_reviews_enabled = _optional_bool(
+        data, "external_reviews_enabled", True, config_path, "github_watcher"
+    )
+
+    trusted_bots_raw = data.get("trusted_bots", list(GitHubWatcherConfig.trusted_bots))
+    if not isinstance(trusted_bots_raw, list) or not all(
+        isinstance(b, str) and b for b in trusted_bots_raw
+    ):
+        raise ConfigError(
+            f"{config_path}: github_watcher.trusted_bots must be a list of "
+            f"non-empty strings (bot logins)"
+        )
+
     return GitHubWatcherConfig(
         enabled=enabled,
         poll_interval_seconds=poll_interval,
@@ -833,6 +863,8 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
         resolved_replay_days=resolved_replay_days,
         reconcile_interval_minutes=reconcile_interval,
         pr_merge_poll_enabled=pr_merge_poll_enabled,
+        external_reviews_enabled=external_reviews_enabled,
+        trusted_bots=tuple(trusted_bots_raw),
     )
 
 

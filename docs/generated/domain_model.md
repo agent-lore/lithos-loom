@@ -52,6 +52,10 @@ classDiagram
   class PullRequestReview {
     +author str
     +body str
+    +review_id int
+    +state str
+    +submitted_at datetime | None
+    +commit_id str
   }
   class PullRequestReviewComment {
     +comment_id int
@@ -60,6 +64,10 @@ classDiagram
     +line int | None
     +body str
     +in_reply_to_id int | None
+    +html_url str
+    +commit_id str
+    +original_commit_id str
+    +updated_at datetime | None
   }
 ```
 

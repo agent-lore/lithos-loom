@@ -371,18 +371,25 @@ tags = ["trigger:story-develop"]
 # # interval it re-dispatches GH-linked Lithos tasks through the push
 # # handler. Set to 0 to disable.
 # pr_merge_poll_enabled = true
-# # The same reconcile sweep also resolves PR delivery on merge. Two paths,
-# # same GitHub poll:
-# #   Epic H: for each open `pr` gate (task_type="gate", gate_type="pr") it
-# #   polls the PR and, on merge, completes the gated story then the gate
-# #   ([GateResolved]); closed-unmerged / deleted leaves the gate OPEN with a
-# #   one-shot [DeliveredPRClosed] on the story (never cancels — a cancelled
-# #   gate would strand the story).
-# #   #87 legacy: for each open task carrying metadata.develop_pr_url (and
-# #   NOT github_issue_url — those close via the issue mirror — and NOT
-# #   pr_gate_id — owned by the gate resolver), merged -> task_complete;
-# #   closed-unmerged / deleted -> left open with [DeliveredPRClosed].
+# # The same reconcile sweep also resolves PR delivery on merge (Epic H —
+# # the sole merge-tracking path since US11): for each open `pr` gate
+# # (task_type="gate", gate_type="pr") it polls the PR and, on merge,
+# # completes the gated story then the gate ([GateResolved]);
+# # closed-unmerged / deleted leaves the gate OPEN with a one-shot
+# # [DeliveredPRClosed] on the story (never cancels — a cancelled gate
+# # would strand the story).
 # # Set false to run the watcher for issue sync only.
+# external_reviews_enabled = true
+# # PRD S2 detection: on each still-open `pr` gate the sweep also reads the
+# # PR's reviews + inline review comments and posts anything new as a
+# # one-shot [ExternalReview] finding on the blocked story (CHANGES_REQUESTED
+# # always posts; COMMENTED only with content; APPROVED/DISMISSED are
+# # recorded silently). De-duped by high-water marks on the gate. Rides the
+# # pr_merge_poll_enabled pass. Set false for a pure merge poll.
+# trusted_bots = ["copilot-pull-request-reviewer[bot]"]
+# # Bot logins whose findings may seed automated remediation (ADR 0011:
+# # allowlisted bots + humans with repo write/admin). Detection ingests
+# # every reviewer regardless; this only gates the remediation slices.
 
 # ── story-develop host-wide defaults ──────────────────────────────────
 #
