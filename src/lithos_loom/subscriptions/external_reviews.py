@@ -73,6 +73,15 @@ _SILENT_REVIEW_STATES = frozenset({"APPROVED", "DISMISSED"})
 # lockstep test pins the two strings together).
 _AUTOMATED_REPLY_MARKER = "_(automated reply by story-develop)_"
 
+# The one reply head that proves a fix actually LANDED
+# (pr_delivery.reply_body's pushed case). The same AUTOMATED_MARKER also
+# rides on "A fix was prepared but NOT pushed …" (red regression gate) and
+# "Not changed — …" (coder pushback) replies, where the root is still
+# unresolved (PR #344 re-review) — those must never suppress it. Duplicated
+# literal, same lockstep policy as the marker: the suppression tests build
+# their replies through the real reply_body.
+_FIXED_REPLY_PREFIX = "Fixed in "
+
 # Rendering bounds: a finding is a breadcrumb, not a transcript.
 _EXCERPT_CHARS = 160
 _MAX_LISTED = 20
@@ -145,20 +154,27 @@ def _comment_posts(
 
 
 def _handled_roots(comments: list[PullRequestReviewComment]) -> frozenset[int]:
-    """Root-comment ids proven handled by one of loom's own automated replies.
+    """Root-comment ids proven handled by a landed-fix automated reply.
 
     Backfill guard (PR #344 review, finding 2): until the inline Copilot
     round is retired (slice D), delivery remediates root comments, pushes the
-    fix and replies with the ``AUTOMATED_MARKER`` — all *before* the ``pr``
-    gate exists. A markerless gate's first sweep would otherwise re-report
-    that already-handled history as fresh ``[ExternalReview]`` findings. On
-    later sweeps this is naturally inert: handled roots sit below the id
-    high-water mark anyway.
+    fix and replies — all *before* the ``pr`` gate exists. A markerless
+    gate's first sweep would otherwise re-report that already-handled history
+    as fresh ``[ExternalReview]`` findings. On later sweeps this is naturally
+    inert: handled roots sit below the id high-water mark anyway.
+
+    Proof means **landed** (PR #344 re-review): only the ``Fixed in <sha>``
+    reply shape counts. Held-back (red gate) and "Not changed" replies carry
+    the same ``AUTOMATED_MARKER`` while the root is still unresolved — and
+    "Addressed" (fixed, no sha) records no landed commit — so none of those
+    suppress.
     """
     return frozenset(
         c.in_reply_to_id
         for c in comments
-        if c.in_reply_to_id is not None and _AUTOMATED_REPLY_MARKER in c.body
+        if c.in_reply_to_id is not None
+        and _AUTOMATED_REPLY_MARKER in c.body
+        and c.body.startswith(_FIXED_REPLY_PREFIX)
     )
 
 

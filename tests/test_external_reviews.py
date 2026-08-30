@@ -455,3 +455,93 @@ async def test_changes_requested_review_survives_handled_comment_suppression() -
     posted = _findings(client)
     assert len(posted) == 1
     assert "CHANGES_REQUESTED" in posted[0]
+
+
+# ── PR #344 re-review: a marker reply is only proof when the fix LANDED ─
+
+
+def _real_reply(
+    *, fixed: bool, sha: str | None, held_back_verdict: str | None = None
+) -> str:
+    """Build the reply through the real pr_delivery.reply_body so the
+    suppression prefix stays in lockstep with the producer."""
+    from lithos_loom.plugins.story_develop.pr_delivery import reply_body
+
+    return reply_body(
+        fixed=fixed,
+        sha=sha,
+        coder_response="details",
+        held_back_verdict=held_back_verdict,
+    )
+
+
+async def test_held_back_red_reply_does_not_suppress_its_root() -> None:
+    """PR #344 re-review: the inline round replies with the AUTOMATED_MARKER
+    even when the prepared fix was NOT pushed (red regression gate). That
+    root is still unresolved — suppressing it would advance the id mark and
+    lose it forever."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        comments=[
+            _comment(111, body="real defect"),
+            _comment(
+                112,
+                author="operator",
+                body=_real_reply(fixed=True, sha=None, held_back_verdict="RED"),
+                in_reply_to_id=111,
+            ),
+        ]
+    )
+
+    await _run(client, gate, story, github)
+
+    posted = _findings(client)
+    assert len(posted) == 1 and "real defect" in posted[0]
+
+
+async def test_not_changed_reply_does_not_suppress_its_root() -> None:
+    """A coder pushback ("Not changed — ...") carries the marker but fixed
+    nothing; the operator still gets to see the root."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        comments=[
+            _comment(111, body="real defect"),
+            _comment(
+                112,
+                author="operator",
+                body=_real_reply(fixed=False, sha=None),
+                in_reply_to_id=111,
+            ),
+        ]
+    )
+
+    await _run(client, gate, story, github)
+
+    posted = _findings(client)
+    assert len(posted) == 1 and "real defect" in posted[0]
+
+
+async def test_fixed_in_sha_reply_built_by_the_real_producer_suppresses() -> None:
+    """Lockstep for the landed-fix shape: a reply built by reply_body with a
+    sha ("Fixed in <sha10> — ...") is the one and only proof of remediation."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        comments=[
+            _comment(111, body="handled defect"),
+            _comment(
+                112,
+                author="operator",
+                body=_real_reply(fixed=True, sha="abc123def4567890"),
+                in_reply_to_id=111,
+            ),
+        ]
+    )
+
+    await _run(client, gate, story, github)
+
+    assert _findings(client) == []
+    marker = await _marker(client, gate.id)
+    assert marker["last_comment_id"] == 112
