@@ -173,10 +173,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--copilot-review",
         action="store_true",
-        help="With --open-pr: fire ONE Copilot review request at PR open "
-        "(no wait — the sweep ingests whatever lands). Route-level fallback "
-        "under the per-project/per-task develop_copilot_review metadata key; "
-        "default off (gate 15690a0e: spend Copilot deliberately per story)",
+        help="With --open-pr: fire ONE Copilot review request at PR open, no "
+        "wait. In DAEMON mode the github-watcher sweep ingests whatever lands "
+        "and dispatches converge; a STANDALONE run creates no pr gate, so the "
+        "review is NOT auto-monitored — respond via `develop converge <pr> "
+        "--from-github`. Route-level fallback under the per-project/per-task "
+        "develop_copilot_review metadata key; default off (gate 15690a0e: "
+        "spend Copilot deliberately per story)",
     )
     p.add_argument(
         "--acceptance-criteria",
@@ -649,11 +652,15 @@ def _daemon_main(args: argparse.Namespace) -> int:
         result,
         open_pr=args.open_pr,
         # develop_copilot_review (project-then-task) wins over the route flag,
-        # mirroring develop_test_gate / --no-test-gate (task 0e8d96ba).
+        # mirroring develop_test_gate / --no-test-gate (task 0e8d96ba). A
+        # FAILED context read fails closed (PR #348 review F3): the doc may
+        # hold an explicit opt-out we could not see, and a spend dial must
+        # not fire on an unknown — the same rule the remediation dial follows
+        # (PR #346). A readable absence keeps the route-flag fallback.
         copilot_review=(
             settings.copilot_review
             if settings.copilot_review is not None
-            else args.copilot_review
+            else (False if settings.context_read_failed else args.copilot_review)
         ),
         github_issue_url=raw_issue if isinstance(raw_issue, str) else None,
         task_id=ctx.task_id,
@@ -1043,6 +1050,9 @@ def main(argv: list[str] | None = None) -> int:
         result,
         open_pr=args.open_pr,
         copilot_review=args.copilot_review,  # standalone: the flag is the lever
+        # PR #348 review F2: no pr gate exists for a standalone run, so the
+        # requested review is not sweep-monitored — the delivery note says so.
+        review_monitored=False,
         github_issue_url=github_issue_url,
         task_id=args.task_id,
     )

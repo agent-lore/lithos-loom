@@ -417,6 +417,17 @@ def test_resolve_lithos_unreachable_degrades(fake_client) -> None:
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.reviewers == BUILTIN_REVIEWERS
     assert any("cannot read project-context" in f for f in settings.frictions)
+    # PR #348 review F3: a FAILED read is not "read fine and unset" — the doc
+    # may hold an explicit opt-out we could not see, and spend dials (the
+    # Copilot request) must fail closed on it. A readable ABSENCE stays the
+    # documented default (context_read_failed False below).
+    assert settings.context_read_failed is True
+
+
+def test_resolve_missing_doc_is_not_a_read_failure(fake_client) -> None:
+    settings = resolve_project_settings("http://x", {"project": "loom"})
+    assert any("no project-context doc" in f for f in settings.frictions)
+    assert settings.context_read_failed is False
 
 
 def test_resolve_no_context_doc_degrades(fake_client) -> None:
@@ -2123,19 +2134,23 @@ def test_daemon_copilot_review_metadata_beats_route_flag(
 
     monkeypatch.setattr(main_mod, "deliver_guarded", fake_guarded)
 
-    for i, (metadata_value, flag, expected) in enumerate(
+    for i, (metadata_value, read_failed, flag, expected) in enumerate(
         (
-            (True, (), True),  # metadata opts a story in, no flag
-            (False, ("--copilot-review",), False),  # metadata opt-out beats the flag
-            (None, ("--copilot-review",), True),  # unset metadata → route flag
-            (None, (), False),  # default: no request (deliberate spend)
+            (True, False, (), True),  # metadata opts a story in, no flag
+            # metadata opt-out beats the flag
+            (False, False, ("--copilot-review",), False),
+            (None, False, ("--copilot-review",), True),  # unset metadata → route flag
+            (None, False, (), False),  # default: no request (deliberate spend)
+            # PR #348 review F3: an UNREADABLE context doc may hold an explicit
+            # opt-out — the spend dial fails closed, flag or no flag.
+            (None, True, ("--copilot-review",), False),
         )
     ):
         monkeypatch.setattr(
             main_mod,
             "resolve_project_settings",
-            lambda url, meta, v=metadata_value: ProjectDevelopSettings(
-                copilot_review=v
+            lambda url, meta, v=metadata_value, rf=read_failed: ProjectDevelopSettings(
+                copilot_review=v, context_read_failed=rf
             ),
         )
         # a fresh work dir per arm — the idempotency record would otherwise
@@ -2145,4 +2160,4 @@ def test_daemon_copilot_review_metadata_beats_route_flag(
         monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(arm_dir / "idem"))
         argv, _ = _daemon_args(tmp_git_repo, arm_dir, "--open-pr", *flag)
         assert main_mod.main(argv) == EXIT_SUCCEEDED
-        assert seen["copilot_review"] is expected, (metadata_value, flag)
+        assert seen["copilot_review"] is expected, (metadata_value, read_failed, flag)

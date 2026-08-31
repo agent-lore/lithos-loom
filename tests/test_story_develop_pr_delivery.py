@@ -356,7 +356,24 @@ def test_deliver_copilot_review_hatch_fires_one_request(
     out = deliver(config, _result(config, wt), copilot_review=True)
     assert out.copilot_requested is True
     assert state["copilot_requests"] == [("o/r", 82)]
-    assert any("fire-and-forget" in n for n in out.notes)
+    assert any("the sweep ingests it" in n for n in out.notes)
+
+
+def test_deliver_unmonitored_request_note_names_the_response_surface(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # PR #348 review F2: a standalone run creates no pr gate, so the sweep can
+    # never observe the requested review — the note must not promise ingestion
+    # and instead points at the manual converge --from-github surface.
+    _install(monkeypatch, config)
+    wt = _make_wt(config)
+    out = deliver(
+        config, _result(config, wt), copilot_review=True, review_monitored=False
+    )
+    assert out.copilot_requested is True
+    assert any("NOT auto-monitored" in n for n in out.notes)
+    assert any("converge <pr> --from-github" in n for n in out.notes)
+    assert not any("the sweep ingests it" in n for n in out.notes)
 
 
 def test_deliver_copilot_request_failure_is_non_fatal(

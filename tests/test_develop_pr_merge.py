@@ -466,3 +466,35 @@ async def test_reconcile_busy_slot_parks_the_trigger_with_the_marks(
     assert outcome == "still_open"
     refreshed = await _get(client, gate.id)
     assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+
+
+async def test_gate_merged_ingests_final_review_activity_first() -> None:
+    """PR #348 review F1: a review that lands before the first sweep, on a PR
+    that merges before that sweep, must still be OBSERVED — the merged branch
+    ingests once (a detection-only [ExternalReview] record; remediation on a
+    merged PR is structurally impossible) before the gate leaves the open set
+    forever."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_pr(state="closed", merged=True))
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+
+    assert outcome == "merged"
+    findings = [f["summary"] for f in client._findings]
+    assert any(f.startswith("[ExternalReview]") for f in findings)
+    assert any(f.startswith(GATE_RESOLVED) for f in findings)
+    assert (await _get(client, story)).status == "completed"
+    assert (await _get(client, gate.id)).status == "completed"
+
+
+async def test_gate_merged_without_ingestion_flag_stays_pure_merge_poll() -> None:
+    client = FakeLithosClient(agent_id="a")
+    _story, gate = await _gate_with_story(client)
+    github = _review_github(_pr(state="closed", merged=True))
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome == "merged"
+    findings = [f["summary"] for f in client._findings]
+    assert not any(f.startswith("[ExternalReview]") for f in findings)

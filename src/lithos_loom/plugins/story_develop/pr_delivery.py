@@ -493,6 +493,7 @@ def deliver_guarded(
     *,
     open_pr: bool,
     copilot_review: bool,
+    review_monitored: bool = True,
     github_issue_url: str | None,
     task_id: str | None,
 ) -> tuple[DeliveryOutcome | None, str | None]:
@@ -530,6 +531,7 @@ def deliver_guarded(
             config,
             result,
             copilot_review=copilot_review,
+            review_monitored=review_monitored,
             github_issue_url=github_issue_url,
             task_id=task_id,
         )
@@ -546,6 +548,7 @@ def deliver(
     result,
     *,
     copilot_review: bool = False,
+    review_monitored: bool = True,
     github_issue_url: str | None = None,
     task_id: str | None = None,
 ) -> DeliveryOutcome:
@@ -590,6 +593,7 @@ def deliver(
             pr_number=pr_number,
             notes=notes,
             copilot_review=copilot_review,
+            review_monitored=review_monitored,
         )
     except Exception as exc:
         # The PR is already open; never strand its url on a later failure (#192).
@@ -617,6 +621,7 @@ def _deliver_after_open(
     pr_number: int,
     notes: list[str],
     copilot_review: bool,
+    review_monitored: bool,
 ) -> DeliveryOutcome:
     """The post-PR-open delivery work: notify + the optional one-shot Copilot
     review request. Separated so :func:`deliver` can guarantee the PR url
@@ -628,7 +633,11 @@ def _deliver_after_open(
     is FIRE-AND-FORGET — no wait, no fix turn — because the github-watcher's
     external-review ingestion picks up whatever review lands and
     ``converge --from-github`` remediates it under the S5b budget. Failure is
-    logged, never fatal.
+    logged, never fatal. ``review_monitored`` is False on the STANDALONE
+    path (PR #348 review F2): a standalone run creates no ``pr`` gate, so no
+    sweep will ever observe the requested review — the note then points the
+    operator at the manual ``converge --from-github`` response surface
+    instead of promising ingestion.
     """
     del wt, result, title  # retained in the seam for the #192 shape
     # #113: notify the operator their PR awaits review (native GitHub
@@ -649,8 +658,18 @@ def _deliver_after_open(
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
 
     requested = request_copilot(repo, pr_number)
-    if requested:
+    if requested and review_monitored:
         notes.append("requested Copilot review (fire-and-forget; the sweep ingests it)")
+    elif requested:
+        # PR #348 review F2: only a daemon-delivered PR sits behind a `pr`
+        # gate the watcher sweeps — a standalone run's PR is UNMONITORED, and
+        # the note must not promise ingestion that cannot happen. The
+        # operator's response surface is the slice-B command.
+        notes.append(
+            "requested Copilot review (fire-and-forget; NOT auto-monitored — "
+            "this run created no pr gate, so respond via "
+            "`lithos-loom develop converge <pr> --from-github`)"
+        )
     else:
         notes.append("Copilot review request failed; request manually if wanted")
     return DeliveryOutcome(

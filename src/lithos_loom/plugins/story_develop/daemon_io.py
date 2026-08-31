@@ -147,6 +147,12 @@ class ProjectDevelopSettings:
     # open (``develop_copilot_review``). ``None`` = unset at both layers; the
     # daemon falls back to the route-level ``--copilot-review`` flag.
     copilot_review: bool | None = None
+    # PR #348 review F3: True when the project-context doc could not be READ
+    # (Lithos/transport failure) — as opposed to read-and-absent. A failed
+    # read may be hiding an explicit opt-out, so spend dials (the Copilot
+    # request) fail closed on it while a readable absence keeps the
+    # documented route-flag fallback.
+    context_read_failed: bool = False
     # #273: per-check command overrides ({check_name: command}) resolved from
     # ``develop_check_commands`` (project) + a per-task table merged per-key. Empty
     # when neither layer declares any. Threaded onto ``DevelopConfig.check_commands``.
@@ -283,7 +289,9 @@ def resolve_project_settings(
             f"cannot read project-context doc for {slug!r} ({exc}); "
             "using built-in develop defaults"
         )
-        return ProjectDevelopSettings(frictions=tuple(frictions))
+        return ProjectDevelopSettings(
+            frictions=tuple(frictions), context_read_failed=True
+        )
     if meta is None:
         frictions.append(
             f"no project-context doc for {slug!r}; using built-in develop defaults"

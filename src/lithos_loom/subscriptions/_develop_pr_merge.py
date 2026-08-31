@@ -185,6 +185,16 @@ async def reconcile_pr_gate(
 
     state = _pr_merge_state(pr)
     if state == "merged":
+        if ingest_reviews:
+            # PR #348 review F1: a review that landed before the first sweep,
+            # on a PR that merged before that sweep, would otherwise vanish
+            # unrecorded — the gate leaves the open set on completion and is
+            # never swept again. Ingest ONCE here (detection-only: the
+            # [ExternalReview] record on the story; remediation on a merged
+            # PR is structurally impossible — converge refuses it — and the
+            # human merge is the authority on the PR's final state). Never
+            # raises; a transient failure just loses this last-chance record.
+            await ingest_external_reviews(gate, spec, story_id, github, ctx)
         if await _resolve_gate_merged(gate, story_id, spec.pr_url, pr, ctx):
             return "merged"
         # A completion failed transiently; the gate is left open and retried
