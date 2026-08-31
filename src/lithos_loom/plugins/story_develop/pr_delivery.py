@@ -1,20 +1,15 @@
-"""PR delivery + the Copilot review round (T9, PRD decision #9).
+"""PR delivery (T9, PRD decision #9; slimmed by S2 slice D).
 
 After the panel approves, the trusted HOST-side plugin process (never an
-agent container — agents have no push credentials) pushes the branch, opens a
-PR via ``gh``, and runs one **Copilot round**:
-
-    push + open PR -> request Copilot -> poll for its review
-      -> translate inline comments into a synthetic review handoff
-         (Copilot is a reviewer DATA SOURCE, not a panel member — it can only
-         review a PR, which exists only after approval)
-      -> ONE coder fix round on the resumed session (no panel re-review)
-      -> T4 test gate on the fix commit; RED => the fix is NOT pushed
-      -> reply to each Copilot comment thread ("Fixed in <sha> — ..." /
-         "Not changed — ..." for disputes), marked as automated.
-
-No Copilot re-request — one round is the bound; a re-trigger loop is future
-work. A Copilot timeout degrades gracefully: the PR stands as approved.
+agent container — agents have no push credentials) pushes the branch and opens
+a PR via ``gh``. **Delivery ends when the PR is open** (plus best-effort
+notify / review-request calls): the inline Copilot wait-and-fix round that
+used to run here was retired by S2 slice D (gate 15690a0e — its shared
+timeout starved the comment wait, and it saw only reviews loom itself
+requested). Post-delivery review handling is the github-watcher's
+external-review ingestion + ``converge --from-github`` remediation; the
+optional per-project / per-task `develop_copilot_review` dial fires one
+FIRE-AND-FORGET review request at PR open.
 
 Layered like :mod:`containers` / :mod:`test_gate`: pure builders up top,
 thin ``gh`` / ``git`` wrappers at the bottom (monkeypatched in tests).
@@ -23,12 +18,9 @@ thin ``gh`` / ``git`` wrappers at the bottom (monkeypatched in tests).
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from lithos_loom.github_client import GitHubError, parse_github_ref
 from lithos_loom.github_models import (
@@ -36,58 +28,38 @@ from lithos_loom.github_models import (
     FIXED_REPLY_PREFIX,
 )
 
-from . import containers, engines, handoff, run_outcome, turns
-from .agent_session import build_run_cmd
-from .check_runner import run_delivery_test_gate
-from .findings import FindingLedger
+from . import run_outcome
 from .github_access import github_call, repo_name_with_owner
-from .rounds import commit_round
-from .sandbox_facts import for_prompt as _sandbox_section
 
 logger = logging.getLogger(__name__)
 
-COPILOT_LOGIN = "copilot-pull-request-reviewer[bot]"
 # Copilot's reviewer slug for the requested_reviewers POST (the display name
-# "Copilot" silently no-ops — learned the hard way on this repo).
+# "Copilot" silently no-ops — learned the hard way on this repo). Used only by
+# the fire-and-forget `develop_copilot_review` hatch (gate 15690a0e decision):
+# the inline wait-and-fix round is retired (S2 slice D) — the external-review
+# sweep ingests whatever review lands, and `converge --from-github` remediates.
 COPILOT_REVIEWER = "copilot-pull-request-reviewer[bot]"
 # Alias of the shared vocabulary (github_models is the single source; the
 # sweep and the converge external-findings fetch read the same constants).
 AUTOMATED_MARKER = AUTOMATED_REPLY_MARKER
-DEFAULT_COPILOT_TIMEOUT = 600  # seconds; observed turnaround is ~2-4 min
-COPILOT_POLL_SECONDS = 15
-
-
-@dataclass(frozen=True)
-class CopilotComment:
-    """One Copilot inline comment, as fetched from the PR."""
-
-    comment_id: int
-    path: str
-    line: int | None
-    body: str
 
 
 @dataclass(frozen=True)
 class DeliveryOutcome:
-    """What the delivery phase did (for the summary + Lithos posting)."""
+    """What the delivery phase did (for the summary + Lithos posting).
+
+    Slim since S2 slice D retired the inline Copilot round: delivery ends when
+    the PR is open (plus best-effort notify / review-request calls). Review
+    remediation happens post-delivery — the github-watcher ingests external
+    reviews and dispatches ``converge --from-github``.
+    """
 
     pr_url: str
     pr_number: int
     pushed: bool = True
     copilot_requested: bool = False
-    copilot_reviewed: bool = False
-    copilot_settled: bool = True
-    """Whether all the comments Copilot's summary claimed actually materialised
-    within the wait budget. ``False`` means the round was INCOMPLETE — some
-    comments hadn't appeared in time and may be unaddressed (the #91
-    comment-lag race); the operator should review the PR or re-trigger."""
-    comments_count: int = 0
-    fix_committed: bool = False
-    fix_pushed: bool = False
-    fix_gate_verdict: str | None = None  # GREEN | RED | TIMEOUT | None (no gate)
-    replies_posted: int = 0
-    fix_sha: str | None = None  # the (pushed) fix commit
-    extra_cost_usd: float = 0.0  # the Copilot fix turn's spend
+    """The `develop_copilot_review` hatch fired its one-shot request (no wait —
+    the review, if any, arrives later and is ingested by the sweep)."""
     notes: tuple[str, ...] = field(default=())
 
 
@@ -159,32 +131,6 @@ def build_pr_body(
         "🤖 Generated by lithos-loom story-develop",
     ]
     return "\n".join(parts)
-
-
-def comments_to_handoff_text(comments: list[CopilotComment]) -> str:
-    """Render Copilot's inline comments as a synthetic review handoff.
-
-    Findings carry blank ids (the ``copilot`` ledger assigns them) and
-    ``minor`` severity (Copilot expresses no severity; the round is
-    non-gating either way — the PR is already open).
-    """
-    lines = [
-        "## Status: FINDINGS",
-        "## Summary",
-        f"Copilot left {len(comments)} inline comment(s) on the PR.",
-        "## Findings",
-    ]
-    for c in comments:
-        loc = f"{c.path}:{c.line}" if c.line else c.path
-        rationale = " ".join(c.body.split())  # one line; parser-safe
-        lines += [
-            "- finding_id:",
-            "  severity: minor",
-            "  status: open",
-            f'  files: ["{loc}"]',
-            f"  rationale: {rationale}",
-        ]
-    return "\n".join(lines) + "\n"
 
 
 def reply_body(
@@ -486,122 +432,6 @@ def request_operator_review(repo: str, pr_number: int, login: str) -> str:
         return "failed"
 
 
-_GENERATED_RE = re.compile(r"generated (\d+|no) comments?", re.IGNORECASE)
-
-
-def copilot_expected_comments(repo: str, pr_number: int) -> int | None:
-    """The comment count Copilot's review summary claims, or status markers.
-
-    Returns ``None`` while no Copilot review exists yet (or the fetch failed);
-    ``-1`` when a review exists but its body doesn't state a count (treat as
-    "unknown, expect some"); otherwise the stated count (``"no comments"`` -> 0).
-    """
-    try:
-        reviews = github_call(lambda c: c.list_pull_request_reviews(repo, pr_number))
-    except GitHubError:
-        return None
-    for r in reviews:
-        if r.author != COPILOT_LOGIN:
-            continue
-        m = _GENERATED_RE.search(r.body)
-        if m is None:
-            return -1
-        token = m.group(1)
-        return 0 if token == "no" else int(token)  # noqa: S105 — "token" is a parsed Copilot-marker value (a count or "no"), not a credential
-    return None
-
-
-def fetch_copilot_comments(repo: str, pr_number: int) -> list[CopilotComment]:
-    """Copilot's top-level inline comments on the PR (replies excluded)."""
-    try:
-        comments = github_call(
-            lambda c: c.list_pull_request_review_comments(repo, pr_number)
-        )
-    except GitHubError:
-        return []
-    return [
-        CopilotComment(
-            comment_id=c.comment_id,
-            path=c.path,
-            line=c.line,
-            body=c.body,
-        )
-        for c in comments
-        if c.author == COPILOT_LOGIN and not c.in_reply_to_id  # replies aren't findings
-    ]
-
-
-def wait_for_copilot(
-    repo: str,
-    pr_number: int,
-    *,
-    timeout: int,
-    poll_seconds: int = COPILOT_POLL_SECONDS,
-) -> int | None:
-    """Poll until Copilot's review lands; its expected comment count, or
-    ``None`` on timeout (see :func:`copilot_expected_comments`)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        expected = copilot_expected_comments(repo, pr_number)
-        if expected is not None:
-            return expected
-        time.sleep(min(poll_seconds, max(1, deadline - time.monotonic())))
-    return None
-
-
-def fetch_copilot_comments_settled(
-    repo: str,
-    pr_number: int,
-    *,
-    expected: int,
-    grace_seconds: int = 180,
-    poll_seconds: int = 5,
-    settle_seconds: int = 15,
-) -> tuple[list[CopilotComment], bool]:
-    """Fetch Copilot's inline comments, waiting for them to MATERIALISE.
-
-    Returns ``(comments, settled)``. *settled* is ``True`` only when the wait
-    ended because the comments actually arrived and the count stabilised —
-    ``False`` when it ended at the deadline (so the caller can flag the round
-    incomplete rather than silently treat a partial/empty result as complete).
-
-    Copilot's inline comments lag its review summary by a variable amount
-    (a first-poll empty list is the norm, not the signal — this raced in the
-    first T9 dogfood run and again at 90 s grace).  *expected* comes from the
-    review body: 0 returns immediately (settled); a positive count waits until
-    that many are visible AND the count stabilises; -1 (unknown) waits for the
-    count to stabilise after any appear.  The grace window bounds the wait.
-
-    "Stabilised" means the count has not changed for *settle_seconds*.
-    This prevents returning before late-arriving comments materialise —
-    the original 90 s window with an immediate return on threshold hit
-    was the root cause of the recurrence.
-    """
-    if expected == 0:
-        return fetch_copilot_comments(repo, pr_number), True
-    deadline = time.monotonic() + grace_seconds
-    comments: list[CopilotComment] = []
-    prev_count = 0
-    settled_at: float | None = None  # monotonic time the count last changed
-    while True:
-        comments = fetch_copilot_comments(repo, pr_number)
-        now = time.monotonic()
-        if len(comments) != prev_count:
-            prev_count = len(comments)
-            settled_at = now  # (re)start the settle clock
-
-        threshold_hit = (expected > 0 and len(comments) >= expected) or (
-            expected < 0 and len(comments) > 0
-        )
-        stable = settled_at is not None and now - settled_at >= settle_seconds
-        if threshold_hit and stable:
-            return comments, True
-
-        if now >= deadline:
-            return comments, False
-        time.sleep(min(poll_seconds, max(1, deadline - now)))
-
-
 def post_thread_reply(repo: str, pr_number: int, comment_id: int, body: str) -> bool:
     try:
         github_call(
@@ -637,35 +467,24 @@ def post_pr_comment(repo: str, pr_number: int, body: str) -> bool:
 _DELIVERY_OVERHEAD_SECONDS = 1800
 
 
-def delivery_budget_seconds(config, *, copilot_timeout: int, coder_timeout: int) -> int:
+def delivery_budget_seconds(config) -> int:
     """Upper bound on the wall-clock :func:`deliver` can legitimately spend (#189).
 
     `develop attach` records a delivery deadline from this (via
     :func:`run_outcome.record_delivery_deadline` — the develop-run marker contract
     lives in :mod:`run_outcome`) so it can bound a *crashed* delivery without ever
-    timing out a *healthy* slow one. It sums every bounded phase below — **keep in
-    sync with deliver() if a phase is added** — each bound maps to the named
-    primitive that phase drives (ARCH-1.S7):
-
-    - the Copilot review round — ``copilot_timeout`` (:func:`wait_for_copilot`
-      + :func:`fetch_copilot_comments_settled`),
-    - the Copilot fix coder turn — ``coder_timeout`` (the one-shot
-      ``turns.run_turn`` in :func:`_deliver_after_open`),
-    - the regression gate on the fix commit — ``config.test_timeout``
-      (:func:`check_runner.run_delivery_test_gate`),
-    - plus push / PR / gh overhead (a flat margin).
+    timing out a *healthy* slow one. Since S2 slice D retired the inline Copilot
+    round, delivery has **no agent phase**: it is the branch pushes, the PR open,
+    and the best-effort notify / review-request gh calls — all covered by the flat
+    overhead margin. **Keep in sync with deliver() if a phase is added.**
 
     That attach's no-deadline fallback (``run_outcome.DELIVERY_FALLBACK_SECONDS``)
     stays above this budget — so it can't false-fire on a healthy default-config
     run — is enforced by the executed invariant
     ``test_delivery_fallback_exceeds_the_full_default_delivery_budget``, not prose.
     """
-    return (
-        copilot_timeout
-        + coder_timeout
-        + config.test_timeout
-        + _DELIVERY_OVERHEAD_SECONDS
-    )
+    del config  # the remaining bound is config-independent; kept for the seam
+    return _DELIVERY_OVERHEAD_SECONDS
 
 
 def deliver_guarded(
@@ -673,9 +492,7 @@ def deliver_guarded(
     result,
     *,
     open_pr: bool,
-    no_copilot: bool,
-    copilot_timeout: int,
-    coder_timeout: int,
+    copilot_review: bool,
     github_issue_url: str | None,
     task_id: str | None,
 ) -> tuple[DeliveryOutcome | None, str | None]:
@@ -706,17 +523,13 @@ def deliver_guarded(
         return None, None
     run_outcome.record_delivery_deadline(
         config.run_dir,
-        budget_seconds=delivery_budget_seconds(
-            config, copilot_timeout=copilot_timeout, coder_timeout=coder_timeout
-        ),
+        budget_seconds=delivery_budget_seconds(config),
     )
     try:
         delivery = deliver(
             config,
             result,
-            no_copilot=no_copilot,
-            copilot_timeout=copilot_timeout,
-            coder_timeout=coder_timeout,
+            copilot_review=copilot_review,
             github_issue_url=github_issue_url,
             task_id=task_id,
         )
@@ -732,13 +545,11 @@ def deliver(
     config,
     result,
     *,
-    no_copilot: bool = False,
-    copilot_timeout: int = DEFAULT_COPILOT_TIMEOUT,
-    coder_timeout: int = 3600,
+    copilot_review: bool = False,
     github_issue_url: str | None = None,
     task_id: str | None = None,
 ) -> DeliveryOutcome:
-    """Push the approved branch and open the PR, then run the Copilot round.
+    """Push the approved branch and open the PR. Delivery ends there.
 
     Once :func:`create_pr` returns, the PR exists — so any later failure must NOT
     lose its url. The post-open work is delegated to :func:`_deliver_after_open`,
@@ -778,9 +589,7 @@ def deliver(
             pr_url=pr_url,
             pr_number=pr_number,
             notes=notes,
-            no_copilot=no_copilot,
-            copilot_timeout=copilot_timeout,
-            coder_timeout=coder_timeout,
+            copilot_review=copilot_review,
         )
     except Exception as exc:
         # The PR is already open; never strand its url on a later failure (#192).
@@ -807,20 +616,21 @@ def _deliver_after_open(
     pr_url: str,
     pr_number: int,
     notes: list[str],
-    no_copilot: bool,
-    copilot_timeout: int,
-    coder_timeout: int,
+    copilot_review: bool,
 ) -> DeliveryOutcome:
-    """The post-PR-open delivery work: notify, the Copilot round, the fix turn +
-    regression gate, and the per-thread replies. Separated so :func:`deliver` can
-    guarantee the PR url survives any failure here (#192).
+    """The post-PR-open delivery work: notify + the optional one-shot Copilot
+    review request. Separated so :func:`deliver` can guarantee the PR url
+    survives any failure here (#192).
 
-    Drives the shared story-develop primitives directly (ARCH-1.S7) —
-    :func:`agent_session.build_run_cmd`, :func:`handoff.render_prompt` /
-    :func:`handoff.render_findings`, :func:`rounds.commit_round`, and
-    :func:`check_runner.run_delivery_test_gate` — rather than re-implementing the
-    coder round inline or reaching develop's private aliases through a lazy import.
+    The inline wait-and-fix round that used to live here is retired (S2
+    slice D; gate 15690a0e). ``copilot_review`` is the per-project / per-task
+    `develop_copilot_review` dial resolved by the caller: when on, the request
+    is FIRE-AND-FORGET — no wait, no fix turn — because the github-watcher's
+    external-review ingestion picks up whatever review lands and
+    ``converge --from-github`` remediates it under the S5b budget. Failure is
+    logged, never fatal.
     """
+    del wt, result, title  # retained in the seam for the #192 shape
     # #113: notify the operator their PR awaits review (native GitHub
     # notification). Best-effort; the note threads into every return below.
     if config.notify_github_login:
@@ -835,245 +645,17 @@ def _deliver_after_open(
         else:
             notes.append(f"could not notify @{config.notify_github_login} of the PR")
 
-    if no_copilot:
+    if not copilot_review:
         return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
 
     requested = request_copilot(repo, pr_number)
-    if not requested:
-        notes.append("Copilot review request failed; respond manually")
-        return DeliveryOutcome(pr_url=pr_url, pr_number=pr_number, notes=tuple(notes))
-    # copilot_timeout is the whole-round budget: the review summary wait AND
-    # the comment-materialisation wait share it.
-    copilot_deadline = time.monotonic() + copilot_timeout
-    expected = wait_for_copilot(repo, pr_number, timeout=copilot_timeout)
-    if expected is None:
-        notes.append(
-            f"Copilot review not received within {copilot_timeout}s; "
-            "respond manually when it lands"
-        )
-        return DeliveryOutcome(
-            pr_url=pr_url,
-            pr_number=pr_number,
-            copilot_requested=True,
-            notes=tuple(notes),
-        )
-
-    # Bound the comment-settle by the REMAINING copilot budget — the #91 fix.
-    # Comments lag the summary by a variable amount; a flat 90/180s window
-    # silently missed late arrivals. Give materialisation whatever of
-    # copilot_timeout wait_for_copilot left, and NOTHING more — copilot_timeout
-    # is a hard cap on the whole round. A near-exhausted budget just means the
-    # round is flagged incomplete (below), which is honest.
-    settle_budget = max(0, int(copilot_deadline - time.monotonic()))
-    comments, settled = fetch_copilot_comments_settled(
-        repo, pr_number, expected=expected, grace_seconds=settle_budget
-    )
-    # `settled` is authoritative (the fetch reports whether the comments
-    # actually arrived + stabilised, vs hit the deadline). A non-settle means
-    # the round is INCOMPLETE, not all-clear (#91): the operator must be told,
-    # not left thinking Copilot was happy.
-    if not settled:
-        if expected > 0:
-            notes.append(
-                f"Copilot review did not settle: expected {expected} comment(s), "
-                f"{len(comments)} arrived within {settle_budget}s — the rest may "
-                "be unaddressed; review the PR or re-trigger Copilot"
-            )
-        else:
-            notes.append(
-                "Copilot review's comment stream did not stabilise within "
-                f"{settle_budget}s ({len(comments)} seen) — there may be more; "
-                "review the PR or re-trigger Copilot"
-            )
-    if not comments:
-        # Nothing to fix this round. With expected>0 and none materialised this
-        # is a deferral (flagged above + copilot_settled=False), not an
-        # all-clear; with expected==0 it is a genuine clean review.
-        return DeliveryOutcome(
-            pr_url=pr_url,
-            pr_number=pr_number,
-            copilot_requested=True,
-            copilot_reviewed=True,
-            copilot_settled=settled,
-            notes=tuple(notes),
-        )
-
-    # --- synthetic copilot review -> ledger ids -> ONE coder fix round ------
-    fix_round = result.rounds + 1
-    synthetic = comments_to_handoff_text(comments)
-    parsed = handoff.parse_review_handoff(synthetic)
-    ledger = FindingLedger("copilot")
-    canonical = ledger.apply_review(parsed, fix_round)
-    id_to_comment = {f.finding_id: c for f, c in zip(canonical, comments, strict=True)}
-    # keep the synthetic review on disk: conversation-log + audit parity
-    synthetic_path = config.handoff_dir / handoff.reviewer_handoff_name(
-        fix_round, "copilot"
-    )
-    synthetic_path.write_text(synthetic, encoding="utf-8")
-
-    coder_handoff = handoff.coder_handoff_name(fix_round)
-    prompt = handoff.render_prompt(
-        handoff.load_prompt("copilot_fix.md"),
-        pr_url=pr_url,
-        acceptance_criteria=config.effective_acceptance_criteria,
-        findings=handoff.render_findings(canonical),
-        handoff_file=coder_handoff,
-        sandbox_facts=_sandbox_section(config.image, for_coder=True),
-    )
-    name, run_cmd = build_run_cmd(
-        config,
-        agent="coder",
-        engine=engines.get_engine(config.coder),
-        config_dir=config.coder_config_dir,
-        wt=wt,
-        read_only=False,
-    )
-    try:
-        containers.start_container(run_cmd)
-        # Same coder, same session resumed — it must run on the SAME tool (#94)
-        # + model + reasoning effort the develop loop used (#93), not silently
-        # revert to the agent default while finalizing the branch.
-        # ``result.coder_session`` is the live handle (the codex thread_id, or
-        # the claude uuid).
-        #
-        # Deliberately a bare ``turns.run_turn`` — no usage-limit pause / tool-switch
-        # reaction and no #114 salvage nudge, unlike develop()'s
-        # ``agent_session.turn_with_limit_pauses``. This one-shot fix turn just
-        # fails cleanly (below) if the coder is usage-limited; whether it should
-        # gain the limit reaction is tracked as a follow-up, not decided here.
-        turn = turns.run_turn(
-            container=name,
-            prompt=prompt,
-            session_id=result.coder_session,
-            resume=True,
-            timeout=coder_timeout,
-            engine=engines.get_engine(config.coder),
-            model=config.coder_model,
-            effort=config.coder_effort,
-        )
-    finally:
-        containers.stop_container(name)
-
-    extra_cost = turn.cost_usd
-    if not turn.succeeded:
-        notes.append(
-            f"Copilot fix turn failed (exit {turn.exit_code}); comments left "
-            "unanswered — respond manually"
-        )
-        post_pr_comment(
-            repo,
-            pr_number,
-            "story-develop attempted an automated response to Copilot's "
-            f"review but the coder turn failed.\n\n{AUTOMATED_MARKER}",
-        )
-        return DeliveryOutcome(
-            pr_url=pr_url,
-            pr_number=pr_number,
-            copilot_requested=True,
-            copilot_reviewed=True,
-            copilot_settled=settled,
-            comments_count=len(comments),
-            extra_cost_usd=extra_cost,
-            notes=tuple(notes),
-        )
-
-    # per-finding coder responses (fixed/disputed + public one-liner)
-    responses: dict[str, Any] = {}
-    coder_path = config.handoff_dir / coder_handoff
-    try:
-        coder_parsed = handoff.parse_review_handoff(
-            coder_path.read_text(encoding="utf-8")
-        )
-        responses = {f.finding_id: f for f in coder_parsed.findings}
-    except Exception:  # tolerant: replies degrade gracefully
-        notes.append("coder handoff unreadable; replies use generic text")
-
-    new_sha = commit_round(wt, f"story-develop copilot round: {title}")
-    fix_committed = new_sha is not None
-
-    # regression gate on the fix commit; RED => do NOT push the fix
-    fix_pushed = False
-    gate_verdict: str | None = None
-    if fix_committed:
-        # The delivery-side regression gate on the fix commit: test-only,
-        # ledger-less — the intentional delivery-vs-develop divergence lives in
-        # check_runner.run_delivery_test_gate (its docstring carries the rationale).
-        gate = run_delivery_test_gate(config, wt, new_sha, fix_round)
-        gate_verdict = gate.verdict if gate else None
-        if gate is None or gate.passed:
-            push_branch(wt, result.branch)
-            fix_pushed = True
-        else:
-            notes.append(
-                "Copilot fix NOT pushed: test gate "
-                f"{gate.verdict} on the fix commit (kept locally in the worktree)"
-            )
-            post_pr_comment(
-                repo,
-                pr_number,
-                "story-develop prepared a fix for Copilot's comments but the "
-                f"regression test gate came back {gate.verdict}, so it was NOT "
-                f"pushed. The candidate fix is in the run worktree.\n\n"
-                f"{AUTOMATED_MARKER}",
-            )
-
-    # per-thread replies
-    replies = 0
-    for fid, comment in id_to_comment.items():
-        f = responses.get(fid)
-        disputed = f is not None and f.status == "disputed"
-        coder_response = f.coder_response if f is not None else ""
-        held_back = (
-            gate_verdict
-            if (not disputed and fix_committed and not fix_pushed)
-            else None
-        )
-        body_text = reply_body(
-            fixed=not disputed and fix_pushed,
-            sha=new_sha if fix_pushed else None,
-            coder_response=coder_response,
-            held_back_verdict=held_back,
-        )
-        if post_thread_reply(repo, pr_number, comment.comment_id, body_text):
-            replies += 1
-
-    # Audit parity: the conversation log must include the Copilot exchange.
-    _append_copilot_round_to_log(
-        config, fix_round=fix_round, pr_url=pr_url, coder_handoff=coder_handoff
-    )
-
+    if requested:
+        notes.append("requested Copilot review (fire-and-forget; the sweep ingests it)")
+    else:
+        notes.append("Copilot review request failed; request manually if wanted")
     return DeliveryOutcome(
         pr_url=pr_url,
         pr_number=pr_number,
-        copilot_requested=True,
-        copilot_reviewed=True,
-        copilot_settled=settled,
-        comments_count=len(comments),
-        fix_committed=fix_committed,
-        fix_pushed=fix_pushed,
-        fix_gate_verdict=gate_verdict,
-        replies_posted=replies,
-        fix_sha=new_sha if fix_pushed else None,
-        extra_cost_usd=extra_cost,
+        copilot_requested=requested,
         notes=tuple(notes),
     )
-
-
-def _append_copilot_round_to_log(
-    config, *, fix_round: int, pr_url: str, coder_handoff: str
-) -> None:
-    """Append the Copilot review + the coder's response to conversation.md.
-
-    ``develop()`` wrote the log before delivery started; without this append
-    the shipped log would omit the whole Copilot exchange.
-    """
-    log_path = config.run_dir / run_outcome.CONVERSATION_LOG
-    review_name = handoff.reviewer_handoff_name(fix_round, "copilot")
-    section = handoff.render_log_section(
-        config.handoff_dir,
-        f"## Copilot round ({pr_url})",
-        [("Reviewer [copilot]", review_name), ("Coder", coder_handoff)],
-    )
-    with open(log_path, "a", encoding="utf-8") as fh:
-        # leading newline separates the appended section from develop()'s log body
-        fh.write("\n" + "\n".join(section))

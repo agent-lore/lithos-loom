@@ -61,7 +61,8 @@ APPROVED = "approved"
 
 # Fallback bound for an in-flight delivery when the daemon recorded no deadline
 # (a run predating #189, or one whose marker write failed). > the full DEFAULT
-# delivery budget (copilot 600 + coder 3600 + gate 900 + overhead 1800 = 6900s;
+# delivery budget (push/PR/gh overhead only since S2 slice D retired the
+# inline Copilot round — 1800s;
 # see pr_delivery.delivery_budget_seconds) so it can't false-fire on a
 # default-config run.
 DELIVERY_FALLBACK_SECONDS = 9000.0  # 2.5 h
@@ -106,7 +107,7 @@ def delivery_complete(run_dir: Path) -> bool:
     """Whether THIS approved run's post-dialogue PR delivery succeeded.
 
     ``develop()`` writes ``state.json`` the moment the dialogue approves, but in
-    daemon mode the branch push, the Copilot round, and the ``result.json`` write
+    daemon mode the branch push, the PR open, and the ``result.json`` write
     all happen AFTER it returns (``story_develop/__main__`` calls ``deliver()``
     then ``write_result_atomically``). ``result.json`` — the plugin's final
     contract output — is the "fully delivered" signal, bound to this run by
@@ -149,7 +150,7 @@ def delivery_deadline(run_dir: Path) -> datetime | None:
     """The instant this run's delivery budget expires (#189), or ``None``.
 
     The daemon writes ``run_dir/delivery.json`` with an absolute ``deadline``
-    (its own ``copilot_timeout + coder_timeout`` budget) before delivery starts.
+    (the push/PR overhead budget — no agent phase remains) before delivery starts.
     Reading it lets attach bound a crashed/orphaned delivery WITHOUT timing out a
     delivery still inside its budget — which attach can't otherwise size, since the
     budget is the daemon's configurable flags.
@@ -245,7 +246,7 @@ def run_phase(
     (the plugin writes the log *before* ``state.json``, so stopping on the log
     would misreport an approved run). But the verdict in ``state.json`` is not the
     whole story: ``develop()`` writes it the instant the dialogue ends, while in
-    daemon mode the **PR delivery** (branch push, Copilot round, ``result.json``)
+    daemon mode the **PR delivery** (branch push, PR open, ``result.json``)
     all happen *after* it returns. So an **approved** verdict alone is NOT
     terminal — exiting there is the #171 false-done window (attach quits while the
     PR is still being pushed). We stay in ``"delivering"`` until this run's

@@ -12,13 +12,12 @@ decides the approval floor — all lives here, behind a small public surface:
 * :func:`merge_check_sets` — the fast + approval-candidate merge (#140);
 * :func:`load_gate_ledger` / :func:`persist_gate_ledger` — the run's
   deterministic-finding ledger (#132), reloaded on resume;
-* :func:`run_delivery_test_gate` — the *delivery* regression gate (test-only,
-  ledger-less) — the intentional delivery-vs-develop divergence (#140), now a
-  named policy function instead of an inline filter in :mod:`pr_delivery`.
 
 This module is engine-blind and imports no ``develop`` symbols (``develop``
-imports *this*): the round pipeline drives these functions, review-only reuses
-them, and delivery calls the one policy wrapper — one implementation, no drift.
+imports *this*): the round pipeline drives these functions and review-only
+reuses them — one implementation, no drift. (The former delivery-side
+``run_delivery_test_gate`` wrapper left with the inline Copilot round —
+S2 slice D; delivery has no fix commit to gate any more.)
 """
 
 from __future__ import annotations
@@ -677,43 +676,3 @@ def persist_gate_ledger(config: DevelopConfig, ledger: GateLedger) -> None:
         logger.warning(
             "story-develop %s: gate ledger persist failed: %s", config.run_id, exc
         )
-
-
-def run_delivery_test_gate(
-    config: DevelopConfig, wt: Path, sha: str, round_no: int
-) -> GateResult | None:
-    """The *delivery* regression gate: run ONLY the ``test`` check on a fix commit.
-
-    Delivery holds the push on ANY red ``test`` fix regardless of the profile's
-    declared blocking config, so this reads the raw ``test`` :class:`GateResult` —
-    NOT :func:`gate_floor_blocks` (which would honour an *informational* ``test``
-    and push a RED fix) — and passes **no gate ledger**. #140: the profile set now
-    also carries informational + candidate checks, but delivery keys only on
-    ``test``; running the advisory / candidate checks here would burn containers
-    without affecting the push decision (or wrongly hold it).
-
-    This is the intentional delivery-vs-develop gate divergence — #140 put
-    informational + candidate checks into the profile set, so delivery must key
-    only on ``test`` or it would push a RED fix an informational ``test`` allowed.
-    It is now a named policy function instead of an inline filter in
-    :mod:`pr_delivery`, so a change to the develop-side gate can no longer silently
-    skip (or accidentally rewire) the delivery gate. No dedicated ADR records this
-    policy; the required/informational check-state model it rests on is ADR 0003 §4.
-
-    #273 slice 2 interaction — the two ways to relax the ``test`` check differ here on
-    purpose: ``check_states={"test": "informational"}`` keeps the check in the built
-    set, so delivery STILL reads its raw verdict and holds a RED fix (the divergence
-    above), whereas ``check_states={"test": "off"}`` (≡ the legacy ``test_gate=false``)
-    DROPS the check entirely, so delivery has nothing to run and returns ``None`` — no
-    red-fix hold. So ``informational`` weakens the *develop floor* but not delivery's
-    regression safety; ``off`` opts out of both.
-
-    Returns the ``test`` check's :class:`GateResult`, or ``None`` when no ``test``
-    check is runnable (``test`` state ``off`` / ``develop_test_gate=false`` / no command
-    / absent) or the tree export errored.
-    """
-    checks = tuple(c for c in build_check_set(config, wt) if c.name == "test")
-    if not checks:
-        return None
-    cs = run_check_set(config, wt, sha, round_no, checks)  # NO gate ledger
-    return cs.test_gate if cs is not None else None

@@ -608,7 +608,7 @@ class DevelopConfig:
     acceptance_criteria: str | None = None
     run_id: str = field(default_factory=_short_run_id)
     # #113: GitHub login to request as a reviewer (or assign, when they authored
-    # the PR) on delivery, so native notifications fire. None → Copilot only.
+    # the PR) on delivery, so native notifications fire. None → no notify.
     notify_github_login: str | None = None
     # Host path to the operator's claude config dir (source of the auth file).
     claude_config_dir: Path = field(default_factory=lambda: Path.home() / ".claude")

@@ -747,7 +747,7 @@ def develop_attach(
     / teardown after the last agent turn, grace-polling through the window where
     the plugin has stopped its containers but not yet written the outcome. An
     **approved** verdict is not yet the end in daemon mode — PR delivery (push +
-    Copilot round + ``result.json``) runs after the dialogue approves, shown as a
+    ``result.json``) runs after the dialogue approves, shown as a
     distinct "delivering PR…" phase — so attach follows through it instead of
     exiting early. If the work dir is reaped on success before a poll observes the
     result, the outcome is recovered from the plugin's completion store.

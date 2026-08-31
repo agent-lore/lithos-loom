@@ -64,6 +64,7 @@ class ScalarSettings:
     artifacts_path: str | None = None
     test_command: str | None = None
     test_gate: bool | None = None
+    copilot_review: bool | None = None
     review_profile_project: str | None = None
     # #273: per-check command overrides ({check_name: command}), project-then-task
     # merged per-key. Empty when neither layer declares any.
@@ -365,6 +366,19 @@ def resolve_scalar_settings(
         task_metadata,
         frictions,
     )
+    # Gate 15690a0e / task 0e8d96ba: the deliberate per-project/per-task dial
+    # for the one-shot Copilot review request at PR open (the inline round is
+    # retired — S2 slice D). None = unset at both layers; the caller falls
+    # back to the route-level --copilot-review flag (default off). Appended
+    # last, like parity_command, so the pinned friction order is unchanged.
+    copilot_review = _resolve_project_then_task(
+        _ProjectThenTaskField(
+            "copilot_review", "develop_copilot_review", parse_bool_setting
+        ),
+        meta,
+        task_metadata,
+        frictions,
+    )
     return ScalarSettings(
         coder=coder,
         coder_model=coder_model,
@@ -380,4 +394,5 @@ def resolve_scalar_settings(
         check_commands=check_commands,
         check_states=check_states,
         parity_command=parity_command,
+        copilot_review=copilot_review,
     )

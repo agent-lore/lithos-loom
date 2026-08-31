@@ -108,7 +108,8 @@ class DevelopResult:
     message: str
     # the final round's outcomes, in panel order (immutable — frozen dataclass)
     reviews: tuple[ReviewOutcome, ...] = ()
-    # the coder's session id — the PR-delivery Copilot round resumes it (T9)
+    # the coder's session id — retained for post-approval resumption (T9;
+    # the retired inline Copilot round was its consumer, converge may be next)
     coder_session: str = ""
     test_gate: GateResult | None = None  # the latest round's gate (T4)
     # the latest round's open deterministic gate findings (#132)

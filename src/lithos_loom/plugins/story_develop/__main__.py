@@ -97,7 +97,7 @@ from .lithos_io import (
     spawn_deferred_tasks,
 )
 from .model_policy import resolve_config_models
-from .pr_delivery import DEFAULT_COPILOT_TIMEOUT, deliver_guarded
+from .pr_delivery import deliver_guarded
 from .profiles import resolve_profile
 
 
@@ -166,19 +166,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--open-pr",
         action="store_true",
-        help="On approval: push the branch and open a PR host-side (gh), then "
-        "request a Copilot review and respond to its comments in one round",
+        help="On approval: push the branch and open a PR host-side (gh); "
+        "delivery ends at the open PR (external reviews are handled by the "
+        "github-watcher sweep + converge --from-github)",
     )
     p.add_argument(
-        "--no-copilot",
+        "--copilot-review",
         action="store_true",
-        help="With --open-pr: skip the Copilot review request + response round",
-    )
-    p.add_argument(
-        "--copilot-timeout",
-        type=int,
-        default=DEFAULT_COPILOT_TIMEOUT,
-        help="Max seconds to wait for the Copilot review before proceeding",
+        help="With --open-pr: fire ONE Copilot review request at PR open "
+        "(no wait — the sweep ingests whatever lands). Route-level fallback "
+        "under the per-project/per-task develop_copilot_review metadata key; "
+        "default off (gate 15690a0e: spend Copilot deliberately per story)",
     )
     p.add_argument(
         "--acceptance-criteria",
@@ -650,9 +648,13 @@ def _daemon_main(args: argparse.Namespace) -> int:
         config,
         result,
         open_pr=args.open_pr,
-        no_copilot=args.no_copilot,
-        copilot_timeout=args.copilot_timeout,
-        coder_timeout=args.coder_timeout,
+        # develop_copilot_review (project-then-task) wins over the route flag,
+        # mirroring develop_test_gate / --no-test-gate (task 0e8d96ba).
+        copilot_review=(
+            settings.copilot_review
+            if settings.copilot_review is not None
+            else args.copilot_review
+        ),
         github_issue_url=raw_issue if isinstance(raw_issue, str) else None,
         task_id=ctx.task_id,
     )
@@ -1040,28 +1042,13 @@ def main(argv: list[str] | None = None) -> int:
         config,
         result,
         open_pr=args.open_pr,
-        no_copilot=args.no_copilot,
-        copilot_timeout=args.copilot_timeout,
-        coder_timeout=args.coder_timeout,
+        copilot_review=args.copilot_review,  # standalone: the flag is the lever
         github_issue_url=github_issue_url,
         task_id=args.task_id,
     )
     if args.open_pr and result.approved:
         if delivery is not None:
             print(f"  pr:       {delivery.pr_url}")
-            if delivery.copilot_reviewed:
-                fix = (
-                    f"fix pushed ({delivery.fix_gate_verdict or 'no gate'})"
-                    if delivery.fix_pushed
-                    else (
-                        "fix held back" if delivery.fix_committed else "no fix needed"
-                    )
-                )
-                print(
-                    f"  copilot:  {delivery.comments_count} comment(s); {fix}; "
-                    f"{delivery.replies_posted} repl(ies) posted; "
-                    f"+${delivery.extra_cost_usd:.4f}"
-                )
             for note in delivery.notes:
                 print(f"  note:     {note}")
         else:  # #194: deliver() raised before a PR opened — no PR exists

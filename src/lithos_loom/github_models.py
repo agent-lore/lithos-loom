@@ -154,7 +154,7 @@ class PullRequest:
 class PullRequestReview:
     """A single PR review: the reviewer login + the review-summary body.
 
-    story-develop's Copilot round reads these to detect Copilot's review and
+    the external-review sweep reads these to detect a bot's review and
     parse its "generated N comments" marker (see ``pr_delivery``).
 
     ``review_id`` / ``state`` / ``submitted_at`` / ``commit_id`` exist for the
@@ -178,7 +178,7 @@ class PullRequestReviewComment:
 
     ``line`` falls back to ``original_line`` (GitHub drops ``line`` for comments
     anchored to a since-changed line). ``in_reply_to_id`` is set on thread
-    replies — story-develop excludes those when collecting Copilot findings.
+    replies — consumers exclude those when collecting root findings.
 
     For the external-review sweep (PRD S2): ``html_url`` is the thread link
     (operator navigation + reply anchor), ``commit_id`` /

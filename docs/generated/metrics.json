@@ -52,8 +52,8 @@
         "max_function": "lithos_loom.lithos_client._parse_note"
       },
       "Plugins": {
-        "functions_over_10": 35,
-        "max_complexity": 101,
+        "functions_over_10": 33,
+        "max_complexity": 97,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
       "ProjectContext": {
@@ -97,10 +97,10 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 100,
+    "functions_over_10": 98,
     "top_functions": [
       {
-        "complexity": 101,
+        "complexity": 97,
         "qualname": "lithos_loom.plugins.story_develop.__main__.main"
       },
       {
@@ -116,7 +116,7 @@
         "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
-        "complexity": 34,
+        "complexity": 35,
         "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
       },
       {
@@ -136,11 +136,11 @@
         "qualname": "lithos_loom.config._parse_obsidian_sync"
       },
       {
-        "complexity": 28,
-        "qualname": "lithos_loom.plugins.story_develop.pr_delivery._deliver_after_open"
+        "complexity": 27,
+        "qualname": "lithos_loom.plugins.story_develop.converge.converge_pr"
       }
     ],
-    "total_functions": 1140
+    "total_functions": 1133
   },
   "domain": {
     "associations": 2,
@@ -310,7 +310,6 @@
       "tests/test_eval_review_patch.py -> lithos_loom.evals.review.patch._materialise_patched_head (x2)",
       "tests/test_review_resolve.py -> lithos_loom.plugins.story_develop.review_resolve._gh_pr_view (x2)",
       "tests/test_story_develop_idempotency.py -> lithos_loom.plugins.story_develop.idempotency._record_path (x2)",
-      "tests/test_story_develop_pr_delivery.py -> lithos_loom.plugins.story_develop.pr_delivery._GENERATED_RE (x2)",
       "tests/test_awaiting_review.py -> lithos_loom.subscriptions._awaiting_review",
       "tests/test_child_boot.py -> lithos_loom.children._boot",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._iter_run_dirs",
@@ -323,9 +322,10 @@
       "tests/test_cli_project.py -> lithos_loom.cli.project._rows_from_toml",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags",
-      "tests/test_cli_project_create.py -> lithos_loom.cli.project._slugify"
+      "tests/test_cli_project_create.py -> lithos_loom.cli.project._slugify",
+      "tests/test_cli_project_create.py -> lithos_loom.cli.project._title_from_stem"
     ],
-    "tests_private_imports": 93
+    "tests_private_imports": 92
   },
   "size": {
     "components": {
@@ -430,14 +430,14 @@
         "sloc": 1851
       },
       "Plugins": {
-        "classes": 63,
-        "functions": 381,
+        "classes": 62,
+        "functions": 374,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
-        "largest_module_lines": 1138,
-        "lines": 14966,
+        "largest_module_lines": 1125,
+        "lines": 14504,
         "modules": 44,
-        "public_symbols": 246,
-        "sloc": 11925
+        "public_symbols": 239,
+        "sloc": 11527
       },
       "ProjectContext": {
         "classes": 0,
@@ -494,10 +494,10 @@
         "functions": 165,
         "largest_module": "lithos_loom.subscriptions._obsidian_projection",
         "largest_module_lines": 794,
-        "lines": 7564,
+        "lines": 7566,
         "modules": 23,
         "public_symbols": 43,
-        "sloc": 5865
+        "sloc": 5867
       },
       "Supervisor": {
         "classes": 3,
@@ -527,16 +527,15 @@
       "lithos_loom.cli.project",
       "lithos_loom.config",
       "lithos_loom.lithos_client",
-      "lithos_loom.plugins.story_develop.__main__",
-      "lithos_loom.plugins.story_develop.pr_delivery"
+      "lithos_loom.plugins.story_develop.__main__"
     ],
-    "total_lines": 44566,
+    "total_lines": 44106,
     "total_modules": 131,
-    "total_sloc": 35501
+    "total_sloc": 35105
   },
   "tests": {
     "ratio": 1.63,
-    "src_lines": 44566,
-    "test_lines": 72504
+    "src_lines": 44106,
+    "test_lines": 71918
   }
 }

@@ -16,8 +16,8 @@ lower a budget after improving the code to lock in the gain.
 | `cross_module_private_refs` | 8 | 8 | 0 |
 | `max_module_lines` | 2210 | 2210 | 0 |
 | `module_cycles` | 1 | 1 | 0 |
-| `modules_over_800_lines` | 6 | 6 | 0 |
-| `tests_private_imports` | 93 | 93 | 0 |
+| `modules_over_800_lines` | 5 | 6 | 1 |
+| `tests_private_imports` | 92 | 93 | 1 |
 
 ## Import graph
 
@@ -44,46 +44,45 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Evals | 15 | 3910 | 3167 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 12 |
 | GitHub | 2 | 985 | 768 | 5 | 1 | 0.17 | 14 (`lithos_loom.github_models.parse_pull_request`) | 1 |
 | LithosClient | 1 | 2210 | 1851 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
-| Plugins | 44 | 14966 | 11925 | 2 | 5 | 0.71 | 101 (`lithos_loom.plugins.story_develop.__main__.main`) | 35 |
+| Plugins | 44 | 14504 | 11527 | 2 | 5 | 0.71 | 97 (`lithos_loom.plugins.story_develop.__main__.main`) | 33 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 5 | 625 | 484 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 23 | 7564 | 5865 | 4 | 10 | 0.71 | 27 (`lithos_loom.subscriptions.external_reviews.ingest_external_reviews`) | 11 |
+| Subscriptions | 23 | 7566 | 5867 | 4 | 10 | 0.71 | 27 (`lithos_loom.subscriptions.external_reviews.ingest_external_reviews`) | 11 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
 | Tasks | 4 | 820 | 609 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 2 |
 
 ## Size
 
-- Modules: **131**, lines: **44566**, SLOC: **35501**
+- Modules: **131**, lines: **44106**, SLOC: **35105**
 - Largest module: `lithos_loom.lithos_client` (2210 lines)
-- Modules over 800 lines: **6**
+- Modules over 800 lines: **5**
   - `lithos_loom.cli.develop`
   - `lithos_loom.cli.project`
   - `lithos_loom.config`
   - `lithos_loom.lithos_client`
   - `lithos_loom.plugins.story_develop.__main__`
-  - `lithos_loom.plugins.story_develop.pr_delivery`
 
 ## Complexity
 
-- Functions: **1140**, cyclomatic > 10: **100**
+- Functions: **1133**, cyclomatic > 10: **98**
 
 Top 10 most complex functions:
 
 | Complexity | Function |
 |---:|---|
-| 101 | `lithos_loom.plugins.story_develop.__main__.main` |
+| 97 | `lithos_loom.plugins.story_develop.__main__.main` |
 | 49 | `lithos_loom.cli.project.import_project` |
 | 44 | `lithos_loom.children.obsidian_sync._amain` |
 | 44 | `lithos_loom.plugins.story_develop.develop.develop` |
-| 34 | `lithos_loom.plugins.story_develop.__main__._daemon_main` |
+| 35 | `lithos_loom.plugins.story_develop.__main__._daemon_main` |
 | 31 | `lithos_loom.cli.converge.converge_command` |
 | 30 | `lithos_loom.main._print_dry_run_report` |
 | 29 | `lithos_loom.evals.review.case.load_case` |
 | 28 | `lithos_loom.config._parse_obsidian_sync` |
-| 28 | `lithos_loom.plugins.story_develop.pr_delivery._deliver_after_open` |
+| 27 | `lithos_loom.plugins.story_develop.converge.converge_pr` |
 
 ## Seams
 
@@ -99,7 +98,7 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `lithos_loom.sources.github_issue_watcher -> lithos_loom.sources.github_watch_state._isoformat`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._resolved_at_for`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._task_from_payload`
-- Tests importing src privates: **93**
+- Tests importing src privates: **92**
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)`
@@ -116,7 +115,6 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `tests/test_eval_review_patch.py -> lithos_loom.evals.review.patch._materialise_patched_head (x2)`
   - `tests/test_review_resolve.py -> lithos_loom.plugins.story_develop.review_resolve._gh_pr_view (x2)`
   - `tests/test_story_develop_idempotency.py -> lithos_loom.plugins.story_develop.idempotency._record_path (x2)`
-  - `tests/test_story_develop_pr_delivery.py -> lithos_loom.plugins.story_develop.pr_delivery._GENERATED_RE (x2)`
   - `tests/test_awaiting_review.py -> lithos_loom.subscriptions._awaiting_review`
   - `tests/test_child_boot.py -> lithos_loom.children._boot`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._iter_run_dirs`
@@ -130,9 +128,10 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags`
   - `tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags`
   - `tests/test_cli_project_create.py -> lithos_loom.cli.project._slugify`
+  - `tests/test_cli_project_create.py -> lithos_loom.cli.project._title_from_stem`
   - … (list capped at 30 pairs)
 
 ## Domain & tests
 
 - Domain models: **17** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.63** (72504 test lines / 44566 source lines)
+- Test-to-source line ratio: **1.63** (71918 test lines / 44106 source lines)

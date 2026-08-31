@@ -143,6 +143,10 @@ class ProjectDevelopSettings:
     # blocking is the review profile's, not a separate knob — `block_on_red` removed.)
     test_command: str | None = None
     test_gate: bool | None = None
+    # Gate 15690a0e / task 0e8d96ba: the one-shot Copilot review request at PR
+    # open (``develop_copilot_review``). ``None`` = unset at both layers; the
+    # daemon falls back to the route-level ``--copilot-review`` flag.
+    copilot_review: bool | None = None
     # #273: per-check command overrides ({check_name: command}) resolved from
     # ``develop_check_commands`` (project) + a per-task table merged per-key. Empty
     # when neither layer declares any. Threaded onto ``DevelopConfig.check_commands``.
@@ -318,6 +322,7 @@ def resolve_project_settings(
         artifacts_path=scalars.artifacts_path,
         test_command=scalars.test_command,
         test_gate=scalars.test_gate,
+        copilot_review=scalars.copilot_review,
         check_commands=scalars.check_commands,
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,
@@ -421,7 +426,7 @@ def load_operator_github_login() -> str | None:
 
     Best-effort, mirroring :func:`load_tool_default_models`: an unreadable /
     missing config, or no ``[story_develop]`` section / unset key, yields
-    ``None`` so delivery requests no human reviewer (Copilot-only, today's
+    ``None`` so delivery requests no human reviewer (today's
     behaviour). Never raises.
     """
     from ...config import load_config

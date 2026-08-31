@@ -1689,8 +1689,8 @@ def test_daemon_records_delivery_deadline_before_delivering(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
     """#189: the daemon writes run_dir/delivery.json BEFORE deliver() runs, with a
-    future deadline derived from the copilot/coder budget — so `develop attach` can
-    bound a crashed delivery without timing out a healthy slow one."""
+    future deadline derived from the delivery overhead budget — so `develop attach`
+    can bound a crashed delivery without timing out a healthy slow one."""
     from datetime import UTC, datetime
 
     from lithos_loom.plugins.story_develop import __main__ as main_mod
@@ -1727,21 +1727,15 @@ def test_daemon_records_delivery_deadline_before_delivering(
         "lithos_loom.plugins.story_develop.pr_delivery.deliver", fake_deliver
     )
 
-    argv, _ = _daemon_args(
-        tmp_git_repo,
-        tmp_path,
-        "--open-pr",
-        "--copilot-timeout",
-        "600",
-        "--coder-timeout",
-        "3600",
-    )
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path, "--open-pr")
     assert main_mod.main(argv) == EXIT_SUCCEEDED
     assert seen["marker_at_delivery"] is True  # written BEFORE deliver()
     deadline = datetime.fromisoformat(seen["deadline"])
-    # the full delivery budget: Copilot round (600) + fix turn (3600) + the
-    # regression gate (test_timeout 900) — not just copilot + coder.
-    assert (deadline - datetime.now(UTC)).total_seconds() > 600 + 3600 + 900
+    # Post slice D delivery has no agent phase: the budget is the flat
+    # overhead margin (and nothing larger — a crashed delivery is declared
+    # dead promptly).
+    remaining = (deadline - datetime.now(UTC)).total_seconds()
+    assert 0 < remaining <= 1800
 
 
 def test_daemon_mode_cli_model_effort_fallback_used(
@@ -2097,3 +2091,58 @@ def test_build_result_payload_records_spawned_deferred_tasks(tmp_path: Path) -> 
     )
     assert "spawned_tasks" not in bare  # absent, not empty, when nothing spawned
     validate_result_schema(bare)
+
+
+def test_daemon_copilot_review_metadata_beats_route_flag(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Gate 15690a0e / task 0e8d96ba: develop_copilot_review (project-then-task)
+    wins over the route-level --copilot-review flag, mirroring
+    develop_test_gate / --no-test-gate — so one project can opt out (or in)
+    without touching the route every project shares."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        main_mod,
+        "load_tool_default_models",
+        lambda: ({"claude": "test-claude-model", "codex": "test-codex-model"}, ()),
+    )
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **k: True)
+    monkeypatch.setattr(
+        main_mod, "develop", lambda config, **kw: _result("approved", tmp_path)
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_guarded(config, result, **kw):
+        seen["copilot_review"] = kw["copilot_review"]
+        return None, None
+
+    monkeypatch.setattr(main_mod, "deliver_guarded", fake_guarded)
+
+    for i, (metadata_value, flag, expected) in enumerate(
+        (
+            (True, (), True),  # metadata opts a story in, no flag
+            (False, ("--copilot-review",), False),  # metadata opt-out beats the flag
+            (None, ("--copilot-review",), True),  # unset metadata → route flag
+            (None, (), False),  # default: no request (deliberate spend)
+        )
+    ):
+        monkeypatch.setattr(
+            main_mod,
+            "resolve_project_settings",
+            lambda url, meta, v=metadata_value: ProjectDevelopSettings(
+                copilot_review=v
+            ),
+        )
+        # a fresh work dir per arm — the idempotency record would otherwise
+        # replay arm 1's result and never reach deliver_guarded again
+        arm_dir = tmp_path / f"arm{i}"
+        arm_dir.mkdir()
+        monkeypatch.setenv("LITHOS_LOOM_IDEMPOTENCY_DIR", str(arm_dir / "idem"))
+        argv, _ = _daemon_args(tmp_git_repo, arm_dir, "--open-pr", *flag)
+        assert main_mod.main(argv) == EXIT_SUCCEEDED
+        assert seen["copilot_review"] is expected, (metadata_value, flag)

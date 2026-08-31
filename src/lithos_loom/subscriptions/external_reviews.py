@@ -174,12 +174,14 @@ async def _proven_handled(
 ) -> frozenset[int]:
     """Root-comment ids proven handled by an authenticated landed-fix reply.
 
-    Backfill guard (PR #344 review, finding 2): until the inline Copilot
-    round is retired (slice D), delivery remediates root comments, pushes the
-    fix and replies — all *before* the ``pr`` gate exists. A markerless
-    gate's first sweep would otherwise re-report that already-handled history
-    as fresh ``[ExternalReview]`` findings. On later sweeps this is naturally
-    inert: handled roots sit below the id high-water mark anyway.
+    Backfill guard (PR #344 review, finding 2): before S2 slice D retired the
+    inline Copilot round, delivery remediated root comments, pushed the fix
+    and replied — all *before* the ``pr`` gate existed; pre-D history is
+    still full of such threads, and converge's own thread replies keep
+    producing landed-fix replies. A markerless gate's first sweep would
+    otherwise re-report that already-handled history as fresh
+    ``[ExternalReview]`` findings. On later sweeps this is naturally inert:
+    handled roots sit below the id high-water mark anyway.
 
     Proof has two halves, both required:
 

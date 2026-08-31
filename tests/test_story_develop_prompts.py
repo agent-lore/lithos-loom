@@ -183,7 +183,6 @@ def test_every_agent_template_carries_the_sandbox_facts_slot() -> None:
         "coder_init.md",
         "coder_fix.md",
         "converge_coder_init.md",
-        "copilot_fix.md",
         "external_triage.md",
     ):
         assert "{sandbox_facts}" in load_prompt(name), name

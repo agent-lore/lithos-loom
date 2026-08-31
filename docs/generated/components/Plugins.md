@@ -22,7 +22,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
-| `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 10 |
+| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 14 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
@@ -43,7 +43,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_develop.pr_delivery` | L | 4 | 20 |
+| `lithos_loom.plugins.story_develop.pr_delivery` | M | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
@@ -103,7 +103,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `reconcile_off_check_states` — Retire any persisted findings for checks the operator has turned **off** (#273 slice 2 / #280 review).
 - def `load_gate_ledger` — The run's deterministic-finding ledger (#132) — reloaded from disk on a resume (a re-dispatched run reuses ``gate_dir``), else a fresh ledger.
 - def `persist_gate_ledger` — Write the gate ledger so closure survives across rounds + a resume. Best-effort: a write failure must not fail the run.
-- def `run_delivery_test_gate` — The *delivery* regression gate: run ONLY the ``test`` check on a fix commit.
 
 ### `lithos_loom.plugins.story_develop.check_set`
 - class `Check` — The spec for one deterministic check — what to run and how it counts.
@@ -267,12 +266,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `canonical_personas` — The canonical reviewer personas, keyed by name (ADR 0003 §8).
 
 ### `lithos_loom.plugins.story_develop.pr_delivery`
-- class `CopilotComment` — One Copilot inline comment, as fetched from the PR.
 - class `DeliveryOutcome` — What the delivery phase did (for the summary + Lithos posting).
 - def `parse_issue_ref` — ``https://github.com/o/r/issues/42`` -> ``("o/r", 42)``; None if not.
 - def `closes_line` — The ``Closes …`` line linking the PR to its source issue, or ``""``.
 - def `build_pr_body` — The generated PR body: provenance + verdicts, not the whole log.
-- def `comments_to_handoff_text` — Render Copilot's inline comments as a synthetic review handoff.
 - def `reply_body` — The per-thread reply: fix reference, held-back notice, or pushback.
 - def `push_branch` — Host-side push of the worktree branch to origin. Raises on failure.
 - class `ForkPushUnsupported` — The PR's head ref is not on ``origin`` (a fork PR), so converge cannot push to it under origin credentials (v1). The operator converges + fixes locally with ``--no-push``, or re-runs against a same-repo PR.
@@ -282,15 +279,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `pr_number_from_url` — Extract the PR number from a canonical GitHub PR URL; raise if it can't.
 - def `request_copilot` — Request the Copilot reviewer; False (logged) on failure — non-fatal.
 - def `request_operator_review` — Request *login* as a reviewer on the PR; assign them if they authored it.
-- def `copilot_expected_comments` — The comment count Copilot's review summary claims, or status markers.
-- def `fetch_copilot_comments` — Copilot's top-level inline comments on the PR (replies excluded).
-- def `wait_for_copilot` — Poll until Copilot's review lands; its expected comment count, or ``None`` on timeout (see :func:`copilot_expected_comments`).
-- def `fetch_copilot_comments_settled` — Fetch Copilot's inline comments, waiting for them to MATERIALISE.
 - def `post_thread_reply`
 - def `post_pr_comment`
 - def `delivery_budget_seconds` — Upper bound on the wall-clock :func:`deliver` can legitimately spend (#189).
 - def `deliver_guarded` — Guarded PR delivery for an approved run — shared daemon/standalone seam.
-- def `deliver` — Push the approved branch and open the PR, then run the Copilot round.
+- def `deliver` — Push the approved branch and open the PR. Delivery ends there.
 
 ### `lithos_loom.plugins.story_develop.profiles`
 - class `MonotonicityError` — A profile chain violates the ``strength_rank`` monotonicity invariant (ADR §2).
