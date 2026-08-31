@@ -498,3 +498,90 @@ async def test_gate_merged_without_ingestion_flag_stays_pure_merge_poll() -> Non
     assert outcome == "merged"
     findings = [f["summary"] for f in client._findings]
     assert not any(f.startswith("[ExternalReview]") for f in findings)
+
+
+async def test_gate_merged_final_ingestion_failure_retries_not_resolves() -> None:
+    """PR #348 re-review 1: the merged-path observation is only durable if a
+    transient ingestion failure DEFERS resolution — completing the gate on a
+    failed final ingest loses the record forever (no next sweep exists)."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_pr(state="closed", merged=True))
+    github.list_pull_request_reviews.side_effect = GitHubError("transient")
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+
+    assert outcome == "error"  # retry next sweep — the gate MUST stay open
+    assert (await _get(client, story)).status == "open"
+    assert (await _get(client, gate.id)).status == "open"
+    assert not any(f["summary"].startswith(GATE_RESOLVED) for f in client._findings)
+
+    # Next sweep, GitHub healthy again: the record posts AND the gate resolves.
+    github.list_pull_request_reviews.side_effect = None
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+    assert outcome == "merged"
+    findings = [f["summary"] for f in client._findings]
+    assert any(f.startswith("[ExternalReview]") for f in findings)
+    assert any(f.startswith(GATE_RESOLVED) for f in findings)
+
+
+async def test_gate_merged_finding_post_failure_retries_not_resolves() -> None:
+    """Same guarantee for the Lithos half: the [ExternalReview] record (or its
+    de-dup mark) not landing defers resolution rather than losing the batch."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_pr(state="closed", merged=True))
+    original = client.finding_post
+    fail = {"on": True}
+
+    async def flaky_post(**kwargs: Any) -> Any:
+        if fail["on"]:
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.finding_post = flaky_post  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+    assert outcome == "error"
+    assert (await _get(client, gate.id)).status == "open"
+
+    fail["on"] = False
+    outcome = await reconcile_pr_gate(
+        await _get(client, gate.id), github, _ctx(client), ingest_reviews=True
+    )
+    assert outcome == "merged"
+    findings = [f["summary"] for f in client._findings]
+    assert any(f.startswith("[ExternalReview]") for f in findings)
+
+
+async def test_gate_merged_quiet_ingestion_still_resolves() -> None:
+    """No review activity at all: the merged gate resolves first sweep — a
+    quiet pass must never be mistaken for a failed one."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_pr(state="closed", merged=True))
+    github.list_pull_request_reviews.return_value = []
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+
+    assert outcome == "merged"
+    assert (await _get(client, story)).status == "completed"
+
+
+async def test_gate_merged_final_record_speaks_post_merge() -> None:
+    """PR #348 re-review 3: the final record must not instruct an impossible
+    pre-merge action — it says the activity was observed after merge."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_pr(state="closed", merged=True))
+
+    await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+
+    record = next(
+        f["summary"]
+        for f in client._findings
+        if f["summary"].startswith("[ExternalReview]")
+    )
+    assert "already merged" in record
+    assert "remains blocked" not in record
+    assert "before merging" not in record

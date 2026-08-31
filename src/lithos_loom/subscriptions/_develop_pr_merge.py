@@ -186,15 +186,28 @@ async def reconcile_pr_gate(
     state = _pr_merge_state(pr)
     if state == "merged":
         if ingest_reviews:
-            # PR #348 review F1: a review that landed before the first sweep,
-            # on a PR that merged before that sweep, would otherwise vanish
-            # unrecorded — the gate leaves the open set on completion and is
-            # never swept again. Ingest ONCE here (detection-only: the
-            # [ExternalReview] record on the story; remediation on a merged
-            # PR is structurally impossible — converge refuses it — and the
-            # human merge is the authority on the PR's final state). Never
-            # raises; a transient failure just loses this last-chance record.
-            await ingest_external_reviews(gate, spec, story_id, github, ctx)
+            # PR #348 review F1 + re-review 1: a review that landed before
+            # the first sweep, on a PR that merged before that sweep, would
+            # otherwise vanish unrecorded — the gate leaves the open set on
+            # completion and is never swept again. Ingest ONCE here
+            # (detection-only: the [ExternalReview] record on the story;
+            # remediation on a merged PR is structurally impossible —
+            # converge refuses it — and the human merge is the authority on
+            # the PR's final state). A FAILED observation (GitHub listing
+            # error, or the record/mark not landing) defers resolution: the
+            # gate stays open and the whole branch retries next sweep,
+            # because after resolution there is no next sweep to retry in.
+            final = await ingest_external_reviews(
+                gate, spec, story_id, github, ctx, post_merge=True
+            )
+            if final.failed:
+                ctx.logger.warning(
+                    "[Friction] pr-gate: final review observation for %s "
+                    "failed; leaving the merged gate open to retry — "
+                    "resolution deferred to the next sweep",
+                    spec.pr_url,
+                )
+                return "error"
         if await _resolve_gate_merged(gate, story_id, spec.pr_url, pr, ctx):
             return "merged"
         # A completion failed transiently; the gate is left open and retried

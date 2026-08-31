@@ -430,6 +430,33 @@ def test_resolve_missing_doc_is_not_a_read_failure(fake_client) -> None:
     assert settings.context_read_failed is False
 
 
+def test_resolve_task_metadata_survives_missing_doc_and_missing_slug(
+    fake_client,
+) -> None:
+    """PR #348 re-review 2: the task's own metadata is in hand on EVERY path —
+    an explicit task-level develop_copilot_review must win over the route
+    flag even when no project doc (or no project slug) exists. The early
+    degraded returns used to drop task metadata entirely."""
+    # No context doc, task opts out explicitly.
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_copilot_review": False}
+    )
+    assert settings.copilot_review is False
+
+    # No project slug at all, task opts in explicitly.
+    settings = resolve_project_settings("http://x", {"develop_copilot_review": True})
+    assert settings.copilot_review is True
+
+    # Read FAILURE: the task's explicit value still wins (task metadata is
+    # unaffected by the doc fetch); only the unset case fails closed.
+    fake_client.fail_connect = ConnectionError("lithos down")
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_copilot_review": True}
+    )
+    assert settings.copilot_review is True
+    assert settings.context_read_failed is True
+
+
 def test_resolve_no_context_doc_degrades(fake_client) -> None:
     settings = resolve_project_settings("http://x", {"project": "loom"})
     assert settings.reviewers == BUILTIN_REVIEWERS
