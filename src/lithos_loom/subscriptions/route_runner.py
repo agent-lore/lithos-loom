@@ -226,8 +226,13 @@ class RouteRunner:
         if event.origin == GATE_RESOLVED_ORIGIN:
             # b91177d2: the operator completed this story's needs-human gate —
             # THE retry gesture. The in-process "fail once per task" set
-            # (below) would otherwise swallow it until a restart.
+            # (below) would otherwise swallow it until a restart, and the T10
+            # resume budget starts fresh (PR #349 review F3: a retry the
+            # operator authorized deserves a full bounded resume window, not
+            # an immediate resume_exhausted re-escalation on the first
+            # usage-limit pause).
             self._processed_tasks.discard(task_id)
+            self._resume_counts.pop(task_id, None)
         if task_id in self._processed_tasks:
             logger.debug(
                 "RouteRunner %s: skipping stale event for already-processed %s",
@@ -437,6 +442,38 @@ class RouteRunner:
                     Escalation(
                         reason="timeout",
                         summary=f"plugin exceeded max runtime: {exc}",
+                        brief={"work_dir": str(work_dir)},
+                    ),
+                    payload=payload,
+                )
+            except OSError as exc:
+                # PR #349 review F1: a host-side launch / I/O failure (exec
+                # not found, permissions, a read error) is a non-delivering
+                # exit like any other. Letting it escape to the subscriber
+                # loop stranded the story: claimed forever (it is already in
+                # _processed_tasks), no gate, no finding.
+                await self._escalate(
+                    task_id,
+                    Escalation(
+                        reason="infra",
+                        summary=f"plugin could not run: {exc}",
+                        brief={"work_dir": str(work_dir)},
+                    ),
+                    payload=payload,
+                )
+            except Exception as exc:  # CancelledError is BaseException: propagates
+                # Same seam, unanticipated shape — "every other non-delivering
+                # exit" must hold for exits nobody predicted, too.
+                logger.exception(
+                    "RouteRunner %s: unexpected error running the plugin for %s",
+                    self.route.name,
+                    task_id,
+                )
+                await self._escalate(
+                    task_id,
+                    Escalation(
+                        reason="unknown",
+                        summary=f"unexpected error running the plugin: {exc!r}",
                         brief={"work_dir": str(work_dir)},
                     ),
                     payload=payload,

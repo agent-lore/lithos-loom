@@ -293,7 +293,8 @@ async def escalate_with_failure(
     if not recorded:
         problems.append(
             "could not record the gate on the story (no marker written; the "
-            "gate alone guards re-dispatch, which is sufficient)"
+            "gate alone guards re-dispatch, and the resolver nudges on an "
+            "absent provenance key, so completing the gate still retries)"
         )
     summary = _needs_human_summary(
         route=route, escalation=escalation, run_id=run, gate_id=gate_id

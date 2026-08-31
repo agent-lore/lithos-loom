@@ -104,17 +104,27 @@ class EscalationResolver:
                 story_id,
             )
             return
-        if (story.metadata or {}).get(STORY_HUMAN_GATE_ID_KEY) != gate_id:
-            # A stale completion (the story has since failed into a NEWER gate,
-            # or was already re-dispatched and cleaned up). The current gate,
-            # if any, still guards it via readiness; nothing to do here.
+        recorded = (story.metadata or {}).get(STORY_HUMAN_GATE_ID_KEY)
+        if recorded and recorded != gate_id:
+            # A stale completion: the story has since failed into a NEWER gate,
+            # which guards it via readiness; nothing to do here.
             logger.info(
-                "EscalationResolver: gate %s no longer names story %s's blocker; "
-                "no nudge",
-                gate_id,
+                "EscalationResolver: story %s names gate %s as its blocker, not "
+                "%s; no nudge",
                 story_id,
+                recorded,
+                gate_id,
             )
             return
+        # An ABSENT key still nudges (PR #349 review F2): the degraded
+        # escalation path — gate + edge landed, the story provenance write
+        # failed — leaves exactly this shape, and skipping it made the
+        # operator's tick a no-op until a daemon restart. The waits_on_gate
+        # edge already proves this gate was the story's blocker, and a
+        # spurious nudge (e.g. a duplicate SSE completion after the story was
+        # re-dispatched and cleaned up) is bounded by the normal dispatch
+        # path: readiness defers a story behind any newer gate, and the
+        # collision-safe claim refuses one that is mid-run.
         await self.bus.publish(
             Event(
                 type="lithos.task.updated",

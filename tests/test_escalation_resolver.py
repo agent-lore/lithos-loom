@@ -168,10 +168,32 @@ async def test_resolved_story_is_not_nudged() -> None:
     assert probe.queue.empty()
 
 
-async def test_stale_gate_completion_is_a_no_op() -> None:
-    """The story has since been re-dispatched and cleaned up (or failed into a
-    NEWER gate): the completed gate no longer names its blocker, so a
-    duplicate / late completion must not un-dedup a run."""
+async def test_completion_of_a_superseded_gate_is_a_no_op() -> None:
+    """The story has since failed into a NEWER gate: the completed gate no
+    longer names its blocker, so a duplicate / late completion must not
+    un-dedup a run — the newer gate guards it via readiness anyway."""
+    client = FakeLithosClient(agent_id="loom")
+    story, gate_id = await _escalated_story(client)
+    await client.task_update(
+        task_id=story, agent="loom", metadata={"needs_human_gate_id": "gate-newer"}
+    )
+    await client.task_complete(task_id=gate_id, agent="dave")
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None
+
+    bus = EventBus()
+    probe = _probe(bus)
+    resolver = EscalationResolver(bus=bus, lithos=client, agent_id="loom")
+    await bus.publish(_completed_gate_event(gate))
+    await _run_for(resolver)
+    assert probe.queue.empty()
+
+
+async def test_missing_provenance_still_nudges() -> None:
+    """PR #349 review F2: the degraded escalation path — gate + edge landed,
+    the story provenance write failed — leaves the story with NO
+    needs_human_gate_id. Completing the gate must still retry in-process; the
+    waits_on_gate edge proves the linkage."""
     client = FakeLithosClient(agent_id="loom")
     story, gate_id = await _escalated_story(client)
     await client.task_update(
@@ -186,7 +208,10 @@ async def test_stale_gate_completion_is_a_no_op() -> None:
     resolver = EscalationResolver(bus=bus, lithos=client, agent_id="loom")
     await bus.publish(_completed_gate_event(gate))
     await _run_for(resolver)
-    assert probe.queue.empty()
+
+    nudge = probe.queue.get_nowait()
+    assert nudge.origin == GATE_RESOLVED_ORIGIN
+    assert nudge.payload["id"] == story
 
 
 async def test_a_lithos_error_does_not_kill_the_loop() -> None:

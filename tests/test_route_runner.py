@@ -2790,3 +2790,70 @@ async def test_route_misconfiguration_keeps_the_marker_only_path(
     assert lithos.finding_post.await_args.kwargs["summary"].startswith(
         "[BlockerFailed]"
     )
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_reason", "expected_fragment"),
+    [
+        (OSError("exec failed"), "infra", "plugin could not run: exec failed"),
+        (
+            RuntimeError("surprise"),
+            "unknown",
+            "unexpected error running the plugin: RuntimeError('surprise')",
+        ),
+    ],
+)
+async def test_unexpected_plugin_seam_errors_escalate_and_release(
+    tmp_path: Path,
+    raised: Exception,
+    expected_reason: str,
+    expected_fragment: str,
+) -> None:
+    """PR #349 review F1: a host-side launch / I/O failure (or any
+    unanticipated exception) at the plugin seam must not strand the story
+    claimed-forever with no gate and no finding — it is a non-delivering exit
+    like any other."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=raised)
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    assert lithos.task_create.await_args.kwargs["metadata"]["escalation_reason"] == (
+        expected_reason
+    )
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[NeedsHuman]")
+    assert expected_fragment in summary
+    lithos.task_release.assert_awaited_once()
+    lithos.task_complete.assert_not_called()
+
+
+async def test_gate_resolved_nudge_resets_the_resume_budget(tmp_path: Path) -> None:
+    """PR #349 review F3: the operator-authorized retry gesture grants a
+    fresh bounded resume window — the first usage-limit pause after a
+    completed resume_exhausted gate must schedule a resume, not immediately
+    re-escalate."""
+    from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
+
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=_failed_result())
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    runner._resume_counts["task-1"] = MAX_RESUMES_PER_TASK
+
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload("task-1", metadata={"needs_human_gate_id": "gate-1"}),
+            origin="gate-resolved",
+        )
+    )
+    await _run_for(runner)
+
+    assert plugin_runner.await_count == 1  # the retry ran
+    assert "task-1" not in runner._resume_counts
