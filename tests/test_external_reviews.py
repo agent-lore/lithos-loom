@@ -793,3 +793,58 @@ async def test_failed_marker_write_reports_not_posted() -> None:
     # The finding itself posted (breadcrumb exists) but the de-dup mark did
     # not land — the batch will re-post next sweep, so it must not dispatch.
     assert not result.posted
+
+
+async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
+    """PR #346 re-review 1: the remediation pending trigger must land in the
+    SAME task_update as the seen high-water marks — deferral may never be
+    acknowledged before the trigger is durable. On a failed write, neither
+    lands and the whole batch (finding already posted or not) retries."""
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    pending = {"external_remediation_pending": {"pr_url": spec.pr_url}}
+
+    result = await ingest_external_reviews(
+        gate, spec, story, github, _ctx(client), pending_marker=pending
+    )
+
+    assert result.posted
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert REVIEW_SEEN_KEY in refreshed.metadata
+    assert refreshed.metadata["external_remediation_pending"] == {"pr_url": spec.pr_url}
+
+    # Failure injection: the one combined write fails → NEITHER key lands and
+    # posted is False (the batch retries next sweep, trigger included).
+    client2 = FakeLithosClient()
+    story2, gate2 = await _gate_with_story(client2)
+    original = client2.task_update
+
+    async def failing_update(**kwargs: Any) -> Any:
+        if REVIEW_SEEN_KEY in (kwargs.get("metadata") or {}):
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client2.task_update = failing_update  # type: ignore[method-assign]
+    spec2 = parse_pr_gate(gate2)
+    assert spec2 is not None
+
+    result = await ingest_external_reviews(
+        gate2,
+        spec2,
+        story2,
+        _github(reviews=[_review(500)]),
+        _ctx(client2),
+        pending_marker={"external_remediation_pending": {"pr_url": spec2.pr_url}},
+    )
+
+    assert not result.posted
+    refreshed2 = await client2.task_get(task_id=gate2.id)
+    assert refreshed2 is not None
+    assert REVIEW_SEEN_KEY not in refreshed2.metadata
+    assert "external_remediation_pending" not in refreshed2.metadata

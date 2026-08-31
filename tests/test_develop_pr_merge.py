@@ -435,3 +435,34 @@ async def test_reconcile_exhausted_budget_states_it_in_the_finding(
     assert finding.startswith("[ExternalReview]")
     assert "remediation budget exhausted" in finding
     assert rem._task is None  # nothing dispatched
+
+
+async def test_reconcile_busy_slot_parks_the_trigger_with_the_marks(
+    tmp_path,
+) -> None:
+    """PR #346 re-review 1, end-to-end: a batch arriving while a run is in
+    flight lands its pending trigger in the same sweep that consumed its
+    high-water marks — the deferred dispatch is durable."""
+    import asyncio
+    import contextlib
+
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_open_pr())
+    github.get_collaborator_permission.return_value = "write"
+    rem = _remediation(tmp_path)
+    rem._task = asyncio.create_task(asyncio.sleep(30))  # a run in flight
+    try:
+        outcome = await reconcile_pr_gate(
+            gate, github, _ctx(client), ingest_reviews=True, remediation=rem
+        )
+    finally:
+        rem._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rem._task
+
+    assert outcome == "still_open"
+    refreshed = await _get(client, gate.id)
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}

@@ -32,6 +32,7 @@ follow-up slice; this module only detects and reports.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -293,6 +294,7 @@ async def ingest_external_reviews(
     ctx: SubscriptionContext,
     *,
     extra_note: str | None = None,
+    pending_marker: Mapping[str, Any] | None = None,
 ) -> IngestResult:
     """Ingest new review activity on one still-open gate's PR. Never raises.
 
@@ -305,8 +307,13 @@ async def ingest_external_reviews(
 
     ``extra_note`` is appended to the finding body (S5b: the remediation
     dispatcher states budget exhaustion *inside* the detection breadcrumb, so
-    going over budget never blinds the operator). Returns the posted batch for
-    the dispatcher — see :class:`IngestResult`.
+    going over budget never blinds the operator). ``pending_marker`` (the
+    dispatcher's pending-trigger entry, PR #346 re-review 1) is folded into
+    the SAME ``task_update`` as the seen marks on the posted path — the marks
+    consume the batch, so its dispatch debt must become durable in the same
+    write or not at all (a failed combined write retries the whole batch next
+    sweep). Returns the posted batch for the dispatcher — see
+    :class:`IngestResult`.
     """
     seen = _read_seen(gate, spec.pr_url)
     try:
@@ -358,7 +365,9 @@ async def ingest_external_reviews(
         and not (r.state != "CHANGES_REQUESTED" and r.review_id in handled_review_ids)
     ]
     actionable_comments = [c for c in new_comments if _comment_posts(c, handled_roots)]
-    marker = {REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)}
+    marker: dict[str, Any] = {
+        REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)
+    }
 
     if not actionable_reviews and not actionable_comments:
         # Only silent material (approvals, replies, our own automated replies):
@@ -381,6 +390,8 @@ async def ingest_external_reviews(
         )
         return IngestResult()
 
+    if pending_marker:
+        marker.update(pending_marker)
     landed = await post_finding_then_mark(
         ctx,
         task_id=story_id,

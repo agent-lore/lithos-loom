@@ -611,59 +611,76 @@ async def test_failed_budget_reservation_blocks_dispatch(tmp_path: Path) -> None
     assert rem._task is None
 
 
-async def test_busy_batch_leaves_a_pending_trigger_that_resumes(
-    tmp_path: Path,
-) -> None:
-    """PR #346 review F1: ingestion's high-water marks consume the batch, so
-    a deferred_busy dispatch must persist a pending trigger the NEXT sweep
-    can act on even with zero new review activity."""
+async def test_parked_trigger_survives_busy_and_resumes(tmp_path: Path) -> None:
+    """PR #346 review F1 + re-review 1: the trigger is parked by INGESTION
+    (atomically with the seen marks — see test_external_reviews); consider's
+    busy path merely leaves it in place, and a later quiet sweep resumes it,
+    consuming the trigger with the budget reservation."""
     from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
-    started = asyncio.Event()
-    release = asyncio.Event()
+    # The trigger, as ingestion's atomic marker write parks it.
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
     resumed: list[list[str]] = []
 
-    async def slow_spawn(cmd: list[str]) -> tuple[int, str]:
-        started.set()
-        await release.wait()
-        return 0, ""
-
-    rem = ExternalRemediation(_settings(tmp_path), spawn=slow_spawn)
-    assert await _consider(client, gate, story, rem) == "dispatched"
-    await started.wait()
-
-    # Second batch while busy: deferred AND persisted.
-    assert await _consider(client, gate, story, rem) == "deferred_busy"
-    parked = await client.task_get(task_id=gate.id)
-    assert parked is not None
-    assert parked.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
-
-    release.set()
-    assert rem._task is not None
-    await rem._task
-
-    # A later quiet sweep (no new material) resumes off the pending trigger.
     async def resume_spawn(cmd: list[str]) -> tuple[int, str]:
         resumed.append(cmd)
         return 0, ""
 
-    rem._spawn = resume_spawn
-    gate = await client.task_get(task_id=gate.id)
-    assert gate is not None
+    rem = ExternalRemediation(_settings(tmp_path), spawn=resume_spawn)
+    rem._task = asyncio.create_task(asyncio.sleep(30))  # a run in flight
+    try:
+        # While busy: consider defers and the trigger stays parked.
+        assert await _consider(client, gate, story, rem) == "deferred_busy"
+        parked = await client.task_get(task_id=gate.id)
+        assert parked is not None
+        assert parked.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+    finally:
+        rem._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rem._task
+
+    # A later quiet sweep (no new material — even a restarted daemon, since
+    # the trigger is durable) resumes off the trigger.
+    resumer = ExternalRemediation(_settings(tmp_path), spawn=resume_spawn)
     spec = parse_pr_gate(gate)
     assert spec is not None
     budget = RemediationBudget(pr_url=_PR_URL, rounds_used=1)
-    label = await rem.resume_pending(gate, spec, story, budget, _github(), _ctx(client))
+    label = await resumer.resume_pending(
+        gate, spec, story, budget, _github(), _ctx(client)
+    )
     assert label == "dispatched"
-    assert rem._task is not None
-    await rem._task
+    run = resumer._task
+    assert run is not None
+    await run
     assert len(resumed) == 1
-    # The trigger is consumed on dispatch.
+    # The trigger is consumed atomically with the reservation.
     refreshed = await client.task_get(task_id=gate.id)
     assert refreshed is not None
     assert PENDING_KEY not in refreshed.metadata
+
+
+def test_pending_marker_minted_only_when_dispatch_is_possible(
+    tmp_path: Path,
+) -> None:
+    """The trigger ingestion parks rides its atomic marker write — but only
+    when a dispatch could ever happen (budget on, a story to record to)."""
+    from lithos_loom.gates import PrGateSpec
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    spec = PrGateSpec(repo="agent-lore/lithos-lens", pr_number=62, pr_url=_PR_URL)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    assert rem.pending_marker(spec, "story-1") == {PENDING_KEY: {"pr_url": _PR_URL}}
+    assert rem.pending_marker(spec, None) is None
+    disabled = ExternalRemediation(
+        _settings(tmp_path, budget=0), spawn=_spawner(None)[0]
+    )
+    assert disabled.pending_marker(spec, "story-1") is None
 
 
 async def test_resume_pending_is_a_noop_without_a_trigger(tmp_path: Path) -> None:
@@ -709,32 +726,74 @@ async def test_resume_pending_respects_the_budget_and_keeps_the_trigger(
     assert PENDING_KEY in refreshed.metadata  # kept for after a reset
 
 
-async def test_untrusted_batch_leaves_no_pending_even_while_busy(
+async def test_terminal_consider_outcomes_clear_the_parked_trigger(
     tmp_path: Path,
 ) -> None:
-    """The trust check runs BEFORE the busy check: a batch that would never
-    dispatch must not park a pending trigger."""
+    """Ingestion parks the trigger for every actionable batch (atomicity over
+    precision); a consider outcome that will never dispatch — no trusted
+    author here — clears it so no pointless no-op run fires later."""
     from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
     rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
-    rem._task = asyncio.create_task(asyncio.sleep(30))
-    try:
-        label = await _consider(
-            client,
-            gate,
-            story,
-            rem,
-            ingest=_ingest(actionable_reviews=[_review(author="drive-by")]),
-            github=_github(permission="read"),
-        )
-        assert label == "no_trusted"
-        refreshed = await client.task_get(task_id=gate.id)
-        assert refreshed is not None
-        assert PENDING_KEY not in refreshed.metadata
-    finally:
-        rem._task.cancel()
+
+    label = await _consider(
+        client,
+        gate,
+        story,
+        rem,
+        ingest=_ingest(actionable_reviews=[_review(author="drive-by")]),
+        github=_github(permission="read"),
+    )
+
+    assert label == "no_trusted"
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert PENDING_KEY not in refreshed.metadata
+
+
+async def test_project_settings_read_failure_fails_closed(tmp_path: Path) -> None:
+    """PR #346 re-review 2: an unreadable context doc must NOT authorize an
+    autonomous code-pushing run — a project's explicit opt-out could be
+    sitting in it. Fail closed, keep the parked trigger for a later retry,
+    and spend nothing."""
+    from lithos_loom.errors import LithosClientError
+    from lithos_loom.subscriptions.external_remediation import (
+        PENDING_KEY,
+        REMEDIATION_KEY,
+    )
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+
+    async def failing_note_read(**kwargs: Any) -> Any:
+        raise LithosClientError("server_error", "lithos down")
+
+    client.note_read = failing_note_read  # type: ignore[method-assign]
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    label = await _consider(client, gate, story, rem)
+
+    assert label == "project_settings_unavailable"
+    assert calls == []
+    assert rem._task is None
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert PENDING_KEY in refreshed.metadata  # retained → retried later
+    marker = refreshed.metadata.get(REMEDIATION_KEY)
+    assert marker is None or marker.get("rounds_used", 0) == 0  # nothing spent
 
 
 async def test_shutdown_cancels_the_inflight_run(tmp_path: Path) -> None:

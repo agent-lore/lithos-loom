@@ -203,7 +203,20 @@ async def reconcile_pr_gate(
             budget = await remediation.observe_head(gate, spec, pr, ctx)
             note = remediation.exhaustion_note(budget)
         ingest = await ingest_external_reviews(
-            gate, spec, story_id, github, ctx, extra_note=note
+            gate,
+            spec,
+            story_id,
+            github,
+            ctx,
+            extra_note=note,
+            # Parked atomically with the seen marks (PR #346 re-review 1):
+            # the marks consume the batch, so its dispatch debt must become
+            # durable in the same write or the whole batch retries.
+            pending_marker=(
+                remediation.pending_marker(spec, story_id)
+                if remediation is not None
+                else None
+            ),
         )
         if remediation is not None and budget is not None:
             if ingest.posted:

@@ -30,7 +30,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 8 |
-| `lithos_loom.subscriptions.external_remediation` | M | 3 | 2 |
+| `lithos_loom.subscriptions.external_remediation` | L | 3 | 2 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |

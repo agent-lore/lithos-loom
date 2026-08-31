@@ -278,12 +278,14 @@ class ExternalRemediation:
         Returns a label for the sweep log; ``"dispatched"`` means the budget
         reservation landed and the run task started. Never raises.
 
-        The busy check runs AFTER the trust / own-sha filter and writes a
-        **pending trigger** (:data:`PENDING_KEY`) on the gate: ingestion's
-        high-water marks consume the batch, so a batch merely *deferred*
-        would otherwise never be seen again (PR #346 review F1) — a later
-        quiet sweep resumes it via :meth:`resume_pending`. The trigger is
-        only parked for a batch that would actually have dispatched.
+        The pending trigger this decision leans on is parked by INGESTION,
+        atomically with the batch's high-water marks (PR #346 review F1 +
+        re-review 1 — the marks consume the batch, so its dispatch debt must
+        become durable in the same write; a post-hoc write here could fail
+        after the marks landed and lose the batch). consider() then shapes
+        the trigger's fate: an undispatchable batch clears it, a busy slot
+        leaves it for :meth:`resume_pending`, a dispatch consumes it with
+        the reservation.
         """
         settings = self._settings
         if settings.budget <= 0:
@@ -295,24 +297,50 @@ class ExternalRemediation:
 
         dispatchable = await self._dispatchable(ingest, spec.repo, budget, github, ctx)
         if dispatchable != "yes":
+            # This batch will never dispatch — drop the trigger ingestion
+            # parked with its marks, or a pointless no-op run fires later.
+            await self._clear_pending(gate.id, ctx)
             return dispatchable
 
         if self.busy:
             ctx.logger.info(
-                "external-remediation: a run is already in flight; parking a "
-                "pending trigger for %s (detection continues; a later sweep "
-                "resumes it)",
+                "external-remediation: a run is already in flight for another "
+                "batch; %s stays parked on its pending trigger (detection "
+                "continues; a later sweep resumes it)",
                 spec.pr_url,
-            )
-            await write_marker(
-                ctx,
-                task_id=gate.id,
-                marker={PENDING_KEY: {"pr_url": spec.pr_url}},
-                subsystem="external-remediation",
             )
             return "deferred_busy"
 
         return await self._dispatch(gate, spec, story_id, budget, ctx)
+
+    def pending_marker(
+        self, spec: PrGateSpec, story_id: str | None
+    ) -> dict[str, Any] | None:
+        """The pending-trigger entry the sweep folds into ingestion's atomic
+        marker write (PR #346 re-review 1).
+
+        Minted for every actionable batch a dispatch could ever serve
+        (budget on, a story to record to) — atomicity over precision: trust
+        isn't known pre-ingest, so an over-parked trigger is cleared by
+        consider() or resolved by one refunded no-op resume.
+        """
+        if self._settings.budget <= 0 or story_id is None:
+            return None
+        return {PENDING_KEY: {"pr_url": spec.pr_url}}
+
+    async def _clear_pending(self, gate_id: Any, ctx: SubscriptionContext) -> None:
+        """Drop a parked trigger for an outcome that will never dispatch.
+
+        Best-effort, and unconditional (the caller's gate snapshot predates
+        ingestion's parking write): a failed or needless clear costs at most
+        one refunded no-op resume.
+        """
+        await write_marker(
+            ctx,
+            task_id=gate_id,
+            marker={PENDING_KEY: None},
+            subsystem="external-remediation",
+        )
 
     async def resume_pending(
         self,
@@ -369,14 +397,30 @@ class ExternalRemediation:
                 gate.id,
                 spec.pr_url,
             )
+            await self._clear_pending(gate.id, ctx)
             return "no_project"
         slug, repo = repo_path
-        if not await self._project_converge_enabled(slug, ctx):
+        enabled = await self._project_converge_enabled(slug, ctx)
+        if enabled is None:
+            # PR #346 re-review 2: the context doc may hold an explicit
+            # opt-out we could not read — an unknown dial must never
+            # authorize an autonomous code-pushing run. Fail closed and
+            # LEAVE the pending trigger parked so the decision retries.
+            ctx.logger.warning(
+                "[Friction] external-remediation: cannot read project %r "
+                "settings to check %s; failing closed — no dispatch, the "
+                "pending trigger (if parked) retries next sweep",
+                slug,
+                CONVERGE_SETTING,
+            )
+            return "project_settings_unavailable"
+        if not enabled:
             ctx.logger.info(
                 "external-remediation: project %r disables %s; reporting only",
                 slug,
                 CONVERGE_SETTING,
             )
+            await self._clear_pending(gate.id, ctx)
             return "project_disabled"
 
         # Reserve the round BEFORE the run (crash-safe: a lost refund wastes
@@ -492,7 +536,7 @@ class ExternalRemediation:
 
     async def _project_converge_enabled(
         self, slug: str, ctx: SubscriptionContext
-    ) -> bool:
+    ) -> bool | None:
         """The per-project dial, default **on** (ADR 0011 decision 6).
 
         Reads the context doc's metadata directly (canonical path, then the
@@ -500,8 +544,12 @@ class ExternalRemediation:
         ``daemon_io._fetch_context_metadata`` applies; kept as a local
         seven-liner rather than importing the Plugins component into
         Subscriptions, which would add a cross-component edge for one read).
-        A malformed value warns and stays enabled — the dial fails toward the
-        default, never silently off.
+
+        Tri-state (PR #346 re-review 2): a READABLE doc with the key absent
+        or malformed is the documented default-on (warned when malformed);
+        an UNREADABLE doc returns ``None`` — the project may hold an
+        explicit opt-out we cannot see, and an unknown safety dial must
+        never authorize a run (the caller fails closed and retries).
         """
         meta: Mapping[str, Any] | None = None
         try:
@@ -516,15 +564,8 @@ class ExternalRemediation:
                 )
                 if candidates:
                     meta = min(candidates, key=lambda n: n.path).metadata
-        except LithosClientError as exc:
-            ctx.logger.warning(
-                "[Friction] external-remediation: reading project context for "
-                "%r failed (%s); treating %s as enabled",
-                slug,
-                exc,
-                CONVERGE_SETTING,
-            )
-            return True
+        except LithosClientError:
+            return None  # unreadable ≠ unset — the caller fails closed
         raw = None if meta is None else meta.get(CONVERGE_SETTING)
         if raw is None:
             return True
