@@ -1,0 +1,75 @@
+[case]
+id = "344-reply-suppression-proof"
+description = """
+loom PR #344 escapes (S2 external-review detection), rounds 2+3 of the codex
+re-review: at the round-1-fixed head 3db9ed0 the sweep's backfill guard
+suppresses a root review comment when ANY reply carrying the automated-reply
+marker exists — a "proof" with two independent holes, both refuted by code in
+this same repo:
+
+- the reply PRODUCER (pr_delivery.reply_body, in-tree) emits the SAME marker
+  on held-back (red gate, fix never pushed) and "Not changed" replies — replies
+  that record the root as explicitly NOT resolved, which then suppress it;
+- the marker and reply shape are PUBLIC BODY STRINGS any GitHub commenter can
+  copy — a forged "landed fix" reply by an untrusted outsider hides a trusted
+  reviewer's comment forever, because the reply author is never authenticated.
+
+Escape-review provenance (README §"Escape review"): bucket 1 for both — the
+refuting evidence (the producer's branch structure; the absent permission
+check) is entirely in the diff's own repo. Blind-spot class:
+suppression/trust-proof completeness — when a change treats an observation as
+PROOF, enumerate what else can produce the observation. These were caught by
+an external PR reviewer, not by any panel (the PR was hand-developed; ac.md is
+synthetic, written from the slice's approved plan requirements — the two
+declared criteria are the ones the head genuinely fails).
+
+PAIRING: defect + its authentic fixes, the tight shape — known-good.patch is
+`git diff 088e45e..83ad131`, exactly the round-2 commit (0e518f6: only the
+"Fixed in <sha>" landed-fix reply shape counts) and the round-3 commit
+(83ad131: the reply author must probe to write/admin, once per author, failing
+closed for suppression) on top of the defect head; nothing else differs.
+
+RH-5: both defects are declared (a comprehensive finding covering both holes
+of the proof satisfies both — the lens33 partial-catch semantics). The head's
+since-cursor and backfill-guard-absence defects are already FIXED at 3db9ed0,
+so they are not present here (they live in the sibling 344-backfill-history).
+"""
+ac_provenance = "synthetic"
+tier = "frontier"       # untested blind-spot class at authoring time (2026-08-31)
+repo = "."
+base = "088e45e07a9d7325e5041a1adac407e37eae946a"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness", "security"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+file = "src/lithos_loom/subscriptions/external_reviews.py"
+keywords = ["held-back", "held back", "Not changed", "unresolved", "did not land", "never landed"]
+min_severity = "major"
+mechanism = """
+HELD-BACK form: the backfill suppression treats ANY reply carrying the
+automated-reply marker as proof its root comment was handled — but the reply
+producer in this same repo (pr_delivery.reply_body) emits that marker on
+held-back replies (the fix existed but the red gate kept it from being pushed)
+and on "Not changed —" replies (the coder disputed and changed nothing). Both
+record the root as explicitly NOT resolved, yet the sweep suppresses those
+roots from [ExternalReview] forever. Only the landed-fix reply shape
+("Fixed in <sha>") proves anything landed.
+"""
+
+[[expected]]
+file = "src/lithos_loom/subscriptions/external_reviews.py"
+keywords = ["forge", "forgeable", "any commenter", "authenticat", "permission", "untrusted", "spoof"]
+min_severity = "major"
+mechanism = """
+FORGERY form: the suppression proof is derived entirely from public body
+strings — the automated-reply marker and the reply text — that any GitHub
+user who can comment on the PR can copy verbatim. An untrusted outsider can
+post a fake landed-fix reply under a trusted reviewer's root comment and hide
+that finding from the operator forever; the reply AUTHOR's identity/repo
+permission is never checked before the reply is allowed to suppress.
+"""
