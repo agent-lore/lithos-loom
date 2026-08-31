@@ -32,7 +32,7 @@ follow-up slice; this module only detects and reports.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -294,7 +294,11 @@ async def ingest_external_reviews(
     ctx: SubscriptionContext,
     *,
     extra_note: str | None = None,
-    pending_marker: Mapping[str, Any] | None = None,
+    pending_marker_for: Callable[
+        [list[PullRequestReview], list[PullRequestReviewComment]],
+        Awaitable[Mapping[str, Any] | None],
+    ]
+    | None = None,
 ) -> IngestResult:
     """Ingest new review activity on one still-open gate's PR. Never raises.
 
@@ -307,13 +311,15 @@ async def ingest_external_reviews(
 
     ``extra_note`` is appended to the finding body (S5b: the remediation
     dispatcher states budget exhaustion *inside* the detection breadcrumb, so
-    going over budget never blinds the operator). ``pending_marker`` (the
-    dispatcher's pending-trigger entry, PR #346 re-review 1) is folded into
-    the SAME ``task_update`` as the seen marks on the posted path — the marks
-    consume the batch, so its dispatch debt must become durable in the same
-    write or not at all (a failed combined write retries the whole batch next
-    sweep). Returns the posted batch for the dispatcher — see
-    :class:`IngestResult`.
+    going over budget never blinds the operator). ``pending_marker_for``
+    (PR #346 re-reviews 1+3) is the dispatcher's pending-trigger provider:
+    called with the actionable batch just before the marker write — so
+    dispatchability (trust, own-sha) is decided BEFORE any durable state —
+    and its entry, if any, is folded into the SAME ``task_update`` as the
+    seen marks. The marks consume the batch, so its dispatch debt must
+    become durable in the same write or not at all (a failed combined write
+    retries the whole batch next sweep). Returns the posted batch for the
+    dispatcher — see :class:`IngestResult`.
     """
     seen = _read_seen(gate, spec.pr_url)
     try:
@@ -390,8 +396,10 @@ async def ingest_external_reviews(
         )
         return IngestResult()
 
-    if pending_marker:
-        marker.update(pending_marker)
+    if pending_marker_for is not None:
+        pending = await pending_marker_for(actionable_reviews, actionable_comments)
+        if pending:
+            marker.update(pending)
     landed = await post_finding_then_mark(
         ctx,
         task_id=story_id,

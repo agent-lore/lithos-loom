@@ -209,12 +209,14 @@ async def reconcile_pr_gate(
             github,
             ctx,
             extra_note=note,
-            # Parked atomically with the seen marks (PR #346 re-review 1):
-            # the marks consume the batch, so its dispatch debt must become
-            # durable in the same write or the whole batch retries.
-            pending_marker=(
-                remediation.pending_marker(spec, story_id)
-                if remediation is not None
+            # Parked atomically with the seen marks, and only for a batch
+            # the provider finds dispatchable (PR #346 re-reviews 1+3): the
+            # marks consume the batch, so its dispatch debt must become
+            # durable in the same write or the whole batch retries — and an
+            # undispatchable batch must neither park nor clear.
+            pending_marker_for=(
+                remediation.pending_marker_provider(spec, story_id, budget, github, ctx)
+                if remediation is not None and budget is not None
                 else None
             ),
         )

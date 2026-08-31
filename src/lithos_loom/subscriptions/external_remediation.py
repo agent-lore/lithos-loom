@@ -279,13 +279,15 @@ class ExternalRemediation:
         reservation landed and the run task started. Never raises.
 
         The pending trigger this decision leans on is parked by INGESTION,
-        atomically with the batch's high-water marks (PR #346 review F1 +
-        re-review 1 — the marks consume the batch, so its dispatch debt must
-        become durable in the same write; a post-hoc write here could fail
-        after the marks landed and lose the batch). consider() then shapes
-        the trigger's fate: an undispatchable batch clears it, a busy slot
+        atomically with the batch's high-water marks and only after the
+        provider found the batch dispatchable (PR #346 review F1 +
+        re-reviews 1/3 — the marks consume the batch, so its dispatch debt
+        must become durable in the same write; and dispatchability is
+        decided pre-park so an undispatchable batch neither parks nor
+        clears). consider() then shapes the trigger's fate: a busy slot
         leaves it for :meth:`resume_pending`, a dispatch consumes it with
-        the reservation.
+        the reservation, and dispatch-time refusals that retrying cannot
+        fix (opt-out, unmapped project) clear it.
         """
         settings = self._settings
         if settings.budget <= 0:
@@ -297,9 +299,10 @@ class ExternalRemediation:
 
         dispatchable = await self._dispatchable(ingest, spec.repo, budget, github, ctx)
         if dispatchable != "yes":
-            # This batch will never dispatch — drop the trigger ingestion
-            # parked with its marks, or a pointless no-op run fires later.
-            await self._clear_pending(gate.id, ctx)
+            # This batch was never parked (the provider applies the same
+            # check pre-park) — and it must NOT clear anything: an older
+            # dispatchable batch's trigger may be waiting out a busy slot,
+            # and its marks are already consumed (PR #346 re-review 3).
             return dispatchable
 
         if self.busy:
@@ -313,27 +316,52 @@ class ExternalRemediation:
 
         return await self._dispatch(gate, spec, story_id, budget, ctx)
 
-    def pending_marker(
-        self, spec: PrGateSpec, story_id: str | None
-    ) -> dict[str, Any] | None:
-        """The pending-trigger entry the sweep folds into ingestion's atomic
-        marker write (PR #346 re-review 1).
+    def pending_marker_provider(
+        self,
+        spec: PrGateSpec,
+        story_id: str | None,
+        budget: RemediationBudget,
+        github: GitHubClient,
+        ctx: SubscriptionContext,
+    ) -> Callable[[list[Any], list[Any]], Awaitable[dict[str, Any] | None]]:
+        """The pending-trigger provider ingestion calls with the actionable
+        batch just before its atomic marker write (PR #346 re-reviews 1+3).
 
-        Minted for every actionable batch a dispatch could ever serve
-        (budget on, a story to record to) — atomicity over precision: trust
-        isn't known pre-ingest, so an over-parked trigger is cleared by
-        consider() or resolved by one refunded no-op resume.
+        Dispatchability — trust AND the own-sha loop guard — is evaluated
+        HERE, before any durable state exists. So the trigger is only ever
+        parked for a batch that would genuinely dispatch, which closes two
+        holes at the root: a later undispatchable batch has nothing to clear
+        (an older batch's parked debt can never be erased by it), and no
+        crash between a park and a clear can hand :meth:`resume_pending` a
+        trigger that bypasses the own-sha guard — an own-sha-only batch is
+        simply never parked.
         """
-        if self._settings.budget <= 0 or story_id is None:
-            return None
-        return {PENDING_KEY: {"pr_url": spec.pr_url}}
+
+        async def provider(
+            reviews: list[Any], comments: list[Any]
+        ) -> dict[str, Any] | None:
+            if self._settings.budget <= 0 or story_id is None:
+                return None
+            batch = IngestResult(
+                posted=True,
+                actionable_reviews=list(reviews),
+                actionable_comments=list(comments),
+            )
+            verdict = await self._dispatchable(batch, spec.repo, budget, github, ctx)
+            if verdict != "yes":
+                return None
+            return {PENDING_KEY: {"pr_url": spec.pr_url}}
+
+        return provider
 
     async def _clear_pending(self, gate_id: Any, ctx: SubscriptionContext) -> None:
-        """Drop a parked trigger for an outcome that will never dispatch.
+        """Drop a parked trigger for a dispatch-time refusal that retrying
+        cannot fix (explicit project opt-out, unmapped project).
 
-        Best-effort, and unconditional (the caller's gate snapshot predates
-        ingestion's parking write): a failed or needless clear costs at most
-        one refunded no-op resume.
+        Never called for a merely-undispatchable *batch* — such a batch was
+        never parked, and a newer batch must not erase an older batch's debt
+        (PR #346 re-review 3). Best-effort: a failed clear costs at most one
+        refunded no-op resume.
         """
         await write_marker(
             ctx,
@@ -354,13 +382,15 @@ class ExternalRemediation:
         """Fire a parked pending trigger on a sweep with no new batch.
 
         ``None`` when no trigger is parked for this PR url. The resumed
-        dispatch skips the batch pre-filter (the material is gone — its marks
-        were advanced when it posted); converge re-fetches the PR's live
-        findings and re-applies the trust line itself, and a run that finds
-        nothing live exits 0-without-JSON, refunding the round. The trigger
-        survives a busy slot and an exhausted budget (a human push resets the
-        budget and the trigger then fires) and is consumed atomically with
-        the budget reservation on dispatch.
+        dispatch needs no dispatchability revalidation: a trigger only
+        exists for a batch the provider already found trusted and
+        non-own-sha at park time (re-review 3) — material predating any
+        later loom push stays non-own-sha by construction — and converge
+        re-applies the trust line to whatever it re-fetches, refunding the
+        round when nothing live remains. The trigger survives a busy slot
+        and an exhausted budget (a human push resets the budget and the
+        trigger then fires) and is consumed atomically with the budget
+        reservation on dispatch.
         """
         raw = gate.metadata.get(PENDING_KEY)
         if not isinstance(raw, dict) or raw.get("pr_url") != spec.pr_url:

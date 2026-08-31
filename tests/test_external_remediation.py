@@ -665,22 +665,47 @@ async def test_parked_trigger_survives_busy_and_resumes(tmp_path: Path) -> None:
     assert PENDING_KEY not in refreshed.metadata
 
 
-def test_pending_marker_minted_only_when_dispatch_is_possible(
+async def test_pending_marker_minted_only_for_a_dispatchable_batch(
     tmp_path: Path,
 ) -> None:
-    """The trigger ingestion parks rides its atomic marker write — but only
-    when a dispatch could ever happen (budget on, a story to record to)."""
+    """PR #346 re-review 3: dispatchability (trust + own-sha) is evaluated
+    BEFORE the atomic parking write, so the trigger only ever exists for a
+    batch that would genuinely dispatch — an undispatchable batch neither
+    parks nor (later) clears, closing both the older-debt-erasure and the
+    own-sha crash-window holes at the root."""
     from lithos_loom.gates import PrGateSpec
     from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
+    client = FakeLithosClient()
     spec = PrGateSpec(repo="agent-lore/lithos-lens", pr_number=62, pr_url=_PR_URL)
     rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
-    assert rem.pending_marker(spec, "story-1") == {PENDING_KEY: {"pr_url": _PR_URL}}
-    assert rem.pending_marker(spec, None) is None
+    budget = RemediationBudget(pr_url=_PR_URL, last_loom_pushed_sha=_LOOM_SHA)
+    provider = rem.pending_marker_provider(
+        spec, "story-1", budget, _github(), _ctx(client)
+    )
+
+    # Trusted material at a fresh sha: parked.
+    assert await provider([_review()], []) == {PENDING_KEY: {"pr_url": _PR_URL}}
+    # Untrusted-only material: never parked.
+    untrusted = rem.pending_marker_provider(
+        spec, "story-1", budget, _github(permission="read"), _ctx(client)
+    )
+    assert await untrusted([_review(author="drive-by")], []) is None
+    # Own-sha-only material (a re-review of loom's own fix): never parked —
+    # so no crash between park and clear can ever hand resume_pending a
+    # trigger that bypasses the own-sha loop guard.
+    assert await provider([_review(commit_id=_LOOM_SHA)], []) is None
+
+    # Budget off / no story: no parking either.
+    no_story = rem.pending_marker_provider(spec, None, budget, _github(), _ctx(client))
+    assert await no_story([_review()], []) is None
     disabled = ExternalRemediation(
         _settings(tmp_path, budget=0), spawn=_spawner(None)[0]
     )
-    assert disabled.pending_marker(spec, "story-1") is None
+    off = disabled.pending_marker_provider(
+        spec, "story-1", budget, _github(), _ctx(client)
+    )
+    assert await off([_review()], []) is None
 
 
 async def test_resume_pending_is_a_noop_without_a_trigger(tmp_path: Path) -> None:
@@ -726,12 +751,13 @@ async def test_resume_pending_respects_the_budget_and_keeps_the_trigger(
     assert PENDING_KEY in refreshed.metadata  # kept for after a reset
 
 
-async def test_terminal_consider_outcomes_clear_the_parked_trigger(
+async def test_undispatchable_batch_never_erases_older_parked_debt(
     tmp_path: Path,
 ) -> None:
-    """Ingestion parks the trigger for every actionable batch (atomicity over
-    precision); a consider outcome that will never dispatch — no trusted
-    author here — clears it so no pointless no-op run fires later."""
+    """PR #346 re-review 3, finding 1 (the reviewer's exact probe): a trusted
+    batch's trigger is parked while the slot is busy; a LATER untrusted-only
+    (or own-sha-only) batch must not clear that PR-wide bit — the older
+    batch's marks are consumed, so its debt would be lost permanently."""
     from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
     client = FakeLithosClient()
@@ -751,11 +777,30 @@ async def test_terminal_consider_outcomes_clear_the_parked_trigger(
         ingest=_ingest(actionable_reviews=[_review(author="drive-by")]),
         github=_github(permission="read"),
     )
-
     assert label == "no_trusted"
     refreshed = await client.task_get(task_id=gate.id)
     assert refreshed is not None
-    assert PENDING_KEY not in refreshed.metadata
+    assert PENDING_KEY in refreshed.metadata  # older debt preserved
+
+    # Same for an own-sha-only batch.
+    budget = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=1, last_loom_pushed_sha=_LOOM_SHA
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    label = await rem.consider(
+        gate,
+        spec,
+        story,
+        budget,
+        _ingest(actionable_reviews=[_review(commit_id=_LOOM_SHA)]),
+        _github(),
+        _ctx(client),
+    )
+    assert label == "own_sha_only"
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert PENDING_KEY in refreshed.metadata
 
 
 async def test_project_settings_read_failure_fails_closed(tmp_path: Path) -> None:

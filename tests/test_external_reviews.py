@@ -807,13 +807,20 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     github = _github(reviews=[_review(500)])
     spec = parse_pr_gate(gate)
     assert spec is not None
-    pending = {"external_remediation_pending": {"pr_url": spec.pr_url}}
+    seen_batches: list[tuple[int, int]] = []
+
+    async def provider(reviews: Any, comments: Any) -> dict[str, Any]:
+        # The dispatcher's provider sees the actionable batch (it evaluates
+        # trust + own-sha BEFORE the durable write — re-review 3).
+        seen_batches.append((len(reviews), len(comments)))
+        return {"external_remediation_pending": {"pr_url": spec.pr_url}}
 
     result = await ingest_external_reviews(
-        gate, spec, story, github, _ctx(client), pending_marker=pending
+        gate, spec, story, github, _ctx(client), pending_marker_for=provider
     )
 
     assert result.posted
+    assert seen_batches == [(1, 0)]
     refreshed = await client.task_get(task_id=gate.id)
     assert refreshed is not None
     assert REVIEW_SEEN_KEY in refreshed.metadata
@@ -834,13 +841,16 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     spec2 = parse_pr_gate(gate2)
     assert spec2 is not None
 
+    async def provider2(reviews: Any, comments: Any) -> dict[str, Any]:
+        return {"external_remediation_pending": {"pr_url": spec2.pr_url}}
+
     result = await ingest_external_reviews(
         gate2,
         spec2,
         story2,
         _github(reviews=[_review(500)]),
         _ctx(client2),
-        pending_marker={"external_remediation_pending": {"pr_url": spec2.pr_url}},
+        pending_marker_for=provider2,
     )
 
     assert not result.posted
