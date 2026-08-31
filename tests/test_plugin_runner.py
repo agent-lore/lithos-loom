@@ -84,6 +84,50 @@ def test_result_schema_accepts_run_id() -> None:
     )
 
 
+def test_result_schema_accepts_escalation_block() -> None:
+    # b91177d2: a failed run may describe why it stopped in the shape the
+    # runner's needs-human gate is built from.
+    validate_result_schema(
+        {
+            "schema_version": 1,
+            "task_id": "t1",
+            "status": "failed",
+            "exit_code": 1,
+            "error": {"category": "agent", "message": "stalled"},
+            "escalation": {
+                "reason": "stalled",
+                "summary": "round 4: stalled — no new commit",
+                "brief": {"branch": "b", "rounds": 4, "cost_usd": 12.5},
+            },
+        }
+    )
+    # `reason` is a closed vocabulary — an unknown one is a contract violation.
+    with pytest.raises(PluginContractError):
+        validate_result_schema(
+            {
+                "schema_version": 1,
+                "task_id": "t1",
+                "status": "failed",
+                "exit_code": 1,
+                "escalation": {"reason": "because", "summary": "x"},
+            }
+        )
+
+
+def test_result_schema_escalation_reasons_match_the_gate_vocabulary() -> None:
+    """The schema enum and gates.ESCALATION_REASONS are the same closed set —
+    a reason a plugin may report is one the gate accepts, and vice versa."""
+    from lithos_loom.gates import ESCALATION_REASONS
+    from lithos_loom.plugin_runner import _load_result_schema
+
+    schema = _load_result_schema()
+    variants = schema["properties"]["escalation"]["oneOf"]
+    enum = next(v for v in variants if v.get("type") == "object")["properties"][
+        "reason"
+    ]["enum"]
+    assert set(enum) == ESCALATION_REASONS
+
+
 # ── write_result_atomically ────────────────────────────────────────────
 
 

@@ -40,7 +40,7 @@ Child-process entrypoints spawned by the supervisor (watcher / sync child mains)
 
 ## Dependencies
 
-- Depends on: [Bus](Bus.md), [Config](Config.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Sources](Sources.md), [State](State.md), [Subscriptions](Subscriptions.md)
+- Depends on: [Bus](Bus.md), [Config](Config.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Notifications](Notifications.md), [Sources](Sources.md), [State](State.md), [Subscriptions](Subscriptions.md)
 - Used by: —
 
 [← all generated docs](../README.md)

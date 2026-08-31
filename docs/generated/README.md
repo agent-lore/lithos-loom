@@ -27,7 +27,7 @@ Do not edit these files by hand.
 
 ## Components
 
-Per-component drill-down pages: [Bus](components/Bus.md) · [Children](components/Children.md) · [Cli](components/Cli.md) · [Config](components/Config.md) · [Doctor](components/Doctor.md) · [Entrypoint](components/Entrypoint.md) · [Errors](components/Errors.md) · [Evals](components/Evals.md) · [GitHub](components/GitHub.md) · [LithosClient](components/LithosClient.md) · [Plugins](components/Plugins.md) · [ProjectContext](components/ProjectContext.md) · [Render](components/Render.md) · [Runners](components/Runners.md) · [Sources](components/Sources.md) · [State](components/State.md) · [Subscriptions](components/Subscriptions.md) · [Supervisor](components/Supervisor.md) · [Tasks](components/Tasks.md)
+Per-component drill-down pages: [Bus](components/Bus.md) · [Children](components/Children.md) · [Cli](components/Cli.md) · [Config](components/Config.md) · [Doctor](components/Doctor.md) · [Entrypoint](components/Entrypoint.md) · [Errors](components/Errors.md) · [Evals](components/Evals.md) · [GitHub](components/GitHub.md) · [LithosClient](components/LithosClient.md) · [Notifications](components/Notifications.md) · [Plugins](components/Plugins.md) · [ProjectContext](components/ProjectContext.md) · [Render](components/Render.md) · [Runners](components/Runners.md) · [Sources](components/Sources.md) · [State](components/State.md) · [Subscriptions](components/Subscriptions.md) · [Supervisor](components/Supervisor.md) · [Tasks](components/Tasks.md)
 
 ## Legend
 

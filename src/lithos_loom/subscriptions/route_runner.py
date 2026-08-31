@@ -6,8 +6,13 @@ It listens for ``lithos.task.created`` / ``lithos.task.updated`` /
 ``RouteMatch.tags``, claims the task via Lithos, runs the configured plugin
 subprocess, and applies the resulting status:
 
-* ``status="succeeded"`` → ``task_complete`` (releases all claims)
-* ``status="failed"`` → ``task_release`` + ``[BlockerFailed]`` finding
+* ``status="succeeded"`` → ``task_complete`` (releases all claims), or for a
+  ``completes_task = false`` route a ``pr`` gate + ``task_release``
+  (:mod:`.delivery_gate`)
+* ``status="failed"`` (and every other non-delivering exit) → a loom
+  ``human`` gate blocking the story + ``[NeedsHuman]`` finding +
+  ``task_release`` (:mod:`.escalation`, b91177d2); ``[BlockerFailed]`` only
+  on the marker-only fallback
 * ``status="interrupted"`` → ``task_release`` (no finding — operator
   signal, not an error). When the result also carries a ``resume`` block
   (``resume_after`` timestamp — e.g. a story-develop run checkpointed on a
@@ -42,16 +47,23 @@ from typing import Any
 from lithos_loom.bus import Event, EventBus, Subscription
 from lithos_loom.config import RouteConfig
 from lithos_loom.errors import LithosClientError, PluginContractError
-from lithos_loom.gates import STORY_GATE_ID_KEY, create_pr_gate_best_effort
 from lithos_loom.plugin_runner import run_plugin
+from lithos_loom.subscriptions.delivery_gate import gate_and_release
 from lithos_loom.subscriptions.dispatch_guards import (
     AttemptStampStore,
     clear_superseded_failure,
     declines_bootstrap_replay,
-    last_attempt_key,
     on_ready_frontier,
     release_with_failure,
+    task_payload,
 )
+from lithos_loom.subscriptions.escalation import (
+    Escalation,
+    clear_resolved_escalation,
+    escalate_with_failure,
+    escalation_from_result,
+)
+from lithos_loom.subscriptions.escalation_resolver import GATE_RESOLVED_ORIGIN
 
 __all__ = ["PluginRunFn", "RouteRunner"]
 
@@ -79,35 +91,10 @@ _HANDLED_EVENT_TYPES = (
 # Re-dispatch budget for `interrupted` results carrying a `resume` block.
 # Each resume re-runs the full plugin (container spin-up + agent spend), so
 # a run that keeps hitting its provider limit must not retry unbounded —
-# after this many resumes the task is left open with a [Friction] finding
-# for the operator. Distinct from the failure retry budget (issue #11):
+# after this many resumes the task is escalated (needs-human gate, reason
+# resume_exhausted). Distinct from the failure retry budget (issue #11):
 # resume is "try again after the limit lifts", not "retry a failure".
 MAX_RESUMES_PER_TASK = 3
-
-
-def _task_to_payload(task: Any) -> dict[str, Any]:
-    """Build an event-shaped payload from a fresh :class:`Task` snapshot.
-
-    Mirrors the fields ``_handle`` reads and the runner writes into
-    ``task.json`` (id / status / title / description / tags / metadata), so a
-    resumed run develops against the task's CURRENT content, not the snapshot
-    captured when it was interrupted.
-
-    Deliberately omits ``task_type``: this payload feeds only the runner's own
-    re-dispatch / resume nudges, which reach route matching (tags only) — never
-    the projection. A gate never flows here (no trigger tags → no route claims
-    it), so there is nothing for a type to disambiguate. The projection's
-    source, ``LithosEventStream._event_payload``, is where ``task_type`` is
-    carried.
-    """
-    return {
-        "id": task.id,
-        "title": task.title,
-        "status": task.status,
-        "description": task.description or "",
-        "tags": list(task.tags),
-        "metadata": dict(task.metadata),
-    }
 
 
 @dataclass
@@ -149,6 +136,11 @@ class RouteRunner:
         registered project instead of baking an absolute path into the
         command. Empty by default — routes that don't use ``{{repo}}``
         don't need it.
+    notifier:
+        The push-notification sinks (:class:`~lithos_loom.notifications.Notifier`)
+        fired once when a run ends without delivering and a needs-human gate
+        is raised (b91177d2). ``None`` → no push; the gate + finding still
+        land (the pull surfaces).
     """
 
     route: RouteConfig
@@ -160,6 +152,7 @@ class RouteRunner:
     retain_failed_workdirs: bool = True
     plugin_runner: PluginRunFn = field(default=run_plugin)
     project_repos: Mapping[str, Path] = field(default_factory=dict)
+    notifier: Any = None
 
     def __post_init__(self) -> None:
         # #339: per-(route, task) updated_at stamps for the exact
@@ -230,6 +223,11 @@ class RouteRunner:
             return
         if payload.get("status") != "open":
             return  # nothing to do for terminal-state observations
+        if event.origin == GATE_RESOLVED_ORIGIN:
+            # b91177d2: the operator completed this story's needs-human gate —
+            # THE retry gesture. The in-process "fail once per task" set
+            # (below) would otherwise swallow it until a restart.
+            self._processed_tasks.discard(task_id)
         if task_id in self._processed_tasks:
             logger.debug(
                 "RouteRunner %s: skipping stale event for already-processed %s",
@@ -290,6 +288,19 @@ class RouteRunner:
         # task ID are skipped rather than racing into a second plugin run.
         self._processed_tasks.add(task_id)
         logger.info("RouteRunner %s: claimed %s", self.route.name, task_id)
+        # b91177d2: a story carrying a needs-human gate id that has just passed
+        # the readiness check has had its gate resolved — clear the provenance
+        # + the failed-attempt marker HERE, on every origin, so the loop's
+        # correctness never depends on the live resolver nudge (a gate ticked
+        # while the daemon was down arrives via bootstrap, not the resolver).
+        await clear_resolved_escalation(
+            self.lithos,
+            task_id=task_id,
+            route=self.route.name,
+            agent=self.agent_id,
+            payload=payload,
+            stamps=self._attempt_stamps,
+        )
         await self._run_claimed_task(task_id, payload)
 
     async def _is_ready(self, task_id: str, metadata: Mapping[str, Any]) -> bool:
@@ -328,7 +339,7 @@ class RouteRunner:
                     Event(
                         type="lithos.task.updated",
                         timestamp=datetime.now(UTC),
-                        payload=_task_to_payload(task),
+                        payload=task_payload(task),
                     )
                 )
                 logger.info(
@@ -409,15 +420,25 @@ class RouteRunner:
                     max_runtime_seconds=self.route.max_runtime_seconds,
                 )
             except PluginContractError as exc:
-                await self._release_with_finding(
+                # No usable result — the runner has only the exception and
+                # the retained work dir to brief the human with.
+                await self._escalate(
                     task_id,
-                    f"plugin contract violation: {exc}",
+                    Escalation(
+                        reason="contract_violation",
+                        summary=f"plugin contract violation: {exc}",
+                        brief={"work_dir": str(work_dir)},
+                    ),
                     payload=payload,
                 )
             except TimeoutError as exc:
-                await self._release_with_finding(
+                await self._escalate(
                     task_id,
-                    f"plugin exceeded max runtime: {exc}",
+                    Escalation(
+                        reason="timeout",
+                        summary=f"plugin exceeded max runtime: {exc}",
+                        brief={"work_dir": str(work_dir)},
+                    ),
                     payload=payload,
                 )
             else:
@@ -475,11 +496,12 @@ class RouteRunner:
                 await self._gate_and_release(task_id, payload, result)
             return True
         if status == "failed":
-            err = result.get("error") or {}
-            err_msg = err.get("message") if isinstance(err, dict) else None
-            await self._release_with_finding(
+            # b91177d2: the run ended without delivering — raise the
+            # needs-human gate from the plugin's own `escalation` block (or a
+            # composed one), never re-run on our own.
+            await self._escalate(
                 task_id,
-                f"plugin reported failure: {err_msg or 'no error message'}",
+                escalation_from_result(result, detail="plugin reported failure"),
                 payload=payload,
                 run_id=result.get("run_id"),
             )
@@ -515,11 +537,14 @@ class RouteRunner:
             # plugin says WHEN a re-run is expected to succeed.
             resume = result.get("resume")
             if isinstance(resume, Mapping):
-                await self._maybe_schedule_resume(task_id, resume)
+                await self._maybe_schedule_resume(task_id, resume, payload)
             return False
-        await self._release_with_finding(
+        await self._escalate(
             task_id,
-            f"plugin returned unknown status {status!r}",
+            Escalation(
+                reason="contract_violation",
+                summary=f"plugin returned unknown status {status!r}",
+            ),
             payload=payload,
             run_id=result.get("run_id"),
         )
@@ -531,6 +556,7 @@ class RouteRunner:
         self,
         task_id: str,
         resume: Mapping[str, Any],
+        payload: Mapping[str, Any],
     ) -> None:
         raw = resume.get("resume_after")
         try:
@@ -549,21 +575,28 @@ class RouteRunner:
         used = self._resume_counts.get(task_id, 0)
         if used >= MAX_RESUMES_PER_TASK:
             logger.warning(
-                "RouteRunner %s: %s exhausted its resume budget (%d); leaving open",
+                "RouteRunner %s: %s exhausted its resume budget (%d); escalating",
                 self.route.name,
                 task_id,
                 MAX_RESUMES_PER_TASK,
             )
-            with contextlib.suppress(Exception):
-                await self.lithos.finding_post(
-                    task_id=task_id,
+            # b91177d2: a run that keeps hitting its provider limit is a
+            # human's problem now, not a retry's. The claim was already
+            # released on the interrupted path, so this raises the gate + the
+            # [NeedsHuman] finding without releasing again.
+            await self._escalate(
+                task_id,
+                Escalation(
+                    reason="resume_exhausted",
                     summary=(
-                        f"[Friction] route {self.route.name}: usage-limited run "
-                        f"resume budget exhausted ({MAX_RESUMES_PER_TASK} "
-                        "re-dispatches); the task stays open for the operator"
+                        "usage-limited run resume budget exhausted "
+                        f"({MAX_RESUMES_PER_TASK} re-dispatches)"
                     ),
-                    agent=self.agent_id,
-                )
+                ),
+                payload=payload,
+                run_id=resume.get("run_id"),
+                release=False,
+            )
             return
         self._resume_counts[task_id] = used + 1
         existing = self._resume_tasks.get(task_id)
@@ -634,7 +667,7 @@ class RouteRunner:
                 Event(
                     type="loom.route.resume",
                     timestamp=datetime.now(UTC),
-                    payload=_task_to_payload(task),
+                    payload=task_payload(task),
                 )
             )
         except asyncio.CancelledError:
@@ -654,8 +687,11 @@ class RouteRunner:
         payload: Mapping[str, Any],
         run_id: Any = None,
     ) -> None:
-        # The failure-path contract (marker + stamp + finding + release)
-        # lives with its guards in dispatch_guards.release_with_failure.
+        # The marker-only failure path (marker + stamp + [BlockerFailed] +
+        # release) — kept for the one non-delivering exit that is NOT a story
+        # decision: a misconfigured route (a host problem; a gate per task
+        # would be spam and completing it fails again). Everything else goes
+        # through _escalate.
         await release_with_failure(
             self.lithos,
             task_id=task_id,
@@ -667,119 +703,49 @@ class RouteRunner:
             stamps=self._attempt_stamps,
         )
 
+    async def _escalate(
+        self,
+        task_id: str,
+        escalation: Escalation,
+        *,
+        payload: Mapping[str, Any],
+        run_id: Any = None,
+        release: bool = True,
+    ) -> None:
+        # The non-delivering exit (b91177d2): needs-human gate + marker naming
+        # it + [NeedsHuman] finding + push notification + release, with the
+        # marker-only path as the fallback when no gate can be raised. Lives
+        # with its guards in dispatch_guards.escalate_with_failure.
+        await escalate_with_failure(
+            self.lithos,
+            task_id=task_id,
+            route=self.route.name,
+            agent=self.agent_id,
+            payload=payload,
+            escalation=escalation,
+            run_id=run_id,
+            stamps=self._attempt_stamps,
+            notifier=self.notifier,
+            release=release,
+        )
+
     async def _gate_and_release(
         self,
         task_id: str,
         payload: Mapping[str, Any],
         result: Mapping[str, Any],
     ) -> None:
-        """Gate a delivered task on human merge, then release (``completes_task
-        =false``).
-
-        Epic H: create a ``pr`` gate from the run's ``pr_url`` so "awaiting
-        merge" is a first-class blocker, record its id on the story as
-        provenance, and release the claim (don't hold it across a potentially
-        long human wait). Each step's failure is degraded, not fatal — the
-        branch + PR exist regardless — so we collect the consequences and post
-        ONE ``[Friction]`` making the degraded state visible in Lithos rather
-        than only logging.
-
-        The gate is the sole re-dispatch guard now (US11 retired
-        ``loom_delivered``): a gated story is absent from ``task_ready``, so the
-        runner won't re-develop it. Gate creation is therefore load-bearing and
-        best-effort: if ``pr_url`` is missing (a PR-less success — for
-        story-develop, #194 makes that impossible, but the runner is
-        plugin-agnostic) or the write fails, NO gate exists and the loud
-        ``[Friction]`` (carried in ``gate_problem``) warns that a restart could
-        re-develop the story into a duplicate PR until a human merges the PR or
-        creates the gate.
-        """
-        problems: list[str] = []
-
-        project = (payload.get("metadata") or {}).get("project")
-        gate_id, gate_problem = await create_pr_gate_best_effort(
+        # The delivering exit (Epic H): pr gate + provenance + release, with
+        # ONE [Friction] for any degraded step. Lives in delivery_gate.
+        await gate_and_release(
             self.lithos,
-            story_id=task_id,
-            story_title=str(payload.get("title") or task_id),
-            pr_url=result.get("pr_url"),
-            project=project if isinstance(project, str) else None,
+            task_id=task_id,
+            route=self.route.name,
             agent=self.agent_id,
+            payload=payload,
+            result=result,
+            stamps=self._attempt_stamps,
         )
-        if gate_problem is not None:
-            problems.append(gate_problem)
-
-        # Record the gate on the story as provenance (the inverse of the
-        # waits_on_gate edge, so an operator sees which gate withholds the story
-        # without walking edges). Only written when a gate exists; loom_delivered
-        # is retired (US11) — the gate plus the runner's task_ready check are the
-        # whole re-dispatch guard.
-        story_metadata: dict[str, Any] = {}
-        if gate_id is not None:
-            story_metadata[STORY_GATE_ID_KEY] = gate_id
-            # A delivery supersedes any earlier failed attempt: per-key
-            # delete of the marker on the same write. Skipped when no gate
-            # exists — the loud [Friction] owns that state, and a leftover
-            # marker only declines bootstrap replay, the safe direction.
-            story_metadata[last_attempt_key(self.route.name)] = None
-
-        marked = True
-        if story_metadata:
-            try:
-                await self.lithos.task_update(
-                    task_id=task_id,
-                    agent=self.agent_id,
-                    metadata=story_metadata,
-                )
-                # The marker delete rode along on this write — retire its
-                # local stamp with it (#339).
-                self._attempt_stamps.clear(self.route.name, task_id)
-            except Exception:
-                marked = False
-                logger.exception(
-                    "RouteRunner %s: recording pr_gate_id on %s failed",
-                    self.route.name,
-                    task_id,
-                )
-        released = True
-        try:
-            await self.lithos.task_release(
-                task_id=task_id, aspect=self.route.name, agent=self.agent_id
-            )
-        except Exception:
-            released = False
-            logger.exception(
-                "RouteRunner %s: task_release failed for %s", self.route.name, task_id
-            )
-        if not marked:
-            # We only attempt the write when a gate exists, so reaching here
-            # means the gate is present but its provenance id didn't land. The
-            # gate already blocks re-dispatch (a gated story is absent from the
-            # ready frontier), so the missing marker is benign.
-            problems.append(
-                "could not record pr_gate_id on the story, but the pr gate "
-                "already blocks re-dispatch"
-            )
-        if not released:
-            problems.append(
-                "could not release the claim — it will linger until its TTL "
-                "expires, briefly blocking other runners"
-            )
-        if not problems:
-            logger.info(
-                "RouteRunner %s: delivered %s — gated on merge (gate %s)",
-                self.route.name,
-                task_id,
-                gate_id,
-            )
-            return
-        summary = (
-            f"[Friction] route {self.route.name}: delivered task (PR raised) but "
-            + "; ".join(problems)
-        )
-        with contextlib.suppress(Exception):
-            await self.lithos.finding_post(
-                task_id=task_id, summary=summary, agent=self.agent_id
-            )
 
     def _cleanup_work_dir(self, work_dir: Path, *, success: bool) -> None:
         if success or not self.retain_failed_workdirs:

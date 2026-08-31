@@ -51,9 +51,24 @@ pre-guard behaviour, never a stuck task.
 A live ``lithos.task.updated`` reaching a runner that has not suppressed
 the task in-process, and the T10 resume re-dispatch, bypass the decline by
 origin. A later gated delivery clears the marker
-(``route_runner._gate_and_release``), and an ``interrupted`` run clears it
+(``delivery_gate.gate_and_release``), and an ``interrupted`` run clears it
 too — interrupted's designed recovery IS the restart bootstrap, which a
 stale failure marker must not veto.
+
+The needs-human gate supersedes the marker (b91177d2):
+
+Since the escalation convention, the failure path's primary guard is a
+loom-raised ``human`` gate joined to the story by a ``waits_on_gate`` edge —
+the story is then *structurally* off the ready frontier, which the readiness
+check enforces on every origin, and completing the gate is the operator's
+explicit "run it again". The marker still gets written (provenance: status,
+run id, ended_at) but carries the ``gate_id``, and **a marker with a
+``gate_id`` never declines** — the gate is the guard, and a marker that kept
+declining after the gate was ticked would strand the story. The marker's
+fingerprint / stamp semantics apply only when gate creation FAILED
+(``escalate_with_failure`` posts ``[Friction]`` for that), i.e. exactly the
+pre-gate behaviour as the fallback. The two cannot disagree: with a gate the
+marker abstains; without one the marker is all there is.
 
 Reserved namespace: plugins see ``loom_last_attempt:*`` in their
 ``task.json`` metadata and must not repurpose it (SPECIFICATION §2.2).
@@ -71,6 +86,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from lithos_loom.gates import STORY_HUMAN_GATE_ID_KEY
+
 __all__ = [
     "LAST_ATTEMPT_KEY_PREFIX",
     "READY_QUERY_LIMIT",
@@ -82,6 +99,7 @@ __all__ = [
     "record_failed_attempt",
     "release_with_failure",
     "task_fingerprint",
+    "task_payload",
 ]
 
 logger = logging.getLogger(__name__)
@@ -131,6 +149,31 @@ def task_fingerprint(payload: Mapping[str, Any]) -> str:
 # such a frontier, so ask for far more and treat a full page as undetermined
 # rather than as "not ready" (see `on_ready_frontier`).
 READY_QUERY_LIMIT = 500
+
+
+def task_payload(task: Any) -> dict[str, Any]:
+    """Build an event-shaped payload from a fresh :class:`Task` snapshot.
+
+    Mirrors the fields ``RouteRunner._handle`` reads and the runner writes
+    into ``task.json`` (id / status / title / description / tags / metadata),
+    so a re-dispatch develops against the task's CURRENT content, not the
+    snapshot captured when it was interrupted or escalated.
+
+    Deliberately omits ``task_type``: this payload feeds only loom's own
+    re-dispatch nudges (the T10 resume, the US6 unblock, the gate-resolved
+    nudge), which reach route matching (tags only) — never the projection. A
+    gate never flows here (no trigger tags → no route claims it), so there is
+    nothing for a type to disambiguate. The projection's source,
+    ``LithosEventStream._event_payload``, is where ``task_type`` is carried.
+    """
+    return {
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "description": task.description or "",
+        "tags": list(task.tags),
+        "metadata": dict(task.metadata),
+    }
 
 
 class _GuardClient(Protocol):
@@ -320,6 +363,19 @@ def declines_bootstrap_replay(
     last = failed_attempt_for_route(metadata, route)
     if last is None:
         return False
+    if last.get("gate_id"):
+        # b91177d2: the failure raised a needs-human gate, and the gate is the
+        # guard — open, it keeps the story off the ready frontier (checked on
+        # every origin); completed, it IS the operator's retry. A marker that
+        # kept declining here would strand the story after the tick.
+        logger.debug(
+            "RouteRunner %s: %s's failed-attempt marker names gate %s; the gate "
+            "decides, not the marker",
+            route,
+            task_id,
+            last["gate_id"],
+        )
+        return False
     recorded_stamp = stamps.read(route, task_id) if stamps is not None else None
     payload_stamp = payload.get("updated_at")
     if recorded_stamp is not None and isinstance(payload_stamp, str) and payload_stamp:
@@ -362,8 +418,10 @@ async def record_failed_attempt(
     payload: Mapping[str, Any],
     run_id: str | None = None,
     stamps: AttemptStampStore | None = None,
-) -> None:
-    """Best-effort persist the failed attempt on the task.
+    gate_id: str | None = None,
+) -> bool:
+    """Best-effort persist the failed attempt on the task. Returns whether
+    the write landed.
 
     Called BEFORE the claim release so the record exists by the time the task
     is externally visible as unclaimed. A Lithos hiccup here must never mask
@@ -371,6 +429,14 @@ async def record_failed_attempt(
     and swallowed. ``task_update`` metadata is an additive per-key merge, so
     this cannot clobber ``develop_status``, ``pr_gate_id``, or any
     plugin-written key.
+
+    With *gate_id* (b91177d2) the marker names the needs-human gate that now
+    guards the story — the marker then never declines (see
+    :func:`declines_bootstrap_replay`) — and the story's provenance key
+    ``needs_human_gate_id`` rides on the SAME write, so the two cannot land
+    apart. No stamp is recorded in that case: the marker abstains, so the
+    stamp would only ever speak for a future gate-less failure (any stale
+    one is cleared).
 
     On a lithos#415 server the update response returns the write's own
     ``updated_at`` — the stamp of the failure path's LAST bumping mutation
@@ -385,19 +451,26 @@ async def record_failed_attempt(
     }
     if run_id:
         marker["run_id"] = run_id
+    if gate_id:
+        marker["gate_id"] = gate_id
     key = last_attempt_key(route)
+    metadata: dict[str, Any] = {key: marker}
+    if gate_id:
+        metadata[STORY_HUMAN_GATE_ID_KEY] = gate_id
     try:
         stamp = await lithos.task_update(
             task_id=task_id,
             agent=agent,
-            metadata={key: marker},
+            metadata=metadata,
         )
     except Exception:
         logger.exception("route %s: recording %s on %s failed", route, key, task_id)
-        return
+        return False
     if stamps is None:
-        return
-    if isinstance(stamp, datetime):
+        return True
+    if gate_id:
+        stamps.clear(route, task_id)
+    elif isinstance(stamp, datetime):
         stamps.record(route, task_id, stamp.isoformat())
     elif isinstance(stamp, str) and stamp:
         stamps.record(route, task_id, stamp)
@@ -407,6 +480,7 @@ async def record_failed_attempt(
         # stamp always mismatches, which would nullify the guard into a
         # dispatch on every restart. Absent stamp = fingerprint fallback.
         stamps.clear(route, task_id)
+    return True
 
 
 async def release_with_failure(
@@ -419,6 +493,7 @@ async def release_with_failure(
     payload: Mapping[str, Any],
     run_id: Any = None,
     stamps: AttemptStampStore | None = None,
+    release: bool = True,
 ) -> None:
     """The whole failure-path release: marker (+stamp), finding, release.
 
@@ -444,6 +519,8 @@ async def release_with_failure(
         await lithos.finding_post(task_id=task_id, summary=summary, agent=agent)
     except Exception:
         logger.exception("RouteRunner %s: finding_post failed for %s", route, task_id)
+    if not release:
+        return
     try:
         await lithos.task_release(task_id=task_id, aspect=route, agent=agent)
     except Exception:

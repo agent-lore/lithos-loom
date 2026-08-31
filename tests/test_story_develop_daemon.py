@@ -1275,6 +1275,125 @@ def test_build_result_payload_delivery_failure_is_failed(tmp_path: Path) -> None
     validate_result_schema(payload)
 
 
+# ── escalation block (b91177d2 — the needs-human gate's brief) ──────────
+
+
+@pytest.mark.parametrize(
+    "status", ["max_rounds", "stalled", "disputed", "cost_exceeded"]
+)
+def test_build_result_payload_stop_statuses_escalate_verbatim(
+    tmp_path: Path, status: str
+) -> None:
+    """A T7 stop names itself as the escalation reason, with the bare
+    CycleExit reason (not the decorated message) as the summary and the brief
+    every August rescue needed by hand."""
+    payload, _ = build_result_payload(
+        _result(status, tmp_path, failure_reason="round 4: stalled — nothing new"),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    escalation = payload["escalation"]
+    assert escalation["reason"] == status
+    assert escalation["summary"] == "round 4: stalled — nothing new"
+    assert escalation["brief"] == {
+        "branch": "b",
+        "rounds": 2,
+        "cost_usd": 1.0,
+        "worktree": str(tmp_path / "wt"),
+        "findings_by_severity": {"critical": 0, "major": 0, "minor": 0},
+        "conversation_log": str(tmp_path / "conversation.md"),
+    }
+    validate_result_schema(payload)
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "expected"),
+    [
+        ("round 2: coder turn failed (exit 1)", "coder_failed"),
+        ("round 2: reviewer [security] handoff invalid", "reviewer_failed"),
+        ("round 1: coder produced no commit", "coder_failed"),
+        ("something else entirely", "failed"),
+    ],
+)
+def test_build_result_payload_failed_splits_coder_from_reviewer(
+    tmp_path: Path, failure_reason: str, expected: str
+) -> None:
+    payload, _ = build_result_payload(
+        _result("failed", tmp_path, failure_reason=failure_reason),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert payload["escalation"]["reason"] == expected
+    assert payload["escalation"]["summary"] == failure_reason
+    validate_result_schema(payload)
+
+
+def test_build_result_payload_failed_without_reason_uses_the_message(
+    tmp_path: Path,
+) -> None:
+    payload, _ = build_result_payload(
+        _result("failed", tmp_path, message="the decorated message"),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert payload["escalation"]["summary"] == "the decorated message"
+
+
+def test_build_result_payload_delivery_failure_escalates_as_delivery(
+    tmp_path: Path,
+) -> None:
+    payload, _ = build_result_payload(
+        _result("approved", tmp_path),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+        delivery_error="gh pr create failed: HTTP 422",
+    )
+    assert payload["escalation"]["reason"] == "delivery"
+    assert "HTTP 422" in payload["escalation"]["summary"]
+    validate_result_schema(payload)
+
+
+def test_build_result_payload_brief_carries_the_gate_verdict(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.test_gate import GateResult
+
+    gate = GateResult(
+        command="make check", exit_code=2, passed=False, output_tail="boom"
+    )
+    payload, _ = build_result_payload(
+        _result("stalled", tmp_path, test_gate=gate),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert payload["escalation"]["brief"]["test_gate_verdict"] == "RED"
+
+
+@pytest.mark.parametrize("status", ["approved", "interrupted"])
+def test_build_result_payload_no_escalation_when_not_failed(
+    tmp_path: Path, status: str
+) -> None:
+    """Delivered runs raise no gate; interrupted runs have the T10 resume
+    path — neither carries an escalation block."""
+    payload, _ = build_result_payload(
+        _result(status, tmp_path),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert "escalation" not in payload
+    validate_result_schema(payload)
+
+
 def test_daemon_records_delivery_failure_when_deliver_raises(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

@@ -105,11 +105,78 @@ def test_classify_orphan_precedes_malformed() -> None:
     assert classify_gate(bad, None, None).health == HEALTH_ORPHAN
 
 
+def _human_gate(gate_id: str = "gate-h", *, metadata: dict | None = None):
+    return make_task(
+        gate_id,
+        title="Needs human: Wire the thing",
+        task_type="gate",
+        metadata=metadata
+        if metadata is not None
+        else {
+            "gate_type": "human",
+            "raised_by": "loom",
+            "route": "story-develop",
+            "story_id": "story-1",
+            "run_id": "abcd1234",
+            "escalation_reason": "max_rounds",
+            "escalation_summary": "round 5: NOT approved (max_rounds)",
+        },
+    )
+
+
+def test_classify_loom_human_gate_carries_the_escalation() -> None:
+    """b91177d2: a loom-raised human gate's REF is its escalation reason and
+    the row carries the summary the operator triages by."""
+    row = classify_gate(_human_gate(), "story-1", _story())
+    assert row.health == HEALTH_OK
+    assert row.gate_type == "human"
+    assert row.ref_label == "max_rounds"
+    assert row.escalation_summary == "round 5: NOT approved (max_rounds)"
+    assert row.pr_label == "—"
+
+
+def test_classify_loom_human_gate_without_reason_is_malformed() -> None:
+    bad = _human_gate(metadata={"gate_type": "human", "raised_by": "loom"})
+    row = classify_gate(bad, "story-1", _story())
+    assert row.health == HEALTH_MALFORMED
+    assert row.ref_label == "—"
+
+
+def test_classify_operators_own_human_gate_is_ok_without_loom_columns() -> None:
+    """A human gate the operator created by hand has no escalation and is not
+    malformed for lacking one — it is simply theirs."""
+    theirs = _human_gate(metadata={"gate_type": "human", "target_by": "2026-09-01"})
+    row = classify_gate(theirs, "story-1", _story())
+    assert row.health == HEALTH_OK
+    assert row.ref_label == "—"
+    assert row.escalation_reason is None
+
+
+def test_classify_timer_gate_is_listed_with_wiring_health() -> None:
+    timer = make_task("gate-t", task_type="gate", metadata={"gate_type": "timer"})
+    row = classify_gate(timer, None, None)
+    assert row.gate_type == "timer"
+    assert row.health == HEALTH_ORPHAN
+
+
 # ── Pure: render_report ────────────────────────────────────────────────
 
 
+def test_render_loom_human_gate_row_and_summary_line() -> None:
+    rows = [
+        classify_gate(_gate("gate-1"), "story-1", _story("story-1")),
+        classify_gate(_human_gate("gate-2"), "story-2", _story("story-2")),
+    ]
+    lines = render_report(rows)
+    text = "\n".join(lines)
+    assert "TYPE" in lines[0] and "REF" in lines[0]
+    assert "gate-2" in text and "human" in text and "max_rounds" in text
+    assert "    ↳ round 5: NOT approved (max_rounds)" in lines
+    assert "by type: 1 human, 1 pr, 1 raised by loom" in lines
+
+
 def test_render_empty() -> None:
-    assert render_report([]) == ["no open pr gates"]
+    assert render_report([]) == ["no open gates"]
 
 
 def test_render_summary_counts_health() -> None:
@@ -121,14 +188,13 @@ def test_render_summary_counts_health() -> None:
     text = "\n".join(lines)
     assert "GATE" in text and "HEALTH" in text
     assert "gate-1" in text and "gate-2" in text
-    assert "2 open pr gates: 1 healthy, 1 needs attention" in text
+    assert "2 open gates: 1 healthy, 1 needs attention" in text
+    assert "by type: 2 pr" in text
 
 
 def test_render_singular_summary() -> None:
     rows = [classify_gate(_gate("gate-1"), "story-1", _story("story-1"))]
-    assert "1 open pr gate: 1 healthy, 0 need attention" in "\n".join(
-        render_report(rows)
-    )
+    assert "1 open gate: 1 healthy, 0 need attention" in "\n".join(render_report(rows))
 
 
 def test_render_by_health_footer_counts_each_class() -> None:
@@ -196,20 +262,20 @@ def test_gates_lists_open_pr_gate_with_waiter(
     assert "agent-lore/lithos-loom#42" in result.output
     assert "story-1" in result.output
     assert HEALTH_OK in result.output
-    assert "1 open pr gate" in result.output
+    assert "1 open gate" in result.output
 
 
 def test_gates_ignores_non_gate_tasks(
     loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only ``pr`` gates are listed; plain open tasks are skipped."""
+    """Only gates are listed; plain open tasks are skipped."""
     fake = FakeLithosClient(tasks=[_story("just-a-task")])
     _patch_client(monkeypatch, fake)
 
     result = runner.invoke(app, ["gates"])
 
     assert result.exit_code == 0, result.output
-    assert "no open pr gates" in result.output
+    assert "no open gates" in result.output
     assert "just-a-task" not in result.output
 
 
@@ -283,3 +349,20 @@ def test_gates_reports_client_error(
 
     assert result.exit_code == 1
     assert "listing gates failed" in result.output
+
+
+def test_gates_lists_a_loom_human_gate_with_its_reason(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeLithosClient(tasks=[_human_gate("gate-h"), _story("story-1")])
+    fake.add_edge(from_task_id="gate-h", to_task_id="story-1", type="waits_on_gate")
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["gates"])
+
+    assert result.exit_code == 0, result.output
+    assert "gate-h" in result.output
+    assert "max_rounds" in result.output
+    assert "round 5: NOT approved (max_rounds)" in result.output
+    assert HEALTH_OK in result.output
+    assert fake.mutating_calls == []

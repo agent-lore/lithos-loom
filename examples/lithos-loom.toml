@@ -459,3 +459,25 @@ tags = ["trigger:story-develop"]
 # [story_develop.default_models]
 # claude = "opus"
 # codex  = "gpt-5.4"
+
+# ── Notifications (needs-human escalation, b91177d2) ──────────────────
+#
+# When a story-develop run ends without delivering (max_rounds, stalled,
+# disputed, cost ceiling, a coder/reviewer death, a contract violation, a
+# timeout, a resume budget exhausted) the route-runner raises a `human` gate
+# on the story — visible in Obsidian tasks.md, lens's Gates section and
+# `lithos-loom gates`, with a [NeedsHuman] finding on the story. Those are all
+# PULL surfaces. This section is the PUSH: fired once, right after the gate is
+# created, best-effort (a sink failure is noted on the finding, never blocks
+# the escalation). The section is optional; these are the defaults.
+# [notifications]
+# desktop_toast = true       # notify-send on this host (skipped if not on PATH)
+# github_mention = true      # "@<operator_github_login> [NeedsHuman] …" comment on
+#                            # the story's linked issue / delivered PR — reuses the
+#                            # [story_develop].operator_github_login channel (#113);
+#                            # only stories carrying a GitHub link reach it
+# on_needs_human = "curl -d @- https://ntfy.sh/your-topic"
+#                            # any shell command; the notice arrives as JSON on
+#                            # stdin ({gate_id, story_id, story_title, project,
+#                            # route, reason, summary, run_id, github_ref}) — the
+#                            # escape hatch for ntfy / Pushover / Slack / mail

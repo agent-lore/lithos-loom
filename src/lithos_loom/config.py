@@ -353,6 +353,36 @@ class StoryDevelopConfig:
 
 
 @dataclass(frozen=True)
+class NotificationsConfig:
+    """Push channels for loom-raised ``human`` gates (the ``[notifications]``
+    section, b91177d2 design D6).
+
+    Every other surface a needs-human gate reaches — Obsidian ``tasks.md``,
+    lens's Gates section, ``lithos-loom gates``, the ``[NeedsHuman]`` finding —
+    is *pull*: the operator has to look. These are the channels that
+    *interrupt* them, fired once by the route-runner (and the github-watcher,
+    for a stranded PR) right after the gate is created. All best-effort: a
+    sink failure is noted on the finding and never blocks the escalation.
+    The section is optional; its absence means the defaults below.
+
+    ``desktop_toast`` — ``notify-send`` on the daemon's host (skipped silently
+    when the binary is not on PATH). ``github_mention`` — an ``@<login>``
+    comment on the story's linked GitHub issue (``metadata.github_issue_url``)
+    or delivered PR (``develop_pr_url``), so GitHub's own notifications fire —
+    reuses ``[story_develop].operator_github_login`` (#113) and needs ``gh``;
+    only stories that carry a GitHub link reach this channel.
+    ``on_needs_human`` — a shell command run with the notice as JSON on stdin:
+    the transport-agnostic escape hatch (``curl`` to ntfy / Pushover / Slack,
+    ``mail``, …). Later sinks (Discord, Twilio, …) are one key + one function
+    each in this same flat section.
+    """
+
+    desktop_toast: bool = True
+    github_mention: bool = True
+    on_needs_human: str | None = None
+
+
+@dataclass(frozen=True)
 class LoomConfig:
     orchestrator: OrchestratorConfig
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
@@ -361,6 +391,7 @@ class LoomConfig:
     obsidian_sync: ObsidianSyncConfig | None = None
     github_watcher: GitHubWatcherConfig | None = None
     story_develop: StoryDevelopConfig | None = None
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     source_path: Path | None = None
     environment: str | None = None
 
@@ -458,6 +489,7 @@ def load_config(path: Path | None = None) -> LoomConfig:
     obsidian_sync = _parse_obsidian_sync(raw.get("obsidian_sync"), config_path)
     github_watcher = _parse_github_watcher(raw.get("github_watcher"), config_path)
     story_develop = _parse_story_develop(raw.get("story_develop"), config_path)
+    notifications = _parse_notifications(raw.get("notifications"), config_path)
 
     cfg = LoomConfig(
         orchestrator=orchestrator,
@@ -467,6 +499,7 @@ def load_config(path: Path | None = None) -> LoomConfig:
         obsidian_sync=obsidian_sync,
         github_watcher=github_watcher,
         story_develop=story_develop,
+        notifications=notifications,
         source_path=config_path,
         environment=environment,
     )
@@ -891,6 +924,44 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
         external_reviews_enabled=external_reviews_enabled,
         trusted_bots=tuple(trusted_bots_raw),
         external_remediation_budget=external_remediation_budget,
+    )
+
+
+_NOTIFICATIONS_KEYS: frozenset[str] = frozenset(
+    {"desktop_toast", "github_mention", "on_needs_human"}
+)
+
+
+def _parse_notifications(data: Any, config_path: Path) -> NotificationsConfig:
+    """Parse the optional ``[notifications]`` section (defaults when absent)."""
+    if data is None:
+        return NotificationsConfig()
+    if not isinstance(data, dict):
+        raise ConfigError(f"{config_path}: [notifications] must be a table")
+    unknown = set(data.keys()) - _NOTIFICATIONS_KEYS
+    if unknown:
+        raise ConfigError(
+            f"{config_path}: [notifications] has unknown key(s) {sorted(unknown)}; "
+            f"valid keys: {sorted(_NOTIFICATIONS_KEYS)}"
+        )
+    desktop_toast = _optional_bool(
+        data, "desktop_toast", True, config_path, "notifications"
+    )
+    github_mention = _optional_bool(
+        data, "github_mention", True, config_path, "notifications"
+    )
+    raw_command = data.get("on_needs_human")
+    if raw_command is not None and (
+        not isinstance(raw_command, str) or not raw_command.strip()
+    ):
+        raise ConfigError(
+            f"{config_path}: notifications.on_needs_human must be a non-empty "
+            "shell command string (omit the key to disable)"
+        )
+    return NotificationsConfig(
+        desktop_toast=desktop_toast,
+        github_mention=github_mention,
+        on_needs_human=raw_command.strip() if isinstance(raw_command, str) else None,
     )
 
 
