@@ -1,0 +1,71 @@
+[case]
+id = "344-backfill-history"
+description = """
+loom PR #344 escape (S2 external-review detection), round 1 of the codex
+review: the feature as first pushed (head 050c21c) has NO backfill guard — a
+markerless gate's FIRST sweep fetches the PR's whole review history and posts
+every root comment as a fresh [ExternalReview] finding, including comments the
+delivery-time inline Copilot round (pr_delivery.py, in this same repo) already
+remediated, pushed a fix for, and replied to before the gate existed. The
+operator gets already-resolved history re-reported as new actionable review
+activity on every freshly-gated PR.
+
+Escape-review provenance (README §"Escape review"): bucket 1 — the refuting
+lifecycle is entirely in-tree (the inline round's reply/push behaviour in
+pr_delivery.py; the gate's creation after delivery in gates.py; the
+markerless first sweep in the diff itself). Blind-spot class: cross-component
+LIFECYCLE reasoning — trace what has already happened to the data a new
+consumer reads, before this code exists in the timeline. Caught by an
+external PR reviewer, not by any panel (hand-developed PR; ac.md is
+synthetic, from the slice's approved plan requirements).
+
+KNOWN DEFECT, PRESENT BUT DELIBERATELY UNDECLARED (bucket 2): the same head
+also passes the stored `last_comment_at` cursor as GitHub's `since` with no
+overlap — `since` is strictly-after with SECOND precision, so a comment
+becoming visible in the same second as the stored maximum is excluded forever
+(the id high-water mark cannot rescue a row that is never returned). Catching
+that requires knowing the GitHub API's `since` boundary semantics, which the
+hermetic review sandbox has no way to look up and the tree nowhere states —
+an escape-review bucket-2 classification (capability evidence for vendored
+API contracts in the sandbox, the SC-1 pattern), NOT an expected finding: a
+panel must not be scored a miss for lacking knowledge it cannot reach. The
+under-declaration risk (RH-5) is correspondingly small — samples are unlikely
+to file it for the same reason — but treat any finding about the `since`
+cursor as a bonus, invisible to this case's number.
+
+PAIRING: defect + its authentic fix, the tight shape — known-good.patch is
+`git diff 088e45e..3db9ed0`, exactly the round-1 fix commit (backfill guard:
+roots with a marker reply are skipped; plus the one-second `since` overlap for
+the bucket-2 defect above) on top of the feature. KNOWN-GOOD IS CLEAN ON THE
+MEASURED DEFECT ONLY: at 3db9ed0 the guard's proof is still marker-only — the
+held-back and forgery holes measured by the sibling 344-reply-suppression-proof
+are live there, so expect nonzero noise/blk from a sharp panel; `fp` is
+defect-scoped and unaffected.
+"""
+ac_provenance = "synthetic"
+tier = "frontier"       # untested blind-spot class at authoring time (2026-08-31)
+repo = "."
+base = "088e45e07a9d7325e5041a1adac407e37eae946a"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+file = "src/lithos_loom/subscriptions/external_reviews.py"
+keywords = ["inline", "already handled", "already remediated", "re-report", "first sweep", "backfill", "handled history"]
+min_severity = "major"
+mechanism = """
+First-sweep backfill re-reports handled history: a gate is created only AFTER
+delivery, and delivery's inline Copilot round (pr_delivery.py, in-tree) has by
+then already remediated root review comments, pushed the fix, and replied to
+each thread. The new sweep's first pass over a markerless gate fetches the
+PR's full review/comment history and posts ALL of it as fresh
+[ExternalReview] findings — nothing distinguishes an already-handled root
+(one with a landed-fix reply from the inline round) from live unaddressed
+review activity, so the operator is told to act on history that was resolved
+before the gate existed.
+"""

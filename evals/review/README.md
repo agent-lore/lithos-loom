@@ -617,6 +617,84 @@ The sha form needs each head to be a reachable commit — a synthetic clean head
 that isn't on any branch must be kept alive by a pushed tag (see the `180`
 seed). The patch form (above) avoids that.
 
+## Escape review — external findings feed this corpus
+
+Every panel escape should become a regression case ("Add a case" above) — but
+noticing escapes was ad-hoc. Since PRD S2, the escapes arrive on a conveyor:
+external reviewers (Copilot, other bots, humans) comment on delivered PRs,
+loom ingests the activity as `[ExternalReview]` findings and remediates via
+`converge --from-github`, and the outcome lands in thread replies and
+remediation-outcome findings. **Run an escape review once per merged
+loom-authored PR that received validated external findings.** The inputs are
+durable — the `[ExternalReview]` finding on the story carries
+author/state/location/thread-url and the reviewed sha; the fix outcome lives
+in the thread replies and commits — so nothing depends on anyone remembering.
+
+Classify each validated external finding into one of four buckets:
+
+1. **Escape, catchable-in-principle** — the panel reviewed the exact diff (or
+   would have, for a hand-developed PR probing the same blind-spot class),
+   the defect was in it, and catching it needs only the repo tree plus
+   reasoning. → **Mint an eval regression case** per "Add a case", subject to
+   the minting rules below.
+2. **Escape, but needs knowledge the sandbox lacks** — e.g. a live external
+   API's boundary semantics: the review sandbox is hermetic (no network) and
+   the tree nowhere states the fact. → **NOT an expected finding** (a panel
+   must never be scored a miss for knowledge it cannot reach). Record it as
+   **capability evidence** instead — for vendored API contracts in the
+   sandbox (the SC-1 pattern) — explicitly, in the relevant case's
+   `description` or in the tracking issue. Worked example: PR #344's
+   since-cursor defect (GitHub's `since` is strictly-after with second
+   precision) is documented as present-but-undeclared in
+   `344-backfill-history`.
+3. **Valid but out-of-scope for the diff** — pre-existing on the base. → Not
+   a panel escape; it belongs to the #342 deferral path. Scoring it as an
+   escape would punish correct review behaviour.
+4. **Invalid claim** — triage / the fix run showed it wrong. → An **S5a
+   triage fixture**: a known-false external finding the triage step must
+   REJECT with cited `file:line` evidence. Format: a parametrized entry in
+   `tests/test_story_develop_external_triage.py` carrying (a) the finding
+   body as the external reviewer wrote it, (b) the repo/sha it was written
+   against, and (c) the refuting citation a correct triage should produce —
+   the hermetic half of the PRD S8 measurement (known-false rejected /
+   known-true proceeds). No seed fixtures yet: every external finding on the
+   S2 arc's own PRs validated as real.
+
+### Minting rules (the RH-5 gates, applied)
+
+- **Case shape**: the PR's base..head diff at the reviewed sha (cross-repo
+  via `repo = "../<checkout>"` where the PR belongs to another project), the
+  slice's real AC as `ac.md` (declare `ac_provenance` honestly — a
+  hand-developed PR that never faced a panel is `synthetic`), expected
+  findings = the external reviewer's validated findings. Pick the tightest
+  pairing shape the escape allows (the table above).
+- **Declare every defect** ("Declare every defect the diff contains" above):
+  the declared set is a floor, not a census. A bucket-2 defect present in the
+  same head is documented in the `description` as present-but-undeclared with
+  its classification rationale, never silently omitted.
+- **One case per blind-spot CLASS, not per finding** — near-duplicates grow
+  sweep cost without signal. Name the class in the `description` (e.g.
+  contract-grounding against an in-repo requirements doc; suppression/trust-
+  proof completeness; cross-component lifecycle reasoning). Two findings of
+  one class in one diff become two `[[expected]]` on one case, not two cases.
+- **Tier**: enter at `frontier` (RH-6) — a case never opts into the floor
+  silently; promote to `floor` only once measured saturated.
+- **Measurement discipline**: these cases serve as (a) a regression floor —
+  near-total moves are what K=3/K=5 can resolve — and (b) a blind-spot
+  taxonomy source. They do NOT cheaply resolve mid-band improvements (K=5 has
+  ~11% power there); any paid A/B over them states its MDE first.
+
+### Seed corpus (2026-08-31)
+
+The process run once over the material then in hand produced three cases —
+`lens43-degraded-contract` (bucket 1 ×2: the PRD pr-reconciliation "Failure 1"
+evidence — a 5-round zero-findings panel vs two in-tree contract violations
+Copilot caught in nine minutes), `344-reply-suppression-proof` (bucket 1 ×2:
+the suppression-proof completeness class from PR #344's review rounds 2+3) and
+`344-backfill-history` (bucket 1: cross-component lifecycle, PR #344 round 1)
+— plus one explicit bucket-2 classification (the since-cursor defect, above)
+and an empty bucket 4.
+
 ## Scoring (how a finding matches)
 
 - **Mechanism LLM-judge (default, `--judge`):** authoritative. Given the reviewer's
