@@ -32,7 +32,8 @@ follow-up slice; this module only detects and reports.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -54,6 +55,7 @@ from lithos_loom.subscriptions._findings import post_finding_then_mark, write_ma
 __all__ = [
     "EXTERNAL_REVIEW",
     "REVIEW_SEEN_KEY",
+    "IngestResult",
     "ingest_external_reviews",
 ]
 
@@ -75,6 +77,22 @@ _TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
 # Rendering bounds: a finding is a breadcrumb, not a transcript.
 _EXCERPT_CHARS = 160
 _MAX_LISTED = 20
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    """What one ingestion pass posted, for the remediation dispatcher (slice C).
+
+    ``posted`` is True only when an ``[ExternalReview]`` finding actually
+    landed on the story; the actionable lists carry the exact material it
+    described so the dispatch decision (trust, own-sha) filters what was
+    *reported*, never a re-fetch. Every quiet path — no news, silent states,
+    orphan gate, GitHub error — reports ``posted=False`` with empty lists.
+    """
+
+    posted: bool = False
+    actionable_reviews: list[PullRequestReview] = field(default_factory=list)
+    actionable_comments: list[PullRequestReviewComment] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -217,6 +235,7 @@ def _render_summary(
     *,
     story_id: str,
     gate_id: str,
+    extra_note: str | None = None,
 ) -> str:
     lines = [f"{EXTERNAL_REVIEW} new review activity on delivered PR {pr_url}:"]
     for review in reviews[:_MAX_LISTED]:
@@ -234,6 +253,8 @@ def _render_summary(
     hidden = max(0, len(reviews) - _MAX_LISTED) + max(0, len(comments) - _MAX_LISTED)
     if hidden:
         lines.append(f"- …and {hidden} more (see the PR)")
+    if extra_note:
+        lines.append(extra_note)
     lines.append(
         f"story {story_id} remains blocked on gate {gate_id}; review the PR "
         f"before merging"
@@ -271,7 +292,14 @@ async def ingest_external_reviews(
     story_id: str | None,
     github: GitHubClient,
     ctx: SubscriptionContext,
-) -> None:
+    *,
+    extra_note: str | None = None,
+    pending_marker_for: Callable[
+        [list[PullRequestReview], list[PullRequestReviewComment]],
+        Awaitable[Mapping[str, Any] | None],
+    ]
+    | None = None,
+) -> IngestResult:
     """Ingest new review activity on one still-open gate's PR. Never raises.
 
     Called from :func:`.._develop_pr_merge.reconcile_pr_gate`'s still-open
@@ -280,6 +308,18 @@ async def ingest_external_reviews(
     the marker untouched — the whole batch retries next sweep. The
     finding-then-mark ordering (via :func:`.._findings.post_finding_then_mark`)
     means a crash between the two costs at most one duplicate finding.
+
+    ``extra_note`` is appended to the finding body (S5b: the remediation
+    dispatcher states budget exhaustion *inside* the detection breadcrumb, so
+    going over budget never blinds the operator). ``pending_marker_for``
+    (PR #346 re-reviews 1+3) is the dispatcher's pending-trigger provider:
+    called with the actionable batch just before the marker write — so
+    dispatchability (trust, own-sha) is decided BEFORE any durable state —
+    and its entry, if any, is folded into the SAME ``task_update`` as the
+    seen marks. The marks consume the batch, so its dispatch debt must
+    become durable in the same write or not at all (a failed combined write
+    retries the whole batch next sweep). Returns the posted batch for the
+    dispatcher — see :class:`IngestResult`.
     """
     seen = _read_seen(gate, spec.pr_url)
     try:
@@ -297,12 +337,12 @@ async def ingest_external_reviews(
             type(exc).__name__,
             exc,
         )
-        return
+        return IngestResult()
 
     new_reviews = [r for r in reviews if r.review_id > seen.last_review_id]
     new_comments = [c for c in comments if c.comment_id > seen.last_comment_id]
     if not new_reviews and not new_comments:
-        return  # idle PR: no fetch produced news, write nothing
+        return IngestResult()  # idle PR: no fetch produced news, write nothing
 
     handled_roots = await _proven_handled(
         _fixed_reply_candidates(comments), spec.repo, github, ctx
@@ -331,7 +371,9 @@ async def ingest_external_reviews(
         and not (r.state != "CHANGES_REQUESTED" and r.review_id in handled_review_ids)
     ]
     actionable_comments = [c for c in new_comments if _comment_posts(c, handled_roots)]
-    marker = {REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)}
+    marker: dict[str, Any] = {
+        REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)
+    }
 
     if not actionable_reviews and not actionable_comments:
         # Only silent material (approvals, replies, our own automated replies):
@@ -339,7 +381,7 @@ async def ingest_external_reviews(
         await write_marker(
             ctx, task_id=gate.id, marker=marker, subsystem="external-reviews"
         )
-        return
+        return IngestResult()
 
     if story_id is None:
         # Orphan gate (no waiter edge): nothing to post the finding on.
@@ -352,9 +394,13 @@ async def ingest_external_reviews(
             gate.id,
             spec.pr_url,
         )
-        return
+        return IngestResult()
 
-    await post_finding_then_mark(
+    if pending_marker_for is not None:
+        pending = await pending_marker_for(actionable_reviews, actionable_comments)
+        if pending:
+            marker.update(pending)
+    landed = await post_finding_then_mark(
         ctx,
         task_id=story_id,
         summary=_render_summary(
@@ -363,12 +409,19 @@ async def ingest_external_reviews(
             actionable_comments,
             story_id=story_id,
             gate_id=gate.id,
+            extra_note=extra_note,
         ),
         marker=marker,
         subsystem="external-reviews",
         retry_hint="will retry next sweep",
         marker_task_id=gate.id,
     )
+    if not landed:
+        # PR #346 review F4: the finding or the de-dup mark did not land —
+        # the batch retries next sweep and must NOT dispatch remediation now
+        # (either the operator breadcrumb is missing, or an unmarked batch
+        # would double-dispatch when it re-posts).
+        return IngestResult()
     ctx.logger.info(
         "external-reviews: posted %s for %s (%d review(s), %d comment(s)) on story %s",
         EXTERNAL_REVIEW,
@@ -376,4 +429,9 @@ async def ingest_external_reviews(
         len(actionable_reviews),
         len(actionable_comments),
         story_id,
+    )
+    return IngestResult(
+        posted=True,
+        actionable_reviews=actionable_reviews,
+        actionable_comments=actionable_comments,
     )

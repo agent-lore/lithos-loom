@@ -82,8 +82,8 @@
         "max_function": "lithos_loom.cursor_store.CursorStore._load"
       },
       "Subscriptions": {
-        "functions_over_10": 10,
-        "max_complexity": 24,
+        "functions_over_10": 11,
+        "max_complexity": 27,
         "max_function": "lithos_loom.subscriptions.external_reviews.ingest_external_reviews"
       },
       "Supervisor": {
@@ -97,7 +97,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 99,
+    "functions_over_10": 100,
     "top_functions": [
       {
         "complexity": 101,
@@ -140,7 +140,7 @@
         "qualname": "lithos_loom.plugins.story_develop.pr_delivery._deliver_after_open"
       }
     ],
-    "total_functions": 1116
+    "total_functions": 1140
   },
   "domain": {
     "associations": 2,
@@ -252,7 +252,7 @@
       }
     },
     "cross_component_edges": 65,
-    "cross_component_module_edges": 245,
+    "cross_component_module_edges": 249,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
@@ -295,7 +295,6 @@
     "cross_module_private_refs": 8,
     "tests_private_detail": [
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)",
-      "tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x6)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._resolve (x4)",
@@ -323,9 +322,10 @@
       "tests/test_cli_project.py -> lithos_loom.cli.project._merge_lithos_with_toml",
       "tests/test_cli_project.py -> lithos_loom.cli.project._rows_from_toml",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags",
-      "tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags"
+      "tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags",
+      "tests/test_cli_project_create.py -> lithos_loom.cli.project._slugify"
     ],
-    "tests_private_imports": 98
+    "tests_private_imports": 93
   },
   "size": {
     "components": {
@@ -342,12 +342,12 @@
       "Children": {
         "classes": 0,
         "functions": 23,
-        "largest_module": "lithos_loom.children.obsidian_sync",
-        "largest_module_lines": 497,
-        "lines": 1288,
+        "largest_module": "lithos_loom.children.github_watcher",
+        "largest_module_lines": 517,
+        "lines": 1322,
         "modules": 6,
         "public_symbols": 8,
-        "sloc": 966
+        "sloc": 991
       },
       "Cli": {
         "classes": 19,
@@ -363,11 +363,11 @@
         "classes": 10,
         "functions": 22,
         "largest_module": "lithos_loom.config",
-        "largest_module_lines": 1076,
-        "lines": 1076,
+        "largest_module_lines": 1102,
+        "lines": 1102,
         "modules": 1,
         "public_symbols": 13,
-        "sloc": 905
+        "sloc": 930
       },
       "Doctor": {
         "classes": 2,
@@ -490,14 +490,14 @@
         "sloc": 439
       },
       "Subscriptions": {
-        "classes": 11,
-        "functions": 141,
+        "classes": 15,
+        "functions": 165,
         "largest_module": "lithos_loom.subscriptions._obsidian_projection",
         "largest_module_lines": 794,
-        "lines": 6684,
-        "modules": 22,
-        "public_symbols": 37,
-        "sloc": 5119
+        "lines": 7564,
+        "modules": 23,
+        "public_symbols": 43,
+        "sloc": 5865
       },
       "Supervisor": {
         "classes": 3,
@@ -530,13 +530,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.pr_delivery"
     ],
-    "total_lines": 43626,
-    "total_modules": 130,
-    "total_sloc": 34705
+    "total_lines": 44566,
+    "total_modules": 131,
+    "total_sloc": 35501
   },
   "tests": {
     "ratio": 1.63,
-    "src_lines": 43626,
-    "test_lines": 71202
+    "src_lines": 44566,
+    "test_lines": 72504
   }
 }

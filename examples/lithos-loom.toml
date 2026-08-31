@@ -389,7 +389,17 @@ tags = ["trigger:story-develop"]
 # trusted_bots = ["copilot-pull-request-reviewer[bot]"]
 # # Bot logins whose findings may seed automated remediation (ADR 0011:
 # # allowlisted bots + humans with repo write/admin). Detection ingests
-# # every reviewer regardless; this only gates the remediation slices.
+# # every reviewer regardless; this only gates remediation.
+# external_remediation_budget = 2
+# # PRD S5b: max autonomous `develop converge --from-github` dispatches per
+# # delivered PR. When a posted [ExternalReview] batch carries trusted
+# # material, the sweep spawns converge (one in-flight run globally; the
+# # PR's repo comes from [projects.<slug>].repo via the gate's project).
+# # The counter never resets on a loom-authored push and resets when a
+# # human pushes; exhaustion stops dispatch only — detection keeps posting,
+# # with the exhaustion stated in the finding. 0 disables autonomous
+# # dispatch. Per-project opt-out: context-doc metadata
+# # `develop_external_review_converge = false` (default on).
 
 # ── story-develop host-wide defaults ──────────────────────────────────
 #

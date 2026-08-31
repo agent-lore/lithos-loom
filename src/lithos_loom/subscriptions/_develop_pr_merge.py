@@ -32,6 +32,7 @@ from lithos_loom.gates import (
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 
 __all__ = [
@@ -99,6 +100,7 @@ async def reconcile_pr_gate(
     ctx: SubscriptionContext,
     *,
     ingest_reviews: bool = False,
+    remediation: ExternalRemediation | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -120,7 +122,11 @@ async def reconcile_pr_gate(
     ``ingest_reviews`` additionally runs the external-review ingestion
     (:mod:`.external_reviews`, PRD S2) on the still-open branch — the one place
     that has the fetched PR, the parsed spec and the waiting story all in
-    hand. It never changes the merge outcome.
+    hand. It never changes the merge outcome. ``remediation``, when set (and
+    ingestion is on), wraps that ingestion with the slice-C autonomy: the
+    head observation + S5b budget *before* it (so exhaustion is stated in
+    the finding body), the dispatch decision *after* it (on the batch it
+    posted). See :mod:`.external_remediation`.
     """
     spec = parse_pr_gate(gate)
     if spec is None:
@@ -191,7 +197,43 @@ async def reconcile_pr_gate(
 
     # state == "open" — still in flight; re-poll next sweep (no merge marker).
     if ingest_reviews:
-        await ingest_external_reviews(gate, spec, story_id, github, ctx)
+        budget = None
+        note = None
+        if remediation is not None:
+            budget = await remediation.observe_head(gate, spec, pr, ctx)
+            note = remediation.exhaustion_note(budget)
+        ingest = await ingest_external_reviews(
+            gate,
+            spec,
+            story_id,
+            github,
+            ctx,
+            extra_note=note,
+            # Parked atomically with the seen marks, and only for a batch
+            # the provider finds dispatchable (PR #346 re-reviews 1+3): the
+            # marks consume the batch, so its dispatch debt must become
+            # durable in the same write or the whole batch retries — and an
+            # undispatchable batch must neither park nor clear.
+            pending_marker_for=(
+                remediation.pending_marker_provider(spec, story_id, budget, github, ctx)
+                if remediation is not None and budget is not None
+                else None
+            ),
+        )
+        if remediation is not None and budget is not None:
+            if ingest.posted:
+                label: str | None = await remediation.consider(
+                    gate, spec, story_id, budget, ingest, github, ctx
+                )
+            else:
+                # A quiet sweep may still owe a dispatch: a batch deferred
+                # behind the busy slot parked a pending trigger (its marks
+                # were consumed when it posted — PR #346 review F1).
+                label = await remediation.resume_pending(
+                    gate, spec, story_id, budget, github, ctx
+                )
+            if label is not None:
+                ctx.logger.info("external-remediation: %s for %s", label, spec.pr_url)
     return "still_open"
 
 

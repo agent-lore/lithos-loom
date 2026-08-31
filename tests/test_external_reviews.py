@@ -696,3 +696,165 @@ async def test_later_summary_review_not_hidden_by_old_handled_roots() -> None:
     assert len(posted) == 1
     assert "two new problems" in posted[0]
     assert "generated 1 comment" not in posted[0]
+
+
+# ── slice C seams: the returned batch + the exhaustion note ────────────
+
+
+async def test_ingest_returns_the_actionable_batch() -> None:
+    """Remediation (slice C) dispatches off what ingestion just posted — the
+    result carries the actionable material so the dispatch decision (trust,
+    own-sha) never re-fetches or re-filters."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500)], comments=[_comment(1)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+    assert result.posted
+    assert [r.review_id for r in result.actionable_reviews] == [500]
+    assert [c.comment_id for c in result.actionable_comments] == [1]
+
+
+async def test_ingest_returns_empty_batch_when_nothing_posts() -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500, state="APPROVED", body="")])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+    assert not result.posted
+    assert result.actionable_reviews == []
+    assert result.actionable_comments == []
+
+
+async def test_extra_note_lands_in_the_finding_body() -> None:
+    """S5b: budget exhaustion is stated in the [ExternalReview] body itself —
+    going over budget must not blind the operator to new activity."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    await ingest_external_reviews(
+        gate,
+        spec,
+        story,
+        github,
+        _ctx(client),
+        extra_note="remediation budget exhausted — findings will be reported "
+        "but not auto-fixed until a human pushes or merges",
+    )
+    (finding,) = _findings(client)
+    assert "remediation budget exhausted" in finding
+
+
+async def test_failed_finding_post_reports_not_posted() -> None:
+    """PR #346 review F4: `posted` must be the truth — a batch whose finding
+    (or de-dup marker) never landed must not claim to have posted, or
+    remediation dispatches without the promised operator breadcrumb."""
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def failing_post(**kwargs: Any) -> Any:
+        raise LithosClientError("server_error", "boom")
+
+    client.finding_post = failing_post  # type: ignore[method-assign]
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    assert not result.posted
+
+
+async def test_failed_marker_write_reports_not_posted() -> None:
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    original = client.task_update
+
+    async def failing_update(**kwargs: Any) -> Any:
+        if REVIEW_SEEN_KEY in (kwargs.get("metadata") or {}):
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_update = failing_update  # type: ignore[method-assign]
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    # The finding itself posted (breadcrumb exists) but the de-dup mark did
+    # not land — the batch will re-post next sweep, so it must not dispatch.
+    assert not result.posted
+
+
+async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
+    """PR #346 re-review 1: the remediation pending trigger must land in the
+    SAME task_update as the seen high-water marks — deferral may never be
+    acknowledged before the trigger is durable. On a failed write, neither
+    lands and the whole batch (finding already posted or not) retries."""
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    seen_batches: list[tuple[int, int]] = []
+
+    async def provider(reviews: Any, comments: Any) -> dict[str, Any]:
+        # The dispatcher's provider sees the actionable batch (it evaluates
+        # trust + own-sha BEFORE the durable write — re-review 3).
+        seen_batches.append((len(reviews), len(comments)))
+        return {"external_remediation_pending": {"pr_url": spec.pr_url}}
+
+    result = await ingest_external_reviews(
+        gate, spec, story, github, _ctx(client), pending_marker_for=provider
+    )
+
+    assert result.posted
+    assert seen_batches == [(1, 0)]
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert REVIEW_SEEN_KEY in refreshed.metadata
+    assert refreshed.metadata["external_remediation_pending"] == {"pr_url": spec.pr_url}
+
+    # Failure injection: the one combined write fails → NEITHER key lands and
+    # posted is False (the batch retries next sweep, trigger included).
+    client2 = FakeLithosClient()
+    story2, gate2 = await _gate_with_story(client2)
+    original = client2.task_update
+
+    async def failing_update(**kwargs: Any) -> Any:
+        if REVIEW_SEEN_KEY in (kwargs.get("metadata") or {}):
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client2.task_update = failing_update  # type: ignore[method-assign]
+    spec2 = parse_pr_gate(gate2)
+    assert spec2 is not None
+
+    async def provider2(reviews: Any, comments: Any) -> dict[str, Any]:
+        return {"external_remediation_pending": {"pr_url": spec2.pr_url}}
+
+    result = await ingest_external_reviews(
+        gate2,
+        spec2,
+        story2,
+        _github(reviews=[_review(500)]),
+        _ctx(client2),
+        pending_marker_for=provider2,
+    )
+
+    assert not result.posted
+    refreshed2 = await client2.task_get(task_id=gate2.id)
+    assert refreshed2 is not None
+    assert REVIEW_SEEN_KEY not in refreshed2.metadata
+    assert "external_remediation_pending" not in refreshed2.metadata

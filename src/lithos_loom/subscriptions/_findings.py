@@ -32,13 +32,18 @@ async def write_marker(
     task_id: Any,
     marker: Mapping[str, Any],
     subsystem: str,
-) -> None:
+) -> bool:
     """Write a de-dup marker via ``task_update``, swallowing ``task_not_found``.
 
     post-lithos#303 a terminal task still accepts ``task_update``, so
     ``task_not_found`` now only fires for a genuinely deleted task (nothing left
     to mark). Any other Lithos error warns as ``[Friction]`` and leaves the
     marker unset (→ retried by the caller's next cycle). Never raises.
+
+    Returns ``True`` only when the marker actually landed (PR #346 review F4)
+    — a caller whose next action depends on the de-dup state being durable
+    (e.g. remediation dispatch) must check it; fire-and-forget callers may
+    ignore it.
     """
     try:
         await ctx.lithos.task_update(task_id=task_id, metadata=dict(marker))
@@ -47,6 +52,8 @@ async def write_marker(
             ctx.logger.warning(
                 "[Friction] %s: marking task %s failed (%s)", subsystem, task_id, exc
             )
+        return False
+    return True
 
 
 async def post_finding_then_mark(
@@ -58,7 +65,7 @@ async def post_finding_then_mark(
     subsystem: str,
     retry_hint: str,
     marker_task_id: Any = None,
-) -> None:
+) -> bool:
     """Post a one-shot prefixed finding, then write a scoped de-dup marker.
 
     Ordering is finding-then-mark: a crash between the two costs at most one
@@ -73,7 +80,12 @@ async def post_finding_then_mark(
     task). The pr-gate resolver posts the finding on the *story* but marks the
     *gate* — the gate is what stays open and would be re-swept — so it passes a
     distinct marker target.
+
+    Returns ``True`` only when BOTH the finding posted and the marker landed
+    (PR #346 review F4). The ``task_not_found`` fall-through still marks (the
+    terminal-task case) but reports ``False`` — the breadcrumb does not exist.
     """
+    posted = True
     try:
         await ctx.lithos.finding_post(task_id=task_id, summary=summary)
     except LithosClientError as exc:
@@ -85,10 +97,12 @@ async def post_finding_then_mark(
                 exc,
                 retry_hint,
             )
-            return  # leave the marker unset → retry next cycle
-    await write_marker(
+            return False  # leave the marker unset → retry next cycle
+        posted = False
+    marked = await write_marker(
         ctx,
         task_id=task_id if marker_task_id is None else marker_task_id,
         marker=marker,
         subsystem=subsystem,
     )
+    return posted and marked

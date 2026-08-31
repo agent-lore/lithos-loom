@@ -724,6 +724,44 @@ def test_github_watcher_trusted_bots_must_be_string_list(
         load_config()
 
 
+def test_github_watcher_external_remediation_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD S5b: the per-PR remediation-round budget defaults to 2; 0 disables
+    autonomous dispatch (detection unaffected); negative / non-int rejected."""
+    _write_config(tmp_path, monkeypatch, "[github_watcher]\n")
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.external_remediation_budget == 2
+
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            external_remediation_budget = 0
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.external_remediation_budget == 0
+
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            external_remediation_budget = -1
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="external_remediation_budget"):
+        load_config()
+
+
 def test_github_watcher_rejects_unknown_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
