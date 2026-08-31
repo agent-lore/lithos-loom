@@ -394,11 +394,11 @@
         "classes": 1,
         "functions": 19,
         "largest_module": "lithos_loom.main",
-        "largest_module_lines": 616,
-        "lines": 622,
+        "largest_module_lines": 618,
+        "lines": 624,
         "modules": 2,
         "public_symbols": 5,
-        "sloc": 492
+        "sloc": 494
       },
       "Errors": {
         "classes": 7,
@@ -534,11 +534,11 @@
         "classes": 6,
         "functions": 28,
         "largest_module": "lithos_loom.gates",
-        "largest_module_lines": 601,
-        "lines": 1208,
+        "largest_module_lines": 605,
+        "lines": 1212,
         "modules": 4,
         "public_symbols": 23,
-        "sloc": 941
+        "sloc": 945
       }
     },
     "max_module": "lithos_loom.lithos_client",
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 45768,
+    "total_lines": 45774,
     "total_modules": 135,
-    "total_sloc": 36501
+    "total_sloc": 36507
   },
   "tests": {
     "ratio": 1.61,
-    "src_lines": 45768,
+    "src_lines": 45774,
     "test_lines": 73832
   }
 }

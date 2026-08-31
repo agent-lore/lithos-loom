@@ -39,7 +39,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Cli | 12 | 5364 | 4490 | 2 | 8 | 0.80 | 49 (`lithos_loom.cli.project.import_project`) | 18 |
 | Config | 1 | 1173 | 992 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
-| Entrypoint | 2 | 622 | 492 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
+| Entrypoint | 2 | 624 | 494 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
 | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
 | Evals | 15 | 3910 | 3167 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 12 |
 | GitHub | 2 | 985 | 768 | 6 | 1 | 0.14 | 14 (`lithos_loom.github_models.parse_pull_request`) | 1 |
@@ -53,11 +53,11 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
 | Subscriptions | 26 | 8309 | 6483 | 4 | 11 | 0.73 | 28 (`lithos_loom.subscriptions.external_reviews.ingest_external_reviews`) | 14 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
-| Tasks | 4 | 1208 | 941 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 3 |
+| Tasks | 4 | 1212 | 945 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 3 |
 
 ## Size
 
-- Modules: **135**, lines: **45768**, SLOC: **36501**
+- Modules: **135**, lines: **45774**, SLOC: **36507**
 - Largest module: `lithos_loom.lithos_client` (2210 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **18** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.61** (73832 test lines / 45768 source lines)
+- Test-to-source line ratio: **1.61** (73832 test lines / 45774 source lines)

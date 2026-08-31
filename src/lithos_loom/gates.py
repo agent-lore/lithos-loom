@@ -425,10 +425,14 @@ def human_gate_brief(
     lines += [
         "",
         "**What to do:**",
-        "- Complete this gate → loom re-dispatches the story. Edit the story's "
-        "description / acceptance criteria first if the brief needs sharpening.",
-        "- Cancel the *story* (not this gate) → abandon it. Cancelling the gate "
-        "instead strands the story: a cancelled gate can never be satisfied.",
+        (
+            "- Complete this gate → loom re-dispatches the story. Edit the story's "
+            "description / acceptance criteria first if the brief needs sharpening."
+        ),
+        (
+            "- Cancel the *story* (not this gate) → abandon it. Cancelling the gate "
+            "instead strands the story: a cancelled gate can never be satisfied."
+        ),
     ]
     return "\n".join(lines)
 
