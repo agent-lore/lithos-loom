@@ -214,6 +214,53 @@ async def test_missing_provenance_still_nudges() -> None:
     assert nudge.payload["id"] == story
 
 
+async def test_a_replayed_completion_nudges_at_most_once_per_process() -> None:
+    """PR #349 review, round 2: a completion is terminal, so a second delivery
+    of the same gate's completion is always an SSE replay. It must not nudge
+    again — after the first retry dispatched and cleared the story's
+    provenance, a marker-free re-nudge would un-dedup the runner, reset the
+    resume budget, and start a duplicate run past a pending resume schedule."""
+    client = FakeLithosClient(agent_id="loom")
+    story, gate_id = await _escalated_story(client)
+    await client.task_complete(task_id=gate_id, agent="dave")
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None
+
+    bus = EventBus()
+    probe = _probe(bus)
+    resolver = EscalationResolver(bus=bus, lithos=client, agent_id="loom")
+    await bus.publish(_completed_gate_event(gate))
+    await _run_for(resolver)
+    assert probe.queue.get_nowait().payload["id"] == story
+
+    # The first nudge's dispatch cleared the provenance; the replay arrives.
+    await client.task_update(
+        task_id=story, agent="loom", metadata={"needs_human_gate_id": None}
+    )
+    await bus.publish(_completed_gate_event(gate))
+    await _run_for(resolver)
+    assert probe.queue.empty()
+
+
+async def test_a_fresh_process_replay_nudges_again_by_design() -> None:
+    """The dedup is deliberately per-process: after a restart the state a
+    duplicate nudge could corrupt is gone too, so a replayed completion
+    degrades to the restart bootstrap's own (correct) semantics."""
+    client = FakeLithosClient(agent_id="loom")
+    story, gate_id = await _escalated_story(client)
+    await client.task_complete(task_id=gate_id, agent="dave")
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None
+
+    for _ in range(2):  # two daemon lifetimes, one delivery each
+        bus = EventBus()
+        probe = _probe(bus)
+        resolver = EscalationResolver(bus=bus, lithos=client, agent_id="loom")
+        await bus.publish(_completed_gate_event(gate))
+        await _run_for(resolver)
+        assert probe.queue.get_nowait().payload["id"] == story
+
+
 async def test_a_lithos_error_does_not_kill_the_loop() -> None:
     client = FakeLithosClient(agent_id="loom")
     story, gate_id = await _escalated_story(client)

@@ -19,10 +19,15 @@ never reaches this subscriber; the story is simply re-surfaced by bootstrap,
 passes the readiness check (the gate is resolved) and is dispatched — and the
 clean-up of ``needs_human_gate_id`` + the failed-attempt marker lives on that
 dispatch path (``dispatch_guards.clear_resolved_escalation``), not here. So a
-dropped or duplicate nudge is always recoverable: this handler publishes only
-when the story is still open AND still names this gate as its blocker, which
-makes stale / duplicate completions (an SSE replay, slice D's hygiene
-completing a gate whose waiter already resolved) no-ops.
+dropped or duplicate nudge is always recoverable: this handler nudges each
+gate AT MOST ONCE per process (a completion is terminal, so a second delivery
+is always an SSE replay — deduped by gate id), and only while the story is
+still open and does not name a NEWER gate as its blocker; slice D's hygiene
+completing a gate whose waiter already resolved is likewise a no-op. A
+replayed completion arriving in a fresh process nudges again by design: the
+state a duplicate nudge could corrupt (the fail-once dedup, the resume
+schedule and budget) is per-process too, so post-restart it degrades to the
+restart bootstrap's own correct semantics.
 """
 
 from __future__ import annotations
@@ -68,6 +73,19 @@ class EscalationResolver:
             },
             name="escalation-resolver",
         )
+        # Gates this process has already nudged for (PR #349 review, round 2).
+        # The event source is replay-capable, and a gate's completion is
+        # terminal — so a second delivery is always a replay, never new
+        # intent. Without this, a late/replayed completion arriving after the
+        # first retry ran (and cleared the story's provenance) would look
+        # exactly like the missing-provenance fallback below and nudge again:
+        # un-dedup the runner's fail-once set, reset the resume budget, and
+        # start a duplicate run past a pending resume schedule. In-memory is
+        # the right durability: those three pieces of state are themselves
+        # per-process, and after a restart a replayed nudge degrades to the
+        # restart bootstrap's own (correct) semantics. Grows by one small id
+        # per resolved loom gate per process lifetime.
+        self._handled_gates: set[str] = set()
 
     @property
     def subscription(self) -> Subscription:
@@ -89,6 +107,13 @@ class EscalationResolver:
     async def _handle(self, event: Event) -> None:
         gate_id = str(event.payload.get("id") or "")
         if not gate_id:
+            return
+        if gate_id in self._handled_gates:
+            logger.info(
+                "EscalationResolver: gate %s already nudged this process; "
+                "replayed completion ignored",
+                gate_id,
+            )
             return
         story_id = await waiter_of(self.lithos, gate_id)
         if story_id is None:
@@ -120,11 +145,13 @@ class EscalationResolver:
         # escalation path — gate + edge landed, the story provenance write
         # failed — leaves exactly this shape, and skipping it made the
         # operator's tick a no-op until a daemon restart. The waits_on_gate
-        # edge already proves this gate was the story's blocker, and a
-        # spurious nudge (e.g. a duplicate SSE completion after the story was
-        # re-dispatched and cleaned up) is bounded by the normal dispatch
-        # path: readiness defers a story behind any newer gate, and the
+        # edge already proves this gate was the story's blocker. Absence is
+        # ALSO the normal state after the first retry dispatched and cleared
+        # the key — the per-process _handled_gates dedup above is what keeps
+        # a replayed completion of this gate from nudging twice; beyond it,
+        # readiness defers a story behind any newer gate and the
         # collision-safe claim refuses one that is mid-run.
+        self._handled_gates.add(gate_id)
         await self.bus.publish(
             Event(
                 type="lithos.task.updated",
