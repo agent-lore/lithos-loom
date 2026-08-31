@@ -1,0 +1,2455 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 3188590..7042e2c 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -6,7 +6,7 @@ A workflow orchestration daemon for [Lithos](https://github.com/agent-lore/litho
+ 
+ - **Obsidian bridge.** Projects open Lithos tasks into an Obsidian-Tasks-compatible inbox; pushes Obsidian-side status / priority / due-date edits back to Lithos; bidirectionally syncs project-context docs; Templater macros + CLI for capture and project import.
+ - **Route-runner.** Subscribes to Lithos's SSE event stream, matches `lithos.task.created`, `lithos.task.updated`, and `lithos.task.released` against TOML-configured routes (a task must carry every tag in the route's `match.tags`), claims tasks collision-safely, and dispatches subprocess plugins. The runner reads `status` from each plugin's `result.json` (other fields like `metadata_updates` and `artifacts` are schema-validated but not yet applied). Scaffolding for `prd-decompose` is present; its body is a stub — `story-develop` is the one implement→review→PR path. Adding a route's trigger tag to an existing open task re-triggers route matching without a daemon restart (#86); a plugin's own end-of-run `task_update` cannot self-trigger a re-run because the task is already in the runner's in-process claim-dedup set (and across a restart a delivered `completes_task=false` story is held off the ready frontier by its `pr` gate). On a `completes_task=false` success the runner creates a **`pr` gate** (`task_type=gate`, `gate_type=pr`) linked to the story by a `waits_on_gate` edge (epic H / US10) — "awaiting human merge" as a first-class blocker — records `metadata.pr_gate_id` on the story as provenance, and releases the claim. The gate is the **sole** re-dispatch guard: since US11 there is no `loom_delivered` marker — a gated story is simply absent from `lithos_task_ready`, so the runner's readiness check defers it (including across the restart bootstrap that re-emits every open task as `created`). Gate creation is best-effort; if it fails the runner posts a loud `[Friction]` (no fallback exists now — the delivered story could be re-developed on restart until a human merges the PR or creates the gate).
+-- **GitHub issue watcher.** Polls every project-context doc with `github_watch_enabled = true` metadata for new and updated open issues on each repo in its `github_repos` list (a project may map several), materialises each unseen issue as a Lithos task carrying `metadata.github_issue_url`, and keeps the two sides in sync both directions: GH→Lithos mirrors title / body / labels / close as `task_update` + `task_complete` / `task_cancel`; Lithos→GH mirrors task completion / cancellation as `state=closed` with the matching `state_reason`, and Lithos title renames as title PATCH. Reopen on the GH side posts a one-shot `[ReopenRequested]` finding (de-duped via `metadata.github_state_snapshot`). A linked issue **deleted** on the GH side self-heals the Lithos→GH push (#69): an issue-level 404 (typed `GitHubIssueNotFoundError`, distinct from a repo-404 so a deleted issue is never mistaken for a deleted repo) posts a one-shot `[LinkedIssueGone]` finding and writes a `metadata.github_issue_gone_url` marker (scoped to the gone url) so later `task.*` events skip the dead link instead of re-probing it every time; re-linking to a new issue re-evaluates. Per-project repos are managed via `lithos-loom project add-github-repo <slug> <owner/name>` / `remove-github-repo` and toggled via `enable-github` / `disable-github`; `migrate-github-tags` ports legacy tag-based config. Config lives in document metadata (`github_repos`, `github_watch_enabled`, `github_exclude_labels`, `github_exclude_authors`) — see [ADR 0001](docs/adr/0001-github-watch-config-storage.md). Auth is `gh auth token` at startup — host must have `gh` on PATH with the operator logged in. Per-host gate is `[github_watcher] enabled = true`. The same reconcile sweep resolves delivered-PR **`pr` gates** on merge (#87, epic H / US12), gated by `[github_watcher] pr_merge_poll_enabled` (default on): for each open `pr` gate it checks the PR and, on **merge**, completes the story **then** the gate (story-first, so a failed story-completion can't strand a ready story) and posts `[GateResolved]` on the story; on **closed-unmerged / deleted** it leaves the gate **open** (never cancels — a cancelled gate is terminal and its story would be unrecoverable) with a `[DeliveredPRClosed]` finding on the story and a `metadata.develop_pr_merge_state` + `develop_pr_merge_url` marker on the **gate**, scoped to the resolved PR (so re-developing into a **replacement** PR re-triggers evaluation rather than stranding it — but note reopening the *same* closed PR does not, see [#268](https://github.com/agent-lore/lithos-loom/issues/268)). US11 removed the pre-gate `loom_delivered` flag and the legacy `develop_pr_url` merge sweep — the gate is the sole merge-tracking and re-dispatch path.
++- **GitHub issue watcher.** Polls every project-context doc with `github_watch_enabled = true` metadata for new and updated open issues on each repo in its `github_repos` list (a project may map several), materialises each unseen issue as a Lithos task carrying `metadata.github_issue_url`, and keeps the two sides in sync both directions: GH→Lithos mirrors title / body / labels / close as `task_update` + `task_complete` / `task_cancel`; Lithos→GH mirrors task completion / cancellation as `state=closed` with the matching `state_reason`, and Lithos title renames as title PATCH. Reopen on the GH side posts a one-shot `[ReopenRequested]` finding (de-duped via `metadata.github_state_snapshot`). A linked issue **deleted** on the GH side self-heals the Lithos→GH push (#69): an issue-level 404 (typed `GitHubIssueNotFoundError`, distinct from a repo-404 so a deleted issue is never mistaken for a deleted repo) posts a one-shot `[LinkedIssueGone]` finding and writes a `metadata.github_issue_gone_url` marker (scoped to the gone url) so later `task.*` events skip the dead link instead of re-probing it every time; re-linking to a new issue re-evaluates. Per-project repos are managed via `lithos-loom project add-github-repo <slug> <owner/name>` / `remove-github-repo` and toggled via `enable-github` / `disable-github`; `migrate-github-tags` ports legacy tag-based config. Config lives in document metadata (`github_repos`, `github_watch_enabled`, `github_exclude_labels`, `github_exclude_authors`) — see [ADR 0001](docs/adr/0001-github-watch-config-storage.md). Auth is `gh auth token` at startup — host must have `gh` on PATH with the operator logged in. Per-host gate is `[github_watcher] enabled = true`. The same reconcile sweep resolves delivered-PR **`pr` gates** on merge (#87, epic H / US12), gated by `[github_watcher] pr_merge_poll_enabled` (default on): for each open `pr` gate it checks the PR and, on **merge**, completes the story **then** the gate (story-first, so a failed story-completion can't strand a ready story) and posts `[GateResolved]` on the story; on **closed-unmerged / deleted** it leaves the gate **open** (never cancels — a cancelled gate is terminal and its story would be unrecoverable) with a `[DeliveredPRClosed]` finding on the story and a `metadata.develop_pr_merge_state` + `develop_pr_merge_url` marker on the **gate**, scoped to the resolved PR (so re-developing into a **replacement** PR re-triggers evaluation rather than stranding it — but note reopening the *same* closed PR does not, see [#268](https://github.com/agent-lore/lithos-loom/issues/268)). US11 removed the pre-gate `loom_delivered` flag and the legacy `develop_pr_url` merge sweep — the gate is the sole merge-tracking and re-dispatch path. On each **still-open** `pr` gate the same sweep also ingests external review activity (new PR reviews + inline comments → a one-shot `[ExternalReview]` finding on the story, de-duped by high-water marks on the gate; PRD S2 detection, gated by `[github_watcher] external_reviews_enabled`, default on).
+ 
+ Loom replaces [Ralph++](https://github.com/snarktank/ralph) as the user's coding orchestration approach; useful Ralph++ pieces (worktree creation, agent subprocess runner with stream-json, commit detection) are salvaged into `src/lithos_loom/runner/`.
+ 
+@@ -20,7 +20,7 @@ Loom replaces [Ralph++](https://github.com/snarktank/ralph) as the user's coding
+ - **Lithos `task.metadata` is a hard prerequisite.** `lithos-loom doctor` probes for it on first run. Loom also requires `lithos_write(id=..., expected_version=...)` (optimistic locking for note-push), `note.*` SSE events, and `lithos_task_create(metadata=...)` (single-shot create with metadata).
+ - **Dispatch readiness is Lithos's answer, not Loom's (epic G).** The task-graph extension is live, so tasks carry real `blocks` / `parent_child` edges server-side. The route-runner gates dispatch on `lithos_task_ready` (US4) and re-dispatches whatever `lithos_task_complete` reports as newly-unblocked (US6) — it does **not** compute readiness from `metadata.depends_on`. The Obsidian projection likewise derives its ⛔ markers + `include_blocked` gate from a per-flush `lithos_task_blocked` sweep (US8). `project import` *writes* that graph: an indented group becomes an `epic` plus `parent_child` edges, and a `[sequential]` parent chains its children with `blocks` edges (US9). **`metadata.depends_on` / `blocked_on` are now rejected by Lithos** (`invalid_metadata_key` — "task dependencies are first-class task edges"), so never reintroduce them; `metadata.parallelizable` is gone too — parallelism is the *absence* of a `blocks` edge.
+ - **`obsidian-projection` writes `tasks_file` from scratch on every flush.** Idempotent re-runs are no-ops thanks to atomic-write + content-hash dedup. Frontmatter-only edits to projected project-context docs are silently absorbed; `note-push` hashes the body only.
+-- **Stable finding prefixes** for machine-parseable breadcrumbs: `[Friction]`, `[ReopenRequested]`, `[BlockerFailed]`, `[DevelopResult]` (story-develop run outcome posted to the task), `[ReviewDispute]` (story-develop dispute deadlock needing human arbitration), `[DeliveredPRClosed]` (a delivered PR closed without merging / was deleted, the story left blocked on its open gate — posted by the github-watcher `pr`-gate resolver), `[GateResolved]` (github-watcher `pr`-gate resolver: a `pr` gate's PR merged, so the gate + its story are completed — records why the story unblocked), `[LinkedIssueGone]` (github-issue-push: a task's linked GitHub issue was deleted, so the Lithos→GH link is orphaned and further pushes suppressed). Pick a fresh prefix when introducing a new one rather than overloading these — operator queries grep by prefix.
++- **Stable finding prefixes** for machine-parseable breadcrumbs: `[Friction]`, `[ReopenRequested]`, `[BlockerFailed]`, `[DevelopResult]` (story-develop run outcome posted to the task), `[ReviewDispute]` (story-develop dispute deadlock needing human arbitration), `[DeliveredPRClosed]` (a delivered PR closed without merging / was deleted, the story left blocked on its open gate — posted by the github-watcher `pr`-gate resolver), `[GateResolved]` (github-watcher `pr`-gate resolver: a `pr` gate's PR merged, so the gate + its story are completed — records why the story unblocked), `[LinkedIssueGone]` (github-issue-push: a task's linked GitHub issue was deleted, so the Lithos→GH link is orphaned and further pushes suppressed), `[ExternalReview]` (github-watcher external-review ingestion, PRD S2: new review activity — a PR review and/or inline comments — landed on a delivered PR still awaiting merge; posted on the story, de-duped by high-water marks on the gate). Pick a fresh prefix when introducing a new one rather than overloading these — operator queries grep by prefix.
+ - **Project files stay clean.** Loom config is machine-local TOML; project repo `AGENTS.md` / `CLAUDE.md` files contain no Lithos / Loom references (except for projects in the Lithos ecosystem itself).
+ 
+ ## Specifications
+diff --git a/docs/SPECIFICATION.md b/docs/SPECIFICATION.md
+index 3aa303a..ee4e545 100644
+--- a/docs/SPECIFICATION.md
++++ b/docs/SPECIFICATION.md
+@@ -139,7 +139,9 @@ Filters apply only on the create branch (no marker + no matching URL + GH open).
+ 
+ **Dispatch contract (Lithos → GH).** The push direction uses the bus because `LithosEventStream` already serves multiple subscribers across child processes. The consumer loop classifies handler exceptions: permanent errors (`GitHubAuthError`, `GitHubRepoNotFoundError`) log `[Friction]` and drop without retry — retry won't help. Other `GitHubError` subclasses (transients — 5xx, network blips, rate-limit exhausted) retry with exponential backoff capped at 60s, up to 8 attempts (inter-attempt waits 2/4/8/16/32/60/60 s ≈ 3 minutes total before drop). Outages outlasting that budget are caught by the **periodic reconciliation sweep**: every `[github_watcher].reconcile_interval_minutes` (default 60) the child re-fetches open Lithos tasks plus completed + cancelled tasks resolved within `resolved_replay_days` (skipped entirely when `resolved_replay_days = 0`), filters to those carrying `metadata.github_issue_url`, and re-dispatches each one through the push handler. Terminal tasks dispatch both a synthetic `task.updated` (so title drift reconciles) AND the matching close event. The handler is idempotent (re-fetches GH before PATCH) so the sweep is a no-op in steady state. The sweep keeps recovery cadence within the configured interval even without a daemon restart; set to 0 to disable.
+ 
+-**PR-gate resolver (Epic H / US12+US13).** The same reconcile sweep, on the same `[github_watcher].pr_merge_poll_enabled` gate (default on), also resolves the first-class **`pr` gates** the runner raises (§2.2 above). For each open `task_type="gate"` task carrying `metadata.gate_type="pr"`, it reads the gate's `repo` / `pr_number`, finds the gated story via the `waits_on_gate` edge, fetches the PR, and acts on the state: **merged** → complete the **story first**, then the **gate** (both swallowing `task_not_found`), and post `[GateResolved]` on the story; **closed without merging** or **deleted (404)** → leave the gate **open** (never cancel — a cancelled gate is terminal and strands the story permanently unreachable through Loom) and post a one-shot `[DeliveredPRClosed]` on the story; **still open** → no-op; **transient `GitHubError`** → retry next sweep; a gate whose metadata won't parse → one-shot `[Friction]`. **Story-first ordering is non-negotiable:** completing the gate first would momentarily ready a story still tagged `trigger:story-develop`, and if story completion then failed the gate would be gone from the open set → story stranded open+ready+tagged → duplicate PR. The de-dup marker for the non-merged end-states (`metadata.develop_pr_merge_state` + `develop_pr_merge_url`, PR-scoped) is written **on the gate** (the durable node that stays open and would be re-swept), so a re-develop into a replacement PR (which updates the gate) re-evaluates. On **merge** the gate itself is completed, so no marker is needed. Completing all gated stories means the Lithos→GH push then closes any linked issue on merge (the push re-fetches before PATCH, so the ownership change is race-benign); `task_complete`'s `unblocked` return is ignored (story-first leaves nothing to dispatch, and the watcher runs no `RouteRunner`).
++**PR-gate resolver (Epic H / US12+US13).** The same reconcile sweep, on the same `[github_watcher].pr_merge_poll_enabled` gate (default on), also resolves the first-class **`pr` gates** the runner raises (§2.2 above). For each open `task_type="gate"` task carrying `metadata.gate_type="pr"`, it reads the gate's `repo` / `pr_number`, finds the gated story via the `waits_on_gate` edge, fetches the PR, and acts on the state: **merged** → complete the **story first**, then the **gate** (both swallowing `task_not_found`), and post `[GateResolved]` on the story; **closed without merging** or **deleted (404)** → leave the gate **open** (never cancel — a cancelled gate is terminal and strands the story permanently unreachable through Loom) and post a one-shot `[DeliveredPRClosed]` on the story; **still open** → re-poll next sweep (and, when `[github_watcher].external_reviews_enabled` is on — the default — ingest external review activity, below); **transient `GitHubError`** → retry next sweep; a gate whose metadata won't parse → one-shot `[Friction]`. **Story-first ordering is non-negotiable:** completing the gate first would momentarily ready a story still tagged `trigger:story-develop`, and if story completion then failed the gate would be gone from the open set → story stranded open+ready+tagged → duplicate PR. The de-dup marker for the non-merged end-states (`metadata.develop_pr_merge_state` + `develop_pr_merge_url`, PR-scoped) is written **on the gate** (the durable node that stays open and would be re-swept), so a re-develop into a replacement PR (which updates the gate) re-evaluates. On **merge** the gate itself is completed, so no marker is needed. Completing all gated stories means the Lithos→GH push then closes any linked issue on merge (the push re-fetches before PATCH, so the ownership change is race-benign); `task_complete`'s `unblocked` return is ignored (story-first leaves nothing to dispatch, and the watcher runs no `RouteRunner`).
++
++**External-review ingestion (PRD S2, detection).** On each **still-open** `pr` gate the same sweep also reads the PR's reviews and inline review comments and posts anything new as a one-shot **`[ExternalReview]`** finding on the blocked *story* (author, review state, `path:line`, a one-line excerpt, and the thread url per comment). Per-state policy: `CHANGES_REQUESTED` always posts; `COMMENTED` (and any unrecognised state) posts only with a non-empty body; `APPROVED` / `DISMISSED` are recorded silently — an approval is not an operator action item. Thread replies and loom's own automated replies are never re-ingested. De-dup is a pair of **high-water marks** (`last_review_id` / `last_comment_id` — GitHub REST ids are monotonic, so a summary-only review with zero inline comments still keys exactly) held in a `metadata.external_review_seen` marker on the **gate**, scoped to the PR url so a replacement PR re-evaluates from scratch; the marker also carries a `last_comment_at` cursor passed as `since` on the comment fetch so a long-lived PR's history isn't re-paginated every sweep. A transient `GitHubError` leaves the marker untouched and the whole batch retries next sweep. Gate: `[github_watcher].external_reviews_enabled` (default on; rides the `pr_merge_poll_enabled` pass). The companion `trusted_bots` allowlist has no effect on detection — it feeds the remediation slices (ADR 0011 decision 8), which inject trusted findings into `develop converge`.
+ 
+ **Drift sync** (GH → Lithos, Slice 7.2). Every poll that matches a known Lithos task layers three checks on top of the close mirror:
+ 
+@@ -328,6 +330,15 @@ reconcile_interval_minutes = 60
+ # interval the child scans Lithos for open + recently-resolved tasks
+ # carrying metadata.github_issue_url and replays each through the push
+ # handler. Set to 0 to disable the sweep.
++external_reviews_enabled = true
++# PRD S2 detection: on each still-open `pr` gate the reconcile sweep also
++# reads the PR's reviews + inline comments and posts anything new as a
++# one-shot [ExternalReview] finding on the blocked story. Set false for a
++# pure merge poll.
++trusted_bots = ["copilot-pull-request-reviewer[bot]"]
++# Bot logins whose findings may seed automated remediation (ADR 0011:
++# allowlisted bots + humans with repo write/admin). Detection ingests
++# every reviewer regardless.
+ 
+ # ── story-develop host-wide defaults ──────────────────────────────────
+ #
+@@ -1060,6 +1071,7 @@ Loom posts findings with stable prefixes so operators (and `lithos-lens`) can gr
+ | `[BlockerFailed]` | route-runner | Plugin failed, timed out, violated the contract, or returned an unknown status. The claim was released. |
+ | `[GateResolved]` | github-watcher (PR-gate resolver, Epic H) | A story's `pr` gate saw its PR **merge**. The story was completed (story-first), then the gate; the finding is posted on the story. |
+ | `[DeliveredPRClosed]` | github-watcher (PR-gate resolver) | A delivered PR was closed without merging, or deleted. The `pr` gate is left **open** (never cancelled) and the finding is posted on the story, which stays blocked; a human decides whether to abandon or re-develop into a replacement PR. |
++| `[ExternalReview]` | github-watcher (external-review ingestion, PRD S2) | New external review activity (a PR review and/or inline comments) landed on a delivered PR still awaiting merge. Posted on the story; de-duped by high-water marks in `metadata.external_review_seen` on the gate. Detection only — remediation is a later slice. |
+ | `[LinkedIssueGone]` | `github-issue-push` (#69) | A task's linked GitHub issue was deleted (404). The Lithos→GH link is orphaned; a `metadata.github_issue_gone_url` marker suppresses further pushes to it until the task is re-linked. |
+ 
+ ---
+diff --git a/docs/architecture.toml b/docs/architecture.toml
+index d3074c0..705389d 100644
+--- a/docs/architecture.toml
++++ b/docs/architecture.toml
+@@ -61,7 +61,7 @@ Bus            = ["lithos_loom.bus"]
+ Config         = ["lithos_loom.config"]
+ Errors         = ["lithos_loom.errors"]
+ LithosClient   = ["lithos_loom.lithos_client"]
+-GitHub         = ["lithos_loom.github_client"]
++GitHub         = ["lithos_loom.github_client", "lithos_loom.github_models"]
+ Tasks          = ["lithos_loom.task_graph", "lithos_loom.task_line_parser", "lithos_loom.task_line", "lithos_loom.gates"]
+ State          = ["lithos_loom.cursor_store", "lithos_loom.sync_state"]
+ Runners        = ["lithos_loom.runner", "lithos_loom.plugin_runner"]
+@@ -94,7 +94,7 @@ max_module_lines       = 2210 # stop-loss; lithos_client is 2195 (Epic G US3 add
+                                # wire-types/parsers extraction — tracked as a follow-up;
+                                # do that (not another bump) before it grows further.
+ cross_module_private_refs = 8   # measured 2026-07; children._boot x3, story_develop seam constants; goal: 0
+-tests_private_imports     = 99  # 97->99: Epic H gate-resolver tests reach _develop_pr_merge internals; cli.develop helpers dominate; direction: down
++tests_private_imports     = 98  # 99->98: github_models extraction made the issue/PR parsers public; cli.develop helpers dominate; direction: down
+ 
+ # Domain class diagram: the GitHub/task data types are the domain entities.
+ # Everything else (config/settings, plugin-internal working types, eval
+@@ -103,6 +103,7 @@ tests_private_imports     = 99  # 97->99: Epic H gate-resolver tests reach _deve
+ [domain]
+ include_modules = [
+     "lithos_loom.github_client",
++    "lithos_loom.github_models",
+     "lithos_loom.gates",
+     "lithos_loom.task_graph",
+     "lithos_loom.task_line_parser",
+diff --git a/docs/generated/components/GitHub.md b/docs/generated/components/GitHub.md
+index c7ee08c..f612925 100644
+--- a/docs/generated/components/GitHub.md
++++ b/docs/generated/components/GitHub.md
+@@ -11,27 +11,34 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_loom.github_client` | L | 12 | 4 |
++| `lithos_loom.github_client` | M | 7 | 0 |
++| `lithos_loom.github_models` | M | 5 | 8 |
+ 
+ ## Public API
+ 
+ ### `lithos_loom.github_client`
+-- class `GitHubRef` — A parsed reference to a GitHub issue or pull request.
+-- def `parse_github_ref` — Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
+ - class `GitHubError` — Base for GitHub-watcher errors. Subclasses carry actionable context.
+ - class `GitHubAuthError` — Raised when GitHub auth fails (401, 403, or missing/broken gh CLI).
+ - class `GitHubRepoNotFoundError` — Raised when a watched repo returns 404.
+ - class `GitHubIssueNotFoundError` — Raised when an issue-level endpoint returns 404 (the issue is gone).
+ - class `GitHubRateLimitError` — Raised when a rate-limit retry exhausts (currently only on a second 403).
+ - class `GitHubTransportError` — Raised when the HTTP request itself fails (connect/read/reset/timeout).
++- class `GitHubClient` — Async client for the slice-7.1 subset of the GitHub REST API.
++
++### `lithos_loom.github_models`
++- class `GitHubRef` — A parsed reference to a GitHub issue or pull request.
++- def `parse_github_ref` — Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
+ - class `Issue` — The slice of GitHub's issue payload the watcher cares about.
+ - class `PullRequest` — The pull-request payload two consumers share off the single-PR endpoint.
+ - class `PullRequestReview` — A single PR review: the reviewer login + the review-summary body.
+ - class `PullRequestReviewComment` — A single inline review comment on a PR.
++- def `parse_issues_response` — Convert a GitHub ``/issues`` response into typed Issues, dropping PRs.
++- def `parse_pull_request` — Convert a GitHub ``GET /pulls/{n}`` response row into a typed PullRequest.
++- def `parse_pull_request_review`
++- def `parse_pull_request_review_comment`
+ - def `parse_marker` — Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
+ - def `apply_marker` — Return ``body`` with a canonical marker appended at the end.
+ - def `strip_marker` — Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.
+-- class `GitHubClient` — Async client for the slice-7.1 subset of the GitHub REST API.
+ 
+ ## Dependencies
+ 
+diff --git a/docs/generated/components/Subscriptions.md b/docs/generated/components/Subscriptions.md
+index 8cac23f..817f1af 100644
+--- a/docs/generated/components/Subscriptions.md
++++ b/docs/generated/components/Subscriptions.md
+@@ -15,7 +15,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
+ | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
+ | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
+ | `lithos_loom.subscriptions._blocked_snapshot` | S | 1 | 0 |
+-| `lithos_loom.subscriptions._develop_pr_merge` | S | 0 | 1 |
++| `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 1 |
+ | `lithos_loom.subscriptions._findings` | XS | 0 | 2 |
+ | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
+ | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |
+@@ -30,6 +30,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
+ | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
+ | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
+ | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 8 |
++| `lithos_loom.subscriptions.external_reviews` | S | 0 | 1 |
+ | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
+ | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
+ 
+@@ -107,6 +108,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
+ - def `release_with_failure` — The whole failure-path release: marker (+stamp), finding, release.
+ - def `clear_superseded_failure` — Best-effort per-key delete of ``route``'s failed-attempt marker, iff the dispatch-time ``payload`` carried one (no round trip otherwise).
+ 
++### `lithos_loom.subscriptions.external_reviews`
++- def `ingest_external_reviews` — Ingest new review activity on one still-open gate's PR. Never raises.
++
+ ### `lithos_loom.subscriptions.retry`
+ - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.
+ 
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 97efb03..8aa00ef 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -52,6 +52,10 @@ classDiagram
+   class PullRequestReview {
+     +author str
+     +body str
++    +review_id int
++    +state str
++    +submitted_at datetime | None
++    +commit_id str
+   }
+   class PullRequestReviewComment {
+     +comment_id int
+@@ -60,6 +64,10 @@ classDiagram
+     +line int | None
+     +body str
+     +in_reply_to_id int | None
++    +html_url str
++    +commit_id str
++    +original_commit_id str
++    +updated_at datetime | None
+   }
+ ```
+ 
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index 3feb43a..4f3b656 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -44,7 +44,7 @@
+       "GitHub": {
+         "functions_over_10": 1,
+         "max_complexity": 14,
+-        "max_function": "lithos_loom.github_client._parse_pull_request"
++        "max_function": "lithos_loom.github_models.parse_pull_request"
+       },
+       "LithosClient": {
+         "functions_over_10": 6,
+@@ -82,9 +82,9 @@
+         "max_function": "lithos_loom.cursor_store.CursorStore._load"
+       },
+       "Subscriptions": {
+-        "functions_over_10": 8,
+-        "max_complexity": 13,
+-        "max_function": "lithos_loom.subscriptions._note_push.make_handler.handle"
++        "functions_over_10": 10,
++        "max_complexity": 15,
++        "max_function": "lithos_loom.subscriptions.external_reviews.ingest_external_reviews"
+       },
+       "Supervisor": {
+         "functions_over_10": 1,
+@@ -97,7 +97,7 @@
+         "max_function": "lithos_loom.task_graph.build_plan"
+       }
+     },
+-    "functions_over_10": 94,
++    "functions_over_10": 96,
+     "top_functions": [
+       {
+         "complexity": 101,
+@@ -140,7 +140,7 @@
+         "qualname": "lithos_loom.cli.develop._outcome_line"
+       }
+     ],
+-    "total_functions": 1086
++    "total_functions": 1095
+   },
+   "domain": {
+     "associations": 2,
+@@ -252,7 +252,7 @@
+       }
+     },
+     "cross_component_edges": 65,
+-    "cross_component_module_edges": 235,
++    "cross_component_module_edges": 237,
+     "longest_component_chain": 6,
+     "module_cycle_count": 1,
+     "module_cycles": [
+@@ -295,7 +295,7 @@
+     "cross_module_private_refs": 8,
+     "tests_private_detail": [
+       "tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)",
+-      "tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x5)",
++      "tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x6)",
+       "tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)",
+       "tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)",
+       "tests/test_cli_develop.py -> lithos_loom.cli.develop._resolve (x4)",
+@@ -325,7 +325,7 @@
+       "tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags",
+       "tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags"
+     ],
+-    "tests_private_imports": 99
++    "tests_private_imports": 98
+   },
+   "size": {
+     "components": {
+@@ -344,10 +344,10 @@
+         "functions": 23,
+         "largest_module": "lithos_loom.children.obsidian_sync",
+         "largest_module_lines": 497,
+-        "lines": 1284,
++        "lines": 1288,
+         "modules": 6,
+         "public_symbols": 8,
+-        "sloc": 962
++        "sloc": 966
+       },
+       "Cli": {
+         "classes": 19,
+@@ -363,11 +363,11 @@
+         "classes": 10,
+         "functions": 22,
+         "largest_module": "lithos_loom.config",
+-        "largest_module_lines": 1044,
+-        "lines": 1044,
++        "largest_module_lines": 1076,
++        "lines": 1076,
+         "modules": 1,
+         "public_symbols": 13,
+-        "sloc": 875
++        "sloc": 905
+       },
+       "Doctor": {
+         "classes": 2,
+@@ -411,13 +411,13 @@
+       },
+       "GitHub": {
+         "classes": 12,
+-        "functions": 38,
++        "functions": 39,
+         "largest_module": "lithos_loom.github_client",
+-        "largest_module_lines": 796,
+-        "lines": 796,
+-        "modules": 1,
+-        "public_symbols": 16,
+-        "sloc": 616
++        "largest_module_lines": 600,
++        "lines": 925,
++        "modules": 2,
++        "public_symbols": 20,
++        "sloc": 735
+       },
+       "LithosClient": {
+         "classes": 14,
+@@ -490,14 +490,14 @@
+         "sloc": 439
+       },
+       "Subscriptions": {
+-        "classes": 10,
+-        "functions": 132,
++        "classes": 11,
++        "functions": 140,
+         "largest_module": "lithos_loom.subscriptions._obsidian_projection",
+         "largest_module_lines": 794,
+-        "lines": 6293,
+-        "modules": 21,
+-        "public_symbols": 36,
+-        "sloc": 4797
++        "lines": 6586,
++        "modules": 22,
++        "public_symbols": 37,
++        "sloc": 5031
+       },
+       "Supervisor": {
+         "classes": 3,
+@@ -530,13 +530,13 @@
+       "lithos_loom.plugins.story_develop.__main__",
+       "lithos_loom.plugins.story_develop.pr_delivery"
+     ],
+-    "total_lines": 42029,
+-    "total_modules": 126,
+-    "total_sloc": 33386
++    "total_lines": 42487,
++    "total_modules": 128,
++    "total_sloc": 33773
+   },
+   "tests": {
+     "ratio": 1.64,
+-    "src_lines": 42029,
+-    "test_lines": 69078
++    "src_lines": 42487,
++    "test_lines": 69717
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 766a3c0..8c69384 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -17,11 +17,11 @@ lower a budget after improving the code to lock in the gain.
+ | `max_module_lines` | 2210 | 2210 | 0 |
+ | `module_cycles` | 1 | 1 | 0 |
+ | `modules_over_800_lines` | 6 | 6 | 0 |
+-| `tests_private_imports` | 99 | 99 | 0 |
++| `tests_private_imports` | 98 | 98 | 0 |
+ 
+ ## Import graph
+ 
+-- Cross-component edges: **65** (235 module-level)
++- Cross-component edges: **65** (237 module-level)
+ - Component cycles: Render ↔ Subscriptions
+ - Module cycles: lithos_loom.plugins.story_develop.agent_session ↔ lithos_loom.plugins.story_develop.panel ↔ lithos_loom.plugins.story_develop.rounds
+ - Tier-skipping edges (Entrypoints → Foundation): 10 (Children -> Bus, Children -> Config, Children -> GitHub, Children -> LithosClient, Children -> State, Entrypoint -> Bus, Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> LithosClient, Entrypoint -> Supervisor)
+@@ -35,14 +35,14 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Component | Modules | Lines | SLOC | Fan-in | Fan-out | Instability | Max complexity | Functions > 10 |
+ |---|---:|---:|---:|---:|---:|---:|---|---:|
+ | Bus | 1 | 207 | 168 | 4 | 0 | 0.00 | 11 (`lithos_loom.bus._matches_struct`) | 1 |
+-| Children | 6 | 1284 | 962 | 0 | 7 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 1 |
++| Children | 6 | 1288 | 966 | 0 | 7 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 1 |
+ | Cli | 12 | 5199 | 4335 | 2 | 8 | 0.80 | 49 (`lithos_loom.cli.project.import_project`) | 17 |
+-| Config | 1 | 1044 | 875 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
++| Config | 1 | 1076 | 905 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
+ | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
+ | Entrypoint | 2 | 622 | 492 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
+ | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
+ | Evals | 15 | 3910 | 3167 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 12 |
+-| GitHub | 1 | 796 | 616 | 5 | 1 | 0.17 | 14 (`lithos_loom.github_client._parse_pull_request`) | 1 |
++| GitHub | 2 | 925 | 735 | 5 | 1 | 0.17 | 14 (`lithos_loom.github_models.parse_pull_request`) | 1 |
+ | LithosClient | 1 | 2210 | 1851 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
+ | Plugins | 42 | 14098 | 11221 | 2 | 5 | 0.71 | 101 (`lithos_loom.plugins.story_develop.__main__.main`) | 32 |
+ | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
+@@ -50,13 +50,13 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Runners | 5 | 625 | 484 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
+ | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
+ | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
+-| Subscriptions | 21 | 6293 | 4797 | 4 | 10 | 0.71 | 13 (`lithos_loom.subscriptions._note_push.make_handler.handle`) | 8 |
++| Subscriptions | 22 | 6586 | 5031 | 4 | 10 | 0.71 | 15 (`lithos_loom.subscriptions.external_reviews.ingest_external_reviews`) | 10 |
+ | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
+ | Tasks | 4 | 820 | 609 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 2 |
+ 
+ ## Size
+ 
+-- Modules: **126**, lines: **42029**, SLOC: **33386**
++- Modules: **128**, lines: **42487**, SLOC: **33773**
+ - Largest module: `lithos_loom.lithos_client` (2210 lines)
+ - Modules over 800 lines: **6**
+   - `lithos_loom.cli.develop`
+@@ -68,7 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ 
+ ## Complexity
+ 
+-- Functions: **1086**, cyclomatic > 10: **94**
++- Functions: **1095**, cyclomatic > 10: **96**
+ 
+ Top 10 most complex functions:
+ 
+@@ -99,9 +99,9 @@ Private-name reaches across module seams. Both counts can be pinned as
+   - `lithos_loom.sources.github_issue_watcher -> lithos_loom.sources.github_watch_state._isoformat`
+   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._resolved_at_for`
+   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._task_from_payload`
+-- Tests importing src privates: **99**
++- Tests importing src privates: **98**
+   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)`
+-  - `tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x5)`
++  - `tests/test_github_watcher_child.py -> lithos_loom.children.github_watcher._run_reconcile_pass (x6)`
+   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)`
+   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)`
+   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._resolve (x4)`
+@@ -135,4 +135,4 @@ Private-name reaches across module seams. Both counts can be pinned as
+ ## Domain & tests
+ 
+ - Domain models: **17** (2 associations, 0 without docstrings)
+-- Test-to-source line ratio: **1.64** (69078 test lines / 42029 source lines)
++- Test-to-source line ratio: **1.64** (69717 test lines / 42487 source lines)
+diff --git a/examples/lithos-loom.toml b/examples/lithos-loom.toml
+index 56d4634..0eabfe3 100644
+--- a/examples/lithos-loom.toml
++++ b/examples/lithos-loom.toml
+@@ -371,18 +371,25 @@ tags = ["trigger:story-develop"]
+ # # interval it re-dispatches GH-linked Lithos tasks through the push
+ # # handler. Set to 0 to disable.
+ # pr_merge_poll_enabled = true
+-# # The same reconcile sweep also resolves PR delivery on merge. Two paths,
+-# # same GitHub poll:
+-# #   Epic H: for each open `pr` gate (task_type="gate", gate_type="pr") it
+-# #   polls the PR and, on merge, completes the gated story then the gate
+-# #   ([GateResolved]); closed-unmerged / deleted leaves the gate OPEN with a
+-# #   one-shot [DeliveredPRClosed] on the story (never cancels — a cancelled
+-# #   gate would strand the story).
+-# #   #87 legacy: for each open task carrying metadata.develop_pr_url (and
+-# #   NOT github_issue_url — those close via the issue mirror — and NOT
+-# #   pr_gate_id — owned by the gate resolver), merged -> task_complete;
+-# #   closed-unmerged / deleted -> left open with [DeliveredPRClosed].
++# # The same reconcile sweep also resolves PR delivery on merge (Epic H —
++# # the sole merge-tracking path since US11): for each open `pr` gate
++# # (task_type="gate", gate_type="pr") it polls the PR and, on merge,
++# # completes the gated story then the gate ([GateResolved]);
++# # closed-unmerged / deleted leaves the gate OPEN with a one-shot
++# # [DeliveredPRClosed] on the story (never cancels — a cancelled gate
++# # would strand the story).
+ # # Set false to run the watcher for issue sync only.
++# external_reviews_enabled = true
++# # PRD S2 detection: on each still-open `pr` gate the sweep also reads the
++# # PR's reviews + inline review comments and posts anything new as a
++# # one-shot [ExternalReview] finding on the blocked story (CHANGES_REQUESTED
++# # always posts; COMMENTED only with content; APPROVED/DISMISSED are
++# # recorded silently). De-duped by high-water marks on the gate. Rides the
++# # pr_merge_poll_enabled pass. Set false for a pure merge poll.
++# trusted_bots = ["copilot-pull-request-reviewer[bot]"]
++# # Bot logins whose findings may seed automated remediation (ADR 0011:
++# # allowlisted bots + humans with repo write/admin). Detection ingests
++# # every reviewer regardless; this only gates the remediation slices.
+ 
+ # ── story-develop host-wide defaults ──────────────────────────────────
+ #
+diff --git a/pyproject.toml b/pyproject.toml
+index b90fa5d..11b20c8 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -107,6 +107,7 @@ source_modules = [
+     "lithos_loom.errors",
+     "lithos_loom.lithos_client",
+     "lithos_loom.github_client",
++    "lithos_loom.github_models",
+     "lithos_loom.task_graph",
+     "lithos_loom.task_line_parser",
+     "lithos_loom.task_line",
+diff --git a/src/lithos_loom/children/github_watcher.py b/src/lithos_loom/children/github_watcher.py
+index cd64d53..702e518 100644
+--- a/src/lithos_loom/children/github_watcher.py
++++ b/src/lithos_loom/children/github_watcher.py
+@@ -80,6 +80,7 @@ async def _run_reconcile_pass(
+     resolved_window: timedelta | None,
+     github: GitHubClient,
+     pr_merge_enabled: bool,
++    external_reviews_enabled: bool = False,
+ ) -> None:
+     """Single pass of the periodic Lithos→GH reconciliation sweep.
+ 
+@@ -149,7 +150,9 @@ async def _run_reconcile_pass(
+     async def _pr_gate_one(gate: Any) -> None:
+         """Resolve one open ``pr`` gate (Epic H). Same defensive wrap."""
+         try:
+-            outcome = await reconcile_pr_gate(gate, github, ctx)
++            outcome = await reconcile_pr_gate(
++                gate, github, ctx, ingest_reviews=external_reviews_enabled
++            )
+         except Exception as exc:  # defensive — the reconcile catches its own
+             logger.warning(
+                 "[Friction] github-watcher: gate resolve for %s failed: %s: %s",
+@@ -439,6 +442,7 @@ async def _amain(cfg: LoomConfig) -> int:
+                             resolved_window=window,
+                             github=github,
+                             pr_merge_enabled=gh_cfg.pr_merge_poll_enabled,
++                            external_reviews_enabled=gh_cfg.external_reviews_enabled,
+                         )
+                     except Exception:
+                         logger.exception(
+diff --git a/src/lithos_loom/config.py b/src/lithos_loom/config.py
+index b639552..d347ea8 100644
+--- a/src/lithos_loom/config.py
++++ b/src/lithos_loom/config.py
+@@ -285,6 +285,21 @@ class GitHubWatcherConfig:
+     cadence. Set ``false`` to run the watcher for issue sync only without the
+     gate resolver.
+     """
++    external_reviews_enabled: bool = True
++    """Whether the sweep also ingests external review activity on still-open
++    ``pr`` gates (PRD S2 detection): new PR reviews and inline review comments
++    post a one-shot ``[ExternalReview]`` finding on the blocked story, de-duped
++    by high-water marks on the gate. Requires ``pr_merge_poll_enabled`` (it
++    rides the same per-gate pass). Set ``false`` to keep the merge poll without
++    review ingestion.
++    """
++    trusted_bots: tuple[str, ...] = ("copilot-pull-request-reviewer[bot]",)
++    """Bot logins whose review findings may seed automated remediation
++    (ADR 0011 decision 8). Detection ingests *every* reviewer's activity; this
++    allowlist (plus humans with repo write/admin) only gates which findings the
++    remediation slices may hand to a coder — comment bodies are third-party
++    text on a prompt path.
++    """
+ 
+ 
+ @dataclass(frozen=True)
+@@ -742,6 +757,8 @@ _GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
+         "resolved_replay_days",
+         "reconcile_interval_minutes",
+         "pr_merge_poll_enabled",
++        "external_reviews_enabled",
++        "trusted_bots",
+     }
+ )
+ 
+@@ -826,6 +843,19 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
+         data, "pr_merge_poll_enabled", True, config_path, "github_watcher"
+     )
+ 
++    external_reviews_enabled = _optional_bool(
++        data, "external_reviews_enabled", True, config_path, "github_watcher"
++    )
++
++    trusted_bots_raw = data.get("trusted_bots", list(GitHubWatcherConfig.trusted_bots))
++    if not isinstance(trusted_bots_raw, list) or not all(
++        isinstance(b, str) and b for b in trusted_bots_raw
++    ):
++        raise ConfigError(
++            f"{config_path}: github_watcher.trusted_bots must be a list of "
++            f"non-empty strings (bot logins)"
++        )
++
+     return GitHubWatcherConfig(
+         enabled=enabled,
+         poll_interval_seconds=poll_interval,
+@@ -833,6 +863,8 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
+         resolved_replay_days=resolved_replay_days,
+         reconcile_interval_minutes=reconcile_interval,
+         pr_merge_poll_enabled=pr_merge_poll_enabled,
++        external_reviews_enabled=external_reviews_enabled,
++        trusted_bots=tuple(trusted_bots_raw),
+     )
+ 
+ 
+diff --git a/src/lithos_loom/github_client.py b/src/lithos_loom/github_client.py
+index 3b9588d..f3c431f 100644
+--- a/src/lithos_loom/github_client.py
++++ b/src/lithos_loom/github_client.py
+@@ -24,11 +24,50 @@ import logging
+ import re
+ from dataclasses import dataclass
+ from datetime import UTC, datetime
+-from typing import Any, Literal
++from typing import Any
+ 
+ import httpx
+ 
+ from .errors import LithosLoomError
++from .github_models import (
++    GitHubRef,
++    Issue,
++    PullRequest,
++    PullRequestReview,
++    PullRequestReviewComment,
++    apply_marker,
++    parse_github_ref,
++    parse_issues_response,
++    parse_marker,
++    parse_pull_request,
++    parse_pull_request_review,
++    parse_pull_request_review_comment,
++    strip_marker,
++)
++
++__all__ = [
++    "GITHUB_API_BASE",
++    "GitHubAuthError",
++    "GitHubClient",
++    "GitHubError",
++    "GitHubIssueNotFoundError",
++    "GitHubRateLimitError",
++    "GitHubRef",
++    "GitHubRepoNotFoundError",
++    "GitHubTransportError",
++    "Issue",
++    "PullRequest",
++    "PullRequestReview",
++    "PullRequestReviewComment",
++    "apply_marker",
++    "parse_github_ref",
++    "parse_issues_response",
++    "parse_marker",
++    "parse_pull_request",
++    "parse_pull_request_review",
++    "parse_pull_request_review_comment",
++    "strip_marker",
++]
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -36,63 +75,6 @@ GITHUB_API_BASE = "https://api.github.com"
+ _API_VERSION = "2022-11-28"
+ _USER_AGENT = "lithos-loom-github-watcher"
+ 
+-# Regex matches both canonical and operator-edited shapes:
+-#   <!-- lithos:abc-123 -->  → canonical
+-#   <!-- LITHOS:ABC-123 -->  → case-insensitive tolerated
+-# Captured group 1 is the task id.
+-_MARKER_RE = re.compile(r"<!--\s*lithos:\s*([A-Za-z0-9_-]+)\s*-->", re.IGNORECASE)
+-
+-# The one home for the canonical GitHub issue/PR web-URL grammar (ARCH-7). Every
+-# marker/reconcile path that carries a ``develop_pr_url`` or ``github_issue_url``
+-# parsed it independently before — six near-identical prefix-splits and regexes
+-# that could drift on host, trailing path, or numeric id. They are now thin
+-# adapters over ``parse_github_ref``. Anchored at both ends: a single trailing
+-# slash is tolerated, any extra path segment (``/pull/82/files``) is not.
+-_GITHUB_REF_RE = re.compile(
+-    r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
+-    r"(?P<kind>issues|pull)/(?P<number>\d+)/?$"
+-)
+-
+-
+-@dataclass(frozen=True)
+-class GitHubRef:
+-    """A parsed reference to a GitHub issue or pull request.
+-
+-    ``repo`` is ``"owner/name"``; ``number`` is the issue/PR number; ``kind`` is
+-    the canonical singular ``"issue"`` or ``"pull"``. Produced only by
+-    :func:`parse_github_ref`.
+-    """
+-
+-    repo: str
+-    number: int
+-    kind: Literal["issue", "pull"]
+-
+-
+-def parse_github_ref(url: object) -> GitHubRef | None:
+-    """Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
+-
+-    Returns a :class:`GitHubRef`, or ``None`` for anything that is not exactly
+-    that shape — a non-string, a non-github host, a non-https scheme, an unknown
+-    kind, a trailing path segment, or a non-numeric id. A single trailing slash
+-    is tolerated and surrounding whitespace is stripped.
+-
+-    This is the single home for the GitHub issue/PR URL grammar; the per-caller
+-    helpers (``pr_delivery.parse_issue_ref`` / ``pr_delivery.pr_number_from_url``,
+-    ``_develop_pr_merge._parse_pr_url``, ``_github_issue_push._resolve_repo_number``)
+-    are thin adapters that filter on ``kind`` and shape the return their own way.
+-    """
+-    if not isinstance(url, str):
+-        return None
+-    m = _GITHUB_REF_RE.match(url.strip())
+-    if m is None:
+-        return None
+-    kind: Literal["issue", "pull"] = "issue" if m.group("kind") == "issues" else "pull"
+-    return GitHubRef(
+-        repo=f"{m.group('owner')}/{m.group('repo')}",
+-        number=int(m.group("number")),
+-        kind=kind,
+-    )
+-
+ 
+ class GitHubError(LithosLoomError):
+     """Base for GitHub-watcher errors. Subclasses carry actionable context."""
+@@ -148,210 +130,6 @@ class GitHubTransportError(GitHubError):
+         self.__cause__ = cause
+ 
+ 
+-@dataclass(frozen=True)
+-class Issue:
+-    """The slice of GitHub's issue payload the watcher cares about."""
+-
+-    repo: str
+-    number: int
+-    title: str
+-    body: str
+-    state: str  # "open" | "closed"
+-    state_reason: str | None  # "completed" | "not_planned" | None
+-    labels: tuple[str, ...]
+-    author: str
+-    updated_at: datetime
+-    html_url: str
+-
+-
+-@dataclass(frozen=True)
+-class PullRequest:
+-    """The pull-request payload two consumers share off the single-PR endpoint.
+-
+-    ``merged`` is a top-level boolean on the single-PR endpoint
+-    (``GET /pulls/{n}``) — reliable there, unlike the list endpoint where it
+-    is absent. ``merged_at`` / ``merge_commit_sha`` are populated only once the
+-    PR has actually merged. The PR-merge watcher (#87) reads those.
+-
+-    ``head_sha`` / ``base_ref`` / ``head_ref`` / ``title`` / ``body`` come from
+-    the same response and drive review-only resolution (``review_resolve``,
+-    #154 / ARCH-7c) — the head commit to diff, the base branch to merge-base
+-    against, and the PR's title/body as the default acceptance-criteria source.
+-    They default to empty so a minimal row (e.g. a list-endpoint slice or an
+-    older test fixture) still parses; the single-PR endpoint always populates
+-    them in practice.
+-
+-    ``head_repo`` / ``base_repo`` are the head/base repo full-names
+-    (``owner/name``); when they differ the PR head lives on a **fork**, which
+-    converge (``review_resolve``) reads to refuse pushing to a fork branch under
+-    origin credentials.
+-    """
+-
+-    repo: str
+-    number: int
+-    state: str  # "open" | "closed"
+-    merged: bool
+-    merged_at: datetime | None
+-    merge_commit_sha: str | None
+-    head_sha: str = ""
+-    base_ref: str = ""
+-    head_ref: str = ""
+-    title: str = ""
+-    body: str = ""
+-    head_repo: str = ""
+-    base_repo: str = ""
+-
+-
+-@dataclass(frozen=True)
+-class PullRequestReview:
+-    """A single PR review: the reviewer login + the review-summary body.
+-
+-    story-develop's Copilot round reads these to detect Copilot's review and
+-    parse its "generated N comments" marker (see ``pr_delivery``)."""
+-
+-    author: str
+-    body: str
+-
+-
+-@dataclass(frozen=True)
+-class PullRequestReviewComment:
+-    """A single inline review comment on a PR.
+-
+-    ``line`` falls back to ``original_line`` (GitHub drops ``line`` for comments
+-    anchored to a since-changed line). ``in_reply_to_id`` is set on thread
+-    replies — story-develop excludes those when collecting Copilot findings."""
+-
+-    comment_id: int
+-    author: str
+-    path: str
+-    line: int | None
+-    body: str
+-    in_reply_to_id: int | None
+-
+-
+-# ── Pure helpers ──────────────────────────────────────────────────────
+-
+-
+-def _parse_iso(s: str) -> datetime:
+-    """GitHub stamps timestamps as ``2026-05-29T12:00:00Z``. Make them tz-aware."""
+-    if s.endswith("Z"):
+-        s = s[:-1] + "+00:00"
+-    return datetime.fromisoformat(s)
+-
+-
+-def _parse_issues_response(payload: list[dict[str, Any]], *, repo: str) -> list[Issue]:
+-    """Convert a GitHub ``/issues`` response into typed Issues, dropping PRs.
+-
+-    Pull requests appear in the same endpoint with a ``pull_request`` field
+-    set. D53 requires they be filtered out so the subscription handler never
+-    sees them.
+-    """
+-    issues: list[Issue] = []
+-    for row in payload:
+-        if "pull_request" in row:
+-            continue
+-        issues.append(
+-            Issue(
+-                repo=repo,
+-                number=int(row["number"]),
+-                title=str(row["title"]),
+-                body=str(row.get("body") or ""),
+-                state=str(row["state"]),
+-                state_reason=row.get("state_reason"),
+-                labels=tuple(lbl["name"] for lbl in row.get("labels") or ()),
+-                author=str((row.get("user") or {}).get("login", "")),
+-                updated_at=_parse_iso(str(row["updated_at"])),
+-                html_url=str(row.get("html_url", "")),
+-            )
+-        )
+-    return issues
+-
+-
+-def _parse_pull_request(row: dict[str, Any], *, repo: str) -> PullRequest:
+-    """Convert a GitHub ``GET /pulls/{n}`` response row into a typed PullRequest."""
+-    merged_at_raw = row.get("merged_at")
+-    sha = row.get("merge_commit_sha")
+-    head = row.get("head") or {}
+-    base = row.get("base") or {}
+-    return PullRequest(
+-        repo=repo,
+-        number=int(row["number"]),
+-        state=str(row["state"]),
+-        merged=bool(row.get("merged", False)),
+-        merged_at=_parse_iso(str(merged_at_raw)) if merged_at_raw else None,
+-        merge_commit_sha=str(sha) if sha else None,
+-        head_sha=str(head.get("sha") or ""),
+-        base_ref=str(base.get("ref") or ""),
+-        head_ref=str(head.get("ref") or ""),
+-        title=str(row.get("title") or ""),
+-        body=str(row.get("body") or ""),
+-        head_repo=str((head.get("repo") or {}).get("full_name") or ""),
+-        base_repo=str((base.get("repo") or {}).get("full_name") or ""),
+-    )
+-
+-
+-def _parse_pull_request_review(row: dict[str, Any]) -> PullRequestReview:
+-    return PullRequestReview(
+-        author=str((row.get("user") or {}).get("login", "")),
+-        body=str(row.get("body") or ""),
+-    )
+-
+-
+-def _parse_pull_request_review_comment(row: dict[str, Any]) -> PullRequestReviewComment:
+-    return PullRequestReviewComment(
+-        comment_id=int(row["id"]),
+-        author=str((row.get("user") or {}).get("login", "")),
+-        path=str(row.get("path") or ""),
+-        # ``line`` is null for comments anchored to a since-changed line;
+-        # GitHub then exposes the position via ``original_line``.
+-        line=row.get("line") or row.get("original_line"),
+-        body=str(row.get("body") or ""),
+-        in_reply_to_id=row.get("in_reply_to_id"),
+-    )
+-
+-
+-def parse_marker(body: str | None) -> str | None:
+-    """Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
+-
+-    Tolerant of placement (top/bottom of body) and case (the writer emits
+-    canonical lowercase ``lithos:`` but the parser accepts both).
+-    """
+-    if not body:
+-        return None
+-    match = _MARKER_RE.search(body)
+-    if match is None:
+-        return None
+-    return match.group(1)
+-
+-
+-def apply_marker(body: str | None, task_id: str) -> str:
+-    """Return ``body`` with a canonical marker appended at the end.
+-
+-    If a marker is already present (anywhere), it is removed first so the
+-    canonical form lands at the body's tail. This both fixes operator
+-    placement drift over time and prevents duplicate markers.
+-    """
+-    text = body or ""
+-    text = _MARKER_RE.sub("", text).rstrip()
+-    canonical = f"<!-- lithos:{task_id} -->"
+-    if not text:
+-        return canonical
+-    return f"{text}\n\n{canonical}"
+-
+-
+-def strip_marker(body: str | None) -> str:
+-    """Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.
+-
+-    Slice 7.2 mirrors GH issue body → Lithos task description. The Loom-
+-    managed marker is bookkeeping noise from the operator's perspective
+-    and must not bleed into the projected task surface, so it is stripped
+-    before comparison + write.
+-    """
+-    if not body:
+-        return ""
+-    return _MARKER_RE.sub("", body).strip()
+-
+-
+ # ── gh auth token resolver ────────────────────────────────────────────
+ 
+ 
+@@ -563,7 +341,7 @@ class GitHubClient:
+         while url is not None:
+             response = await self._get_url(url, params=page_params)
+             _raise_for_status(response, repo=repo)
+-            all_issues.extend(_parse_issues_response(response.json(), repo=repo))
++            all_issues.extend(parse_issues_response(response.json(), repo=repo))
+             url = _parse_next_link(response.headers.get("Link"))
+             # Pagination URLs already encode the query string, so subsequent
+             # pages must not double-up the params.
+@@ -576,7 +354,7 @@ class GitHubClient:
+         if response.status_code == 404:
+             return None
+         _raise_for_status(response, repo=repo)
+-        parsed = _parse_issues_response([response.json()], repo=repo)
++        parsed = parse_issues_response([response.json()], repo=repo)
+         return parsed[0] if parsed else None
+ 
+     async def get_pull_request(self, repo: str, number: int) -> PullRequest | None:
+@@ -590,7 +368,7 @@ class GitHubClient:
+         if response.status_code == 404:
+             return None
+         _raise_for_status(response, repo=repo)
+-        return _parse_pull_request(response.json(), repo=repo)
++        return parse_pull_request(response.json(), repo=repo)
+ 
+     async def list_pull_request_reviews(
+         self, repo: str, number: int
+@@ -602,19 +380,45 @@ class GitHubClient:
+         rows = await self._get_all_pages(
+             f"/repos/{repo}/pulls/{number}/reviews", repo=repo
+         )
+-        return [_parse_pull_request_review(row) for row in rows]
++        return [parse_pull_request_review(row) for row in rows]
+ 
+     async def list_pull_request_review_comments(
+-        self, repo: str, number: int
++        self, repo: str, number: int, *, since: datetime | None = None
+     ) -> list[PullRequestReviewComment]:
+         """Every inline review comment on the PR, all pages.
+ 
+         story-develop keeps the top-level Copilot comments (``in_reply_to_id``
+-        is ``None``) as findings to hand back to the coder."""
++        is ``None``) as findings to hand back to the coder.
++
++        ``since`` bounds the walk to comments updated at-or-after the given
++        time (the endpoint supports it; ``/reviews`` does not) — the
++        external-review sweep passes its stored cursor so a long-lived PR's
++        full comment history isn't re-paginated every pass. Exact de-dup stays
++        the caller's id high-water mark: ``since`` keys on ``updated_at``, so
++        an *edited* old comment can reappear here."""
++        params: dict[str, Any] | None = None
++        if since is not None:
++            params = {"since": _isoformat_utc(since), "per_page": 100}
+         rows = await self._get_all_pages(
+-            f"/repos/{repo}/pulls/{number}/comments", repo=repo
++            f"/repos/{repo}/pulls/{number}/comments", repo=repo, params=params
+         )
+-        return [_parse_pull_request_review_comment(row) for row in rows]
++        return [parse_pull_request_review_comment(row) for row in rows]
++
++    async def get_collaborator_permission(self, repo: str, username: str) -> str:
++        """Permission of ``username`` on ``repo``: admin / write / read / none.
++
++        Trust input for the external-review path (ADR 0011 decision 8): only
++        allowlisted bots and humans with write/admin may seed a coder. A 404
++        here means "not a collaborator", NOT a missing repo, so it
++        short-circuits to ``"none"`` *before* ``_raise_for_status`` (whose
++        unconditional 404 → ``GitHubRepoNotFoundError`` mapping would make an
++        outside commenter look like a deleted repo)."""
++        response = await self._get(f"/repos/{repo}/collaborators/{username}/permission")
++        if response.status_code == 404:
++            return "none"
++        _raise_for_status(response, repo=repo)
++        payload = response.json()
++        return str(payload.get("permission") or "none")
+ 
+     async def request_reviewers(
+         self, repo: str, number: int, reviewers: list[str]
+@@ -712,7 +516,7 @@ class GitHubClient:
+             # self-heals rather than mislabelling it a repo-not-found.
+             raise GitHubIssueNotFoundError(repo, number)
+         _raise_for_status(response, repo=repo)
+-        parsed = _parse_issues_response([response.json()], repo=repo)
++        parsed = parse_issues_response([response.json()], repo=repo)
+         return parsed[0] if parsed else None
+ 
+ 
+diff --git a/src/lithos_loom/github_models.py b/src/lithos_loom/github_models.py
+new file mode 100644
+index 0000000..0e958fe
+--- /dev/null
++++ b/src/lithos_loom/github_models.py
+@@ -0,0 +1,325 @@
++"""Typed GitHub payload models + pure parsers (extracted from ``github_client``).
++
++The dataclasses here are the domain entities the watcher, the PR-gate
++resolver, story-develop's delivery path and the external-review sweep all
++share; the ``parse_*`` functions convert raw REST rows into them, and the
++``lithos`` body-marker helpers round-trip the ``<!-- lithos:<id> -->`` link.
++Everything is pure (no I/O) — the async client lives in
++:mod:`lithos_loom.github_client`, which re-exports these names so existing
++importers keep working.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++from datetime import datetime
++from typing import Any, Literal
++
++__all__ = [
++    "GitHubRef",
++    "Issue",
++    "PullRequest",
++    "PullRequestReview",
++    "PullRequestReviewComment",
++    "apply_marker",
++    "parse_github_ref",
++    "parse_issues_response",
++    "parse_marker",
++    "parse_pull_request",
++    "parse_pull_request_review",
++    "parse_pull_request_review_comment",
++    "strip_marker",
++]
++
++# Regex matches both canonical and operator-edited shapes:
++#   <!-- lithos:abc-123 -->  → canonical
++#   <!-- LITHOS:ABC-123 -->  → case-insensitive tolerated
++# Captured group 1 is the task id.
++_MARKER_RE = re.compile(r"<!--\s*lithos:\s*([A-Za-z0-9_-]+)\s*-->", re.IGNORECASE)
++
++# The one home for the canonical GitHub issue/PR web-URL grammar (ARCH-7). Every
++# marker/reconcile path that carries a ``develop_pr_url`` or ``github_issue_url``
++# parsed it independently before — six near-identical prefix-splits and regexes
++# that could drift on host, trailing path, or numeric id. They are now thin
++# adapters over ``parse_github_ref``. Anchored at both ends: a single trailing
++# slash is tolerated, any extra path segment (``/pull/82/files``) is not.
++_GITHUB_REF_RE = re.compile(
++    r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
++    r"(?P<kind>issues|pull)/(?P<number>\d+)/?$"
++)
++
++
++@dataclass(frozen=True)
++class GitHubRef:
++    """A parsed reference to a GitHub issue or pull request.
++
++    ``repo`` is ``"owner/name"``; ``number`` is the issue/PR number; ``kind`` is
++    the canonical singular ``"issue"`` or ``"pull"``. Produced only by
++    :func:`parse_github_ref`.
++    """
++
++    repo: str
++    number: int
++    kind: Literal["issue", "pull"]
++
++
++def parse_github_ref(url: object) -> GitHubRef | None:
++    """Parse a canonical ``https://github.com/<owner>/<repo>/(issues|pull)/<n>`` URL.
++
++    Returns a :class:`GitHubRef`, or ``None`` for anything that is not exactly
++    that shape — a non-string, a non-github host, a non-https scheme, an unknown
++    kind, a trailing path segment, or a non-numeric id. A single trailing slash
++    is tolerated and surrounding whitespace is stripped.
++
++    This is the single home for the GitHub issue/PR URL grammar; the per-caller
++    helpers (``pr_delivery.parse_issue_ref`` / ``pr_delivery.pr_number_from_url``,
++    ``_develop_pr_merge._parse_pr_url``, ``_github_issue_push._resolve_repo_number``)
++    are thin adapters that filter on ``kind`` and shape the return their own way.
++    """
++    if not isinstance(url, str):
++        return None
++    m = _GITHUB_REF_RE.match(url.strip())
++    if m is None:
++        return None
++    kind: Literal["issue", "pull"] = "issue" if m.group("kind") == "issues" else "pull"
++    return GitHubRef(
++        repo=f"{m.group('owner')}/{m.group('repo')}",
++        number=int(m.group("number")),
++        kind=kind,
++    )
++
++
++@dataclass(frozen=True)
++class Issue:
++    """The slice of GitHub's issue payload the watcher cares about."""
++
++    repo: str
++    number: int
++    title: str
++    body: str
++    state: str  # "open" | "closed"
++    state_reason: str | None  # "completed" | "not_planned" | None
++    labels: tuple[str, ...]
++    author: str
++    updated_at: datetime
++    html_url: str
++
++
++@dataclass(frozen=True)
++class PullRequest:
++    """The pull-request payload two consumers share off the single-PR endpoint.
++
++    ``merged`` is a top-level boolean on the single-PR endpoint
++    (``GET /pulls/{n}``) — reliable there, unlike the list endpoint where it
++    is absent. ``merged_at`` / ``merge_commit_sha`` are populated only once the
++    PR has actually merged. The PR-merge watcher (#87) reads those.
++
++    ``head_sha`` / ``base_ref`` / ``head_ref`` / ``title`` / ``body`` come from
++    the same response and drive review-only resolution (``review_resolve``,
++    #154 / ARCH-7c) — the head commit to diff, the base branch to merge-base
++    against, and the PR's title/body as the default acceptance-criteria source.
++    They default to empty so a minimal row (e.g. a list-endpoint slice or an
++    older test fixture) still parses; the single-PR endpoint always populates
++    them in practice.
++
++    ``head_repo`` / ``base_repo`` are the head/base repo full-names
++    (``owner/name``); when they differ the PR head lives on a **fork**, which
++    converge (``review_resolve``) reads to refuse pushing to a fork branch under
++    origin credentials.
++    """
++
++    repo: str
++    number: int
++    state: str  # "open" | "closed"
++    merged: bool
++    merged_at: datetime | None
++    merge_commit_sha: str | None
++    head_sha: str = ""
++    base_ref: str = ""
++    head_ref: str = ""
++    title: str = ""
++    body: str = ""
++    head_repo: str = ""
++    base_repo: str = ""
++
++
++@dataclass(frozen=True)
++class PullRequestReview:
++    """A single PR review: the reviewer login + the review-summary body.
++
++    story-develop's Copilot round reads these to detect Copilot's review and
++    parse its "generated N comments" marker (see ``pr_delivery``).
++
++    ``review_id`` / ``state`` / ``submitted_at`` / ``commit_id`` exist for the
++    external-review sweep (PRD S2): a summary-only review — an ``APPROVED`` or
++    ``CHANGES_REQUESTED`` with zero inline comments — has no comment id to
++    de-dup on, so the review id is its only stable key; ``state`` drives the
++    per-state posting policy; ``commit_id`` is the head the reviewer read
++    (re-anchor input for remediation)."""
++
++    author: str
++    body: str
++    review_id: int = 0
++    state: str = ""
++    submitted_at: datetime | None = None
++    commit_id: str = ""
++
++
++@dataclass(frozen=True)
++class PullRequestReviewComment:
++    """A single inline review comment on a PR.
++
++    ``line`` falls back to ``original_line`` (GitHub drops ``line`` for comments
++    anchored to a since-changed line). ``in_reply_to_id`` is set on thread
++    replies — story-develop excludes those when collecting Copilot findings.
++
++    For the external-review sweep (PRD S2): ``html_url`` is the thread link
++    (operator navigation + reply anchor), ``commit_id`` /
++    ``original_commit_id`` are the shas the comment was written against
++    (re-anchor input), and ``updated_at`` feeds the sweep's bounded ``since``
++    cursor so a long-lived PR's history isn't re-walked every pass."""
++
++    comment_id: int
++    author: str
++    path: str
++    line: int | None
++    body: str
++    in_reply_to_id: int | None
++    html_url: str = ""
++    commit_id: str = ""
++    original_commit_id: str = ""
++    updated_at: datetime | None = None
++
++
++# ── Pure helpers ──────────────────────────────────────────────────────
++
++
++def _parse_iso(s: str) -> datetime:
++    """GitHub stamps timestamps as ``2026-05-29T12:00:00Z``. Make them tz-aware."""
++    if s.endswith("Z"):
++        s = s[:-1] + "+00:00"
++    return datetime.fromisoformat(s)
++
++
++def parse_issues_response(payload: list[dict[str, Any]], *, repo: str) -> list[Issue]:
++    """Convert a GitHub ``/issues`` response into typed Issues, dropping PRs.
++
++    Pull requests appear in the same endpoint with a ``pull_request`` field
++    set. D53 requires they be filtered out so the subscription handler never
++    sees them.
++    """
++    issues: list[Issue] = []
++    for row in payload:
++        if "pull_request" in row:
++            continue
++        issues.append(
++            Issue(
++                repo=repo,
++                number=int(row["number"]),
++                title=str(row["title"]),
++                body=str(row.get("body") or ""),
++                state=str(row["state"]),
++                state_reason=row.get("state_reason"),
++                labels=tuple(lbl["name"] for lbl in row.get("labels") or ()),
++                author=str((row.get("user") or {}).get("login", "")),
++                updated_at=_parse_iso(str(row["updated_at"])),
++                html_url=str(row.get("html_url", "")),
++            )
++        )
++    return issues
++
++
++def parse_pull_request(row: dict[str, Any], *, repo: str) -> PullRequest:
++    """Convert a GitHub ``GET /pulls/{n}`` response row into a typed PullRequest."""
++    merged_at_raw = row.get("merged_at")
++    sha = row.get("merge_commit_sha")
++    head = row.get("head") or {}
++    base = row.get("base") or {}
++    return PullRequest(
++        repo=repo,
++        number=int(row["number"]),
++        state=str(row["state"]),
++        merged=bool(row.get("merged", False)),
++        merged_at=_parse_iso(str(merged_at_raw)) if merged_at_raw else None,
++        merge_commit_sha=str(sha) if sha else None,
++        head_sha=str(head.get("sha") or ""),
++        base_ref=str(base.get("ref") or ""),
++        head_ref=str(head.get("ref") or ""),
++        title=str(row.get("title") or ""),
++        body=str(row.get("body") or ""),
++        head_repo=str((head.get("repo") or {}).get("full_name") or ""),
++        base_repo=str((base.get("repo") or {}).get("full_name") or ""),
++    )
++
++
++def parse_pull_request_review(row: dict[str, Any]) -> PullRequestReview:
++    submitted_raw = row.get("submitted_at")
++    return PullRequestReview(
++        author=str((row.get("user") or {}).get("login", "")),
++        body=str(row.get("body") or ""),
++        review_id=int(row.get("id") or 0),
++        state=str(row.get("state") or ""),
++        submitted_at=_parse_iso(str(submitted_raw)) if submitted_raw else None,
++        commit_id=str(row.get("commit_id") or ""),
++    )
++
++
++def parse_pull_request_review_comment(row: dict[str, Any]) -> PullRequestReviewComment:
++    updated_raw = row.get("updated_at")
++    return PullRequestReviewComment(
++        comment_id=int(row["id"]),
++        author=str((row.get("user") or {}).get("login", "")),
++        path=str(row.get("path") or ""),
++        # ``line`` is null for comments anchored to a since-changed line;
++        # GitHub then exposes the position via ``original_line``.
++        line=row.get("line") or row.get("original_line"),
++        body=str(row.get("body") or ""),
++        in_reply_to_id=row.get("in_reply_to_id"),
++        html_url=str(row.get("html_url") or ""),
++        commit_id=str(row.get("commit_id") or ""),
++        original_commit_id=str(row.get("original_commit_id") or ""),
++        updated_at=_parse_iso(str(updated_raw)) if updated_raw else None,
++    )
++
++
++def parse_marker(body: str | None) -> str | None:
++    """Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
++
++    Tolerant of placement (top/bottom of body) and case (the writer emits
++    canonical lowercase ``lithos:`` but the parser accepts both).
++    """
++    if not body:
++        return None
++    match = _MARKER_RE.search(body)
++    if match is None:
++        return None
++    return match.group(1)
++
++
++def apply_marker(body: str | None, task_id: str) -> str:
++    """Return ``body`` with a canonical marker appended at the end.
++
++    If a marker is already present (anywhere), it is removed first so the
++    canonical form lands at the body's tail. This both fixes operator
++    placement drift over time and prevents duplicate markers.
++    """
++    text = body or ""
++    text = _MARKER_RE.sub("", text).rstrip()
++    canonical = f"<!-- lithos:{task_id} -->"
++    if not text:
++        return canonical
++    return f"{text}\n\n{canonical}"
++
++
++def strip_marker(body: str | None) -> str:
++    """Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.
++
++    Slice 7.2 mirrors GH issue body → Lithos task description. The Loom-
++    managed marker is bookkeeping noise from the operator's perspective
++    and must not bleed into the projected task surface, so it is stripped
++    before comparison + write.
++    """
++    if not body:
++        return ""
++    return _MARKER_RE.sub("", body).strip()
+diff --git a/src/lithos_loom/subscriptions/_develop_pr_merge.py b/src/lithos_loom/subscriptions/_develop_pr_merge.py
+index 986db78..f56d853 100644
+--- a/src/lithos_loom/subscriptions/_develop_pr_merge.py
++++ b/src/lithos_loom/subscriptions/_develop_pr_merge.py
+@@ -32,6 +32,7 @@ from lithos_loom.gates import (
+ from lithos_loom.github_client import GitHubClient, GitHubError
+ from lithos_loom.subscriptions import SubscriptionContext
+ from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
++from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
+ 
+ __all__ = [
+     "DELIVERED_PR_CLOSED",
+@@ -93,7 +94,11 @@ def _pr_merge_state(pr: Any) -> str:
+ 
+ 
+ async def reconcile_pr_gate(
+-    gate: Any, github: GitHubClient, ctx: SubscriptionContext
++    gate: Any,
++    github: GitHubClient,
++    ctx: SubscriptionContext,
++    *,
++    ingest_reviews: bool = False,
+ ) -> str | None:
+     """Resolve one open ``pr`` gate against its PR's merge state.
+ 
+@@ -111,6 +116,11 @@ async def reconcile_pr_gate(
+     finding is posted on the story, and a url-scoped marker on the GATE stops the
+     dead PR being re-polled. A still-open PR re-polls next sweep; a transient
+     GitHub failure retries.
++
++    ``ingest_reviews`` additionally runs the external-review ingestion
++    (:mod:`.external_reviews`, PRD S2) on the still-open branch — the one place
++    that has the fetched PR, the parsed spec and the waiting story all in
++    hand. It never changes the merge outcome.
+     """
+     spec = parse_pr_gate(gate)
+     if spec is None:
+@@ -179,7 +189,9 @@ async def reconcile_pr_gate(
+         await _gate_closed(gate, story_id, spec.pr_url, "closed_unmerged", ctx)
+         return "closed_unmerged"
+ 
+-    # state == "open" — still in flight; re-poll next sweep (no marker).
++    # state == "open" — still in flight; re-poll next sweep (no merge marker).
++    if ingest_reviews:
++        await ingest_external_reviews(gate, spec, story_id, github, ctx)
+     return "still_open"
+ 
+ 
+diff --git a/src/lithos_loom/subscriptions/external_reviews.py b/src/lithos_loom/subscriptions/external_reviews.py
+new file mode 100644
+index 0000000..ce169ca
+--- /dev/null
++++ b/src/lithos_loom/subscriptions/external_reviews.py
+@@ -0,0 +1,281 @@
++"""External-review ingestion for still-open ``pr`` gates (PRD S2, detection).
++
++A delivered PR sits behind a ``pr`` gate awaiting a human merge. Reviews left
++on it in the meantime — Copilot, other bots, humans — were invisible to loom:
++the reconcile sweep polled only merge state. This module is the detection half
++of PRD S2 (``docs/prd/pr-reconciliation.md``): each sweep of a still-open
++gate, read the PR's reviews and inline review comments and surface anything
++new as a one-shot ``[ExternalReview]`` finding on the blocked *story* (the
++task an operator watches), with a de-dup marker on the *gate* (the task the
++sweep re-visits).
++
++De-dup is a pair of **high-water marks** — ``last_review_id`` and
++``last_comment_id`` — not a seen-id set: GitHub REST ids are monotonically
++increasing, so the marks are bounded and a summary-only review (an
++``APPROVED``/``CHANGES_REQUESTED`` with zero inline comments, which comment-id
++de-dup cannot represent at all) keys on its review id. The marker is scoped to
++the PR url, mirroring ``develop_pr_merge_state``: a replacement PR (fresh url,
++fresh id space) re-evaluates from scratch. It is deliberately a **separate
++metadata key** from the merge marker so neither can trip the other's skip
++logic.
++
++Per-state posting policy (PRD S2): ``CHANGES_REQUESTED`` always posts;
++``COMMENTED`` (and any unrecognised state) posts only with a non-empty body;
++``APPROVED`` / ``DISMISSED`` advance the marker silently — an approval is not
++an operator action item. Inline comments post unless they are thread replies
++or loom's own automated replies. Skipped material still advances the marks so
++it is never re-fetched or re-considered.
++
++Remediation (injecting trusted findings into ``develop converge``) is the
++follow-up slice; this module only detects and reports.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import datetime
++from typing import Any
++
++from lithos_loom.gates import PrGateSpec
++from lithos_loom.github_client import (
++    GitHubClient,
++    GitHubError,
++    PullRequestReview,
++    PullRequestReviewComment,
++)
++from lithos_loom.subscriptions import SubscriptionContext
++from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
++
++__all__ = [
++    "EXTERNAL_REVIEW",
++    "REVIEW_SEEN_KEY",
++    "ingest_external_reviews",
++]
++
++# Stable, machine-parseable finding prefix (see AGENTS.md): new external review
++# activity (a PR review, or inline review comments) landed on a delivered PR
++# that is still awaiting merge behind its `pr` gate.
++EXTERNAL_REVIEW = "[ExternalReview]"
++
++# Gate-metadata key holding the ingestion state: {"pr_url", "last_review_id",
++# "last_comment_id", "last_comment_at"}. pr_url scopes the marks; the ids are
++# the exact de-dup; last_comment_at (ISO) feeds the bounded `since` cursor on
++# the comment fetch so a long-lived PR isn't re-paginated every sweep.
++REVIEW_SEEN_KEY = "external_review_seen"
++
++# Review states that are recorded but never posted: an approval is not an
++# operator action item, and a dismissal has already had its say.
++_SILENT_REVIEW_STATES = frozenset({"APPROVED", "DISMISSED"})
++
++# Loom's own PR thread replies end with this marker
++# (plugins.story_develop.pr_delivery.AUTOMATED_MARKER — duplicated as a
++# literal so the subscriptions tier doesn't import plugin internals; a
++# lockstep test pins the two strings together).
++_AUTOMATED_REPLY_MARKER = "_(automated reply by story-develop)_"
++
++# Rendering bounds: a finding is a breadcrumb, not a transcript.
++_EXCERPT_CHARS = 160
++_MAX_LISTED = 20
++
++
++@dataclass(frozen=True)
++class _Seen:
++    """The marker's parsed high-water marks (zeros when absent/foreign-url)."""
++
++    last_review_id: int
++    last_comment_id: int
++    last_comment_at: str | None
++
++
++def _read_seen(gate: Any, pr_url: str) -> _Seen:
++    raw = gate.metadata.get(REVIEW_SEEN_KEY)
++    if not isinstance(raw, dict) or raw.get("pr_url") != pr_url:
++        # Absent, malformed, or recorded for a *different* PR (the story was
++        # re-developed into a replacement) — start from scratch; the old PR's
++        # id space says nothing about the new one's.
++        return _Seen(0, 0, None)
++    review_id = raw.get("last_review_id")
++    comment_id = raw.get("last_comment_id")
++    comment_at = raw.get("last_comment_at")
++    return _Seen(
++        last_review_id=review_id if isinstance(review_id, int) else 0,
++        last_comment_id=comment_id if isinstance(comment_id, int) else 0,
++        last_comment_at=comment_at if isinstance(comment_at, str) else None,
++    )
++
++
++def _since(seen: _Seen) -> datetime | None:
++    if seen.last_comment_at is None:
++        return None
++    try:
++        return datetime.fromisoformat(seen.last_comment_at)
++    except ValueError:
++        return None  # corrupt cursor → unbounded fetch; ids still de-dup
++
++
++def _review_posts(review: PullRequestReview) -> bool:
++    """Per-state posting policy. Unrecognised states fall to the COMMENTED
++    rule (post only with content) — conservative for states GitHub adds
++    later, silent-drop only for the two states known to be non-actionable."""
++    if review.state == "CHANGES_REQUESTED":
++        return True
++    if review.state in _SILENT_REVIEW_STATES:
++        return False
++    return bool(review.body.strip())
++
++
++def _comment_posts(comment: PullRequestReviewComment) -> bool:
++    if comment.in_reply_to_id is not None:
++        return False  # thread replies ride on their root comment
++    return _AUTOMATED_REPLY_MARKER not in comment.body
++
++
++def _excerpt(body: str) -> str:
++    line = " ".join(body.strip().split())
++    if len(line) > _EXCERPT_CHARS:
++        return line[: _EXCERPT_CHARS - 1] + "…"
++    return line
++
++
++def _render_summary(
++    pr_url: str,
++    reviews: list[PullRequestReview],
++    comments: list[PullRequestReviewComment],
++    *,
++    story_id: str,
++    gate_id: str,
++) -> str:
++    lines = [f"{EXTERNAL_REVIEW} new review activity on delivered PR {pr_url}:"]
++    for review in reviews[:_MAX_LISTED]:
++        state = review.state or "COMMENTED"
++        at = f", at {review.commit_id[:12]}" if review.commit_id else ""
++        excerpt = _excerpt(review.body)
++        tail = f": {excerpt}" if excerpt else ""
++        lines.append(f"- review by {review.author} ({state}{at}){tail}")
++    for comment in comments[:_MAX_LISTED]:
++        loc = f"{comment.path}:{comment.line}" if comment.line else comment.path
++        url = f" ({comment.html_url})" if comment.html_url else ""
++        lines.append(
++            f"- comment by {comment.author} on {loc}: {_excerpt(comment.body)}{url}"
++        )
++    hidden = max(0, len(reviews) - _MAX_LISTED) + max(0, len(comments) - _MAX_LISTED)
++    if hidden:
++        lines.append(f"- …and {hidden} more (see the PR)")
++    lines.append(
++        f"story {story_id} remains blocked on gate {gate_id}; review the PR "
++        f"before merging"
++    )
++    return "\n".join(lines)
++
++
++def _new_marker(
++    pr_url: str,
++    seen: _Seen,
++    reviews: list[PullRequestReview],
++    comments: list[PullRequestReviewComment],
++) -> dict[str, Any]:
++    """Advance the marks over EVERYTHING fetched — including replies, silent
++    states and loom's own automated replies — so skipped material is never
++    re-fetched (the `since` cursor) or re-considered (the ids)."""
++    marker: dict[str, Any] = {
++        "pr_url": pr_url,
++        "last_review_id": max(seen.last_review_id, *(r.review_id for r in reviews), 0),
++        "last_comment_id": max(
++            seen.last_comment_id, *(c.comment_id for c in comments), 0
++        ),
++    }
++    stamps = [c.updated_at for c in comments if c.updated_at is not None]
++    if stamps:
++        marker["last_comment_at"] = max(stamps).isoformat()
++    elif seen.last_comment_at is not None:
++        marker["last_comment_at"] = seen.last_comment_at
++    return marker
++
++
++async def ingest_external_reviews(
++    gate: Any,
++    spec: PrGateSpec,
++    story_id: str | None,
++    github: GitHubClient,
++    ctx: SubscriptionContext,
++) -> None:
++    """Ingest new review activity on one still-open gate's PR. Never raises.
++
++    Called from :func:`.._develop_pr_merge.reconcile_pr_gate`'s still-open
++    branch, which has already fetched the PR (proving it exists) and resolved
++    the gate's waiting story. A transient GitHub failure logs and returns with
++    the marker untouched — the whole batch retries next sweep. The
++    finding-then-mark ordering (via :func:`.._findings.post_finding_then_mark`)
++    means a crash between the two costs at most one duplicate finding.
++    """
++    seen = _read_seen(gate, spec.pr_url)
++    try:
++        reviews = await github.list_pull_request_reviews(spec.repo, spec.pr_number)
++        comments = await github.list_pull_request_review_comments(
++            spec.repo, spec.pr_number, since=_since(seen)
++        )
++    except GitHubError as exc:
++        ctx.logger.warning(
++            "[Friction] external-reviews: fetching reviews for %s#%d "
++            "(gate %s) failed (%s: %s); will retry next sweep",
++            spec.repo,
++            spec.pr_number,
++            gate.id,
++            type(exc).__name__,
++            exc,
++        )
++        return
++
++    new_reviews = [r for r in reviews if r.review_id > seen.last_review_id]
++    new_comments = [c for c in comments if c.comment_id > seen.last_comment_id]
++    if not new_reviews and not new_comments:
++        return  # idle PR: no fetch produced news, write nothing
++
++    actionable_reviews = [r for r in new_reviews if _review_posts(r)]
++    actionable_comments = [c for c in new_comments if _comment_posts(c)]
++    marker = {REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)}
++
++    if not actionable_reviews and not actionable_comments:
++        # Only silent material (approvals, replies, our own automated replies):
++        # advance the marks so it is never re-walked, post nothing.
++        await write_marker(
++            ctx, task_id=gate.id, marker=marker, subsystem="external-reviews"
++        )
++        return
++
++    if story_id is None:
++        # Orphan gate (no waiter edge): nothing to post the finding on.
++        await write_marker(
++            ctx, task_id=gate.id, marker=marker, subsystem="external-reviews"
++        )
++        ctx.logger.warning(
++            "[Friction] external-reviews: gate %s has no waiter; review "
++            "activity on %s recorded but not posted",
++            gate.id,
++            spec.pr_url,
++        )
++        return
++
++    await post_finding_then_mark(
++        ctx,
++        task_id=story_id,
++        summary=_render_summary(
++            spec.pr_url,
++            actionable_reviews,
++            actionable_comments,
++            story_id=story_id,
++            gate_id=gate.id,
++        ),
++        marker=marker,
++        subsystem="external-reviews",
++        retry_hint="will retry next sweep",
++        marker_task_id=gate.id,
++    )
++    ctx.logger.info(
++        "external-reviews: posted %s for %s (%d review(s), %d comment(s)) on story %s",
++        EXTERNAL_REVIEW,
++        spec.pr_url,
++        len(actionable_reviews),
++        len(actionable_comments),
++        story_id,
++    )
+diff --git a/tests/test_config.py b/tests/test_config.py
+index 7c9572d..3819aa2 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -671,6 +671,59 @@ def test_github_watcher_full_parses(
+     assert cfg.github_watcher.coord_doc_path == "projects/_internal/gh-state.md"
+ 
+ 
++def test_github_watcher_external_reviews_defaults_and_overrides(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """PRD S2: ingestion defaults on with the Copilot login trusted; both are
++    operator-tunable."""
++    _write_config(
++        tmp_path,
++        monkeypatch,
++        dedent(
++            """
++            [github_watcher]
++            """
++        ),
++    )
++    cfg = load_config()
++    assert cfg.github_watcher is not None
++    assert cfg.github_watcher.external_reviews_enabled is True
++    assert cfg.github_watcher.trusted_bots == ("copilot-pull-request-reviewer[bot]",)
++
++    _write_config(
++        tmp_path,
++        monkeypatch,
++        dedent(
++            """
++            [github_watcher]
++            external_reviews_enabled = false
++            trusted_bots = ["github-code-quality[bot]"]
++            """
++        ),
++    )
++    cfg = load_config()
++    assert cfg.github_watcher is not None
++    assert cfg.github_watcher.external_reviews_enabled is False
++    assert cfg.github_watcher.trusted_bots == ("github-code-quality[bot]",)
++
++
++def test_github_watcher_trusted_bots_must_be_string_list(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    _write_config(
++        tmp_path,
++        monkeypatch,
++        dedent(
++            """
++            [github_watcher]
++            trusted_bots = [""]
++            """
++        ),
++    )
++    with pytest.raises(ConfigError, match="trusted_bots"):
++        load_config()
++
++
+ def test_github_watcher_rejects_unknown_keys(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+diff --git a/tests/test_develop_pr_merge.py b/tests/test_develop_pr_merge.py
+index e43b2eb..bdd452a 100644
+--- a/tests/test_develop_pr_merge.py
++++ b/tests/test_develop_pr_merge.py
+@@ -17,7 +17,11 @@ from unittest.mock import AsyncMock
+ 
+ from lithos_loom.errors import LithosClientError
+ from lithos_loom.gates import create_pr_gate
+-from lithos_loom.github_client import GitHubError, PullRequest
++from lithos_loom.github_client import (
++    GitHubError,
++    PullRequest,
++    PullRequestReview,
++)
+ from lithos_loom.lithos_client import Task
+ from lithos_loom.subscriptions import SubscriptionContext
+ from lithos_loom.subscriptions._develop_pr_merge import (
+@@ -284,3 +288,55 @@ async def test_orphan_gate_merged_completes_gate_without_a_finding() -> None:
+     assert outcome == "merged"
+     assert (await _get(client, gate_id)).status == "completed"
+     assert client._findings == []
++
++
++# ── external-review ingestion wiring (PRD S2 — detail in test_external_reviews) ──
++
++
++def _open_pr() -> PullRequest:
++    return PullRequest(
++        repo="agent-lore/lithos-loom",
++        number=7,
++        state="open",
++        merged=False,
++        merged_at=None,
++        merge_commit_sha=None,
++        head_sha="e" * 40,
++    )
++
++
++def _review_github(pr: PullRequest) -> AsyncMock:
++    github = _github(pr)
++    github.list_pull_request_reviews.return_value = [
++        PullRequestReview(
++            author="reviewer-human",
++            body="two problems here",
++            review_id=500,
++            state="CHANGES_REQUESTED",
++        )
++    ]
++    github.list_pull_request_review_comments.return_value = []
++    return github
++
++
++async def test_reconcile_still_open_ingests_reviews_when_enabled() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _review_github(_open_pr())
++
++    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
++
++    assert outcome == "still_open"
++    findings = [f["summary"] for f in client._findings]
++    assert len(findings) == 1 and findings[0].startswith("[ExternalReview]")
++
++
++async def test_reconcile_still_open_skips_ingestion_by_default() -> None:
++    client = FakeLithosClient(agent_id="a")
++    _story, gate = await _gate_with_story(client)
++    github = _review_github(_open_pr())
++
++    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
++
++    assert outcome == "still_open"
++    github.list_pull_request_reviews.assert_not_called()
+diff --git a/tests/test_external_reviews.py b/tests/test_external_reviews.py
+new file mode 100644
+index 0000000..1a151fd
+--- /dev/null
++++ b/tests/test_external_reviews.py
+@@ -0,0 +1,355 @@
++"""Tests for ``lithos_loom.subscriptions.external_reviews`` (PRD S2, detection).
++
++The reconcile sweep's still-open ``pr``-gate branch ingests external review
++activity: new PR reviews and inline review comments post a one-shot
++``[ExternalReview]`` finding on the blocked story, de-duped by high-water
++marks (``last_review_id`` / ``last_comment_id``) in a url-scoped
++``external_review_seen`` marker on the GATE. Per-state policy:
++``CHANGES_REQUESTED`` always posts; ``COMMENTED`` only with content;
++``APPROVED`` / ``DISMISSED`` advance the marker silently. GitHub + Lithos are
++stubbed exactly as in ``test_develop_pr_merge``.
++"""
++
++from __future__ import annotations
++
++import logging
++from datetime import UTC, datetime
++from typing import Any
++from unittest.mock import AsyncMock
++
++from lithos_loom.gates import create_pr_gate, parse_pr_gate
++from lithos_loom.github_client import (
++    GitHubError,
++    PullRequestReview,
++    PullRequestReviewComment,
++)
++from lithos_loom.subscriptions import SubscriptionContext
++from lithos_loom.subscriptions.external_reviews import (
++    EXTERNAL_REVIEW,
++    REVIEW_SEEN_KEY,
++    ingest_external_reviews,
++)
++from tests.support import FakeLithosClient
++
++_PR_URL = "https://github.com/agent-lore/lithos-lens/pull/62"
++_REPO = "agent-lore/lithos-lens"
++
++
++def _ctx(lithos: Any) -> SubscriptionContext:
++    return SubscriptionContext(
++        lithos=lithos,
++        logger=logging.getLogger("test-external-reviews"),
++        agent_id="lithos-loom-agent",
++    )
++
++
++async def _gate_with_story(
++    client: FakeLithosClient, *, pr_url: str = _PR_URL
++) -> tuple[str, Any]:
++    story = await client.task_create(title="US7", metadata={"project": "p"})
++    gate_id = await create_pr_gate(
++        client,
++        story_id=story,
++        story_title="US7",
++        pr_url=pr_url,
++        project="p",
++        agent="a",
++    )
++    gate = await client.task_get(task_id=gate_id)
++    return story, gate
++
++
++def _github(
++    *,
++    reviews: list[PullRequestReview] | None = None,
++    comments: list[PullRequestReviewComment] | None = None,
++) -> AsyncMock:
++    github = AsyncMock()
++    github.list_pull_request_reviews.return_value = reviews or []
++    github.list_pull_request_review_comments.return_value = comments or []
++    return github
++
++
++def _review(
++    review_id: int,
++    *,
++    state: str = "CHANGES_REQUESTED",
++    author: str = "reviewer-human",
++    body: str = "two problems here",
++) -> PullRequestReview:
++    return PullRequestReview(
++        author=author,
++        body=body,
++        review_id=review_id,
++        state=state,
++        submitted_at=datetime(2026, 8, 30, tzinfo=UTC),
++    )
++
++
++def _comment(
++    comment_id: int,
++    *,
++    author: str = "reviewer-human",
++    body: str = "this leaks a handle",
++    in_reply_to_id: int | None = None,
++    path: str = "src/x.py",
++    line: int | None = 12,
++) -> PullRequestReviewComment:
++    return PullRequestReviewComment(
++        comment_id=comment_id,
++        author=author,
++        path=path,
++        line=line,
++        body=body,
++        in_reply_to_id=in_reply_to_id,
++        html_url=f"https://github.com/{_REPO}/pull/62#discussion_r{comment_id}",
++        commit_id="d" * 40,
++        updated_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
++    )
++
++
++async def _run(
++    client: FakeLithosClient, gate: Any, story_id: str | None, github: AsyncMock
++) -> None:
++    spec = parse_pr_gate(gate)
++    assert spec is not None
++    await ingest_external_reviews(gate, spec, story_id, github, _ctx(client))
++
++
++async def _refresh(client: FakeLithosClient, gate: Any) -> Any:
++    """Re-read the gate so the just-written marker is visible (asserts alive)."""
++    fresh = await client.task_get(task_id=gate.id)
++    assert fresh is not None
++    return fresh
++
++
++def _findings(client: FakeLithosClient) -> list[str]:
++    return [f["summary"] for f in client._findings]
++
++
++async def _marker(client: FakeLithosClient, gate_id: str) -> Any:
++    gate = await client.task_get(task_id=gate_id)
++    assert gate is not None
++    return gate.metadata.get(REVIEW_SEEN_KEY)
++
++
++# ── posting policy ─────────────────────────────────────────────────────
++
++
++async def test_changes_requested_review_posts_finding_and_marks_gate() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(reviews=[_review(500)])
++
++    await _run(client, gate, story, github)
++
++    posted = _findings(client)
++    assert len(posted) == 1
++    assert posted[0].startswith(EXTERNAL_REVIEW)
++    assert "reviewer-human" in posted[0] and "CHANGES_REQUESTED" in posted[0]
++    marker = await _marker(client, gate.id)
++    assert marker["pr_url"] == _PR_URL and marker["last_review_id"] == 500
++
++
++async def test_summary_only_changes_requested_posts_exactly_once() -> None:
++    """The case comment-id de-dup cannot represent: a review with zero inline
++    comments must post on first sight and never again."""
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(reviews=[_review(500)])
++
++    await _run(client, gate, story, github)
++    gate = await _refresh(client, gate)
++    await _run(client, gate, story, github)
++
++    assert len(_findings(client)) == 1
++
++
++async def test_approved_and_dismissed_advance_marker_without_posting() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(
++        reviews=[_review(500, state="APPROVED"), _review(501, state="DISMISSED")]
++    )
++
++    await _run(client, gate, story, github)
++
++    assert _findings(client) == []
++    marker = await _marker(client, gate.id)
++    assert marker["last_review_id"] == 501  # recorded, silent
++
++
++async def test_commented_review_posts_only_with_content() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(reviews=[_review(500, state="COMMENTED", body="  ")])
++    await _run(client, gate, story, github)
++    assert _findings(client) == []
++
++    gate = await _refresh(client, gate)
++    github = _github(reviews=[_review(501, state="COMMENTED", body="worth a look")])
++    await _run(client, gate, story, github)
++    assert len(_findings(client)) == 1
++
++
++async def test_new_inline_comment_posts_with_location_and_thread_url() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(comments=[_comment(111)])
++
++    await _run(client, gate, story, github)
++
++    posted = _findings(client)
++    assert len(posted) == 1
++    assert "src/x.py:12" in posted[0]
++    assert "discussion_r111" in posted[0]
++    marker = await _marker(client, gate.id)
++    assert marker["last_comment_id"] == 111
++
++
++async def test_looms_automated_reply_marker_is_in_lockstep() -> None:
++    """The sweep skips loom's own PR replies by their AUTOMATED_MARKER, held as
++    a duplicated literal (subscriptions must not import plugin internals). A
++    drifting copy would make loom re-ingest its own replies as external
++    findings — pin the two strings byte-for-byte via behaviour."""
++    from lithos_loom.plugins.story_develop.pr_delivery import AUTOMATED_MARKER
++
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(
++        comments=[_comment(111, body=f"Fixed in abc123.\n\n{AUTOMATED_MARKER}")]
++    )
++
++    await _run(client, gate, story, github)
++
++    assert _findings(client) == []
++
++
++async def test_replies_and_looms_own_automated_replies_are_skipped() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(
++        comments=[
++            _comment(112, in_reply_to_id=111),
++            _comment(
++                113,
++                author="operator",
++                body="Fixed in abc123.\n\n_(automated reply by story-develop)_",
++            ),
++        ]
++    )
++
++    await _run(client, gate, story, github)
++
++    assert _findings(client) == []
++    # The marker still advances past the skipped ids so they are never re-read.
++    marker = await _marker(client, gate.id)
++    assert marker["last_comment_id"] == 113
++
++
++# ── de-dup semantics ───────────────────────────────────────────────────
++
++
++async def test_same_material_across_two_sweeps_posts_once() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(reviews=[_review(500)], comments=[_comment(111)])
++
++    await _run(client, gate, story, github)
++    gate = await _refresh(client, gate)
++    await _run(client, gate, story, github)
++
++    assert len(_findings(client)) == 1
++
++
++async def test_new_comment_on_already_reported_pr_posts_again() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    await _run(client, gate, story, _github(comments=[_comment(111)]))
++
++    gate = await _refresh(client, gate)
++    await _run(client, gate, story, _github(comments=[_comment(111), _comment(112)]))
++
++    posted = _findings(client)
++    assert len(posted) == 2
++    assert "discussion_r112" in posted[1]
++
++
++async def test_marker_for_a_different_pr_url_is_ignored() -> None:
++    """Url scoping: a replacement PR re-evaluates from scratch (the recorded
++    high-water marks belong to the dead PR's id space)."""
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    await client.task_update(
++        task_id=gate.id,
++        metadata={
++            REVIEW_SEEN_KEY: {
++                "pr_url": "https://github.com/agent-lore/lithos-lens/pull/60",
++                "last_review_id": 9999,
++                "last_comment_id": 9999,
++            }
++        },
++    )
++    gate = await _refresh(client, gate)
++    github = _github(reviews=[_review(500)])
++
++    await _run(client, gate, story, github)
++
++    assert len(_findings(client)) == 1
++    marker = await _marker(client, gate.id)
++    assert marker["pr_url"] == _PR_URL and marker["last_review_id"] == 500
++
++
++async def test_comment_since_cursor_is_passed_from_the_marker() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(comments=[_comment(111)])
++    await _run(client, gate, story, github)
++
++    gate = await _refresh(client, gate)
++    github2 = _github()
++    await _run(client, gate, story, github2)
++
++    _, kwargs = github2.list_pull_request_review_comments.call_args
++    assert kwargs["since"] is not None  # bounded pagination, not a full re-walk
++
++
++# ── degraded paths ─────────────────────────────────────────────────────
++
++
++async def test_github_error_is_swallowed_and_nothing_is_marked() -> None:
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github()
++    github.list_pull_request_reviews.side_effect = GitHubError("boom")
++
++    await _run(client, gate, story, github)  # must not raise
++
++    assert _findings(client) == []
++    assert await _marker(client, gate.id) is None  # retried next sweep
++
++
++async def test_orphan_gate_marks_without_posting() -> None:
++    client = FakeLithosClient(agent_id="a")
++    _story, gate = await _gate_with_story(client)
++    github = _github(reviews=[_review(500)])
++
++    await _run(client, gate, None, github)
++
++    assert _findings(client) == []
++    marker = await _marker(client, gate.id)
++    assert marker["last_review_id"] == 500
++
++
++async def test_nothing_new_writes_no_marker() -> None:
++    """An idle PR must not generate a task_update every sweep."""
++    client = FakeLithosClient(agent_id="a")
++    story, gate = await _gate_with_story(client)
++    github = _github(reviews=[_review(500)])
++    await _run(client, gate, story, github)
++
++    gate = await _refresh(client, gate)
++    spy = AsyncMock(wraps=client.task_update)
++    client.task_update = spy  # type: ignore[method-assign]
++    await _run(client, gate, story, github)
++    assert spy.await_count == 0
+diff --git a/tests/test_github_client.py b/tests/test_github_client.py
+index 0088e99..d3ac58b 100644
+--- a/tests/test_github_client.py
++++ b/tests/test_github_client.py
+@@ -36,12 +36,12 @@ from lithos_loom.github_client import (
+     PullRequest,
+     PullRequestReview,
+     PullRequestReviewComment,
+-    _parse_issues_response,
+-    _parse_pull_request,
+     _resolve_gh_token,
+     apply_marker,
+     parse_github_ref,
++    parse_issues_response,
+     parse_marker,
++    parse_pull_request,
+ )
+ 
+ # ── Issue parsing ─────────────────────────────────────────────────────
+@@ -61,7 +61,7 @@ def test_parse_issues_response_returns_typed_issues() -> None:
+             "html_url": "https://github.com/agent-lore/lithos-loom/issues/42",
+         },
+     ]
+-    issues = _parse_issues_response(raw, repo="agent-lore/lithos-loom")
++    issues = parse_issues_response(raw, repo="agent-lore/lithos-loom")
+     assert len(issues) == 1
+     iss = issues[0]
+     assert isinstance(iss, Issue)
+@@ -107,7 +107,7 @@ def test_parse_issues_response_filters_pull_requests() -> None:
+             "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/2"},
+         },
+     ]
+-    issues = _parse_issues_response(raw, repo="x/y")
++    issues = parse_issues_response(raw, repo="x/y")
+     assert [i.number for i in issues] == [1]
+ 
+ 
+@@ -126,7 +126,7 @@ def test_parse_issues_response_handles_null_body() -> None:
+             "html_url": "u",
+         }
+     ]
+-    issues = _parse_issues_response(raw, repo="x/y")
++    issues = parse_issues_response(raw, repo="x/y")
+     assert issues[0].body == ""
+ 
+ 
+@@ -155,7 +155,7 @@ def test_parse_issues_response_closed_state_reasons() -> None:
+             "html_url": "u",
+         },
+     ]
+-    issues = _parse_issues_response(raw, repo="x/y")
++    issues = parse_issues_response(raw, repo="x/y")
+     assert issues[0].state == "closed" and issues[0].state_reason == "completed"
+     assert issues[1].state == "closed" and issues[1].state_reason == "not_planned"
+ 
+@@ -579,7 +579,7 @@ async def test_get_issue_404_returns_none() -> None:
+ 
+ 
+ def test_parse_pull_request_merged() -> None:
+-    pr = _parse_pull_request(
++    pr = parse_pull_request(
+         {
+             "number": 7,
+             "state": "closed",
+@@ -600,7 +600,7 @@ def test_parse_pull_request_merged() -> None:
+ 
+ 
+ def test_parse_pull_request_open_has_no_merge_fields() -> None:
+-    pr = _parse_pull_request(
++    pr = parse_pull_request(
+         {"number": 7, "state": "open", "merged": False, "merged_at": None}, repo="x/y"
+     )
+     assert pr.merged is False and pr.merged_at is None and pr.merge_commit_sha is None
+@@ -906,7 +906,7 @@ def test_parse_pull_request_includes_refs_title_body() -> None:
+     """The single-PR endpoint carries head/base refs + title/body — the review-only
+     resolver (review_resolve) reads these off the same typed PullRequest the merge
+     watcher uses for state/merged."""
+-    pr = _parse_pull_request(
++    pr = parse_pull_request(
+         {
+             "number": 142,
+             "state": "open",
+@@ -929,7 +929,7 @@ def test_parse_pull_request_includes_refs_title_body() -> None:
+ def test_parse_pull_request_tolerates_missing_ref_fields() -> None:
+     """A minimal row (the merge-watcher's older test shape) still parses — the new
+     ref/title/body/repo fields default to empty rather than KeyError-ing."""
+-    pr = _parse_pull_request(
++    pr = parse_pull_request(
+         {"number": 7, "state": "closed", "merged": True, "merged_at": None}, repo=_REPO
+     )
+     assert pr.head_sha == "" and pr.base_ref == "" and pr.title == "" and pr.body == ""
+@@ -939,7 +939,7 @@ def test_parse_pull_request_tolerates_missing_ref_fields() -> None:
+ def test_parse_pull_request_captures_head_and_base_repos() -> None:
+     """head/base repo full-names distinguish a fork PR (they differ) from a
+     same-repo PR — review_resolve reads these to flag forks for converge."""
+-    pr = _parse_pull_request(
++    pr = parse_pull_request(
+         {
+             "number": 9,
+             "state": "open",
+@@ -965,7 +965,7 @@ def test_parse_pull_request_captures_head_and_base_repos() -> None:
+ def test_parse_pull_request_tolerates_null_head_repo() -> None:
+     """A deleted fork leaves ``head.repo`` null; that must parse to an empty
+     head_repo (converge then can't confirm same-repo → the push guard backstops)."""
+-    pr = _parse_pull_request(
++    pr = parse_pull_request(
+         {
+             "number": 9,
+             "state": "open",
+@@ -1206,3 +1206,112 @@ async def test_transport_error_on_a_post_is_wrapped() -> None:
+         client = GitHubClient(http=http, token="fake")
+         with pytest.raises(GitHubTransportError):
+             await client.request_reviewers(_REPO, 7, ["dave"])
++
++
++# ── external-review fields + permission endpoint (PRD S2, detection) ───
++
++
++@pytest.mark.asyncio
++@respx.mock
++async def test_review_parse_carries_id_state_and_submitted_at() -> None:
++    """A summary-only review (no inline comments) has no comment id to de-dup
++    on — the review id is the only stable key, and the state drives the
++    per-state posting policy (PRD S2)."""
++    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/reviews").mock(
++        return_value=httpx.Response(
++            200,
++            json=[
++                {
++                    "id": 4242,
++                    "user": {"login": "reviewer-human"},
++                    "body": "two problems",
++                    "state": "CHANGES_REQUESTED",
++                    "submitted_at": "2026-08-30T09:00:00Z",
++                    "commit_id": "e" * 40,
++                }
++            ],
++        )
++    )
++    async with httpx.AsyncClient() as http:
++        client = GitHubClient(http=http, token="fake")
++        reviews = await client.list_pull_request_reviews(_REPO, 9)
++    (review,) = reviews
++    assert review.review_id == 4242
++    assert review.state == "CHANGES_REQUESTED"
++    assert review.submitted_at == datetime(2026, 8, 30, 9, 0, tzinfo=UTC)
++    assert review.commit_id == "e" * 40
++
++
++@pytest.mark.asyncio
++@respx.mock
++async def test_review_comment_parse_carries_urls_shas_and_updated_at() -> None:
++    """``html_url`` is the thread link for replies/operator; ``commit_id`` is
++    the sha the reviewer actually read (re-anchor input); ``updated_at`` feeds
++    the sweep's bounded ``since`` cursor."""
++    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/comments").mock(
++        return_value=httpx.Response(
++            200,
++            json=[
++                {
++                    "id": 111,
++                    "user": {"login": "reviewer-human"},
++                    "path": "src/x.py",
++                    "line": 12,
++                    "body": "leaks a handle",
++                    "in_reply_to_id": None,
++                    "html_url": "https://github.com/o/r/pull/9#discussion_r111",
++                    "commit_id": "d" * 40,
++                    "original_commit_id": "c" * 40,
++                    "updated_at": "2026-08-30T10:30:00Z",
++                }
++            ],
++        )
++    )
++    async with httpx.AsyncClient() as http:
++        client = GitHubClient(http=http, token="fake")
++        comments = await client.list_pull_request_review_comments(_REPO, 9)
++    (comment,) = comments
++    assert comment.html_url.endswith("discussion_r111")
++    assert comment.commit_id == "d" * 40
++    assert comment.original_commit_id == "c" * 40
++    assert comment.updated_at == datetime(2026, 8, 30, 10, 30, tzinfo=UTC)
++
++
++@pytest.mark.asyncio
++@respx.mock
++async def test_review_comments_pass_since_when_given() -> None:
++    route = respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9/comments").mock(
++        return_value=httpx.Response(200, json=[])
++    )
++    async with httpx.AsyncClient() as http:
++        client = GitHubClient(http=http, token="fake")
++        await client.list_pull_request_review_comments(
++            _REPO, 9, since=datetime(2026, 8, 30, tzinfo=UTC)
++        )
++    # Same rendering convention as list_issues_since (_isoformat_utc).
++    assert route.calls[0].request.url.params["since"] == "2026-08-30T00:00:00+00:00"
++
++
++@pytest.mark.asyncio
++@respx.mock
++async def test_collaborator_permission_maps_the_payload() -> None:
++    respx.get(
++        f"https://api.github.com/repos/{_REPO}/collaborators/dave/permission"
++    ).mock(return_value=httpx.Response(200, json={"permission": "admin"}))
++    async with httpx.AsyncClient() as http:
++        client = GitHubClient(http=http, token="fake")
++        assert await client.get_collaborator_permission(_REPO, "dave") == "admin"
++
++
++@pytest.mark.asyncio
++@respx.mock
++async def test_collaborator_permission_404_means_none_not_repo_gone() -> None:
++    """On this endpoint 404 means "not a collaborator" — it must short-circuit
++    BEFORE _raise_for_status, whose unconditional 404→GitHubRepoNotFoundError
++    mapping would make an outside commenter look like a deleted repo."""
++    respx.get(
++        f"https://api.github.com/repos/{_REPO}/collaborators/stranger/permission"
++    ).mock(return_value=httpx.Response(404, json={"message": "Not Found"}))
++    async with httpx.AsyncClient() as http:
++        client = GitHubClient(http=http, token="fake")
++        assert await client.get_collaborator_permission(_REPO, "stranger") == "none"
+diff --git a/tests/test_github_watcher_child.py b/tests/test_github_watcher_child.py
+index 9cbf227..5037ecc 100644
+--- a/tests/test_github_watcher_child.py
++++ b/tests/test_github_watcher_child.py
+@@ -364,3 +364,69 @@ async def test_reconcile_pass_ignores_bare_develop_pr_url_task() -> None:
+ # The child's configure_logging boot code moved to children/_boot.py
+ # (ARCH-6); its MCP-SSE-pin behaviour is pinned once in
+ # tests/test_child_boot.py.
++
++
++async def test_reconcile_pass_threads_external_review_ingestion() -> None:
++    """PRD S2: with external_reviews_enabled the still-open gate branch also
++    reads the PR's reviews; without it (default) it stays a pure merge poll.
++    Ingestion detail lives in test_external_reviews.py."""
++    import logging
++    from unittest.mock import AsyncMock
++
++    from lithos_loom.children.github_watcher import _run_reconcile_pass
++    from lithos_loom.github_client import PullRequest
++    from lithos_loom.lithos_client import Task
++    from lithos_loom.subscriptions import SubscriptionContext
++
++    def _gate() -> Task:
++        return Task(
++            id="gate-1",
++            title="Awaiting merge: US9",
++            status="open",
++            tags=(),
++            metadata={
++                "gate_type": "pr",
++                "repo": "o/r",
++                "pr_number": 9,
++                "pr_url": "https://github.com/o/r/pull/9",
++            },
++            claims=(),
++            task_type="gate",
++        )
++
++    def _github() -> AsyncMock:
++        github = AsyncMock()
++        github.get_pull_request = AsyncMock(
++            return_value=PullRequest(
++                repo="o/r",
++                number=9,
++                state="open",
++                merged=False,
++                merged_at=None,
++                merge_commit_sha=None,
++            )
++        )
++        github.list_pull_request_reviews = AsyncMock(return_value=[])
++        github.list_pull_request_review_comments = AsyncMock(return_value=[])
++        return github
++
++    for enabled, expect_review_fetch in ((True, True), (False, False)):
++        lithos = AsyncMock()
++        lithos.task_list = AsyncMock(return_value=[_gate()])
++        lithos.task_edge_list = AsyncMock(return_value=[])
++        github = _github()
++        ctx = SubscriptionContext(
++            lithos=lithos, logger=logging.getLogger("test-gate"), agent_id="a"
++        )
++        await _run_reconcile_pass(
++            lithos=lithos,
++            push_handler=AsyncMock(),
++            ctx=ctx,
++            resolved_window=None,
++            github=github,
++            pr_merge_enabled=True,
++            external_reviews_enabled=enabled,
++        )
++        assert github.list_pull_request_reviews.await_count == (
++            1 if expect_review_fetch else 0
++        ), f"external_reviews_enabled={enabled}"

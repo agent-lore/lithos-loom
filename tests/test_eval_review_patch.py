@@ -682,3 +682,115 @@ def test_lens34_fixture_pins_both_read_skew_forms(
         assert "[chip.target_id for chip in row.blockers]" in good_tests
     finally:
         cleanup()
+
+
+_LOOM_EXTERNAL_REVIEWS = "src/lithos_loom/subscriptions/external_reviews.py"
+
+
+def _materialised_external_reviews(
+    monkeypatch: pytest.MonkeyPatch, case_id: str
+) -> tuple[str, str]:
+    """(buggy, known-good) blobs of the sweep module for a shipped 344 case."""
+    case = load_case(_SHIPPED_CASES_DIR / case_id)
+    repo = Path(case.repo).resolve()
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        buggy = _blob_at(repo, resolved.head, _LOOM_EXTERNAL_REVIEWS)
+        good = _blob_at(repo, resolved.known_good_head or "", _LOOM_EXTERNAL_REVIEWS)
+    finally:
+        cleanup()
+    return buggy, good
+
+
+def test_344_backfill_fixture_pins_the_missing_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Escape review (PR #344 round 1): the defect head has NO handled-root
+    # suppression at all — a markerless gate's first sweep re-posts history
+    # the inline round already remediated — and the known-good is exactly the
+    # round-1 fix (handled_roots + the one-second since overlap). A
+    # regenerated patch from the wrong ref would corrupt every later number.
+    buggy, good = _materialised_external_reviews(monkeypatch, "344-backfill-history")
+
+    assert "handled_roots" not in buggy
+    assert "timedelta(seconds=1)" not in buggy
+    assert "handled_roots" in good
+    assert "timedelta(seconds=1)" in good
+
+
+def test_344_suppression_fixture_pins_the_marker_only_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Escape review (PR #344 rounds 2+3): the defect head suppresses on the
+    # bare automated-reply marker (no landed-fix shape, no authenticated
+    # author); the known-good requires BOTH halves of the proof.
+    buggy, good = _materialised_external_reviews(
+        monkeypatch, "344-reply-suppression-proof"
+    )
+
+    # marker-only proof at the defect head: suppression exists...
+    assert "handled_roots" in buggy
+    # ...but neither the landed-fix shape nor the author check does.
+    assert "_FIXED_REPLY_PREFIX" not in buggy
+    assert "get_collaborator_permission" not in buggy
+    # the fix: both halves, and failure of the probe stays untrusted
+    # (the helper moved to github_models in a later slice; at this head the
+    # landed-fix shape is the local _FIXED_REPLY_PREFIX check).
+    assert '_FIXED_REPLY_PREFIX = "Fixed in "' in good
+    assert "get_collaborator_permission" in good
+
+
+_LENS43_FRONTIER = "src/lithos_lens/frontier.py"
+_LENS43_TASKS = "src/lithos_lens/tasks.py"
+
+
+def test_lens43_fixture_pins_both_contract_violations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Escape review (lens PR #43 / PRD pr-reconciliation "Failure 1"): the
+    # delivered head keeps the graph surface on a transient frontier read
+    # failure (§14 requires the flat fallback) and lets the healthy stripe
+    # ignore the open rows classify_open_tasks skips. The known-good is the
+    # human-fixed pre-squash tip (the 289 merged-head shape).
+    case = load_case(_SHIPPED_CASES_DIR / "lens43-degraded-contract")
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        buggy_frontier = _blob_at(repo, resolved.head, _LENS43_FRONTIER)
+        good_frontier = _blob_at(repo, resolved.known_good_head or "", _LENS43_FRONTIER)
+        buggy_tasks = _blob_at(repo, resolved.head, _LENS43_TASKS)
+        good_tasks = _blob_at(repo, resolved.known_good_head or "", _LENS43_TASKS)
+
+        # Defect 1: a failed frontier read keeps the graph surface (the error
+        # is appended, frontier_ok drops, rows stay) — no per-load flat
+        # fallback distinct from the cached tools-absent verdict.
+        assert "Could not load the ready frontier." in buggy_frontier
+        assert "frontier_fallback" not in buggy_frontier
+        # The human fix (lens 6907906/0347ec4) extracts + wires the fallback.
+        assert "frontier_fallback" in good_frontier
+
+        # Defect 2: the healthy stripe never accounts for the open rows
+        # classify_open_tasks skips (non-"task" task_types).
+        assert "def healthy" in buggy_tasks
+        assert "rolled_up_only" not in buggy_tasks
+        # The fix (lens 8f8d24b): rolled_up_only names the epics/gates-only
+        # condition and the healthy derivation withholds the claim on it.
+        assert "def rolled_up_only" in good_tasks
+        assert "not self.rolled_up_only" in good_tasks
+    finally:
+        cleanup()

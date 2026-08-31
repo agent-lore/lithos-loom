@@ -263,6 +263,7 @@ class _SplitCase:
 
 
 _CHECK_RUNNER = "src/lithos_loom/plugins/story_develop/check_runner.py"
+_EXTERNAL_REVIEWS = "src/lithos_loom/subscriptions/external_reviews.py"
 _KNOWLEDGE_METADATA = "src/lithos_lens/knowledge_metadata.py"
 _FRONTIER = "src/lithos_lens/frontier.py"
 _LENS_TASKS = "src/lithos_lens/tasks.py"
@@ -391,6 +392,59 @@ _SPLIT_CASES = (
         unrelated_b=(
             "normalize_related repeats the incoming-title lookup for every "
             "row sequentially; results should be memoized per id"
+        ),
+    ),
+    _SplitCase(
+        case_id="lens43-degraded-contract",
+        file_a=_FRONTIER,
+        file_b=_LENS_TASKS,
+        only_a=(
+            "a transient ready/blocked read failure keeps the graph sections "
+            "and leaves rows Not classified instead of dropping the load to "
+            "the flat open list with a warning — the resilience table in "
+            "docs/REQUIREMENTS.md requires no silent classification on "
+            "exactly this failure"
+        ),
+        only_b=(
+            "the All systems healthy stripe still renders when the only open "
+            "rows are epics or gates, which classify_open_tasks skips — "
+            "invisible open work contradicts the system-wide claim"
+        ),
+        unrelated_a=(
+            "the frontier gather issues both reads sequentially and should "
+            "share one task group to halve dashboard render latency"
+        ),
+        # avoid 'gate'/'epic'/'healthy' substrings — the negative must clear
+        # every keyword of BOTH expecteds
+        unrelated_b=(
+            "the empty-state panel copy is duplicated across three templates "
+            "and should be a shared partial"
+        ),
+    ),
+    _SplitCase(
+        case_id="344-reply-suppression-proof",
+        file_a=_EXTERNAL_REVIEWS,
+        file_b=_EXTERNAL_REVIEWS,
+        only_a=(
+            "a reply carrying the automated marker is treated as proof, but "
+            "the producer posts the same marker on held-back red-gate replies "
+            "and Not changed dispute replies, so roots that are explicitly "
+            "unresolved get suppressed from the operator's findings"
+        ),
+        only_b=(
+            "the marker and reply shape are public strings any commenter can "
+            "copy, so an untrusted outsider can forge a fixed reply to hide a "
+            "trusted reviewer's comment; the reply author's permission is "
+            "never checked"
+        ),
+        unrelated_a=(
+            "the sweep fetches all reviews on every pass and should cache "
+            "pages between sweeps to cut API quota use"
+        ),
+        # avoid 'forge' ('forget'!), 'permission', 'held', 'unresolved'
+        unrelated_b=(
+            "the marker constant is duplicated between the sweep and the "
+            "reply producer and should be imported from one home"
         ),
     ),
 )
@@ -806,3 +860,41 @@ def test_status_less_findings_score_as_before() -> None:
     )
     assert "status" not in report["reviewers"][0]["findings"][0]
     assert score_run(_case(), report).caught is True
+
+
+# ── 344-backfill-history: single-expected precision ───────────────────────────
+
+
+def _backfill() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "344-backfill-history")
+
+
+def test_backfill_history_finding_is_caught() -> None:
+    score = score_run(
+        _backfill(),
+        _split_report(
+            (
+                _EXTERNAL_REVIEWS,
+                "a markerless gate's first sweep re-posts the whole review "
+                "history, including roots the inline round already remediated "
+                "and replied to before the gate existed",
+            )
+        ),
+    )
+    assert score.caught is True
+
+
+def test_backfill_history_topic_adjacent_finding_is_not_a_catch() -> None:
+    # A same-file rendering finding must not satisfy the backfill expected.
+    score = score_run(
+        _backfill(),
+        _split_report(
+            (
+                _EXTERNAL_REVIEWS,
+                "the summary rendering caps listed comments at 20 but the "
+                "hidden-count arithmetic ignores reviews, so the trailing "
+                "and-N-more line under-counts",
+            )
+        ),
+    )
+    assert score.caught is False

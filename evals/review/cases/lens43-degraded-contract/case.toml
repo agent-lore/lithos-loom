@@ -1,0 +1,78 @@
+[case]
+id = "lens43-degraded-contract"
+description = """
+lens PR #43 escape (T1-S12, story-develop run f2e46eef): the standard panel
+(correctness + security, 5 rounds, $66.45, ZERO findings at any severity)
+approved and delivered head d53126a — and Copilot found two real contract
+violations nine minutes later (the PRD pr-reconciliation.md §"Failure 1"
+evidence; the inline round then starved itself and neither was remediated).
+Both are IN-TREE contract violations: docs/REQUIREMENTS.md §14 ("Resilience &
+Error Handling") ships in the reviewed checkout and names the exact required
+behaviour — the blind-spot class is contract-grounding: checking the diff
+against a requirements doc the repo itself carries, not just against the AC
+text (#173 "a persona panel isn't an AC auditor" made general).
+
+Escape-review provenance (README §"Escape review"): bucket 1 — the panel
+reviewed this exact diff, both defects are in it, and catching them needs
+only the repo tree (the §14 table) plus reasoning.
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. FULL-FEATURE
+diff as the panel approved it (base = lens main 6199396, the shared merge-base
+of the 2026-08 lens rollout; defect patch = delivered r5 head d53126a).
+
+PAIRING: defect head vs MERGED head (the 289 shape — valid, not minimal).
+known-good.patch is `git diff 6199396..41a43c8`, the human-fixed pre-squash
+tip: it closes both defects (lens 6907906 honours the §14 flat fallback;
+lens 8f8d24b withholds the healthy claim on partially-rendered boards) but
+ALSO carries the T1-S9/T1-S10 merge the fixes were built on — so a finding
+about code that exists only at the known-good head is not automatically a
+false positive; read `fp` (defect-scoped) and ignore raw `noise`/`blk`.
+
+RH-5 DECLARATION NOTE: the declared set is the two externally-caught escapes
+— a floor, not a census. The human fix commits also adjusted card links and
+related rendering on partially-rendered boards, so the r5 head plausibly
+carries undeclared residue in the same files; the LLM judge is the trusted
+matcher for the remainder (ADR 0005). Treat a mid-band number from this case
+as ranking-contaminated; its job is the blind-spot regression floor.
+"""
+ac_provenance = "replay"
+tier = "frontier"       # the 2026-08 lens rollout's live escape class — headline signal
+repo = "../lithos-lens"
+base = "61993963b10071525c4965abc1d083f444e919b3"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+file = "src/lithos_lens/frontier.py"
+keywords = ["flat", "REQUIREMENTS", "resilience", "silent classification", "unclassified"]
+min_severity = "major"
+mechanism = """
+Transient frontier read failure renders as graph classification instead of the
+contracted flat fallback: when lithos_task_ready / lithos_task_blocked raises,
+_resolve_frontier keeps the graph surface (frontier_ok=False, the failed
+side's rows simply empty), so open rows render partially classified /
+"Not classified" — an OUTAGE presented as a benign classification/truncation
+state. docs/REQUIREMENTS.md §14 (in this repo) requires exactly this failure
+to render the master open list FLAT with a warning banner ("no silent
+classification"), the way the tools-absent path already does — retryable and
+per-load, distinct from the cached missing-tools verdict.
+"""
+
+[[expected]]
+file = "src/lithos_lens/tasks.py"
+keywords = ["All systems healthy", "healthy", "epic", "gate", "task_type"]
+min_severity = "major"
+mechanism = """
+The "All systems healthy" stripe makes a whole-system claim over rows it
+cannot see: classify_open_tasks deliberately skips every open row whose
+task_type is not "task" (epics, gates), but the healthy derivation does not
+account for the skipped rows — a corpus whose only open rows are epics/gates
+renders no row and no empty-state panel while still asserting all-healthy.
+The claim must be withheld (or the rows surfaced/flagged) when open rows of
+unsupported task types are invisible.
+"""
