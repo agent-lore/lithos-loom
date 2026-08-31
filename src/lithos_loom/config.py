@@ -335,7 +335,7 @@ class StoryDevelopConfig:
 
     ``operator_github_login`` (#113): when set, a delivered PR requests this
     GitHub user as a reviewer so native notifications fire. ``None`` → no human
-    reviewer is requested (today's behaviour; Copilot only).
+    reviewer is requested (today's behaviour).
 
     ``default_review_profile`` (#139): the host-wide Review Profile selected when
     neither the task nor the project sets one — the lowest layer of the profile

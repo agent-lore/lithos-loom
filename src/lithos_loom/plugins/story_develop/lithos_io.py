@@ -176,20 +176,14 @@ def _deferred_section(spawns: Sequence[DeferredSpawn]) -> str:
 
 
 def _delivery_section(delivery: Any) -> str:
-    """The Copilot-round block of the ``[DevelopResult]`` finding."""
+    """The delivery block of the ``[DevelopResult]`` finding.
+
+    Slim since S2 slice D: delivery ends at the open PR (the inline Copilot
+    round is retired — external reviews are ingested by the sweep and
+    remediated by ``converge --from-github``). The notes carry the notify /
+    review-request outcomes.
+    """
     lines = [f"pull request: {delivery.pr_url}"]
-    if delivery.copilot_reviewed:
-        if delivery.fix_pushed:
-            fix = f"fix pushed ({delivery.fix_sha})"
-        elif delivery.fix_committed:
-            fix = f"fix prepared but HELD BACK (gate {delivery.fix_gate_verdict})"
-        else:
-            fix = "no code change"
-        incomplete = "" if delivery.copilot_settled else " — INCOMPLETE (see note)"
-        lines.append(
-            f"copilot round: {delivery.comments_count} comment(s); {fix}; "
-            f"{delivery.replies_posted} repl(ies) posted{incomplete}"
-        )
     for note in delivery.notes:
         lines.append(f"note: {note}")
     return "\n".join(lines)
@@ -314,9 +308,8 @@ def post_results(
 ) -> bool:
     """Post the run outcome back to the task. Returns True when fully posted.
 
-    *delivery* (a ``DeliveryOutcome``) supersedes *pr_url* and corrects the
-    reported spend: the Copilot fix round happens AFTER ``develop()`` returns,
-    so the result object alone would understate cost and omit the round.
+    *delivery* (a ``DeliveryOutcome``) supersedes *pr_url*: it carries the
+    delivery notes (notify / review-request outcomes) alongside the PR url.
 
     *deferred_spawns* (from :func:`spawn_deferred_tasks`) records where each
     ``out-of-scope`` finding went; without it, any deferred findings still
@@ -330,9 +323,6 @@ def post_results(
         deferred_spawns = [
             DeferredSpawn(finding=f, task_id=None) for f in result.deferred_findings
         ]
-    total_cost = result.total_cost_usd + (
-        delivery.extra_cost_usd if delivery is not None else 0.0
-    )
     # Local import: the module keeps `develop` out of its runtime import surface
     # (DevelopResult is TYPE_CHECKING-only) — reuse the one severity-count helper
     # so the metadata patch + state.json can't drift.
@@ -345,8 +335,6 @@ def post_results(
                 summary += "\n\n" + _deferred_section(deferred_spawns)
             if delivery is not None:
                 summary += "\n\n" + _delivery_section(delivery)
-                if delivery.extra_cost_usd:
-                    summary += f"\ntotal cost incl. copilot round: ${total_cost:.4f}"
             elif pr_url:
                 summary += f"\n\npull request: {pr_url}"
             await client.finding_post(task_id=task_id, summary=summary)
@@ -365,7 +353,7 @@ def post_results(
                 "develop_branch": result.branch,
                 "develop_run_id": result.run_id,
                 "develop_rounds": result.rounds,
-                "develop_cost_usd": round(total_cost, 4),
+                "develop_cost_usd": round(result.total_cost_usd, 4),
                 # Review-metadata record (#139/ADR 0003 §11): the profile that
                 # ran, the panel, and its findings-by-severity + gate verdict —
                 # the per-run signal correlated against post-merge outcomes. Kept

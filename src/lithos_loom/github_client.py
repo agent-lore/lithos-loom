@@ -375,7 +375,7 @@ class GitHubClient:
     ) -> list[PullRequestReview]:
         """Every review on the PR (author + summary body), all pages.
 
-        story-develop scans these for Copilot's review and its "generated N
+        the external-review sweep + converge scan these for reviews and "generated N
         comments" marker (:mod:`.pr_delivery`)."""
         rows = await self._get_all_pages(
             f"/repos/{repo}/pulls/{number}/reviews", repo=repo
@@ -387,7 +387,7 @@ class GitHubClient:
     ) -> list[PullRequestReviewComment]:
         """Every inline review comment on the PR, all pages.
 
-        story-develop keeps the top-level Copilot comments (``in_reply_to_id``
+        consumers keep the top-level root comments (``in_reply_to_id``
         is ``None``) as findings to hand back to the coder.
 
         ``since`` bounds the walk to comments updated at-or-after the given
@@ -447,7 +447,7 @@ class GitHubClient:
     async def create_review_comment_reply(
         self, repo: str, number: int, comment_id: int, body: str
     ) -> None:
-        """Reply to an inline review comment thread (Copilot dispute/ack)."""
+        """Reply to an inline review comment thread (fix/dispute replies)."""
         response = await self._post(
             f"/repos/{repo}/pulls/{number}/comments/{comment_id}/replies",
             json={"body": body},

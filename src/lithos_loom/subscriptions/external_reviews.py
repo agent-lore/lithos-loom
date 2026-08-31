@@ -88,9 +88,16 @@ class IngestResult:
     described so the dispatch decision (trust, own-sha) filters what was
     *reported*, never a re-fetch. Every quiet path — no news, silent states,
     orphan gate, GitHub error — reports ``posted=False`` with empty lists.
+
+    ``failed`` (PR #348 re-review 1) separates "nothing to report" from a
+    RETRYABLE failure — a GitHub listing error, or a batch whose finding /
+    de-dup mark did not land. On the still-open path the next sweep retries
+    either way; on the MERGED path the caller must not resolve the gate over
+    a failed final observation (there is no next sweep after resolution).
     """
 
     posted: bool = False
+    failed: bool = False
     actionable_reviews: list[PullRequestReview] = field(default_factory=list)
     actionable_comments: list[PullRequestReviewComment] = field(default_factory=list)
 
@@ -174,12 +181,14 @@ async def _proven_handled(
 ) -> frozenset[int]:
     """Root-comment ids proven handled by an authenticated landed-fix reply.
 
-    Backfill guard (PR #344 review, finding 2): until the inline Copilot
-    round is retired (slice D), delivery remediates root comments, pushes the
-    fix and replies — all *before* the ``pr`` gate exists. A markerless
-    gate's first sweep would otherwise re-report that already-handled history
-    as fresh ``[ExternalReview]`` findings. On later sweeps this is naturally
-    inert: handled roots sit below the id high-water mark anyway.
+    Backfill guard (PR #344 review, finding 2): before S2 slice D retired the
+    inline Copilot round, delivery remediated root comments, pushed the fix
+    and replied — all *before* the ``pr`` gate existed; pre-D history is
+    still full of such threads, and converge's own thread replies keep
+    producing landed-fix replies. A markerless gate's first sweep would
+    otherwise re-report that already-handled history as fresh
+    ``[ExternalReview]`` findings. On later sweeps this is naturally inert:
+    handled roots sit below the id high-water mark anyway.
 
     Proof has two halves, both required:
 
@@ -236,6 +245,7 @@ def _render_summary(
     story_id: str,
     gate_id: str,
     extra_note: str | None = None,
+    post_merge: bool = False,
 ) -> str:
     lines = [f"{EXTERNAL_REVIEW} new review activity on delivered PR {pr_url}:"]
     for review in reviews[:_MAX_LISTED]:
@@ -255,10 +265,19 @@ def _render_summary(
         lines.append(f"- …and {hidden} more (see the PR)")
     if extra_note:
         lines.append(extra_note)
-    lines.append(
-        f"story {story_id} remains blocked on gate {gate_id}; review the PR "
-        f"before merging"
-    )
+    if post_merge:
+        # PR #348 re-review 3: this record is written on the MERGED path — an
+        # instruction to review before merging would be impossible to follow.
+        lines.append(
+            "the PR was already merged when this activity was first observed "
+            "— recorded for audit; automated remediation is no longer "
+            "possible, follow up on the merged changes manually"
+        )
+    else:
+        lines.append(
+            f"story {story_id} remains blocked on gate {gate_id}; review the "
+            f"PR before merging"
+        )
     return "\n".join(lines)
 
 
@@ -294,6 +313,7 @@ async def ingest_external_reviews(
     ctx: SubscriptionContext,
     *,
     extra_note: str | None = None,
+    post_merge: bool = False,
     pending_marker_for: Callable[
         [list[PullRequestReview], list[PullRequestReviewComment]],
         Awaitable[Mapping[str, Any] | None],
@@ -318,7 +338,11 @@ async def ingest_external_reviews(
     and its entry, if any, is folded into the SAME ``task_update`` as the
     seen marks. The marks consume the batch, so its dispatch debt must
     become durable in the same write or not at all (a failed combined write
-    retries the whole batch next sweep). Returns the posted batch for the
+    retries the whole batch next sweep). ``post_merge`` (PR #348 re-reviews
+    1+3) marks the merged-path final observation: the rendered record says
+    the activity was discovered after merge, and the caller reads
+    ``IngestResult.failed`` to defer gate resolution instead of losing the
+    record. Returns the posted batch for the
     dispatcher — see :class:`IngestResult`.
     """
     seen = _read_seen(gate, spec.pr_url)
@@ -337,7 +361,7 @@ async def ingest_external_reviews(
             type(exc).__name__,
             exc,
         )
-        return IngestResult()
+        return IngestResult(failed=True)
 
     new_reviews = [r for r in reviews if r.review_id > seen.last_review_id]
     new_comments = [c for c in comments if c.comment_id > seen.last_comment_id]
@@ -377,24 +401,32 @@ async def ingest_external_reviews(
 
     if not actionable_reviews and not actionable_comments:
         # Only silent material (approvals, replies, our own automated replies):
-        # advance the marks so it is never re-walked, post nothing.
-        await write_marker(
+        # advance the marks so it is never re-walked, post nothing. The marker
+        # IS this material's durable record, so a failed write is a retryable
+        # failure (PR #348 re-review round 3) — the merged-path caller must
+        # defer resolution over it, not lose the observation forever.
+        marked = await write_marker(
             ctx, task_id=gate.id, marker=marker, subsystem="external-reviews"
         )
-        return IngestResult()
+        return IngestResult(failed=not marked)
 
     if story_id is None:
-        # Orphan gate (no waiter edge): nothing to post the finding on.
-        await write_marker(
+        # Orphan gate (no waiter edge): nothing to post the finding on — the
+        # marker is the only record here too, so its write result propagates
+        # the same way (and the "recorded" claim is only logged when true).
+        marked = await write_marker(
             ctx, task_id=gate.id, marker=marker, subsystem="external-reviews"
         )
         ctx.logger.warning(
             "[Friction] external-reviews: gate %s has no waiter; review "
-            "activity on %s recorded but not posted",
+            "activity on %s %s",
             gate.id,
             spec.pr_url,
+            "recorded but not posted"
+            if marked
+            else "NOT recorded (marker write failed; will retry)",
         )
-        return IngestResult()
+        return IngestResult(failed=not marked)
 
     if pending_marker_for is not None:
         pending = await pending_marker_for(actionable_reviews, actionable_comments)
@@ -410,6 +442,7 @@ async def ingest_external_reviews(
             story_id=story_id,
             gate_id=gate.id,
             extra_note=extra_note,
+            post_merge=post_merge,
         ),
         marker=marker,
         subsystem="external-reviews",
@@ -420,8 +453,9 @@ async def ingest_external_reviews(
         # PR #346 review F4: the finding or the de-dup mark did not land —
         # the batch retries next sweep and must NOT dispatch remediation now
         # (either the operator breadcrumb is missing, or an unmarked batch
-        # would double-dispatch when it re-posts).
-        return IngestResult()
+        # would double-dispatch when it re-posts). PR #348 re-review 1:
+        # ``failed`` lets the merged-path caller defer resolution too.
+        return IngestResult(failed=True)
     ctx.logger.info(
         "external-reviews: posted %s for %s (%d review(s), %d comment(s)) on story %s",
         EXTERNAL_REVIEW,

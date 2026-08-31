@@ -720,20 +720,6 @@ def test_check_state_off_wins_over_command_override(
     assert "lint" not in names
 
 
-def test_test_off_removes_delivery_regression_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # #280: test=off drops the test check, so the delivery regression gate (test-only)
-    # has nothing to run and returns None. (An *informational* test STILL delivery-gates
-    # on red — the intentional divergence, pinned in test_story_develop_check_runner.)
-    _python(monkeypatch, present=("uv", "ruff", "bandit"))
-    monkeypatch.setattr(
-        check_runner, "_resolve_test_command", lambda config, wt: "pytest"
-    )
-    cfg = _config(tmp_path, review_profile="standard", check_states={"test": "off"})
-    assert check_runner.run_delivery_test_gate(cfg, tmp_path, "sha", 1) is None
-
-
 def test_reconcile_off_check_states_retires_persisted_findings(
     tmp_path: Path,
 ) -> None:

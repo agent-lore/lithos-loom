@@ -88,8 +88,13 @@ name = "story-develop"
 # its findings are structured into a stable gate/<check>-NNN ledger surfaced to
 # the panel + [DevelopResult] (non-blocking; #132).
 # See docs/SPECIFICATION.md §5.5 for the keys + resolution precedence.
-# Add --open-pr to push + open a PR (and run the Copilot review round) on
-# approval. The --coder-model/--coder-effort/--reviewer-model/--reviewer-effort
+# Add --open-pr to push + open a PR on approval; delivery ends at the open PR
+# (the inline Copilot round is retired — the github-watcher ingests external
+# reviews and `develop converge --from-github` remediates them). Add
+# --copilot-review as the ROUTE-LEVEL fallback for the one-shot Copilot
+# request at PR open; per-project/per-task develop_copilot_review metadata
+# overrides it (default off — spend Copilot deliberately, gate 15690a0e).
+# The --coder-model/--coder-effort/--reviewer-model/--reviewer-effort
 # flags may be appended here as a ROUTE-LEVEL DEFAULT that project/task
 # metadata overrides (they fill only what metadata leaves unset), e.g.:
 #   ... --repo {{repo}} --coder-effort high --reviewer-effort high
@@ -428,7 +433,7 @@ tags = ["trigger:story-develop"]
 # is delivered — requested as a reviewer, or *assigned* to the PR when they
 # authored it (loom usually runs under their own gh auth, and GitHub forbids
 # self review-requests). Either way GitHub fires a native notification. Unset →
-# Copilot review only, no human notification. Lives under [story_develop], so
+# no human notification. Lives under [story_develop], so
 # it must precede the [story_develop.default_models] subtable.
 # [story_develop]
 # operator_github_login = "your-github-login"

@@ -425,7 +425,7 @@ def commit_round(wt: Path, message: str) -> str | None:
     """Commit a round's work as one commit, excluding the handoff dir.
 
     The single shared commit primitive (ARCH-1.S7): both ``develop()``'s
-    :func:`commit_phase` and ``pr_delivery``'s Copilot fix round call it, so the
+    :func:`commit_phase` calls it, so the
     handoff-dir exclusion is single-sourced on :data:`HANDOFF_DIRNAME` rather than
     drifting as a bare ``".handoff"`` literal on the delivery side. Returns the new
     commit SHA, or ``None`` when nothing (outside the handoff dir) was staged.

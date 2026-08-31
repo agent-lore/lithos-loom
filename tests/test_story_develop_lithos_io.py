@@ -18,6 +18,7 @@ from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutco
 from lithos_loom.plugins.story_develop.findings import DeferredFinding
 from lithos_loom.plugins.story_develop.gate_findings import GateFinding
 from lithos_loom.plugins.story_develop.handoff import Finding
+from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
 from tests.support import FakeLithosClient, make_task
 
 
@@ -245,53 +246,26 @@ def test_post_results_names_blocking_raw_checks(
     assert "repo-parity: RED (`make check`)" in body
 
 
-def test_post_results_with_delivery_corrects_cost_and_reports_round(
+def test_post_results_with_delivery_reports_pr_and_notes(
     fake_client: FakeLithosClient,
 ) -> None:
-    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
-
+    # Slim since slice D: the delivery section is the PR url + the notify /
+    # request notes (the inline Copilot round and its cost line are retired).
     delivery = DeliveryOutcome(
-        pr_url="https://github.com/o/r/pull/12",
-        pr_number=12,
+        pr_url="https://github.com/o/r/pull/9",
+        pr_number=9,
         copilot_requested=True,
-        copilot_reviewed=True,
-        comments_count=2,
-        fix_committed=True,
-        fix_pushed=True,
-        fix_sha="abc123",
-        replies_posted=2,
-        extra_cost_usd=0.5,
+        notes=("requested Copilot review (fire-and-forget; the sweep ingests it)",),
     )
     ok = lithos_io.post_results("http://x", "task-1", _result(), delivery=delivery)
     assert ok is True
-    body = fake_client.findings[0]["summary"]
-    assert "pull request: https://github.com/o/r/pull/12" in body
-    assert "copilot round: 2 comment(s); fix pushed (abc123); 2 repl(ies)" in body
-    assert "total cost incl. copilot round: $1.2500" in body  # 0.75 + 0.5
-    (update,) = fake_client.calls_to("task_update")
-    meta = update["metadata"]
-    assert meta["develop_cost_usd"] == 1.25  # NOT the stale 0.75
-    assert meta["develop_pr_url"] == "https://github.com/o/r/pull/12"
-
-
-def test_post_results_with_held_back_delivery(fake_client: FakeLithosClient) -> None:
-    from lithos_loom.plugins.story_develop.pr_delivery import DeliveryOutcome
-
-    delivery = DeliveryOutcome(
-        pr_url="https://github.com/o/r/pull/12",
-        pr_number=12,
-        copilot_requested=True,
-        copilot_reviewed=True,
-        comments_count=1,
-        fix_committed=True,
-        fix_pushed=False,
-        fix_gate_verdict="RED",
-        replies_posted=1,
-        extra_cost_usd=0.2,
-    )
-    lithos_io.post_results("http://x", "task-1", _result(), delivery=delivery)
-    body = fake_client.findings[0]["summary"]
-    assert "HELD BACK (gate RED)" in body
+    body = fake_client._findings[0]["summary"]
+    assert "pull request: https://github.com/o/r/pull/9" in body
+    assert "note: requested Copilot review (fire-and-forget" in body
+    assert "copilot round" not in body  # the retired round never reappears
+    # the metadata cost is the develop run's own spend (no delivery add-on).
+    task = fake_client._tasks["task-1"]
+    assert task.metadata["develop_cost_usd"] == 0.75
 
 
 def test_post_results_disputed_adds_breadcrumb(fake_client: FakeLithosClient) -> None:

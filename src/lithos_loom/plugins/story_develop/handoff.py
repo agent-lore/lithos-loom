@@ -214,7 +214,7 @@ def render_log_section(
     followed by that handoff file's blockquoted body (or a placeholder when the
     file was never written, so gaps stay visible). The section shape — heading +
     read-or-missing + blockquote — lives here so :func:`conversation_log` (per
-    develop round) and ``pr_delivery``'s Copilot-round append share one renderer
+    develop round) shares one renderer
     instead of each reaching the private helpers (ARCH-1.S7).
     """
     parts = [header, ""]

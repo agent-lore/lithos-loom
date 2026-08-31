@@ -363,3 +363,32 @@ def test_friction_order_project_coder_before_task_override() -> None:
     assert len(frictions) == 2
     assert "develop_coder.effort" in frictions[0]
     assert "task metadata.develop_model" in frictions[1]
+
+
+# ── develop_copilot_review (gate 15690a0e / task 0e8d96ba) ─────────────
+
+
+def test_copilot_review_defaults_unset() -> None:
+    settings, frictions = _resolve()
+    assert settings.copilot_review is None  # caller falls back to the route flag
+    assert frictions == ()
+
+
+def test_copilot_review_project_layer_and_task_override() -> None:
+    # The point of the task: a project can default the request OFF while a
+    # single story opts back in (spend Copilot deliberately, per story).
+    settings, frictions = _resolve({"develop_copilot_review": False})
+    assert settings.copilot_review is False
+    assert frictions == ()
+
+    settings, frictions = _resolve(
+        {"develop_copilot_review": False}, {"develop_copilot_review": True}
+    )
+    assert settings.copilot_review is True
+    assert frictions == ()
+
+
+def test_bad_copilot_review_frictions_and_falls_back() -> None:
+    settings, frictions = _resolve({"develop_copilot_review": "yes please"})
+    assert settings.copilot_review is None
+    assert len(frictions) == 1 and "develop_copilot_review" in frictions[0]

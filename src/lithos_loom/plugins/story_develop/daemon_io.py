@@ -143,6 +143,16 @@ class ProjectDevelopSettings:
     # blocking is the review profile's, not a separate knob — `block_on_red` removed.)
     test_command: str | None = None
     test_gate: bool | None = None
+    # Gate 15690a0e / task 0e8d96ba: the one-shot Copilot review request at PR
+    # open (``develop_copilot_review``). ``None`` = unset at both layers; the
+    # daemon falls back to the route-level ``--copilot-review`` flag.
+    copilot_review: bool | None = None
+    # PR #348 review F3: True when the project-context doc could not be READ
+    # (Lithos/transport failure) — as opposed to read-and-absent. A failed
+    # read may be hiding an explicit opt-out, so spend dials (the Copilot
+    # request) fail closed on it while a readable absence keeps the
+    # documented route-flag fallback.
+    context_read_failed: bool = False
     # #273: per-check command overrides ({check_name: command}) resolved from
     # ``develop_check_commands`` (project) + a per-task table merged per-key. Empty
     # when neither layer declares any. Threaded onto ``DevelopConfig.check_commands``.
@@ -251,6 +261,42 @@ def _select_reviewers(
     return tuple(selected)
 
 
+def _degraded_settings(
+    task_metadata: Mapping[str, Any],
+    frictions: list[str],
+    *,
+    context_read_failed: bool = False,
+) -> ProjectDevelopSettings:
+    """Settings for the degraded paths (no slug / no doc / failed doc read).
+
+    Reviewers and the project-layer profile stay built-in — but the TASK's own
+    scalar overrides still resolve, with an empty project layer (PR #348
+    re-review 2: task metadata is in hand on every path, so an explicit
+    task-level ``develop_copilot_review`` — or ``develop_image`` etc. — must
+    never be dropped just because the project doc was missing or unreadable).
+    """
+    scalars = resolve_scalar_settings({}, dict(task_metadata), frictions)
+    return ProjectDevelopSettings(
+        coder=scalars.coder,
+        coder_model=scalars.coder_model,
+        coder_effort=scalars.coder_effort,
+        fallback_chain=scalars.fallback_chain,
+        max_rounds=scalars.max_rounds,
+        max_cost_usd=scalars.max_cost_usd,
+        image=scalars.image,
+        artifacts_path=scalars.artifacts_path,
+        test_command=scalars.test_command,
+        test_gate=scalars.test_gate,
+        copilot_review=scalars.copilot_review,
+        check_commands=scalars.check_commands,
+        check_states=scalars.check_states,
+        parity_command=scalars.parity_command,
+        review_profile_project=scalars.review_profile_project,
+        context_read_failed=context_read_failed,
+        frictions=tuple(frictions),
+    )
+
+
 def resolve_project_settings(
     url: str, task_metadata: Mapping[str, Any]
 ) -> ProjectDevelopSettings:
@@ -266,7 +312,7 @@ def resolve_project_settings(
         frictions.append(
             "task has no metadata.project slug; using built-in develop defaults"
         )
-        return ProjectDevelopSettings(frictions=tuple(frictions))
+        return _degraded_settings(task_metadata, frictions)
 
     async def _fetch() -> Mapping[str, Any] | None:
         async with LithosClient(url, agent_id=AGENT_ID) as client:
@@ -279,12 +325,12 @@ def resolve_project_settings(
             f"cannot read project-context doc for {slug!r} ({exc}); "
             "using built-in develop defaults"
         )
-        return ProjectDevelopSettings(frictions=tuple(frictions))
+        return _degraded_settings(task_metadata, frictions, context_read_failed=True)
     if meta is None:
         frictions.append(
             f"no project-context doc for {slug!r}; using built-in develop defaults"
         )
-        return ProjectDevelopSettings(frictions=tuple(frictions))
+        return _degraded_settings(task_metadata, frictions)
 
     pool = _parse_pool(meta, frictions)
     reviewers = _select_reviewers(pool, meta, task_metadata, frictions)
@@ -318,6 +364,7 @@ def resolve_project_settings(
         artifacts_path=scalars.artifacts_path,
         test_command=scalars.test_command,
         test_gate=scalars.test_gate,
+        copilot_review=scalars.copilot_review,
         check_commands=scalars.check_commands,
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,
@@ -421,7 +468,7 @@ def load_operator_github_login() -> str | None:
 
     Best-effort, mirroring :func:`load_tool_default_models`: an unreadable /
     missing config, or no ``[story_develop]`` section / unset key, yields
-    ``None`` so delivery requests no human reviewer (Copilot-only, today's
+    ``None`` so delivery requests no human reviewer (today's
     behaviour). Never raises.
     """
     from ...config import load_config

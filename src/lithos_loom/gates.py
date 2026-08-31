@@ -148,8 +148,10 @@ async def create_pr_gate_best_effort(
         return None, (
             "plugin reported success with no pr_url — no pr gate created; this "
             "delivered story has no merge-tracking gate and a daemon restart "
-            "could re-develop it into a duplicate PR. Merge the PR or create a "
-            "gate manually"
+            "could re-develop it into a duplicate PR — and no external-review "
+            "monitoring: reviews on this PR will not be ingested or "
+            "remediated (the retired inline round is no fallback). Merge the "
+            "PR or create a gate manually"
         )
     try:
         gate_id = await create_pr_gate(
@@ -165,7 +167,9 @@ async def create_pr_gate_best_effort(
         return None, (
             "could not create the pr gate — this delivered story has no "
             "merge-tracking gate and a daemon restart could re-develop it into "
-            "a duplicate PR. Merge the PR or create a gate manually"
+            "a duplicate PR — and no external-review monitoring: reviews on "
+            "this PR will not be ingested or remediated (the retired inline "
+            "round is no fallback). Merge the PR or create a gate manually"
         )
     logger.info("created pr gate %s for story %s", gate_id, story_id)
     return gate_id, None
