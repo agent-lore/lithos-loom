@@ -585,3 +585,39 @@ async def test_gate_merged_final_record_speaks_post_merge() -> None:
     assert "already merged" in record
     assert "remains blocked" not in record
     assert "before merging" not in record
+
+
+async def test_gate_merged_silent_review_marker_failure_defers() -> None:
+    """PR #348 re-review round 3: an APPROVED review's only durable record is
+    the seen marker — a failed marker write on the merged path must defer
+    resolution, exactly like a failed finding post."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_pr(state="closed", merged=True))
+    github.list_pull_request_reviews.return_value = [
+        PullRequestReview(
+            author="reviewer-human", body="", review_id=500, state="APPROVED"
+        )
+    ]
+    original = client.task_update
+    fail = {"on": True}
+
+    async def flaky_update(**kwargs: Any) -> Any:
+        if fail["on"] and "external_review_seen" in (kwargs.get("metadata") or {}):
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_update = flaky_update  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+    assert outcome == "error"
+    assert (await _get(client, story)).status == "open"
+    assert (await _get(client, gate.id)).status == "open"
+
+    fail["on"] = False
+    outcome = await reconcile_pr_gate(
+        await _get(client, gate.id), github, _ctx(client), ingest_reviews=True
+    )
+    assert outcome == "merged"
+    marked = await _get(client, gate.id)
+    assert "external_review_seen" in marked.metadata

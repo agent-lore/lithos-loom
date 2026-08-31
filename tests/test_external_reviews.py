@@ -858,3 +858,49 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     assert refreshed2 is not None
     assert REVIEW_SEEN_KEY not in refreshed2.metadata
     assert "external_remediation_pending" not in refreshed2.metadata
+
+
+async def test_silent_material_marker_failure_reports_failed() -> None:
+    """PR #348 re-review round 3: for APPROVED/DISMISSED/reply-only activity
+    the marker IS the durable record — a failed write must surface as
+    ``failed`` so the merged-path caller defers resolution instead of losing
+    the observation forever."""
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    original = client.task_update
+
+    async def failing_update(**kwargs: Any) -> Any:
+        if REVIEW_SEEN_KEY in (kwargs.get("metadata") or {}):
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_update = failing_update  # type: ignore[method-assign]
+    github = _github(reviews=[_review(500, state="APPROVED", body="")])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    assert result.failed is True
+    assert not result.posted
+
+
+async def test_orphan_gate_marker_failure_reports_failed() -> None:
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    _story, gate = await _gate_with_story(client)
+
+    async def failing_update(**kwargs: Any) -> Any:
+        raise LithosClientError("server_error", "boom")
+
+    client.task_update = failing_update  # type: ignore[method-assign]
+    github = _github(reviews=[_review(500)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, None, github, _ctx(client))
+
+    assert result.failed is True

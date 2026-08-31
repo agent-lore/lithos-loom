@@ -401,24 +401,32 @@ async def ingest_external_reviews(
 
     if not actionable_reviews and not actionable_comments:
         # Only silent material (approvals, replies, our own automated replies):
-        # advance the marks so it is never re-walked, post nothing.
-        await write_marker(
+        # advance the marks so it is never re-walked, post nothing. The marker
+        # IS this material's durable record, so a failed write is a retryable
+        # failure (PR #348 re-review round 3) — the merged-path caller must
+        # defer resolution over it, not lose the observation forever.
+        marked = await write_marker(
             ctx, task_id=gate.id, marker=marker, subsystem="external-reviews"
         )
-        return IngestResult()
+        return IngestResult(failed=not marked)
 
     if story_id is None:
-        # Orphan gate (no waiter edge): nothing to post the finding on.
-        await write_marker(
+        # Orphan gate (no waiter edge): nothing to post the finding on — the
+        # marker is the only record here too, so its write result propagates
+        # the same way (and the "recorded" claim is only logged when true).
+        marked = await write_marker(
             ctx, task_id=gate.id, marker=marker, subsystem="external-reviews"
         )
         ctx.logger.warning(
             "[Friction] external-reviews: gate %s has no waiter; review "
-            "activity on %s recorded but not posted",
+            "activity on %s %s",
             gate.id,
             spec.pr_url,
+            "recorded but not posted"
+            if marked
+            else "NOT recorded (marker write failed; will retry)",
         )
-        return IngestResult()
+        return IngestResult(failed=not marked)
 
     if pending_marker_for is not None:
         pending = await pending_marker_for(actionable_reviews, actionable_comments)
