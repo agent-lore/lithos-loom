@@ -131,6 +131,11 @@ class DevelopResult:
     # final round's outcomes (a deferral round earlier than the seal would
     # otherwise vanish from the record).
     deferred_findings: tuple[DeferredFinding, ...] = ()
+    # the bare CycleExit reason for a reason-bearing stop (failed / interrupted
+    # / stalled / disputed / cost_exceeded), without the gate / commit / cost
+    # tail `message` appends — what the needs-human escalation (b91177d2)
+    # reads to name the stop and split a `failed` into coder vs reviewer
+    failure_reason: str = ""
 
     @property
     def review(self) -> ReviewOutcome | None:
@@ -640,4 +645,5 @@ def develop(
         review_profile=config.review_profile,
         resume_after=resume_after,
         deferred_findings=collect_deferred(r.ledger for r in reviewers),
+        failure_reason=failure_reason if status in _REASON_BEARING_STATUSES else "",
     )

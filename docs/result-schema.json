@@ -86,6 +86,25 @@
         }
       ]
     },
+    "escalation": {
+      "description": "Optional, on status=failed runs: the plugin's own account of why it stopped, in the shape the runner's needs-human gate is built from (b91177d2). `reason` is the closed vocabulary shared with the gate's metadata.escalation_reason; `summary` is one line (the runner truncates to 200 chars); `brief` is free-form detail (branch, rounds, cost_usd, test_gate_verdict, findings_by_severity, conversation_log, worktree, ...) copied verbatim onto the gate as run_brief. Absent → the runner composes the gate from error.category / error.message + rounds / run_id / worktree.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["reason", "summary"],
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string",
+              "enum": ["max_rounds", "stalled", "disputed", "cost_exceeded", "coder_failed", "reviewer_failed", "failed", "infra", "delivery", "contract_violation", "timeout", "resume_exhausted", "pr_closed_unmerged", "pr_gone", "unknown"]
+            },
+            "summary": {"type": "string"},
+            "brief": {"type": "object", "additionalProperties": true}
+          }
+        }
+      ]
+    },
     "resume": {
       "description": "Present only on status=interrupted runs that are worth re-dispatching (e.g. a provider usage limit). The runner schedules a re-claim + re-run at resume_after; session ids let the plugin resume its on-disk transcripts from the retained work dir.",
       "oneOf": [

@@ -11,7 +11,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.gates` | S | 1 | 5 |
+| `lithos_loom.gates` | M | 3 | 11 |
 | `lithos_loom.task_graph` | S | 1 | 1 |
 | `lithos_loom.task_line` | S | 0 | 4 |
 | `lithos_loom.task_line_parser` | S | 2 | 1 |
@@ -19,11 +19,19 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 ## Public API
 
 ### `lithos_loom.gates`
+- class `GateWriter` — The three Lithos calls gate creation needs (a structural subset of :class:`~lithos_loom.lithos_client.TaskClient`).
 - class `PrGateSpec` — The PR a ``pr`` gate watches, read back from its metadata.
+- class `HumanGateSpec` — What a loom-raised ``human`` gate escalated, read back from its metadata.
 - def `create_pr_gate` — Create a ``pr`` gate for *story_id*'s delivered PR and link it.
 - def `create_pr_gate_best_effort` — Create a ``pr`` gate for a delivered story, degrading instead of raising.
 - def `is_pr_gate` — Whether *task* is a ``pr`` gate (type + ``gate_type`` metadata).
 - def `parse_pr_gate` — Read a ``pr`` gate's watched PR out of its metadata, or ``None``.
+- def `human_gate_brief` — The gate's description: the decision brief an operator reads before acting, so the investigation is not redone by hand.
+- def `create_human_gate` — Raise a loom ``human`` gate on *story_id* and link it (the escalation primitive).
+- def `create_human_gate_best_effort` — Raise a loom ``human`` gate, degrading instead of raising.
+- def `is_human_gate` — Whether *task* is a ``human`` gate — loom's or the operator's own.
+- def `is_loom_human_gate` — Whether *task* is a ``human`` gate loom raised (``raised_by=loom``).
+- def `parse_human_gate` — Read a loom ``human`` gate's escalation out of its metadata, or ``None`` when it carries no ``escalation_reason`` (an operator's own gate, or a malformed one).
 - def `waiter_of` — The story a gate blocks — the ``to`` of its outgoing ``waits_on_gate`` edge — or ``None`` for an orphan gate (no waiter).
 
 ### `lithos_loom.task_graph`

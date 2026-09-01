@@ -44,6 +44,7 @@ from .config import (
 )
 from .lithos_io import AGENT_ID, TaskContext
 from .model_policy import apply_panel_default_models
+from .panel import findings_by_severity
 from .personas import canonical_personas
 from .profiles import DEFAULT_PROFILE_NAME, get_profile, resolve_profile
 from .settings_resolver import resolve_scalar_settings
@@ -676,6 +677,59 @@ def _reviewer_sessions(run_dir: Path) -> dict[str, str]:
     }
 
 
+_STOP_STATUS_REASONS: frozenset[str] = frozenset(
+    {"max_rounds", "stalled", "disputed", "cost_exceeded"}
+)
+
+
+def escalation_block(
+    result: DevelopResult, *, delivery_error: str | None = None
+) -> dict[str, Any] | None:
+    """The result.json ``escalation`` block for a non-delivering run (b91177d2).
+
+    The plugin's own account of why it stopped, in the shape the runner builds
+    its needs-human gate from: a closed-vocabulary ``reason`` (the schema enum
+    mirrors ``gates.ESCALATION_REASONS``), a one-line ``summary`` (the bare
+    ``failure_reason`` when there is one), and a ``brief`` carrying what every
+    August rescue needed by hand — branch, rounds, cost, gate verdict, open
+    findings by severity, the worktree and conversation log. ``None`` for a
+    delivered or ``interrupted`` run (interrupted has its own resume path).
+    """
+    if delivery_error is not None:
+        reason = "delivery"
+        summary = f"PR delivery failed: {delivery_error}"
+    elif result.approved or result.status == "interrupted":
+        return None
+    else:
+        summary = result.failure_reason or result.message
+        if result.status in _STOP_STATUS_REASONS:
+            reason = result.status
+        elif result.status == "infra_failed":
+            reason = "infra"
+        elif result.status == "failed":
+            lowered = summary.lower()
+            if "coder" in lowered:
+                reason = "coder_failed"
+            elif "reviewer" in lowered:
+                reason = "reviewer_failed"
+            else:
+                reason = "failed"
+        else:
+            reason = "unknown"
+    brief: dict[str, Any] = {
+        "branch": result.branch,
+        "rounds": result.rounds,
+        "cost_usd": round(result.total_cost_usd, 4),
+        "worktree": str(result.worktree),
+        "findings_by_severity": findings_by_severity(result.reviews),
+    }
+    if result.test_gate is not None:
+        brief["test_gate_verdict"] = result.test_gate.verdict
+    if result.conversation_log is not None:
+        brief["conversation_log"] = str(result.conversation_log)
+    return {"reason": reason, "summary": summary, "brief": brief}
+
+
 def build_result_payload(
     result: DevelopResult,
     *,
@@ -759,6 +813,12 @@ def build_result_payload(
     # success still surfaces it.
     if delivery is not None:
         payload["pr_url"] = delivery.pr_url
+    # b91177d2: a failed run says why in the runner's escalation shape, so the
+    # needs-human gate it raises is triageable without opening the run dir.
+    if status == "failed":
+        escalation = escalation_block(result, delivery_error=delivery_error)
+        if escalation is not None:
+            payload["escalation"] = escalation
     if status == "interrupted" and result.resume_after is not None:
         resume: dict[str, Any] = {
             "resume_after": result.resume_after.isoformat(timespec="seconds"),

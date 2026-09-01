@@ -1091,3 +1091,74 @@ def test_story_develop_rejects_invalid_unknown_profile(
     )
     with pytest.raises(ConfigError, match="unknown_profile must be one of"):
         load_config()
+
+
+# ── [notifications] (b91177d2 design D6) ────────────────────────────────
+
+
+def test_notifications_absent_yields_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No section → toast + github mention on, no command. The push channels
+    default ON: a needs-human gate nobody is told about is August's failure
+    mode, so silence has to be opted into."""
+    _write_config(tmp_path, monkeypatch, "")
+    cfg = load_config()
+    assert cfg.notifications.desktop_toast is True
+    assert cfg.notifications.github_mention is True
+    assert cfg.notifications.on_needs_human is None
+
+
+def test_notifications_full_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [notifications]
+            desktop_toast = false
+            github_mention = false
+            on_needs_human = "  curl -d @- https://ntfy.sh/loom  "
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.notifications.desktop_toast is False
+    assert cfg.notifications.github_mention is False
+    assert cfg.notifications.on_needs_human == "curl -d @- https://ntfy.sh/loom"
+
+
+def test_notifications_rejects_unknown_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [notifications]
+            discord_webhook = "https://discord.example/hook"
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match=r"unknown key\(s\) \['discord_webhook'\]"):
+        load_config()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[notifications]\ndesktop_toast = "yes"\n',
+        "[notifications]\ngithub_mention = 1\n",
+        '[notifications]\non_needs_human = ""\n',
+        "[notifications]\non_needs_human = 42\n",
+    ],
+)
+def test_notifications_rejects_ill_typed_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    _write_config(tmp_path, monkeypatch, body)
+    with pytest.raises(ConfigError, match="notifications"):
+        load_config()

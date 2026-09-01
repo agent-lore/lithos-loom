@@ -29,7 +29,10 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
-| `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 8 |
+| `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
+| `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 9 |
+| `lithos_loom.subscriptions.escalation` | M | 1 | 3 |
+| `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 3 | 2 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
@@ -98,16 +101,29 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
 
+### `lithos_loom.subscriptions.delivery_gate`
+- def `gate_and_release` — Gate a delivered task on human merge, then release (``completes_task =false``).
+
 ### `lithos_loom.subscriptions.dispatch_guards`
 - def `last_attempt_key` — The task-metadata key holding ``route``'s last failed attempt.
 - def `task_fingerprint` — Fingerprint of the operator-shaped task fields (title, description, tags — order-insensitive).
+- def `task_payload` — Build an event-shaped payload from a fresh :class:`Task` snapshot.
 - def `on_ready_frontier` — Is ``task_id`` on Lithos's ready frontier for this route? (US4)
 - class `AttemptStampStore` — Loom-local store for each failed attempt's ``updated_at`` stamp (#339).
 - def `failed_attempt_for_route` — The task's last-attempt marker, iff it records a FAILURE for ``route``.
 - def `declines_bootstrap_replay` — True iff a bootstrap replay of this payload must be declined (logged).
-- def `record_failed_attempt` — Best-effort persist the failed attempt on the task.
+- def `record_failed_attempt` — Best-effort persist the failed attempt on the task. Returns whether the write landed.
 - def `release_with_failure` — The whole failure-path release: marker (+stamp), finding, release.
 - def `clear_superseded_failure` — Best-effort per-key delete of ``route``'s failed-attempt marker, iff the dispatch-time ``payload`` carried one (no round trip otherwise).
+
+### `lithos_loom.subscriptions.escalation`
+- class `Escalation` — Why a run ended without delivering, in the gate's shape: a closed- vocabulary *reason*, a one-line *summary*, and the *brief* (branch, rounds, cost, gate verdict, findings, paths) the gate carries as ``run_brief``.
+- def `escalation_from_result` — Read a ``failed`` result.json into an :class:`Escalation`.
+- def `escalate_with_failure` — The whole non-delivering exit: raise the needs-human gate, record it on the story, tell the operator, release the claim. Returns the gate id, or ``None`` when no gate could be raised (the marker-only fallback ran).
+- def `clear_resolved_escalation` — Best-effort per-key delete of a story's ``needs_human_gate_id`` and ``route``'s failed-attempt marker, iff the dispatch-time *payload* carried the gate key (no round trip otherwise).
+
+### `lithos_loom.subscriptions.escalation_resolver`
+- class `EscalationResolver` — One subscriber per route-runner child; see the module docstring.
 
 ### `lithos_loom.subscriptions.external_remediation`
 - class `RemediationBudget` — The gate's parsed S5b budget state (fresh when absent / foreign-url).
@@ -128,7 +144,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ## Dependencies
 
-- Depends on: [Bus](Bus.md), [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [State](State.md), [Tasks](Tasks.md)
+- Depends on: [Bus](Bus.md), [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Notifications](Notifications.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [State](State.md), [Tasks](Tasks.md)
 - Used by: [Children](Children.md), [Cli](Cli.md), [Entrypoint](Entrypoint.md), [Render](Render.md)
 
 ## ADRs

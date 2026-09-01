@@ -11,7 +11,7 @@ TOML config discovery/loading and the config dataclasses (LoomConfig, Orchestrat
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.config` | L | 10 | 3 |
+| `lithos_loom.config` | L | 11 | 3 |
 
 ## Public API
 
@@ -26,6 +26,7 @@ TOML config discovery/loading and the config dataclasses (LoomConfig, Orchestrat
 - class `ObsidianSyncConfig` — Vault-host configuration for the obsidian-sync child.
 - class `GitHubWatcherConfig` — Per-host gate for the github-issue-watcher child.
 - class `StoryDevelopConfig` — Host-wide ``story-develop`` defaults (the ``[story_develop]`` section).
+- class `NotificationsConfig` — Push channels for loom-raised ``human`` gates (the ``[notifications]`` section, b91177d2 design D6).
 - class `LoomConfig`
 - def `find_config_path` — Locate the active config file via env var, env-named lookup, or default name.
 - def `load_config` — Load, validate, and return a :class:`LoomConfig`.

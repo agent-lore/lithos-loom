@@ -131,6 +131,11 @@ def _lithos_mock(*, ready_ids: tuple[str, ...] | None = None) -> AsyncMock:
         _ready(_AnyTaskId()) if ready_ids is None else _ready(*ready_ids)
     )
     lithos.task_complete.return_value = []
+    # b91177d2: a failed run raises a needs-human gate via task_create (the id
+    # must be a string, not a Mock) and refreshes the story via task_get (None
+    # → the runner falls back to the dispatch payload).
+    lithos.task_create.return_value = "gate-1"
+    lithos.task_get.return_value = None
     return lithos
 
 
@@ -561,9 +566,21 @@ async def test_runner_failed_result_releases_and_posts_finding(
     lithos.task_release.assert_awaited_once()
     lithos.finding_post.assert_awaited_once()
     summary = lithos.finding_post.await_args.kwargs["summary"]
-    assert summary.startswith("[BlockerFailed]")
+    # b91177d2: a non-delivering run raises a needs-human gate and says so.
+    assert summary.startswith("[NeedsHuman]")
     assert "story-develop" in summary
     assert "plugin gave up" in summary
+    assert "gate gate-1" in summary
+    create = lithos.task_create.await_args
+    assert create.kwargs["task_type"] == "gate"
+    assert create.kwargs["metadata"]["gate_type"] == "human"
+    assert create.kwargs["metadata"]["raised_by"] == "loom"
+    assert create.kwargs["metadata"]["escalation_reason"] == "failed"
+    edge = lithos.task_edge_upsert.await_args
+    assert (edge.kwargs["from_task_id"], edge.kwargs["to_task_id"]) == (
+        "gate-1",
+        "task-1",
+    )
 
 
 async def test_runner_plugin_contract_violation_releases_and_posts(
@@ -581,7 +598,12 @@ async def test_runner_plugin_contract_violation_releases_and_posts(
     lithos.task_complete.assert_not_called()
     lithos.task_release.assert_awaited_once()
     lithos.finding_post.assert_awaited_once()
-    assert "[BlockerFailed]" in lithos.finding_post.await_args.kwargs["summary"]
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[NeedsHuman]")
+    assert "contract_violation" in summary
+    assert lithos.task_create.await_args.kwargs["metadata"]["escalation_reason"] == (
+        "contract_violation"
+    )
 
 
 async def test_runner_plugin_timeout_releases_and_posts(
@@ -1002,10 +1024,12 @@ async def test_runner_resume_dropped_when_task_no_longer_open(
     assert lithos.task_claim.await_count == 1
 
 
-async def test_runner_resume_budget_exhausted_posts_friction(
+async def test_runner_resume_budget_exhausted_escalates(
     tmp_path: Path,
 ) -> None:
-    """Beyond MAX_RESUMES_PER_TASK the task stays open with a [Friction] note."""
+    """Beyond MAX_RESUMES_PER_TASK the task is a human's problem: a needs-human
+    gate (reason resume_exhausted) + [NeedsHuman], no further re-dispatch. The
+    claim was released on the interrupted path already — exactly once."""
     from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
 
     bus = EventBus()
@@ -1022,8 +1046,12 @@ async def test_runner_resume_budget_exhausted_posts_friction(
     assert not runner._resume_tasks
     lithos.finding_post.assert_awaited_once()
     summary = lithos.finding_post.await_args.kwargs["summary"]
-    assert summary.startswith("[Friction]")
+    assert summary.startswith("[NeedsHuman]")
     assert "resume budget exhausted" in summary
+    assert lithos.task_create.await_args.kwargs["metadata"]["escalation_reason"] == (
+        "resume_exhausted"
+    )
+    lithos.task_release.assert_awaited_once()
 
 
 async def test_runner_unparseable_resume_after_not_scheduled(
@@ -1060,9 +1088,9 @@ async def test_rescheduled_resume_survives_old_sleepers_cleanup(
     runner, _ = _make_runner(bus=bus, work_dir=tmp_path)
     resume = {"resume_after": "2099-01-01T00:00:00+00:00"}
 
-    await runner._maybe_schedule_resume("task-1", resume)
+    await runner._maybe_schedule_resume("task-1", resume, _payload())
     first = runner._resume_tasks["task-1"]
-    await runner._maybe_schedule_resume("task-1", resume)
+    await runner._maybe_schedule_resume("task-1", resume, _payload())
     second = runner._resume_tasks["task-1"]
     assert first is not second
 
@@ -1383,6 +1411,7 @@ async def test_completes_task_false_creates_pr_gate(
     assert lithos.task_update.await_args.kwargs["metadata"] == {
         "pr_gate_id": "gate-1",
         last_attempt_key("story-develop"): None,
+        "needs_human_gate_id": None,
     }
     lithos.task_release.assert_awaited_once()
 
@@ -1534,6 +1563,16 @@ def _failed_result(run_id: str | None = "run-abc") -> dict[str, Any]:
     if run_id is not None:
         result["run_id"] = run_id
     return result
+
+
+class _GateCreationFails(FakeLithosClient):
+    """A Lithos whose gate writes fail — pins the marker-only FALLBACK path of
+    the failure exit (b91177d2 degrades to the pre-gate contract)."""
+
+    async def task_create(self, **kwargs: Any) -> str:  # type: ignore[override]
+        if kwargs.get("task_type") == "gate":
+            raise LithosClientError("internal_error", "gate create failed")
+        return await super().task_create(**kwargs)
 
 
 async def test_bootstrap_replay_of_failed_story_is_declined(tmp_path: Path) -> None:
@@ -1807,6 +1846,7 @@ async def test_gated_success_clears_failed_marker(tmp_path: Path) -> None:
     assert lithos.task_update.await_args.kwargs["metadata"] == {
         "pr_gate_id": "gate-1",
         last_attempt_key("story-develop"): None,
+        "needs_human_gate_id": None,
     }
 
 
@@ -1843,8 +1883,12 @@ async def test_resume_dispatch_ignores_stale_marker(tmp_path: Path) -> None:
 async def test_two_routes_keep_independent_failure_markers(tmp_path: Path) -> None:
     """Per-route keys under the real merge contract: routes A and B both fail
     on the same task, and NEITHER write erases the other's guard — a fresh
-    runner for each route declines its bootstrap replay."""
-    fake = FakeLithosClient()
+    runner for each route declines its bootstrap replay.
+
+    Runs on the marker-only fallback (gate creation fails): with a gate, the
+    first failure would block the story for BOTH routes via readiness, which
+    is the new primary guard (pinned in the escalation tests below)."""
+    fake = _GateCreationFails()
     fake.add_task(
         make_task(
             "story-1",
@@ -1917,14 +1961,100 @@ async def test_two_routes_keep_independent_failure_markers(tmp_path: Path) -> No
     assert len(fake.calls_to("task_claim")) == claims_before
 
 
-async def test_restart_roundtrip_declines_bootstrap_then_dispatches_on_edit(
+async def test_restart_roundtrip_gate_guards_bootstrap_then_tick_dispatches(
     tmp_path: Path,
 ) -> None:
-    """Acceptance (c), through the real client contract: the marker written by
-    a failing run persists in Lithos metadata, a FRESH runner (empty
-    `_processed_tasks`, i.e. a restarted daemon) declines the bootstrap replay
-    off that persisted state, and a live task edit still dispatches."""
+    """b91177d2, through the real client contract: a failing run raises a
+    needs-human gate that structurally blocks the story. A FRESH runner (a
+    restarted daemon) defers the bootstrap replay because the story is off the
+    ready frontier — the marker abstains (it names the gate). The operator
+    completes the gate; the next event for the story dispatches it, and the
+    runner clears the gate provenance + marker on that dispatch."""
     fake = FakeLithosClient()
+
+    def _runner(bus: EventBus, plugin_runner: Any) -> RouteRunner:
+        return RouteRunner(
+            route=_route(),
+            bus=bus,
+            lithos=fake,
+            agent_id="lithos-orchestrator-test",
+            work_dir_base=tmp_path,
+            renew_interval_seconds=3600,
+            plugin_runner=plugin_runner,
+        )
+
+    fake.add_task(
+        make_task(
+            "story-1",
+            status="open",
+            tags=("trigger:story-develop",),
+            metadata={"project": "loom"},
+        )
+    )
+    bus1 = EventBus()
+    runner1 = _runner(bus1, AsyncMock(return_value=_failed_result("run-1")))
+    await bus1.publish(_evt(payload=_payload("story-1", metadata={"project": "loom"})))
+    await _run_for(runner1)
+    stored = await fake.task_get(task_id="story-1")
+    assert stored is not None
+    marker = stored.metadata[last_attempt_key("story-develop")]
+    gate_id = stored.metadata["needs_human_gate_id"]
+    assert marker["status"] == "failed" and marker["gate_id"] == gate_id
+    assert "story-1" not in [t.id for t in await fake.task_ready(project="loom")]
+    # No stamp: the marker abstains, so a stamp would have nothing to guard.
+    assert _stamps(tmp_path).read("story-develop", "story-1") is None
+
+    # Daemon #2 (restart): the bootstrap replay is deferred by READINESS (the
+    # open gate), not by the marker.
+    bus2 = EventBus()
+    succeeding = AsyncMock(
+        return_value={
+            "schema_version": 1,
+            "task_id": "story-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+    )
+    runner2 = _runner(bus2, succeeding)
+    claims_before = len(fake.calls_to("task_claim"))
+    await bus2.publish(
+        _evt(
+            payload=_payload("story-1", metadata=dict(stored.metadata)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner2)
+    assert len(fake.calls_to("task_claim")) == claims_before
+    assert succeeding.await_count == 0
+
+    # The operator ticks the gate: the story is ready again, the next event
+    # (here a bootstrap replay — the daemon-down path) dispatches it, and the
+    # dispatch clears the provenance + marker.
+    await fake.task_complete(task_id=gate_id, agent="dave")
+    await bus2.publish(
+        _evt(
+            payload=_payload("story-1", metadata=dict(stored.metadata)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner2)
+    assert len(fake.calls_to("task_claim")) == claims_before + 1
+    assert succeeding.await_count == 1
+    after = await fake.task_get(task_id="story-1")
+    assert after is not None
+    assert "needs_human_gate_id" not in after.metadata
+    assert last_attempt_key("story-develop") not in after.metadata
+
+
+async def test_restart_roundtrip_without_gate_falls_back_to_marker_decline(
+    tmp_path: Path,
+) -> None:
+    """The pre-gate contract, kept as the FALLBACK when no gate can be raised:
+    the marker written by a failing run persists in Lithos metadata, a FRESH
+    runner (empty `_processed_tasks`, i.e. a restarted daemon) declines the
+    bootstrap replay off that persisted state, and a live task edit still
+    dispatches."""
+    fake = _GateCreationFails()
     fake.add_task(
         make_task(
             "story-1",
@@ -2088,10 +2218,11 @@ def _stamps(work_dir: Path) -> AttemptStampStore:
 async def test_failed_run_records_the_marker_writes_own_stamp(
     tmp_path: Path,
 ) -> None:
-    """The failure path records the `updated_at` the marker write's response
-    returned — the stamp of the failure path's LAST bumping mutation, which
-    the marker itself cannot contain (its write is what mints it)."""
-    fake = FakeLithosClient()
+    """The marker-only fallback records the `updated_at` the marker write's
+    response returned — the stamp of the failure path's LAST bumping mutation,
+    which the marker itself cannot contain (its write is what mints it). (With
+    a gate the marker abstains and no stamp is kept — see the roundtrip test.)"""
+    fake = _GateCreationFails()
     fake.add_task(
         make_task(
             "story-1",
@@ -2375,3 +2506,354 @@ def test_attempt_stamp_store_keys_cannot_escape_or_collide(tmp_path: Path) -> No
     stamps.record("a_b", "t", "right")
     assert stamps.read("a/b", "t") == "left"
     assert stamps.read("a_b", "t") == "right"
+
+
+# ── needs-human escalation (b91177d2) ───────────────────────────────────
+#
+# The non-delivering exit raises a loom `human` gate that structurally blocks
+# the story (the primary guard), records it on the story (provenance + a
+# marker that names the gate and therefore abstains), posts [NeedsHuman], fires
+# the push sinks, releases. The operator's tick is the retry gesture: the
+# resolver's gate-resolved nudge un-dedups the in-process set, and the dispatch
+# path clears the provenance on every origin.
+
+
+class _RecordingNotifier:
+    def __init__(self, problems: list[str] | None = None) -> None:
+        self.notices: list[Any] = []
+        self.problems = problems or []
+
+    async def needs_human(self, notice: Any) -> list[str]:
+        self.notices.append(notice)
+        return list(self.problems)
+
+
+async def test_failed_run_raises_a_needs_human_gate_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Through the real client contract: gate + edge + story provenance +
+    marker naming the gate + [NeedsHuman] + release, and the story is off the
+    ready frontier."""
+    fake = FakeLithosClient()
+    fake.add_task(
+        make_task(
+            "story-1",
+            title="Wire the thing",
+            status="open",
+            tags=("trigger:story-develop",),
+            metadata={"project": "loom"},
+        )
+    )
+    bus = EventBus()
+    result = _failed_result("run-1") | {
+        "rounds": 5,
+        "worktree": "/tmp/wt",
+        "escalation": {
+            "reason": "max_rounds",
+            "summary": "round 5: NOT approved (max_rounds)",
+            "brief": {"branch": "loom/story-1", "rounds": 5, "cost_usd": 48.53},
+        },
+    }
+    notifier = _RecordingNotifier()
+    runner = RouteRunner(
+        route=_route(),
+        bus=bus,
+        lithos=fake,
+        agent_id="lithos-orchestrator-test",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=AsyncMock(return_value=result),
+        notifier=notifier,
+    )
+    await bus.publish(_evt(payload=_payload("story-1", metadata={"project": "loom"})))
+    await _run_for(runner)
+
+    story = await fake.task_get(task_id="story-1")
+    assert story is not None
+    gate_id = story.metadata["needs_human_gate_id"]
+    gate = await fake.task_get(task_id=gate_id)
+    assert gate is not None
+    assert gate.task_type == "gate" and gate.status == "open"
+    assert gate.title == "Needs human: Wire the thing"
+    assert gate.metadata["gate_type"] == "human"
+    assert gate.metadata["raised_by"] == "loom"
+    assert gate.metadata["escalation_reason"] == "max_rounds"
+    assert gate.metadata["escalation_summary"] == "round 5: NOT approved (max_rounds)"
+    assert gate.metadata["run_brief"]["cost_usd"] == 48.53
+    assert gate.metadata["run_id"] == "run-1"
+    assert gate.metadata["route"] == "story-develop"
+    assert gate.metadata["story_id"] == "story-1"
+    # Structurally blocked, marker abstains, claim released.
+    assert "story-1" not in [t.id for t in await fake.task_ready(project="loom")]
+    marker = story.metadata[last_attempt_key("story-develop")]
+    assert marker["gate_id"] == gate_id and marker["run_id"] == "run-1"
+    assert fake.called("task_release")
+    # One [NeedsHuman] finding carrying the brief facts and the two actions.
+    summaries = [f["summary"] for f in fake.findings]
+    assert len(summaries) == 1
+    assert summaries[0].startswith("[NeedsHuman] route story-develop: max_rounds —")
+    assert "5 round(s)" in summaries[0]
+    assert "$48.53" in summaries[0]
+    assert "branch loom/story-1" in summaries[0]
+    assert f"gate {gate_id}" in summaries[0]
+    assert "cancel the story to abandon" in summaries[0]
+    assert "[BlockerFailed]" not in summaries[0]
+    # The push sinks got the notice.
+    (notice,) = notifier.notices
+    assert notice.gate_id == gate_id
+    assert notice.story_title == "Wire the thing"
+    assert notice.reason == "max_rounds"
+    assert notice.project == "loom"
+
+
+async def test_notifier_problems_land_on_the_finding(tmp_path: Path) -> None:
+    bus = EventBus()
+    notifier = _RecordingNotifier(problems=["desktop toast timed out after 30s"])
+    lithos = _lithos_mock()
+    runner, _ = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        lithos=lithos,
+        plugin_runner=AsyncMock(return_value=_failed_result()),
+    )
+    runner.notifier = notifier
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[NeedsHuman]")
+    assert "[Friction] desktop toast timed out after 30s" in summary
+    lithos.task_release.assert_awaited_once()
+
+
+async def test_notice_uses_the_fresh_story_for_title_and_github_link(
+    tmp_path: Path,
+) -> None:
+    """The plugin's end-of-run task_update (develop_pr_url, …) post-dates the
+    dispatch payload; the gate + notice read the CURRENT story."""
+    bus = EventBus()
+    notifier = _RecordingNotifier()
+    lithos = _lithos_mock()
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t — retitled since dispatch",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata={
+            "project": "loom",
+            "github_issue_url": "https://github.com/o/r/issues/9",
+        },
+        claims=(),
+    )
+    runner, _ = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        lithos=lithos,
+        plugin_runner=AsyncMock(return_value=_failed_result()),
+    )
+    runner.notifier = notifier
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    (notice,) = notifier.notices
+    assert notice.story_title == "t — retitled since dispatch"
+    assert notice.github_ref == "https://github.com/o/r/issues/9"
+    assert lithos.task_create.await_args.kwargs["title"] == (
+        "Needs human: t — retitled since dispatch"
+    )
+
+
+async def test_gate_creation_failure_falls_back_to_the_marker_path(
+    tmp_path: Path,
+) -> None:
+    """No gate → the pre-gate contract: marker WITHOUT a gate id (so it
+    guards), [BlockerFailed] with the gate problem as [Friction], release."""
+    bus = EventBus()
+    lithos = _lithos_mock()
+    lithos.task_create.side_effect = LithosClientError("internal_error", "nope")
+    runner, _ = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        lithos=lithos,
+        plugin_runner=AsyncMock(return_value=_failed_result()),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[BlockerFailed] route story-develop: failed — boom")
+    assert "[Friction] could not create the needs-human gate" in summary
+    metadata = lithos.task_update.await_args.kwargs["metadata"]
+    assert "gate_id" not in metadata[last_attempt_key("story-develop")]
+    assert "needs_human_gate_id" not in metadata
+    lithos.task_release.assert_awaited_once()
+
+
+async def test_story_write_failure_after_the_gate_leaves_no_marker(
+    tmp_path: Path,
+) -> None:
+    """The gate landed but the story write did not: no marker at all (a
+    missing marker fails open into readiness, which the gate guards — a marker
+    without the gate id would decline forever once the gate is ticked), the
+    finding says so, the claim is still released."""
+    bus = EventBus()
+    lithos = _lithos_mock()
+    lithos.task_update.side_effect = RuntimeError("lithos unavailable")
+    runner, _ = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        lithos=lithos,
+        plugin_runner=AsyncMock(return_value=_failed_result()),
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[NeedsHuman]")
+    assert "could not record the gate on the story" in summary
+    lithos.task_release.assert_awaited_once()
+
+
+async def test_bootstrap_replay_with_a_gate_marker_is_not_declined(
+    tmp_path: Path,
+) -> None:
+    """A marker naming a gate abstains: readiness decides. Here the mock says
+    everything is ready (the gate was ticked), so the replay dispatches."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+
+    fp = task_fingerprint(_payload())
+    metadata = _marker_metadata(fingerprint=fp)
+    metadata[last_attempt_key("story-develop")]["gate_id"] = "gate-9"
+    metadata["needs_human_gate_id"] = "gate-9"
+    await bus.publish(_evt(payload=_payload(metadata=metadata), origin="bootstrap"))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    # … and the dispatch path clears the resolved escalation.
+    cleared = lithos.task_update.await_args_list[0].kwargs["metadata"]
+    assert cleared == {
+        "needs_human_gate_id": None,
+        last_attempt_key("story-develop"): None,
+    }
+
+
+async def test_gate_resolved_nudge_undedups_the_same_process(tmp_path: Path) -> None:
+    """Within one daemon process a failed task stays suppressed by
+    `_processed_tasks` — EXCEPT for the resolver's gate-resolved nudge, which
+    is the operator's explicit retry."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=_failed_result())
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await _run_for(runner)
+    assert plugin_runner.await_count == 1
+
+    # A plain live update is still suppressed (issue #11's contract) …
+    await bus.publish(_evt(type_="lithos.task.updated", payload=_payload("task-1")))
+    await _run_for(runner)
+    assert plugin_runner.await_count == 1
+
+    # … the gate-resolved nudge is not.
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload("task-1", metadata={"needs_human_gate_id": "gate-1"}),
+            origin="gate-resolved",
+        )
+    )
+    await _run_for(runner)
+    assert plugin_runner.await_count == 2
+    assert lithos.task_claim.await_count == 2
+
+
+async def test_route_misconfiguration_keeps_the_marker_only_path(
+    tmp_path: Path,
+) -> None:
+    """The one stated exception: a host problem is not a story decision — no
+    gate, [BlockerFailed] as before."""
+    bus = EventBus()
+    route = _route(command="story-develop --repo {{repo}}")
+    runner, lithos = _make_runner(bus=bus, route=route, work_dir=tmp_path)
+
+    await bus.publish(_evt(payload=_payload(metadata={})))
+    await _run_for(runner)
+
+    lithos.task_create.assert_not_called()
+    assert lithos.finding_post.await_args.kwargs["summary"].startswith(
+        "[BlockerFailed]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_reason", "expected_fragment"),
+    [
+        (OSError("exec failed"), "infra", "plugin could not run: exec failed"),
+        (
+            RuntimeError("surprise"),
+            "unknown",
+            "unexpected error running the plugin: RuntimeError('surprise')",
+        ),
+    ],
+)
+async def test_unexpected_plugin_seam_errors_escalate_and_release(
+    tmp_path: Path,
+    raised: Exception,
+    expected_reason: str,
+    expected_fragment: str,
+) -> None:
+    """PR #349 review F1: a host-side launch / I/O failure (or any
+    unanticipated exception) at the plugin seam must not strand the story
+    claimed-forever with no gate and no finding — it is a non-delivering exit
+    like any other."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=raised)
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    assert lithos.task_create.await_args.kwargs["metadata"]["escalation_reason"] == (
+        expected_reason
+    )
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[NeedsHuman]")
+    assert expected_fragment in summary
+    lithos.task_release.assert_awaited_once()
+    lithos.task_complete.assert_not_called()
+
+
+async def test_gate_resolved_nudge_resets_the_resume_budget(tmp_path: Path) -> None:
+    """PR #349 review F3: the operator-authorized retry gesture grants a
+    fresh bounded resume window — the first usage-limit pause after a
+    completed resume_exhausted gate must schedule a resume, not immediately
+    re-escalate."""
+    from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
+
+    bus = EventBus()
+    plugin_runner = AsyncMock(return_value=_failed_result())
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    runner._resume_counts["task-1"] = MAX_RESUMES_PER_TASK
+
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload("task-1", metadata={"needs_human_gate_id": "gate-1"}),
+            origin="gate-resolved",
+        )
+    )
+    await _run_for(runner)
+
+    assert plugin_runner.await_count == 1  # the retry ran
+    assert "task-1" not in runner._resume_counts

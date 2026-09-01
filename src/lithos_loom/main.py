@@ -298,14 +298,16 @@ def gates(
         help="Explicit TOML config path (overrides LITHOS_LOOM_CONFIG).",
     ),
 ) -> None:
-    """List open PR gates and each gate's waiter health (read-only).
+    """List open gates and each gate's waiter health (read-only).
 
-    A ``pr`` gate models "PR raised, awaiting human merge" and blocks its story
-    by a ``waits_on_gate`` edge (Epic H). This command enumerates the open
-    gates and, for each, the story it blocks plus a one-word *health*
-    (``ok`` / ``orphan`` / ``malformed`` / ``waiter-gone`` /
-    ``waiter-resolved``) classifying the wiring the resolver depends on — so a
-    stuck gate is diagnosable without touching GitHub or mutating anything.
+    A gate blocks its story by a ``waits_on_gate`` edge: a ``pr`` gate models
+    "PR raised, awaiting human merge" (Epic H); a loom-raised ``human`` gate
+    models "loom stopped and needs a decision" (b91177d2) and shows its
+    escalation reason + summary. This command enumerates every open gate
+    and, for each, the story it blocks plus a one-word *health* (``ok`` /
+    ``orphan`` / ``malformed`` / ``waiter-gone`` / ``waiter-resolved``)
+    classifying the wiring the resolvers depend on — so a stuck gate is
+    diagnosable without touching GitHub or mutating anything.
 
     Non-mutating: one open-task sweep plus a per-gate edge/waiter read. Exit
     codes: `0` on a successful listing (regardless of gate health); `1` if the

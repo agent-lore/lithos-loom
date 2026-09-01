@@ -1,26 +1,35 @@
-"""``lithos-loom gates`` — read-only inventory of open ``pr`` gates (Epic H).
+"""``lithos-loom gates`` — read-only inventory of open gates.
 
-A ``pr`` gate (``task_type="gate"``, ``metadata.gate_type="pr"``) models
-"PR raised, awaiting human merge" and blocks its story by a ``waits_on_gate``
-edge (see :mod:`lithos_loom.gates`). The github-watcher resolves a gate when
-its PR merges; until then the operator has no single view of *which* gates are
-open and whether each is wired to a healthy waiter.
+A gate (``task_type="gate"``) blocks its story by a ``waits_on_gate`` edge
+(see :mod:`lithos_loom.gates`). Two kinds matter to loom's own automation:
+
+* a **`pr` gate** (Epic H) — "PR raised, awaiting human merge"; the
+  github-watcher resolves it when the PR merges;
+* a **loom-raised `human` gate** (b91177d2) — "loom stopped and needs a
+  decision"; the operator resolves it (complete → the story re-dispatches;
+  cancel the *story* → abandon), and it carries the escalation reason +
+  summary this listing shows.
+
+The operator's own ``human`` gates (and any ``timer`` / ``ci`` /
+``external_task`` gates) are listed too, with their wiring health, but carry
+no loom-specific columns.
 
 This command is that view. It is **read-only** — it lists open gates and, for
 each, the story it blocks plus a one-word *health* classifying the gate/waiter
-wiring the resolver depends on:
+wiring the resolvers depend on:
 
-* ``ok`` — the gate has an open waiter and parseable PR metadata (awaiting
-  merge, working as intended).
+* ``ok`` — the gate has an open waiter and readable loom metadata (working as
+  intended).
 * ``orphan`` — the gate has no ``waits_on_gate`` edge, so it blocks nothing
-  (the resolver's ``_gate_closed`` has no story to post a finding on).
-* ``malformed`` — the gate's PR metadata is missing/ill-typed, so
-  :func:`~lithos_loom.gates.parse_pr_gate` can't read a PR to watch; the
-  resolver marks it ``unparseable`` and its waiter stays blocked forever.
+  (a resolver has no story to act on).
+* ``malformed`` — a ``pr`` gate whose PR metadata is missing/ill-typed
+  (:func:`~lithos_loom.gates.parse_pr_gate` can't read a PR to watch; the
+  resolver marks it ``unparseable`` and its waiter stays blocked forever), or
+  a loom ``human`` gate with no ``escalation_reason``.
 * ``waiter-gone`` — the ``waits_on_gate`` edge points at a task that no longer
   exists.
 * ``waiter-resolved`` — the waiter is already completed/cancelled while the
-  gate is still open (the merge→complete never landed the gate side).
+  gate is still open (the resolve never landed the gate side).
 
 The classification mirrors the branches
 :func:`~lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` reasons
@@ -33,7 +42,14 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
-from lithos_loom.gates import is_pr_gate, parse_pr_gate, waiter_of
+from lithos_loom.gates import (
+    GATE_TYPE_HUMAN,
+    GATE_TYPE_PR,
+    is_loom_human_gate,
+    parse_human_gate,
+    parse_pr_gate,
+    waiter_of,
+)
 from lithos_loom.lithos_client import Task, TaskClient
 
 __all__ = [
@@ -66,13 +82,16 @@ HEALTH_ORDER = (
     HEALTH_WAITER_RESOLVED,
 )
 
+_NO_REF = "—"
+
 
 @dataclass(frozen=True)
 class GateRow:
-    """One open ``pr`` gate plus its waiter, as the listing renders it."""
+    """One open gate plus its waiter, as the listing renders it."""
 
     gate_id: str
     gate_title: str
+    gate_type: str
     repo: str | None
     pr_number: int | None
     pr_url: str | None
@@ -80,13 +99,23 @@ class GateRow:
     waiter_title: str | None
     waiter_status: str | None
     health: str
+    escalation_reason: str | None = None
+    escalation_summary: str | None = None
 
     @property
     def pr_label(self) -> str:
-        """``owner/repo#42`` for a parseable gate, ``—`` when malformed."""
+        """``owner/repo#42`` for a parseable ``pr`` gate, ``—`` otherwise."""
         if self.repo is not None and self.pr_number is not None:
             return f"{self.repo}#{self.pr_number}"
-        return "—"
+        return _NO_REF
+
+    @property
+    def ref_label(self) -> str:
+        """The REF column: the watched PR for a ``pr`` gate, the escalation
+        reason for a loom ``human`` gate, ``—`` for anything else."""
+        if self.gate_type == GATE_TYPE_PR:
+            return self.pr_label
+        return self.escalation_reason or _NO_REF
 
 
 def classify_gate(gate: Task, waiter_id: str | None, waiter: Task | None) -> GateRow:
@@ -95,13 +124,18 @@ def classify_gate(gate: Task, waiter_id: str | None, waiter: Task | None) -> Gat
     *waiter* is the ``task_get`` of *waiter_id* (or ``None`` when there is no
     waiter edge, or the edge dangles). Health precedence follows what an
     operator can act on: ``orphan`` first (no waiter → nothing else about the
-    gate matters), then ``malformed`` (a real story is stranded on an
-    unwatchable PR), then the waiter-side anomalies, then ``ok``.
+    gate matters), then ``malformed`` (a real story is stranded on a gate a
+    resolver cannot read), then the waiter-side anomalies, then ``ok``.
     """
-    spec = parse_pr_gate(gate)
+    gate_type = str((gate.metadata or {}).get("gate_type") or "?")
+    pr_spec = parse_pr_gate(gate) if gate_type == GATE_TYPE_PR else None
+    human_spec = parse_human_gate(gate) if is_loom_human_gate(gate) else None
+    malformed = (gate_type == GATE_TYPE_PR and pr_spec is None) or (
+        is_loom_human_gate(gate) and human_spec is None
+    )
     if waiter_id is None:
         health = HEALTH_ORPHAN
-    elif spec is None:
+    elif malformed:
         health = HEALTH_MALFORMED
     elif waiter is None:
         health = HEALTH_WAITER_GONE
@@ -112,18 +146,21 @@ def classify_gate(gate: Task, waiter_id: str | None, waiter: Task | None) -> Gat
     return GateRow(
         gate_id=gate.id,
         gate_title=gate.title,
-        repo=spec.repo if spec else None,
-        pr_number=spec.pr_number if spec else None,
-        pr_url=spec.pr_url if spec else None,
+        gate_type=gate_type,
+        repo=pr_spec.repo if pr_spec else None,
+        pr_number=pr_spec.pr_number if pr_spec else None,
+        pr_url=pr_spec.pr_url if pr_spec else None,
         waiter_id=waiter_id,
         waiter_title=waiter.title if waiter else None,
         waiter_status=waiter.status if waiter else None,
         health=health,
+        escalation_reason=human_spec.reason if human_spec else None,
+        escalation_summary=human_spec.summary if human_spec else None,
     )
 
 
 async def collect_gate_rows(client: TaskClient) -> list[GateRow]:
-    """Enumerate open ``pr`` gates and classify each (read-only).
+    """Enumerate open gates and classify each (read-only).
 
     One ``task_list(status="open")`` sweep, then per gate one
     ``task_edge_list`` (via :func:`~lithos_loom.gates.waiter_of`) and — only
@@ -133,7 +170,7 @@ async def collect_gate_rows(client: TaskClient) -> list[GateRow]:
     tasks = await client.task_list(status="open")
     rows: list[GateRow] = []
     for gate in tasks:
-        if not is_pr_gate(gate):
+        if gate.task_type != "gate":
             continue
         waiter_id = await waiter_of(client, gate.id)
         waiter = (
@@ -148,20 +185,22 @@ def render_report(rows: list[GateRow]) -> list[str]:
     """Render the gate listing as aligned text lines (pure).
 
     Returns a list of lines the caller ``typer.echo``es. Empty input yields a
-    single "no open pr gates" line; otherwise a header + one row per gate + a
-    summary counting healthy vs. needs-attention gates, then a per-health
-    breakdown counting each health class present (in :data:`HEALTH_ORDER`).
+    single "no open gates" line; otherwise a header + one row per gate (a loom
+    ``human`` gate adds an indented line with its escalation summary — the
+    "why" an operator triages by) + a summary counting healthy vs.
+    needs-attention gates, then per-type and per-health breakdowns.
     """
     if not rows:
-        return ["no open pr gates"]
+        return ["no open gates"]
 
-    headers = ("GATE", "PR", "WAITER", "WAITER STATUS", "HEALTH")
+    headers = ("GATE", "TYPE", "REF", "WAITER", "WAITER STATUS", "HEALTH")
     cells = [
         (
             row.gate_id,
-            row.pr_label,
-            row.waiter_id or "—",
-            row.waiter_status or "—",
+            row.gate_type,
+            row.ref_label,
+            row.waiter_id or _NO_REF,
+            row.waiter_status or _NO_REF,
             row.health,
         )
         for row in rows
@@ -175,7 +214,10 @@ def render_report(rows: list[GateRow]) -> list[str]:
         return "  ".join(v.ljust(widths[col]) for col, v in enumerate(values)).rstrip()
 
     lines = [_fmt(headers)]
-    lines.extend(_fmt(cell) for cell in cells)
+    for row, cell in zip(rows, cells, strict=True):
+        lines.append(_fmt(cell))
+        if row.escalation_summary:
+            lines.append(f"    ↳ {row.escalation_summary}")
 
     counts = Counter(row.health for row in rows)
     healthy = counts[HEALTH_OK]
@@ -183,9 +225,19 @@ def render_report(rows: list[GateRow]) -> list[str]:
     plural = "gate" if len(rows) == 1 else "gates"
     lines.append("")
     lines.append(
-        f"{len(rows)} open pr {plural}: {healthy} healthy, "
+        f"{len(rows)} open {plural}: {healthy} healthy, "
         f"{attention} need{'s' if attention == 1 else ''} attention"
     )
+    types = Counter(row.gate_type for row in rows)
+    loom_human = sum(
+        1
+        for row in rows
+        if row.gate_type == GATE_TYPE_HUMAN and row.escalation_reason is not None
+    )
+    type_parts = [f"{types[t]} {t}" for t in sorted(types)]
+    if loom_human:
+        type_parts.append(f"{loom_human} raised by loom")
+    lines.append(f"by type: {', '.join(type_parts)}")
     breakdown = ", ".join(
         f"{counts[health]} {health}" for health in HEALTH_ORDER if counts[health]
     )

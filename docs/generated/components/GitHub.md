@@ -46,7 +46,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 ## Dependencies
 
 - Depends on: [Errors](Errors.md)
-- Used by: [Children](Children.md), [Plugins](Plugins.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
+- Used by: [Children](Children.md), [Notifications](Notifications.md), [Plugins](Plugins.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
 
 ## ADRs
 

@@ -93,6 +93,14 @@ classDiagram
 
 ```mermaid
 classDiagram
+  class HumanGateSpec {
+    +reason str
+    +summary str
+    +route str | None
+    +story_id str | None
+    +run_id str | None
+    +brief Mapping[str, Any]
+  }
   class ParsedTaskLine {
     +line_number int
     +indent int
