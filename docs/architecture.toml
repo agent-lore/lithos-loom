@@ -62,7 +62,7 @@ Bus            = ["lithos_loom.bus"]
 Config         = ["lithos_loom.config"]
 Errors         = ["lithos_loom.errors"]
 LithosClient   = ["lithos_loom.lithos_client"]
-GitHub         = ["lithos_loom.github_client", "lithos_loom.github_models"]
+GitHub         = ["lithos_loom.github_client", "lithos_loom.github_models", "lithos_loom.github_review_activity"]
 Tasks          = ["lithos_loom.task_graph", "lithos_loom.task_line_parser", "lithos_loom.task_line", "lithos_loom.gates"]
 Notifications  = ["lithos_loom.notifications"]
 State          = ["lithos_loom.cursor_store", "lithos_loom.sync_state"]
@@ -106,6 +106,7 @@ tests_private_imports     = 93  # 98->93: test_github_watcher_child's seven per-
 include_modules = [
     "lithos_loom.github_client",
     "lithos_loom.github_models",
+    "lithos_loom.github_review_activity",
     "lithos_loom.gates",
     "lithos_loom.task_graph",
     "lithos_loom.task_line_parser",

@@ -37,25 +37,22 @@ follow-up slice; this module only detects and reports.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 from lithos_loom.gates import PrGateSpec
-from lithos_loom.github_client import (
-    GitHubClient,
-    GitHubError,
-    IssueComment,
-    PullRequestReview,
-    PullRequestReviewComment,
-)
-from lithos_loom.github_models import (
-    is_automated_reply,
-    is_landed_fix_reply,
-    issue_comment_is_actionable,
-    issue_comment_reply_target,
-    review_is_actionable,
+from lithos_loom.github_client import GitHubClient, GitHubError
+from lithos_loom.github_review_activity import (
+    STREAM_ADAPTERS,
+    AuthorTrust,
+    ExternalReviewActivity,
+    ReviewStream,
+    actionable,
+    fetch_activity,
+    proven_handled,
 )
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
@@ -80,10 +77,6 @@ EXTERNAL_REVIEW = "[ExternalReview]"
 # comment fetch so a long-lived PR isn't re-paginated every sweep.
 REVIEW_SEEN_KEY = "external_review_seen"
 
-# Repo permission levels whose holders' landed-fix replies count as proof —
-# the ADR 0011 trust line (allowlisted bots aside, which never post replies).
-_TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
-
 # Rendering bounds: a finding is a breadcrumb, not a transcript.
 _EXCERPT_CHARS = 160
 _MAX_LISTED = 20
@@ -94,10 +87,11 @@ class IngestResult:
     """What one ingestion pass posted, for the remediation dispatcher (slice C).
 
     ``posted`` is True only when an ``[ExternalReview]`` finding actually
-    landed on the story; the actionable lists carry the exact material it
-    described so the dispatch decision (trust, own-sha) filters what was
-    *reported*, never a re-fetch. Every quiet path — no news, silent states,
-    orphan gate, GitHub error — reports ``posted=False`` with empty lists.
+    landed on the story; ``actionable`` carries the exact rows it described
+    (every stream, in finding order) so the dispatch decision (trust,
+    own-sha) filters what was *reported*, never a re-fetch. Every quiet path
+    — no news, silent states, orphan gate, GitHub error — reports
+    ``posted=False`` with an empty batch.
 
     ``failed`` (PR #348 re-review 1) separates "nothing to report" from a
     RETRYABLE failure — a GitHub listing error, or a batch whose finding /
@@ -108,53 +102,42 @@ class IngestResult:
 
     posted: bool = False
     failed: bool = False
-    actionable_reviews: list[PullRequestReview] = field(default_factory=list)
-    actionable_comments: list[PullRequestReviewComment] = field(default_factory=list)
-    actionable_issue_comments: list[IssueComment] = field(default_factory=list)
+    actionable: list[ExternalReviewActivity] = field(default_factory=list)
+
+    def count(self, stream: ReviewStream) -> int:
+        return sum(1 for a in self.actionable if a.stream is stream)
 
 
-# The pending-trigger provider's shape: the three actionable streams, in the
-# order the finding lists them.
+# The pending-trigger provider's shape: the actionable batch, in finding order.
 PendingMarkerProvider = Callable[
-    [list[PullRequestReview], list[PullRequestReviewComment], list[IssueComment]],
-    Awaitable[Mapping[str, Any] | None],
+    [list[ExternalReviewActivity]], Awaitable[Mapping[str, Any] | None]
 ]
 
 
 @dataclass(frozen=True)
-class _Seen:
-    """The marker's parsed high-water marks (zeros when absent/foreign-url)."""
+class _Mark:
+    """One stream's parsed high-water mark (zeros when absent/foreign-url)."""
 
-    last_review_id: int
-    last_comment_id: int
-    last_comment_at: str | None
-    last_issue_comment_id: int = 0
-    last_issue_comment_at: str | None = None
+    last_id: int = 0
+    last_at: str | None = None
 
 
-def _read_seen(gate: Any, pr_url: str) -> _Seen:
+def _read_seen(gate: Any, pr_url: str) -> dict[ReviewStream, _Mark]:
     raw = gate.metadata.get(REVIEW_SEEN_KEY)
     if not isinstance(raw, dict) or raw.get("pr_url") != pr_url:
         # Absent, malformed, or recorded for a *different* PR (the story was
         # re-developed into a replacement) — start from scratch; the old PR's
         # id space says nothing about the new one's.
-        return _Seen(0, 0, None)
-    review_id = raw.get("last_review_id")
-    comment_id = raw.get("last_comment_id")
-    comment_at = raw.get("last_comment_at")
-    issue_comment_id = raw.get("last_issue_comment_id")
-    issue_comment_at = raw.get("last_issue_comment_at")
-    return _Seen(
-        last_review_id=review_id if isinstance(review_id, int) else 0,
-        last_comment_id=comment_id if isinstance(comment_id, int) else 0,
-        last_comment_at=comment_at if isinstance(comment_at, str) else None,
-        last_issue_comment_id=(
-            issue_comment_id if isinstance(issue_comment_id, int) else 0
-        ),
-        last_issue_comment_at=(
-            issue_comment_at if isinstance(issue_comment_at, str) else None
-        ),
-    )
+        return {adapter.stream: _Mark() for adapter in STREAM_ADAPTERS}
+    seen: dict[ReviewStream, _Mark] = {}
+    for adapter in STREAM_ADAPTERS:
+        last_id = raw.get(adapter.mark_id_key)
+        last_at = raw.get(adapter.mark_at_key) if adapter.mark_at_key else None
+        seen[adapter.stream] = _Mark(
+            last_id=last_id if isinstance(last_id, int) else 0,
+            last_at=last_at if isinstance(last_at, str) else None,
+        )
+    return seen
 
 
 def _since(stamp: str | None) -> datetime | None:
@@ -165,8 +148,7 @@ def _since(stamp: str | None) -> datetime | None:
     the stored maximum would be excluded forever — the id high-water mark
     cannot rescue a row that is never returned. Querying one second early
     re-fetches at most a second's worth of rows, and the id mark drops the
-    repeats. Shared by the inline and conversation streams (#353), each
-    with its own stamp.
+    repeats. One cursor per stream that has a ``since``.
     """
     if stamp is None:
         return None
@@ -177,108 +159,6 @@ def _since(stamp: str | None) -> datetime | None:
     return boundary - timedelta(seconds=1)
 
 
-def _comment_posts(
-    comment: PullRequestReviewComment, handled_roots: frozenset[int]
-) -> bool:
-    if comment.in_reply_to_id is not None:
-        return False  # thread replies ride on their root comment
-    if comment.comment_id in handled_roots:
-        return False  # the inline round already remediated + replied to it
-    return not is_automated_reply(comment.body)
-
-
-# A handled-proof candidate names the stream it belongs to: inline review
-# comments and conversation comments have separate id spaces (#353), so a
-# bare int could name one root in each.
-_INLINE = "inline"
-_CONVERSATION = "conversation"
-_RootKey = tuple[str, int]
-
-
-def _fixed_reply_candidates(
-    comments: list[PullRequestReviewComment],
-    issue_comments: list[IssueComment],
-) -> list[tuple[_RootKey, str]]:
-    """``(root_key, reply_author)`` pairs whose reply *claims* a landed fix.
-
-    A claim, not proof: the marker and the ``Fixed in`` head are public body
-    strings any commenter can copy. :func:`_proven_handled` authenticates the
-    author before the claim may suppress anything. Inline replies name their
-    root by ``in_reply_to_id``; conversation replies (which have no thread
-    structure) by the reply line loom writes into them.
-    """
-    inline = [
-        ((_INLINE, c.in_reply_to_id), c.author)
-        for c in comments
-        if c.in_reply_to_id is not None and is_landed_fix_reply(c.body)
-    ]
-    conversation: list[tuple[_RootKey, str]] = []
-    for c in issue_comments:
-        if not is_landed_fix_reply(c.body):
-            continue
-        target = issue_comment_reply_target(c.body)
-        if target is not None:
-            conversation.append(((_CONVERSATION, target), c.author))
-    return inline + conversation
-
-
-async def _proven_handled(
-    candidates: list[tuple[_RootKey, str]],
-    repo: str,
-    github: GitHubClient,
-    ctx: SubscriptionContext,
-) -> frozenset[_RootKey]:
-    """Root-comment keys proven handled by an authenticated landed-fix reply.
-
-    Backfill guard (PR #344 review, finding 2): before S2 slice D retired the
-    inline Copilot round, delivery remediated root comments, pushed the fix
-    and replied — all *before* the ``pr`` gate existed; pre-D history is
-    still full of such threads, and converge's own thread replies keep
-    producing landed-fix replies. A markerless gate's first sweep would
-    otherwise re-report that already-handled history as fresh
-    ``[ExternalReview]`` findings. On later sweeps this is naturally inert:
-    handled roots sit below the id high-water mark anyway.
-
-    Proof has two halves, both required:
-
-    - **Landed** (PR #344 re-review 1): only the ``Fixed in <sha>`` reply
-      shape counts. Held-back (red gate) and "Not changed" replies carry the
-      same ``AUTOMATED_MARKER`` while the root is still unresolved — and
-      "Addressed" (fixed, no sha) records no landed commit.
-    - **Authenticated** (PR #344 re-review 2): the reply's author must hold
-      write/admin on the repo — the ADR 0011 trust line, and the identity
-      loom's own replies post under (the operator's ``gh`` login). Body
-      strings are forgeable; without this, any outside commenter could hide a
-      trusted reviewer's root forever by copying the two tokens. One
-      permission call per unseen author; a probe failure counts as untrusted
-      (fail closed for *suppression*: a duplicate report is recoverable, a
-      hidden root is not).
-    """
-    handled: set[_RootKey] = set()
-    author_trusted: dict[str, bool] = {}
-    for root_key, author in candidates:
-        trusted = author_trusted.get(author)
-        if trusted is None:
-            try:
-                permission = await github.get_collaborator_permission(repo, author)
-            except GitHubError as exc:
-                ctx.logger.warning(
-                    "[Friction] external-reviews: permission probe for reply "
-                    "author %r on %s failed (%s: %s); treating their "
-                    "landed-fix replies as unproven this sweep",
-                    author,
-                    repo,
-                    type(exc).__name__,
-                    exc,
-                )
-                permission = "none"
-            trusted = permission in _TRUSTED_PERMISSIONS
-            author_trusted[author] = trusted
-        if trusted:
-            handled.add(root_key)
-    return frozenset(handled)
-
-
 def _excerpt(body: str) -> str:
     line = " ".join(body.strip().split())
     if len(line) > _EXCERPT_CHARS:
@@ -286,11 +166,23 @@ def _excerpt(body: str) -> str:
     return line
 
 
+def _render_row(a: ExternalReviewActivity) -> str:
+    if a.stream is ReviewStream.REVIEW:
+        state = a.review_state or "COMMENTED"
+        at = f", at {a.head_sha[:12]}" if a.head_sha else ""
+        excerpt = _excerpt(a.body)
+        tail = f": {excerpt}" if excerpt else ""
+        return f"- review by {a.author} ({state}{at}){tail}"
+    url = f" ({a.url})" if a.url else ""
+    if a.stream is ReviewStream.INLINE:
+        loc = f"{a.path}:{a.line}" if a.line else a.path
+        return f"- comment by {a.author} on {loc}: {_excerpt(a.body)}{url}"
+    return f"- comment by {a.author} on the PR conversation: {_excerpt(a.body)}{url}"
+
+
 def _render_summary(
     pr_url: str,
-    reviews: list[PullRequestReview],
-    comments: list[PullRequestReviewComment],
-    issue_comments: list[IssueComment],
+    batch: list[ExternalReviewActivity],
     *,
     story_id: str,
     gate_id: str,
@@ -298,29 +190,11 @@ def _render_summary(
     post_merge: bool = False,
 ) -> str:
     lines = [f"{EXTERNAL_REVIEW} new review activity on delivered PR {pr_url}:"]
-    for review in reviews[:_MAX_LISTED]:
-        state = review.state or "COMMENTED"
-        at = f", at {review.commit_id[:12]}" if review.commit_id else ""
-        excerpt = _excerpt(review.body)
-        tail = f": {excerpt}" if excerpt else ""
-        lines.append(f"- review by {review.author} ({state}{at}){tail}")
-    for comment in comments[:_MAX_LISTED]:
-        loc = f"{comment.path}:{comment.line}" if comment.line else comment.path
-        url = f" ({comment.html_url})" if comment.html_url else ""
-        lines.append(
-            f"- comment by {comment.author} on {loc}: {_excerpt(comment.body)}{url}"
-        )
-    for comment in issue_comments[:_MAX_LISTED]:
-        url = f" ({comment.html_url})" if comment.html_url else ""
-        lines.append(
-            f"- comment by {comment.author} on the PR conversation: "
-            f"{_excerpt(comment.body)}{url}"
-        )
-    hidden = (
-        max(0, len(reviews) - _MAX_LISTED)
-        + max(0, len(comments) - _MAX_LISTED)
-        + max(0, len(issue_comments) - _MAX_LISTED)
-    )
+    hidden = 0
+    for adapter in STREAM_ADAPTERS:  # listed per stream, each capped
+        rows = [a for a in batch if a.stream is adapter.stream]
+        lines.extend(_render_row(a) for a in rows[:_MAX_LISTED])
+        hidden += max(0, len(rows) - _MAX_LISTED)
     if hidden:
         lines.append(f"- …and {hidden} more (see the PR)")
     if extra_note:
@@ -343,35 +217,51 @@ def _render_summary(
 
 def _new_marker(
     pr_url: str,
-    seen: _Seen,
-    reviews: list[PullRequestReview],
-    comments: list[PullRequestReviewComment],
-    issue_comments: list[IssueComment],
+    seen: Mapping[ReviewStream, _Mark],
+    activities: list[ExternalReviewActivity],
 ) -> dict[str, Any]:
-    """Advance the marks over EVERYTHING fetched — including replies, silent
-    states and loom's own automated replies / notices — so skipped material
-    is never re-fetched (the `since` cursors) or re-considered (the ids)."""
-    marker: dict[str, Any] = {
-        "pr_url": pr_url,
-        "last_review_id": max(seen.last_review_id, *(r.review_id for r in reviews), 0),
-        "last_comment_id": max(
-            seen.last_comment_id, *(c.comment_id for c in comments), 0
-        ),
-        "last_issue_comment_id": max(
-            seen.last_issue_comment_id, *(c.comment_id for c in issue_comments), 0
-        ),
-    }
-    stamps = [c.updated_at for c in comments if c.updated_at is not None]
-    if stamps:
-        marker["last_comment_at"] = max(stamps).isoformat()
-    elif seen.last_comment_at is not None:
-        marker["last_comment_at"] = seen.last_comment_at
-    issue_stamps = [c.updated_at for c in issue_comments if c.updated_at is not None]
-    if issue_stamps:
-        marker["last_issue_comment_at"] = max(issue_stamps).isoformat()
-    elif seen.last_issue_comment_at is not None:
-        marker["last_issue_comment_at"] = seen.last_issue_comment_at
+    """Advance every stream's marks over EVERYTHING fetched — including
+    replies, silent states and loom's own automated replies / notices — so
+    skipped material is never re-fetched (the `since` cursors) or
+    re-considered (the ids)."""
+    marker: dict[str, Any] = {"pr_url": pr_url}
+    for adapter in STREAM_ADAPTERS:
+        rows = [a for a in activities if a.stream is adapter.stream]
+        mark = seen[adapter.stream]
+        marker[adapter.mark_id_key] = max(
+            mark.last_id, *(a.activity_id for a in rows), 0
+        )
+        if adapter.mark_at_key is None:
+            continue
+        stamps = [a.updated_at for a in rows if a.updated_at is not None]
+        if stamps:
+            marker[adapter.mark_at_key] = max(stamps).isoformat()
+        elif mark.last_at is not None:
+            marker[adapter.mark_at_key] = mark.last_at
     return marker
+
+
+def _reply_author_trust(
+    spec: PrGateSpec, github: GitHubClient, ctx: SubscriptionContext
+) -> AuthorTrust:
+    """The sweep's trust for handled-proof: write/admin humans only (bots never
+    post replies), a probe failure logged as friction and treated as unproven."""
+
+    def on_error(author: str, exc: Exception) -> None:
+        ctx.logger.warning(
+            "[Friction] external-reviews: permission probe for reply "
+            "author %r on %s failed (%s: %s); treating their "
+            "landed-fix replies as unproven this sweep",
+            author,
+            spec.repo,
+            type(exc).__name__,
+            exc,
+        )
+
+    async def permission_of(author: str) -> str:
+        return await github.get_collaborator_permission(spec.repo, author)
+
+    return AuthorTrust(permission_of, on_error=on_error)
 
 
 async def ingest_external_reviews(
@@ -412,12 +302,11 @@ async def ingest_external_reviews(
     """
     seen = _read_seen(gate, spec.pr_url)
     try:
-        reviews = await github.list_pull_request_reviews(spec.repo, spec.pr_number)
-        comments = await github.list_pull_request_review_comments(
-            spec.repo, spec.pr_number, since=_since(seen.last_comment_at)
-        )
-        issue_comments = await github.list_issue_comments(
-            spec.repo, spec.pr_number, since=_since(seen.last_issue_comment_at)
+        activities = await fetch_activity(
+            github,
+            spec.repo,
+            spec.pr_number,
+            since={stream: _since(mark.last_at) for stream, mark in seen.items()},
         )
     except GitHubError as exc:
         ctx.logger.warning(
@@ -431,61 +320,19 @@ async def ingest_external_reviews(
         )
         return IngestResult(failed=True)
 
-    new_reviews = [r for r in reviews if r.review_id > seen.last_review_id]
-    new_comments = [c for c in comments if c.comment_id > seen.last_comment_id]
-    new_issue_comments = [
-        c for c in issue_comments if c.comment_id > seen.last_issue_comment_id
-    ]
-    if not new_reviews and not new_comments and not new_issue_comments:
+    new = [a for a in activities if a.activity_id > seen[a.stream].last_id]
+    if not new:
         return IngestResult()  # idle PR: no fetch produced news, write nothing
 
-    handled_keys = await _proven_handled(
-        _fixed_reply_candidates(comments, issue_comments), spec.repo, github, ctx
-    )
-    handled_roots = frozenset(i for kind, i in handled_keys if kind == _INLINE)
-    handled_conversation = frozenset(
-        i for kind, i in handled_keys if kind == _CONVERSATION
-    )
-    # A non-blocking summary review ALL of whose own roots the inline round
-    # already remediated is part of that same handled history — suppressing
-    # it keeps the round's Copilot review out of the first sweep. Bound to
-    # the review that OWNS the handled roots (PR #345 review F3) — an
-    # author-wide rule would hide a later summary re-review behind an
-    # ancient fixed root. Narrow on purpose: CHANGES_REQUESTED always posts
-    # (review_is_actionable) — a reply does not prove the requested changes
-    # were accepted.
-    review_roots: dict[int, list[int]] = {}
-    for c in comments:
-        if c.in_reply_to_id is None and c.pull_request_review_id is not None:
-            review_roots.setdefault(c.pull_request_review_id, []).append(c.comment_id)
-    handled_review_ids = frozenset(
-        rid
-        for rid, roots in review_roots.items()
-        if roots and all(r in handled_roots for r in roots)
-    )
-    actionable_reviews = [
-        r
-        for r in new_reviews
-        if review_is_actionable(r)
-        and not (r.state != "CHANGES_REQUESTED" and r.review_id in handled_review_ids)
-    ]
-    actionable_comments = [c for c in new_comments if _comment_posts(c, handled_roots)]
-    actionable_issue_comments = [
-        c
-        for c in new_issue_comments
-        if c.comment_id not in handled_conversation and issue_comment_is_actionable(c)
-    ]
+    # Handled-ness is proven over the whole fetched history (roots below the
+    # marks still vouch for a review above them); the decision is on `new`.
+    handled = await proven_handled(activities, _reply_author_trust(spec, github, ctx))
+    batch = actionable(new, handled, context=activities)
     marker: dict[str, Any] = {
-        REVIEW_SEEN_KEY: _new_marker(
-            spec.pr_url, seen, reviews, comments, issue_comments
-        )
+        REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, activities)
     }
 
-    if (
-        not actionable_reviews
-        and not actionable_comments
-        and not actionable_issue_comments
-    ):
+    if not batch:
         # Only silent material (approvals, replies, our own automated replies):
         # advance the marks so it is never re-walked, post nothing. The marker
         # IS this material's durable record, so a failed write is a retryable
@@ -515,9 +362,7 @@ async def ingest_external_reviews(
         return IngestResult(failed=not marked)
 
     if pending_marker_for is not None:
-        pending = await pending_marker_for(
-            actionable_reviews, actionable_comments, actionable_issue_comments
-        )
+        pending = await pending_marker_for(batch)
         if pending:
             marker.update(pending)
     landed = await post_finding_then_mark(
@@ -525,9 +370,7 @@ async def ingest_external_reviews(
         task_id=story_id,
         summary=_render_summary(
             spec.pr_url,
-            actionable_reviews,
-            actionable_comments,
-            actionable_issue_comments,
+            batch,
             story_id=story_id,
             gate_id=gate.id,
             extra_note=extra_note,
@@ -545,19 +388,15 @@ async def ingest_external_reviews(
         # would double-dispatch when it re-posts). PR #348 re-review 1:
         # ``failed`` lets the merged-path caller defer resolution too.
         return IngestResult(failed=True)
+    counts = Counter(a.stream for a in batch)
     ctx.logger.info(
-        "external-reviews: posted %s for %s (%d review(s), %d inline comment(s), "
-        "%d conversation comment(s)) on story %s",
+        "external-reviews: posted %s for %s (%s) on story %s",
         EXTERNAL_REVIEW,
         spec.pr_url,
-        len(actionable_reviews),
-        len(actionable_comments),
-        len(actionable_issue_comments),
+        ", ".join(
+            f"{counts[adapter.stream]} {adapter.label}(s)"
+            for adapter in STREAM_ADAPTERS
+        ),
         story_id,
     )
-    return IngestResult(
-        posted=True,
-        actionable_reviews=actionable_reviews,
-        actionable_comments=actionable_comments,
-        actionable_issue_comments=actionable_issue_comments,
-    )
+    return IngestResult(posted=True, actionable=batch)

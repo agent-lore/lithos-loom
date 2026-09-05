@@ -7,6 +7,20 @@
 
 ```mermaid
 classDiagram
+  class ExternalReviewActivity {
+    +stream ReviewStream
+    +activity_id int
+    +author str
+    +body str
+    +url str
+    +head_sha str
+    +path str
+    +line int | None
+    +review_state str
+    +owning_review_id int | None
+    +reply_to int | None
+    +updated_at datetime | None
+  }
   class GitHubAuthError
   class GitHubClient {
     +http httpx.AsyncClient
@@ -77,6 +91,13 @@ classDiagram
     +original_commit_id str
     +updated_at datetime | None
     +pull_request_review_id int | None
+  }
+  class StreamAdapter {
+    +stream ReviewStream
+    +mark_id_key str
+    +mark_at_key str | None
+    +fetch Fetch
+    +label str
   }
 ```
 

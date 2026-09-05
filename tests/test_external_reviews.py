@@ -29,6 +29,7 @@ from lithos_loom.github_models import (
     LOOM_NOTICE_MARKER,
     issue_comment_reply_body,
 )
+from lithos_loom.github_review_activity import ReviewStream
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.external_reviews import (
     EXTERNAL_REVIEW,
@@ -737,8 +738,10 @@ async def test_ingest_returns_the_actionable_batch() -> None:
     assert spec is not None
     result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
     assert result.posted
-    assert [r.review_id for r in result.actionable_reviews] == [500]
-    assert [c.comment_id for c in result.actionable_comments] == [1]
+    assert [(a.stream, a.activity_id) for a in result.actionable] == [
+        (ReviewStream.REVIEW, 500),
+        (ReviewStream.INLINE, 1),
+    ]
 
 
 async def test_ingest_returns_empty_batch_when_nothing_posts() -> None:
@@ -749,8 +752,7 @@ async def test_ingest_returns_empty_batch_when_nothing_posts() -> None:
     assert spec is not None
     result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
     assert not result.posted
-    assert result.actionable_reviews == []
-    assert result.actionable_comments == []
+    assert result.actionable == []
 
 
 async def test_extra_note_lands_in_the_finding_body() -> None:
@@ -832,14 +834,12 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     github = _github(reviews=[_review(500)])
     spec = parse_pr_gate(gate)
     assert spec is not None
-    seen_batches: list[tuple[int, int]] = []
+    seen_batches: list[list[Any]] = []
 
-    async def provider(
-        reviews: Any, comments: Any, issue_comments: Any
-    ) -> dict[str, Any]:
+    async def provider(activities: Any) -> dict[str, Any]:
         # The dispatcher's provider sees the actionable batch (it evaluates
         # trust + own-sha BEFORE the durable write — re-review 3).
-        seen_batches.append((len(reviews), len(comments)))
+        seen_batches.append([(a.stream, a.activity_id) for a in activities])
         return {"external_remediation_pending": {"pr_url": spec.pr_url}}
 
     result = await ingest_external_reviews(
@@ -847,7 +847,7 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     )
 
     assert result.posted
-    assert seen_batches == [(1, 0)]
+    assert seen_batches == [[(ReviewStream.REVIEW, 500)]]
     refreshed = await client.task_get(task_id=gate.id)
     assert refreshed is not None
     assert REVIEW_SEEN_KEY in refreshed.metadata
@@ -868,9 +868,7 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     spec2 = parse_pr_gate(gate2)
     assert spec2 is not None
 
-    async def provider2(
-        reviews: Any, comments: Any, issue_comments: Any
-    ) -> dict[str, Any]:
+    async def provider2(activities: Any) -> dict[str, Any]:
         return {"external_remediation_pending": {"pr_url": spec2.pr_url}}
 
     result = await ingest_external_reviews(
@@ -1067,10 +1065,10 @@ async def test_pending_provider_receives_the_conversation_batch() -> None:
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     github = _github(issue_comments=[_issue_comment(30)])
-    seen_batches: list[tuple[int, int, int]] = []
+    seen_batches: list[list[Any]] = []
 
-    async def provider(reviews: Any, comments: Any, issue_comments: Any) -> dict:
-        seen_batches.append((len(reviews), len(comments), len(issue_comments)))
+    async def provider(activities: Any) -> dict:
+        seen_batches.append([(a.stream, a.activity_id) for a in activities])
         return {"external_remediation_pending": {"pr_url": _PR_URL}}
 
     spec = parse_pr_gate(gate)
@@ -1080,7 +1078,9 @@ async def test_pending_provider_receives_the_conversation_batch() -> None:
     )
 
     assert result.posted
-    assert [c.comment_id for c in result.actionable_issue_comments] == [30]
-    assert seen_batches == [(0, 0, 1)]
+    assert [(a.stream, a.activity_id) for a in result.actionable] == [
+        (ReviewStream.CONVERSATION, 30)
+    ]
+    assert seen_batches == [[(ReviewStream.CONVERSATION, 30)]]
     fresh = await _refresh(client, gate)
     assert fresh.metadata["external_remediation_pending"] == {"pr_url": _PR_URL}
