@@ -396,8 +396,18 @@ def develop(
     )
     branch = wt.name
     # converge diffs/reviews against the PR merge-base, not the worktree HEAD
-    # (which, entered at the PR head, would show an empty diff).
-    base = entry.base_override if entry is not None else git.base_sha(wt)
+    # (which, entered at the PR head, would show an empty diff). Either way the
+    # base is a RangeBase — the recorded start plus the live base ref — so a
+    # base merge mid-run moves the fork point instead of leaking the base's
+    # commits into the review (S5c).
+    base = (
+        entry.base_override
+        if entry is not None
+        else git.RangeBase(
+            start_sha=git.base_sha(wt),
+            ref=git.base_ref_for(wt, config.base_branch),
+        )
+    )
     logger.info("story-develop %s: worktree %s (branch %s)", config.run_id, wt, branch)
 
     coder_name, coder_cmd = agent_session.build_run_cmd(
@@ -517,7 +527,7 @@ def develop(
     coder_session = ctx.coder_session
     rounds_completed = ctx.rounds_completed
 
-    commits = git.commits_since(wt, base)
+    commits = git.commits_since(wt, git.fork_point(wt, base))
     handoff_present = (config.handoff_dir / handoff.coder_handoff_name(1)).is_file()
 
     log_path = config.run_dir / run_outcome.CONVERSATION_LOG
@@ -591,7 +601,7 @@ def develop(
                 "run_id": config.run_id,
                 "branch": branch,
                 "worktree": str(wt),
-                "base_sha": base,
+                "base_sha": base.start_sha,
                 "rounds": rounds_completed,
                 # Why a non-approved run stopped, for the offline `attach` summary
                 # (#188). Only the reason-bearing statuses set a real reason;
@@ -629,7 +639,7 @@ def develop(
         run_id=config.run_id,
         worktree=wt,
         branch=branch,
-        base_sha=base,
+        base_sha=base.start_sha,
         commits=commits,
         rounds=rounds_completed,
         handoff_present=handoff_present,

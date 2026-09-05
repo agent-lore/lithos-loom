@@ -178,7 +178,7 @@ def _artifact_ctx(tmp_path: Path, *, collects: bool, panel_passes: bool) -> tupl
     ctx = rounds_mod.RoundContext(
         config=config,
         wt=tmp_path / "repo",
-        base="0" * 40,
+        base=rounds_mod.git.RangeBase("0" * 40),
         names=["correctness"],
         services=services,
         reviewers=[rstate],

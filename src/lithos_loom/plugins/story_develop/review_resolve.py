@@ -42,11 +42,17 @@ class ResolvedChange:
     ``is_merged`` reports that the PR has already landed. It is a FLAG here, not
     a refusal: reviewing a merged PR is a legitimate read-only operation, so only
     converge — which would push fixes that could never land — acts on it.
+
+    ``base_ref`` names the LIVE base the change lands on (``origin/main`` for a
+    PR, the base branch for a local branch, the typed base of a range) so a
+    base merge during a converge run moves the diff base with it (S5c). Empty
+    when the operator forced the base: an explicit sha is the base, full stop.
     """
 
     base_sha: str
     head_sha: str
     head_ref: str
+    base_ref: str = ""
     title: str = ""
     body: str = ""
     head_branch: str = ""
@@ -125,14 +131,19 @@ def resolve_change(
             base_sha=_rev_parse(repo, base_override or base_ref),
             head_sha=_rev_parse(repo, head_ref),
             head_ref=head_ref,
+            base_ref="" if base_override else base_ref,
         )
 
     head_sha = _rev_parse(repo, spec)
     if base_override is not None:
         base_sha = _rev_parse(repo, base_override)
+        live_base = ""
     else:
         base_sha = _merge_base(repo, base_branch, spec)
-    return ResolvedChange(base_sha=base_sha, head_sha=head_sha, head_ref=spec)
+        live_base = base_branch
+    return ResolvedChange(
+        base_sha=base_sha, head_sha=head_sha, head_ref=spec, base_ref=live_base
+    )
 
 
 def _resolve_pr(
@@ -146,6 +157,7 @@ def _resolve_pr(
     _git_fetch(repo, f"pull/{number}/head", base_ref_name)
     if base_override:
         base_sha = _rev_parse(repo, base_override)
+        live_base = ""
     else:
         # Derive the PR's true diff base as the merge-base of the base branch
         # and the head (what GitHub diffs) rather than the PR object's base ref
@@ -154,9 +166,11 @@ def _resolve_pr(
         # also why not requesting the base OID at all sidesteps #207). The base
         # branch was just fetched, so its tip is local at origin/<base>.
         base_sha = _merge_base(repo, f"origin/{base_ref_name}", head_sha)
+        live_base = f"origin/{base_ref_name}"
     return ResolvedChange(
         base_sha=base_sha,
         head_sha=head_sha,
+        base_ref=live_base,
         head_ref=f"#{number} ({pr.head_ref})".strip(),
         title=pr.title,
         body=pr.body,
