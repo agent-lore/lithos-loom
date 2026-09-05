@@ -20,8 +20,14 @@ from unittest.mock import AsyncMock
 from lithos_loom.gates import create_pr_gate, parse_pr_gate
 from lithos_loom.github_client import (
     GitHubError,
+    IssueComment,
     PullRequestReview,
     PullRequestReviewComment,
+)
+from lithos_loom.github_models import (
+    AUTOMATED_REPLY_MARKER,
+    LOOM_NOTICE_MARKER,
+    issue_comment_reply_body,
 )
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.external_reviews import (
@@ -63,10 +69,12 @@ def _github(
     *,
     reviews: list[PullRequestReview] | None = None,
     comments: list[PullRequestReviewComment] | None = None,
+    issue_comments: list[IssueComment] | None = None,
 ) -> AsyncMock:
     github = AsyncMock()
     github.list_pull_request_reviews.return_value = reviews or []
     github.list_pull_request_review_comments.return_value = comments or []
+    github.list_issue_comments.return_value = issue_comments or []
     # Default: reply authors are collaborators, so landed-fix replies count
     # as proof. Forgery tests override this per author.
     github.get_collaborator_permission.return_value = "write"
@@ -110,6 +118,23 @@ def _comment(
         commit_id="d" * 40,
         updated_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
         pull_request_review_id=pull_request_review_id,
+    )
+
+
+def _issue_comment(
+    comment_id: int,
+    *,
+    author: str = "davesnowdon",
+    body: str = "Verdict: not ready — two P1 gaps",
+    updated_at: datetime | None = datetime(2026, 9, 5, 10, 25, 24, tzinfo=UTC),
+) -> IssueComment:
+    return IssueComment(
+        comment_id=comment_id,
+        author=author,
+        body=body,
+        html_url=f"https://github.com/{_REPO}/pull/62#issuecomment-{comment_id}",
+        created_at=updated_at,
+        updated_at=updated_at,
     )
 
 
@@ -809,7 +834,9 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     assert spec is not None
     seen_batches: list[tuple[int, int]] = []
 
-    async def provider(reviews: Any, comments: Any) -> dict[str, Any]:
+    async def provider(
+        reviews: Any, comments: Any, issue_comments: Any
+    ) -> dict[str, Any]:
         # The dispatcher's provider sees the actionable batch (it evaluates
         # trust + own-sha BEFORE the durable write — re-review 3).
         seen_batches.append((len(reviews), len(comments)))
@@ -841,7 +868,9 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
     spec2 = parse_pr_gate(gate2)
     assert spec2 is not None
 
-    async def provider2(reviews: Any, comments: Any) -> dict[str, Any]:
+    async def provider2(
+        reviews: Any, comments: Any, issue_comments: Any
+    ) -> dict[str, Any]:
         return {"external_remediation_pending": {"pr_url": spec2.pr_url}}
 
     result = await ingest_external_reviews(
@@ -904,3 +933,154 @@ async def test_orphan_gate_marker_failure_reports_failed() -> None:
     result = await ingest_external_reviews(gate, spec, None, github, _ctx(client))
 
     assert result.failed is True
+
+
+# ── conversation comments (#353) ──────────────────────────────────────
+#
+# A PR's author cannot leave a review on it, so the operator's only channel
+# on a loom-delivered PR is the Conversation tab — an ISSUE comment, a third
+# stream with its own id space and high-water mark.
+
+
+async def test_conversation_comment_posts_a_finding_and_marks_its_own_stream() -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(issue_comments=[_issue_comment(5551158842)])
+
+    await _run(client, gate, story, github)
+
+    findings = _findings(client)
+    assert len(findings) == 1
+    body = findings[0]
+    assert body.startswith(EXTERNAL_REVIEW)
+    assert "comment by davesnowdon on the PR conversation: Verdict: not ready" in body
+    assert f"{_PR_URL}#issuecomment-5551158842" in body
+    seen = (await _refresh(client, gate)).metadata[REVIEW_SEEN_KEY]
+    assert seen["last_issue_comment_id"] == 5551158842
+    assert seen["last_issue_comment_at"] == "2026-09-05T10:25:24+00:00"
+    assert seen["last_review_id"] == 0 and seen["last_comment_id"] == 0
+
+    # Second sweep: the same comment is below the mark → nothing new.
+    await _run(client, await _refresh(client, gate), story, github)
+    assert len(_findings(client)) == 1
+
+
+async def test_conversation_fetch_is_bounded_by_its_own_cursor() -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            REVIEW_SEEN_KEY: {
+                "pr_url": _PR_URL,
+                "last_review_id": 0,
+                "last_comment_id": 0,
+                "last_issue_comment_id": 5,
+                "last_issue_comment_at": "2026-09-05T10:25:24+00:00",
+            }
+        },
+    )
+    github = _github()
+
+    await _run(client, await _refresh(client, gate), story, github)
+
+    # One-second overlap, same as the inline stream (PR #344 review, finding 1).
+    github.list_issue_comments.assert_awaited_once_with(
+        _REPO, 62, since=datetime(2026, 9, 5, 10, 25, 23, tzinfo=UTC)
+    )
+    github.list_pull_request_review_comments.assert_awaited_once_with(
+        _REPO, 62, since=None
+    )
+
+
+async def test_looms_own_conversation_comments_advance_the_mark_silently() -> None:
+    """The [NeedsHuman] @mention and converge's conversation replies are
+    loom-authored under the operator's (trusted) login — never re-ingested."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        issue_comments=[
+            _issue_comment(
+                10, body=f"@dave [NeedsHuman] loom stopped on x\n\n{LOOM_NOTICE_MARKER}"
+            ),
+            _issue_comment(11, body=f"Not changed — nope\n\n{AUTOMATED_REPLY_MARKER}"),
+            _issue_comment(12, body="   "),
+        ]
+    )
+
+    await _run(client, gate, story, github)
+
+    assert _findings(client) == []
+    seen = (await _refresh(client, gate)).metadata[REVIEW_SEEN_KEY]
+    assert seen["last_issue_comment_id"] == 12
+
+
+async def test_conversation_comment_proven_handled_by_a_landed_reply_is_skipped() -> (
+    None
+):
+    """Parity with inline roots: a `Fixed in <sha>` conversation reply by a
+    write/admin author, naming the comment it answers, proves it handled."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    handled_url = f"https://github.com/{_REPO}/pull/62#issuecomment-20"
+    reply = issue_comment_reply_body(
+        f"Fixed in abc123def4 — guarded it\n\n{AUTOMATED_REPLY_MARKER}", handled_url
+    )
+    github = _github(
+        issue_comments=[
+            _issue_comment(20, body="please guard the read"),
+            _issue_comment(21, author="dave", body=reply),
+            _issue_comment(22, body="still open: the epic reads bypass the gate"),
+        ]
+    )
+
+    await _run(client, gate, story, github)
+
+    (finding,) = _findings(client)
+    assert "still open" in finding
+    assert "please guard the read" not in finding
+    github.get_collaborator_permission.assert_awaited_once_with(_REPO, "dave")
+
+
+async def test_forged_conversation_reply_never_suppresses() -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    handled_url = f"https://github.com/{_REPO}/pull/62#issuecomment-20"
+    reply = issue_comment_reply_body(
+        f"Fixed in abc123def4 — trust me\n\n{AUTOMATED_REPLY_MARKER}", handled_url
+    )
+    github = _github(
+        issue_comments=[
+            _issue_comment(20, body="please guard the read"),
+            _issue_comment(21, author="stranger", body=reply),
+        ]
+    )
+    github.get_collaborator_permission.return_value = "none"
+
+    await _run(client, gate, story, github)
+
+    (finding,) = _findings(client)
+    assert "please guard the read" in finding
+
+
+async def test_pending_provider_receives_the_conversation_batch() -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    github = _github(issue_comments=[_issue_comment(30)])
+    seen_batches: list[tuple[int, int, int]] = []
+
+    async def provider(reviews: Any, comments: Any, issue_comments: Any) -> dict:
+        seen_batches.append((len(reviews), len(comments), len(issue_comments)))
+        return {"external_remediation_pending": {"pr_url": _PR_URL}}
+
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    result = await ingest_external_reviews(
+        gate, spec, story, github, _ctx(client), pending_marker_for=provider
+    )
+
+    assert result.posted
+    assert [c.comment_id for c in result.actionable_issue_comments] == [30]
+    assert seen_batches == [(0, 0, 1)]
+    fresh = await _refresh(client, gate)
+    assert fresh.metadata["external_remediation_pending"] == {"pr_url": _PR_URL}

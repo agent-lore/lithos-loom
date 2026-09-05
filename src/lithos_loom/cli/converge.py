@@ -45,10 +45,12 @@ from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_
 from lithos_loom.plugins.story_develop.external_reviews import (
     GitHubError,
     fetch_external_findings,
+    issue_comment_reply_body,
     pr_number_from_spec,
 )
 from lithos_loom.plugins.story_develop.github_access import repo_name_with_owner
 from lithos_loom.plugins.story_develop.pr_delivery import (
+    post_pr_comment,
     post_thread_reply,
     reply_body,
 )
@@ -166,11 +168,12 @@ def converge_command(
         False,
         "--from-github",
         help="Ingest the PR's external review findings (reviews + inline "
-        "comments) instead of running the local-panel intake: trusted ones "
-        "(allowlisted bots + write/admin humans) are triaged and, if they "
-        "survive, seed the fix loop directly; untrusted ones are printed but "
-        "never fed to an agent. Thread replies are posted for what was fixed "
-        "or rejected.",
+        "comments + conversation comments) instead of running the local-panel "
+        "intake: trusted ones (allowlisted bots + write/admin humans) are "
+        "triaged and, if they survive, seed the fix loop directly; untrusted "
+        "ones are printed but never fed to an agent. Replies are posted for "
+        "what was fixed or rejected (on the thread, or on the conversation "
+        "for a conversation comment).",
     ),
     repo: Path | None = typer.Option(
         None, "--repo", help="Repository to converge in (default: current directory)."
@@ -380,18 +383,21 @@ def _render(result: ConvergeResult) -> str:
 def _post_external_replies(
     result: ConvergeResult, *, repo: str, pr_number: int
 ) -> None:
-    """Thread a reply onto each comment-backed external finding's thread.
+    """Answer each comment-backed external finding where it was raised.
 
+    Inline findings get a thread reply; conversation-comment findings (#353,
+    no thread structure) get a conversation comment naming the comment it
+    answers — the shape the sweep and the fetch read to prove it handled.
     Only what actually happened is asserted: a *fixed* reply is posted only
     when the branch was pushed (its sha is the proof — an unpushed fix must
     not claim to have landed); rejections and disputes reply regardless.
-    Summary-only findings (no ``comment_id``) have no thread to reply on and
-    are left to the rendered summary. Best-effort: a failed reply logs via
-    ``post_thread_reply`` and the rest continue.
+    Summary-only findings (no comment id of either kind) have nothing to
+    reply on and are left to the rendered summary. Best-effort: a failed
+    reply logs via the poster and the rest continue.
     """
     posted = 0
     for o in result.external_outcomes:
-        if o.finding.comment_id is None:
+        if o.finding.comment_id is None and o.finding.issue_comment_id is None:
             continue
         if o.disposition == "rejected":
             body = reply_body(
@@ -405,7 +411,13 @@ def _post_external_replies(
             )
         else:
             continue  # unaddressed, or a fix that never landed — assert nothing
-        if post_thread_reply(repo, pr_number, o.finding.comment_id, body):
+        if o.finding.comment_id is not None:
+            landed = post_thread_reply(repo, pr_number, o.finding.comment_id, body)
+        else:
+            landed = post_pr_comment(
+                repo, pr_number, issue_comment_reply_body(body, o.finding.thread_url)
+            )
+        if landed:
             posted += 1
     if posted:
-        typer.echo(f"posted {posted} thread repl(ies) on {repo}#{pr_number}")
+        typer.echo(f"posted {posted} external review repl(ies) on {repo}#{pr_number}")

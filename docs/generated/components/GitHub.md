@@ -12,7 +12,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.github_client` | M | 7 | 0 |
-| `lithos_loom.github_models` | M | 5 | 11 |
+| `lithos_loom.github_models` | M | 6 | 16 |
 
 ## Public API
 
@@ -32,15 +32,21 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - class `PullRequest` — The pull-request payload two consumers share off the single-PR endpoint.
 - class `PullRequestReview` — A single PR review: the reviewer login + the review-summary body.
 - class `PullRequestReviewComment` — A single inline review comment on a PR.
+- class `IssueComment` — A comment on the PR's **Conversation** tab (GitHub: an *issue* comment — a PR is an issue on that endpoint).
 - def `parse_issues_response` — Convert a GitHub ``/issues`` response into typed Issues, dropping PRs.
 - def `parse_pull_request` — Convert a GitHub ``GET /pulls/{n}`` response row into a typed PullRequest.
 - def `parse_pull_request_review`
 - def `parse_pull_request_review_comment`
+- def `parse_issue_comment`
 - def `parse_marker` — Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
 - def `apply_marker` — Return ``body`` with a canonical marker appended at the end.
 - def `strip_marker` — Return ``body`` with any ``<!-- lithos:<id> -->`` marker removed.
 - def `is_automated_reply` — True for loom's own automated PR replies (never re-ingested).
 - def `is_landed_fix_reply` — True for the reply shape that proves a fix landed (see the constants).
+- def `is_loom_pr_comment` — True for any conversation comment loom itself posted (a reply or a notice, marked or legacy-shaped) — never re-ingested (#353).
+- def `issue_comment_is_actionable` — The conversation-stream policy (#353): a non-empty body from anyone but loom. There is no review state to key on and no thread structure — every human comment on the conversation is a potential verdict.
+- def `issue_comment_reply_body` — Wrap a per-finding reply for the conversation tab, naming its target.
+- def `issue_comment_reply_target` — The conversation comment id a loom reply answers, or ``None``.
 - def `review_is_actionable` — The per-state external-review policy (PRD S2).
 
 ## Dependencies

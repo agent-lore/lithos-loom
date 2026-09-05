@@ -587,3 +587,75 @@ def test_triage_rejected_exits_zero(stubs: dict, tmp_path: Path) -> None:
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+
+
+def test_from_github_answers_a_conversation_finding_on_the_conversation(
+    github_stubs: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conversation-comment finding (#353) has no thread to reply on; the
+    epilogue answers it with a conversation comment that names its target —
+    the shape the sweep and the fetch use to prove it handled."""
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import (
+        ExternalFinding,
+        ExternalOutcome,
+    )
+
+    url = "https://github.com/o/r/pull/142#issuecomment-5551158842"
+    finding = ExternalFinding(
+        author="davesnowdon",
+        source="human",
+        trusted=True,
+        review_id=None,
+        comment_id=None,
+        thread_url=url,
+        head_sha="",
+        body="Verdict: two P1 gaps",
+        issue_comment_id=5551158842,
+    )
+    github_stubs["trusted"] = [finding]
+    pr_comments: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        converge_cli,
+        "post_pr_comment",
+        lambda repo, pr, body: pr_comments.append((pr, body)) or True,
+    )
+
+    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+        return ConvergeResult(
+            status="converged",
+            change=change,
+            pushed=True,
+            pushed_sha="p" * 40,
+            external_outcomes=(
+                ExternalOutcome("f-001", finding, "fixed", detail="bounded the work"),
+            ),
+            message="converged and pushed to feature",
+        )
+
+    import lithos_loom.cli.converge as cli_mod
+
+    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            [
+                "converge",
+                "#142",
+                "--repo",
+                str(tmp_path),
+                "--ac",
+                "do it",
+                "--from-github",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        cli_mod.converge_pr = saved
+
+    assert result.exit_code == 0
+    assert github_stubs["replies"] == []  # no thread to reply on
+    ((pr, body),) = pr_comments
+    assert pr == 142
+    assert body.startswith("Fixed in pppppppppp")
+    assert f"replying to {url}" in body

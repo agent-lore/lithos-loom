@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 from lithos_loom.github_client import parse_github_ref
+from lithos_loom.github_models import LOOM_NOTICE_MARKER
 
 __all__ = ["GitHubCommenter", "NeedsHumanNotice", "Notifier"]
 
@@ -87,7 +88,11 @@ class NeedsHumanNotice:
             f"(`{self.reason}`): {self.summary}\n\n"
             f"Gate `{self.gate_id}` in Lithos — complete it to re-dispatch the "
             "story (edit the story first if the brief must change); cancel the "
-            "story to abandon."
+            "story to abandon.\n\n"
+            # Posted under the operator's (trusted) login on a PR the watcher
+            # sweeps for conversation comments (#353): the marker keeps this
+            # notice out of the external-review stream.
+            f"{LOOM_NOTICE_MARKER}"
         )
 
 

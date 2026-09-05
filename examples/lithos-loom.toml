@@ -386,10 +386,13 @@ tags = ["trigger:story-develop"]
 # # Set false to run the watcher for issue sync only.
 # external_reviews_enabled = true
 # # PRD S2 detection: on each still-open `pr` gate the sweep also reads the
-# # PR's reviews + inline review comments and posts anything new as a
-# # one-shot [ExternalReview] finding on the blocked story (CHANGES_REQUESTED
-# # always posts; COMMENTED only with content; APPROVED/DISMISSED are
-# # recorded silently). De-duped by high-water marks on the gate. Rides the
+# # PR's reviews + inline review comments + Conversation-tab comments (#353
+# # — the only channel open to the PR's own author, i.e. the operator on
+# # every loom-delivered PR) and posts anything new as a one-shot
+# # [ExternalReview] finding on the blocked story (CHANGES_REQUESTED always
+# # posts; COMMENTED only with content; APPROVED/DISMISSED are recorded
+# # silently; conversation comments post unless empty or loom-authored).
+# # De-duped by high-water marks on the gate. Rides the
 # # pr_merge_poll_enabled pass. Set false for a pure merge poll.
 # trusted_bots = ["copilot-pull-request-reviewer[bot]"]
 # # Bot logins whose findings may seed automated remediation (ADR 0011:

@@ -405,7 +405,9 @@ comments has nothing to key on and would be reported forever or never. So:
   `submitted_at: datetime | None`.
 - The marker stores the highest-seen review id **and** the set of seen comment
   ids — reviews and inline comments are separate streams and neither subsumes
-  the other.
+  the other. (Post-hoc, #353: Conversation-tab comments are a **third** stream
+  with its own mark — the only channel open to the PR's own author, i.e. the
+  operator on every loom-delivered PR, which the first two streams missed.)
 - **Policy per state, declared not implied:** `CHANGES_REQUESTED` posts a
   finding; `COMMENTED` posts one only if it carries inline comments or a
   non-empty body; `APPROVED` and `DISMISSED` are recorded in the marker and

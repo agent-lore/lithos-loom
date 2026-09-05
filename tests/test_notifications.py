@@ -307,3 +307,18 @@ def test_notice_github_ref_prefers_the_issue_then_the_delivered_pr() -> None:
     assert notice_github_ref({}) is None
     assert notice_github_ref(None) is None
     assert notice_github_ref({"github_issue_url": ""}) is None
+
+
+async def test_github_mention_is_marked_as_loom_authored() -> None:
+    """The mention is posted under the operator's (trusted) login on a PR the
+    watcher sweeps for conversation comments (#353) — it must carry the marker
+    that keeps it out of the external-review stream."""
+    from lithos_loom.github_models import is_loom_pr_comment
+
+    commenter = _Commenter()
+    await Notifier(
+        desktop_toast=False, github_login="dave", github=commenter
+    ).needs_human(_NOTICE)
+    ((_, _, body),) = commenter.calls
+    assert is_loom_pr_comment(body)
+    assert body.startswith("@dave [NeedsHuman]")

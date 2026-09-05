@@ -1,10 +1,11 @@
 """External review findings → converge's fix loop (PRD S2, slice B).
 
 The fetch + injection seam for ``develop converge --from-github``: pull a
-delivered PR's external review material (reviews + inline comments), split it
-by the ADR 0011 trust line, and render the trusted findings as a synthetic
-``external`` reviewer outcome that seeds converge's coder via
-``LoopEntry.intake_reviews`` — bypassing the local-panel intake whose
+delivered PR's external review material (reviews + inline comments +
+Conversation-tab comments, #353), split it by the ADR 0011 trust line, and
+render the trusted findings as a synthetic ``external`` reviewer outcome that
+seeds converge's coder via ``LoopEntry.intake_reviews`` — bypassing the
+local-panel intake whose
 ``already_clean`` short-circuit is exactly the panel that missed the defects
 (ADR 0011 decision 1 / 7).
 
@@ -18,7 +19,9 @@ the prompt path).
 by an *authenticated* landed-fix reply (``github_models.is_landed_fix_reply``
 + the reply author holds write/admin — PR #344 re-reviews 1+2) is excluded,
 as is a non-``CHANGES_REQUESTED`` summary review by a handled author, so the
-operator-triggered path and the watcher sweep agree on what is still live.
+operator-triggered path and the watcher sweep agree on what is still live. A
+conversation comment is proven handled the same way by a landed-fix
+conversation reply naming it (``issue_comment_reply_target``).
 
 **Severity:** external reviewers state none; every finding enters at
 ``minor`` (the loop's own panel and gate judge the *result* — the external
@@ -35,6 +38,9 @@ from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.github_models import (
     is_automated_reply,
     is_landed_fix_reply,
+    issue_comment_is_actionable,
+    issue_comment_reply_body,
+    issue_comment_reply_target,
     parse_github_ref,
     review_is_actionable,
 )
@@ -49,6 +55,7 @@ __all__ = [
     "ExternalFinding",
     "ExternalOutcome",
     "GitHubError",  # re-export: the CLI seam catches it without a GitHub-tier import
+    "issue_comment_reply_body",  # re-export: same reason, for the reply epilogue
     "ack_instruction",
     "external_intake_reviews",
     "fetch_external_findings",
@@ -69,7 +76,9 @@ class ExternalFinding:
     finding written against a sha the branch has moved past may already be
     fixed and must be re-anchored, never re-fixed blindly). ``comment_id`` is
     ``None`` for a summary-only review — the reply epilogue can only thread a
-    reply onto comment-backed findings.
+    reply onto comment-backed findings. ``issue_comment_id`` (#353) marks a
+    Conversation-tab comment: no path, line or sha (it reviews the PR, not a
+    hunk), and the epilogue answers it with a conversation comment naming it.
     """
 
     author: str
@@ -83,6 +92,7 @@ class ExternalFinding:
     line: int | None = None
     body: str = ""
     severity: str = "minor"
+    issue_comment_id: int | None = None
 
 
 def fetch_external_findings(
@@ -103,6 +113,7 @@ def fetch_external_findings(
     ) -> tuple[list[ExternalFinding], list[ExternalFinding]]:
         reviews = await client.list_pull_request_reviews(repo, pr_number)
         comments = await client.list_pull_request_review_comments(repo, pr_number)
+        issue_comments = await client.list_issue_comments(repo, pr_number)
 
         permissions: dict[str, str] = {}
 
@@ -125,6 +136,18 @@ def fetch_external_findings(
                 continue
             if c.author in bots or await _permission(c.author) in _TRUSTED_PERMISSIONS:
                 handled_roots.add(c.in_reply_to_id)
+        # Conversation comments have no thread structure: a landed-fix reply
+        # names its target in its reply line instead (#353).
+        handled_conversation: set[int] = set()
+        for ic in issue_comments:
+            target = issue_comment_reply_target(ic.body)
+            if target is None or not is_landed_fix_reply(ic.body):
+                continue
+            if (
+                ic.author in bots
+                or await _permission(ic.author) in _TRUSTED_PERMISSIONS
+            ):
+                handled_conversation.add(target)
         # Bind suppression to the review that OWNS the handled roots (PR #345
         # review F3) — never to the author across the whole PR, which would
         # hide a later summary re-review behind an ancient fixed root.
@@ -193,6 +216,25 @@ def fetch_external_findings(
                 path=c.path,
                 line=c.line,
                 body=c.body,
+            )
+            (trusted if is_trusted else untrusted).append(finding)
+
+        for ic in issue_comments:
+            if ic.comment_id in handled_conversation:
+                continue
+            if not issue_comment_is_actionable(ic):
+                continue  # empty, or loom's own reply / [NeedsHuman] notice
+            source, is_trusted = await _classify(ic.author)
+            finding = ExternalFinding(
+                author=ic.author,
+                source=source,
+                trusted=is_trusted,
+                review_id=None,
+                comment_id=None,
+                thread_url=ic.html_url,
+                head_sha="",  # reviews the PR, not a commit — no re-anchor note
+                body=ic.body,
+                issue_comment_id=ic.comment_id,
             )
             (trusted if is_trusted else untrusted).append(finding)
 

@@ -34,6 +34,14 @@ classDiagram
     +updated_at datetime
     +html_url str
   }
+  class IssueComment {
+    +comment_id int
+    +author str
+    +body str
+    +html_url str
+    +created_at datetime | None
+    +updated_at datetime | None
+  }
   class PullRequest {
     +repo str
     +number int

@@ -32,11 +32,13 @@ from .errors import LithosLoomError
 from .github_models import (
     GitHubRef,
     Issue,
+    IssueComment,
     PullRequest,
     PullRequestReview,
     PullRequestReviewComment,
     apply_marker,
     parse_github_ref,
+    parse_issue_comment,
     parse_issues_response,
     parse_marker,
     parse_pull_request,
@@ -56,6 +58,7 @@ __all__ = [
     "GitHubRepoNotFoundError",
     "GitHubTransportError",
     "Issue",
+    "IssueComment",
     "PullRequest",
     "PullRequestReview",
     "PullRequestReviewComment",
@@ -403,6 +406,24 @@ class GitHubClient:
             f"/repos/{repo}/pulls/{number}/comments", repo=repo, params=params
         )
         return [parse_pull_request_review_comment(row) for row in rows]
+
+    async def list_issue_comments(
+        self, repo: str, number: int, *, since: datetime | None = None
+    ) -> list[IssueComment]:
+        """Every Conversation-tab comment on the issue/PR, all pages (#353).
+
+        The third external-review stream: the only one a PR's own author can
+        write to. ``since`` bounds the walk exactly as it does for inline
+        review comments (``updated_at``-keyed, so an edited old comment can
+        reappear — the caller's id high-water mark stays the exact de-dup).
+        """
+        params: dict[str, Any] = {"per_page": 100}
+        if since is not None:
+            params["since"] = _isoformat_utc(since)
+        rows = await self._get_all_pages(
+            f"/repos/{repo}/issues/{number}/comments", repo=repo, params=params
+        )
+        return [parse_issue_comment(row) for row in rows]
 
     async def get_collaborator_permission(self, repo: str, username: str) -> str:
         """Permission of ``username`` on ``repo``: admin / write / read / none.

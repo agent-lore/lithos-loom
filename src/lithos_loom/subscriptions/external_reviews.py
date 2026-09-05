@@ -4,27 +4,32 @@ A delivered PR sits behind a ``pr`` gate awaiting a human merge. Reviews left
 on it in the meantime — Copilot, other bots, humans — were invisible to loom:
 the reconcile sweep polled only merge state. This module is the detection half
 of PRD S2 (``docs/prd/pr-reconciliation.md``): each sweep of a still-open
-gate, read the PR's reviews and inline review comments and surface anything
-new as a one-shot ``[ExternalReview]`` finding on the blocked *story* (the
-task an operator watches), with a de-dup marker on the *gate* (the task the
-sweep re-visits).
+gate, read the PR's reviews, inline review comments and Conversation-tab
+comments and surface anything new as a one-shot ``[ExternalReview]`` finding
+on the blocked *story* (the task an operator watches), with a de-dup marker
+on the *gate* (the task the sweep re-visits).
 
-De-dup is a pair of **high-water marks** — ``last_review_id`` and
-``last_comment_id`` — not a seen-id set: GitHub REST ids are monotonically
-increasing, so the marks are bounded and a summary-only review (an
-``APPROVED``/``CHANGES_REQUESTED`` with zero inline comments, which comment-id
-de-dup cannot represent at all) keys on its review id. The marker is scoped to
-the PR url, mirroring ``develop_pr_merge_state``: a replacement PR (fresh url,
-fresh id space) re-evaluates from scratch. It is deliberately a **separate
-metadata key** from the merge marker so neither can trip the other's skip
-logic.
+De-dup is a triple of **high-water marks** — ``last_review_id``,
+``last_comment_id`` and ``last_issue_comment_id`` — not a seen-id set: GitHub
+REST ids are monotonically increasing, so the marks are bounded and a
+summary-only review (an ``APPROVED``/``CHANGES_REQUESTED`` with zero inline
+comments, which comment-id de-dup cannot represent at all) keys on its review
+id. The three streams have separate id spaces, hence three marks. The marker
+is scoped to the PR url, mirroring ``develop_pr_merge_state``: a replacement
+PR (fresh url, fresh id space) re-evaluates from scratch. It is deliberately a
+**separate metadata key** from the merge marker so neither can trip the
+other's skip logic.
 
 Per-state posting policy (PRD S2): ``CHANGES_REQUESTED`` always posts;
 ``COMMENTED`` (and any unrecognised state) posts only with a non-empty body;
 ``APPROVED`` / ``DISMISSED`` advance the marker silently — an approval is not
 an operator action item. Inline comments post unless they are thread replies
-or loom's own automated replies. Skipped material still advances the marks so
-it is never re-fetched or re-considered.
+or loom's own automated replies. Conversation comments (#353 — the only
+channel open to the PR's own author, i.e. the operator on every
+loom-delivered PR) post unless empty or loom-authored (a reply or a
+``[NeedsHuman]`` notice, both posted under the operator's login). Skipped
+material still advances the marks so it is never re-fetched or
+re-considered.
 
 Remediation (injecting trusted findings into ``develop converge``) is the
 follow-up slice; this module only detects and reports.
@@ -41,12 +46,15 @@ from lithos_loom.gates import PrGateSpec
 from lithos_loom.github_client import (
     GitHubClient,
     GitHubError,
+    IssueComment,
     PullRequestReview,
     PullRequestReviewComment,
 )
 from lithos_loom.github_models import (
     is_automated_reply,
     is_landed_fix_reply,
+    issue_comment_is_actionable,
+    issue_comment_reply_target,
     review_is_actionable,
 )
 from lithos_loom.subscriptions import SubscriptionContext
@@ -56,18 +64,20 @@ __all__ = [
     "EXTERNAL_REVIEW",
     "REVIEW_SEEN_KEY",
     "IngestResult",
+    "PendingMarkerProvider",
     "ingest_external_reviews",
 ]
 
 # Stable, machine-parseable finding prefix (see AGENTS.md): new external review
-# activity (a PR review, or inline review comments) landed on a delivered PR
-# that is still awaiting merge behind its `pr` gate.
+# activity (a PR review, inline review comments, or Conversation-tab comments)
+# landed on a delivered PR that is still awaiting merge behind its `pr` gate.
 EXTERNAL_REVIEW = "[ExternalReview]"
 
 # Gate-metadata key holding the ingestion state: {"pr_url", "last_review_id",
-# "last_comment_id", "last_comment_at"}. pr_url scopes the marks; the ids are
-# the exact de-dup; last_comment_at (ISO) feeds the bounded `since` cursor on
-# the comment fetch so a long-lived PR isn't re-paginated every sweep.
+# "last_comment_id", "last_comment_at", "last_issue_comment_id",
+# "last_issue_comment_at"}. pr_url scopes the marks; the ids are the exact
+# de-dup; the *_at stamps (ISO) feed the bounded `since` cursor on each
+# comment fetch so a long-lived PR isn't re-paginated every sweep.
 REVIEW_SEEN_KEY = "external_review_seen"
 
 # Repo permission levels whose holders' landed-fix replies count as proof —
@@ -100,6 +110,15 @@ class IngestResult:
     failed: bool = False
     actionable_reviews: list[PullRequestReview] = field(default_factory=list)
     actionable_comments: list[PullRequestReviewComment] = field(default_factory=list)
+    actionable_issue_comments: list[IssueComment] = field(default_factory=list)
+
+
+# The pending-trigger provider's shape: the three actionable streams, in the
+# order the finding lists them.
+PendingMarkerProvider = Callable[
+    [list[PullRequestReview], list[PullRequestReviewComment], list[IssueComment]],
+    Awaitable[Mapping[str, Any] | None],
+]
 
 
 @dataclass(frozen=True)
@@ -109,6 +128,8 @@ class _Seen:
     last_review_id: int
     last_comment_id: int
     last_comment_at: str | None
+    last_issue_comment_id: int = 0
+    last_issue_comment_at: str | None = None
 
 
 def _read_seen(gate: Any, pr_url: str) -> _Seen:
@@ -121,27 +142,36 @@ def _read_seen(gate: Any, pr_url: str) -> _Seen:
     review_id = raw.get("last_review_id")
     comment_id = raw.get("last_comment_id")
     comment_at = raw.get("last_comment_at")
+    issue_comment_id = raw.get("last_issue_comment_id")
+    issue_comment_at = raw.get("last_issue_comment_at")
     return _Seen(
         last_review_id=review_id if isinstance(review_id, int) else 0,
         last_comment_id=comment_id if isinstance(comment_id, int) else 0,
         last_comment_at=comment_at if isinstance(comment_at, str) else None,
+        last_issue_comment_id=(
+            issue_comment_id if isinstance(issue_comment_id, int) else 0
+        ),
+        last_issue_comment_at=(
+            issue_comment_at if isinstance(issue_comment_at, str) else None
+        ),
     )
 
 
-def _since(seen: _Seen) -> datetime | None:
-    """The stored boundary minus a one-second overlap.
+def _since(stamp: str | None) -> datetime | None:
+    """A stored boundary minus a one-second overlap.
 
     GitHub's ``since`` is strictly-after with second precision (PR #344
     review, finding 1): a comment that becomes visible in the same second as
     the stored maximum would be excluded forever — the id high-water mark
     cannot rescue a row that is never returned. Querying one second early
     re-fetches at most a second's worth of rows, and the id mark drops the
-    repeats.
+    repeats. Shared by the inline and conversation streams (#353), each
+    with its own stamp.
     """
-    if seen.last_comment_at is None:
+    if stamp is None:
         return None
     try:
-        boundary = datetime.fromisoformat(seen.last_comment_at)
+        boundary = datetime.fromisoformat(stamp)
     except ValueError:
         return None  # corrupt cursor → unbounded fetch; ids still de-dup
     return boundary - timedelta(seconds=1)
@@ -157,29 +187,48 @@ def _comment_posts(
     return not is_automated_reply(comment.body)
 
 
+# A handled-proof candidate names the stream it belongs to: inline review
+# comments and conversation comments have separate id spaces (#353), so a
+# bare int could name one root in each.
+_INLINE = "inline"
+_CONVERSATION = "conversation"
+_RootKey = tuple[str, int]
+
+
 def _fixed_reply_candidates(
     comments: list[PullRequestReviewComment],
-) -> list[tuple[int, str]]:
-    """``(root_id, reply_author)`` pairs whose reply *claims* a landed fix.
+    issue_comments: list[IssueComment],
+) -> list[tuple[_RootKey, str]]:
+    """``(root_key, reply_author)`` pairs whose reply *claims* a landed fix.
 
     A claim, not proof: the marker and the ``Fixed in`` head are public body
     strings any commenter can copy. :func:`_proven_handled` authenticates the
-    author before the claim may suppress anything.
+    author before the claim may suppress anything. Inline replies name their
+    root by ``in_reply_to_id``; conversation replies (which have no thread
+    structure) by the reply line loom writes into them.
     """
-    return [
-        (c.in_reply_to_id, c.author)
+    inline = [
+        ((_INLINE, c.in_reply_to_id), c.author)
         for c in comments
         if c.in_reply_to_id is not None and is_landed_fix_reply(c.body)
     ]
+    conversation: list[tuple[_RootKey, str]] = []
+    for c in issue_comments:
+        if not is_landed_fix_reply(c.body):
+            continue
+        target = issue_comment_reply_target(c.body)
+        if target is not None:
+            conversation.append(((_CONVERSATION, target), c.author))
+    return inline + conversation
 
 
 async def _proven_handled(
-    candidates: list[tuple[int, str]],
+    candidates: list[tuple[_RootKey, str]],
     repo: str,
     github: GitHubClient,
     ctx: SubscriptionContext,
-) -> frozenset[int]:
-    """Root-comment ids proven handled by an authenticated landed-fix reply.
+) -> frozenset[_RootKey]:
+    """Root-comment keys proven handled by an authenticated landed-fix reply.
 
     Backfill guard (PR #344 review, finding 2): before S2 slice D retired the
     inline Copilot round, delivery remediated root comments, pushed the fix
@@ -205,9 +254,9 @@ async def _proven_handled(
       (fail closed for *suppression*: a duplicate report is recoverable, a
       hidden root is not).
     """
-    handled: set[int] = set()
+    handled: set[_RootKey] = set()
     author_trusted: dict[str, bool] = {}
-    for root_id, author in candidates:
+    for root_key, author in candidates:
         trusted = author_trusted.get(author)
         if trusted is None:
             try:
@@ -226,7 +275,7 @@ async def _proven_handled(
             trusted = permission in _TRUSTED_PERMISSIONS
             author_trusted[author] = trusted
         if trusted:
-            handled.add(root_id)
+            handled.add(root_key)
     return frozenset(handled)
 
 
@@ -241,6 +290,7 @@ def _render_summary(
     pr_url: str,
     reviews: list[PullRequestReview],
     comments: list[PullRequestReviewComment],
+    issue_comments: list[IssueComment],
     *,
     story_id: str,
     gate_id: str,
@@ -260,7 +310,17 @@ def _render_summary(
         lines.append(
             f"- comment by {comment.author} on {loc}: {_excerpt(comment.body)}{url}"
         )
-    hidden = max(0, len(reviews) - _MAX_LISTED) + max(0, len(comments) - _MAX_LISTED)
+    for comment in issue_comments[:_MAX_LISTED]:
+        url = f" ({comment.html_url})" if comment.html_url else ""
+        lines.append(
+            f"- comment by {comment.author} on the PR conversation: "
+            f"{_excerpt(comment.body)}{url}"
+        )
+    hidden = (
+        max(0, len(reviews) - _MAX_LISTED)
+        + max(0, len(comments) - _MAX_LISTED)
+        + max(0, len(issue_comments) - _MAX_LISTED)
+    )
     if hidden:
         lines.append(f"- …and {hidden} more (see the PR)")
     if extra_note:
@@ -286,15 +346,19 @@ def _new_marker(
     seen: _Seen,
     reviews: list[PullRequestReview],
     comments: list[PullRequestReviewComment],
+    issue_comments: list[IssueComment],
 ) -> dict[str, Any]:
     """Advance the marks over EVERYTHING fetched — including replies, silent
-    states and loom's own automated replies — so skipped material is never
-    re-fetched (the `since` cursor) or re-considered (the ids)."""
+    states and loom's own automated replies / notices — so skipped material
+    is never re-fetched (the `since` cursors) or re-considered (the ids)."""
     marker: dict[str, Any] = {
         "pr_url": pr_url,
         "last_review_id": max(seen.last_review_id, *(r.review_id for r in reviews), 0),
         "last_comment_id": max(
             seen.last_comment_id, *(c.comment_id for c in comments), 0
+        ),
+        "last_issue_comment_id": max(
+            seen.last_issue_comment_id, *(c.comment_id for c in issue_comments), 0
         ),
     }
     stamps = [c.updated_at for c in comments if c.updated_at is not None]
@@ -302,6 +366,11 @@ def _new_marker(
         marker["last_comment_at"] = max(stamps).isoformat()
     elif seen.last_comment_at is not None:
         marker["last_comment_at"] = seen.last_comment_at
+    issue_stamps = [c.updated_at for c in issue_comments if c.updated_at is not None]
+    if issue_stamps:
+        marker["last_issue_comment_at"] = max(issue_stamps).isoformat()
+    elif seen.last_issue_comment_at is not None:
+        marker["last_issue_comment_at"] = seen.last_issue_comment_at
     return marker
 
 
@@ -314,11 +383,7 @@ async def ingest_external_reviews(
     *,
     extra_note: str | None = None,
     post_merge: bool = False,
-    pending_marker_for: Callable[
-        [list[PullRequestReview], list[PullRequestReviewComment]],
-        Awaitable[Mapping[str, Any] | None],
-    ]
-    | None = None,
+    pending_marker_for: PendingMarkerProvider | None = None,
 ) -> IngestResult:
     """Ingest new review activity on one still-open gate's PR. Never raises.
 
@@ -349,7 +414,10 @@ async def ingest_external_reviews(
     try:
         reviews = await github.list_pull_request_reviews(spec.repo, spec.pr_number)
         comments = await github.list_pull_request_review_comments(
-            spec.repo, spec.pr_number, since=_since(seen)
+            spec.repo, spec.pr_number, since=_since(seen.last_comment_at)
+        )
+        issue_comments = await github.list_issue_comments(
+            spec.repo, spec.pr_number, since=_since(seen.last_issue_comment_at)
         )
     except GitHubError as exc:
         ctx.logger.warning(
@@ -365,11 +433,18 @@ async def ingest_external_reviews(
 
     new_reviews = [r for r in reviews if r.review_id > seen.last_review_id]
     new_comments = [c for c in comments if c.comment_id > seen.last_comment_id]
-    if not new_reviews and not new_comments:
+    new_issue_comments = [
+        c for c in issue_comments if c.comment_id > seen.last_issue_comment_id
+    ]
+    if not new_reviews and not new_comments and not new_issue_comments:
         return IngestResult()  # idle PR: no fetch produced news, write nothing
 
-    handled_roots = await _proven_handled(
-        _fixed_reply_candidates(comments), spec.repo, github, ctx
+    handled_keys = await _proven_handled(
+        _fixed_reply_candidates(comments, issue_comments), spec.repo, github, ctx
+    )
+    handled_roots = frozenset(i for kind, i in handled_keys if kind == _INLINE)
+    handled_conversation = frozenset(
+        i for kind, i in handled_keys if kind == _CONVERSATION
     )
     # A non-blocking summary review ALL of whose own roots the inline round
     # already remediated is part of that same handled history — suppressing
@@ -395,11 +470,22 @@ async def ingest_external_reviews(
         and not (r.state != "CHANGES_REQUESTED" and r.review_id in handled_review_ids)
     ]
     actionable_comments = [c for c in new_comments if _comment_posts(c, handled_roots)]
+    actionable_issue_comments = [
+        c
+        for c in new_issue_comments
+        if c.comment_id not in handled_conversation and issue_comment_is_actionable(c)
+    ]
     marker: dict[str, Any] = {
-        REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, reviews, comments)
+        REVIEW_SEEN_KEY: _new_marker(
+            spec.pr_url, seen, reviews, comments, issue_comments
+        )
     }
 
-    if not actionable_reviews and not actionable_comments:
+    if (
+        not actionable_reviews
+        and not actionable_comments
+        and not actionable_issue_comments
+    ):
         # Only silent material (approvals, replies, our own automated replies):
         # advance the marks so it is never re-walked, post nothing. The marker
         # IS this material's durable record, so a failed write is a retryable
@@ -429,7 +515,9 @@ async def ingest_external_reviews(
         return IngestResult(failed=not marked)
 
     if pending_marker_for is not None:
-        pending = await pending_marker_for(actionable_reviews, actionable_comments)
+        pending = await pending_marker_for(
+            actionable_reviews, actionable_comments, actionable_issue_comments
+        )
         if pending:
             marker.update(pending)
     landed = await post_finding_then_mark(
@@ -439,6 +527,7 @@ async def ingest_external_reviews(
             spec.pr_url,
             actionable_reviews,
             actionable_comments,
+            actionable_issue_comments,
             story_id=story_id,
             gate_id=gate.id,
             extra_note=extra_note,
@@ -457,15 +546,18 @@ async def ingest_external_reviews(
         # ``failed`` lets the merged-path caller defer resolution too.
         return IngestResult(failed=True)
     ctx.logger.info(
-        "external-reviews: posted %s for %s (%d review(s), %d comment(s)) on story %s",
+        "external-reviews: posted %s for %s (%d review(s), %d inline comment(s), "
+        "%d conversation comment(s)) on story %s",
         EXTERNAL_REVIEW,
         spec.pr_url,
         len(actionable_reviews),
         len(actionable_comments),
+        len(actionable_issue_comments),
         story_id,
     )
     return IngestResult(
         posted=True,
         actionable_reviews=actionable_reviews,
         actionable_comments=actionable_comments,
+        actionable_issue_comments=actionable_issue_comments,
     )
