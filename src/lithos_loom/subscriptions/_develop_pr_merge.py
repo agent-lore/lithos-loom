@@ -8,7 +8,9 @@ github-watcher child's periodic reconcile sweep (``children/github_watcher.py``,
 which enumerates open tasks and holds a ``GitHubClient``), it reads the gate's
 PR merge state from GitHub and, on merge, completes the story **then** the gate;
 on closed-unmerged / deleted it leaves the gate open with a
-``[DeliveredPRClosed]`` finding.
+``[DeliveredPRClosed]`` finding; while still open it also reports
+landability (:mod:`.pr_landability`, PRD S1) and ingests external reviews
+(:mod:`.external_reviews`, PRD S2).
 
 De-dup lives in a single ``metadata.develop_pr_merge_state`` marker written on
 the GATE (mirrors ``github_state_snapshot``), scoped to the PR url it resolved
@@ -34,6 +36,7 @@ from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
+from lithos_loom.subscriptions.pr_landability import check_landability
 
 __all__ = [
     "DELIVERED_PR_CLOSED",
@@ -219,6 +222,10 @@ async def reconcile_pr_gate(
         return "closed_unmerged"
 
     # state == "open" — still in flight; re-poll next sweep (no merge marker).
+    # PRD S1: say so on the story when the PR cannot merge as it stands. Runs
+    # on every merge poll (no separate dial): it reads fields the fetch above
+    # already returned and writes only on a change.
+    await check_landability(gate, spec, story_id, pr, ctx)
     if ingest_reviews:
         budget = None
         note = None
