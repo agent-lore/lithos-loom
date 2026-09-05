@@ -70,6 +70,9 @@ classDiagram
     +body str
     +head_repo str
     +base_repo str
+    +mergeable bool | None
+    +mergeable_state str
+    +base_sha str
   }
   class PullRequestReview {
     +author str

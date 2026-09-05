@@ -1380,3 +1380,30 @@ async def test_issue_comments_pass_since_when_given() -> None:
     params = route.calls[0].request.url.params
     assert params["since"] == "2026-08-30T00:00:00+00:00"
     assert params["per_page"] == "100"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pull_request_parse_carries_landability_fields() -> None:
+    """PRD S1: mergeable / mergeable_state / base.sha come off the single-PR
+    endpoint the sweep already fetches; a null mergeable stays None."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 9,
+                "state": "open",
+                "merged": False,
+                "mergeable": None,
+                "mergeable_state": "unknown",
+                "head": {"sha": "h" * 40, "ref": "feature"},
+                "base": {"sha": "b" * 40, "ref": "main"},
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        pr = await client.get_pull_request(_REPO, 9)
+    assert pr is not None
+    assert pr.mergeable is None and pr.mergeable_state == "unknown"
+    assert pr.base_sha == "b" * 40 and pr.head_sha == "h" * 40

@@ -621,3 +621,28 @@ async def test_gate_merged_silent_review_marker_failure_defers() -> None:
     assert outcome == "merged"
     marked = await _get(client, gate.id)
     assert "external_review_seen" in marked.metadata
+
+
+async def test_still_open_branch_checks_landability(caplog: Any) -> None:
+    """PRD S1: the merge poll's still-open branch classifies the PR and posts
+    [PRConflicted] on the story when GitHub reports it cannot merge."""
+    from dataclasses import replace
+
+    from lithos_loom.subscriptions.pr_landability import LANDABILITY_KEY, PR_CONFLICTED
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dirty = replace(
+        _pr(state="open", merged=False),
+        head_sha="h" * 40,
+        base_sha="b" * 40,
+        base_ref="main",
+        mergeable=False,
+        mergeable_state="dirty",
+    )
+    outcome = await reconcile_pr_gate(gate, _github(dirty), _ctx(client))
+
+    assert outcome == "still_open"
+    findings = [f["summary"] for f in client._findings]
+    assert any(s.startswith(PR_CONFLICTED) for s in findings)
+    assert (await _get(client, gate.id)).metadata[LANDABILITY_KEY]["state"] == "dirty"

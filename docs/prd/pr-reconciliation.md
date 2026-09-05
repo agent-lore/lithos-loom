@@ -1061,7 +1061,7 @@ Reconciling explicitly, so the two do not drift:
 | # | slice | ships | cost |
 |---|---|---|---|
 | 0 | **S0 real task brief + PR body** — implemented, PR #333 **open** | the coder, the panel AC and the PR body all get the description | none |
-| 1 | S1 landability + `[PRConflicted]` | two fields, one branch, one marker | none |
+| 1 | S1 landability + `[PRConflicted]` — **shipped** (detection; the `behind` auto-update rides with S3) | two fields, one branch, one marker | none |
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |

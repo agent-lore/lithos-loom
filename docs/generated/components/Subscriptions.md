@@ -35,6 +35,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 3 | 2 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
+| `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -135,6 +136,10 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.external_reviews`
 - class `IngestResult` — What one ingestion pass posted, for the remediation dispatcher (slice C).
 - def `ingest_external_reviews` — Ingest new review activity on one still-open gate's PR. Never raises.
+
+### `lithos_loom.subscriptions.pr_landability`
+- def `classify_landability` — ``unknown`` / ``dirty`` / ``mergeable`` from the fetched PR.
+- def `check_landability` — Classify one still-open gate's PR and report a conflict once per ``(pr_url, base_sha, head_sha)``. Returns the state label. Never raises.
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.

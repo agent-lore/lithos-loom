@@ -140,6 +140,12 @@ class PullRequest:
     (``owner/name``); when they differ the PR head lives on a **fork**, which
     converge (``review_resolve``) reads to refuse pushing to a fork branch under
     origin credentials.
+
+    ``mergeable`` / ``mergeable_state`` / ``base_sha`` (PRD S1 landability):
+    GitHub computes ``mergeable`` lazily and returns ``null`` on a cold fetch —
+    kept as ``None`` here, which the sweep reads as "ask again", never as
+    clean. ``base_sha`` is the base branch's tip at fetch time, so a base move
+    is observable from the sweep's stored marker.
     """
 
     repo: str
@@ -155,6 +161,9 @@ class PullRequest:
     body: str = ""
     head_repo: str = ""
     base_repo: str = ""
+    mergeable: bool | None = None
+    mergeable_state: str = ""
+    base_sha: str = ""
 
 
 @dataclass(frozen=True)
@@ -285,6 +294,11 @@ def parse_pull_request(row: dict[str, Any], *, repo: str) -> PullRequest:
         body=str(row.get("body") or ""),
         head_repo=str((head.get("repo") or {}).get("full_name") or ""),
         base_repo=str((base.get("repo") or {}).get("full_name") or ""),
+        mergeable=mergeable
+        if isinstance(mergeable := row.get("mergeable"), bool)
+        else None,
+        mergeable_state=str(row.get("mergeable_state") or ""),
+        base_sha=str(base.get("sha") or ""),
     )
 
 
