@@ -42,7 +42,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Entrypoint | 2 | 624 | 494 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
 | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
 | Evals | 15 | 3910 | 3167 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 12 |
-| GitHub | 2 | 1101 | 852 | 6 | 1 | 0.14 | 14 (`lithos_loom.github_models.parse_pull_request`) | 1 |
+| GitHub | 2 | 1121 | 865 | 6 | 1 | 0.14 | 14 (`lithos_loom.github_models.parse_pull_request`) | 1 |
 | LithosClient | 1 | 2210 | 1851 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 225 | 185 | 2 | 1 | 0.33 | 5 (`lithos_loom.notifications.Notifier._github_mention`) | 0 |
 | Plugins | 44 | 14684 | 11675 | 2 | 5 | 0.71 | 97 (`lithos_loom.plugins.story_develop.__main__.main`) | 34 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **135**, lines: **46128**, SLOC: **36780**
+- Modules: **135**, lines: **46148**, SLOC: **36793**
 - Largest module: `lithos_loom.lithos_client` (2210 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -69,7 +69,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1186**, cyclomatic > 10: **107**
+- Functions: **1187**, cyclomatic > 10: **107**
 
 Top 10 most complex functions:
 
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **19** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.62** (74540 test lines / 46128 source lines)
+- Test-to-source line ratio: **1.62** (74597 test lines / 46148 source lines)

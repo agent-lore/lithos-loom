@@ -400,8 +400,24 @@ LOOM_NOTICE_MARKER = "_(automated notice by lithos-loom)_"
 
 # The head of the notices posted before the marker existed (b91177d2 slice A
 # shipped 2026-09-01; the marker landed with #353) — recognised so a PR that
-# already carries one is not re-ingested after the upgrade.
-_LEGACY_NOTICE_HEAD = "[NeedsHuman] loom stopped on"
+# already carries one is not re-ingested after the upgrade. Anchored at the
+# very start of the body (`@<login> ` then the fixed phrase): a human QUOTING
+# or discussing the phrase is not a notice (PR #354 review, finding 1).
+_LEGACY_NOTICE_RE = re.compile(r"\A@\S+ \[NeedsHuman\] loom stopped on ")
+
+
+def _has_marker_line(body: str, marker: str) -> bool:
+    """True when *marker* is a standalone, unquoted line of *body*.
+
+    Loom writes its markers on their own line; a quoted copy (GitHub's
+    Quote-reply prefixes every quoted line with ``> ``) or an in-sentence
+    mention is not loom speaking (PR #354 review, finding 1). Structural
+    on purpose: ``marker in body`` would let a human verdict that quotes a
+    loom comment be discarded as automation, and the sweep's marks would
+    then bury it forever.
+    """
+    return any(line.strip() == marker for line in body.splitlines())
+
 
 # Review states recorded but never actionable: an approval is not an operator
 # action item, and a dismissal has already had its say.
@@ -418,8 +434,12 @@ _ISSUE_COMMENT_REPLY_RE = re.compile(
 
 
 def is_automated_reply(body: str) -> bool:
-    """True for loom's own automated PR replies (never re-ingested)."""
-    return AUTOMATED_REPLY_MARKER in body
+    """True for loom's own automated PR replies (never re-ingested).
+
+    Structural — the marker must be its own unquoted line — so a human
+    reply that quotes a loom reply is still a human reply.
+    """
+    return _has_marker_line(body, AUTOMATED_REPLY_MARKER)
 
 
 def is_landed_fix_reply(body: str) -> bool:
@@ -436,9 +456,9 @@ def is_loom_pr_comment(body: str) -> bool:
     """True for any conversation comment loom itself posted (a reply or a
     notice, marked or legacy-shaped) — never re-ingested (#353)."""
     return (
-        AUTOMATED_REPLY_MARKER in body
-        or LOOM_NOTICE_MARKER in body
-        or _LEGACY_NOTICE_HEAD in body
+        is_automated_reply(body)
+        or _has_marker_line(body, LOOM_NOTICE_MARKER)
+        or _LEGACY_NOTICE_RE.match(body) is not None
     )
 
 

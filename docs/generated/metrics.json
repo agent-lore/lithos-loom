@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.evals.review.case.load_case"
       }
     ],
-    "total_functions": 1186
+    "total_functions": 1187
   },
   "domain": {
     "associations": 2,
@@ -422,13 +422,13 @@
       },
       "GitHub": {
         "classes": 13,
-        "functions": 48,
+        "functions": 49,
         "largest_module": "lithos_loom.github_client",
         "largest_module_lines": 621,
-        "lines": 1101,
+        "lines": 1121,
         "modules": 2,
         "public_symbols": 29,
-        "sloc": 852
+        "sloc": 865
       },
       "LithosClient": {
         "classes": 14,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 46128,
+    "total_lines": 46148,
     "total_modules": 135,
-    "total_sloc": 36780
+    "total_sloc": 36793
   },
   "tests": {
     "ratio": 1.62,
-    "src_lines": 46128,
-    "test_lines": 74540
+    "src_lines": 46148,
+    "test_lines": 74597
   }
 }

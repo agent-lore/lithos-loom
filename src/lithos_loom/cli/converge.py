@@ -420,4 +420,4 @@ def _post_external_replies(
         if landed:
             posted += 1
     if posted:
-        typer.echo(f"posted {posted} thread repl(ies) on {repo}#{pr_number}")
+        typer.echo(f"posted {posted} external review repl(ies) on {repo}#{pr_number}")

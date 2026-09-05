@@ -12,6 +12,7 @@ from lithos_loom.github_models import (
     AUTOMATED_REPLY_MARKER,
     LOOM_NOTICE_MARKER,
     IssueComment,
+    is_automated_reply,
     is_landed_fix_reply,
     is_loom_pr_comment,
     issue_comment_is_actionable,
@@ -61,3 +62,59 @@ def test_reply_target_reads_only_the_reply_line_never_the_prose() -> None:
     prose = f"Not changed — see {_URL} for context\n\n{AUTOMATED_REPLY_MARKER}"
     assert issue_comment_reply_target(prose) is None
     assert issue_comment_reply_target("plain human text") is None
+
+
+# ── PR #354 review, finding 1: a QUOTED loom marker is not loom's ─────
+#
+# GitHub's Quote-reply carries the quoted comment into the new one as
+# `> ...` lines. A human verdict that quotes a loom notice or reply must
+# never be discarded as automation — seeing the operator's Conversation
+# comment is the whole point of the stream.
+
+
+def test_quoted_loom_comment_followed_by_a_human_verdict_is_human() -> None:
+    quoted_notice = (
+        "> _(automated notice by lithos-loom)_\n\n"
+        "Still not ready: the retry path drops state."
+    )
+    assert not is_loom_pr_comment(quoted_notice)
+    quoted_reply = (
+        f"> Fixed in abc123 — guarded it\n> \n> {AUTOMATED_REPLY_MARKER}\n\n"
+        "No it isn't — the guard is on the wrong branch."
+    )
+    assert not is_loom_pr_comment(quoted_reply)
+    assert not is_automated_reply(quoted_reply)
+    quoted_legacy = (
+        "> @dave [NeedsHuman] loom stopped on **x** (`max_rounds`): y\n\n"
+        "Resolved this by hand; re-dispatch."
+    )
+    assert not is_loom_pr_comment(quoted_legacy)
+    # …and mentioning the phrase mid-sentence is discussion, not a notice.
+    assert not is_loom_pr_comment(
+        "the '[NeedsHuman] loom stopped on' notice fired twice here"
+    )
+    assert issue_comment_is_actionable(_c(quoted_notice))
+
+
+def test_genuine_loom_shapes_are_still_recognised_structurally() -> None:
+    # A marker on its own line (what loom writes), with surrounding blank
+    # lines, trailing whitespace, or CRLF endings.
+    assert is_loom_pr_comment(f"Not changed — x\n\n{AUTOMATED_REPLY_MARKER}")
+    assert is_loom_pr_comment(f"Not changed — x\r\n\r\n{AUTOMATED_REPLY_MARKER}  \r\n")
+    assert is_loom_pr_comment(
+        f"@dave [NeedsHuman] loom stopped on x\n\n{LOOM_NOTICE_MARKER}"
+    )
+    assert is_loom_pr_comment(
+        f"@dave [NeedsHuman] loom stopped on x\n\n{LOOM_NOTICE_MARKER}\n"
+    )
+    # The legacy notice: the fixed head at the very start of the body.
+    assert is_loom_pr_comment(
+        "@dave [NeedsHuman] loom stopped on **x** (`max_rounds`): y"
+    )
+    assert is_automated_reply(f"Fixed in abc — done\n\n{AUTOMATED_REPLY_MARKER}")
+    # The reply line loom appends AFTER the marker on conversation replies
+    # keeps the marker structural.
+    body = issue_comment_reply_body(
+        f"Fixed in abc — done\n\n{AUTOMATED_REPLY_MARKER}", _URL
+    )
+    assert is_loom_pr_comment(body) and is_landed_fix_reply(body)
