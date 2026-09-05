@@ -25,7 +25,11 @@ import pytest
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.config import RouteConfig, RouteMatch
 from lithos_loom.errors import LithosClientError, PluginContractError
+from lithos_loom.gates import create_pr_gate
+from lithos_loom.github_client import PullRequest
 from lithos_loom.lithos_client import Task
+from lithos_loom.subscriptions import SubscriptionContext
+from lithos_loom.subscriptions._develop_pr_merge import reconcile_pr_gate
 from lithos_loom.subscriptions.dispatch_guards import (
     READY_QUERY_LIMIT,
     AttemptStampStore,
@@ -34,6 +38,7 @@ from lithos_loom.subscriptions.dispatch_guards import (
     last_attempt_key,
     record_failed_attempt,
     task_fingerprint,
+    task_payload,
 )
 from lithos_loom.subscriptions.route_runner import RouteRunner
 from tests.support import FakeLithosClient, make_task
@@ -468,6 +473,106 @@ async def test_blocks_edge_chain_dispatches_in_order_end_to_end(
 
     assert await _status("blocker") == "completed"
     assert await _status("dependent") == "completed"
+
+
+async def test_watcher_merge_nudge_dispatches_the_unblocked_dependent(
+    tmp_path: Path,
+) -> None:
+    """#350 across the two children, through the bus.
+
+    The github-watcher child completes a delivered story when its PR merges;
+    the route-runner child lives in a different process with no IPC, and the
+    story's own `task.completed` names the story, not its dependents. The
+    resolver's nudge closes that gap by using **Lithos as the bus**: a no-op
+    `task_update` on each newly-unblocked id, which Lithos re-emits as
+    `task.updated`. The `_relay` below stands in for the SSE source that
+    carries it to the runner; without the nudge nothing reaches the bus and
+    the dependent waits for a restart.
+    """
+    fake = FakeLithosClient(agent_id="lithos-orchestrator-test")
+    for tid in ("story", "dependent"):
+        fake.add_task(
+            make_task(
+                tid,
+                status="open",
+                tags=("trigger:story-develop",),
+                metadata={"project": "loom"},
+            )
+        )
+    fake.add_edge(from_task_id="story", to_task_id="dependent", type="blocks")
+    gate_id = await create_pr_gate(
+        fake,
+        story_id="story",
+        story_title="story",
+        pr_url="https://github.com/agent-lore/lithos-loom/pull/7",
+        project="loom",
+        agent="lithos-loom-agent",
+    )
+    gate = await fake.task_get(task_id=gate_id)
+    assert gate is not None
+
+    bus = EventBus()
+    original_update = fake.task_update
+
+    async def _relay(**kwargs: Any) -> Any:
+        """Stand-in for `LithosEventStream`: every task_update Lithos accepts
+        comes back to the runner's bus as a live `lithos.task.updated`."""
+        stamp = await original_update(**kwargs)
+        task = await fake.task_get(task_id=kwargs["task_id"])
+        if task is not None:
+            await bus.publish(
+                Event(
+                    type="lithos.task.updated",
+                    timestamp=datetime.now(UTC),
+                    payload=task_payload(task),
+                )
+            )
+        return stamp
+
+    fake.task_update = _relay  # type: ignore[method-assign]
+    runner = RouteRunner(
+        route=_route(),
+        bus=bus,
+        lithos=fake,
+        agent_id="lithos-orchestrator-test",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=AsyncMock(
+            return_value={
+                "schema_version": 1,
+                "task_id": "dependent",
+                "status": "succeeded",
+                "exit_code": 0,
+            }
+        ),
+    )
+
+    github = AsyncMock()
+    github.get_pull_request.return_value = PullRequest(
+        repo="agent-lore/lithos-loom",
+        number=7,
+        state="closed",
+        merged=True,
+        merged_at=datetime(2026, 9, 5, tzinfo=UTC),
+        merge_commit_sha="abc123",
+    )
+    outcome = await reconcile_pr_gate(
+        gate,
+        github,
+        SubscriptionContext(
+            lithos=fake,
+            logger=logging.getLogger("test-watcher"),
+            agent_id="lithos-loom-agent",
+        ),
+    )
+    assert outcome == "merged"
+
+    await _run_all(runner, seconds=0.3)
+
+    claimed = [c["task_id"] for c in fake.calls_to("task_claim")]
+    assert claimed == ["dependent"]
+    dependent = await fake.task_get(task_id="dependent")
+    assert dependent is not None and dependent.status == "completed"
 
 
 # ── Claim race ─────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ gate is now the sole merge-tracking and re-dispatch path.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
@@ -277,12 +278,20 @@ async def _resolve_gate_merged(
     Both completes swallow ``task_not_found`` so a race with the issue
     close-mirror (or a retry after a partial run) converges. The gate leaving
     the open set is the de-dup — no marker needed on the merged path.
+
+    The story completion's ``unblocked`` ids are then nudged (see
+    :func:`_nudge_unblocked`) so a now-ready dependent dispatches without
+    waiting for a daemon restart.
     """
-    if story_id is not None and not await _complete_swallowing(
-        story_id, ctx, subject=f"story {story_id}"
-    ):
-        return False  # transient — leave gate open, retry next sweep
-    if not await _complete_swallowing(gate.id, ctx, subject=f"gate {gate.id}"):
+    unblocked: list[str] = []
+    if story_id is not None:
+        released = await _complete_swallowing(
+            story_id, ctx, subject=f"story {story_id}"
+        )
+        if released is None:
+            return False  # transient — leave gate open, retry next sweep
+        unblocked = released
+    if await _complete_swallowing(gate.id, ctx, subject=f"gate {gate.id}") is None:
         return False
     if story_id is not None:
         summary = (
@@ -300,6 +309,7 @@ async def _resolve_gate_merged(
                 story_id,
                 exc,
             )
+    await _nudge_unblocked(unblocked, story_id, ctx)
     ctx.logger.info(
         "pr-gate: resolved gate %s on PR merge %s (%s)",
         gate.id,
@@ -309,26 +319,92 @@ async def _resolve_gate_merged(
     return True
 
 
+async def _nudge_unblocked(
+    task_ids: Sequence[str], story_id: str | None, ctx: SubscriptionContext
+) -> None:
+    """Re-surface the dependents the story's completion just readied (#350).
+
+    ``task_complete`` names the tasks whose last ``blocks`` predecessor just
+    cleared. The route-runner has US6 machinery for exactly this
+    (``RouteRunner._re_dispatch_unblocked``) but it lives in a *different*
+    child with no IPC, and the ``task.completed`` for the story names the
+    story, not its dependents — so a tagged, now-ready dependent would sit
+    until a restart's bootstrap replay.
+
+    The nudge therefore goes through **Lithos as the bus** (the architecture's
+    ``sources → bus → subscribers``, no inter-child IPC): a no-op
+    ``task_update(metadata={})`` bumps ``updated_at`` and emits
+    ``lithos.task.updated``, which the runner picks up on its normal SSE path
+    — route match, ready check, collision-safe claim. Double-evaluation is
+    harmless; the claim decides.
+
+    Best-effort. The merge is already resolved by the time we get here, so a
+    failed nudge must not undo it: it posts ``[Friction]`` on the story and
+    leaves the bootstrap replay as the backstop. Never raises.
+    """
+    for task_id in task_ids:
+        try:
+            await ctx.lithos.task_update(task_id=task_id, metadata={})
+        except LithosClientError as exc:
+            ctx.logger.warning(
+                "[Friction] pr-gate: nudging newly-unblocked %s failed (%s); "
+                "it waits for the next daemon restart",
+                task_id,
+                exc,
+            )
+            if story_id is not None:
+                await _post_friction(
+                    story_id,
+                    ctx,
+                    summary=(
+                        f"[Friction] pr-gate: story {story_id} completed on PR "
+                        f"merge but nudging newly-unblocked task {task_id} "
+                        f"failed ({exc}); it will not dispatch until the "
+                        f"daemon restarts or the task is touched"
+                    ),
+                )
+        else:
+            ctx.logger.info(
+                "pr-gate: nudged newly-unblocked %s after story %s completed",
+                task_id,
+                story_id,
+            )
+
+
+async def _post_friction(
+    task_id: str, ctx: SubscriptionContext, *, summary: str
+) -> None:
+    """Post a ``[Friction]`` finding, swallowing a failure to post it."""
+    try:
+        await ctx.lithos.finding_post(task_id=task_id, summary=summary)
+    except LithosClientError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: posting friction for task %s failed (%s)",
+            task_id,
+            exc,
+        )
+
+
 async def _complete_swallowing(
     task_id: str, ctx: SubscriptionContext, *, subject: str
-) -> bool:
+) -> list[str] | None:
     """``task_complete`` swallowing ``task_not_found`` (already terminal).
 
-    Returns ``True`` when the task is now terminal (completed here or already
-    was), ``False`` on a transient error the caller should retry next sweep.
+    Returns the completion's newly-**unblocked** task ids when the task is now
+    terminal (empty when it already was — nothing was released by us), and
+    ``None`` on a transient error the caller should retry next sweep.
     """
     try:
-        await ctx.lithos.task_complete(task_id=task_id)
+        return await ctx.lithos.task_complete(task_id=task_id)
     except LithosClientError as exc:
         if exc.code == "task_not_found":
-            return True  # already terminal — fine
+            return []  # already terminal — fine, and it released nothing here
         ctx.logger.warning(
             "[Friction] pr-gate: completing %s failed (%s); will retry next sweep",
             subject,
             exc,
         )
-        return False
-    return True
+        return None
 
 
 async def _gate_closed(
