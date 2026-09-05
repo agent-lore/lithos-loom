@@ -902,8 +902,8 @@ The `[story_develop].default_models` layer (§3.1) is a **host-wide, per-tool** 
 ```python
 @dataclass(frozen=True)
 class Event:
-    type: str                   # dotted name, e.g. "lithos.task.created"
-    timestamp: datetime         # UTC; when the source published the event
+    type: str  # dotted name, e.g. "lithos.task.created"
+    timestamp: datetime  # UTC; when the source published the event
     payload: Mapping[str, Any]  # event-type-specific; see §6.4
 ```
 
