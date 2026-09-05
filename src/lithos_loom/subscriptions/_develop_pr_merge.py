@@ -21,6 +21,7 @@ gate is now the sole merge-tracking and re-dispatch path.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
@@ -277,11 +278,25 @@ async def _resolve_gate_merged(
     Both completes swallow ``task_not_found`` so a race with the issue
     close-mirror (or a retry after a partial run) converges. The gate leaving
     the open set is the de-dup — no marker needed on the merged path.
+
+    The story completion's ``unblocked`` ids are nudged (see
+    :func:`_nudge_unblocked`) so a now-ready dependent dispatches without
+    waiting for a daemon restart. That happens **before the gate is
+    completed**, deliberately: completing the gate is the durable "this merge
+    is resolved" transition — it takes the gate out of the open set the sweep
+    enumerates, so anything after it (a crash, a kill, a cancellation) is
+    never retried. With the nudge ahead of it, an interrupted batch leaves the
+    gate open and the next sweep re-enters this branch, where
+    :func:`_complete_story` recovers the ids the lost response would have
+    named. Anything that leaves those ids *unknown* — a failed completion, or
+    a graph read that did not answer — returns ``False`` here rather than
+    resolving the gate, so the retry stays possible.
     """
-    if story_id is not None and not await _complete_swallowing(
-        story_id, ctx, subject=f"story {story_id}"
-    ):
-        return False  # transient — leave gate open, retry next sweep
+    if story_id is not None:
+        to_nudge = await _complete_story(story_id, ctx)
+        if to_nudge is None:
+            return False  # transient — leave gate open, retry next sweep
+        await _nudge_unblocked(to_nudge, story_id, ctx)
     if not await _complete_swallowing(gate.id, ctx, subject=f"gate {gate.id}"):
         return False
     if story_id is not None:
@@ -309,6 +324,143 @@ async def _resolve_gate_merged(
     return True
 
 
+async def _nudge_unblocked(
+    task_ids: Sequence[str], story_id: str | None, ctx: SubscriptionContext
+) -> None:
+    """Re-surface the dependents the story's completion just readied (#350).
+
+    ``task_complete`` names the tasks whose last ``blocks`` predecessor just
+    cleared. The route-runner has US6 machinery for exactly this
+    (``RouteRunner._re_dispatch_unblocked``) but it lives in a *different*
+    child with no IPC, and the ``task.completed`` for the story names the
+    story, not its dependents — so a tagged, now-ready dependent would sit
+    until a restart's bootstrap replay.
+
+    The nudge therefore goes through **Lithos as the bus** (the architecture's
+    ``sources → bus → subscribers``, no inter-child IPC): a no-op
+    ``task_update(metadata={})`` bumps ``updated_at`` and emits
+    ``lithos.task.updated``, which the runner picks up on its normal SSE path
+    — route match, ready check, collision-safe claim. Double-evaluation is
+    harmless; the claim decides.
+
+    The write is not free of side effects, which is why the caller keeps this
+    set to the ids Lithos actually named: bumping ``updated_at`` consumes the
+    "nobody has edited it since it failed" evidence the #339 bootstrap-replay
+    guard reads (``dispatch_guards.declines_bootstrap_replay``), so nudging a
+    task that is not even ready could cost an unrequested re-run of a failed
+    story on the next restart.
+
+    Best-effort. The story is completed by the time we get here, so a failed
+    nudge must not undo the merge resolution: it posts ``[Friction]`` on the
+    story, lets the caller finish resolving the gate, and leaves the bootstrap
+    replay as the backstop. Never raises a ``LithosClientError`` — but
+    cancellation propagates, and the caller's ordering (nudge before the gate's
+    terminal transition) is what makes an interrupted batch retryable.
+    """
+    for task_id in task_ids:
+        try:
+            await ctx.lithos.task_update(task_id=task_id, metadata={})
+        except LithosClientError as exc:
+            ctx.logger.warning(
+                "[Friction] pr-gate: nudging newly-unblocked %s failed (%s); "
+                "it waits for the next daemon restart",
+                task_id,
+                exc,
+            )
+            if story_id is not None:
+                await _post_friction(
+                    story_id,
+                    ctx,
+                    summary=(
+                        f"[Friction] pr-gate: story {story_id} completed on PR "
+                        f"merge but nudging newly-unblocked task {task_id} "
+                        f"failed ({exc}); it will not dispatch until the "
+                        f"daemon restarts or the task is touched"
+                    ),
+                )
+        else:
+            ctx.logger.info(
+                "pr-gate: nudged newly-unblocked %s after story %s completed",
+                task_id,
+                story_id,
+            )
+
+
+async def _blocks_dependents(
+    story_id: str, ctx: SubscriptionContext
+) -> list[str] | None:
+    """The tasks the story ``blocks`` — the durable stand-in for a completion's
+    ``unblocked`` response once that response is gone (see
+    :func:`_complete_story`).
+
+    The graph edges are the record: unlike the response they survive a crash,
+    so a retried sweep can still nudge. Returns ``None`` when the read itself
+    failed — "could not read the edges" must NOT collapse into "there are no
+    edges", or a transient failure here would silently nudge nobody and the
+    caller would then complete the gate, putting the story's dependents beyond
+    the reach of any later sweep. ``None`` defers the whole resolution instead.
+    """
+    try:
+        edges = await ctx.lithos.task_edge_list(
+            task_id=story_id, direction="outgoing", types=["blocks"]
+        )
+    except LithosClientError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: listing story %s's dependents failed (%s); "
+            "leaving the gate open to retry the nudge next sweep",
+            story_id,
+            exc,
+        )
+        return None
+    return [edge.to_task_id for edge in edges]
+
+
+async def _post_friction(
+    task_id: str, ctx: SubscriptionContext, *, summary: str
+) -> None:
+    """Post a ``[Friction]`` finding, swallowing a failure to post it."""
+    try:
+        await ctx.lithos.finding_post(task_id=task_id, summary=summary)
+    except LithosClientError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: posting friction for task %s failed (%s)",
+            task_id,
+            exc,
+        )
+
+
+async def _complete_story(story_id: str, ctx: SubscriptionContext) -> list[str] | None:
+    """Complete the story and answer **who to nudge**, or ``None`` to retry.
+
+    Three outcomes, deliberately kept apart (collapsing any two of them loses
+    dependents):
+
+    * **completed here** → the ids Lithos names as newly unblocked, which is
+      the authoritative answer and often empty for a good reason: an ordinary
+      fan-in dependent still waiting on a *sibling* blocker is not ready, and
+      must not be nudged. No fallback runs on this branch.
+    * **already terminal** (``task_not_found`` — the issue close-mirror got
+      there first, or an earlier sweep completed the story and died mid-nudge)
+      → the response that would have named them is gone for good, so recover
+      the candidates from the durable graph (:func:`_blocks_dependents`).
+    * **transient failure** (either the completion or that graph read) →
+      ``None``: who to nudge is unknown, so the caller leaves the gate open
+      and the next sweep tries the whole branch again.
+    """
+    try:
+        return await ctx.lithos.task_complete(task_id=story_id)
+    except LithosClientError as exc:
+        if exc.code == "task_not_found":
+            return await _blocks_dependents(story_id, ctx)
+        ctx.logger.warning(
+            "[Friction] pr-gate: completing story %s failed (%s); "
+            "will retry next sweep",
+            story_id,
+            exc,
+        )
+        return None
+
+
 async def _complete_swallowing(
     task_id: str, ctx: SubscriptionContext, *, subject: str
 ) -> bool:
@@ -316,6 +468,8 @@ async def _complete_swallowing(
 
     Returns ``True`` when the task is now terminal (completed here or already
     was), ``False`` on a transient error the caller should retry next sweep.
+    The story has its own variant (:func:`_complete_story`) because it also
+    has to answer *who this released*.
     """
     try:
         await ctx.lithos.task_complete(task_id=task_id)

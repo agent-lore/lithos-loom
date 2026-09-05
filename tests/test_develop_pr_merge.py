@@ -10,10 +10,13 @@ GitHub + Lithos are stubbed; the ``task`` is a minimal id + metadata object.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
+
+import pytest
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import create_pr_gate
@@ -161,6 +164,183 @@ async def test_gate_merged_story_completion_failure_is_not_counted_resolved() ->
     assert (await _get(client, story)).status == "open"
     assert MERGE_STATE_KEY not in (await _get(client, gate.id)).metadata
     assert not any(f["summary"].startswith(GATE_RESOLVED) for f in client._findings)
+
+
+async def _blocked_dependent(client: FakeLithosClient, blocker: str) -> str:
+    """A second tagged story the first one ``blocks`` — the T2-slice shape."""
+    dependent = await client.task_create(
+        title="US8", tags=["trigger:story-develop"], metadata={"project": "p"}
+    )
+    await client.task_edge_upsert(
+        from_task_id=blocker, to_task_id=dependent, type="blocks"
+    )
+    return dependent
+
+
+async def test_gate_merged_nudges_the_tasks_the_story_unblocked() -> None:
+    """#350: the story completion names its newly-unblocked dependents, and each
+    gets a no-op ``task_update`` so Lithos emits the ``task.updated`` the
+    route-runner child (no IPC to this one) dispatches off. Without the nudge a
+    tagged, now-ready dependent waits for a daemon restart."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    assert outcome == "merged"
+    nudges = [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+    assert [c["metadata"] for c in nudges] == [{}]  # a no-op write, stamp only
+    # …and the nudge is worth sending: Lithos now offers the dependent as ready.
+    assert dependent in [t.id for t in await client.task_ready()]
+
+
+async def test_gate_merged_nudges_nothing_when_no_dependent_was_released() -> None:
+    """The common case — a story with no dependents — writes nothing extra."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    before = len(client.calls_to("task_update"))
+
+    await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    assert len(client.calls_to("task_update")) == before
+
+
+async def test_gate_merged_interrupted_mid_nudge_is_retried_next_sweep() -> None:
+    """The nudge lands BEFORE the gate's terminal transition, so a sweep killed
+    mid-batch is retryable: the gate is still open, and the second sweep — whose
+    story completion can no longer name anybody — recovers the dependents from
+    the story's `blocks` edges."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+
+    async def _killed(**kwargs: Any) -> Any:
+        raise asyncio.CancelledError  # the watcher process is taken down
+
+    client.task_update = _killed  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await reconcile_pr_gate(
+            gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+        )
+
+    # Story completed, gate NOT completed → the sweep still has the gate to
+    # retry from, and the dependent has not been nudged.
+    assert (await _get(client, story)).status == "completed"
+    assert (await _get(client, gate.id)).status == "open"
+    assert not [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+
+    del client.task_update  # back to the real implementation
+    outcome = await reconcile_pr_gate(
+        await _get(client, gate.id),
+        _github(_pr(state="closed", merged=True)),
+        _ctx(client),
+    )
+
+    assert outcome == "merged"
+    nudges = [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+    assert [c["metadata"] for c in nudges] == [{}]
+    assert (await _get(client, gate.id)).status == "completed"
+
+
+async def test_gate_merged_unreadable_dependents_defer_the_gate() -> None:
+    """The recovery read must not fail silently: "could not read the edges" is
+    not "there are no edges". A transient `task_edge_list` failure on the retry
+    sweep leaves the gate OPEN (outcome `error`), so a third sweep can still
+    nudge — completing the gate here would put the dependent beyond reach."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+    await client.task_complete(task_id=story)  # an earlier sweep died mid-nudge
+    original = client.task_edge_list
+
+    async def _fail_blocks_read(**kwargs: Any) -> Any:
+        if kwargs.get("types") == ["blocks"]:
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_edge_list = _fail_blocks_read  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    assert outcome == "error"
+    assert (await _get(client, gate.id)).status == "open"
+    assert not [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+
+    # Lithos recovers → the next sweep resolves the gate and nudges after all.
+    del client.task_edge_list  # back to the real implementation
+    outcome = await reconcile_pr_gate(
+        await _get(client, gate.id),
+        _github(_pr(state="closed", merged=True)),
+        _ctx(client),
+    )
+
+    assert outcome == "merged"
+    assert (await _get(client, gate.id)).status == "completed"
+    nudges = [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+    assert [c["metadata"] for c in nudges] == [{}]
+
+
+async def test_gate_merged_does_not_nudge_a_still_blocked_fan_in_dependent() -> None:
+    """The ordinary fan-in case (A and B both block C; A's PR merges first) is a
+    LEGITIMATELY empty `unblocked`, not a lost response — C is not ready. No
+    graph fallback runs and C is left alone: a nudge would bump its `updated_at`
+    and consume the #339 bootstrap-replay guard's evidence for nothing."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+    sibling = await client.task_create(title="US9", metadata={"project": "p"})
+    await client.task_edge_upsert(
+        from_task_id=sibling, to_task_id=dependent, type="blocks"
+    )
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    assert outcome == "merged"
+    assert not [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+    assert not [
+        c for c in client.calls_to("task_edge_list") if c["types"] == ["blocks"]
+    ]
+
+
+async def test_gate_merged_nudge_failure_posts_friction_and_still_resolves() -> None:
+    """A failed nudge is best-effort: it surfaces as [Friction] on the story and
+    leaves the merged outcome (story + gate completed) untouched — the restart
+    bootstrap remains the backstop."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+    original = client.task_update
+
+    async def _fail_nudge(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == dependent:
+            raise LithosClientError("server_error", "boom")
+        return await original(**kwargs)
+
+    client.task_update = _fail_nudge  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    assert outcome == "merged"
+    assert (await _get(client, story)).status == "completed"
+    assert (await _get(client, gate.id)).status == "completed"
+    friction = [
+        f
+        for f in client.findings
+        if f["summary"].startswith("[Friction]") and dependent in f["summary"]
+    ]
+    assert [f["task_id"] for f in friction] == [story]
+    assert any(f["summary"].startswith(GATE_RESOLVED) for f in client.findings)
 
 
 async def test_gate_closed_unmerged_leaves_gate_open_and_warns() -> None:
