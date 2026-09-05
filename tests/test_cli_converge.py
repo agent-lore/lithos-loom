@@ -404,14 +404,17 @@ def test_exit_code_follows_status(stubs: dict, status: str, code: int) -> None:
 
 
 def _ext(comment_id, *, author="dave", trusted=True, body="a claim"):
+    from lithos_loom.github_review_activity import ReviewStream
+    from lithos_loom.github_review_streams import ReplyMode
     from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
 
     return ExternalFinding(
         author=author,
         source="human",
         trusted=trusted,
-        review_id=None,
-        comment_id=comment_id,
+        stream=ReviewStream.INLINE,
+        activity_id=comment_id,
+        reply_mode=ReplyMode.THREAD,
         thread_url=f"https://example/t/{comment_id}",
         head_sha="h" * 40,
         path="src/x.py",
@@ -602,16 +605,19 @@ def test_from_github_answers_a_conversation_finding_on_the_conversation(
     )
 
     url = "https://github.com/o/r/pull/142#issuecomment-5551158842"
+    from lithos_loom.github_review_activity import ReviewStream
+    from lithos_loom.github_review_streams import ReplyMode
+
     finding = ExternalFinding(
         author="davesnowdon",
         source="human",
         trusted=True,
-        review_id=None,
-        comment_id=None,
+        stream=ReviewStream.CONVERSATION,
+        activity_id=5551158842,
+        reply_mode=ReplyMode.CONVERSATION,
         thread_url=url,
         head_sha="",
         body="Verdict: two P1 gaps",
-        issue_comment_id=5551158842,
     )
     github_stubs["trusted"] = [finding]
     pr_comments: list[tuple[int, str]] = []
@@ -659,3 +665,50 @@ def test_from_github_answers_a_conversation_finding_on_the_conversation(
     assert pr == 142
     assert body.startswith("Fixed in pppppppppp")
     assert f"replying to {url}" in body
+
+
+def test_reply_transports_cover_every_reply_mode_and_none_posts_nothing(
+    github_stubs: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #356 re-review: the epilogue routes on the reply capability, never
+    the stream — the table is exhaustive, NONE answers nowhere, and a mode
+    without a transport fails loudly instead of being skipped."""
+    from lithos_loom.github_review_streams import ReplyMode
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    assert set(converge_cli.REPLY_TRANSPORTS) == set(ReplyMode)
+    summary = _ext(500)
+    summary = summary.__class__(**{**summary.__dict__, "reply_mode": ReplyMode.NONE})
+    github_stubs["trusted"] = [summary]
+    args = [
+        "converge",
+        "#142",
+        "--repo",
+        str(tmp_path),
+        "--ac",
+        "do it",
+        "--from-github",
+    ]
+
+    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+        return ConvergeResult(
+            status="converged",
+            change=change,
+            pushed=True,
+            pushed_sha="p" * 40,
+            external_outcomes=tuple(
+                ExternalOutcome(f"f-00{i}", f, "fixed", detail="x")
+                for i, f in enumerate(external_findings or (), 1)
+            ),
+        )
+
+    monkeypatch.setattr(converge_cli, "converge_pr", fake_converge_pr)
+    result = runner.invoke(develop_app, args, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert github_stubs["replies"] == []  # NONE: nothing to answer on
+
+    github_stubs["trusted"] = [_ext(7)]
+    monkeypatch.setattr(converge_cli, "REPLY_TRANSPORTS", {ReplyMode.NONE: None})
+    with pytest.raises(LookupError):
+        runner.invoke(develop_app, args, catch_exceptions=False)

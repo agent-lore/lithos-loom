@@ -514,14 +514,17 @@ def test_converge_result_json_round_trips_the_documented_shape(
 
 
 def _ext_finding(comment_id: int = 7, body: str = "leaks a handle"):
+    from lithos_loom.github_review_activity import ReviewStream
+    from lithos_loom.github_review_streams import ReplyMode
     from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
 
     return ExternalFinding(
         author="dave",
         source="human",
         trusted=True,
-        review_id=None,
-        comment_id=comment_id,
+        stream=ReviewStream.INLINE,
+        activity_id=comment_id,
+        reply_mode=ReplyMode.THREAD,
         thread_url=f"https://example/thread/{comment_id}",
         head_sha=_HEAD,
         path="src/x.py",
@@ -600,7 +603,7 @@ def test_external_mode_skips_intake_and_seeds_surviving_findings(
     assert by_id["f-001"].disposition == "rejected"
     assert "refutes" in by_id["f-001"].detail
     assert by_id["f-002"].disposition == "fixed"  # acked FIXED + approved loop
-    assert by_id["f-001"].finding.comment_id == 7
+    assert by_id["f-001"].finding.activity_id == 7
 
 
 def test_external_mode_all_rejected_builds_no_coder(

@@ -59,7 +59,9 @@ from typing import Any
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
-from lithos_loom.github_client import GitHubClient, GitHubError
+from lithos_loom.github_client import GitHubClient
+from lithos_loom.github_review_activity import ExternalReviewActivity
+from lithos_loom.github_review_streams import AuthorTrust
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
 from lithos_loom.subscriptions.external_reviews import (
@@ -98,8 +100,6 @@ CONVERGE_SETTING = "develop_external_review_converge"
 # the global single-flight slot forever. Generous: a thorough multi-round
 # converge is an hours-scale run.
 RUN_TIMEOUT_SECONDS = 4 * 3600
-
-_TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
 
 # The completion/friction findings quote at most this much subprocess output.
 _OUTPUT_TAIL_CHARS = 600
@@ -343,16 +343,11 @@ class ExternalRemediation:
         """
 
         async def provider(
-            reviews: list[Any], comments: list[Any], issue_comments: list[Any]
+            activities: list[ExternalReviewActivity],
         ) -> dict[str, Any] | None:
             if self._settings.budget <= 0 or story_id is None:
                 return None
-            batch = IngestResult(
-                posted=True,
-                actionable_reviews=list(reviews),
-                actionable_comments=list(comments),
-                actionable_issue_comments=list(issue_comments),
-            )
+            batch = IngestResult(posted=True, actionable=list(activities))
             verdict = await self._dispatchable(batch, spec.repo, budget, github, ctx)
             if verdict != "yes":
                 return None
@@ -516,43 +511,34 @@ class ExternalRemediation:
         github: GitHubClient,
         ctx: SubscriptionContext,
     ) -> str:
-        """``"yes"`` / ``"no_trusted"`` / ``"own_sha_only"`` for the batch."""
-        items = (
-            [(r.author, r.commit_id) for r in ingest.actionable_reviews]
-            + [
-                (c.author, c.commit_id or c.original_commit_id)
-                for c in ingest.actionable_comments
-            ]
-            # No sha: a conversation comment is never an own-sha re-review.
-            + [(c.author, "") for c in ingest.actionable_issue_comments]
-        )
-        trusted_cache: dict[str, bool] = {}
+        """``"yes"`` / ``"no_trusted"`` / ``"own_sha_only"`` for the batch.
+
+        A conversation comment carries no sha, so it is never own-sha: a
+        human verdict left after loom's push is exactly what must dispatch.
+        """
+        trust = self._author_trust(repo, github)
         any_trusted = False
-        for author, sha in items:
-            trusted = trusted_cache.get(author)
-            if trusted is None:
-                trusted = await self._trusted(author, repo, github, ctx)
-                trusted_cache[author] = trusted
-            if not trusted:
+        for a in ingest.actionable:
+            if not await trust.is_trusted(a.author):
                 continue
             any_trusted = True
-            if budget.last_loom_pushed_sha and sha == budget.last_loom_pushed_sha:
+            if (
+                budget.last_loom_pushed_sha
+                and a.head_sha == budget.last_loom_pushed_sha
+            ):
                 continue  # a re-review of loom's own fix in flight
             return "yes"
         return "own_sha_only" if any_trusted else "no_trusted"
 
-    async def _trusted(
-        self, author: str, repo: str, github: GitHubClient, ctx: SubscriptionContext
-    ) -> bool:
-        if author in self._settings.trusted_bots:
-            return True
-        try:
-            permission = await github.get_collaborator_permission(repo, author)
-        except GitHubError:
-            # Fail closed for dispatch: an unverifiable author never triggers
-            # an agent run. Detection already reported the material.
-            return False
-        return permission in _TRUSTED_PERMISSIONS
+    def _author_trust(self, repo: str, github: GitHubClient) -> AuthorTrust:
+        """Allowlisted bots + write/admin humans; an unverifiable author never
+        triggers an agent run (fail closed for dispatch — detection already
+        reported the material)."""
+
+        async def permission_of(author: str) -> str:
+            return await github.get_collaborator_permission(repo, author)
+
+        return AuthorTrust(permission_of, bots=self._settings.trusted_bots)
 
     async def _project_repo(
         self, gate: Any, story_id: str, ctx: SubscriptionContext

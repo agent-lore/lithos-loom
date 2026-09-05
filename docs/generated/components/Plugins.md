@@ -30,7 +30,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 13 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 7 |
+| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 8 |
 | `lithos_loom.plugins.story_develop.external_triage` | S | 1 | 2 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -173,6 +173,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.external_reviews`
 - class `ExternalFinding` — One external review finding, with enough provenance to reply to it.
+- def `finding_from_activity` — The intake's finding for one normalised row (#355): identity and the reply capability come from the row and its stream's adapter.
 - def `fetch_external_findings` — Fetch a PR's live external findings, split ``(trusted, untrusted)``.
 - def `findings_to_handoff_text` — Render external findings as a synthetic review handoff.
 - def `external_intake_reviews` — Build the synthetic intake that seeds converge's coder, plus the ``finding_id → ExternalFinding`` map the reply epilogue threads back on.

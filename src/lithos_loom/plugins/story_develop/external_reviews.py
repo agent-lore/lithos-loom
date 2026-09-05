@@ -15,13 +15,11 @@ write/admin may seed the coder; everyone else's findings are returned in the
 An author whose permission cannot be verified is untrusted (fail closed for
 the prompt path).
 
-**Suppression parity with the sweep:** a root comment already proven handled
-by an *authenticated* landed-fix reply (``github_models.is_landed_fix_reply``
-+ the reply author holds write/admin — PR #344 re-reviews 1+2) is excluded,
-as is a non-``CHANGES_REQUESTED`` summary review by a handled author, so the
-operator-triggered path and the watcher sweep agree on what is still live. A
-conversation comment is proven handled the same way by a landed-fix
-conversation reply naming it (``issue_comment_reply_target``).
+**Suppression parity with the sweep (#355):** what is still live — the
+per-stream actionability rules and the authenticated landed-fix proof (PR
+#344 re-reviews 1+2, PR #345 F3) — is decided by the shared
+:mod:`lithos_loom.github_review_activity`, so the operator-triggered path and
+the watcher sweep cannot disagree.
 
 **Severity:** external reviewers state none; every finding enters at
 ``minor`` (the loop's own panel and gate judge the *result* — the external
@@ -35,14 +33,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from lithos_loom.github_client import GitHubClient, GitHubError
-from lithos_loom.github_models import (
-    is_automated_reply,
-    is_landed_fix_reply,
-    issue_comment_is_actionable,
-    issue_comment_reply_body,
-    issue_comment_reply_target,
-    parse_github_ref,
-    review_is_actionable,
+from lithos_loom.github_models import issue_comment_reply_body, parse_github_ref
+from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
+from lithos_loom.github_review_streams import (
+    AuthorTrust,
+    ReplyMode,
+    actionable,
+    adapter_for,
+    fetch_activity,
+    proven_handled,
 )
 
 from . import handoff
@@ -55,17 +54,17 @@ __all__ = [
     "ExternalFinding",
     "ExternalOutcome",
     "GitHubError",  # re-export: the CLI seam catches it without a GitHub-tier import
+    "ReplyMode",  # re-export: the CLI epilogue routes on it (no GitHub-tier import)
     "issue_comment_reply_body",  # re-export: same reason, for the reply epilogue
     "ack_instruction",
     "external_intake_reviews",
     "fetch_external_findings",
+    "finding_from_activity",
     "findings_to_handoff_text",
     "outcomes_after_loop",
     "parse_coder_acks",
     "pr_number_from_spec",
 ]
-
-_TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
 
 
 @dataclass(frozen=True)
@@ -74,25 +73,47 @@ class ExternalFinding:
 
     ``head_sha`` is the commit the reviewer actually read (load-bearing: a
     finding written against a sha the branch has moved past may already be
-    fixed and must be re-anchored, never re-fixed blindly). ``comment_id`` is
-    ``None`` for a summary-only review — the reply epilogue can only thread a
-    reply onto comment-backed findings. ``issue_comment_id`` (#353) marks a
-    Conversation-tab comment: no path, line or sha (it reviews the PR, not a
-    hunk), and the epilogue answers it with a conversation comment naming it.
+    fixed and must be re-anchored, never re-fixed blindly; empty for a
+    conversation comment, which reviews the PR, not a hunk). ``stream`` +
+    ``activity_id`` are the row's identity; ``reply_mode`` is the reply
+    capability its stream's adapter chose (PR #356 re-review) — the epilogue
+    routes on the mode, never on the stream, so a new stream picks an
+    existing capability in its adapter row and is answered without touching
+    the epilogue.
     """
 
     author: str
     source: str  # "bot" | "human"
     trusted: bool
-    review_id: int | None
-    comment_id: int | None
+    stream: ReviewStream
+    activity_id: int
+    reply_mode: ReplyMode
     thread_url: str
     head_sha: str
     path: str = ""
     line: int | None = None
     body: str = ""
     severity: str = "minor"
-    issue_comment_id: int | None = None
+
+
+def finding_from_activity(
+    a: ExternalReviewActivity, *, source: str, trusted: bool
+) -> ExternalFinding:
+    """The intake's finding for one normalised row (#355): identity and the
+    reply capability come from the row and its stream's adapter."""
+    return ExternalFinding(
+        author=a.author,
+        source=source,
+        trusted=trusted,
+        stream=a.stream,
+        activity_id=a.activity_id,
+        reply_mode=adapter_for(a.stream).reply_mode,
+        thread_url=a.url,
+        head_sha=a.head_sha,
+        path=a.path,
+        line=a.line,
+        body=a.body,
+    )
 
 
 def fetch_external_findings(
@@ -100,144 +121,31 @@ def fetch_external_findings(
 ) -> tuple[list[ExternalFinding], list[ExternalFinding]]:
     """Fetch a PR's live external findings, split ``(trusted, untrusted)``.
 
-    One sync bridge call (``github_call``) covering the review + comment
-    listings and the per-author permission probes. Raises ``GitHubError`` on
-    a listing failure — unlike the retired ``fetch_copilot_comments``, which
-    swallowed it to ``[]``, the caller here must be able to distinguish "no
-    findings" from "could not look".
+    One sync bridge call (``github_call``) covering the three stream listings
+    and the per-author permission probes. Raises ``GitHubError`` on a listing
+    failure — unlike the retired ``fetch_copilot_comments``, which swallowed
+    it to ``[]``, the caller here must be able to distinguish "no findings"
+    from "could not look". What is still live is decided by the same shared
+    rules the watcher sweep applies (:mod:`lithos_loom.github_review_activity`).
     """
-    bots = frozenset(trusted_bots)
 
     async def _op(
         client: GitHubClient,
     ) -> tuple[list[ExternalFinding], list[ExternalFinding]]:
-        reviews = await client.list_pull_request_reviews(repo, pr_number)
-        comments = await client.list_pull_request_review_comments(repo, pr_number)
-        issue_comments = await client.list_issue_comments(repo, pr_number)
+        activities = await fetch_activity(client, repo, pr_number)
 
-        permissions: dict[str, str] = {}
+        async def permission_of(author: str) -> str:
+            return await client.get_collaborator_permission(repo, author)
 
-        async def _permission(author: str) -> str:
-            cached = permissions.get(author)
-            if cached is not None:
-                return cached
-            try:
-                value = await client.get_collaborator_permission(repo, author)
-            except Exception:  # noqa: BLE001 — any probe failure = unverified
-                value = "none"
-            permissions[author] = value
-            return value
-
-        # Roots proven handled: an authenticated landed-fix reply (the same
-        # two-part proof the sweep applies — PR #344 re-reviews 1+2).
-        handled_roots: set[int] = set()
-        for c in comments:
-            if c.in_reply_to_id is None or not is_landed_fix_reply(c.body):
-                continue
-            if c.author in bots or await _permission(c.author) in _TRUSTED_PERMISSIONS:
-                handled_roots.add(c.in_reply_to_id)
-        # Conversation comments have no thread structure: a landed-fix reply
-        # names its target in its reply line instead (#353).
-        handled_conversation: set[int] = set()
-        for ic in issue_comments:
-            target = issue_comment_reply_target(ic.body)
-            if target is None or not is_landed_fix_reply(ic.body):
-                continue
-            if (
-                ic.author in bots
-                or await _permission(ic.author) in _TRUSTED_PERMISSIONS
-            ):
-                handled_conversation.add(target)
-        # Bind suppression to the review that OWNS the handled roots (PR #345
-        # review F3) — never to the author across the whole PR, which would
-        # hide a later summary re-review behind an ancient fixed root.
-        review_roots: dict[int, list[int]] = {}
-        for c in comments:
-            if c.in_reply_to_id is None and c.pull_request_review_id is not None:
-                review_roots.setdefault(c.pull_request_review_id, []).append(
-                    c.comment_id
-                )
-        handled_review_ids = frozenset(
-            rid
-            for rid, roots in review_roots.items()
-            if roots and all(r in handled_roots for r in roots)
-        )
+        trust = AuthorTrust(permission_of, bots=trusted_bots)
+        handled = await proven_handled(activities, trust)
 
         trusted: list[ExternalFinding] = []
         untrusted: list[ExternalFinding] = []
-
-        async def _classify(author: str) -> tuple[str, bool]:
-            if author in bots:
-                return "bot", True
-            return "human", await _permission(author) in _TRUSTED_PERMISSIONS
-
-        for review in reviews:
-            if not review_is_actionable(review):
-                continue
-            # A non-blocking summary review ALL of whose own roots were
-            # handled is part of that handled history; a
-            # CHANGES_REQUESTED is never suppressed — a reply does not prove
-            # the requested changes were accepted.
-            if (
-                review.state != "CHANGES_REQUESTED"
-                and review.review_id in handled_review_ids
-            ):
-                continue
-            source, is_trusted = await _classify(review.author)
-            finding = ExternalFinding(
-                author=review.author,
-                source=source,
-                trusted=is_trusted,
-                review_id=review.review_id,
-                comment_id=None,
-                thread_url=(
-                    f"https://github.com/{repo}/pull/{pr_number}"
-                    f"#pullrequestreview-{review.review_id}"
-                ),
-                head_sha=review.commit_id,
-                body=review.body,
-            )
+        for a in actionable(activities, handled):
+            source, is_trusted = await trust.source(a.author)
+            finding = finding_from_activity(a, source=source, trusted=is_trusted)
             (trusted if is_trusted else untrusted).append(finding)
-
-        for c in comments:
-            if c.in_reply_to_id is not None or is_automated_reply(c.body):
-                continue
-            if c.comment_id in handled_roots:
-                continue
-            source, is_trusted = await _classify(c.author)
-            finding = ExternalFinding(
-                author=c.author,
-                source=source,
-                trusted=is_trusted,
-                review_id=None,
-                comment_id=c.comment_id,
-                thread_url=c.html_url,
-                head_sha=c.commit_id or c.original_commit_id,
-                path=c.path,
-                line=c.line,
-                body=c.body,
-            )
-            (trusted if is_trusted else untrusted).append(finding)
-
-        for ic in issue_comments:
-            if ic.comment_id in handled_conversation:
-                continue
-            if not issue_comment_is_actionable(ic):
-                continue  # empty, or loom's own reply / [NeedsHuman] notice
-            source, is_trusted = await _classify(ic.author)
-            finding = ExternalFinding(
-                author=ic.author,
-                source=source,
-                trusted=is_trusted,
-                review_id=None,
-                comment_id=None,
-                thread_url=ic.html_url,
-                head_sha="",  # reviews the PR, not a commit — no re-anchor note
-                body=ic.body,
-                issue_comment_id=ic.comment_id,
-            )
-            (trusted if is_trusted else untrusted).append(finding)
-
         return trusted, untrusted
 
     return github_call(_op)

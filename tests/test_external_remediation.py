@@ -35,6 +35,12 @@ from lithos_loom.github_client import (
     PullRequestReview,
     PullRequestReviewComment,
 )
+from lithos_loom.github_review_activity import (
+    ExternalReviewActivity,
+    from_conversation_comment,
+    from_inline_comment,
+    from_review,
+)
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.external_remediation import (
     REMEDIATION_KEY,
@@ -120,14 +126,22 @@ def _comment(
     )
 
 
-def _ingest(**kw: Any) -> IngestResult:
-    defaults: dict[str, Any] = {
-        "posted": True,
-        "actionable_reviews": [_review()],
-        "actionable_comments": [],
-    }
-    defaults.update(kw)
-    return IngestResult(**defaults)
+def _act(*rows: Any) -> list[ExternalReviewActivity]:
+    """Normalise raw GitHub rows the way the sweep does (#355)."""
+    out: list[ExternalReviewActivity] = []
+    for row in rows:
+        if isinstance(row, PullRequestReview):
+            out.append(from_review(row, repo="agent-lore/lithos-lens", pr_number=62))
+        elif isinstance(row, PullRequestReviewComment):
+            out.append(from_inline_comment(row))
+        else:
+            out.append(from_conversation_comment(row))
+    return out
+
+
+def _ingest(*rows: Any, posted: bool = True) -> IngestResult:
+    """An ingest result over *rows* (default: one trusted-bot review)."""
+    return IngestResult(posted=posted, actionable=_act(*(rows or (_review(),))))
 
 
 def _github(permission: str = "write") -> AsyncMock:
@@ -394,10 +408,7 @@ async def test_untrusted_only_material_never_dispatches(tmp_path: Path) -> None:
         gate,
         story,
         rem,
-        ingest=_ingest(
-            actionable_reviews=[_review(author="drive-by")],
-            actionable_comments=[_comment(author="drive-by")],
-        ),
+        ingest=_ingest(_review(author="drive-by"), _comment(author="drive-by")),
         github=_github(permission="read"),
     )
 
@@ -423,7 +434,7 @@ async def test_own_sha_material_is_reported_not_remediated(tmp_path: Path) -> No
         spec,
         story,
         budget,
-        _ingest(actionable_reviews=[_review(commit_id=_LOOM_SHA)]),
+        _ingest(_review(commit_id=_LOOM_SHA)),
         _github(),
         _ctx(client),
     )
@@ -689,27 +700,27 @@ async def test_pending_marker_minted_only_for_a_dispatchable_batch(
     )
 
     # Trusted material at a fresh sha: parked.
-    assert await provider([_review()], [], []) == {PENDING_KEY: {"pr_url": _PR_URL}}
+    assert await provider(_act(_review())) == {PENDING_KEY: {"pr_url": _PR_URL}}
     # Untrusted-only material: never parked.
     untrusted = rem.pending_marker_provider(
         spec, "story-1", budget, _github(permission="read"), _ctx(client)
     )
-    assert await untrusted([_review(author="drive-by")], [], []) is None
+    assert await untrusted(_act(_review(author="drive-by"))) is None
     # Own-sha-only material (a re-review of loom's own fix): never parked —
     # so no crash between park and clear can ever hand resume_pending a
     # trigger that bypasses the own-sha loop guard.
-    assert await provider([_review(commit_id=_LOOM_SHA)], [], []) is None
+    assert await provider(_act(_review(commit_id=_LOOM_SHA))) is None
 
     # Budget off / no story: no parking either.
     no_story = rem.pending_marker_provider(spec, None, budget, _github(), _ctx(client))
-    assert await no_story([_review()], [], []) is None
+    assert await no_story(_act(_review())) is None
     disabled = ExternalRemediation(
         _settings(tmp_path, budget=0), spawn=_spawner(None)[0]
     )
     off = disabled.pending_marker_provider(
         spec, "story-1", budget, _github(), _ctx(client)
     )
-    assert await off([_review()], [], []) is None
+    assert await off(_act(_review())) is None
 
 
 async def test_resume_pending_is_a_noop_without_a_trigger(tmp_path: Path) -> None:
@@ -778,7 +789,7 @@ async def test_undispatchable_batch_never_erases_older_parked_debt(
         gate,
         story,
         rem,
-        ingest=_ingest(actionable_reviews=[_review(author="drive-by")]),
+        ingest=_ingest(_review(author="drive-by")),
         github=_github(permission="read"),
     )
     assert label == "no_trusted"
@@ -797,7 +808,7 @@ async def test_undispatchable_batch_never_erases_older_parked_debt(
         spec,
         story,
         budget,
-        _ingest(actionable_reviews=[_review(commit_id=_LOOM_SHA)]),
+        _ingest(_review(commit_id=_LOOM_SHA)),
         _github(),
         _ctx(client),
     )
@@ -940,7 +951,7 @@ async def test_trusted_conversation_comment_dispatches_even_after_a_loom_push(
         spec,
         story,
         budget,
-        _ingest(actionable_reviews=[], actionable_issue_comments=[_issue_comment()]),
+        _ingest(_issue_comment()),
         _github("admin"),
         _ctx(client),
     )
@@ -963,10 +974,7 @@ async def test_untrusted_conversation_comment_never_dispatches(tmp_path: Path) -
         spec,
         story,
         RemediationBudget(pr_url=_PR_URL),
-        _ingest(
-            actionable_reviews=[],
-            actionable_issue_comments=[_issue_comment(author="stranger")],
-        ),
+        _ingest(_issue_comment(author="stranger")),
         _github("none"),
         _ctx(client),
     )
@@ -987,6 +995,6 @@ async def test_pending_provider_parks_for_a_trusted_conversation_batch(
         spec, story, RemediationBudget(pr_url=_PR_URL), _github("write"), _ctx(client)
     )
 
-    assert await provider([], [], [_issue_comment()]) == {
+    assert await provider(_act(_issue_comment())) == {
         "external_remediation_pending": {"pr_url": _PR_URL}
     }
