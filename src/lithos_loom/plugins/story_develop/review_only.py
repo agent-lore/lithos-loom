@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from ...runner import worktree
+from ...runner import git, worktree
 from . import check_artifacts, containers, engines, sandbox_facts
 from .agent_session import PauseBudget, build_run_cmd
 from .check_runner import (
@@ -247,7 +247,7 @@ def review_head(
             config,
             reviewers,
             wt=wt,
-            base=change.base_sha,
+            base=git.RangeBase(change.base_sha, change.base_ref),
             round_no=1,
             check_set=check_set,
             gate_ledger=gate_ledger,

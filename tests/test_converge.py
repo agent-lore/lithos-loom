@@ -45,6 +45,7 @@ def _change(
         base_sha=_BASE,
         head_sha=_HEAD,
         head_ref="#142 (feature)",
+        base_ref="origin/main",
         title="A PR",
         body="do the thing",
         head_branch=head_branch,
@@ -179,7 +180,9 @@ def test_blocking_intake_seeds_loop_and_pushes_on_approval(
 
     entry = captured["entry"]
     assert entry is not None
-    assert entry.base_override == _BASE  # PR merge-base, not the worktree HEAD
+    # PR merge-base (not the worktree HEAD) + the live base ref, so a base merge
+    # during the run moves the fork point (S5c)
+    assert entry.base_override == converge_mod.git.RangeBase(_BASE, "origin/main")
     assert entry.intake_reviews is panel.round_reviews  # seeded from the intake panel
     assert entry.intake_check_set == "cs"
     assert callable(entry.worktree_factory)

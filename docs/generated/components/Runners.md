@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | S | 0 | 9 |
+| `lithos_loom.runner.git` | S | 1 | 11 |
 | `lithos_loom.runner.worktree` | S | 0 | 5 |
 
 ## Public API
@@ -31,14 +31,17 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.git`
 - def `base_sha` — Return the current ``HEAD`` SHA of *worktree*.
+- class `RangeBase` — Where a branch's own work begins (PRD S5c).
+- def `base_ref_for` — Name the live base ref for *base_branch* as seen from *worktree*.
+- def `fork_point` — Resolve *base* to the sha the branch's own work starts from, right now.
 - def `commit_sha` — Resolve *ref* to its full commit SHA.
 - def `tree_sha` — Return the tree object *ref* points at — a commit's CONTENT identity.
-- def `commits_since` — Return full 40-char SHAs added since *base_sha*, in chronological order.
+- def `commits_since` — Return full 40-char SHAs the BRANCH added since *since*, oldest first.
 - def `has_uncommitted_changes` — Return True if *worktree* has staged or unstaged changes.
 - def `commit_all` — Stage all changes (minus *exclude* pathspecs) and commit if any remain.
 - def `apply_patch` — Apply the unified diff at *patch_path* to *worktree*'s working tree (#193).
-- def `log_between` — Return the commit log for ``base..head`` (subject + body), oldest first.
-- def `diff_stat` — Return ``git diff --stat base_sha..HEAD`` — the cumulative change so far.
+- def `log_between` — Return the branch's commit log from *base* to *head*, oldest first.
+- def `diff_stat` — Return ``git diff --stat base...HEAD`` — the branch's cumulative change.
 
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.

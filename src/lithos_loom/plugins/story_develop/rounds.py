@@ -135,7 +135,7 @@ class RoundContext:
     # --- per-run inputs ---
     config: DevelopConfig
     wt: Path
-    base: str
+    base: git.RangeBase
     names: list[str]
     services: Services
     reviewers: list[ReviewerState]
@@ -195,14 +195,16 @@ class LoopEntry:
     ``worktree_factory`` builds the committable worktree — converge positions a
     fresh local branch at the PR head so the coder's commits land on it and can
     be pushed back. ``base_override`` is the PR's merge-base (the review + gate
-    diff base, not the worktree HEAD). ``intake_reviews`` / ``intake_check_set``
+    diff base, not the worktree HEAD) paired with the live base ref, so a base
+    merge during the run moves the fork point (S5c). ``intake_reviews`` /
+    ``intake_check_set``
     seed round 1's cold-start coder from the intake review of the PR (there is no
     prior coder session to resume — converge is a fresh process). The default
     ``entry=None`` on ``develop()`` is the story-develop path, unchanged.
     """
 
     worktree_factory: Callable[[DevelopConfig], Path]
-    base_override: str
+    base_override: git.RangeBase
     intake_reviews: list[ReviewOutcome]
     intake_check_set: CheckSetResult | None
     # External mode (PRD S2): the per-id acknowledgement contract block for
@@ -266,7 +268,8 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 handoff.load_prompt("converge_coder_init.md"),
                 acceptance_criteria=config.effective_acceptance_criteria,
                 commit_log=(
-                    git.log_between(ctx.wt, ctx.base) or "(no commits in range)"
+                    git.log_between(ctx.wt, git.fork_point(ctx.wt, ctx.base))
+                    or "(no commits in range)"
                 ),
                 findings=ctx.render_panel_findings(ctx.intake_reviews),
                 gate_summary=render_check_summary(

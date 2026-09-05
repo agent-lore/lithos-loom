@@ -1065,7 +1065,7 @@ Reconciling explicitly, so the two do not drift:
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
-| 5 | **S5c merge-aware ranges** | prerequisite: reviewers stop seeing other people's work | none |
+| 5 | **S5c merge-aware ranges** — **shipped** (`RangeBase` + `fork_point`, three-dot diffs, first-parent enumeration; the pair test is `tests/test_runner_git.py`) | prerequisite: reviewers stop seeing other people's work | none |
 | 6 | **S5a external-claim triage** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
 | 7 | **S5b remediation budget** | the two-bot loop terminates | none |
 | 8 | **S5 conflict convergence** | routine conflicts resolved without the operator | 1 attempt per sha pair |
