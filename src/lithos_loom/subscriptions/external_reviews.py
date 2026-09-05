@@ -45,14 +45,14 @@ from typing import Any
 
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.github_client import GitHubClient, GitHubError
-from lithos_loom.github_review_activity import (
+from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
+from lithos_loom.github_review_streams import (
     STREAM_ADAPTERS,
     AuthorTrust,
-    ExternalReviewActivity,
-    ReviewStream,
     actionable,
     fetch_activity,
     proven_handled,
+    render_row,
 )
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
@@ -77,8 +77,7 @@ EXTERNAL_REVIEW = "[ExternalReview]"
 # comment fetch so a long-lived PR isn't re-paginated every sweep.
 REVIEW_SEEN_KEY = "external_review_seen"
 
-# Rendering bounds: a finding is a breadcrumb, not a transcript.
-_EXCERPT_CHARS = 160
+# A finding is a breadcrumb, not a transcript: rows listed per stream, capped.
 _MAX_LISTED = 20
 
 
@@ -159,27 +158,6 @@ def _since(stamp: str | None) -> datetime | None:
     return boundary - timedelta(seconds=1)
 
 
-def _excerpt(body: str) -> str:
-    line = " ".join(body.strip().split())
-    if len(line) > _EXCERPT_CHARS:
-        return line[: _EXCERPT_CHARS - 1] + "…"
-    return line
-
-
-def _render_row(a: ExternalReviewActivity) -> str:
-    if a.stream is ReviewStream.REVIEW:
-        state = a.review_state or "COMMENTED"
-        at = f", at {a.head_sha[:12]}" if a.head_sha else ""
-        excerpt = _excerpt(a.body)
-        tail = f": {excerpt}" if excerpt else ""
-        return f"- review by {a.author} ({state}{at}){tail}"
-    url = f" ({a.url})" if a.url else ""
-    if a.stream is ReviewStream.INLINE:
-        loc = f"{a.path}:{a.line}" if a.line else a.path
-        return f"- comment by {a.author} on {loc}: {_excerpt(a.body)}{url}"
-    return f"- comment by {a.author} on the PR conversation: {_excerpt(a.body)}{url}"
-
-
 def _render_summary(
     pr_url: str,
     batch: list[ExternalReviewActivity],
@@ -193,7 +171,7 @@ def _render_summary(
     hidden = 0
     for adapter in STREAM_ADAPTERS:  # listed per stream, each capped
         rows = [a for a in batch if a.stream is adapter.stream]
-        lines.extend(_render_row(a) for a in rows[:_MAX_LISTED])
+        lines.extend(render_row(a) for a in rows[:_MAX_LISTED])
         hidden += max(0, len(rows) - _MAX_LISTED)
     if hidden:
         lines.append(f"- …and {hidden} more (see the PR)")

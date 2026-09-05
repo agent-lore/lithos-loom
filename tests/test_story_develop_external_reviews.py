@@ -484,3 +484,28 @@ def test_fetch_skips_conversation_comments_proven_handled(
 
     assert [f.issue_comment_id for f in trusted] == [22]
     assert untrusted == []
+
+
+def test_every_adapters_finding_id_field_is_a_real_finding_field() -> None:
+    """The reply epilogue answers on the id the adapter projects the row onto
+    (PR #356 review, finding 1): a registry row naming a field ExternalFinding
+    does not have would be a silent loss of reply identity."""
+    from dataclasses import fields
+
+    from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
+    from lithos_loom.github_review_streams import STREAM_ADAPTERS
+
+    names = {f.name for f in fields(ExternalFinding)}
+    assert {a.finding_id_field for a in STREAM_ADAPTERS} <= names
+    assert len({a.finding_id_field for a in STREAM_ADAPTERS}) == len(STREAM_ADAPTERS)
+    for adapter in STREAM_ADAPTERS:
+        row = ExternalReviewActivity(
+            stream=adapter.stream, activity_id=99, author="x", body="b", url="u"
+        )
+        finding = ext_mod.finding_from_activity(row, source="human", trusted=True)
+        assert getattr(finding, adapter.finding_id_field) == 99
+        others = {f for f in ("review_id", "comment_id", "issue_comment_id")} - {
+            adapter.finding_id_field
+        }
+        assert all(getattr(finding, f) is None for f in others)
+    assert list(ReviewStream)  # the enum drives the registry, not the reverse

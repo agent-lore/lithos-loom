@@ -22,18 +22,22 @@ from lithos_loom.github_client import (
 )
 from lithos_loom.github_models import AUTOMATED_REPLY_MARKER, issue_comment_reply_body
 from lithos_loom.github_review_activity import (
-    STREAM_ADAPTERS,
-    AuthorTrust,
     ExternalReviewActivity,
     ReviewStream,
-    actionable,
-    fetch_activity,
     from_conversation_comment,
     from_inline_comment,
     from_review,
+)
+from lithos_loom.github_review_streams import (
+    STREAM_ADAPTERS,
+    AuthorTrust,
+    actionable,
+    adapter_for,
+    fetch_activity,
     handled_review_ids,
     landed_fix_claims,
     proven_handled,
+    render_row,
 )
 
 _REPO = "agent-lore/lithos-lens"
@@ -326,3 +330,51 @@ def test_actionable_candidates_can_be_a_subset_of_the_context() -> None:
     assert [a.activity_id for a in actionable(new, handled)] == [
         500
     ]  # no context → no roots known
+
+
+# ── the registry is the ONLY policy site (PR #356 review, finding 1) ──
+
+
+def test_every_stream_policy_is_registered_exhaustively() -> None:
+    assert {a.stream for a in STREAM_ADAPTERS} == set(ReviewStream)
+    for a in STREAM_ADAPTERS:
+        assert adapter_for(a.stream) is a
+        assert callable(a.fetch) and callable(a.is_actionable) and callable(a.render)
+        assert a.label and a.finding_id_field
+
+
+def test_an_unregistered_stream_fails_loudly_never_as_a_catch_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remove a stream's adapter and every stream-indexed decision must raise
+    — not fall through to another stream's policy."""
+    from lithos_loom import github_review_streams as streams
+
+    registry = {
+        a.stream: a
+        for a in STREAM_ADAPTERS
+        if a.stream is not ReviewStream.CONVERSATION
+    }
+    monkeypatch.setattr(streams, "_BY_STREAM", registry)
+    row = from_conversation_comment(_conversation(20))
+    with pytest.raises(LookupError):
+        adapter_for(ReviewStream.CONVERSATION)
+    with pytest.raises(LookupError):
+        actionable([row], frozenset())
+    with pytest.raises(LookupError):
+        render_row(row)
+
+
+def test_render_row_uses_each_streams_own_line_shape() -> None:
+    conv = f"https://github.com/{_REPO}/pull/{_PR}#issuecomment-20"
+    assert render_row(from_review(_review(500), repo=_REPO, pr_number=_PR)) == (
+        f"- review by reviewer (CHANGES_REQUESTED, at {_HEAD[:12]}): two problems"
+    )
+    assert render_row(from_inline_comment(_inline(7))) == (
+        f"- comment by reviewer on src/x.py:12: leaks a handle "
+        f"(https://github.com/{_REPO}/pull/{_PR}#discussion_r7)"
+    )
+    assert render_row(from_conversation_comment(_conversation(20))) == (
+        "- comment by davesnowdon on the PR conversation: Verdict: two P1 gaps "
+        f"({conv})"
+    )

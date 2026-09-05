@@ -28,17 +28,18 @@ reviewer proposes, loom's gate disposes).
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.github_models import issue_comment_reply_body, parse_github_ref
-from lithos_loom.github_review_activity import (
+from lithos_loom.github_review_activity import ExternalReviewActivity
+from lithos_loom.github_review_streams import (
     AuthorTrust,
-    ExternalReviewActivity,
-    ReviewStream,
     actionable,
+    adapter_for,
     fetch_activity,
     proven_handled,
 )
@@ -95,22 +96,27 @@ class ExternalFinding:
 def finding_from_activity(
     a: ExternalReviewActivity, *, source: str, trusted: bool
 ) -> ExternalFinding:
-    """The intake's finding for one normalised row (#355): the stream decides
-    which id the reply epilogue can answer on."""
-    return ExternalFinding(
+    """The intake's finding for one normalised row (#355).
+
+    The row's id lands on the ``ExternalFinding`` field its stream's adapter
+    names (``finding_id_field``) — the reply epilogue answers on that id, so
+    an unregistered stream fails here loudly instead of losing its reply
+    identity (PR #356 review, finding 1).
+    """
+    blank = ExternalFinding(
         author=a.author,
         source=source,
         trusted=trusted,
-        review_id=a.activity_id if a.stream is ReviewStream.REVIEW else None,
-        comment_id=a.activity_id if a.stream is ReviewStream.INLINE else None,
+        review_id=None,
+        comment_id=None,
         thread_url=a.url,
         head_sha=a.head_sha,
         path=a.path,
         line=a.line,
         body=a.body,
-        issue_comment_id=(
-            a.activity_id if a.stream is ReviewStream.CONVERSATION else None
-        ),
+    )
+    return dataclasses.replace(
+        blank, **{adapter_for(a.stream).finding_id_field: a.activity_id}
     )
 
 

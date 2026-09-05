@@ -92,13 +92,6 @@ classDiagram
     +updated_at datetime | None
     +pull_request_review_id int | None
   }
-  class StreamAdapter {
-    +stream ReviewStream
-    +mark_id_key str
-    +mark_at_key str | None
-    +fetch Fetch
-    +label str
-  }
 ```
 
 ## Supervisor

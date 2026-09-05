@@ -13,7 +13,8 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 |---|---|---:|---:|
 | `lithos_loom.github_client` | M | 7 | 0 |
 | `lithos_loom.github_models` | M | 6 | 16 |
-| `lithos_loom.github_review_activity` | M | 4 | 8 |
+| `lithos_loom.github_review_activity` | S | 2 | 3 |
+| `lithos_loom.github_review_streams` | M | 2 | 8 |
 
 ## Public API
 
@@ -56,7 +57,12 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - def `from_review`
 - def `from_inline_comment`
 - def `from_conversation_comment`
-- class `StreamAdapter` — Everything the sweep needs to know about one stream, in one row.
+
+### `lithos_loom.github_review_streams`
+- class `StreamAdapter` — One stream's complete policy, in one row.
+- def `excerpt`
+- def `adapter_for` — The registered policy for *stream*; ``LookupError`` if unregistered.
+- def `render_row`
 - def `fetch_activity` — Every stream's rows, concatenated in stream order. Raises ``GitHubError`` on any listing failure (the caller decides whether that is retryable).
 - class `AuthorTrust` — Per-batch answer to "may this author's material act?" (ADR 0011 d8).
 - def `landed_fix_claims` — ``(root_key, reply_author)`` pairs whose reply *claims* a landed fix.

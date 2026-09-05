@@ -60,7 +60,8 @@ from typing import Any
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.github_client import GitHubClient
-from lithos_loom.github_review_activity import AuthorTrust, ExternalReviewActivity
+from lithos_loom.github_review_activity import ExternalReviewActivity
+from lithos_loom.github_review_streams import AuthorTrust
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
 from lithos_loom.subscriptions.external_reviews import (
