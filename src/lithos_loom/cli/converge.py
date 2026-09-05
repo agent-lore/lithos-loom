@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -43,7 +44,9 @@ from lithos_loom.plugins.story_develop.config import (
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
 from lithos_loom.plugins.story_develop.external_reviews import (
+    ExternalFinding,
     GitHubError,
+    ReplyMode,
     fetch_external_findings,
     issue_comment_reply_body,
     pr_number_from_spec,
@@ -380,24 +383,58 @@ def _render(result: ConvergeResult) -> str:
     return "\n".join(lines)
 
 
+# One transport per reply capability (PR #356 re-review): the epilogue routes
+# on the finding's ``reply_mode`` — never on its stream — so a new stream
+# that picks an existing capability in its adapter row is answered here
+# unchanged, and a new capability is a new member + a row here. Exhaustive
+# over ReplyMode (checked at import); ``None`` = nothing to answer on.
+Transport = Callable[[str, int, ExternalFinding, str], bool]
+
+
+def _reply_on_thread(repo: str, pr_number: int, f: ExternalFinding, body: str) -> bool:
+    return post_thread_reply(repo, pr_number, f.activity_id, body)
+
+
+def _reply_on_conversation(
+    repo: str, pr_number: int, f: ExternalFinding, body: str
+) -> bool:
+    return post_pr_comment(
+        repo, pr_number, issue_comment_reply_body(body, f.thread_url)
+    )
+
+
+REPLY_TRANSPORTS: dict[ReplyMode, Transport | None] = {
+    ReplyMode.NONE: None,
+    ReplyMode.THREAD: _reply_on_thread,
+    ReplyMode.CONVERSATION: _reply_on_conversation,
+}
+if set(REPLY_TRANSPORTS) != set(ReplyMode):
+    raise RuntimeError("REPLY_TRANSPORTS must cover every ReplyMode")
+
+
+def _reply_transport(mode: ReplyMode) -> Transport | None:
+    try:
+        return REPLY_TRANSPORTS[mode]
+    except KeyError:
+        raise LookupError(f"no reply transport for {mode!r}") from None
+
+
 def _post_external_replies(
     result: ConvergeResult, *, repo: str, pr_number: int
 ) -> None:
-    """Answer each comment-backed external finding where it was raised.
+    """Answer each external finding where it was raised, by its reply mode.
 
-    Inline findings get a thread reply; conversation-comment findings (#353,
-    no thread structure) get a conversation comment naming the comment it
-    answers — the shape the sweep and the fetch read to prove it handled.
     Only what actually happened is asserted: a *fixed* reply is posted only
     when the branch was pushed (its sha is the proof — an unpushed fix must
     not claim to have landed); rejections and disputes reply regardless.
-    Summary-only findings (no comment id of either kind) have nothing to
-    reply on and are left to the rendered summary. Best-effort: a failed
-    reply logs via the poster and the rest continue.
+    Findings whose mode is ``NONE`` (a summary review has no thread) are
+    left to the rendered summary. Best-effort: a failed reply logs via the
+    poster and the rest continue.
     """
     posted = 0
     for o in result.external_outcomes:
-        if o.finding.comment_id is None and o.finding.issue_comment_id is None:
+        transport = _reply_transport(o.finding.reply_mode)
+        if transport is None:
             continue
         if o.disposition == "rejected":
             body = reply_body(
@@ -411,13 +448,7 @@ def _post_external_replies(
             )
         else:
             continue  # unaddressed, or a fix that never landed — assert nothing
-        if o.finding.comment_id is not None:
-            landed = post_thread_reply(repo, pr_number, o.finding.comment_id, body)
-        else:
-            landed = post_pr_comment(
-                repo, pr_number, issue_comment_reply_body(body, o.finding.thread_url)
-            )
-        if landed:
+        if transport(repo, pr_number, o.finding, body):
             posted += 1
     if posted:
         typer.echo(f"posted {posted} external review repl(ies) on {repo}#{pr_number}")

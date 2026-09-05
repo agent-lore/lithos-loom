@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 
 from .github_client import GitHubClient
 from .github_models import (
@@ -43,9 +44,11 @@ from .github_review_activity import (
 )
 
 __all__ = [
+    "ADAPTERS_BY_STREAM",
     "STREAM_ADAPTERS",
     "TRUSTED_PERMISSIONS",
     "AuthorTrust",
+    "ReplyMode",
     "StreamAdapter",
     "actionable",
     "adapter_for",
@@ -63,6 +66,21 @@ TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
 
 # A rendered row is a breadcrumb, not a transcript.
 EXCERPT_CHARS = 160
+
+
+class ReplyMode(StrEnum):
+    """How loom answers a row of this stream after acting on it — a reply
+    *capability*, chosen per stream in its adapter row (PR #356 re-review).
+
+    A new stream selects an existing capability here; a genuinely new
+    transport is a new member plus a transport in the epilogue's table,
+    which is exhaustive over this enum.
+    """
+
+    NONE = "none"  # nothing to answer on (a summary review has no thread)
+    THREAD = "thread"  # an inline review-comment thread reply
+    CONVERSATION = "conversation"  # a Conversation-tab comment naming its target
+
 
 Fetch = Callable[
     [GitHubClient, str, int, datetime | None], Awaitable[list[ExternalReviewActivity]]
@@ -86,8 +104,7 @@ class StreamAdapter:
       proven-handled keys and the handled summary-review ids.
     - ``render``: the row's line in the ``[ExternalReview]`` finding.
     - ``label``: the finding's noun for a row, for the sweep log.
-    - ``finding_id_field``: the ``ExternalFinding`` field the row's id is
-      projected onto — what the reply epilogue can answer on.
+    - ``reply_mode``: the reply capability the epilogue answers a row with.
     """
 
     stream: ReviewStream
@@ -97,7 +114,7 @@ class StreamAdapter:
     is_actionable: Actionable
     render: Render
     label: str
-    finding_id_field: str
+    reply_mode: ReplyMode
 
 
 def excerpt(body: str) -> str:
@@ -204,7 +221,7 @@ STREAM_ADAPTERS: tuple[StreamAdapter, ...] = (
         is_actionable=_review_actionable,
         render=_render_review,
         label="review",
-        finding_id_field="review_id",
+        reply_mode=ReplyMode.NONE,
     ),
     StreamAdapter(
         stream=ReviewStream.INLINE,
@@ -214,7 +231,7 @@ STREAM_ADAPTERS: tuple[StreamAdapter, ...] = (
         is_actionable=_inline_actionable,
         render=_render_inline,
         label="inline comment",
-        finding_id_field="comment_id",
+        reply_mode=ReplyMode.THREAD,
     ),
     StreamAdapter(
         stream=ReviewStream.CONVERSATION,
@@ -224,17 +241,21 @@ STREAM_ADAPTERS: tuple[StreamAdapter, ...] = (
         is_actionable=_conversation_actionable,
         render=_render_conversation,
         label="conversation comment",
-        finding_id_field="issue_comment_id",
+        reply_mode=ReplyMode.CONVERSATION,
     ),
 )
 
-_BY_STREAM: dict[ReviewStream, StreamAdapter] = {a.stream: a for a in STREAM_ADAPTERS}
+# Read-only view of the registry by stream (public so tests can stage an
+# unregistered stream without a private reference).
+ADAPTERS_BY_STREAM: dict[ReviewStream, StreamAdapter] = {
+    a.stream: a for a in STREAM_ADAPTERS
+}
 
 # Exhaustive by construction: a ReviewStream member without an adapter row
 # is an import-time error, never a row silently handled under some other
 # stream's policy.
-_missing = set(ReviewStream) - set(_BY_STREAM)
-if _missing or len(_BY_STREAM) != len(STREAM_ADAPTERS):
+_missing = set(ReviewStream) - set(ADAPTERS_BY_STREAM)
+if _missing or len(ADAPTERS_BY_STREAM) != len(STREAM_ADAPTERS):
     raise RuntimeError(
         f"STREAM_ADAPTERS must register every ReviewStream exactly once; "
         f"missing {sorted(_missing)}"
@@ -244,7 +265,7 @@ if _missing or len(_BY_STREAM) != len(STREAM_ADAPTERS):
 def adapter_for(stream: ReviewStream) -> StreamAdapter:
     """The registered policy for *stream*; ``LookupError`` if unregistered."""
     try:
-        return _BY_STREAM[stream]
+        return ADAPTERS_BY_STREAM[stream]
     except KeyError:
         raise LookupError(f"no StreamAdapter registered for {stream!r}") from None
 

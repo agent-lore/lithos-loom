@@ -14,7 +14,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 | `lithos_loom.github_client` | M | 7 | 0 |
 | `lithos_loom.github_models` | M | 6 | 16 |
 | `lithos_loom.github_review_activity` | S | 2 | 3 |
-| `lithos_loom.github_review_streams` | M | 2 | 8 |
+| `lithos_loom.github_review_streams` | M | 3 | 8 |
 
 ## Public API
 
@@ -59,6 +59,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - def `from_conversation_comment`
 
 ### `lithos_loom.github_review_streams`
+- class `ReplyMode` — How loom answers a row of this stream after acting on it — a reply *capability*, chosen per stream in its adapter row (PR #356 re-review).
 - class `StreamAdapter` — One stream's complete policy, in one row.
 - def `excerpt`
 - def `adapter_for` — The registered policy for *stream*; ``LookupError`` if unregistered.

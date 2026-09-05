@@ -31,6 +31,7 @@ from lithos_loom.github_review_activity import (
 from lithos_loom.github_review_streams import (
     STREAM_ADAPTERS,
     AuthorTrust,
+    ReplyMode,
     actionable,
     adapter_for,
     fetch_activity,
@@ -340,7 +341,7 @@ def test_every_stream_policy_is_registered_exhaustively() -> None:
     for a in STREAM_ADAPTERS:
         assert adapter_for(a.stream) is a
         assert callable(a.fetch) and callable(a.is_actionable) and callable(a.render)
-        assert a.label and a.finding_id_field
+        assert a.label and a.reply_mode in set(ReplyMode)
 
 
 def test_an_unregistered_stream_fails_loudly_never_as_a_catch_all(
@@ -355,7 +356,7 @@ def test_an_unregistered_stream_fails_loudly_never_as_a_catch_all(
         for a in STREAM_ADAPTERS
         if a.stream is not ReviewStream.CONVERSATION
     }
-    monkeypatch.setattr(streams, "_BY_STREAM", registry)
+    monkeypatch.setattr(streams, "ADAPTERS_BY_STREAM", registry)
     row = from_conversation_comment(_conversation(20))
     with pytest.raises(LookupError):
         adapter_for(ReviewStream.CONVERSATION)

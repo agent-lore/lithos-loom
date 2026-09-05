@@ -24,6 +24,8 @@ from lithos_loom.github_client import (
     PullRequestReviewComment,
 )
 from lithos_loom.github_models import AUTOMATED_REPLY_MARKER, issue_comment_reply_body
+from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
+from lithos_loom.github_review_streams import ReplyMode
 from lithos_loom.plugins.story_develop import external_reviews as ext_mod
 from lithos_loom.plugins.story_develop.external_reviews import (
     CoderAck,
@@ -237,8 +239,8 @@ def test_review_policy_and_handled_author_suppression(
 
     # The bot's COMMENTED summary is suppressed (its roots were handled); the
     # APPROVED review is silent; the human CHANGES_REQUESTED survives.
-    assert [(f.author, f.review_id) for f in trusted] == [("dave", 502)]
-    assert trusted[0].comment_id is None
+    assert [(f.author, f.activity_id) for f in trusted] == [("dave", 502)]
+    assert trusted[0].reply_mode is ReplyMode.NONE
     assert "pullrequestreview-502" in trusted[0].thread_url
 
 
@@ -251,15 +253,17 @@ def _finding(
     body: str = "leaks a handle",
     path: str = "src/x.py",
     line: int | None = 12,
-    comment_id: int | None = 7,
+    activity_id: int = 7,
+    reply_mode: ReplyMode = ReplyMode.THREAD,
     head_sha: str = _HEAD,
 ) -> ExternalFinding:
     return ExternalFinding(
         author=author,
         source="human",
         trusted=True,
-        review_id=None,
-        comment_id=comment_id,
+        stream=ReviewStream.INLINE,
+        activity_id=activity_id,
+        reply_mode=reply_mode,
         thread_url="https://example/thread",
         head_sha=head_sha,
         path=path,
@@ -270,7 +274,16 @@ def _finding(
 
 def test_handoff_text_parses_and_attributes_the_author() -> None:
     text = findings_to_handoff_text(
-        [_finding(), _finding(body="second", path="", line=None, comment_id=None)],
+        [
+            _finding(),
+            _finding(
+                body="second",
+                path="",
+                line=None,
+                activity_id=500,
+                reply_mode=ReplyMode.NONE,
+            ),
+        ],
         current_head_sha=_HEAD,
     )
     parsed = parse_review_handoff(text)
@@ -296,15 +309,15 @@ def test_stale_head_sha_gets_a_reanchor_note() -> None:
 
 
 def test_external_intake_reviews_builds_outcome_and_id_map() -> None:
-    findings = [_finding(), _finding(body="second", comment_id=8)]
+    findings = [_finding(), _finding(body="second", activity_id=8)]
     outcomes, id_map = external_intake_reviews(findings, current_head_sha=_HEAD)
 
     (outcome,) = outcomes
     assert outcome.reviewer == "external"
     assert outcome.status == "FINDINGS" and outcome.passed is False
     assert [f.finding_id for f in outcome.findings] == ["f-001", "f-002"]
-    assert id_map["f-001"].comment_id == 7
-    assert id_map["f-002"].comment_id == 8
+    assert id_map["f-001"].activity_id == 7
+    assert id_map["f-002"].activity_id == 8
     assert outcome.cost_usd == 0.0
 
 
@@ -335,7 +348,7 @@ def test_later_summary_review_is_not_hidden_by_old_handled_roots(
 
     # Review 500 (all of its roots handled) is suppressed; review 510 is new
     # material and survives.
-    assert [(f.review_id, f.body) for f in trusted] == [(510, "two new problems")]
+    assert [(f.activity_id, f.body) for f in trusted] == [(510, "two new problems")]
 
 
 # --- per-id coder acknowledgements (PR #345 re-review 1) ---------------------
@@ -374,7 +387,7 @@ def test_outcomes_approval_alone_is_never_fixed() -> None:
     # claims, loop approved. Approval is evidence the TREE passed the loop,
     # not evidence of each external disposition — a silent partial fix must
     # not earn a per-thread "Fixed in" claim.
-    id_map = {"f-001": _finding(comment_id=1), "f-002": _finding(comment_id=2)}
+    id_map = {"f-001": _finding(activity_id=1), "f-002": _finding(activity_id=2)}
     out = outcomes_after_loop(id_map, {}, {}, {}, loop_approved=True)
     assert [o.disposition for o in out] == ["unaddressed", "unaddressed"]
 
@@ -442,12 +455,12 @@ def test_fetch_turns_conversation_comments_into_findings(
         author="davesnowdon",
         source="human",
         trusted=True,
-        review_id=None,
-        comment_id=None,
+        stream=ReviewStream.CONVERSATION,
+        activity_id=5551158842,
+        reply_mode=ReplyMode.CONVERSATION,
         thread_url=f"https://github.com/{_REPO}/pull/62#issuecomment-5551158842",
         head_sha="",
         body="Verdict: two P1 gaps",
-        issue_comment_id=5551158842,
     )
     assert [f.author for f in untrusted] == ["stranger"]
     # No sha → no re-anchor note (the comment reviews the PR, not a commit).
@@ -482,30 +495,20 @@ def test_fetch_skips_conversation_comments_proven_handled(
 
     trusted, untrusted = fetch_external_findings(_REPO, 62, trusted_bots=())
 
-    assert [f.issue_comment_id for f in trusted] == [22]
+    assert [f.activity_id for f in trusted] == [22]
     assert untrusted == []
 
 
-def test_every_adapters_finding_id_field_is_a_real_finding_field() -> None:
-    """The reply epilogue answers on the id the adapter projects the row onto
-    (PR #356 review, finding 1): a registry row naming a field ExternalFinding
-    does not have would be a silent loss of reply identity."""
-    from dataclasses import fields
-
-    from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
+def test_finding_carries_identity_and_the_adapters_reply_capability() -> None:
+    """PR #356 re-review: the finding routes on ``reply_mode``, never on the
+    stream — every adapter picks a capability, and the intake copies it."""
     from lithos_loom.github_review_streams import STREAM_ADAPTERS
 
-    names = {f.name for f in fields(ExternalFinding)}
-    assert {a.finding_id_field for a in STREAM_ADAPTERS} <= names
-    assert len({a.finding_id_field for a in STREAM_ADAPTERS}) == len(STREAM_ADAPTERS)
+    assert {a.reply_mode for a in STREAM_ADAPTERS} <= set(ReplyMode)
     for adapter in STREAM_ADAPTERS:
         row = ExternalReviewActivity(
             stream=adapter.stream, activity_id=99, author="x", body="b", url="u"
         )
         finding = ext_mod.finding_from_activity(row, source="human", trusted=True)
-        assert getattr(finding, adapter.finding_id_field) == 99
-        others = {f for f in ("review_id", "comment_id", "issue_comment_id")} - {
-            adapter.finding_id_field
-        }
-        assert all(getattr(finding, f) is None for f in others)
-    assert list(ReviewStream)  # the enum drives the registry, not the reverse
+        assert (finding.stream, finding.activity_id) == (adapter.stream, 99)
+        assert finding.reply_mode is adapter.reply_mode

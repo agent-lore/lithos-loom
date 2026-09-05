@@ -28,16 +28,16 @@ reviewer proposes, loom's gate disposes).
 
 from __future__ import annotations
 
-import dataclasses
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.github_models import issue_comment_reply_body, parse_github_ref
-from lithos_loom.github_review_activity import ExternalReviewActivity
+from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
 from lithos_loom.github_review_streams import (
     AuthorTrust,
+    ReplyMode,
     actionable,
     adapter_for,
     fetch_activity,
@@ -54,6 +54,7 @@ __all__ = [
     "ExternalFinding",
     "ExternalOutcome",
     "GitHubError",  # re-export: the CLI seam catches it without a GitHub-tier import
+    "ReplyMode",  # re-export: the CLI epilogue routes on it (no GitHub-tier import)
     "issue_comment_reply_body",  # re-export: same reason, for the reply epilogue
     "ack_instruction",
     "external_intake_reviews",
@@ -72,51 +73,46 @@ class ExternalFinding:
 
     ``head_sha`` is the commit the reviewer actually read (load-bearing: a
     finding written against a sha the branch has moved past may already be
-    fixed and must be re-anchored, never re-fixed blindly). ``comment_id`` is
-    ``None`` for a summary-only review — the reply epilogue can only thread a
-    reply onto comment-backed findings. ``issue_comment_id`` (#353) marks a
-    Conversation-tab comment: no path, line or sha (it reviews the PR, not a
-    hunk), and the epilogue answers it with a conversation comment naming it.
+    fixed and must be re-anchored, never re-fixed blindly; empty for a
+    conversation comment, which reviews the PR, not a hunk). ``stream`` +
+    ``activity_id`` are the row's identity; ``reply_mode`` is the reply
+    capability its stream's adapter chose (PR #356 re-review) — the epilogue
+    routes on the mode, never on the stream, so a new stream picks an
+    existing capability in its adapter row and is answered without touching
+    the epilogue.
     """
 
     author: str
     source: str  # "bot" | "human"
     trusted: bool
-    review_id: int | None
-    comment_id: int | None
+    stream: ReviewStream
+    activity_id: int
+    reply_mode: ReplyMode
     thread_url: str
     head_sha: str
     path: str = ""
     line: int | None = None
     body: str = ""
     severity: str = "minor"
-    issue_comment_id: int | None = None
 
 
 def finding_from_activity(
     a: ExternalReviewActivity, *, source: str, trusted: bool
 ) -> ExternalFinding:
-    """The intake's finding for one normalised row (#355).
-
-    The row's id lands on the ``ExternalFinding`` field its stream's adapter
-    names (``finding_id_field``) — the reply epilogue answers on that id, so
-    an unregistered stream fails here loudly instead of losing its reply
-    identity (PR #356 review, finding 1).
-    """
-    blank = ExternalFinding(
+    """The intake's finding for one normalised row (#355): identity and the
+    reply capability come from the row and its stream's adapter."""
+    return ExternalFinding(
         author=a.author,
         source=source,
         trusted=trusted,
-        review_id=None,
-        comment_id=None,
+        stream=a.stream,
+        activity_id=a.activity_id,
+        reply_mode=adapter_for(a.stream).reply_mode,
         thread_url=a.url,
         head_sha=a.head_sha,
         path=a.path,
         line=a.line,
         body=a.body,
-    )
-    return dataclasses.replace(
-        blank, **{adapter_for(a.stream).finding_id_field: a.activity_id}
     )
 
 
