@@ -10,10 +10,13 @@ GitHub + Lithos are stubbed; the ``task`` is a minimal id + metadata object.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
+
+import pytest
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import create_pr_gate
@@ -205,6 +208,43 @@ async def test_gate_merged_nudges_nothing_when_no_dependent_was_released() -> No
     )
 
     assert len(client.calls_to("task_update")) == before
+
+
+async def test_gate_merged_interrupted_mid_nudge_is_retried_next_sweep() -> None:
+    """The nudge lands BEFORE the gate's terminal transition, so a sweep killed
+    mid-batch is retryable: the gate is still open, and the second sweep — whose
+    story completion can no longer name anybody — recovers the dependents from
+    the story's `blocks` edges."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+
+    async def _killed(**kwargs: Any) -> Any:
+        raise asyncio.CancelledError  # the watcher process is taken down
+
+    client.task_update = _killed  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await reconcile_pr_gate(
+            gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+        )
+
+    # Story completed, gate NOT completed → the sweep still has the gate to
+    # retry from, and the dependent has not been nudged.
+    assert (await _get(client, story)).status == "completed"
+    assert (await _get(client, gate.id)).status == "open"
+    assert not [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+
+    del client.task_update  # back to the real implementation
+    outcome = await reconcile_pr_gate(
+        await _get(client, gate.id),
+        _github(_pr(state="closed", merged=True)),
+        _ctx(client),
+    )
+
+    assert outcome == "merged"
+    nudges = [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+    assert [c["metadata"] for c in nudges] == [{}]
+    assert (await _get(client, gate.id)).status == "completed"
 
 
 async def test_gate_merged_nudge_failure_posts_friction_and_still_resolves() -> None:

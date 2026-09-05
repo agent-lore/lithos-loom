@@ -279,18 +279,34 @@ async def _resolve_gate_merged(
     close-mirror (or a retry after a partial run) converges. The gate leaving
     the open set is the de-dup — no marker needed on the merged path.
 
-    The story completion's ``unblocked`` ids are then nudged (see
+    The story completion's ``unblocked`` ids are nudged (see
     :func:`_nudge_unblocked`) so a now-ready dependent dispatches without
-    waiting for a daemon restart.
+    waiting for a daemon restart. That happens **before the gate is
+    completed**, deliberately: completing the gate is the durable "this merge
+    is resolved" transition — it takes the gate out of the open set the sweep
+    enumerates, so anything after it (a crash, a kill, a cancellation) is
+    never retried. With the nudge ahead of it, an interrupted batch leaves the
+    gate open, the next sweep re-enters this branch, and the fallback below
+    recovers the ids the lost completion response would have named. Repeat
+    nudges are harmless — the update is a no-op write and the claim decides.
     """
-    unblocked: list[str] = []
     if story_id is not None:
         released = await _complete_swallowing(
             story_id, ctx, subject=f"story {story_id}"
         )
         if released is None:
             return False  # transient — leave gate open, retry next sweep
-        unblocked = released
+        # An empty list means the completion named nobody: the story really has
+        # no dependents, OR its `unblocked` response is gone for good — it was
+        # already terminal (the issue close-mirror got there first, or an
+        # earlier sweep completed it and died mid-nudge), or the server predates
+        # the task-graph extension. Fall back to the durable record of who was
+        # waiting on it: its own outgoing `blocks` edges. Nudging one that is
+        # still blocked by another predecessor is harmless — the runner's
+        # readiness check defers it.
+        await _nudge_unblocked(
+            released or await _blocks_dependents(story_id, ctx), story_id, ctx
+        )
     if await _complete_swallowing(gate.id, ctx, subject=f"gate {gate.id}") is None:
         return False
     if story_id is not None:
@@ -309,7 +325,6 @@ async def _resolve_gate_merged(
                 story_id,
                 exc,
             )
-    await _nudge_unblocked(unblocked, story_id, ctx)
     ctx.logger.info(
         "pr-gate: resolved gate %s on PR merge %s (%s)",
         gate.id,
@@ -338,9 +353,12 @@ async def _nudge_unblocked(
     — route match, ready check, collision-safe claim. Double-evaluation is
     harmless; the claim decides.
 
-    Best-effort. The merge is already resolved by the time we get here, so a
-    failed nudge must not undo it: it posts ``[Friction]`` on the story and
-    leaves the bootstrap replay as the backstop. Never raises.
+    Best-effort. The story is completed by the time we get here, so a failed
+    nudge must not undo the merge resolution: it posts ``[Friction]`` on the
+    story, lets the caller finish resolving the gate, and leaves the bootstrap
+    replay as the backstop. Never raises a ``LithosClientError`` — but
+    cancellation propagates, and the caller's ordering (nudge before the gate's
+    terminal transition) is what makes an interrupted batch retryable.
     """
     for task_id in task_ids:
         try:
@@ -369,6 +387,29 @@ async def _nudge_unblocked(
                 task_id,
                 story_id,
             )
+
+
+async def _blocks_dependents(story_id: str, ctx: SubscriptionContext) -> list[str]:
+    """The tasks the story ``blocks`` — the durable stand-in for a completion's
+    ``unblocked`` response once that response is gone (see the caller).
+
+    The graph edges are the record; unlike the response they survive a crash,
+    so a retried sweep can still nudge. Never raises: with nothing to nudge the
+    restart bootstrap remains the backstop, exactly as for a failed nudge.
+    """
+    try:
+        edges = await ctx.lithos.task_edge_list(
+            task_id=story_id, direction="outgoing", types=["blocks"]
+        )
+    except LithosClientError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: listing story %s's dependents failed (%s); "
+            "they wait for the next daemon restart",
+            story_id,
+            exc,
+        )
+        return []
+    return [edge.to_task_id for edge in edges]
 
 
 async def _post_friction(

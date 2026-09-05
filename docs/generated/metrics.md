@@ -51,13 +51,13 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Runners | 5 | 625 | 484 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 26 | 8460 | 6594 | 4 | 11 | 0.73 | 28 (`lithos_loom.subscriptions.external_reviews.ingest_external_reviews`) | 14 |
+| Subscriptions | 26 | 8501 | 6624 | 4 | 11 | 0.73 | 28 (`lithos_loom.subscriptions.external_reviews.ingest_external_reviews`) | 14 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
 | Tasks | 4 | 1212 | 945 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 3 |
 
 ## Size
 
-- Modules: **135**, lines: **45925**, SLOC: **36618**
+- Modules: **135**, lines: **45966**, SLOC: **36648**
 - Largest module: `lithos_loom.lithos_client` (2210 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -69,7 +69,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1182**, cyclomatic > 10: **104**
+- Functions: **1183**, cyclomatic > 10: **104**
 
 Top 10 most complex functions:
 
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **18** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.61** (74152 test lines / 45925 source lines)
+- Test-to-source line ratio: **1.61** (74192 test lines / 45966 source lines)
