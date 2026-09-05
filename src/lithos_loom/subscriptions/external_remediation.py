@@ -28,7 +28,8 @@ The guard rails, all sweep-owned (ADR 0011 decision 3 — single writer):
   attributed).
 - **Own-sha skip** — material reviewing loom's own pushed sha is reported,
   never auto-remediated (it is almost always a re-review of the fix in
-  flight).
+  flight). A conversation comment (#353) reviews no sha, so it is never
+  own-sha: a human verdict after loom's push is exactly what must dispatch.
 - **Trust** — only allowlisted bots / write-admin humans' material triggers a
   dispatch (converge re-applies the same line to what it feeds the coder).
 - **Per-project dial** — context-doc ``develop_external_review_converge``
@@ -61,7 +62,11 @@ from lithos_loom.gates import PrGateSpec
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
-from lithos_loom.subscriptions.external_reviews import EXTERNAL_REVIEW, IngestResult
+from lithos_loom.subscriptions.external_reviews import (
+    EXTERNAL_REVIEW,
+    IngestResult,
+    PendingMarkerProvider,
+)
 
 __all__ = [
     "CONVERGE_SETTING",
@@ -323,7 +328,7 @@ class ExternalRemediation:
         budget: RemediationBudget,
         github: GitHubClient,
         ctx: SubscriptionContext,
-    ) -> Callable[[list[Any], list[Any]], Awaitable[dict[str, Any] | None]]:
+    ) -> PendingMarkerProvider:
         """The pending-trigger provider ingestion calls with the actionable
         batch just before its atomic marker write (PR #346 re-reviews 1+3).
 
@@ -338,7 +343,7 @@ class ExternalRemediation:
         """
 
         async def provider(
-            reviews: list[Any], comments: list[Any]
+            reviews: list[Any], comments: list[Any], issue_comments: list[Any]
         ) -> dict[str, Any] | None:
             if self._settings.budget <= 0 or story_id is None:
                 return None
@@ -346,6 +351,7 @@ class ExternalRemediation:
                 posted=True,
                 actionable_reviews=list(reviews),
                 actionable_comments=list(comments),
+                actionable_issue_comments=list(issue_comments),
             )
             verdict = await self._dispatchable(batch, spec.repo, budget, github, ctx)
             if verdict != "yes":
@@ -511,10 +517,15 @@ class ExternalRemediation:
         ctx: SubscriptionContext,
     ) -> str:
         """``"yes"`` / ``"no_trusted"`` / ``"own_sha_only"`` for the batch."""
-        items = [(r.author, r.commit_id) for r in ingest.actionable_reviews] + [
-            (c.author, c.commit_id or c.original_commit_id)
-            for c in ingest.actionable_comments
-        ]
+        items = (
+            [(r.author, r.commit_id) for r in ingest.actionable_reviews]
+            + [
+                (c.author, c.commit_id or c.original_commit_id)
+                for c in ingest.actionable_comments
+            ]
+            # No sha: a conversation comment is never an own-sha re-review.
+            + [(c.author, "") for c in ingest.actionable_issue_comments]
+        )
         trusted_cache: dict[str, bool] = {}
         any_trusted = False
         for author, sha in items:

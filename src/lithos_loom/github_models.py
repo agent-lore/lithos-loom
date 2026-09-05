@@ -20,13 +20,16 @@ __all__ = [
     "AUTOMATED_REPLY_MARKER",
     "FIXED_REPLY_PREFIX",
     "SILENT_REVIEW_STATES",
+    "LOOM_NOTICE_MARKER",
     "GitHubRef",
     "Issue",
+    "IssueComment",
     "PullRequest",
     "PullRequestReview",
     "PullRequestReviewComment",
     "apply_marker",
     "parse_github_ref",
+    "parse_issue_comment",
     "parse_issues_response",
     "parse_marker",
     "parse_pull_request",
@@ -35,6 +38,10 @@ __all__ = [
     "strip_marker",
     "is_automated_reply",
     "is_landed_fix_reply",
+    "is_loom_pr_comment",
+    "issue_comment_is_actionable",
+    "issue_comment_reply_body",
+    "issue_comment_reply_target",
     "review_is_actionable",
 ]
 
@@ -199,6 +206,27 @@ class PullRequestReviewComment:
     pull_request_review_id: int | None = None
 
 
+@dataclass(frozen=True)
+class IssueComment:
+    """A comment on the PR's **Conversation** tab (GitHub: an *issue* comment —
+    a PR is an issue on that endpoint).
+
+    The third external-review stream (#353). It is the only channel open to
+    the PR's own author — GitHub refuses a review from the author, and every
+    loom-delivered PR is opened under the operator's login — so the
+    operator's verdicts arrive here and nowhere else. No ``path`` / ``line``
+    / sha: it reviews the PR, not a commit or a hunk. Its id space is
+    separate from inline review comments', so it carries its own
+    high-water mark."""
+
+    comment_id: int
+    author: str
+    body: str
+    html_url: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 # ── Pure helpers ──────────────────────────────────────────────────────
 
 
@@ -291,6 +319,19 @@ def parse_pull_request_review_comment(row: dict[str, Any]) -> PullRequestReviewC
     )
 
 
+def parse_issue_comment(row: dict[str, Any]) -> IssueComment:
+    created_raw = row.get("created_at")
+    updated_raw = row.get("updated_at")
+    return IssueComment(
+        comment_id=int(row["id"]),
+        author=str((row.get("user") or {}).get("login", "")),
+        body=str(row.get("body") or ""),
+        html_url=str(row.get("html_url") or ""),
+        created_at=_parse_iso(str(created_raw)) if created_raw else None,
+        updated_at=_parse_iso(str(updated_raw)) if updated_raw else None,
+    )
+
+
 def parse_marker(body: str | None) -> str | None:
     """Extract the task id from a ``<!-- lithos:<id> -->`` marker, if present.
 
@@ -350,9 +391,30 @@ AUTOMATED_REPLY_MARKER = "_(automated reply by story-develop)_"
 # root comment is still unresolved — those must never count as proof.
 FIXED_REPLY_PREFIX = "Fixed in "
 
+# Every loom-authored conversation comment that is NOT a reply — today the
+# route-runner's ``[NeedsHuman]`` @mention — ends with this marker. Both it and
+# the reply marker are posted under the operator's ``gh`` login, i.e. a
+# write/admin human: without a marker the conversation stream (#353) would
+# ingest loom's own notices as trusted review material.
+LOOM_NOTICE_MARKER = "_(automated notice by lithos-loom)_"
+
+# The head of the notices posted before the marker existed (b91177d2 slice A
+# shipped 2026-09-01; the marker landed with #353) — recognised so a PR that
+# already carries one is not re-ingested after the upgrade.
+_LEGACY_NOTICE_HEAD = "[NeedsHuman] loom stopped on"
+
 # Review states recorded but never actionable: an approval is not an operator
 # action item, and a dismissal has already had its say.
 SILENT_REVIEW_STATES = frozenset({"APPROVED", "DISMISSED"})
+
+# The reply line that names the conversation comment a loom reply answers —
+# the conversation-stream twin of ``in_reply_to_id`` (which issue comments do
+# not have). Anchored to this exact line so a coder's prose quoting some other
+# comment's url can never be read as the target.
+_ISSUE_COMMENT_REPLY_LINE = "_(replying to {url})_"
+_ISSUE_COMMENT_REPLY_RE = re.compile(
+    r"^_\(replying to \S*#issuecomment-(\d+)\)_[ \t]*$", re.MULTILINE
+)
 
 
 def is_automated_reply(body: str) -> bool:
@@ -368,6 +430,39 @@ def is_landed_fix_reply(body: str) -> bool:
     commenter can copy (PR #344 re-review 2).
     """
     return is_automated_reply(body) and body.startswith(FIXED_REPLY_PREFIX)
+
+
+def is_loom_pr_comment(body: str) -> bool:
+    """True for any conversation comment loom itself posted (a reply or a
+    notice, marked or legacy-shaped) — never re-ingested (#353)."""
+    return (
+        AUTOMATED_REPLY_MARKER in body
+        or LOOM_NOTICE_MARKER in body
+        or _LEGACY_NOTICE_HEAD in body
+    )
+
+
+def issue_comment_is_actionable(comment: IssueComment) -> bool:
+    """The conversation-stream policy (#353): a non-empty body from anyone
+    but loom. There is no review state to key on and no thread structure —
+    every human comment on the conversation is a potential verdict."""
+    return bool(comment.body.strip()) and not is_loom_pr_comment(comment.body)
+
+
+def issue_comment_reply_body(reply: str, target_url: str) -> str:
+    """Wrap a per-finding reply for the conversation tab, naming its target.
+
+    The reply head stays FIRST (``is_landed_fix_reply`` keys on the body's
+    start) and the target line comes last, so the same reply text proves the
+    same things whether threaded inline or posted on the conversation.
+    """
+    return f"{reply}\n\n{_ISSUE_COMMENT_REPLY_LINE.format(url=target_url)}"
+
+
+def issue_comment_reply_target(body: str) -> int | None:
+    """The conversation comment id a loom reply answers, or ``None``."""
+    match = _ISSUE_COMMENT_REPLY_RE.search(body)
+    return int(match.group(1)) if match is not None else None
 
 
 def review_is_actionable(review: PullRequestReview) -> bool:

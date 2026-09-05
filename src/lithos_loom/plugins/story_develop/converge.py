@@ -168,6 +168,7 @@ class ConvergeResult:
                 "author": o.finding.author,
                 "source": o.finding.source,
                 "comment_id": o.finding.comment_id,
+                "issue_comment_id": o.finding.issue_comment_id,
                 "thread_url": o.finding.thread_url,
                 "disposition": o.disposition,
                 "detail": o.detail,

@@ -30,7 +30,11 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 from lithos_loom.gates import create_pr_gate, parse_pr_gate
-from lithos_loom.github_client import PullRequestReview, PullRequestReviewComment
+from lithos_loom.github_client import (
+    IssueComment,
+    PullRequestReview,
+    PullRequestReviewComment,
+)
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.external_remediation import (
     REMEDIATION_KEY,
@@ -685,27 +689,27 @@ async def test_pending_marker_minted_only_for_a_dispatchable_batch(
     )
 
     # Trusted material at a fresh sha: parked.
-    assert await provider([_review()], []) == {PENDING_KEY: {"pr_url": _PR_URL}}
+    assert await provider([_review()], [], []) == {PENDING_KEY: {"pr_url": _PR_URL}}
     # Untrusted-only material: never parked.
     untrusted = rem.pending_marker_provider(
         spec, "story-1", budget, _github(permission="read"), _ctx(client)
     )
-    assert await untrusted([_review(author="drive-by")], []) is None
+    assert await untrusted([_review(author="drive-by")], [], []) is None
     # Own-sha-only material (a re-review of loom's own fix): never parked —
     # so no crash between park and clear can ever hand resume_pending a
     # trigger that bypasses the own-sha loop guard.
-    assert await provider([_review(commit_id=_LOOM_SHA)], []) is None
+    assert await provider([_review(commit_id=_LOOM_SHA)], [], []) is None
 
     # Budget off / no story: no parking either.
     no_story = rem.pending_marker_provider(spec, None, budget, _github(), _ctx(client))
-    assert await no_story([_review()], []) is None
+    assert await no_story([_review()], [], []) is None
     disabled = ExternalRemediation(
         _settings(tmp_path, budget=0), spawn=_spawner(None)[0]
     )
     off = disabled.pending_marker_provider(
         spec, "story-1", budget, _github(), _ctx(client)
     )
-    assert await off([_review()], []) is None
+    assert await off([_review()], [], []) is None
 
 
 async def test_resume_pending_is_a_noop_without_a_trigger(tmp_path: Path) -> None:
@@ -898,3 +902,91 @@ async def test_default_spawn_terminates_the_child_on_cancel(
         await asyncio.sleep(0.05)
     else:
         raise AssertionError(f"child {pid} still alive after cancellation")
+
+
+# ── conversation comments (#353) ──────────────────────────────────────
+
+
+def _issue_comment(
+    comment_id: int = 40, *, author: str = "davesnowdon"
+) -> IssueComment:
+    return IssueComment(
+        comment_id=comment_id,
+        author=author,
+        body="Verdict: not ready — two P1 gaps",
+        html_url=f"{_PR_URL}#issuecomment-{comment_id}",
+    )
+
+
+async def test_trusted_conversation_comment_dispatches_even_after_a_loom_push(
+    tmp_path: Path,
+) -> None:
+    """A conversation comment reviews no particular sha, so the own-sha guard
+    (a bot re-reviewing loom's in-flight fix) never applies to it — a human
+    verdict after loom's push is exactly the material that must dispatch."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    (tmp_path / "repo").mkdir()
+    spawn, calls = _spawner({"status": "converged", "pushed": False})
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=0, last_loom_pushed_sha=_LOOM_SHA
+    )
+
+    label = await rem.consider(
+        gate,
+        spec,
+        story,
+        budget,
+        _ingest(actionable_reviews=[], actionable_issue_comments=[_issue_comment()]),
+        _github("admin"),
+        _ctx(client),
+    )
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert calls and "--from-github" in calls[0]
+
+
+async def test_untrusted_conversation_comment_never_dispatches(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    label = await rem.consider(
+        gate,
+        spec,
+        story,
+        RemediationBudget(pr_url=_PR_URL),
+        _ingest(
+            actionable_reviews=[],
+            actionable_issue_comments=[_issue_comment(author="stranger")],
+        ),
+        _github("none"),
+        _ctx(client),
+    )
+
+    assert label == "no_trusted"
+    assert calls == []
+
+
+async def test_pending_provider_parks_for_a_trusted_conversation_batch(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    rem = ExternalRemediation(_settings(tmp_path))
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    provider = rem.pending_marker_provider(
+        spec, story, RemediationBudget(pr_url=_PR_URL), _github("write"), _ctx(client)
+    )
+
+    assert await provider([], [], [_issue_comment()]) == {
+        "external_remediation_pending": {"pr_url": _PR_URL}
+    }
