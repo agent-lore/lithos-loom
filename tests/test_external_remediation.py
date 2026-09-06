@@ -29,6 +29,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pytest
+
 from lithos_loom.gates import create_pr_gate, parse_pr_gate
 from lithos_loom.github_client import (
     IssueComment,
@@ -998,3 +1000,50 @@ async def test_pending_provider_parks_for_a_trusted_conversation_batch(
     assert await provider(_act(_issue_comment())) == {
         "external_remediation_pending": {"pr_url": _PR_URL}
     }
+
+
+# ── the argv must be accepted by the REAL converge parser ────────────────────
+#
+# Every spawn above is faked, so the argv the dispatcher builds was never run
+# through Typer. In production it was, and the first live dispatch (lens#78,
+# 2026-09-05) died on `No such option: -c` — the config flag the watcher child
+# understands is not the one `develop converge` exposes — spending a budget
+# round on a usage error. This test invokes the actual CLI with the actual
+# argv (the converge body stopped at its first host-config read).
+
+
+def test_dispatch_argv_is_accepted_by_the_real_converge_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    from lithos_loom.cli import converge as converge_cli
+    from lithos_loom.gates import PrGateSpec
+    from lithos_loom.main import app
+
+    class _Stop(Exception):
+        pass
+
+    seen: list[Path | None] = []
+
+    def fake_load_config(path: Path | None) -> None:
+        seen.append(path)
+        raise _Stop
+
+    monkeypatch.setattr(converge_cli, "load_config", fake_load_config)
+    host_cfg = tmp_path / "host.toml"
+    rem = ExternalRemediation(
+        _settings(tmp_path, config_path=host_cfg), spawn=_spawner(None)[0]
+    )
+    spec = PrGateSpec(repo="agent-lore/lithos-lens", pr_number=78, pr_url=_PR_URL)
+    cmd = rem._command(spec, tmp_path / "repo", tmp_path / "out.json")
+    assert cmd[:3] == [sys.executable, "-m", "lithos_loom"]
+
+    result = CliRunner().invoke(app, cmd[3:])
+
+    # Typer's usage error is exit 2 — the class of failure this pins.
+    assert result.exit_code != 2, result.output
+    assert "No such option" not in result.output
+    assert isinstance(result.exception, _Stop), result.output
+    # ...and the host config the child was booted with reached the run.
+    assert seen == [host_cfg]
