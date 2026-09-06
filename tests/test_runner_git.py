@@ -263,6 +263,15 @@ def test_fork_point_raises_on_an_unresolvable_ref(tmp_git_repo: Path) -> None:
         git.fork_point(tmp_git_repo, base)
 
 
+def test_fork_point_raises_on_an_unresolvable_start_sha(tmp_git_repo: Path) -> None:
+    # PR #358 review: `merge-base --is-ancestor` exits 0 / 1 for true / false and
+    # HIGHER for a command error (an unknown start). Folding every non-zero into
+    # "not lagging" would hand back the merge-base as if the probe had run.
+    base = git.RangeBase(start_sha="definitely-not-a-ref", ref="main")
+    with pytest.raises(RuntimeError, match="is-ancestor"):
+        git.fork_point(tmp_git_repo, base)
+
+
 def test_base_ref_for_prefers_the_remote_tracking_branch(
     tmp_git_repo: Path, tmp_path: Path
 ) -> None:

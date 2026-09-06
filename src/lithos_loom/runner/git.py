@@ -96,12 +96,20 @@ def fork_point(worktree: Path, base: RangeBase) -> str:
     if not base.ref:
         return base.start_sha
     merge_base = _git(worktree, "merge-base", "HEAD", base.ref)
+    # `--is-ancestor` answers with the exit code: 0 = yes, 1 = no, anything
+    # higher is a command error (an unresolvable start) — which must raise, not
+    # read as "no" and hand back a plausible-looking fork point.
     lagging = subprocess.run(
         ["git", "merge-base", "--is-ancestor", merge_base, base.start_sha],
         cwd=worktree,
         capture_output=True,
         text=True,
     )
+    if lagging.returncode > 1:
+        raise RuntimeError(
+            f"git merge-base --is-ancestor {merge_base} {base.start_sha} failed "
+            f"(exit {lagging.returncode}): {lagging.stderr.strip()}"
+        )
     return base.start_sha if lagging.returncode == 0 else merge_base
 
 

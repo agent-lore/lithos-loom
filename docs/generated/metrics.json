@@ -483,12 +483,12 @@
       "Runners": {
         "classes": 1,
         "functions": 30,
-        "largest_module": "lithos_loom.plugin_runner",
-        "largest_module_lines": 210,
-        "lines": 708,
+        "largest_module": "lithos_loom.runner.git",
+        "largest_module_lines": 212,
+        "lines": 716,
         "modules": 5,
         "public_symbols": 23,
-        "sloc": 555
+        "sloc": 560
       },
       "Sources": {
         "classes": 11,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 46772,
+    "total_lines": 46780,
     "total_modules": 138,
-    "total_sloc": 37263
+    "total_sloc": 37268
   },
   "tests": {
     "ratio": 1.62,
-    "src_lines": 46772,
-    "test_lines": 75604
+    "src_lines": 46780,
+    "test_lines": 75613
   }
 }
