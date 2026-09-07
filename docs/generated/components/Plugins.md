@@ -40,6 +40,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
+| `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 2 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
@@ -248,6 +249,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `spawn_deferred_tasks` — Spin each ``out-of-scope`` finding into its own Lithos task (819370e5).
 - def `post_results` — Post the run outcome back to the task. Returns True when fully posted.
 - def `complete_task` — Mark the task completed (``--complete-on-approval`` opt-in only).
+
+### `lithos_loom.plugins.story_develop.merge_gate`
+- class `MergeGateCheck` — One check's outcome on the merge result, flattened for the record.
+- class `MergeGateResult` — The outcome of one trial merge + gate.
+- def `config_fingerprint` — A short stable digest of *what gated*: the resolved checks + the image.
+- def `run_merge_gate` — Trial-merge *change*'s current base into its head and gate the result.
 
 ### `lithos_loom.plugins.story_develop.model_policy`
 - def `apply_panel_default_models` — Fill each reviewer's model from the per-tool default where still unset.

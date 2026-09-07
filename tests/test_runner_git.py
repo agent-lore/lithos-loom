@@ -355,3 +355,95 @@ def test_commits_since_walks_first_parent_past_a_merge(tmp_git_repo: Path) -> No
     since_head = git.commits_since(tmp_git_repo, story_commit)
     assert since_head == [_sha(tmp_git_repo)]
     assert base_commit not in since_head
+
+
+# ── merge primitives for the trial merge (PRD S3) ────────────────────────────
+
+
+def test_is_ancestor_answers_both_ways_and_raises_on_a_bad_ref(
+    tmp_git_repo: Path,
+) -> None:
+    first = git.base_sha(tmp_git_repo)
+    _commit(tmp_git_repo, "a.txt", "a")
+    second = git.base_sha(tmp_git_repo)
+    assert git.is_ancestor(tmp_git_repo, first, second) is True
+    assert git.is_ancestor(tmp_git_repo, second, first) is False
+    assert git.is_ancestor(tmp_git_repo, first, first) is True
+    with pytest.raises(RuntimeError, match="is-ancestor"):
+        git.is_ancestor(tmp_git_repo, "no-such-ref", second)
+
+
+def test_merge_clean_creates_a_merge_commit_and_returns_no_paths(
+    tmp_git_repo: Path,
+) -> None:
+    start = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "-c", "story", "-q")
+    _commit(tmp_git_repo, "own.txt", "story")
+    head = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "main", "-q")
+    _commit(tmp_git_repo, "base.txt", "base")
+    base_tip = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "story", "-q")
+
+    conflicts = git.merge(tmp_git_repo, base_tip, message="merge main into story")
+
+    assert conflicts == []
+    merged = git.base_sha(tmp_git_repo)
+    parents = subprocess.run(
+        ["git", "log", "-1", "--format=%P", merged],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert parents == [head, base_tip]  # always a real merge commit, never a ff
+    assert start != merged
+    assert (tmp_git_repo / "own.txt").exists() and (tmp_git_repo / "base.txt").exists()
+
+
+def test_merge_conflict_returns_the_paths_and_leaves_the_tree_clean(
+    tmp_git_repo: Path,
+) -> None:
+    (tmp_git_repo / "shared.txt").write_text("v0\n")
+    _run(tmp_git_repo, "add", "-A")
+    _run(tmp_git_repo, "commit", "-m", "seed")
+    _run(tmp_git_repo, "switch", "-c", "story", "-q")
+    (tmp_git_repo / "shared.txt").write_text("story\n")
+    _commit(tmp_git_repo, "own.txt", "story")
+    head = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "main", "-q")
+    (tmp_git_repo / "shared.txt").write_text("base\n")
+    _commit(tmp_git_repo, "base.txt", "base")
+    base_tip = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "story", "-q")
+
+    conflicts = git.merge(tmp_git_repo, base_tip, message="merge main into story")
+
+    assert conflicts == ["shared.txt"]
+    # aborted: HEAD unmoved, nothing staged or unmerged, no MERGE_HEAD left behind
+    assert git.base_sha(tmp_git_repo) == head
+    assert git.has_uncommitted_changes(tmp_git_repo) is False
+    assert not (tmp_git_repo / ".git" / "MERGE_HEAD").exists()
+
+
+def test_merge_already_up_to_date_makes_no_commit(tmp_git_repo: Path) -> None:
+    ancestor = git.base_sha(tmp_git_repo)
+    _commit(tmp_git_repo, "a.txt", "a")
+    head = git.base_sha(tmp_git_repo)
+    assert git.merge(tmp_git_repo, ancestor, message="noop") == []
+    assert git.base_sha(tmp_git_repo) == head
+
+
+def test_delete_branch_removes_a_non_checked_out_branch(tmp_git_repo: Path) -> None:
+    _run(tmp_git_repo, "branch", "throwaway")
+    git.delete_branch(tmp_git_repo, "throwaway")
+    names = subprocess.run(
+        ["git", "branch", "--list", "throwaway"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert names.strip() == ""
+    with pytest.raises(RuntimeError):
+        git.delete_branch(tmp_git_repo, "throwaway")  # already gone → loud

@@ -662,6 +662,19 @@ Converges an **existing PR** to review-green: it runs the reviewer panel + deter
 
 Host-only like a develop run (`docker` + `claude`/`codex` + `gh`); not part of the hermetic `make check`.
 
+### 4.15b `lithos-loom develop merge-gate` — trial merge + current check-set (PRD S3)
+
+```
+lithos-loom develop merge-gate <pr>
+    [-p|--profile standard] [--check-command NAME=CMD ...] [--check-state NAME=STATE ...]
+    [--test-command CMD] [--parity-command CMD] [--image IMG] [--test-timeout N]
+    [--no-push] [--keep-worktree] [--repo PATH] [--json PATH] [--config config.toml]
+```
+
+Answers *"will the base break if I merge this PR now?"* with **zero agent tokens**: in a throwaway worktree at the PR head it merges the base's **current** tip (`--no-ff` — a base move yields a real merge commit whose parents are the head and the base, never a rewrite of which commit the head is), then either reports the **conflicting paths** (the only source of that list — GitHub's API says `dirty` and nothing more; no check-set runs on a tree that does not exist) or runs the project's **current** check-set on the merge result (PRD S3 decision: the base is defended by today's gate, not the one the story passed a week ago; the record carries a **config fingerprint** of the resolved checks + image so the sweep's re-run key `(head_sha, base_sha, fingerprint)` re-gates an already-observed PR when the check-set tightens). When the gate is **green and the PR was behind**, the merge commit is pushed onto the PR branch through the same leased, ancestry-proved push `converge` uses (append-only; a branch that moved since the resolve is a `push_error` beside the green verdict, never a rewrite); `--no-push` disables it, and red / errored / no-checks / up-to-date results never push. Forks are refused before any git work. The worktree and its branch are removed afterwards unless `--keep-worktree`. Exit codes: `green` / `no_checks` 0, `red` / `errored` 1, `fork_unsupported` 2, `conflict` 3. The github-watcher sweep drives this command as a subprocess on every base move (the watcher half of S3 — not yet shipped); on its own it is the operator's pre-merge check. See [`docs/cli/merge-gate.md`](cli/merge-gate.md).
+
+Host-only (`docker` + `gh`); not part of the hermetic `make check`.
+
 ### 4.16 `lithos-loom eval review` — review-correctness eval harness (#183)
 
 ```

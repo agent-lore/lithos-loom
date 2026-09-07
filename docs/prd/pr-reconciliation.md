@@ -1063,7 +1063,7 @@ Reconciling explicitly, so the two do not drift:
 | 0 | **S0 real task brief + PR body** — implemented, PR #333 **open** | the coder, the panel AC and the PR body all get the description | none |
 | 1 | S1 landability + `[PRConflicted]` — **shipped** (detection; the `behind` auto-update rides with S3) | two fields, one branch, one marker | none |
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
-| 3 | S3 re-gate on base move | the merge-blindness fix | none |
+| 3 | S3 re-gate on base move — **CLI half shipped** (`develop merge-gate`: trial merge, conflicting paths, current check-set, green-and-behind push; the watcher half — fire on base move, marker + `[MergeGateFailed]` + paths into `[PRConflicted]` — follows) | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
 | 5 | **S5c merge-aware ranges** — **shipped** (`RangeBase` + `fork_point`, three-dot diffs, first-parent enumeration; the pair test is `tests/test_runner_git.py`) | prerequisite: reviewers stop seeing other people's work | none |
 | 6 | **S5a external-claim triage** | a wrong bot comment does not become a wrong commit | one cheap call per finding |

@@ -19,6 +19,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
+| `lithos_loom.cli.merge_gate` | S | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
 | `lithos_loom.cli.review` | M | 0 | 7 |
@@ -76,6 +77,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `classify_gate` — Classify one gate + its waiter into a :class:`GateRow` (pure).
 - def `collect_gate_rows` — Enumerate open gates and classify each (read-only).
 - def `render_report` — Render the gate listing as aligned text lines (pure).
+
+### `lithos_loom.cli.merge_gate`
+- def `merge_gate_command` — Trial-merge a PR into its current base and run the check-set on the result.
 
 ### `lithos_loom.cli.obsidian_sync`
 - def `show` — Print the resolved ``[obsidian_sync]`` block from the active config.

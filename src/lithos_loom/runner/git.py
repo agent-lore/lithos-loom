@@ -96,21 +96,30 @@ def fork_point(worktree: Path, base: RangeBase) -> str:
     if not base.ref:
         return base.start_sha
     merge_base = _git(worktree, "merge-base", "HEAD", base.ref)
-    # `--is-ancestor` answers with the exit code: 0 = yes, 1 = no, anything
-    # higher is a command error (an unresolvable start) — which must raise, not
-    # read as "no" and hand back a plausible-looking fork point.
-    lagging = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", merge_base, base.start_sha],
+    # the live ref LAGS the recorded start → the start is still the fork point
+    lagging = is_ancestor(worktree, merge_base, base.start_sha)
+    return base.start_sha if lagging else merge_base
+
+
+def is_ancestor(worktree: Path, ancestor: str, descendant: str) -> bool:
+    """Whether *ancestor* is reachable from *descendant* (a commit is its own).
+
+    ``git merge-base --is-ancestor`` answers with the exit code: 0 = yes, 1 =
+    no, anything higher is a command error (an unresolvable ref) — which must
+    raise, never read as "no" (PR #358 review).
+    """
+    probe = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
         cwd=worktree,
         capture_output=True,
         text=True,
     )
-    if lagging.returncode > 1:
+    if probe.returncode > 1:
         raise RuntimeError(
-            f"git merge-base --is-ancestor {merge_base} {base.start_sha} failed "
-            f"(exit {lagging.returncode}): {lagging.stderr.strip()}"
+            f"git merge-base --is-ancestor {ancestor} {descendant} failed "
+            f"(exit {probe.returncode}): {probe.stderr.strip()}"
         )
-    return base.start_sha if lagging.returncode == 0 else merge_base
+    return probe.returncode == 0
 
 
 def commit_sha(worktree: Path, ref: str = "HEAD") -> str:
@@ -210,3 +219,42 @@ def diff_stat(worktree: Path, base: str) -> str:
     branch's own changes only. Empty string when *base* is already HEAD.
     """
     return _git(worktree, "diff", "--stat", f"{base}...HEAD")
+
+
+def merge(worktree: Path, ref: str, *, message: str) -> list[str]:
+    """Merge *ref* into *worktree*'s HEAD; return the conflicting paths.
+
+    The trial merge behind PRD S3 / S5. Always ``--no-ff`` so a base move
+    yields a real merge commit (parents: the branch head, then *ref*) rather
+    than a fast-forward that would rewrite which commit the PR head *is*;
+    ``git merge`` reports "already up to date" (nothing to do) as success with
+    no commit. A conflict returns the unmerged paths — the only source of that
+    list, the GitHub API does not provide it — and **aborts** the merge, so
+    the tree is left exactly as found (HEAD unmoved, nothing staged, no
+    ``MERGE_HEAD``); an empty list means the merge landed.
+    """
+    result = subprocess.run(
+        ["git", "merge", "--no-ff", "--no-edit", "-m", message, ref],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return []
+    unmerged = _git(worktree, "diff", "--name-only", "--diff-filter=U")
+    paths = unmerged.splitlines() if unmerged else []
+    if not paths:
+        # not a conflict — a bad ref, a dirty tree, an unrelated failure
+        raise RuntimeError(
+            f"git merge {ref} failed (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    _git(worktree, "merge", "--abort")
+    return paths
+
+
+def delete_branch(repo: Path, branch: str) -> None:
+    """Delete local *branch* (``-D``: a throwaway trial-merge branch is never
+    merged anywhere, so the safe ``-d`` would always refuse). Raises when the
+    branch does not exist or is checked out."""
+    _git(repo, "branch", "-D", branch)
