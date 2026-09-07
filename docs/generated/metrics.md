@@ -51,13 +51,13 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Runners | 5 | 625 | 484 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 27 | 8477 | 6599 | 4 | 11 | 0.73 | 20 (`lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate`) | 14 |
+| Subscriptions | 27 | 8478 | 6599 | 4 | 11 | 0.73 | 20 (`lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate`) | 14 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
 | Tasks | 4 | 1212 | 945 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 3 |
 
 ## Size
 
-- Modules: **138**, lines: **46659**, SLOC: **37168**
+- Modules: **138**, lines: **46660**, SLOC: **37168**
 - Largest module: `lithos_loom.lithos_client` (2210 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.62** (75363 test lines / 46659 source lines)
+- Test-to-source line ratio: **1.62** (75412 test lines / 46660 source lines)
