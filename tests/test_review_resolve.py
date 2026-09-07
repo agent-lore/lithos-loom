@@ -40,6 +40,8 @@ def test_resolves_explicit_ref_range(tmp_git_repo: Path) -> None:
 
     assert change.base_sha == base
     assert change.head_sha == head
+    # the typed base is the live ref for a range (S5c)
+    assert change.base_ref == base
     # a bare range carries no acceptance-criteria source
     assert change.title == ""
     assert change.body == ""
@@ -59,6 +61,7 @@ def test_resolves_local_branch_against_merge_base(tmp_git_repo: Path) -> None:
     assert change.base_sha == main_tip
     assert change.head_sha == head
     assert change.head_ref == "feature"
+    assert change.base_ref == "main"  # the base branch is the live ref (S5c)
 
 
 def test_base_override_wins_for_branch(tmp_git_repo: Path) -> None:
@@ -73,6 +76,8 @@ def test_base_override_wins_for_branch(tmp_git_repo: Path) -> None:
     assert change.base_sha == second
     assert change.head_sha == head
     assert first != second  # sanity: the override is not the default merge-base
+    # an operator-forced base IS the base — no live ref to move it (S5c)
+    assert change.base_ref == ""
 
 
 def test_unknown_ref_raises(tmp_git_repo: Path) -> None:
@@ -132,6 +137,8 @@ def test_resolves_pr_number(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     # (which is why #207's missing baseRefOid never mattered).
     assert change.base_sha == "m" * 40
     assert stub_gh.merge_base == [("origin/main", "h" * 40)]
+    # the remote-tracking base branch is the live ref converge merges (S5c)
+    assert change.base_ref == "origin/main"
     assert change.head_sha == "h" * 40
     # the PR body is the default acceptance-criteria source
     assert "adds a thing" in change.body

@@ -324,7 +324,7 @@ def converge_pr(
             worktree_factory=lambda cfg: worktree.create_on_branch(
                 cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent
             ),
-            base_override=change.base_sha,
+            base_override=git.RangeBase(change.base_sha, change.base_ref),
             intake_reviews=[dataclasses.replace(seed[0], findings=surviving)],
             intake_check_set=None,
             # The per-id acknowledgement contract (PR #345 re-review 1): the
@@ -465,7 +465,7 @@ def converge_pr(
         worktree_factory=lambda cfg: worktree.create_on_branch(
             cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent
         ),
-        base_override=change.base_sha,
+        base_override=git.RangeBase(change.base_sha, change.base_ref),
         intake_reviews=intake.panel.round_reviews,
         intake_check_set=intake.check_set,
     )
