@@ -149,7 +149,8 @@ class RemediationSettings:
     budget: int
     projects: Mapping[str, Path] = field(default_factory=dict)
     work_dir: Path = Path(".")
-    # Forwarded to the subprocess as `-c` so it loads the same host config;
+    # Forwarded to the subprocess as `--config` so it loads the same host
+    # config (`develop converge` has no `-c` short flag — the daemon commands do);
     # None lets it fall back to env/CWD discovery (the child's own mode).
     config_path: Path | None = None
 
@@ -626,7 +627,7 @@ class ExternalRemediation:
             str(json_path),
         ]
         if self._settings.config_path is not None:
-            cmd += ["-c", str(self._settings.config_path)]
+            cmd += ["--config", str(self._settings.config_path)]
         return cmd
 
     async def _run(
