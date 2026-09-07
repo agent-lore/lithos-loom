@@ -223,3 +223,36 @@ def notice_github_ref(metadata: Any) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+async def build_notifier(cfg: Any, http: Any) -> Notifier:
+    """The push sinks for needs-human gates, from ``[notifications]``.
+
+    Shared by every daemon child that raises a loom ``human`` gate (the
+    route-runner's failed exit, the github-watcher's exhausted remediation).
+    The GitHub mention sink needs an operator login (``[story_develop]
+    .operator_github_login``, #113) AND a working ``gh auth token``; either
+    missing stands the sink down with a log line rather than failing the
+    child — the gate + finding still land, only the push is lost.
+    """
+    from .github_client import GitHubClient, GitHubError
+
+    notifications = cfg.notifications
+    login = cfg.story_develop.operator_github_login if cfg.story_develop else None
+    github: GitHubClient | None = None
+    if notifications.github_mention and login:
+        try:
+            github = await GitHubClient.create(http=http)
+        except GitHubError as exc:
+            logger.warning("github_mention notifications disabled — %s", exc)
+    elif notifications.github_mention:
+        logger.info(
+            "github_mention notifications need "
+            "[story_develop].operator_github_login; standing down"
+        )
+    return Notifier(
+        desktop_toast=notifications.desktop_toast,
+        command=notifications.on_needs_human,
+        github_login=login if github is not None else None,
+        github=github,
+    )

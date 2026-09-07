@@ -53,7 +53,6 @@ import contextlib
 import dataclasses
 import sys
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +68,13 @@ from lithos_loom.subscriptions.external_reviews import (
     IngestResult,
     PendingMarkerProvider,
 )
+from lithos_loom.subscriptions.remediation_budget import (
+    REMEDIATION_KEY,
+    RemediationBudget,
+    RemediationSettings,
+    read_budget,
+)
+from lithos_loom.subscriptions.remediation_escalation import escalate_if_exhausted
 
 __all__ = [
     "CONVERGE_SETTING",
@@ -81,10 +87,6 @@ __all__ = [
     "spawn_converge",
 ]
 
-# Gate-metadata key holding the S5b budget state (see the module docstring).
-# A separate key from `external_review_seen` and the merge marker — no marker
-# may trip another's skip logic.
-REMEDIATION_KEY = "external_remediation"
 
 # Gate-metadata key parking a batch deferred behind the busy single-flight
 # slot (PR #346 review F1): ingestion's high-water marks consume the batch,
@@ -105,54 +107,6 @@ RUN_TIMEOUT_SECONDS = 4 * 3600
 _OUTPUT_TAIL_CHARS = 600
 
 Spawn = Callable[[list[str]], Awaitable[tuple[int, str]]]
-
-
-@dataclass(frozen=True)
-class RemediationBudget:
-    """The gate's parsed S5b budget state (fresh when absent / foreign-url)."""
-
-    pr_url: str
-    rounds_used: int = 0
-    last_loom_pushed_sha: str = ""
-    last_seen_head_sha: str = ""
-
-    def as_marker(self) -> dict[str, Any]:
-        return {
-            "pr_url": self.pr_url,
-            "rounds_used": self.rounds_used,
-            "last_loom_pushed_sha": self.last_loom_pushed_sha,
-            "last_seen_head_sha": self.last_seen_head_sha,
-        }
-
-
-def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
-    """Parse the gate's budget marker; fresh state for a foreign / absent url."""
-    raw = gate.metadata.get(REMEDIATION_KEY)
-    if not isinstance(raw, dict) or raw.get("pr_url") != pr_url:
-        return RemediationBudget(pr_url=pr_url)
-    rounds = raw.get("rounds_used")
-    loom_sha = raw.get("last_loom_pushed_sha")
-    seen_sha = raw.get("last_seen_head_sha")
-    return RemediationBudget(
-        pr_url=pr_url,
-        rounds_used=rounds if isinstance(rounds, int) and rounds >= 0 else 0,
-        last_loom_pushed_sha=loom_sha if isinstance(loom_sha, str) else "",
-        last_seen_head_sha=seen_sha if isinstance(seen_sha, str) else "",
-    )
-
-
-@dataclass(frozen=True)
-class RemediationSettings:
-    """Host-side knobs the watcher child threads in from its config."""
-
-    trusted_bots: tuple[str, ...]
-    budget: int
-    projects: Mapping[str, Path] = field(default_factory=dict)
-    work_dir: Path = Path(".")
-    # Forwarded to the subprocess as `--config` so it loads the same host
-    # config (`develop converge` has no `-c` short flag — the daemon commands do);
-    # None lets it fall back to env/CWD discovery (the child's own mode).
-    config_path: Path | None = None
 
 
 async def _end_process(proc: asyncio.subprocess.Process) -> None:
@@ -243,7 +197,7 @@ class ExternalRemediation:
                 budget.last_loom_pushed_sha[:12] or "(never pushed)",
                 budget.rounds_used,
             )
-            budget = dataclasses.replace(budget, rounds_used=0, last_seen_head_sha=head)
+            budget = RemediationBudget(pr_url=spec.pr_url, last_seen_head_sha=head)
         else:
             budget = dataclasses.replace(budget, last_seen_head_sha=head)
         await write_marker(
@@ -612,7 +566,9 @@ class ExternalRemediation:
 
     # ── the run itself ─────────────────────────────────────────────────
 
-    def _command(self, spec: PrGateSpec, repo: Path, json_path: Path) -> list[str]:
+    def _command(
+        self, spec: PrGateSpec, repo: Path, json_path: Path, story_id: str
+    ) -> list[str]:
         cmd = [
             sys.executable,
             "-m",
@@ -621,6 +577,12 @@ class ExternalRemediation:
             "converge",
             str(spec.pr_number),
             "--from-github",
+            # The story: converge resolves the project's + task's develop_*
+            # settings (rounds, profile, panel, check-set, image) the way the
+            # daemon path does — lens#78 ran at the CLI default of 5 rounds
+            # while the project said 8.
+            "--story",
+            story_id,
             "--repo",
             str(repo),
             "--json",
@@ -660,7 +622,7 @@ class ExternalRemediation:
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.unlink(missing_ok=True)
 
-        rc, output = await self._spawn(self._command(spec, repo, json_path))
+        rc, output = await self._spawn(self._command(spec, repo, json_path, story_id))
 
         data: dict[str, Any] | None = None
         try:
@@ -691,6 +653,14 @@ class ExternalRemediation:
             )
             return
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
+        ctx.logger.warning(
+            "external-remediation: converge for %s finished: failed (exit %d) "
+            "without a result, round %d/%d spent",
+            spec.pr_url,
+            rc,
+            budget.rounds_used,
+            self._settings.budget,
+        )
         await self._post_finding(
             story_id,
             f"[Friction] external-remediation: converge --from-github for "
@@ -698,6 +668,15 @@ class ExternalRemediation:
             f"spent ({budget.rounds_used}/{self._settings.budget}). Output "
             f"tail: {tail}",
             ctx,
+        )
+        await self._escalate_if_exhausted(
+            gate_id,
+            story_id,
+            spec,
+            budget,
+            last_status="failed",
+            detail=f"converge exited {rc} without a result",
+            ctx=ctx,
         )
 
     async def _record_result(
@@ -747,7 +726,63 @@ class ExternalRemediation:
         cost = data.get("total_cost_usd")
         if isinstance(cost, int | float):
             lines.append(f"- spend ${cost:.2f}")
+        ctx.logger.info(
+            "external-remediation: converge for %s finished: %s, round %d/%d%s%s",
+            spec.pr_url,
+            status,
+            budget.rounds_used,
+            self._settings.budget,
+            f", pushed {pushed_sha[:12]}" if pushed_sha else ", nothing pushed",
+            f", ${cost:.2f}" if isinstance(cost, int | float) else "",
+        )
         await self._post_finding(story_id, "\n".join(lines), ctx)
+        if status != "converged":
+            await self._escalate_if_exhausted(
+                gate_id,
+                story_id,
+                spec,
+                budget,
+                last_status=str(status),
+                detail=str(data.get("message") or status),
+                cost=cost if isinstance(cost, int | float) else None,
+                ctx=ctx,
+            )
+
+    async def _escalate_if_exhausted(
+        self,
+        gate_id: str,
+        story_id: str,
+        spec: PrGateSpec,
+        budget: RemediationBudget,
+        *,
+        last_status: str,
+        detail: str,
+        ctx: SubscriptionContext,
+        cost: float | None = None,
+    ) -> None:
+        """PRD S5b: exhaustion → human gate (:mod:`.remediation_escalation`);
+        a gate that could not be raised is said so on the story."""
+        problem = await escalate_if_exhausted(
+            ctx,
+            gate_id=gate_id,
+            story_id=story_id,
+            spec=spec,
+            budget=budget,
+            budget_limit=self._settings.budget,
+            notifier=self._settings.notifier,
+            last_status=last_status,
+            detail=detail,
+            cost=cost,
+        )
+        if problem is not None:
+            await self._post_finding(
+                story_id,
+                f"[Friction] external-remediation: budget spent on {spec.pr_url} "
+                f"but no needs-human gate could be raised ({problem}); the PR "
+                "is not converged and loom will not dispatch again until a "
+                "human pushes to the branch",
+                ctx,
+            )
 
     async def _post_finding(
         self, story_id: str, summary: str, ctx: SubscriptionContext

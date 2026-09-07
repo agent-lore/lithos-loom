@@ -43,7 +43,7 @@ import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from ...plugin_runner import write_result_atomically
 from . import check_runner, engines, sandbox_facts
@@ -73,11 +73,8 @@ from .config import (
 from .daemon_io import (
     EXIT_BAD_INPUT,
     EXIT_SUCCEEDED,
-    apply_cli_fallbacks,
-    apply_review_profile,
-    apply_review_profile_panel,
-    apply_tool_default_models,
     build_result_payload,
+    layer_run_settings,
     load_operator_github_login,
     load_review_profile_policy,
     load_tool_default_models,
@@ -85,6 +82,7 @@ from .daemon_io import (
     profile_panel,
     read_task_payload,
     resolve_project_settings,
+    story_config_overrides,
 )
 from .develop import develop
 from .idempotency import lookup_completed, record_completion
@@ -472,98 +470,60 @@ def _daemon_main(args: argparse.Namespace) -> int:
     # substitution keys off). An explicit-but-unknown name fails closed further down;
     # its friction is merged here so it posts even on a halt.
     profile_default, unknown_policy, profile_frictions = load_review_profile_policy()
-    settings = apply_review_profile(
+    # Per-tool global default models from the loom TOML's [story_develop]
+    # section: the lowest-priority layer, filling any agent the metadata /
+    # per-task / route-fallback layers left unset, keyed by that agent's tool.
+    default_models, dm_frictions = load_tool_default_models()
+    # Profile → panel → route-level --coder-*/--reviewer-* fallbacks (#93) →
+    # default models: the one layering an on-demand `--story` run shares.
+    settings = layer_run_settings(
         settings,
-        task_value=ctx.metadata.get("develop_review_profile"),
-        host_default=profile_default,
+        ctx.metadata,
+        host_default_profile=profile_default,
         unknown_profile=unknown_policy,
-    )
-    settings = apply_review_profile_panel(settings)
-    if profile_frictions:
-        settings = replace(settings, frictions=settings.frictions + profile_frictions)
-    # Route-level --coder-*/--reviewer-* flags are blanket fallbacks under the
-    # resolved metadata (#93); bad values drop with friction, never error.
-    settings = apply_cli_fallbacks(
-        settings,
+        default_models=default_models,
         coder_model=args.coder_model,
         coder_effort=args.coder_effort,
         reviewer_model=args.reviewer_model,
         reviewer_effort=args.reviewer_effort,
     )
-    # Per-tool global default models from the loom TOML's [story_develop]
-    # section: the lowest-priority layer, filling any agent the metadata /
-    # per-task / route-fallback layers left unset, keyed by that agent's tool.
-    default_models, dm_frictions = load_tool_default_models()
-    settings = apply_tool_default_models(settings, default_models)
-    if dm_frictions:
-        settings = replace(settings, frictions=settings.frictions + dm_frictions)
+    if profile_frictions or dm_frictions:
+        settings = replace(
+            settings, frictions=settings.frictions + profile_frictions + dm_frictions
+        )
     for friction in settings.frictions:
         print(f"[Friction] {friction}", file=sys.stderr)
     post_frictions(args.lithos_url, ctx.task_id, settings.frictions)
     print(f"developing Lithos task {ctx.task_id}: {ctx.title} (daemon mode)")
 
-    config = DevelopConfig(
+    # The route-level flags are the FALLBACK layer; whatever the project /
+    # task metadata pinned (story_config_overrides) is laid over them —
+    # metadata REPLACES a route flag, never disables it (None/absent =
+    # inherit; a route --parity-command is a per-route policy floor applied to
+    # every project it serves — ADR 0010 "Precedence and disabling"). #127
+    # test gate, #273 check commands / states / parity, #140 profile, the
+    # sandbox image and the model / effort layers all follow that one rule.
+    route_layer: dict[str, Any] = dict(
         repo=repo,
         description=ctx.task_text,
         work_dir=args.work_dir.expanduser().resolve(),
         acceptance_criteria=ctx.acceptance_criteria,
-        coder=settings.coder,
-        coder_model=settings.coder_model,
-        coder_effort=settings.coder_effort,
-        reviewers=settings.reviewers,
-        # #140: the resolved Review Profile selects the deterministic check-set.
-        review_profile=settings.review_profile,
-        max_rounds=settings.max_rounds or args.max_rounds,
-        # Per-project / per-task test-gate config from project-context metadata
-        # (#127) wins; the route-level flags (--no-test-gate / --test-command) are
-        # the fallback when metadata pins nothing. ``None`` from the resolver means
-        # "inherit the flag". (#140: the `test` check's blocking is the review
-        # profile's, not a separate knob — `block_on_red` removed.)
-        test_gate=(
-            settings.test_gate
-            if settings.test_gate is not None
-            else not args.no_test_gate
-        ),
-        test_command=(
-            settings.test_command
-            if settings.test_command is not None
-            else route_test_command
-        ),
-        # #273: project-context develop_check_commands wins; the route-level
-        # --check-command flag is the all-or-nothing fallback when metadata declares
-        # none (mirrors how --test-command sits under develop_test_command).
-        check_commands=settings.check_commands or route_check_commands,
-        # #273 slice 2: same all-or-nothing fallback for the per-check state overrides.
-        check_states=settings.check_states or route_check_states,
-        # #273 slice 3: project-context develop_parity_command wins; the route flag is
-        # the fallback (mirrors --test-command under develop_test_command). Uniform
-        # scalar precedence — metadata may REPLACE the route command but not disable it
-        # (None/absent = inherit); a route --parity-command is a per-route policy floor
-        # applied to every project it serves. See ADR 0010 "Precedence and disabling".
-        parity_command=(
-            settings.parity_command
-            if settings.parity_command is not None
-            else route_parity_command
-        ),
+        max_rounds=args.max_rounds,
+        test_gate=not args.no_test_gate,
+        test_command=route_test_command,
+        check_commands=route_check_commands,
+        check_states=route_check_states,
+        parity_command=route_parity_command,
         test_timeout=args.test_timeout,
         max_pause_minutes=args.max_pause_minutes,
         pause_poll_minutes=args.pause_poll_minutes,
-        reviewer_fallback_chain=(
-            settings.fallback_chain or tuple(args.reviewer_fallback or ())
-        ),
-        max_cost_usd=(
-            settings.max_cost_usd
-            if settings.max_cost_usd is not None
-            else args.max_cost_usd
-        ),
-        # Per-project / per-task sandbox image from project-context metadata
-        # wins; the route-level --image flag (default DEFAULT_IMAGE) is the
-        # fallback when metadata pins nothing.
-        image=settings.image or args.image,
-        artifacts_path=settings.artifacts_path,
+        reviewer_fallback_chain=tuple(args.reviewer_fallback or ()),
+        max_cost_usd=args.max_cost_usd,
+        image=args.image,
         base_branch=args.branch,
         notify_github_login=load_operator_github_login(),
     )
+    config = DevelopConfig(**{**route_layer, **story_config_overrides(settings)})
 
     # Probe the sandbox once here, where a failure still has somewhere to go:
     # the coder and reviewer prompt sites read the cached result and cannot post

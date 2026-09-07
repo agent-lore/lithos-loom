@@ -31,11 +31,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 9 |
-| `lithos_loom.subscriptions.escalation` | M | 1 | 3 |
+| `lithos_loom.subscriptions.escalation` | M | 1 | 4 |
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
-| `lithos_loom.subscriptions.external_remediation` | L | 3 | 2 |
+| `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
+| `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
+| `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -120,6 +122,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.escalation`
 - class `Escalation` — Why a run ended without delivering, in the gate's shape: a closed- vocabulary *reason*, a one-line *summary*, and the *brief* (branch, rounds, cost, gate verdict, findings, paths) the gate carries as ``run_brief``.
 - def `escalation_from_result` — Read a ``failed`` result.json into an :class:`Escalation`.
+- def `raise_needs_human` — Raise a loom ``human`` gate on *task_id* and tell the operator.
 - def `escalate_with_failure` — The whole non-delivering exit: raise the needs-human gate, record it on the story, tell the operator, release the claim. Returns the gate id, or ``None`` when no gate could be raised (the marker-only fallback ran).
 - def `clear_resolved_escalation` — Best-effort per-key delete of a story's ``needs_human_gate_id`` and ``route``'s failed-attempt marker, iff the dispatch-time *payload* carried the gate key (no round trip otherwise).
 
@@ -127,9 +130,6 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - class `EscalationResolver` — One subscriber per route-runner child; see the module docstring.
 
 ### `lithos_loom.subscriptions.external_remediation`
-- class `RemediationBudget` — The gate's parsed S5b budget state (fresh when absent / foreign-url).
-- def `read_budget` — Parse the gate's budget marker; fresh state for a foreign / absent url.
-- class `RemediationSettings` — Host-side knobs the watcher child threads in from its config.
 - def `spawn_converge` — Default spawn: run the converge CLI, return ``(returncode, output)``.
 - class `ExternalRemediation` — Owns the single-flight dispatch of ``develop converge --from-github``.
 
@@ -140,6 +140,15 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.pr_landability`
 - def `classify_landability` — ``unknown`` / ``dirty`` / ``mergeable`` from the fetched PR.
 - def `check_landability` — Classify one still-open gate's PR and report a conflict once per ``(pr_url, base_sha, head_sha)``. Returns the state label. Never raises.
+
+### `lithos_loom.subscriptions.remediation_budget`
+- class `RemediationNotifier`
+- class `RemediationBudget` — The gate's parsed S5b budget state (fresh when absent / foreign-url).
+- def `read_budget` — Parse the gate's budget marker; fresh state for a foreign / absent url.
+- class `RemediationSettings` — Host-side knobs the watcher child threads in from its config.
+
+### `lithos_loom.subscriptions.remediation_escalation`
+- def `escalate_if_exhausted` — Raise the needs-human gate when *budget* is spent and the PR is still not converged. Returns ``None`` when nothing was needed or the gate landed, else the problem that stopped the gate (for the caller's ``[Friction]``). Never raises.
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.

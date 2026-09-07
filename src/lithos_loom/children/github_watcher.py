@@ -33,6 +33,7 @@ from lithos_loom.config import LoomConfig, RetryPolicy, load_config
 from lithos_loom.cursor_store import CursorStore
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.lithos_client import LithosClient, TaskClient
+from lithos_loom.notifications import build_notifier
 from lithos_loom.sources.github_issue_watcher import GitHubIssueWatcher
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
@@ -267,6 +268,9 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
             ) as lithos,
         ):
             github = await GitHubClient.create(http=http)
+            # The push sinks for the needs-human gate an exhausted remediation
+            # raises (PRD S5b) — same builder as the route-runner child.
+            notifier = await build_notifier(cfg, http)
             ctx = SubscriptionContext(
                 lithos=lithos,
                 logger=logging.getLogger("lithos_loom.subscriptions"),
@@ -424,6 +428,7 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                     projects={slug: pc.repo for slug, pc in cfg.projects.items()},
                     work_dir=cfg.orchestrator.work_dir,
                     config_path=config_path,
+                    notifier=notifier,
                 )
             )
 

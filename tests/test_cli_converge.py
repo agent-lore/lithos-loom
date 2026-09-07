@@ -712,3 +712,129 @@ def test_reply_transports_cover_every_reply_mode_and_none_posts_nothing(
     monkeypatch.setattr(converge_cli, "REPLY_TRANSPORTS", {ReplyMode.NONE: None})
     with pytest.raises(LookupError):
         runner.invoke(develop_app, args, catch_exceptions=False)
+
+
+# ── --story: the story's resolved develop settings are the base layer ────────
+#
+# lens#78 (2026-09-07): the watcher-dispatched converge ran at the CLI default
+# of 5 rounds while the lens project doc said 8 — converge resolved nothing
+# from the project. With --story it resolves exactly what the daemon path
+# would (project doc > task metadata > host policy); explicit flags still win.
+
+
+@pytest.fixture
+def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict = stubs
+    monkeypatch.setattr(
+        converge_cli,
+        "fetch_task_metadata",
+        lambda url, task_id: (
+            captured.setdefault("fetched", []).append((url, task_id)) or "T",
+            {"project": "lens", "develop_review_profile": "thorough"},
+        ),
+    )
+    panel = (
+        ReviewerSpec(name="correctness", tool="codex"),
+        ReviewerSpec(name="tests", tool="claude"),
+    )
+    monkeypatch.setattr(
+        converge_cli,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(
+            max_rounds=8,
+            image="ralph-sandbox:lens",
+            test_command="make check",
+            reviewers=panel,
+            reviewers_explicit=True,
+            coder="codex",
+        ),
+    )
+    monkeypatch.setattr(
+        converge_cli, "load_review_profile_policy", lambda: ("standard", "halt", ())
+    )
+    monkeypatch.setattr(
+        converge_cli,
+        "load_tool_default_models",
+        lambda: ({"codex": "gpt-test", "claude": "claude-test"}, ()),
+    )
+    # the host config's Lithos is where the story is fetched from
+    monkeypatch.setattr(
+        converge_cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=Path("/tmp/w"), lithos_url="http://lithos.test"
+            ),
+            story_develop=SimpleNamespace(
+                default_models={"codex": "gpt-test", "claude": "claude-test"}
+            ),
+        ),
+    )
+    return captured
+
+
+def test_story_settings_are_the_base_layer(story_stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["converge", "#142", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    assert story_stubs["fetched"] == [("http://lithos.test", "story-9")]
+    cfg = story_stubs["config"]
+    assert cfg.max_rounds == 8  # the project's cap, not the CLI default
+    assert cfg.image == "ralph-sandbox:lens"
+    assert cfg.test_command == "make check"
+    assert cfg.coder == "codex"
+    # the task's develop_review_profile resolved through the same layering
+    assert cfg.review_profile == "thorough"
+    assert [s.name for s in cfg.reviewers] == ["correctness", "tests"]
+    # the story's PR body is still the acceptance-criteria source
+    assert cfg.acceptance_criteria == "the intent"
+
+
+def test_explicit_flags_win_over_the_story(story_stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--story",
+            "story-9",
+            "--max-rounds",
+            "3",
+            "--image",
+            "custom:img",
+            "--profile",
+            "standard",
+            "--reviewer",
+            "security",
+            "--test-command",
+            "make test",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.max_rounds == 3
+    assert cfg.image == "custom:img"
+    assert cfg.review_profile == "standard"
+    assert [s.name for s in cfg.reviewers] == ["security"]
+    assert cfg.test_command == "make test"
+
+
+def test_missing_story_is_a_hard_error(story_stubs: dict, monkeypatch) -> None:
+    def boom(url, task_id):
+        raise LookupError(f"Lithos task {task_id!r} not found")
+
+    monkeypatch.setattr(converge_cli, "fetch_task_metadata", boom)
+    result = runner.invoke(develop_app, ["converge", "#142", "--story", "nope"])
+    assert result.exit_code == 2
+    assert "config" not in story_stubs  # never reached the loop
+
+
+def test_without_story_the_defaults_are_unchanged(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    cfg = stubs["config"]
+    assert cfg.review_profile == "standard"
+    assert cfg.image == DEFAULT_IMAGE
+    assert cfg.max_rounds == 5  # DevelopConfig's default

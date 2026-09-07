@@ -310,10 +310,12 @@ async def _consider(
     ingest: IngestResult | None = None,
     github: AsyncMock | None = None,
     rounds_used: int = 0,
+    budget: RemediationBudget | None = None,
 ) -> str:
     spec = parse_pr_gate(gate)
     assert spec is not None
-    budget = RemediationBudget(pr_url=_PR_URL, rounds_used=rounds_used)
+    if budget is None:
+        budget = RemediationBudget(pr_url=_PR_URL, rounds_used=rounds_used)
     return await rem.consider(
         gate,
         spec,
@@ -1036,7 +1038,7 @@ def test_dispatch_argv_is_accepted_by_the_real_converge_cli(
         _settings(tmp_path, config_path=host_cfg), spawn=_spawner(None)[0]
     )
     spec = PrGateSpec(repo="agent-lore/lithos-lens", pr_number=78, pr_url=_PR_URL)
-    cmd = rem._command(spec, tmp_path / "repo", tmp_path / "out.json")
+    cmd = rem._command(spec, tmp_path / "repo", tmp_path / "out.json", "story-1")
     assert cmd[:3] == [sys.executable, "-m", "lithos_loom"]
 
     result = CliRunner().invoke(app, cmd[3:])
@@ -1047,3 +1049,239 @@ def test_dispatch_argv_is_accepted_by_the_real_converge_cli(
     assert isinstance(result.exception, _Stop), result.output
     # ...and the host config the child was booted with reached the run.
     assert seen == [host_cfg]
+
+
+# ── the argv carries the story so converge resolves ITS develop settings ────
+
+
+def test_dispatch_argv_names_the_story(tmp_path: Path) -> None:
+    # lens#78 (2026-09-07): the dispatched converge ran at the CLI default of 5
+    # rounds while the project doc said 8 — converge resolved nothing from the
+    # project. The dispatcher hands it the story so it resolves the same
+    # settings the daemon path would.
+    from lithos_loom.gates import PrGateSpec
+
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    spec = PrGateSpec(repo="agent-lore/lithos-lens", pr_number=78, pr_url=_PR_URL)
+    cmd = rem._command(spec, tmp_path / "repo", tmp_path / "out.json", "story-9")
+    assert cmd[cmd.index("--story") + 1] == "story-9"
+
+
+# ── S5b: exhaustion is an escalation, not a finding ─────────────────────────
+#
+# PRD S5b: "On exhaustion → S7 human gate." Until now the exhausted round's
+# outcome was a finding on the story and nothing else — the August failure
+# mode (a stop nobody is told about). lens#78's round 2/2 ended not_converged
+# at 07:24 and was found twelve hours later by looking.
+
+
+class _RecordingNotifier:
+    def __init__(self) -> None:
+        self.notices: list[Any] = []
+
+    async def needs_human(self, notice: Any) -> list[str]:
+        self.notices.append(notice)
+        return []
+
+
+async def _human_gates(client: FakeLithosClient) -> list[Any]:
+    tasks = await client.task_list(status="open")
+    return [
+        t
+        for t in tasks
+        if getattr(t, "task_type", "") == "gate"
+        and t.metadata.get("gate_type") == "human"
+    ]
+
+
+def _not_converged_payload() -> dict:
+    return {
+        "status": "not_converged",
+        "pushed": False,
+        "pushed_sha": "",
+        "rounds": 5,
+        "develop_status": "max_rounds",
+        "total_cost_usd": 67.95,
+        "message": "NOT approved after 5 round(s) (max_rounds)",
+    }
+
+
+async def test_exhausted_budget_after_an_unconverged_run_raises_a_needs_human_gate(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    notifier = _RecordingNotifier()
+    spawn, _calls = _spawner(_not_converged_payload())
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=1, notifier=notifier), spawn=spawn
+    )
+
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    gates = await _human_gates(client)
+    assert len(gates) == 1
+    human = gates[0]
+    assert human.metadata["raised_by"] == "loom"
+    assert human.metadata["escalation_reason"] == "remediation_exhausted"
+    assert human.metadata["route"] == "external-remediation"
+    assert human.metadata["story_id"] == story
+    assert _PR_URL in human.metadata["escalation_summary"]
+    brief = human.metadata["run_brief"]
+    assert brief["pr_url"] == _PR_URL
+    assert brief["rounds_used"] == 1 and brief["budget"] == 1
+    assert brief["last_status"] == "not_converged"
+    assert brief["cost_usd"] == 67.95
+    # the gate blocks the story (waits_on_gate edge) and is recorded on it
+    fresh = await client.task_get(task_id=story)
+    assert fresh is not None
+    assert fresh.metadata["needs_human_gate_id"] == human.id
+    # ...and on the PR gate's budget marker, so it is raised once
+    marker = await _marker(client, gate.id)
+    assert marker["needs_human_gate_id"] == human.id
+    # the operator is told: [NeedsHuman] on the story + the push sinks
+    needs = [f for f in _findings(client) if f.startswith("[NeedsHuman]")]
+    assert len(needs) == 1
+    assert "remediation_exhausted" in needs[0] and human.id in needs[0]
+    assert "push the fix branch" in needs[0]  # remediation's actions, not re-dispatch
+    assert [n.reason for n in notifier.notices] == ["remediation_exhausted"]
+    assert notifier.notices[0].gate_id == human.id
+    assert notifier.notices[0].route == "external-remediation"
+
+
+async def test_rounds_remaining_after_an_unconverged_run_does_not_escalate(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    notifier = _RecordingNotifier()
+    spawn, _calls = _spawner(_not_converged_payload())
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2, notifier=notifier), spawn=spawn
+    )
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    assert await _human_gates(client) == []
+    assert not [f for f in _findings(client) if f.startswith("[NeedsHuman]")]
+    assert notifier.notices == []
+    # the outcome finding still says a round remains, as before
+    outcome = next(f for f in _findings(client) if "remediation outcome" in f)
+    assert "round 1/2" in outcome
+
+
+async def test_converged_on_the_last_round_does_not_escalate(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        {"status": "converged", "pushed": True, "pushed_sha": "ab" * 20, "rounds": 1}
+    )
+    rem = ExternalRemediation(_settings(tmp_path, budget=1), spawn=spawn)
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    assert await _human_gates(client) == []
+
+
+async def test_exhaustion_escalates_once_per_budget(tmp_path: Path) -> None:
+    # A gate already raised for this exhaustion (marker carries its id) is not
+    # raised again by a later exhausted run — one decision, one gate.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        agent="a",
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": _PR_URL,
+                "rounds_used": 1,
+                "last_loom_pushed_sha": "",
+                "last_seen_head_sha": _HEAD,
+                "needs_human_gate_id": "gate-already-raised",
+            }
+        },
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    spawn, _calls = _spawner(_not_converged_payload())
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    label = await _consider(client, gate, story, rem, budget=read_budget(gate, _PR_URL))
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert await _human_gates(client) == []
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 2
+    assert marker["needs_human_gate_id"] == "gate-already-raised"
+
+
+async def test_failed_run_without_a_result_at_exhaustion_escalates(
+    tmp_path: Path,
+) -> None:
+    # The `-c` bug shape: the subprocess died before producing a result. The
+    # round is spent, and if that spent the budget the operator must hear.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    notifier = _RecordingNotifier()
+    spawn, _calls = _spawner(None, rc=2)
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=1, notifier=notifier), spawn=spawn
+    )
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    gates = await _human_gates(client)
+    assert len(gates) == 1
+    assert gates[0].metadata["run_brief"]["last_status"] == "failed"
+    assert [f for f in _findings(client) if f.startswith("[Friction]")]
+    assert len(notifier.notices) == 1
+
+
+async def test_human_push_reset_also_clears_the_escalation(tmp_path: Path) -> None:
+    # A human push resets the budget (S5b) — and with it the raised-gate
+    # record, so the NEXT exhaustion escalates again.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        agent="a",
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": _PR_URL,
+                "rounds_used": 2,
+                "last_loom_pushed_sha": "",
+                "last_seen_head_sha": _HEAD,
+                "needs_human_gate_id": "gate-1",
+            }
+        },
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert read_budget(gate, _PR_URL).needs_human_gate_id == "gate-1"
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    pr = SimpleNamespace(head_sha="9f" * 20)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, pr, _ctx(client))
+    assert budget.rounds_used == 0
+    assert budget.needs_human_gate_id == ""
+
+
+async def test_run_completion_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The dispatcher logged the dispatch and nothing after it — a run's end
+    # was invisible in the daemon log (lens#78, 2026-09-07).
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(_not_converged_payload())
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    with caplog.at_level(logging.INFO, logger="test-external-remediation"):
+        await _consider(client, gate, story, rem)
+        assert rem._task is not None
+        await rem._task
+    done = [r.message for r in caplog.records if "finished" in r.message]
+    assert len(done) == 1
+    assert _PR_URL in done[0] and "not_converged" in done[0] and "1/2" in done[0]

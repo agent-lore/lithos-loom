@@ -322,3 +322,45 @@ async def test_github_mention_is_marked_as_loom_authored() -> None:
     ((_, _, body),) = commenter.calls
     assert is_loom_pr_comment(body)
     assert body.startswith("@dave [NeedsHuman]")
+
+
+# ── build_notifier: the one builder every child uses ─────────────────────────
+
+
+async def test_build_notifier_stands_the_mention_sink_down_without_a_login() -> None:
+    from types import SimpleNamespace
+
+    from lithos_loom.notifications import build_notifier
+
+    cfg = SimpleNamespace(
+        notifications=SimpleNamespace(
+            desktop_toast=False, github_mention=True, on_needs_human="cmd"
+        ),
+        story_develop=None,  # no [story_develop] → no operator login
+    )
+    notifier = await build_notifier(cfg, http=None)
+    assert notifier.desktop_toast is False
+    assert notifier.command == "cmd"
+    assert notifier.github is None and notifier.github_login is None
+
+
+async def test_build_notifier_without_mention_never_touches_github(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from lithos_loom import github_client
+    from lithos_loom.notifications import build_notifier
+
+    async def boom(*a, **k):
+        raise AssertionError("GitHubClient.create must not be called")
+
+    monkeypatch.setattr(github_client.GitHubClient, "create", boom)
+    cfg = SimpleNamespace(
+        notifications=SimpleNamespace(
+            desktop_toast=True, github_mention=False, on_needs_human=None
+        ),
+        story_develop=SimpleNamespace(operator_github_login="dave"),
+    )
+    notifier = await build_notifier(cfg, http=None)
+    assert notifier.desktop_toast is True and notifier.github is None

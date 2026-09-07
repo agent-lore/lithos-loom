@@ -77,6 +77,7 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 | `--from-github` | Ingest the PR's **external review findings** instead of running the local-panel intake (see "Two intake modes"): trusted findings are triaged (S5a) and, if they survive, seed the fix loop directly; untrusted authors are printed but never fed to an agent; thread replies are posted afterwards. |
 | `--repo PATH` | Repository to converge in (default: current directory). |
 | `--json PATH` | Write the structured JSON summary. |
+| `--story TASK_ID` | Resolve the story's develop settings (project doc + task `develop_*`: rounds, profile, panel, check-set, image, models) exactly as the daemon path does, as the base layer under any explicit flags. The watcher-dispatched run passes it. |
 | `-c`, `--config` | Host config path. |
 
 ## Output
