@@ -408,6 +408,17 @@ tags = ["trigger:story-develop"]
 # # with the exhaustion stated in the finding. 0 disables autonomous
 # # dispatch. Per-project opt-out: context-doc metadata
 # # `develop_external_review_converge = false` (default on).
+# merge_gate_enabled = true
+# # PRD S3 (watcher half): on each still-open `pr` gate the sweep re-gates
+# # the delivered PR against its base's CURRENT tip whenever the pair
+# # (head_sha, base_sha) or the story's resolved gate settings change —
+# # `develop merge-gate <pr> --story <id>` as a subprocess (zero agent
+# # tokens: trial merge + the project's current check-set), one in-flight
+# # run per project. Green pushes the merge commit onto the PR branch when
+# # it was behind (append-only); red / errored posts [MergeGateFailed] on
+# # the story; a conflict names the conflicting paths in [PRConflicted].
+# # Set false to keep the sweep to detection. Per-project opt-out:
+# # context-doc metadata `develop_merge_gate = false` (default on).
 
 # ── story-develop host-wide defaults ──────────────────────────────────
 #

@@ -61,12 +61,18 @@ lithos-loom develop merge-gate 352 --no-push --keep-worktree --json /tmp/mg.json
    object survives for the pushed ref). `--keep-worktree` keeps the merged
    tree for inspection and prints its path.
 
-The record carries a **config fingerprint** — a digest of the resolved checks
-(name, command, state, stage), the image, the per-check timeout and the
-blocking threshold. The sweep's re-run key is
-`(head_sha, base_sha, config_fingerprint)`: a tightened check-set re-gates an
-already-observed PR, which is precisely why the *current* config is
-re-resolved rather than a snapshot replayed (PRD S3 decision).
+The record carries two fingerprints. The **config fingerprint** is a digest
+of the resolved checks (name, command, state, stage), the image, the
+per-check timeout and the blocking threshold — what actually gated. The
+**settings fingerprint** is the resolved gate *settings* alone (image,
+timeout, threshold, profile, test command / gate, check tables, parity
+command): it needs no worktree, so `--resolve-only` reports it without a
+fetch, a merge or a check, and it is what the watcher sweep's re-run key
+`(head_sha, base_sha, settings_fingerprint)` compares each pass — a tightened
+check-set re-gates an already-observed PR, which is precisely why the
+*current* config is re-resolved rather than a snapshot replayed (PRD S3
+decision). A tree-dependent change (a lockfile appears) moves the head sha
+anyway.
 
 ## Flags
 
@@ -82,6 +88,7 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
 | `--image` | Sandbox image the checks run in. |
 | `--test-timeout` | Per-check timeout in seconds. |
 | `--no-push` | Gate only; never push the merge commit. |
+| `--resolve-only` | Resolve the gate settings (flags over the story's current config) and print their fingerprint — no fetch, no merge, no checks, no GitHub call. Still strict under `--story` (exit 4). With `--json`, writes `{status: "resolved", settings_fingerprint, image, review_profile}`. The watcher sweep's per-pass probe. |
 | `--keep-worktree` | Keep the throwaway worktree (the merged tree). |
 | `--repo` | Repository to work in (default: current directory). |
 | `--json PATH` | Write the structured record. |
@@ -98,7 +105,8 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
   `conflicting_paths[]`, `checks[]` (`name`, `command`, `state`, `stage`,
   `outcome`, `passed`, `exit_code`, `timed_out`, `output_tail`), `verdict`
   (the gate's own decision: `GREEN` / `RED`, null when no verdict was
-  produced — never the process-exit aggregate), `config_fingerprint`, `pushed`,
+  produced — never the process-exit aggregate), `config_fingerprint`,
+  `settings_fingerprint`, `pushed`,
   `pushed_sha`, `push_error`, `message`.
 
 ## Exit codes
@@ -113,6 +121,22 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
 | `pr_closed` | 2 | The PR is merged or closed; its branch is not a live target, nothing is trial-merged or pushed. |
 | `config_unresolved` | 4 | `--story` could not resolve the project's **current** config (no project slug, no context doc, a read failure, or a malformed gate-affecting setting); nothing was gated — S3 gates with the current config or not at all, never with built-in defaults. |
 | `conflict` | 3 | The base no longer merges; `conflicting_paths` names why. |
+
+## The watcher half
+
+The github-watcher sweep (`[github_watcher] merge_gate_enabled`, default on)
+runs this command autonomously on every still-open `pr` gate whose
+`(head_sha, base_sha, settings_fingerprint)` changed — `merge-gate <pr>
+--story <id> --repo <path> --json <path> --config <host>` — one in-flight run
+per project, holding and held by external remediation per PR (either may
+push to the branch). The record lives in `metadata.merge_gate` on the gate.
+Green records (and a pushed merge commit is recorded as loom's own push on
+the remediation budget); red / errored posts `[MergeGateFailed]` on the
+story; a conflict widens `[PRConflicted]` with the conflicting paths; an
+unresolvable config or a crash posts `[Friction]` on the story (a crash is
+retried once on the same key, then waits for a head or base move). A fork PR
+is recorded once and never fetched. Per-project opt-out: context-doc
+`develop_merge_gate = false`. See SPECIFICATION §2.2.
 
 ## Requirements
 

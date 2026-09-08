@@ -36,6 +36,7 @@ from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
+from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
 from lithos_loom.subscriptions.pr_landability import check_landability
 
 __all__ = [
@@ -104,6 +105,7 @@ async def reconcile_pr_gate(
     *,
     ingest_reviews: bool = False,
     remediation: ExternalRemediation | None = None,
+    merge_gate: MergeGateDispatch | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -129,7 +131,11 @@ async def reconcile_pr_gate(
     ingestion is on), wraps that ingestion with the slice-C autonomy: the
     head observation + S5b budget *before* it (so exhaustion is stated in
     the finding body), the dispatch decision *after* it (on the batch it
-    posted). See :mod:`.external_remediation`.
+    posted). See :mod:`.external_remediation`. ``merge_gate``, when set, is
+    considered LAST on the still-open branch (PRD S3): it re-gates the PR
+    against its base's current tip on a key change, told whether a
+    remediation run is in flight on this PR so the two never push beside
+    each other. See :mod:`.merge_gate_dispatch`.
     """
     spec = parse_pr_gate(gate)
     if spec is None:
@@ -264,6 +270,11 @@ async def reconcile_pr_gate(
                 )
             if label is not None:
                 ctx.logger.info("external-remediation: %s for %s", label, spec.pr_url)
+    if merge_gate is not None:
+        held = remediation is not None and remediation.busy_on(spec.pr_url)
+        verdict = await merge_gate.consider(gate, spec, story_id, pr, ctx, hold=held)
+        if verdict != "unchanged":
+            ctx.logger.info("merge-gate: %s for %s", verdict, spec.pr_url)
     return "still_open"
 
 

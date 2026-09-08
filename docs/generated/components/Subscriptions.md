@@ -28,6 +28,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_projection` | L | 0 | 1 |
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
+| `lithos_loom.subscriptions._project_settings` | XS | 0 | 2 |
+| `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 9 |
@@ -35,6 +37,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
+| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 3 | 2 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.remediation_budget` | XS | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
@@ -102,6 +105,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions._project_context_projection`
 - def `make_handler` — Build a stateful ``project-context-projection`` handler bound to ``cfg``.
 
+### `lithos_loom.subscriptions._project_settings`
+- def `resolve_project_repo` — ``(slug, repo_path)`` via gate metadata, falling back to the story's (gate creation records ``project`` only when the payload carried it). ``None`` when no slug is known or the slug is not mapped under ``[projects]``.
+- def `read_project_flag` — A boolean per-project dial from the context doc's metadata.
+
+### `lithos_loom.subscriptions._subprocess`
+- def `spawn_command` — Run *cmd*, return ``(returncode, combined output)``.
+
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
 
@@ -137,6 +147,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.external_reviews`
 - class `IngestResult` — What one ingestion pass posted, for the remediation dispatcher (slice C).
 - def `ingest_external_reviews` — Ingest new review activity on one still-open gate's PR. Never raises.
+
+### `lithos_loom.subscriptions.merge_gate_dispatch`
+- def `spawn_merge_gate` — Default spawn: the merge-gate CLI, capped by whichever timeout the argv shape calls for (:func:`_subprocess.spawn_command`).
+- class `MergeGateRecord` — The gate's parsed ``merge_gate`` marker: the re-run key + the outcome.
+- def `read_record` — Parse the gate's record; ``None`` for an absent / foreign-url marker (a replacement PR re-evaluates from scratch).
+- class `MergeGateSettings` — Host-side knobs the watcher child threads in from its config.
+- class `MergeGateDispatch` — Owns the per-project single-flight dispatch of ``develop merge-gate``.
 
 ### `lithos_loom.subscriptions.pr_landability`
 - def `classify_landability` — ``unknown`` / ``dirty`` / ``mergeable`` from the fetched PR.

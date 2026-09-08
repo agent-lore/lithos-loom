@@ -40,7 +40,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 2 |
+| `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
@@ -257,6 +257,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.merge_gate`
 - class `MergeGateCheck` — One check's outcome on the merge result, flattened for the record.
 - class `MergeGateResult` — The outcome of one trial merge + gate.
+- def `settings_fingerprint` — A short stable digest of the resolved gate SETTINGS — everything that decides which checks run and how they block, and nothing that needs a tree or is run-local.
 - def `config_fingerprint` — A short stable digest of *what gated*: the resolved checks, the image, the per-check timeout and the blocking threshold.
 - def `run_merge_gate` — Trial-merge *change*'s current base into its head and gate the result.
 

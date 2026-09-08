@@ -724,6 +724,44 @@ def test_github_watcher_trusted_bots_must_be_string_list(
         load_config()
 
 
+def test_github_watcher_merge_gate_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD S3 (watcher half): the base-move re-gate defaults on; false keeps
+    the sweep to detection; a non-bool is rejected."""
+    _write_config(tmp_path, monkeypatch, "[github_watcher]\n")
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.merge_gate_enabled is True
+
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            merge_gate_enabled = false
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.merge_gate_enabled is False
+
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            merge_gate_enabled = "yes"
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="merge_gate_enabled"):
+        load_config()
+
+
 def test_github_watcher_external_remediation_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

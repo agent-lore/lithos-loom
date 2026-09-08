@@ -1375,3 +1375,84 @@ async def test_an_exception_with_rounds_remaining_posts_friction_only(
     await rem._task
     assert [f for f in _findings(client) if f.startswith("[Friction]")]
     assert await _human_gates(client) == []
+
+
+# ── PRD S3 watcher half: merge-gate and remediation hold each other ─────────
+
+
+async def test_dispatch_is_held_while_a_merge_gate_runs_on_the_pr(
+    tmp_path: Path,
+) -> None:
+    # A merge-gate run may push a merge commit at any moment; a converge
+    # dispatched beside it would lose its leased push (a wasted round). The
+    # pending trigger stays parked, so a later sweep resumes it.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None)
+    held = {"on": True}
+    rem = ExternalRemediation(
+        _settings(tmp_path), spawn=spawn, hold=lambda pr_url: held["on"]
+    )
+
+    label = await _consider(client, gate, story, rem)
+    assert label == "deferred_merge_gate"
+    assert calls == []
+    assert (await _marker(client, gate.id)) is None  # no reservation spent
+
+    held["on"] = False
+    label = await _consider(client, gate, story, rem)
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+
+async def test_busy_on_names_the_in_flight_pr(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await release.wait()
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    assert rem.busy_on(_PR_URL) is False
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await started.wait()
+    assert rem.busy_on(_PR_URL) is True
+    assert rem.busy_on("https://github.com/agent-lore/lithos-lens/pull/999") is False
+    release.set()
+    assert rem._task is not None
+    await rem._task
+    assert rem.busy_on(_PR_URL) is False
+
+
+async def test_observe_head_is_inert_while_a_merge_gate_runs_on_the_pr() -> None:
+    # PRD S3 review: a merge-gate run may push its merge commit at any moment
+    # and records it as loom's own only when it finishes; a head observed in
+    # that window cannot be attributed, so it must not reset the budget.
+    client = FakeLithosClient()
+    _story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            REMEDIATION_KEY: RemediationBudget(
+                pr_url=_PR_URL, rounds_used=2, last_seen_head_sha=_HEAD
+            ).as_marker()
+        },
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    rem = ExternalRemediation(
+        _settings(Path("/tmp/x")), spawn=_spawner(None)[0], hold=lambda url: True
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    budget = await rem.observe_head(gate, spec, _pr("m" * 40), _ctx(client))
+
+    assert budget.rounds_used == 2  # no reset
+    assert budget.last_seen_head_sha == _HEAD  # and no observation recorded
+    assert (await _marker(client, gate.id))["rounds_used"] == 2

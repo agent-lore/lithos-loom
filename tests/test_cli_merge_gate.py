@@ -88,6 +88,81 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     return captured
 
 
+def test_record_carries_the_settings_fingerprint(stubs: dict, tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.merge_gate import settings_fingerprint
+
+    out = tmp_path / "r.json"
+    result = runner.invoke(
+        develop_app, ["merge-gate", "#7", "--image", "custom:img", "--json", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    record = json.loads(out.read_text())
+    assert record["settings_fingerprint"] == settings_fingerprint(stubs["config"])
+
+
+def test_resolve_only_prints_the_fingerprint_and_touches_no_pr(
+    story_stubs: dict, tmp_path: Path
+) -> None:
+    # PRD S3 watcher half: the sweep probes the story's CURRENT settings
+    # each pass to detect a tightened check-set without a merge or a fetch.
+    from lithos_loom.plugins.story_develop.merge_gate import settings_fingerprint
+
+    out = tmp_path / "probe.json"
+    result = runner.invoke(
+        develop_app,
+        [
+            "merge-gate",
+            "42",
+            "--story",
+            "story-9",
+            "--resolve-only",
+            "--json",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "resolve" not in story_stubs  # no resolve_change → no fetch
+    assert "config" not in story_stubs  # no run
+    record = json.loads(out.read_text())
+    assert record["status"] == "resolved"
+    assert record["image"] == "ralph-sandbox:lens"
+    assert record["review_profile"] == "thorough"
+    assert len(record["settings_fingerprint"]) == 16
+    assert record["settings_fingerprint"] in result.output
+
+    # the fingerprint is the one a real run would record for the same story
+    full = runner.invoke(
+        develop_app, ["merge-gate", "42", "--story", "story-9", "--json", str(out)]
+    )
+    assert full.exit_code == 0, full.output
+    assert (
+        json.loads(out.read_text())["settings_fingerprint"]
+        == (record["settings_fingerprint"])
+    )
+    assert settings_fingerprint(story_stubs["config"]) == record["settings_fingerprint"]
+
+
+def test_resolve_only_is_strict_too(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _story_settings(monkeypatch, degraded=True, frictions=("no doc; built-ins",))
+    out = tmp_path / "probe.json"
+    result = runner.invoke(
+        develop_app,
+        [
+            "merge-gate",
+            "42",
+            "--story",
+            "story-9",
+            "--resolve-only",
+            "--json",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 4, result.output
+    assert not out.exists()
+
+
 def test_flags_reach_the_develop_config(stubs: dict, tmp_path: Path) -> None:
     result = runner.invoke(
         develop_app,

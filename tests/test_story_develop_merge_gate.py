@@ -163,6 +163,59 @@ def _branches(repo: Path) -> set[str]:
 # ── up to date ───────────────────────────────────────────────────────────────
 
 
+def test_settings_fingerprint_tracks_gate_settings_only(tmp_path: Path) -> None:
+    # PRD S3 (watcher half): the sweep's re-run key needs a fingerprint it
+    # can compute WITHOUT a worktree (the check-set one needs the tree for
+    # ecosystem detection) — the resolved gate settings, nothing run-local.
+    base = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
+    same = DevelopConfig(
+        repo=tmp_path / "elsewhere",
+        description="a different description",
+        work_dir=tmp_path / "w2",
+        max_rounds=9,
+        coder="codex",
+    )
+    assert mg.settings_fingerprint(base) == mg.settings_fingerprint(same)
+    seen = {mg.settings_fingerprint(base)}
+    for changed in (
+        DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path, image="i:2"),
+        DevelopConfig(
+            repo=tmp_path, description="x", work_dir=tmp_path, review_profile="minimal"
+        ),
+        DevelopConfig(
+            repo=tmp_path, description="x", work_dir=tmp_path, test_command="make t"
+        ),
+        DevelopConfig(
+            repo=tmp_path, description="x", work_dir=tmp_path, test_gate=False
+        ),
+        DevelopConfig(
+            repo=tmp_path,
+            description="x",
+            work_dir=tmp_path,
+            check_commands={"lint": "make lint"},
+        ),
+        DevelopConfig(
+            repo=tmp_path,
+            description="x",
+            work_dir=tmp_path,
+            check_states={"sast": "off"},
+        ),
+        DevelopConfig(
+            repo=tmp_path, description="x", work_dir=tmp_path, parity_command="make c"
+        ),
+        DevelopConfig(
+            repo=tmp_path, description="x", work_dir=tmp_path, test_timeout=7
+        ),
+        DevelopConfig(
+            repo=tmp_path, description="x", work_dir=tmp_path, block_threshold="minor"
+        ),
+    ):
+        fp = mg.settings_fingerprint(changed)
+        assert fp not in seen, changed
+        seen.add(fp)
+    assert all(len(fp) == 16 for fp in seen)
+
+
 def test_up_to_date_pr_gates_its_own_head_and_never_pushes(
     fx: Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

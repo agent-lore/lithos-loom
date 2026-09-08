@@ -19,7 +19,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, â€
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
-| `lithos_loom.cli.merge_gate` | S | 0 | 1 |
+| `lithos_loom.cli.merge_gate` | M | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
 | `lithos_loom.cli.review` | M | 1 | 10 |

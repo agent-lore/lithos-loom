@@ -129,6 +129,9 @@ class MergeGateResult:
     checks: tuple[MergeGateCheck, ...] = ()
     verdict: str | None = None
     config_fingerprint: str = ""
+    # The resolved gate SETTINGS alone (no worktree needed) — the sweep's
+    # re-run key component, probed each pass with `--resolve-only`.
+    settings_fingerprint: str = ""
     pushed: bool = False
     pushed_sha: str = ""
     push_error: str = ""
@@ -149,11 +152,40 @@ class MergeGateResult:
             "checks": [c.to_json() for c in self.checks],
             "verdict": self.verdict,
             "config_fingerprint": self.config_fingerprint,
+            "settings_fingerprint": self.settings_fingerprint,
             "pushed": self.pushed,
             "pushed_sha": self.pushed_sha,
             "push_error": self.push_error,
             "message": self.message,
         }
+
+
+def settings_fingerprint(config: DevelopConfig) -> str:
+    """A short stable digest of the resolved gate SETTINGS — everything that
+    decides which checks run and how they block, and nothing that needs a
+    tree or is run-local.
+
+    :func:`config_fingerprint` (the check rows) needs a worktree — ecosystem
+    detection reads the tree — so the watcher sweep cannot compute it
+    without a fetch and a merge. This one it can: ``merge-gate --resolve-only``
+    prints it from the story's current config alone, and the sweep re-gates
+    an already-observed ``(head_sha, base_sha)`` when it changes — the
+    "tightened check-set" case re-resolving the current config exists for.
+    A tree-dependent change (a lockfile appears) moves the head sha anyway.
+    """
+    payload = {
+        "image": config.image,
+        "test_timeout": config.test_timeout,
+        "block_threshold": config.block_threshold,
+        "review_profile": config.review_profile,
+        "test_command": config.test_command,
+        "test_gate": config.test_gate,
+        "check_commands": dict(sorted(config.check_commands.items())),
+        "check_states": dict(sorted(config.check_states.items())),
+        "parity_command": config.parity_command,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8"))
+    return digest.hexdigest()[:16]
 
 
 def config_fingerprint(config: DevelopConfig, checks: tuple[Check, ...]) -> str:

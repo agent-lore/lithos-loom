@@ -12,6 +12,7 @@ same ones ``converge`` takes.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import typer
@@ -32,7 +33,11 @@ from lithos_loom.plugins.story_develop.config import (
     parse_parity_command,
     parse_test_command,
 )
-from lithos_loom.plugins.story_develop.merge_gate import MergeGateResult, run_merge_gate
+from lithos_loom.plugins.story_develop.merge_gate import (
+    MergeGateResult,
+    run_merge_gate,
+    settings_fingerprint,
+)
 from lithos_loom.plugins.story_develop.profiles import (
     UnknownProfileError,
     get_profile,
@@ -105,6 +110,15 @@ def merge_gate_command(
         False,
         "--no-push",
         help="Gate only: never push the merge commit onto the PR branch.",
+    ),
+    resolve_only: bool = typer.Option(
+        False,
+        "--resolve-only",
+        help=(
+            "Resolve the gate settings (flags over the story's current "
+            "config) and report their fingerprint — no fetch, no merge, no "
+            "checks. The watcher sweep's cheap re-run-key probe."
+        ),
     ),
     keep_worktree: bool = typer.Option(
         False,
@@ -198,16 +212,6 @@ def merge_gate_command(
         effective_profile = policy.profile.name
     resolved_image = explicit_image or story_layer.get("image") or DEFAULT_IMAGE
 
-    # Forks are answered from GitHub's metadata before any fetch: the sweep
-    # must never pull a third-party head into the operator's checkout.
-    resolved = resolve_change(repo, change, base_branch="main", allow_fork=False)
-    if not resolved.head_branch:
-        raise typer.BadParameter(
-            f"merge-gate takes a PR (it trial-merges the PR's base and may push "
-            f"the update to the PR branch); {change!r} resolved to a range / "
-            "branch with no PR."
-        )
-
     explicit: dict = {
         k: v
         for k, v in {
@@ -217,34 +221,72 @@ def merge_gate_command(
         if v is not None
     }
     gate_keys = ("test_gate", "test_command", "parity_command")
-    develop_config = DevelopConfig(
-        **{
-            **dict(
-                repo=repo,
-                description=f"merge-gate {resolved.head_ref}",
-                work_dir=host.orchestrator.work_dir / "merge-gate",
-                test_timeout=test_timeout,
-            ),
-            **{k: story_layer[k] for k in gate_keys if k in story_layer},
-            **explicit,
-            # the check tables merge per key, explicit flags over the story's
-            **layer_check_tables(
-                story_layer, check_commands=check_commands, check_states=check_states
-            ),
-            "review_profile": effective_profile,
-            "image": resolved_image,
+    gate_settings: dict = {
+        "test_timeout": test_timeout,
+        **{k: story_layer[k] for k in gate_keys if k in story_layer},
+        **explicit,
+        # the check tables merge per key, explicit flags over the story's
+        **layer_check_tables(
+            story_layer, check_commands=check_commands, check_states=check_states
+        ),
+        "review_profile": effective_profile,
+        "image": resolved_image,
+    }
+    work_dir = host.orchestrator.work_dir / "merge-gate"
+
+    if resolve_only:
+        # The sweep's re-run-key probe: the same settings a run would gate
+        # with, fingerprinted, and nothing touched — no GitHub, no fetch.
+        probe = DevelopConfig(
+            repo=repo,
+            description=f"merge-gate {change} (resolve-only)",
+            work_dir=work_dir,
+            **gate_settings,
+        )
+        record = {
+            "status": "resolved",
+            "settings_fingerprint": settings_fingerprint(probe),
+            "image": probe.image,
+            "review_profile": probe.review_profile,
         }
+        typer.echo(
+            f"merge-gate {change}: resolved — settings {record['settings_fingerprint']}"
+            f" (profile {probe.review_profile}, image {probe.image})"
+        )
+        _write_json(json_out, record)
+        raise typer.Exit(0)
+
+    # Forks are answered from GitHub's metadata before any fetch: the sweep
+    # must never pull a third-party head into the operator's checkout.
+    resolved = resolve_change(repo, change, base_branch="main", allow_fork=False)
+    if not resolved.head_branch:
+        raise typer.BadParameter(
+            f"merge-gate takes a PR (it trial-merges the PR's base and may push "
+            f"the update to the PR branch); {change!r} resolved to a range / "
+            "branch with no PR."
+        )
+    develop_config = DevelopConfig(
+        repo=repo,
+        description=f"merge-gate {resolved.head_ref}",
+        work_dir=work_dir,
+        **gate_settings,
     )
 
     result = run_merge_gate(
         develop_config, resolved, push=not no_push, keep_worktree=keep_worktree
     )
+    result = replace(result, settings_fingerprint=settings_fingerprint(develop_config))
 
     typer.echo(_render(result))
-    if json_out is not None:
-        json_out.parent.mkdir(parents=True, exist_ok=True)
-        json_out.write_text(json.dumps(result.to_json(), indent=2), encoding="utf-8")
+    _write_json(json_out, result.to_json())
     raise typer.Exit(EXIT_CODES.get(result.status, 1))
+
+
+def _write_json(json_out: Path | None, record: dict) -> None:
+    if json_out is None:
+        return
+    json_out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
 def _render(result: MergeGateResult) -> str:
