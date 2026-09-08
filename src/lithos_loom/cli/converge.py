@@ -141,9 +141,10 @@ def converge_command(
         None,
         "--image",
         help="Sandbox container image for the agents and the gate. Match the "
-        "project's develop_image — converge does not read project metadata, so "
-        "without this it runs the default image and a gate needing tooling that "
-        "image lacks (e.g. a browser) can never pass.",
+        "project's develop_image — without --story converge reads no project "
+        "metadata, so without this it runs the default image and a gate needing "
+        "tooling that image lacks (e.g. a browser) can never pass; --story "
+        "inherits develop_image, and this flag still wins.",
     ),
     artifacts_path: str | None = typer.Option(
         None,
