@@ -11,15 +11,16 @@ Push sinks for loom-raised needs-human gates (desktop toast, GitHub @mention, op
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.notifications` | S | 3 | 1 |
+| `lithos_loom.notifications` | S | 3 | 2 |
 
 ## Public API
 
 ### `lithos_loom.notifications`
-- class `NeedsHumanNotice` — What every sink renders: the gate, the story, and why loom stopped.
+- class `NeedsHumanNotice` — What every sink renders: the gate, the story, why loom stopped, and what the operator can do about it.
 - class `GitHubCommenter` — The one GitHub call the mention sink needs (a structural subset of :class:`~lithos_loom.github_client.GitHubClient`).
 - class `Notifier` — The configured sinks, applied in order; see the module docstring.
 - def `notice_github_ref` — The story's GitHub link for the mention sink: its watcher-materialised issue first, else the PR a previous delivery opened.
+- def `build_notifier` — The push sinks for needs-human gates, from ``[notifications]``.
 
 ## Dependencies
 

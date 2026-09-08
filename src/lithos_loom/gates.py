@@ -127,6 +127,9 @@ ESCALATION_REASONS: frozenset[str] = frozenset(
         # github-watcher: the delivered PR closed unmerged / was deleted (04c2448b)
         "pr_closed_unmerged",
         "pr_gone",
+        # github-watcher: the S5b external-remediation budget ran out on a PR
+        # that is still not converged (PRD S5b: exhaustion → human gate)
+        "remediation_exhausted",
         "unknown",
     }
 )

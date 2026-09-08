@@ -43,6 +43,13 @@ from lithos_loom.plugins.story_develop.config import (
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
+from lithos_loom.plugins.story_develop.daemon_io import (
+    ProjectDevelopSettings,
+    fetch_task_metadata,
+    layer_run_settings,
+    resolve_project_settings,
+    story_config_overrides,
+)
 from lithos_loom.plugins.story_develop.external_reviews import (
     ExternalFinding,
     GitHubError,
@@ -80,8 +87,8 @@ def converge_command(
         help="The PR to converge: #142 / 142 / a GitHub PR URL. "
         "converge pushes fixes to the PR branch, so a bare range / branch is rejected.",
     ),
-    profile: str = typer.Option(
-        "standard",
+    profile: str | None = typer.Option(
+        None,
         "--profile",
         "-p",
         help="Review profile (selects panel + check-set).",
@@ -130,13 +137,14 @@ def converge_command(
         "enforces beyond the structured check-set (diagram drift, codegen, docs lint). "
         "Primary gate for ecosystems the catalog doesn't model (C/C++).",
     ),
-    image: str = typer.Option(
-        DEFAULT_IMAGE,
+    image: str | None = typer.Option(
+        None,
         "--image",
         help="Sandbox container image for the agents and the gate. Match the "
-        "project's develop_image — converge does not read project metadata, so "
-        "without this it runs the default image and a gate needing tooling that "
-        "image lacks (e.g. a browser) can never pass.",
+        "project's develop_image — without --story converge reads no project "
+        "metadata, so without this it runs the default image and a gate needing "
+        "tooling that image lacks (e.g. a browser) can never pass; --story "
+        "inherits develop_image, and this flag still wins.",
     ),
     artifacts_path: str | None = typer.Option(
         None,
@@ -184,15 +192,25 @@ def converge_command(
     json_out: Path | None = typer.Option(
         None, "--json", help="Write the structured JSON summary to this path."
     ),
+    story: str | None = typer.Option(
+        None,
+        "--story",
+        help=(
+            "Lithos task id of the story behind this PR: resolve its project's "
+            "and its own develop_* settings (rounds, profile, panel, check-set, "
+            "image) exactly as the daemon path does; explicit flags still win."
+        ),
+    ),
     config: Path | None = typer.Option(None, "--config", help="Host config path."),
 ) -> None:
     """Converge an existing PR to review-green (panel + gate), then push."""
     # Fail closed on an unknown profile / coder before spending any containers,
     # through the same single known-set seams the rest of the code uses.
-    try:
-        get_profile(profile)
-    except UnknownProfileError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    if profile is not None:
+        try:
+            get_profile(profile)
+        except UnknownProfileError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     if coder is not None and not engines.is_supported(coder):
         raise typer.BadParameter(
             f"unsupported coder {coder!r}: expected {engines.supported_tools_phrase()}"
@@ -245,7 +263,7 @@ def converge_command(
     # Fail closed on a blank image before any spend: a whitespace value would
     # reach `docker run` and die deep in the first container start.
     try:
-        resolved_image = parse_image(image, where="--image") or DEFAULT_IMAGE
+        explicit_image = parse_image(image, where="--image") if image else None
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     try:
@@ -255,7 +273,38 @@ def converge_command(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    reviewers = resolve_reviewers(profile, reviewer)
+    # A story's resolved settings are the BASE layer (the same profile → panel
+    # → default-model layering the daemon applies — lens#78 ran at the CLI
+    # default of 5 rounds while the project said 8); explicit flags win.
+    story_layer: dict = {}
+    story_settings = None
+    if story is not None:
+        story_layer, story_settings = _story_settings(host, story)
+    effective_profile = profile or story_layer.get("review_profile") or "standard"
+    # A DERIVED value must follow the setting it was derived from (PR #361
+    # review F4): an explicit --coder drops the story coder's resolved model
+    # / effort (the model policy below re-fills them from the host), and an
+    # explicit --profile re-resolves a panel the story derived from ITS
+    # profile — while a panel the story pinned explicitly stays.
+    if (
+        coder is not None
+        and story_settings is not None
+        and coder != story_settings.coder
+    ):
+        story_layer.pop("coder_model", None)
+        story_layer.pop("coder_effort", None)
+    panel_derived = story_settings is not None and not story_settings.reviewers_explicit
+    if reviewer or story_layer.get("reviewers") is None:
+        reviewers = resolve_reviewers(effective_profile, reviewer)
+    elif (
+        profile is not None
+        and panel_derived
+        and profile != story_layer.get("review_profile")
+    ):
+        reviewers = resolve_reviewers(effective_profile, None)
+    else:
+        reviewers = story_layer["reviewers"]
+    resolved_image = explicit_image or story_layer.get("image") or DEFAULT_IMAGE
 
     external_findings = None
     gh_repo: str | None = None
@@ -300,29 +349,38 @@ def converge_command(
             raise typer.Exit(0)
         external_findings = tuple(trusted)
 
-    overrides: dict = {}
-    if coder is not None:
-        overrides["coder"] = coder
-    if max_rounds is not None:
-        overrides["max_rounds"] = max_rounds
-
+    # Explicit flags, only where given, laid over the story layer (if any),
+    # laid over the CLI defaults.
+    explicit: dict = {
+        k: v
+        for k, v in {
+            "coder": coder,
+            "max_rounds": max_rounds,
+            "max_cost_usd": max_cost,
+            "test_command": test_command,
+            "check_commands": check_commands or None,
+            "check_states": check_states or None,
+            "parity_command": parity_command,
+            "artifacts_path": resolved_artifacts,
+        }.items()
+        if v is not None
+    }
     develop_config = DevelopConfig(
-        repo=repo,
-        description=resolved.title or f"Converge {resolved.head_ref}",
-        work_dir=host.orchestrator.work_dir / "converge",
-        acceptance_criteria=criteria,
-        review_profile=profile,
-        reviewers=reviewers,
-        base_branch=base or "main",
-        max_cost_usd=max_cost,
-        test_command=test_command,
-        test_timeout=test_timeout,
-        check_commands=check_commands,
-        check_states=check_states,
-        parity_command=parity_command,
-        image=resolved_image,
-        artifacts_path=resolved_artifacts,
-        **overrides,
+        **{
+            **dict(
+                repo=repo,
+                description=resolved.title or f"Converge {resolved.head_ref}",
+                work_dir=host.orchestrator.work_dir / "converge",
+                acceptance_criteria=criteria,
+                base_branch=base or "main",
+                test_timeout=test_timeout,
+            ),
+            **story_layer,
+            **explicit,
+            "review_profile": effective_profile,
+            "reviewers": reviewers,
+            "image": resolved_image,
+        }
     )
     develop_config = apply_model_policy(
         develop_config,
@@ -347,6 +405,47 @@ def converge_command(
         json_out.write_text(json.dumps(result.to_json(), indent=2), encoding="utf-8")
 
     raise typer.Exit(_EXIT_CODES.get(result.status, 1))
+
+
+def _story_settings(host, story: str) -> tuple[dict, ProjectDevelopSettings]:
+    """The story's resolved develop settings — as :class:`DevelopConfig`
+    overrides plus the settings themselves (the caller needs to know what was
+    derived from what). The daemon's own resolution (project doc > task
+    metadata > host policy), fetched from the loaded host's Lithos; the host
+    policy (review-profile default + per-tool default models) comes from that
+    SAME loaded config — never re-discovered from the ambient one (PR #361
+    review F3, the #305 rule). Frictions go to stderr; a missing story /
+    unreachable Lithos is a hard error (an on-demand run that asked for a
+    story must not silently proceed without it)."""
+    url = host.orchestrator.lithos_url
+    try:
+        _title, metadata = fetch_task_metadata(url, story)
+    except Exception as exc:
+        typer.secho(f"error: --story {story}: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(2) from exc
+    settings = resolve_project_settings(url, metadata)
+    section = getattr(host, "story_develop", None)
+    settings = layer_run_settings(
+        settings,
+        metadata,
+        host_default_profile=(
+            getattr(section, "default_review_profile", None) if section else None
+        ),
+        unknown_profile=getattr(section, "unknown_profile", "halt")
+        if section
+        else "halt",
+        default_models=host_default_models(host),
+    )
+    for friction in settings.frictions:
+        typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
+    if settings.review_profile_halt:
+        typer.secho(
+            "error: the story's review profile is not defined; not running",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+    return story_config_overrides(settings), settings
 
 
 def _render(result: ConvergeResult) -> str:
