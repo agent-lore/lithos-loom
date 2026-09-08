@@ -328,3 +328,92 @@ def test_without_story_the_host_default_profile_applies(
     result = runner.invoke(develop_app, ["merge-gate", "42"])
     assert result.exit_code == 0, result.output
     assert stubs["config"].review_profile == "thorough"
+
+
+# ── PR #360 re-review ────────────────────────────────────────────────────────
+
+
+def _degraded(*frictions: str):
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    return ProjectDevelopSettings(frictions=tuple(frictions), degraded=True)
+
+
+@pytest.mark.parametrize(
+    "friction",
+    [
+        "task has no metadata.project slug; using built-in develop defaults",
+        "no project-context doc for 'lens'; using built-in develop defaults",
+        "cannot read project-context doc for 'lens' (boom); "
+        "using built-in develop defaults",
+    ],
+)
+def test_story_with_unresolvable_project_never_gates(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch, friction: str
+) -> None:
+    # F1: S3 gates with the project's CURRENT config or not at all — the
+    # daemon's fail-open degrade to built-ins (right for a run a reviewer
+    # attends) would gate and PUSH on a check-set known not to be the
+    # project's. A gate with no resolvable project is skipped loudly.
+    from lithos_loom.cli import review as review_cli
+
+    monkeypatch.setattr(
+        review_cli, "resolve_project_settings", lambda url, meta: _degraded(friction)
+    )
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 4, result.output
+    assert "config" not in story_stubs  # the core never ran
+    assert "merge-gate 42: config_unresolved" in result.output
+    assert "using built-in develop defaults" in result.output
+
+
+def test_story_with_a_malformed_gate_setting_never_gates(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.cli import review as review_cli
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        review_cli,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(
+            frictions=("develop_parity_command is not a string; ignoring",)
+        ),
+    )
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 4, result.output
+    assert "config" not in story_stubs
+
+
+def test_host_profile_goes_through_the_unknown_profile_policy(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F3: an unknown host default under "strongest" selects thorough; under
+    # "halt" it stops before any git work.
+    def host(policy: str):
+        return lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(work_dir=Path("/tmp/w")),
+            story_develop=SimpleNamespace(
+                default_models={}, default_review_profile="nope", unknown_profile=policy
+            ),
+        )
+
+    monkeypatch.setattr(cli, "load_config", host("strongest"))
+    result = runner.invoke(develop_app, ["merge-gate", "42"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].review_profile == "thorough"
+
+    stubs.pop("config")
+    stubs.pop("resolve")
+    monkeypatch.setattr(cli, "load_config", host("halt"))
+    result = runner.invoke(develop_app, ["merge-gate", "42"])
+    assert result.exit_code == 2, result.output
+    assert "config" not in stubs and "resolve" not in stubs
+
+
+def test_blank_image_is_rejected(stubs: dict) -> None:
+    # F5: `--image ""` must fail closed like every other blank value, never
+    # fall through to the story / default image.
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--image", ""])
+    assert result.exit_code == 2
+    assert "resolve" not in stubs

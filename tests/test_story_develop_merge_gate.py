@@ -542,3 +542,80 @@ def test_config_fingerprint_tracks_timeout_and_threshold(
     assert longer.config_fingerprint != base.config_fingerprint
     assert stricter.config_fingerprint != base.config_fingerprint
     assert stricter.config_fingerprint != longer.config_fingerprint
+
+
+# ── PR #360 re-review ────────────────────────────────────────────────────────
+
+
+def test_ledger_red_record_reports_a_red_verdict(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F2: the record is the watcher's contract — `verdict` must reflect the
+    # gate's OWN decision, not the process-exit aggregate (ruff --exit-zero).
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch,
+        checks=(_LINT_ADAPTER,),
+        findings={
+            "lint": [
+                GateFinding(
+                    check="lint",
+                    tool="ruff",
+                    rule="F821",
+                    severity="major",
+                    message="undefined name",
+                    file="a.py",
+                    line=3,
+                )
+            ]
+        },
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change())
+    assert result.status == "red"
+    assert result.verdict == "RED"
+    assert result.to_json()["verdict"] == "RED"
+
+
+def test_required_errored_row_is_not_passed(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch, checks=(_TEST, _LINT), errored=frozenset({"test"})
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change())
+    assert result.status == "errored"
+    test_row = next(c for c in result.checks if c.name == "test")
+    assert test_row.passed is False
+    assert result.verdict is None  # no verdict was produced
+    lint_row = next(c for c in result.checks if c.name == "lint")
+    assert lint_row.passed is True
+
+
+def test_a_merged_pr_is_refused_before_any_git_work(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F4: a PR that already landed (or closed) must never have today's base
+    # merged into its obsolete branch and pushed.
+    fx.advance_base()
+    cap = _stub_checks(monkeypatch)
+    change = ResolvedChange(
+        **{**fx.change().__dict__, "is_merged": True, "is_closed": True}
+    )
+    result = mg.run_merge_gate(fx.config(), change)
+    assert result.status == "pr_closed"
+    assert "build_wt" not in cap and "run" not in cap
+    assert _worktrees(fx.repo) == []
+    assert result.pushed is False
+    assert _remote_sha(fx.bare, "feature") == fx.head
+
+
+def test_a_closed_unmerged_pr_is_refused_too(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    _stub_checks(monkeypatch)
+    change = ResolvedChange(**{**fx.change().__dict__, "is_closed": True})
+    result = mg.run_merge_gate(fx.config(), change)
+    assert result.status == "pr_closed"
+    assert _worktrees(fx.repo) == []

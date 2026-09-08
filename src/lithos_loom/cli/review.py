@@ -323,8 +323,18 @@ def resolve_check_states(check_state: list[str] | None) -> dict[str, str]:
         raise typer.BadParameter(str(exc)) from exc
 
 
+class StorySettingsUnresolved(Exception):
+    """A strict story resolution could not stand on the project's CURRENT
+    config: the project layer degraded to built-ins, or a gate-affecting
+    setting was malformed and dropped. Carries the resolver's own reasons."""
+
+    def __init__(self, reasons: tuple[str, ...]) -> None:
+        super().__init__("; ".join(reasons))
+        self.reasons = reasons
+
+
 def story_settings_for(
-    host: Any, story: str
+    host: Any, story: str, *, strict: bool = False
 ) -> tuple[dict[str, Any], ProjectDevelopSettings]:
     """The story's resolved develop settings — as :class:`DevelopConfig`
     overrides plus the settings themselves (the caller needs to know what was
@@ -354,6 +364,15 @@ def story_settings_for(
         else "halt",
         default_models=host_default_models(host),
     )
+    if strict and (settings.degraded or settings.frictions):
+        # A zero-token pre-merge gate (merge-gate, PRD S3) must gate with the
+        # project's current config or not at all: the daemon's fail-open
+        # degrade would gate — and push — on a check-set known not to be
+        # the project's (PR #360 re-review F1).
+        raise StorySettingsUnresolved(
+            settings.frictions
+            or ("the project layer did not resolve; built-in defaults would apply",)
+        )
     for friction in settings.frictions:
         typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
     if settings.review_profile_halt:

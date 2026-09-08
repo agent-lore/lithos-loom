@@ -256,7 +256,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.merge_gate`
 - class `MergeGateCheck` — One check's outcome on the merge result, flattened for the record.
 - class `MergeGateResult` — The outcome of one trial merge + gate.
-- def `config_fingerprint` — A short stable digest of *what gated*: the resolved checks + the image.
+- def `config_fingerprint` — A short stable digest of *what gated*: the resolved checks, the image, the per-check timeout and the blocking threshold.
 - def `run_merge_gate` — Trial-merge *change*'s current base into its head and gate the result.
 
 ### `lithos_loom.plugins.story_develop.model_policy`

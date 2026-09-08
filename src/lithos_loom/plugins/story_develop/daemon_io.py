@@ -173,6 +173,11 @@ class ProjectDevelopSettings:
     review_profile: str = DEFAULT_PROFILE_NAME
     review_profile_halt: bool = False
     frictions: tuple[str, ...] = ()
+    # True when the PROJECT layer never resolved (no slug / no doc / read
+    # failure) and the settings are built-ins + the task's own overrides. The
+    # daemon runs on regardless (a reviewer attends); a zero-token pre-merge
+    # gate must not (PR #360 re-review F1).
+    degraded: bool = False
 
 
 def _context_doc_path(slug: str) -> str:
@@ -295,6 +300,7 @@ def _degraded_settings(
         review_profile_project=scalars.review_profile_project,
         context_read_failed=context_read_failed,
         frictions=tuple(frictions),
+        degraded=True,
     )
 
 

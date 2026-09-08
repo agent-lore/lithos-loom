@@ -72,8 +72,8 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
 | Flag | Meaning |
 |------|---------|
 | `CHANGE` | The PR: `#142`, `142`, or a GitHub PR URL. A bare range / branch is rejected — there is no PR to update. |
-| `--profile`, `-p` | Review Profile whose check-set gates the result (default: the story's, else the host's `default_review_profile`, else `standard`). |
-| `--story TASK_ID` | Resolve the story's develop settings (project doc + task `develop_*`: profile, check-set, image, test command, parity) exactly as the daemon path does — the **current** config defending that project — as the base layer under any explicit flags. The watcher-dispatched run passes it. |
+| `--profile`, `-p` | Review Profile whose check-set gates the result (default: the story's, else the host's `default_review_profile` resolved through its `unknown_profile` policy, else `standard`). |
+| `--story TASK_ID` | Resolve the story's develop settings (project doc + task `develop_*`: profile, check-set, image, test command, parity) exactly as the daemon path does — the **current** config defending that project — as the base layer under any explicit flags. **Strict:** where the daemon would degrade to built-ins (no project slug / doc, a read failure, a malformed gate setting), merge-gate exits `config_unresolved` (4) and gates nothing. The watcher-dispatched run passes it. |
 | `--check-command NAME=CMD` | Override a check's command (repeatable). |
 | `--check-state NAME=STATE` | Override a check's blocking state (repeatable). |
 | `--test-command` | Explicit `test` check command (beats detection). |
@@ -107,7 +107,9 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
 | `no_checks` | 0 | The profile resolved to an empty check-set; nothing gated, nothing pushed. |
 | `red` | 1 | A blocking check failed on the merge result. |
 | `errored` | 1 | The check-set could not run (infrastructure); no verdict. |
-| `fork_unsupported` | 2 | A fork PR; refused. |
+| `fork_unsupported` | 2 | A fork PR; refused from GitHub's metadata before any fetch. |
+| `pr_closed` | 2 | The PR is merged or closed; its branch is not a live target, nothing is trial-merged or pushed. |
+| `config_unresolved` | 4 | `--story` could not resolve the project's **current** config (no project slug, no context doc, a read failure, or a malformed gate-affecting setting); nothing was gated — S3 gates with the current config or not at all, never with built-in defaults. |
 | `conflict` | 3 | The base no longer merges; `conflicting_paths` names why. |
 
 ## Requirements

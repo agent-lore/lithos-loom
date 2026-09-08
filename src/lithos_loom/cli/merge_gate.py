@@ -17,6 +17,7 @@ from pathlib import Path
 import typer
 
 from lithos_loom.cli.review import (
+    StorySettingsUnresolved,
     resolve_check_commands,
     resolve_check_states,
     story_settings_for,
@@ -31,7 +32,11 @@ from lithos_loom.plugins.story_develop.config import (
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.merge_gate import MergeGateResult, run_merge_gate
-from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_profile
+from lithos_loom.plugins.story_develop.profiles import (
+    UnknownProfileError,
+    get_profile,
+    resolve_profile,
+)
 from lithos_loom.plugins.story_develop.review_resolve import resolve_change
 
 __all__ = ["EXIT_CODES", "merge_gate_command"]
@@ -45,6 +50,10 @@ EXIT_CODES: dict[str, int] = {
     "errored": 1,
     "conflict": 3,
     "fork_unsupported": 2,
+    "pr_closed": 2,
+    # the project's current config could not be resolved — gated with
+    # nothing rather than with built-ins (PRD S3: skipped loudly)
+    "config_unresolved": 4,
 }
 
 
@@ -132,7 +141,11 @@ def merge_gate_command(
     try:
         test_command = parse_test_command(test_command, where="--test-command")
         parity_command = parse_parity_command(parity_command, where="--parity-command")
-        explicit_image = parse_image(image, where="--image") if image else None
+        # `is not None`, not truthiness: a blank --image must fail closed like
+        # every other blank value, never fall through to the story / default
+        explicit_image = (
+            parse_image(image, where="--image") if image is not None else None
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -144,12 +157,44 @@ def merge_gate_command(
     # win, and without a story the host's default profile applies.
     story_layer: dict = {}
     if story is not None:
-        story_layer, _settings = story_settings_for(host, story)
+        try:
+            story_layer, _settings = story_settings_for(host, story, strict=True)
+        except StorySettingsUnresolved as exc:
+            typer.echo(f"merge-gate {change}: config_unresolved")
+            for reason in exc.reasons:
+                typer.echo(f"  {reason}")
+            typer.echo(
+                "  the project's current config could not be resolved; nothing "
+                "was gated (S3 gates with the current config or not at all)"
+            )
+            raise typer.Exit(EXIT_CODES["config_unresolved"]) from exc
     section = getattr(host, "story_develop", None)
-    host_profile = getattr(section, "default_review_profile", None) if section else None
-    effective_profile = (
-        profile or story_layer.get("review_profile") or host_profile or "standard"
-    )
+    if profile is not None or story_layer.get("review_profile"):
+        effective_profile = profile or story_layer["review_profile"]
+    else:
+        # the host default goes through the same unknown-profile policy the
+        # daemon applies (halt, or the strongest configured profile)
+        policy = resolve_profile(
+            task_value=None,
+            project_value=None,
+            host_value=getattr(section, "default_review_profile", None)
+            if section
+            else None,
+            unknown_profile=getattr(section, "unknown_profile", "halt")
+            if section
+            else "halt",
+        )
+        for friction in policy.frictions:
+            typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
+        if policy.halt:
+            typer.secho(
+                "error: the host default_review_profile is not defined "
+                "(unknown_profile=halt); not running",
+                err=True,
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(2)
+        effective_profile = policy.profile.name
     resolved_image = explicit_image or story_layer.get("image") or DEFAULT_IMAGE
 
     # Forks are answered from GitHub's metadata before any fetch: the sweep

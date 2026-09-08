@@ -69,6 +69,7 @@ MergeGateStatus = Literal[
     "no_checks",  # the project's current check-set is empty — vacuous, nothing pushed
     "conflict",  # the base no longer merges; `conflicting_paths` names why
     "fork_unsupported",  # a fork PR: refused before any git work
+    "pr_closed",  # the PR is merged / closed: its branch is not a live target
 ]
 
 
@@ -109,7 +110,8 @@ class MergeGateResult:
     so a green gate whose update lost a race to a human push still reads as
     green. ``merge_sha`` is the gated tree: the merge commit when the PR was
     behind, the PR head itself when it was up to date, empty on a conflict.
-    ``config_fingerprint`` identifies the check-set + image that produced the
+    ``config_fingerprint`` identifies the check-set, image, timeout and
+    blocking threshold that produced the
     verdict — the third component of the sweep's re-run key.
     """
 
@@ -152,7 +154,8 @@ class MergeGateResult:
 
 
 def config_fingerprint(config: DevelopConfig, checks: tuple[Check, ...]) -> str:
-    """A short stable digest of *what gated*: the resolved checks + the image.
+    """A short stable digest of *what gated*: the resolved checks, the image,
+    the per-check timeout and the blocking threshold.
 
     The PRD's re-run key is ``(head_sha, base_sha, config fingerprint)`` —
     without the third component a tightened check-set would never re-gate
@@ -190,7 +193,13 @@ def _flatten(
                 state=r.check.state,
                 stage=r.check.stage,
                 outcome=r.execution_outcome,
-                passed=not check_result_blocks(r, ledger, threshold),
+                # merge-gate's OWN decision: the ledger-aware floor, plus a
+                # required check that never executed is not a pass here
+                # (PR #360 re-review F2 — the record is the watcher's contract)
+                passed=not check_result_blocks(r, ledger, threshold)
+                and not (
+                    r.check.state == "required" and r.execution_outcome == "errored"
+                ),
                 exit_code=gate.exit_code if gate is not None else None,
                 timed_out=gate.timed_out if gate is not None else False,
                 output_tail=gate.output_tail if gate is not None else "",
@@ -236,6 +245,17 @@ def run_merge_gate(
                 f"{change.head_ref} is a fork PR: not trial-merged (the head "
                 "would have to be fetched into the operator's checkout and the "
                 "update could not be pushed under origin credentials)"
+            ),
+        )
+    if change.is_merged or change.is_closed:
+        return MergeGateResult(
+            status="pr_closed",
+            change=change,
+            head_sha=change.head_sha,
+            message=(
+                f"{change.head_ref} is {'merged' if change.is_merged else 'closed'}: "
+                "its branch is not a live target — nothing trial-merged, nothing "
+                "pushed"
             ),
         )
     base_ref = change.base_ref or f"origin/{config.base_branch}"
@@ -321,7 +341,10 @@ def run_merge_gate(
                 ),
             )
         rows = _flatten(outcome, ledger, threshold)
-        verdict = outcome.aggregate_verdict
+        # `aggregate_verdict` is the process-exit view (ruff --exit-zero reads
+        # GREEN); the record's verdict is the gate's own decision.
+        blocked = gate_floor_blocks(outcome, ledger, threshold)
+        verdict = "RED" if blocked else outcome.aggregate_verdict
         # A required check that never EXECUTED is "not blocking" for the
         # agent loop (a reviewer compensates); here nobody does, and the
         # contract is that an unverified merge is never pushed (PR #360
@@ -335,14 +358,14 @@ def run_merge_gate(
             return replace(
                 gated,
                 checks=rows,
-                verdict=verdict,
+                verdict=None,  # no verdict was produced for the set as a whole
                 message=(
                     f"{change.head_ref}: required check(s) could not run on the "
                     f"merge result (infrastructure): {', '.join(unverified)} — no "
                     "verdict, nothing pushed"
                 ),
             )
-        if gate_floor_blocks(outcome, ledger, threshold):
+        if blocked:
             failing = [r.name for r in rows if not r.passed]
             return replace(
                 gated,

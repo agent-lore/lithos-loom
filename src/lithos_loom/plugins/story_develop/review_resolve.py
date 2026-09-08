@@ -39,7 +39,8 @@ class ResolvedChange:
     reads both to push fixes back to the PR branch, and to refuse a fork PR it
     cannot push to under origin credentials.
 
-    ``is_merged`` reports that the PR has already landed. It is a FLAG here, not
+    ``is_closed`` is the PR's state (closed, merged or not); ``is_merged`` that
+    it landed. ``is_merged`` is a FLAG here, not
     a refusal: reviewing a merged PR is a legitimate read-only operation, so only
     converge — which would push fixes that could never land — acts on it.
 
@@ -58,6 +59,7 @@ class ResolvedChange:
     head_branch: str = ""
     is_fork: bool = False
     is_merged: bool = False
+    is_closed: bool = False
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -169,6 +171,7 @@ def _resolve_pr(
             head_branch=pr.head_ref,
             is_fork=True,
             is_merged=pr.merged,
+            is_closed=pr.state == "closed",
         )
     # Fetch the PR head (works for forks too) and the base branch so both
     # commits are local before we materialise a worktree / diff against them.
@@ -195,4 +198,5 @@ def _resolve_pr(
         head_branch=pr.head_ref,
         is_fork=is_fork,
         is_merged=pr.merged,
+        is_closed=pr.state == "closed",
     )

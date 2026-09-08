@@ -270,3 +270,14 @@ def test_allow_fork_default_still_fetches_a_fork(
     change = review_resolve.resolve_change(tmp_path, "#142")
     assert change.is_fork is True
     assert stub_gh.fetches == [("pull/142/head", "main")]
+
+
+def test_resolved_pr_carries_its_open_or_closed_state(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert review_resolve.resolve_change(tmp_path, "#142").is_closed is False
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, merged=True)
+    )
+    change = review_resolve.resolve_change(tmp_path, "#142")
+    assert change.is_merged is True and change.is_closed is True
