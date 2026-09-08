@@ -377,7 +377,11 @@ def test_story_with_a_malformed_gate_setting_never_gates(
         review_cli,
         "resolve_project_settings",
         lambda url, meta: ProjectDevelopSettings(
-            frictions=("develop_parity_command is not a string; ignoring",)
+            frictions=(
+                "develop_parity_command: parity_command must be a "
+                + "non-empty string (got 5); ignoring",
+            ),
+            rejected_keys=("develop_parity_command",),
         ),
     )
     result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
@@ -495,20 +499,64 @@ def test_a_non_gate_friction_does_not_skip_the_gate(
 
 
 @pytest.mark.parametrize(
-    "friction",
+    ("key", "friction"),
     [
-        "develop_check_states: state for check 'lint' must be one of informational, "
-        + "off, required (got 'bogus'); ignoring",
-        "develop_image: image must be a non-empty string (got '  '); ignoring",
-        "task metadata.develop_test_command: must be a non-empty string; "
-        + "keeping project default",
+        (
+            "develop_check_states",
+            "develop_check_states: state for check 'lint' must be one of "
+            + "informational, off, required (got 'bogus'); ignoring",
+        ),
+        (
+            "develop_image",
+            "develop_image: image must be a non-empty string (got '  '); ignoring",
+        ),
+        (
+            "develop_test_command",
+            "task metadata.develop_test_command: must be a non-empty string; "
+            + "keeping project default",
+        ),
     ],
 )
 def test_a_rejected_gate_setting_skips_the_gate(
-    story_stubs: dict, monkeypatch: pytest.MonkeyPatch, friction: str
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch, key: str, friction: str
 ) -> None:
-    _story_settings(monkeypatch, frictions=(friction,))
+    _story_settings(monkeypatch, frictions=(friction,), rejected_keys=(key,))
     result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
     assert result.exit_code == 4, result.output
     assert "config" not in story_stubs
     assert friction.split(";")[0][:30] in result.output
+
+
+def test_the_block_on_red_migration_breadcrumb_does_not_skip_the_gate(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #360 re-review 3: the legacy key is inert and its breadcrumb merely
+    # NAMES the gate keys to migrate to — prose is not a rejection.
+    _story_settings(
+        monkeypatch,
+        image="ralph-sandbox:lens",
+        frictions=(
+            "develop_block_on_red is removed and ignored; the test check's blocking "
+            + "is the review profile's — use develop_review_profile / "
+            + "develop_test_gate instead",
+        ),
+    )
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    assert story_stubs["config"].image == "ralph-sandbox:lens"
+
+
+def test_a_degraded_project_reports_its_reason_once(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _story_settings(
+        monkeypatch,
+        degraded=True,
+        frictions=(
+            "no project-context doc for 'lens'; using built-in develop defaults",
+        ),
+    )
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 4
+    assert result.output.count("no project-context doc") == 1
+    assert "built-in defaults would apply" not in result.output

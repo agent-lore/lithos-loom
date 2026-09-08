@@ -392,3 +392,47 @@ def test_bad_copilot_review_frictions_and_falls_back() -> None:
     settings, frictions = _resolve({"develop_copilot_review": "yes please"})
     assert settings.copilot_review is None
     assert len(frictions) == 1 and "develop_copilot_review" in frictions[0]
+
+
+# ── PR #360 re-review 3: the resolver records WHICH keys it rejected ─────────
+
+
+def test_rejected_keys_are_recorded_structurally_at_both_layers() -> None:
+    from lithos_loom.plugins.story_develop.settings_resolver import (
+        resolve_scalar_settings,
+    )
+
+    frictions: list[str] = []
+    scalars = resolve_scalar_settings(
+        {
+            "develop_image": "  ",
+            "develop_max_rounds": "x",
+            "develop_review_profile": 5,
+            "develop_block_on_red": True,  # inert legacy key: breadcrumb, no rejection
+        },
+        {"develop_check_states": {"lint": "bogus"}},
+        frictions,
+    )
+    assert scalars.rejected_keys == (
+        "develop_image",
+        "develop_max_rounds",
+        "develop_review_profile",
+        "develop_check_states",  # the task layer's, bare key
+    )
+    # the breadcrumb is still posted — it names gate keys, and is not one
+    assert any("develop_block_on_red" in f for f in frictions)
+
+
+def test_a_clean_resolution_rejects_nothing() -> None:
+    from lithos_loom.plugins.story_develop.settings_resolver import (
+        resolve_scalar_settings,
+    )
+
+    frictions: list[str] = []
+    scalars = resolve_scalar_settings(
+        {"develop_image": "img:x", "develop_parity_command": "make parity"},
+        {"develop_test_command": "make test"},
+        frictions,
+    )
+    assert scalars.rejected_keys == ()
+    assert frictions == []

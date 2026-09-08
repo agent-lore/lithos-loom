@@ -75,6 +75,12 @@ class ScalarSettings:
     # #273 slice 3: the aggregate repo-parity command (e.g. "make check"), project-then-
     # task. None = no parity check.
     parity_command: str | None = None
+    # The `develop_*` keys whose value a parser rejected (bare key, either
+    # layer), in resolution order — the structural twin of the friction text.
+    rejected_keys: tuple[str, ...] = ()
+
+
+_TASK_WHERE_PREFIX = "task metadata."
 
 
 def _parse_or_friction(
@@ -85,13 +91,19 @@ def _parse_or_friction(
     suffix: str,
     frictions: list[str],
     fallback: Any,
+    rejected: list[str] | None = None,
 ) -> Any:
     """Parse *value*; on ``ValueError`` append ``f"{exc}{suffix}"`` and return
-    *fallback*. The single parse-or-friction atom every scalar layer shares."""
+    *fallback*. The single parse-or-friction atom every scalar layer shares.
+    *rejected*, when given, also receives the rejected setting's bare key
+    (``where`` minus the task-layer prefix) — the STRUCTURAL record a strict
+    consumer decides on, so nobody has to read friction prose."""
     try:
         return parser(value, where=where)
     except ValueError as exc:
         frictions.append(f"{exc}{suffix}")
+        if rejected is not None:
+            rejected.append(where.removeprefix(_TASK_WHERE_PREFIX))
         return fallback
 
 
@@ -126,6 +138,7 @@ def _resolve_project_then_task(
     meta: Mapping[str, Any],
     task_metadata: Mapping[str, Any],
     frictions: list[str],
+    rejected: list[str] | None = None,
 ) -> Any:
     """Project ``develop_*`` (friction ``"; ignoring"`` on a bad value), then a
     per-task override under the same key (``"; keeping project default"``)."""
@@ -136,6 +149,7 @@ def _resolve_project_then_task(
         suffix="; ignoring",
         frictions=frictions,
         fallback=None,
+        rejected=rejected,
     )
     if task_metadata.get(field.key) is not None:
         value = _parse_or_friction(
@@ -145,6 +159,7 @@ def _resolve_project_then_task(
             suffix="; keeping project default",
             frictions=frictions,
             fallback=value,
+            rejected=rejected,
         )
     return value
 
@@ -242,20 +257,28 @@ def _resolve_fallback_chain(
     return ()
 
 
-def _resolve_max_rounds(meta: Mapping[str, Any], frictions: list[str]) -> int | None:
+def _resolve_max_rounds(
+    meta: Mapping[str, Any], frictions: list[str], rejected: list[str] | None = None
+) -> int | None:
     max_rounds = meta.get("develop_max_rounds")
     if max_rounds is not None and (not isinstance(max_rounds, int) or max_rounds < 1):
         frictions.append(f"develop_max_rounds {max_rounds!r} invalid; ignoring")
+        if rejected is not None:
+            rejected.append("develop_max_rounds")
         return None
     return max_rounds
 
 
-def _resolve_max_cost(meta: Mapping[str, Any], frictions: list[str]) -> float | None:
+def _resolve_max_cost(
+    meta: Mapping[str, Any], frictions: list[str], rejected: list[str] | None = None
+) -> float | None:
     max_cost = meta.get("develop_max_cost_usd")
     if max_cost is not None and (
         not isinstance(max_cost, (int, float)) or max_cost <= 0
     ):
         frictions.append(f"develop_max_cost_usd {max_cost!r} invalid; ignoring")
+        if rejected is not None:
+            rejected.append("develop_max_cost_usd")
         return None
     return float(max_cost) if max_cost is not None else None
 
@@ -267,6 +290,7 @@ def _resolve_merged_map(
     *,
     key: str,
     parser: Parser,
+    rejected: list[str] | None = None,
 ) -> dict[str, str]:
     """A per-key-merged ``develop_*`` **table** setting: the project table, then a
     per-task table merged per-key on top (a task re-points one entry while the project's
@@ -281,6 +305,7 @@ def _resolve_merged_map(
         suffix="; ignoring",
         frictions=frictions,
         fallback={},
+        rejected=rejected,
     )
     if task_metadata.get(key) is not None:
         task_map = _parse_or_friction(
@@ -290,6 +315,7 @@ def _resolve_merged_map(
             suffix="; keeping project default",
             frictions=frictions,
             fallback=None,
+            rejected=rejected,
         )
         if task_map is not None:
             result = {**result, **task_map}
@@ -297,7 +323,7 @@ def _resolve_merged_map(
 
 
 def _resolve_review_profile_project(
-    meta: Mapping[str, Any], frictions: list[str]
+    meta: Mapping[str, Any], frictions: list[str], rejected: list[str] | None = None
 ) -> str | None:
     # Carry the project-layer name only; the full task > project > host resolution
     # needs the host policy and runs in daemon_io.apply_review_profile.
@@ -309,6 +335,8 @@ def _resolve_review_profile_project(
             f"develop_review_profile {raw_profile!r} invalid; ignoring "
             "(must be a non-empty string)"
         )
+        if rejected is not None:
+            rejected.append("develop_review_profile")
     return None
 
 
@@ -328,16 +356,17 @@ def resolve_scalar_settings(
     # the sequence must match the original resolve_project_settings (coder, image,
     # test_command, test_gate, block_on_red, fallback_chain, max_rounds, max_cost,
     # review_profile) — the daemon test net pins it.
+    rejected: list[str] = []
     coder, coder_model, coder_effort = _resolve_coder(meta, task_metadata, frictions)
     scalars = {
-        f.attr: _resolve_project_then_task(f, meta, task_metadata, frictions)
+        f.attr: _resolve_project_then_task(f, meta, task_metadata, frictions, rejected)
         for f in _PROJECT_THEN_TASK_FIELDS
     }
     _warn_removed_block_on_red(meta, task_metadata, frictions)
     fallback_chain = _resolve_fallback_chain(meta, frictions)
-    max_rounds = _resolve_max_rounds(meta, frictions)
-    max_cost_usd = _resolve_max_cost(meta, frictions)
-    review_profile_project = _resolve_review_profile_project(meta, frictions)
+    max_rounds = _resolve_max_rounds(meta, frictions, rejected)
+    max_cost_usd = _resolve_max_cost(meta, frictions, rejected)
+    review_profile_project = _resolve_review_profile_project(meta, frictions, rejected)
     # #273: appended LAST so the pinned friction prefix (coder, image, test_command,
     # test_gate, block_on_red, fallback_chain, max_rounds, max_cost, review_profile) is
     # unchanged — a new field's frictions must not reorder the existing contract.
@@ -348,6 +377,7 @@ def resolve_scalar_settings(
         frictions,
         key="develop_check_commands",
         parser=parse_check_commands,
+        rejected=rejected,
     )
     check_states = _resolve_merged_map(
         meta,
@@ -355,6 +385,7 @@ def resolve_scalar_settings(
         frictions,
         key="develop_check_states",
         parser=parse_check_states,
+        rejected=rejected,
     )
     # #273 slice 3: a scalar project-then-task field, resolved AFTER the dict maps so
     # the pinned friction order is unchanged (appended last).
@@ -365,6 +396,7 @@ def resolve_scalar_settings(
         meta,
         task_metadata,
         frictions,
+        rejected,
     )
     # Gate 15690a0e / task 0e8d96ba: the deliberate per-project/per-task dial
     # for the one-shot Copilot review request at PR open (the inline round is
@@ -378,6 +410,7 @@ def resolve_scalar_settings(
         meta,
         task_metadata,
         frictions,
+        rejected,
     )
     return ScalarSettings(
         coder=coder,
@@ -395,4 +428,5 @@ def resolve_scalar_settings(
         check_states=check_states,
         parity_command=parity_command,
         copilot_review=copilot_review,
+        rejected_keys=tuple(dict.fromkeys(rejected)),
     )

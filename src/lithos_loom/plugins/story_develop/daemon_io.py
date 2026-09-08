@@ -178,6 +178,11 @@ class ProjectDevelopSettings:
     # daemon runs on regardless (a reviewer attends); a zero-token pre-merge
     # gate must not (PR #360 re-review F1).
     degraded: bool = False
+    # The `develop_*` keys whose value a parser REJECTED at either layer
+    # (structural, from the resolver — not inferred from friction prose). A
+    # gate-affecting key here means the check-set that would run is not the
+    # project's (PR #360 re-review 3).
+    rejected_keys: tuple[str, ...] = ()
 
 
 def _context_doc_path(slug: str) -> str:
@@ -301,6 +306,7 @@ def _degraded_settings(
         context_read_failed=context_read_failed,
         frictions=tuple(frictions),
         degraded=True,
+        rejected_keys=scalars.rejected_keys,
     )
 
 
@@ -377,6 +383,7 @@ def resolve_project_settings(
         parity_command=scalars.parity_command,
         review_profile_project=scalars.review_profile_project,
         frictions=tuple(frictions),
+        rejected_keys=scalars.rejected_keys,
     )
 
 

@@ -355,26 +355,35 @@ def gate_config_problems(settings: ProjectDevelopSettings) -> tuple[str, ...]:
     project layer never resolved (``degraded``: no slug / no doc / read
     failure), an explicit-but-unknown profile under ``halt``, and a
     gate-affecting setting rejected by its parser — recognised by the
-    setting's key in the resolver's own friction text (every scalar parse
-    names its ``where``). Everything else in ``frictions`` — reviewer /
-    coder / model / round / cost warnings, the ``minimal`` gate-only note,
-    the ``strongest`` fallback — is agent configuration and does not touch
-    what a gate runs.
+    setting's key in the resolver's structural ``rejected_keys`` (never by
+    searching friction prose — the ``develop_block_on_red`` migration
+    breadcrumb names gate keys innocently). Everything else in
+    ``frictions`` — reviewer / coder / model / round / cost warnings, the
+    ``minimal`` gate-only note, the ``strongest`` fallback — is agent
+    configuration and does not touch what a gate runs.
     """
     problems: list[str] = []
     if settings.degraded:
+        reasons = [f for f in settings.frictions if "built-in develop defaults" in f]
         problems.extend(
-            f for f in settings.frictions if "built-in develop defaults" in f
-        ) or problems.append(
-            "the project layer did not resolve; built-in defaults would apply"
+            reasons
+            or ["the project layer did not resolve; built-in defaults would apply"]
         )
     if settings.review_profile_halt:
         problems.append("the review profile is not defined (unknown_profile=halt)")
-    problems.extend(
-        f
-        for f in settings.frictions
-        if any(key in f for key in GATE_SETTING_KEYS) and f not in problems
-    )
+    # STRUCTURAL: the resolver names the keys its parsers rejected; the
+    # friction text is only looked up to label the reason (by its `where`
+    # prefix — never searched for key names, which a migration breadcrumb or
+    # a quoted value could mention innocently).
+    for key in settings.rejected_keys:
+        if key not in GATE_SETTING_KEYS:
+            continue
+        labels = [
+            f
+            for f in settings.frictions
+            if f.startswith((f"{key}:", f"{key} ", f"task metadata.{key}:"))
+        ]
+        problems.extend(labels or [f"{key} was rejected by its parser"])
     return tuple(problems)
 
 
