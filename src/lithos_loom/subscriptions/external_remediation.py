@@ -64,7 +64,6 @@ from lithos_loom.github_review_streams import AuthorTrust
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
 from lithos_loom.subscriptions.external_reviews import (
-    EXTERNAL_REVIEW,
     IngestResult,
     PendingMarkerProvider,
 )
@@ -74,7 +73,11 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationSettings,
     read_budget,
 )
-from lithos_loom.subscriptions.remediation_escalation import escalate_if_exhausted
+from lithos_loom.subscriptions.remediation_outcome import (
+    escalate_or_report,
+    post_finding,
+    record_result,
+)
 
 __all__ = [
     "CONVERGE_SETTING",
@@ -601,11 +604,35 @@ class ExternalRemediation:
         budget: RemediationBudget,
         ctx: SubscriptionContext,
     ) -> None:
-        """Run one converge subprocess and record its outcome. Never raises."""
+        """Run one converge subprocess and record its outcome. Never raises.
+
+        A crash anywhere in the run (spawning, the result file, recording)
+        still spent the reserved round, so it is reported on the story and —
+        if that was the last round — escalated like any other failed run
+        (PR #361 review F2: a swallowed exception was the silent exhaustion
+        this module exists to close, one layer up).
+        """
         try:
             await self._run_inner(gate_id, story_id, spec, repo, budget, ctx)
-        except Exception:  # noqa: BLE001 — the slot must always free cleanly
+        except Exception as exc:  # noqa: BLE001 — the slot must always free cleanly
             ctx.logger.exception("external-remediation: run for %s raised", spec.pr_url)
+            detail = f"{type(exc).__name__}: {exc}"
+            await self._post_finding(
+                story_id,
+                f"[Friction] external-remediation: converge --from-github for "
+                f"{spec.pr_url} crashed before recording a result ({detail}); "
+                f"the round is spent ({budget.rounds_used}/{self._settings.budget})",
+                ctx,
+            )
+            await self._escalate_if_exhausted(
+                gate_id,
+                story_id,
+                spec,
+                budget,
+                last_status="failed",
+                detail=detail,
+                ctx=ctx,
+            )
 
     async def _run_inner(
         self,
@@ -688,65 +715,16 @@ class ExternalRemediation:
         data: dict[str, Any],
         ctx: SubscriptionContext,
     ) -> None:
-        status = data.get("status", "unknown")
-        pushed_sha = data.get("pushed_sha") or ""
-        if data.get("pushed") and pushed_sha:
-            # Loom's own push: recorded so the next sweep's head observation
-            # attributes it (no human-push reset) and own-sha material skips.
-            updated = dataclasses.replace(
-                budget,
-                last_loom_pushed_sha=pushed_sha,
-                last_seen_head_sha=pushed_sha,
-            )
-            await write_marker(
-                ctx,
-                task_id=gate_id,
-                marker={REMEDIATION_KEY: updated.as_marker()},
-                subsystem="external-remediation",
-            )
-
-        lines = [
-            f"{EXTERNAL_REVIEW} remediation outcome for delivered PR "
-            f"{spec.pr_url}: {status} "
-            f"(round {budget.rounds_used}/{self._settings.budget})"
-        ]
-        if data.get("message"):
-            lines.append(f"- {data['message']}")
-        if pushed_sha:
-            lines.append(f"- pushed {pushed_sha[:12]} to the PR branch")
-        for o in data.get("external_outcomes") or []:
-            if not isinstance(o, dict):
-                continue
-            where = f" ({o['thread_url']})" if o.get("thread_url") else ""
-            detail = f" — {o['detail']}" if o.get("detail") else ""
-            lines.append(
-                f"- {o.get('finding_id', '?')} by {o.get('author', '?')}: "
-                f"{o.get('disposition', '?')}{detail}{where}"
-            )
-        cost = data.get("total_cost_usd")
-        if isinstance(cost, int | float):
-            lines.append(f"- spend ${cost:.2f}")
-        ctx.logger.info(
-            "external-remediation: converge for %s finished: %s, round %d/%d%s%s",
-            spec.pr_url,
-            status,
-            budget.rounds_used,
-            self._settings.budget,
-            f", pushed {pushed_sha[:12]}" if pushed_sha else ", nothing pushed",
-            f", ${cost:.2f}" if isinstance(cost, int | float) else "",
+        await record_result(
+            ctx,
+            gate_id=gate_id,
+            story_id=story_id,
+            spec=spec,
+            budget=budget,
+            budget_limit=self._settings.budget,
+            notifier=self._settings.notifier,
+            data=data,
         )
-        await self._post_finding(story_id, "\n".join(lines), ctx)
-        if status != "converged":
-            await self._escalate_if_exhausted(
-                gate_id,
-                story_id,
-                spec,
-                budget,
-                last_status=str(status),
-                detail=str(data.get("message") or status),
-                cost=cost if isinstance(cost, int | float) else None,
-                ctx=ctx,
-            )
 
     async def _escalate_if_exhausted(
         self,
@@ -760,9 +738,7 @@ class ExternalRemediation:
         ctx: SubscriptionContext,
         cost: float | None = None,
     ) -> None:
-        """PRD S5b: exhaustion → human gate (:mod:`.remediation_escalation`);
-        a gate that could not be raised is said so on the story."""
-        problem = await escalate_if_exhausted(
+        await escalate_or_report(
             ctx,
             gate_id=gate_id,
             story_id=story_id,
@@ -774,26 +750,8 @@ class ExternalRemediation:
             detail=detail,
             cost=cost,
         )
-        if problem is not None:
-            await self._post_finding(
-                story_id,
-                f"[Friction] external-remediation: budget spent on {spec.pr_url} "
-                f"but no needs-human gate could be raised ({problem}); the PR "
-                "is not converged and loom will not dispatch again until a "
-                "human pushes to the branch",
-                ctx,
-            )
 
     async def _post_finding(
         self, story_id: str, summary: str, ctx: SubscriptionContext
     ) -> None:
-        """Best-effort finding post (the story may have completed mid-run)."""
-        try:
-            await ctx.lithos.finding_post(task_id=story_id, summary=summary)
-        except LithosClientError as exc:
-            ctx.logger.warning(
-                "[Friction] external-remediation: posting outcome for story %s "
-                "failed (%s)",
-                story_id,
-                exc,
-            )
+        await post_finding(ctx, story_id, summary)

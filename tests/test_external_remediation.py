@@ -1285,3 +1285,93 @@ async def test_run_completion_is_logged(
     done = [r.message for r in caplog.records if "finished" in r.message]
     assert len(done) == 1
     assert _PR_URL in done[0] and "not_converged" in done[0] and "1/2" in done[0]
+
+
+# ── PR #361 review ───────────────────────────────────────────────────────────
+
+
+async def test_a_successful_triage_rejected_last_round_does_not_escalate(
+    tmp_path: Path,
+) -> None:
+    # Review finding 1: `triage_rejected` is a SUCCESS (every external claim
+    # refuted with evidence — nothing left for the operator), and the CLI's
+    # own `succeeded` flag is the authority, not `status == "converged"`.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    notifier = _RecordingNotifier()
+    spawn, _calls = _spawner(
+        {
+            "status": "triage_rejected",
+            "succeeded": True,
+            "pushed": False,
+            "pushed_sha": "",
+            "message": "every external finding was rejected with evidence",
+        }
+    )
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=1, notifier=notifier), spawn=spawn
+    )
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    assert await _human_gates(client) == []
+    assert notifier.notices == []
+
+
+async def test_a_result_without_the_succeeded_flag_falls_back_to_status(
+    tmp_path: Path,
+) -> None:
+    # An older CLI's JSON (no `succeeded`) is judged by status alone.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner({"status": "not_converged", "pushed": False})
+    rem = ExternalRemediation(_settings(tmp_path, budget=1), spawn=spawn)
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    assert len(await _human_gates(client)) == 1
+
+
+async def test_an_exception_in_the_run_at_exhaustion_still_escalates(
+    tmp_path: Path,
+) -> None:
+    # Review finding 2: the run task's catch-all logged and dropped — an
+    # OSError spawning (or reading the result) left the reserved final round
+    # spent with no finding, no notice, no gate: the silent exhaustion this
+    # PR exists to close, reborn one layer up.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    notifier = _RecordingNotifier()
+
+    async def boom(cmd: list[str]) -> tuple[int, str]:
+        raise OSError("spawn failed: ENOENT")
+
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=1, notifier=notifier), spawn=boom
+    )
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    frictions = [f for f in _findings(client) if f.startswith("[Friction]")]
+    assert any("ENOENT" in f for f in frictions)
+    gates = await _human_gates(client)
+    assert len(gates) == 1
+    assert gates[0].metadata["run_brief"]["last_status"] == "failed"
+    assert len(notifier.notices) == 1
+
+
+async def test_an_exception_with_rounds_remaining_posts_friction_only(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def boom(cmd: list[str]) -> tuple[int, str]:
+        raise OSError("spawn failed")
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=boom)
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    assert [f for f in _findings(client) if f.startswith("[Friction]")]
+    assert await _human_gates(client) == []

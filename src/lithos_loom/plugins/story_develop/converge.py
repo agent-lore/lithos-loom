@@ -180,6 +180,10 @@ class ConvergeResult:
             "deferred_findings": deferred,
             "external_outcomes": external,
             "status": self.status,
+            # The one success verdict (PR #361 review): a consumer that
+            # judged by `status == "converged"` read `triage_rejected` —
+            # every external claim refuted with evidence — as a failure.
+            "succeeded": self.succeeded,
             "head_ref": self.change.head_ref,
             "head_branch": self.change.head_branch,
             "base_sha": self.change.base_sha,

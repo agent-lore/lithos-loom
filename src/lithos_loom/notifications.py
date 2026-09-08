@@ -55,9 +55,20 @@ _NOTIFY_SEND = "notify-send"
 _STDERR_TAIL_CHARS = 200
 
 
+REDISPATCH_ACTIONS = (
+    "complete it to re-dispatch the story (edit the story first if the brief "
+    "must change); cancel the story to abandon"
+)
+"""The route-runner's two actions: the gate holds a story the runner will
+develop again once it is completed. Every other escalation passes its own —
+an exhausted remediation's gate is a decision, not a re-dispatch (PR #361
+review F5: the push channel said "re-dispatch" where nothing would)."""
+
+
 @dataclass(frozen=True)
 class NeedsHumanNotice:
-    """What every sink renders: the gate, the story, and why loom stopped."""
+    """What every sink renders: the gate, the story, why loom stopped, and
+    what the operator can do about it."""
 
     gate_id: str
     story_id: str
@@ -70,6 +81,9 @@ class NeedsHumanNotice:
     github_ref: str | None = None
     """The story's linked GitHub issue or delivered PR url, when it has one —
     the target of the ``@mention`` sink."""
+    actions: str = REDISPATCH_ACTIONS
+    """The actions open to the operator, rendered verbatim after the gate id
+    in every sink that has room for them."""
 
     def as_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -86,9 +100,7 @@ class NeedsHumanNotice:
         return (
             f"@{login} [NeedsHuman] loom stopped on **{self.story_title}** "
             f"(`{self.reason}`): {self.summary}\n\n"
-            f"Gate `{self.gate_id}` in Lithos — complete it to re-dispatch the "
-            "story (edit the story first if the brief must change); cancel the "
-            "story to abandon.\n\n"
+            f"Gate `{self.gate_id}` in Lithos — {self.actions}.\n\n"
             # Posted under the operator's (trusted) login on a PR the watcher
             # sweeps for conversation comments (#353): the marker keeps this
             # notice out of the external-review stream.

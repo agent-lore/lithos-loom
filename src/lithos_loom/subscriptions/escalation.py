@@ -37,7 +37,11 @@ from lithos_loom.gates import (
     STORY_HUMAN_GATE_ID_KEY,
     create_human_gate_best_effort,
 )
-from lithos_loom.notifications import NeedsHumanNotice, notice_github_ref
+from lithos_loom.notifications import (
+    REDISPATCH_ACTIONS,
+    NeedsHumanNotice,
+    notice_github_ref,
+)
 from lithos_loom.subscriptions.dispatch_guards import (
     AttemptStampStore,
     last_attempt_key,
@@ -177,14 +181,6 @@ class _Notifier(Protocol):
     async def needs_human(self, notice: NeedsHumanNotice) -> list[str]: ...
 
 
-REDISPATCH_ACTIONS = (
-    "complete it to re-dispatch (edit the story first if the brief must "
-    "change), cancel the story to abandon"
-)
-"""The route-runner's two actions: the gate holds a story the runner will
-develop again once it is completed."""
-
-
 def _needs_human_summary(
     *,
     route: str,
@@ -294,6 +290,7 @@ async def raise_needs_human(
             summary=escalation.summary,
             run_id=run_id,
             github_ref=notice_github_ref(dict(story_meta)),
+            actions=actions,
         )
         try:
             problems.extend(await notifier.needs_human(notice))

@@ -497,6 +497,7 @@ def test_converge_result_json_round_trips_the_documented_shape(
     assert data == {
         "deferred_findings": [],  # 819370e5: out-of-scope deferrals (none here)
         "status": "converged",
+        "succeeded": True,
         "head_ref": "#142 (feature)",
         "head_branch": "feature",
         "base_sha": _BASE,

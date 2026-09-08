@@ -34,16 +34,6 @@ class RemediationNotifier(Protocol):
     async def needs_human(self, notice: NeedsHumanNotice) -> list[str]: ...
 
 
-REMEDIATION_ACTIONS = (
-    "the story stays behind its pr gate; push the fix branch by hand if the "
-    "residual is acceptable, re-run `develop converge <pr> --from-github` with "
-    "a higher --max-rounds, or address the finding directly — a human push to "
-    "the PR re-arms loom's budget; complete this gate once decided"
-)
-"""What the operator can do about an exhausted remediation — none of it is a
-re-dispatch, so the runner's two actions would mislead here."""
-
-
 @dataclass(frozen=True)
 class RemediationBudget:
     """The gate's parsed S5b budget state (fresh when absent / foreign-url)."""

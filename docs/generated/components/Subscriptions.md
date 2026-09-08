@@ -36,8 +36,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
-| `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
+| `lithos_loom.subscriptions.remediation_budget` | XS | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
+| `lithos_loom.subscriptions.remediation_outcome` | S | 0 | 3 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -149,6 +150,11 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions.remediation_escalation`
 - def `escalate_if_exhausted` — Raise the needs-human gate when *budget* is spent and the PR is still not converged. Returns ``None`` when nothing was needed or the gate landed, else the problem that stopped the gate (for the caller's ``[Friction]``). Never raises.
+
+### `lithos_loom.subscriptions.remediation_outcome`
+- def `post_finding` — Best-effort finding post (the story may have completed mid-run).
+- def `escalate_or_report` — PRD S5b: exhaustion → human gate; a gate that could not be raised is said so on the story instead of vanishing.
+- def `record_result` — Record a run that produced a JSON result: marker, finding, log, and the exhaustion escalation when the CLI reports it did not succeed.
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.

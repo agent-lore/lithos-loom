@@ -44,10 +44,9 @@ from lithos_loom.plugins.story_develop.config import (
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
 from lithos_loom.plugins.story_develop.daemon_io import (
+    ProjectDevelopSettings,
     fetch_task_metadata,
     layer_run_settings,
-    load_review_profile_policy,
-    load_tool_default_models,
     resolve_project_settings,
     story_config_overrides,
 )
@@ -277,11 +276,31 @@ def converge_command(
     # → default-model layering the daemon applies — lens#78 ran at the CLI
     # default of 5 rounds while the project said 8); explicit flags win.
     story_layer: dict = {}
+    story_settings = None
     if story is not None:
-        story_layer = _story_settings(host, story, config)
+        story_layer, story_settings = _story_settings(host, story)
     effective_profile = profile or story_layer.get("review_profile") or "standard"
+    # A DERIVED value must follow the setting it was derived from (PR #361
+    # review F4): an explicit --coder drops the story coder's resolved model
+    # / effort (the model policy below re-fills them from the host), and an
+    # explicit --profile re-resolves a panel the story derived from ITS
+    # profile — while a panel the story pinned explicitly stays.
+    if (
+        coder is not None
+        and story_settings is not None
+        and coder != story_settings.coder
+    ):
+        story_layer.pop("coder_model", None)
+        story_layer.pop("coder_effort", None)
+    panel_derived = story_settings is not None and not story_settings.reviewers_explicit
     if reviewer or story_layer.get("reviewers") is None:
         reviewers = resolve_reviewers(effective_profile, reviewer)
+    elif (
+        profile is not None
+        and panel_derived
+        and profile != story_layer.get("review_profile")
+    ):
+        reviewers = resolve_reviewers(effective_profile, None)
     else:
         reviewers = story_layer["reviewers"]
     resolved_image = explicit_image or story_layer.get("image") or DEFAULT_IMAGE
@@ -387,13 +406,16 @@ def converge_command(
     raise typer.Exit(_EXIT_CODES.get(result.status, 1))
 
 
-def _story_settings(host, story: str, config: Path | None) -> dict:
-    """The story's resolved develop settings as :class:`DevelopConfig`
-    overrides — the daemon's own resolution (project doc > task metadata >
-    host policy), fetched from the host config's Lithos. Frictions go to
-    stderr; a missing story / unreachable Lithos is a hard error (an
-    on-demand run that asked for a story must not silently proceed without
-    it)."""
+def _story_settings(host, story: str) -> tuple[dict, ProjectDevelopSettings]:
+    """The story's resolved develop settings — as :class:`DevelopConfig`
+    overrides plus the settings themselves (the caller needs to know what was
+    derived from what). The daemon's own resolution (project doc > task
+    metadata > host policy), fetched from the loaded host's Lithos; the host
+    policy (review-profile default + per-tool default models) comes from that
+    SAME loaded config — never re-discovered from the ambient one (PR #361
+    review F3, the #305 rule). Frictions go to stderr; a missing story /
+    unreachable Lithos is a hard error (an on-demand run that asked for a
+    story must not silently proceed without it)."""
     url = host.orchestrator.lithos_url
     try:
         _title, metadata = fetch_task_metadata(url, story)
@@ -401,16 +423,19 @@ def _story_settings(host, story: str, config: Path | None) -> dict:
         typer.secho(f"error: --story {story}: {exc}", err=True, fg=typer.colors.RED)
         raise typer.Exit(2) from exc
     settings = resolve_project_settings(url, metadata)
-    profile_default, unknown_policy, profile_frictions = load_review_profile_policy()
-    default_models, dm_frictions = load_tool_default_models()
+    section = getattr(host, "story_develop", None)
     settings = layer_run_settings(
         settings,
         metadata,
-        host_default_profile=profile_default,
-        unknown_profile=unknown_policy,
-        default_models=default_models,
+        host_default_profile=(
+            getattr(section, "default_review_profile", None) if section else None
+        ),
+        unknown_profile=getattr(section, "unknown_profile", "halt")
+        if section
+        else "halt",
+        default_models=host_default_models(host),
     )
-    for friction in (*settings.frictions, *profile_frictions, *dm_frictions):
+    for friction in settings.frictions:
         typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
     if settings.review_profile_halt:
         typer.secho(
@@ -419,7 +444,7 @@ def _story_settings(host, story: str, config: Path | None) -> dict:
             fg=typer.colors.RED,
         )
         raise typer.Exit(2)
-    return story_config_overrides(settings)
+    return story_config_overrides(settings), settings
 
 
 def _render(result: ConvergeResult) -> str:

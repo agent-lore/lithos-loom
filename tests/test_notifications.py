@@ -364,3 +364,31 @@ async def test_build_notifier_without_mention_never_touches_github(
     )
     notifier = await build_notifier(cfg, http=None)
     assert notifier.desktop_toast is True and notifier.github is None
+
+
+# ── PR #361 review finding 5: the push channel carries the gate's own actions ─
+
+
+def test_comment_body_renders_the_escalation_actions() -> None:
+    from lithos_loom.notifications import REDISPATCH_ACTIONS, NeedsHumanNotice
+
+    base = dict(
+        gate_id="g" * 36,
+        story_id="s-1",
+        story_title="Wire the thing",
+        project="p",
+        reason="remediation_exhausted",
+        summary="budget spent on PR 78",
+    )
+    remediation = NeedsHumanNotice(
+        route="external-remediation",
+        actions="push the fix branch by hand or re-run converge; complete the gate",
+        **base,
+    )
+    body = remediation.comment_body("dave")
+    assert "push the fix branch by hand" in body
+    assert "re-dispatch" not in body  # the runner's actions would mislead here
+    # the default is the runner's two actions, unchanged
+    runner = NeedsHumanNotice(route="story-develop", **base)
+    assert REDISPATCH_ACTIONS in runner.comment_body("dave")
+    assert "re-dispatch" in runner.comment_body("dave")
