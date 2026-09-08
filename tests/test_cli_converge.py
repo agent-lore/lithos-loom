@@ -724,12 +724,13 @@ def test_reply_transports_cover_every_reply_mode_and_none_posts_nothing(
 
 @pytest.fixture
 def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
+    from lithos_loom.cli import review as review_cli
     from lithos_loom.plugins.story_develop.config import ReviewerSpec
     from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
 
     captured: dict = stubs
     monkeypatch.setattr(
-        converge_cli,
+        review_cli,
         "fetch_task_metadata",
         lambda url, task_id: (
             captured.setdefault("fetched", []).append((url, task_id)) or "T",
@@ -741,7 +742,7 @@ def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
         ReviewerSpec(name="tests", tool="claude"),
     )
     monkeypatch.setattr(
-        converge_cli,
+        review_cli,
         "resolve_project_settings",
         lambda url, meta: ProjectDevelopSettings(
             max_rounds=8,
@@ -820,7 +821,9 @@ def test_missing_story_is_a_hard_error(story_stubs: dict, monkeypatch) -> None:
     def boom(url, task_id):
         raise LookupError(f"Lithos task {task_id!r} not found")
 
-    monkeypatch.setattr(converge_cli, "fetch_task_metadata", boom)
+    from lithos_loom.cli import review as review_cli
+
+    monkeypatch.setattr(review_cli, "fetch_task_metadata", boom)
     result = runner.invoke(develop_app, ["converge", "#142", "--story", "nope"])
     assert result.exit_code == 2
     assert "config" not in story_stubs  # never reached the loop
@@ -851,8 +854,10 @@ def test_story_layer_reads_profile_policy_and_models_from_the_loaded_host(
     monkeypatch.setattr(daemon_io, "load_review_profile_policy", boom)
     monkeypatch.setattr(daemon_io, "load_tool_default_models", boom)
     monkeypatch.setattr(daemon_io, "load_config", boom, raising=False)
+    from lithos_loom.cli import review as review_cli
+
     monkeypatch.setattr(
-        converge_cli,
+        review_cli,
         "fetch_task_metadata",
         lambda url, task_id: ("T", {"project": "lens"}),  # no task profile
     )
@@ -896,10 +901,11 @@ def test_explicit_profile_re_resolves_a_profile_derived_panel(
 ) -> None:
     # Finding 4: a panel the story DERIVED from its profile follows an
     # explicit --profile; a panel the story pinned explicitly stays.
+    from lithos_loom.cli import review as review_cli
     from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
 
     monkeypatch.setattr(
-        converge_cli,
+        review_cli,
         "resolve_project_settings",
         lambda url, meta: ProjectDevelopSettings(max_rounds=8),  # no explicit panel
     )

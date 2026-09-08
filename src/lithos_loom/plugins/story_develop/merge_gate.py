@@ -3,8 +3,8 @@
 A delivered PR waits behind its ``pr`` gate while the base branch moves on.
 GitHub answers one question about that — *does it still merge?* — and even
 then without naming the conflicting paths. This module answers the one the
-operator actually asks before pressing merge: **will the base break if I
-merge this now?** It is zero tokens: a deterministic check-set on a different
+operator actually asks before pressing merge: **will the PR's current base
+break if I merge this now?** It is zero tokens: a deterministic check-set on a different
 tree.
 
 In a throwaway worktree positioned at the PR head:
@@ -40,7 +40,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ...runner import git, worktree
-from .check_runner import build_check_set, run_check_set
+from .check_runner import (
+    build_check_set,
+    check_result_blocks,
+    gate_floor_blocks,
+    run_check_set,
+)
 from .check_set import Check, CheckSetResult
 from .config import DevelopConfig
 from .gate_findings import GateLedger
@@ -157,13 +162,24 @@ def config_fingerprint(config: DevelopConfig, checks: tuple[Check, ...]) -> str:
     """
     payload = {
         "image": config.image,
+        # verdict-affecting knobs beyond the rows (PR #360 review F4): a
+        # longer timeout can turn a timeout into a pass, a lower threshold a
+        # pass into a block — either must invalidate the sweep's key.
+        "test_timeout": config.test_timeout,
+        "block_threshold": config.block_threshold,
         "checks": [[c.name, c.command, c.state, c.stage, c.raw_exit] for c in checks],
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8"))
     return digest.hexdigest()[:16]
 
 
-def _flatten(result: CheckSetResult) -> tuple[MergeGateCheck, ...]:
+def _flatten(
+    result: CheckSetResult, ledger: GateLedger, threshold: str
+) -> tuple[MergeGateCheck, ...]:
+    """One row per check, ``passed`` from the SAME ledger-aware predicate the
+    develop floor uses (:func:`check_result_blocks`) — an adapter-backed
+    required check (ruff / bandit, ``--exit-zero``) blocks through its
+    findings at *threshold*, never through the exit code (PR #360 review F1)."""
     rows = []
     for r in result.results:
         gate = r.gate
@@ -174,7 +190,7 @@ def _flatten(result: CheckSetResult) -> tuple[MergeGateCheck, ...]:
                 state=r.check.state,
                 stage=r.check.stage,
                 outcome=r.execution_outcome,
-                passed=r.passed,
+                passed=not check_result_blocks(r, ledger, threshold),
                 exit_code=gate.exit_code if gate is not None else None,
                 timed_out=gate.timed_out if gate is not None else False,
                 output_tail=gate.output_tail if gate is not None else "",
@@ -293,7 +309,9 @@ def run_merge_gate(
                     "empty — nothing gated the merge result, so it was not pushed"
                 ),
             )
-        outcome = run_check_set(config, wt, merge_sha, 1, checks, GateLedger())
+        ledger = GateLedger()
+        threshold = config.block_threshold
+        outcome = run_check_set(config, wt, merge_sha, 1, checks, ledger)
         if outcome is None:
             return replace(
                 gated,
@@ -302,9 +320,29 @@ def run_merge_gate(
                     "result (infrastructure) — no verdict, nothing pushed"
                 ),
             )
-        rows = _flatten(outcome)
+        rows = _flatten(outcome, ledger, threshold)
         verdict = outcome.aggregate_verdict
-        if not outcome.blocking_passed:
+        # A required check that never EXECUTED is "not blocking" for the
+        # agent loop (a reviewer compensates); here nobody does, and the
+        # contract is that an unverified merge is never pushed (PR #360
+        # review F2): no infrastructure verdict on a required check → errored.
+        unverified = [
+            r.check.name
+            for r in outcome.results
+            if r.check.state == "required" and r.execution_outcome == "errored"
+        ]
+        if unverified:
+            return replace(
+                gated,
+                checks=rows,
+                verdict=verdict,
+                message=(
+                    f"{change.head_ref}: required check(s) could not run on the "
+                    f"merge result (infrastructure): {', '.join(unverified)} — no "
+                    "verdict, nothing pushed"
+                ),
+            )
+        if gate_floor_blocks(outcome, ledger, threshold):
             failing = [r.name for r in rows if not r.passed]
             return replace(
                 gated,

@@ -391,3 +391,154 @@ def test_to_json_is_a_stable_flat_record(
         "timed_out": False,
         "output_tail": "ok",
     }
+
+
+# ── PR #360 review: the gate decision is the ledger-aware floor ──────────────
+#
+# `CheckSetResult.blocking_passed` reads raw exit codes. Adapter-backed
+# required checks (ruff / bandit) run with --exit-zero and block through the
+# finding LEDGER at the configured threshold — and a required check that
+# failed to EXECUTE is "not blocking" for the agent loop (a reviewer sees it)
+# but must never green a zero-token pre-merge gate.
+
+from lithos_loom.plugins.story_develop.gate_findings import GateFinding  # noqa: E402
+
+_LINT_ADAPTER = Check(name="lint", command="ruff check --exit-zero .", state="required")
+
+
+def _stub_checks_with_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    checks: tuple[Check, ...],
+    findings: dict[str, list[GateFinding]] | None = None,
+    errored: frozenset[str] = frozenset(),
+) -> dict:
+    captured: dict = {}
+    monkeypatch.setattr(mg, "build_check_set", lambda config, wt: checks)
+
+    def fake_run(config, wt, sha, round_no, chks, ledger=None):
+        captured["ledger"] = ledger
+        results = []
+        for c in chks:
+            if c.name in errored:
+                results.append(
+                    CheckResult(check=c, execution_outcome="errored", gate=None)
+                )
+                continue
+            if ledger is not None:
+                ledger.apply_round(c.name, (findings or {}).get(c.name, []), round_no)
+            results.append(
+                CheckResult(
+                    check=c,
+                    execution_outcome="ran",
+                    gate=GateResult(
+                        command=c.command, exit_code=0, passed=True, output_tail="ok"
+                    ),
+                )
+            )
+        return CheckSetResult(results=tuple(results))
+
+    monkeypatch.setattr(mg, "run_check_set", fake_run)
+    return captured
+
+
+def test_required_adapter_finding_at_threshold_is_red_and_never_pushed(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    cap = _stub_checks_with_ledger(
+        monkeypatch,
+        checks=(_LINT_ADAPTER, _TEST),
+        findings={
+            "lint": [
+                GateFinding(
+                    check="lint",
+                    tool="ruff",
+                    rule="F821",
+                    severity="major",
+                    message="undefined name",
+                    file="a.py",
+                    line=3,
+                )
+            ]
+        },
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change())
+    assert cap["ledger"] is not None  # the ledger is kept and consulted
+    assert result.status == "red"
+    lint = next(c for c in result.checks if c.name == "lint")
+    assert lint.passed is False  # the exit code said 0; the ledger decides
+    assert "lint" in result.message
+    assert result.pushed is False
+    assert _remote_sha(fx.bare, "feature") == fx.head
+
+
+def test_required_adapter_finding_below_threshold_stays_green(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch,
+        checks=(_LINT_ADAPTER,),
+        findings={
+            "lint": [
+                GateFinding(
+                    check="lint",
+                    tool="ruff",
+                    rule="E501",
+                    severity="minor",
+                    message="line too long",
+                    file="a.py",
+                    line=3,
+                )
+            ]
+        },
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change(), push=False)
+    assert result.status == "green"
+
+
+def test_required_check_that_failed_to_execute_is_errored_not_green(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch, checks=(_TEST, _LINT), errored=frozenset({"test"})
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change())
+    assert result.status == "errored"
+    assert "test" in result.message
+    assert result.pushed is False
+    assert _remote_sha(fx.bare, "feature") == fx.head
+    # the rows are still reported so the operator sees WHICH check never ran
+    assert [(c.name, c.outcome) for c in result.checks] == [
+        ("test", "errored"),
+        ("lint", "ran"),
+    ]
+
+
+def test_an_informational_check_that_failed_to_execute_does_not_error_the_gate(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch, checks=(_TEST, _LINT), errored=frozenset({"lint"})
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change(), push=False)
+    assert result.status == "green"
+
+
+def test_config_fingerprint_tracks_timeout_and_threshold(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A longer timeout can turn a timeout into a pass; a lower threshold can
+    # turn a pass into a block — both must invalidate the sweep's re-run key.
+    _stub_checks(monkeypatch)
+    base = mg.run_merge_gate(fx.config(), fx.change(), push=False)
+    longer = mg.run_merge_gate(fx.config(test_timeout=3600), fx.change(), push=False)
+    stricter = mg.run_merge_gate(
+        fx.config(block_threshold="minor"), fx.change(), push=False
+    )
+    assert longer.config_fingerprint != base.config_fingerprint
+    assert stricter.config_fingerprint != base.config_fingerprint
+    assert stricter.config_fingerprint != longer.config_fingerprint

@@ -37,8 +37,8 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         ),
     )
 
-    def fake_resolve(repo, spec, *, base_branch="main", base_override=None):
-        captured["resolve"] = {"repo": repo, "spec": spec}
+    def fake_resolve(repo, spec, *, base_branch="main", base_override=None, **kw):
+        captured["resolve"] = {"repo": repo, "spec": spec, **kw}
         return ResolvedChange(
             base_sha="b" * 40,
             head_sha="h" * 40,
@@ -124,7 +124,7 @@ def test_flags_reach_the_develop_config(stubs: dict, tmp_path: Path) -> None:
     assert cfg.test_timeout == 90
     assert cfg.work_dir == tmp_path / "work" / "merge-gate"
     assert cfg.description == "merge-gate #7"
-    assert stubs["resolve"] == {"repo": tmp_path, "spec": "#7"}
+    assert stubs["resolve"] == {"repo": tmp_path, "spec": "#7", "allow_fork": False}
     # zero-token: no agents, so no acceptance criteria or models are demanded
     assert stubs["push"] is True and stubs["keep_worktree"] is False
 
@@ -211,3 +211,120 @@ def test_zero_timeout_is_rejected(stubs: dict) -> None:
     result = runner.invoke(develop_app, ["merge-gate", "42", "--test-timeout", "0"])
     assert result.exit_code == 2
     assert "resolve" not in stubs
+
+
+# ── PR #360 review F3 + F5 ───────────────────────────────────────────────────
+
+
+def test_forks_are_refused_at_resolve_time_without_a_fetch(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict = {}
+
+    def fake_resolve(repo, spec, *, base_branch="main", base_override=None, **kw):
+        captured["allow_fork"] = kw.get("allow_fork", True)
+        return ResolvedChange(
+            base_sha="", head_sha="h" * 40, head_ref=spec, head_branch="f", is_fork=True
+        )
+
+    monkeypatch.setattr(cli, "resolve_change", fake_resolve)
+    stubs["status"] = "fork_unsupported"
+    result = runner.invoke(develop_app, ["merge-gate", "42"])
+    assert result.exit_code == 2, result.output
+    assert captured["allow_fork"] is False
+
+
+@pytest.fixture
+def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
+    from lithos_loom.cli import review as review_cli
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        review_cli,
+        "fetch_task_metadata",
+        lambda url, task_id: (
+            stubs.setdefault("fetched", []).append((url, task_id)) or "T",
+            {"project": "lens", "develop_review_profile": "thorough"},
+        ),
+    )
+    monkeypatch.setattr(
+        review_cli,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(
+            image="ralph-sandbox:lens",
+            test_command="make check",
+            parity_command="make parity",
+            check_states={"lint": "informational"},
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=Path("/tmp/w"), lithos_url="http://lithos.test"
+            ),
+            story_develop=SimpleNamespace(
+                default_models={},
+                default_review_profile="standard",
+                unknown_profile="halt",
+            ),
+        ),
+    )
+    return stubs
+
+
+def test_story_resolves_the_projects_current_check_set(story_stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    assert story_stubs["fetched"] == [("http://lithos.test", "story-9")]
+    cfg = story_stubs["config"]
+    assert cfg.review_profile == "thorough"  # the task's profile
+    assert cfg.image == "ralph-sandbox:lens"
+    assert cfg.test_command == "make check"
+    assert cfg.parity_command == "make parity"
+    assert cfg.check_states == {"lint": "informational"}
+
+
+def test_explicit_flags_win_over_the_story_for_merge_gate(story_stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        [
+            "merge-gate",
+            "42",
+            "--story",
+            "story-9",
+            "--profile",
+            "minimal",
+            "--image",
+            "custom:img",
+            "--test-command",
+            "make test",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.review_profile == "minimal"
+    assert cfg.image == "custom:img"
+    assert cfg.test_command == "make test"
+    assert cfg.parity_command == "make parity"  # untouched story value survives
+
+
+def test_without_story_the_host_default_profile_applies(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(work_dir=Path("/tmp/w")),
+            story_develop=SimpleNamespace(
+                default_models={},
+                default_review_profile="thorough",
+                unknown_profile="halt",
+            ),
+        ),
+    )
+    result = runner.invoke(develop_app, ["merge-gate", "42"])
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].review_profile == "thorough"

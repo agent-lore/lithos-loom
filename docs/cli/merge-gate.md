@@ -6,7 +6,7 @@ with the project's **current** check-set (PRD
 no coder, no panel — a deterministic check-set on a different tree. This is
 the command the github-watcher sweep drives as a subprocess on every base
 move (the watcher half of S3); on its own it answers the operator's question
-*"will main break if I merge this now?"* before they press the button.
+*"will the PR's current base break if I merge this now?"* before they press the button.
 
 ## TL;DR
 
@@ -37,8 +37,14 @@ lithos-loom develop merge-gate 352 --no-push --keep-worktree --json /tmp/mg.json
    merge is aborted. This is the **only** source of that path list — GitHub's
    API says `dirty` and nothing more — and it is the input S5's resolver needs.
    No check-set runs on a tree that does not exist.
-4. **Check-set** on the merge result: the Review Profile's checks (`--profile`,
-   default `standard`) with the same overrides `converge` takes. Each check
+4. **Check-set** on the merge result: the Review Profile's checks (the story's
+   via `--story`, else `--profile`, else the host default) with the same
+   overrides `converge` takes. The verdict is the same **ledger-aware floor** the
+   develop loop uses: an adapter-backed required check (ruff / bandit, run with
+   `--exit-zero`) blocks through its findings at the configured threshold, never
+   through its exit code. A required check that could not *execute* is
+   `errored`, not green — nobody reviews here, and an unverified merge is never
+   pushed. Each check
    runs in its own throwaway container off a fresh export of the committed
    tree (#282). `green` / `red` (exit 0 / 1) by the blocking verdict;
    `errored` (exit 1) when the set could not run at all; `no_checks` (exit 0)
@@ -66,7 +72,8 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
 | Flag | Meaning |
 |------|---------|
 | `CHANGE` | The PR: `#142`, `142`, or a GitHub PR URL. A bare range / branch is rejected — there is no PR to update. |
-| `--profile`, `-p` | Review Profile whose check-set gates the result (default `standard`). |
+| `--profile`, `-p` | Review Profile whose check-set gates the result (default: the story's, else the host's `default_review_profile`, else `standard`). |
+| `--story TASK_ID` | Resolve the story's develop settings (project doc + task `develop_*`: profile, check-set, image, test command, parity) exactly as the daemon path does — the **current** config defending that project — as the base layer under any explicit flags. The watcher-dispatched run passes it. |
 | `--check-command NAME=CMD` | Override a check's command (repeatable). |
 | `--check-state NAME=STATE` | Override a check's blocking state (repeatable). |
 | `--test-command` | Explicit `test` check command (beats detection). |

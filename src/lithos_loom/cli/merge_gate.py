@@ -16,7 +16,11 @@ from pathlib import Path
 
 import typer
 
-from lithos_loom.cli.review import resolve_check_commands, resolve_check_states
+from lithos_loom.cli.review import (
+    resolve_check_commands,
+    resolve_check_states,
+    story_settings_for,
+)
 from lithos_loom.config import load_config
 from lithos_loom.plugins.story_develop.config import (
     DEFAULT_IMAGE,
@@ -49,11 +53,12 @@ def merge_gate_command(
         ...,
         help="The PR to trial-merge: #142 / 142 / a GitHub PR URL.",
     ),
-    profile: str = typer.Option(
-        "standard",
+    profile: str | None = typer.Option(
+        None,
         "--profile",
         "-p",
-        help="Review Profile whose check-set gates the merge result.",
+        help="Review Profile whose check-set gates the merge result (default: "
+        "the story's, else the host's default_review_profile, else standard).",
     ),
     check_command: list[str] | None = typer.Option(
         None,
@@ -75,10 +80,11 @@ def merge_gate_command(
         "--parity-command",
         help="Repo-parity command run as a required raw-exit check.",
     ),
-    image: str = typer.Option(
-        DEFAULT_IMAGE,
+    image: str | None = typer.Option(
+        None,
         "--image",
-        help="Sandbox image the checks run in.",
+        help="Sandbox image the checks run in (default: the story's "
+        "develop_image, else the built-in).",
     ),
     test_timeout: int = typer.Option(
         DEFAULT_TEST_TIMEOUT,
@@ -101,13 +107,24 @@ def merge_gate_command(
     json_out: Path | None = typer.Option(
         None, "--json", help="Write the structured JSON record to this path."
     ),
+    story: str | None = typer.Option(
+        None,
+        "--story",
+        help=(
+            "Lithos task id of the story behind this PR: resolve its project's "
+            "and its own develop_* settings (profile, check-set, image, test "
+            "command, parity) exactly as the daemon path does — the CURRENT "
+            "config defending that project; explicit flags still win."
+        ),
+    ),
     config: Path | None = typer.Option(None, "--config", help="Host config path."),
 ) -> None:
     """Trial-merge a PR into its current base and run the check-set on the result."""
-    try:
-        get_profile(profile)
-    except UnknownProfileError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    if profile is not None:
+        try:
+            get_profile(profile)
+        except UnknownProfileError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     if test_timeout < 1:
         raise typer.BadParameter("--test-timeout must be at least 1 second")
     check_commands = resolve_check_commands(check_command)
@@ -115,14 +132,29 @@ def merge_gate_command(
     try:
         test_command = parse_test_command(test_command, where="--test-command")
         parity_command = parse_parity_command(parity_command, where="--parity-command")
-        resolved_image = parse_image(image, where="--image") or DEFAULT_IMAGE
+        explicit_image = parse_image(image, where="--image") if image else None
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     repo = repo or Path.cwd()
     host = load_config(config)
 
-    resolved = resolve_change(repo, change, base_branch="main")
+    # The project's CURRENT config is what defends its base (PRD S3): a
+    # story's resolved develop_* settings are the base layer, explicit flags
+    # win, and without a story the host's default profile applies.
+    story_layer: dict = {}
+    if story is not None:
+        story_layer, _settings = story_settings_for(host, story)
+    section = getattr(host, "story_develop", None)
+    host_profile = getattr(section, "default_review_profile", None) if section else None
+    effective_profile = (
+        profile or story_layer.get("review_profile") or host_profile or "standard"
+    )
+    resolved_image = explicit_image or story_layer.get("image") or DEFAULT_IMAGE
+
+    # Forks are answered from GitHub's metadata before any fetch: the sweep
+    # must never pull a third-party head into the operator's checkout.
+    resolved = resolve_change(repo, change, base_branch="main", allow_fork=False)
     if not resolved.head_branch:
         raise typer.BadParameter(
             f"merge-gate takes a PR (it trial-merges the PR's base and may push "
@@ -130,17 +162,36 @@ def merge_gate_command(
             "branch with no PR."
         )
 
+    explicit: dict = {
+        k: v
+        for k, v in {
+            "test_command": test_command,
+            "check_commands": check_commands or None,
+            "check_states": check_states or None,
+            "parity_command": parity_command,
+        }.items()
+        if v is not None
+    }
+    gate_keys = (
+        "test_gate",
+        "test_command",
+        "check_commands",
+        "check_states",
+        "parity_command",
+    )
     develop_config = DevelopConfig(
-        repo=repo,
-        description=f"merge-gate {resolved.head_ref}",
-        work_dir=host.orchestrator.work_dir / "merge-gate",
-        review_profile=profile,
-        test_command=test_command,
-        test_timeout=test_timeout,
-        check_commands=check_commands,
-        check_states=check_states,
-        parity_command=parity_command,
-        image=resolved_image,
+        **{
+            **dict(
+                repo=repo,
+                description=f"merge-gate {resolved.head_ref}",
+                work_dir=host.orchestrator.work_dir / "merge-gate",
+                test_timeout=test_timeout,
+            ),
+            **{k: story_layer[k] for k in gate_keys if k in story_layer},
+            **explicit,
+            "review_profile": effective_profile,
+            "image": resolved_image,
+        }
     )
 
     result = run_merge_gate(

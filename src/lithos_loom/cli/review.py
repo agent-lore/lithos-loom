@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -31,7 +32,14 @@ from lithos_loom.plugins.story_develop.config import (
     parse_parity_command,
     parse_test_command,
 )
-from lithos_loom.plugins.story_develop.daemon_io import profile_panel
+from lithos_loom.plugins.story_develop.daemon_io import (
+    ProjectDevelopSettings,
+    fetch_task_metadata,
+    layer_run_settings,
+    profile_panel,
+    resolve_project_settings,
+    story_config_overrides,
+)
 from lithos_loom.plugins.story_develop.model_policy import resolve_config_models
 from lithos_loom.plugins.story_develop.personas import canonical_personas
 from lithos_loom.plugins.story_develop.profiles import (
@@ -313,3 +321,46 @@ def resolve_check_states(check_state: list[str] | None) -> dict[str, str]:
         return parse_check_state_pairs(check_state, where="--check-state")
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+def story_settings_for(
+    host: Any, story: str
+) -> tuple[dict[str, Any], ProjectDevelopSettings]:
+    """The story's resolved develop settings — as :class:`DevelopConfig`
+    overrides plus the settings themselves (the caller needs to know what was
+    derived from what). The daemon's own resolution (project doc > task
+    metadata > host policy), fetched from the loaded host's Lithos; the host
+    policy (review-profile default + per-tool default models) comes from that
+    SAME loaded config — never re-discovered from the ambient one (PR #361
+    review F3, the #305 rule). Frictions go to stderr; a missing story /
+    unreachable Lithos is a hard error (an on-demand run that asked for a
+    story must not silently proceed without it)."""
+    url = host.orchestrator.lithos_url
+    try:
+        _title, metadata = fetch_task_metadata(url, story)
+    except Exception as exc:
+        typer.secho(f"error: --story {story}: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(2) from exc
+    settings = resolve_project_settings(url, metadata)
+    section = getattr(host, "story_develop", None)
+    settings = layer_run_settings(
+        settings,
+        metadata,
+        host_default_profile=(
+            getattr(section, "default_review_profile", None) if section else None
+        ),
+        unknown_profile=getattr(section, "unknown_profile", "halt")
+        if section
+        else "halt",
+        default_models=host_default_models(host),
+    )
+    for friction in settings.frictions:
+        typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
+    if settings.review_profile_halt:
+        typer.secho(
+            "error: the story's review profile is not defined; not running",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+    return story_config_overrides(settings), settings

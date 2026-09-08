@@ -30,6 +30,7 @@ from lithos_loom.cli.review import (
     resolve_check_commands,
     resolve_check_states,
     resolve_reviewers,
+    story_settings_for,
 )
 from lithos_loom.config import GitHubWatcherConfig, load_config
 from lithos_loom.plugins.story_develop import engines
@@ -43,13 +44,6 @@ from lithos_loom.plugins.story_develop.config import (
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
-from lithos_loom.plugins.story_develop.daemon_io import (
-    ProjectDevelopSettings,
-    fetch_task_metadata,
-    layer_run_settings,
-    resolve_project_settings,
-    story_config_overrides,
-)
 from lithos_loom.plugins.story_develop.external_reviews import (
     ExternalFinding,
     GitHubError,
@@ -279,7 +273,7 @@ def converge_command(
     story_layer: dict = {}
     story_settings = None
     if story is not None:
-        story_layer, story_settings = _story_settings(host, story)
+        story_layer, story_settings = story_settings_for(host, story)
     effective_profile = profile or story_layer.get("review_profile") or "standard"
     # A DERIVED value must follow the setting it was derived from (PR #361
     # review F4): an explicit --coder drops the story coder's resolved model
@@ -405,47 +399,6 @@ def converge_command(
         json_out.write_text(json.dumps(result.to_json(), indent=2), encoding="utf-8")
 
     raise typer.Exit(_EXIT_CODES.get(result.status, 1))
-
-
-def _story_settings(host, story: str) -> tuple[dict, ProjectDevelopSettings]:
-    """The story's resolved develop settings — as :class:`DevelopConfig`
-    overrides plus the settings themselves (the caller needs to know what was
-    derived from what). The daemon's own resolution (project doc > task
-    metadata > host policy), fetched from the loaded host's Lithos; the host
-    policy (review-profile default + per-tool default models) comes from that
-    SAME loaded config — never re-discovered from the ambient one (PR #361
-    review F3, the #305 rule). Frictions go to stderr; a missing story /
-    unreachable Lithos is a hard error (an on-demand run that asked for a
-    story must not silently proceed without it)."""
-    url = host.orchestrator.lithos_url
-    try:
-        _title, metadata = fetch_task_metadata(url, story)
-    except Exception as exc:
-        typer.secho(f"error: --story {story}: {exc}", err=True, fg=typer.colors.RED)
-        raise typer.Exit(2) from exc
-    settings = resolve_project_settings(url, metadata)
-    section = getattr(host, "story_develop", None)
-    settings = layer_run_settings(
-        settings,
-        metadata,
-        host_default_profile=(
-            getattr(section, "default_review_profile", None) if section else None
-        ),
-        unknown_profile=getattr(section, "unknown_profile", "halt")
-        if section
-        else "halt",
-        default_models=host_default_models(host),
-    )
-    for friction in settings.frictions:
-        typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
-    if settings.review_profile_halt:
-        typer.secho(
-            "error: the story's review profile is not defined; not running",
-            err=True,
-            fg=typer.colors.RED,
-        )
-        raise typer.Exit(2)
-    return story_config_overrides(settings), settings
 
 
 def _render(result: ConvergeResult) -> str:
