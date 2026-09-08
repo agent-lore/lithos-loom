@@ -62,7 +62,8 @@ lithos-loom develop merge-gate 352 --no-push --keep-worktree --json /tmp/mg.json
    tree for inspection and prints its path.
 
 The record carries a **config fingerprint** — a digest of the resolved checks
-(name, command, state, stage) and the image. The sweep's re-run key is
+(name, command, state, stage), the image, the per-check timeout and the
+blocking threshold. The sweep's re-run key is
 `(head_sha, base_sha, config_fingerprint)`: a tightened check-set re-gates an
 already-observed PR, which is precisely why the *current* config is
 re-resolved rather than a snapshot replayed (PRD S3 decision).
@@ -96,7 +97,8 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
   behind, the head when up to date, empty on conflict), `behind`,
   `conflicting_paths[]`, `checks[]` (`name`, `command`, `state`, `stage`,
   `outcome`, `passed`, `exit_code`, `timed_out`, `output_tail`), `verdict`
-  (`GREEN` / `RED` / `TIMEOUT` / null), `config_fingerprint`, `pushed`,
+  (the gate's own decision: `GREEN` / `RED`, null when no verdict was
+  produced — never the process-exit aggregate), `config_fingerprint`, `pushed`,
   `pushed_sha`, `push_error`, `message`.
 
 ## Exit codes

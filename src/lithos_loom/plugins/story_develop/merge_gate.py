@@ -110,9 +110,12 @@ class MergeGateResult:
     so a green gate whose update lost a race to a human push still reads as
     green. ``merge_sha`` is the gated tree: the merge commit when the PR was
     behind, the PR head itself when it was up to date, empty on a conflict.
-    ``config_fingerprint`` identifies the check-set, image, timeout and
-    blocking threshold that produced the
-    verdict — the third component of the sweep's re-run key.
+    ``verdict`` is the gate's own decision — ``RED`` when the ledger-aware
+    floor blocks, ``GREEN`` when it does not, ``None`` when no verdict was
+    produced (errored / no checks / conflict) — never the process-exit
+    aggregate. ``config_fingerprint`` identifies the check-set, image, timeout
+    and blocking threshold that produced it — the third component of the
+    sweep's re-run key.
     """
 
     status: MergeGateStatus
@@ -341,10 +344,13 @@ def run_merge_gate(
                 ),
             )
         rows = _flatten(outcome, ledger, threshold)
-        # `aggregate_verdict` is the process-exit view (ruff --exit-zero reads
-        # GREEN); the record's verdict is the gate's own decision.
+        # The record's verdict is WHOLLY the gate's own decision (PR #360
+        # re-review 2): RED when the ledger-aware floor blocks, GREEN when it
+        # does not — never the process-exit aggregate, which reads GREEN for a
+        # ruff --exit-zero finding and RED for an informational check that
+        # exited non-zero (which, correctly, does not block).
         blocked = gate_floor_blocks(outcome, ledger, threshold)
-        verdict = "RED" if blocked else outcome.aggregate_verdict
+        verdict = "RED" if blocked else "GREEN"
         # A required check that never EXECUTED is "not blocking" for the
         # agent loop (a reviewer compensates); here nobody does, and the
         # contract is that an unverified merge is never pushed (PR #360

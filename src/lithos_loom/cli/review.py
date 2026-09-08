@@ -333,6 +333,51 @@ class StorySettingsUnresolved(Exception):
         self.reasons = reasons
 
 
+GATE_SETTING_KEYS: tuple[str, ...] = (
+    "develop_image",
+    "develop_test_command",
+    "develop_test_gate",
+    "develop_check_commands",
+    "develop_check_states",
+    "develop_parity_command",
+    "develop_review_profile",
+)
+"""The ``develop_*`` keys a deterministic gate consumes. A rejected value for
+any of these means the check-set that would run is NOT the project's; a
+rejected coder / model / round / cost value, a panel note, or a policy
+fallback changes nothing a gate runs."""
+
+
+def gate_config_problems(settings: ProjectDevelopSettings) -> tuple[str, ...]:
+    """Why *settings* cannot stand as a project's CURRENT gate config.
+
+    Empty when they can. Three things count (PR #360 re-review 2): the
+    project layer never resolved (``degraded``: no slug / no doc / read
+    failure), an explicit-but-unknown profile under ``halt``, and a
+    gate-affecting setting rejected by its parser — recognised by the
+    setting's key in the resolver's own friction text (every scalar parse
+    names its ``where``). Everything else in ``frictions`` — reviewer /
+    coder / model / round / cost warnings, the ``minimal`` gate-only note,
+    the ``strongest`` fallback — is agent configuration and does not touch
+    what a gate runs.
+    """
+    problems: list[str] = []
+    if settings.degraded:
+        problems.extend(
+            f for f in settings.frictions if "built-in develop defaults" in f
+        ) or problems.append(
+            "the project layer did not resolve; built-in defaults would apply"
+        )
+    if settings.review_profile_halt:
+        problems.append("the review profile is not defined (unknown_profile=halt)")
+    problems.extend(
+        f
+        for f in settings.frictions
+        if any(key in f for key in GATE_SETTING_KEYS) and f not in problems
+    )
+    return tuple(problems)
+
+
 def story_settings_for(
     host: Any, story: str, *, strict: bool = False
 ) -> tuple[dict[str, Any], ProjectDevelopSettings]:
@@ -364,15 +409,15 @@ def story_settings_for(
         else "halt",
         default_models=host_default_models(host),
     )
-    if strict and (settings.degraded or settings.frictions):
+    if strict:
         # A zero-token pre-merge gate (merge-gate, PRD S3) must gate with the
         # project's current config or not at all: the daemon's fail-open
         # degrade would gate — and push — on a check-set known not to be
-        # the project's (PR #360 re-review F1).
-        raise StorySettingsUnresolved(
-            settings.frictions
-            or ("the project layer did not resolve; built-in defaults would apply",)
-        )
+        # the project's (PR #360 re-review F1) — while agent-side frictions
+        # (panel, coder, rounds) leave the check-set intact and pass.
+        problems = gate_config_problems(settings)
+        if problems:
+            raise StorySettingsUnresolved(problems)
     for friction in settings.frictions:
         typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
     if settings.review_profile_halt:

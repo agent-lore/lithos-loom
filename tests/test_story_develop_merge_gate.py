@@ -412,6 +412,8 @@ def _stub_checks_with_ledger(
     checks: tuple[Check, ...],
     findings: dict[str, list[GateFinding]] | None = None,
     errored: frozenset[str] = frozenset(),
+    failing: frozenset[str] = frozenset(),
+    timed_out: frozenset[str] = frozenset(),
 ) -> dict:
     captured: dict = {}
     monkeypatch.setattr(mg, "build_check_set", lambda config, wt: checks)
@@ -427,15 +429,22 @@ def _stub_checks_with_ledger(
                 continue
             if ledger is not None:
                 ledger.apply_round(c.name, (findings or {}).get(c.name, []), round_no)
-            results.append(
-                CheckResult(
-                    check=c,
-                    execution_outcome="ran",
-                    gate=GateResult(
-                        command=c.command, exit_code=0, passed=True, output_tail="ok"
-                    ),
+            if c.name in timed_out:
+                gate = GateResult(
+                    command=c.command, exit_code=124, passed=False, output_tail="…"
                 )
-            )
+                outcome = "timed_out"
+            elif c.name in failing:
+                gate = GateResult(
+                    command=c.command, exit_code=1, passed=False, output_tail="boom"
+                )
+                outcome = "ran"
+            else:
+                gate = GateResult(
+                    command=c.command, exit_code=0, passed=True, output_tail="ok"
+                )
+                outcome = "ran"
+            results.append(CheckResult(check=c, execution_outcome=outcome, gate=gate))
         return CheckSetResult(results=tuple(results))
 
     monkeypatch.setattr(mg, "run_check_set", fake_run)
@@ -619,3 +628,48 @@ def test_a_closed_unmerged_pr_is_refused_too(
     result = mg.run_merge_gate(fx.config(), change)
     assert result.status == "pr_closed"
     assert _worktrees(fx.repo) == []
+
+
+# ── PR #360 re-review 2: `verdict` is WHOLLY the gate's decision ─────────────
+
+
+def test_informational_failure_is_green_with_a_green_verdict(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # an informational raw check exiting non-zero does not block (right), and
+    # the record must not say RED beside status green
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch, checks=(_TEST, _LINT), failing=frozenset({"lint"})
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change(), push=False)
+    assert result.status == "green"
+    assert result.verdict == "GREEN"
+    assert result.to_json()["verdict"] == "GREEN"
+    lint = next(c for c in result.checks if c.name == "lint")
+    assert lint.passed is True and lint.exit_code == 1  # the raw row is honest
+
+
+def test_informational_timeout_is_green_with_a_green_verdict(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch, checks=(_TEST, _LINT), timed_out=frozenset({"lint"})
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change(), push=False)
+    assert result.status == "green" and result.verdict == "GREEN"
+    lint = next(c for c in result.checks if c.name == "lint")
+    assert lint.timed_out is True and lint.passed is True
+
+
+def test_required_timeout_is_red_with_a_red_verdict(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.advance_base()
+    _stub_checks_with_ledger(
+        monkeypatch, checks=(_TEST, _LINT), timed_out=frozenset({"test"})
+    )
+    result = mg.run_merge_gate(fx.config(), fx.change())
+    assert result.status == "red" and result.verdict == "RED"
+    assert result.pushed is False

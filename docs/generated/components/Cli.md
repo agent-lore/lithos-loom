@@ -22,7 +22,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.merge_gate` | S | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
-| `lithos_loom.cli.review` | M | 1 | 8 |
+| `lithos_loom.cli.review` | M | 1 | 9 |
 | `lithos_loom.cli.task` | M | 1 | 1 |
 
 ## Public API
@@ -108,6 +108,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `resolve_check_commands` — Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}`` map (#273). Shared by ``review`` and ``converge``.
 - def `resolve_check_states` — Parse repeatable ``--check-state NAME=STATE`` into a ``{check: state}`` map (#273 slice 2). Shared by ``review`` and ``converge``.
 - class `StorySettingsUnresolved` — A strict story resolution could not stand on the project's CURRENT config: the project layer degraded to built-ins, or a gate-affecting setting was malformed and dropped. Carries the resolver's own reasons.
+- def `gate_config_problems` — Why *settings* cannot stand as a project's CURRENT gate config.
 - def `story_settings_for` — The story's resolved develop settings — as :class:`DevelopConfig` overrides plus the settings themselves (the caller needs to know what was derived from what). The daemon's own resolution (project doc > task metadata > host policy), fetched from the loaded host's Lithos; the host policy (review-profile default + per-tool default models) comes from that SAME loaded config — never re-discovered from the ambient one (PR #361 review F3, the #305 rule). Frictions go to stderr; a missing story / unreachable Lithos is a hard error (an on-demand run that asked for a story must not silently proceed without it).
 
 ### `lithos_loom.cli.task`

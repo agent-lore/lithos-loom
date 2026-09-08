@@ -417,3 +417,98 @@ def test_blank_image_is_rejected(stubs: dict) -> None:
     result = runner.invoke(develop_app, ["merge-gate", "42", "--image", ""])
     assert result.exit_code == 2
     assert "resolve" not in stubs
+
+
+# ── PR #360 re-review 2: strict means GATE config, not every friction ────────
+
+
+def _story_settings(monkeypatch: pytest.MonkeyPatch, **fields):
+    from lithos_loom.cli import review as review_cli
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        review_cli,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(**fields),
+    )
+
+
+def test_minimal_profile_gates_even_though_its_panel_note_is_a_friction(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the REAL layering adds "gate-only (no panel)" for minimal — an agent
+    # note; merge-gate runs no panel and the check-set is fully known
+    from lithos_loom.cli import review as review_cli
+
+    monkeypatch.setattr(
+        review_cli, "fetch_task_metadata", lambda url, task_id: ("T", {"project": "p"})
+    )
+    _story_settings(monkeypatch, review_profile_project="minimal")
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    assert story_stubs["config"].review_profile == "minimal"
+
+
+def test_strongest_policy_fallback_gates_with_the_strongest_profile(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.cli import review as review_cli
+
+    monkeypatch.setattr(
+        review_cli, "fetch_task_metadata", lambda url, task_id: ("T", {"project": "p"})
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=Path("/tmp/w"), lithos_url="http://lithos.test"
+            ),
+            story_develop=SimpleNamespace(
+                default_models={},
+                default_review_profile="standard",
+                unknown_profile="strongest",
+            ),
+        ),
+    )
+    _story_settings(monkeypatch, review_profile_project="nope")
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    assert story_stubs["config"].review_profile == "thorough"
+
+
+def test_a_non_gate_friction_does_not_skip_the_gate(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a rejected coder / rounds value changes nothing a gate runs
+    _story_settings(
+        monkeypatch,
+        image="ralph-sandbox:lens",
+        frictions=(
+            "develop_coder must be an object with optional tool/model/effort; ignoring",
+            "develop_max_rounds 'x' invalid; ignoring",
+        ),
+    )
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    assert story_stubs["config"].image == "ralph-sandbox:lens"
+
+
+@pytest.mark.parametrize(
+    "friction",
+    [
+        "develop_check_states: state for check 'lint' must be one of informational, "
+        "off, required (got 'bogus'); ignoring",
+        "develop_image: image must be a non-empty string (got '  '); ignoring",
+        "task metadata.develop_test_command: must be a non-empty string; "
+        "keeping project default",
+    ],
+)
+def test_a_rejected_gate_setting_skips_the_gate(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch, friction: str
+) -> None:
+    _story_settings(monkeypatch, frictions=(friction,))
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 4, result.output
+    assert "config" not in story_stubs
+    assert friction.split(";")[0][:30] in result.output
