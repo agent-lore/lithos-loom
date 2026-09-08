@@ -345,7 +345,7 @@ def _degraded(*frictions: str):
         "task has no metadata.project slug; using built-in develop defaults",
         "no project-context doc for 'lens'; using built-in develop defaults",
         "cannot read project-context doc for 'lens' (boom); "
-        "using built-in develop defaults",
+        + "using built-in develop defaults",
     ],
 )
 def test_story_with_unresolvable_project_never_gates(
@@ -498,10 +498,10 @@ def test_a_non_gate_friction_does_not_skip_the_gate(
     "friction",
     [
         "develop_check_states: state for check 'lint' must be one of informational, "
-        "off, required (got 'bogus'); ignoring",
+        + "off, required (got 'bogus'); ignoring",
         "develop_image: image must be a non-empty string (got '  '); ignoring",
         "task metadata.develop_test_command: must be a non-empty string; "
-        "keeping project default",
+        + "keeping project default",
     ],
 )
 def test_a_rejected_gate_setting_skips_the_gate(
