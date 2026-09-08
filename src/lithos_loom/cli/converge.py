@@ -26,6 +26,7 @@ import typer
 from lithos_loom.cli.review import (
     apply_model_policy,
     host_default_models,
+    layer_check_tables,
     resolve_acceptance_criteria,
     resolve_check_commands,
     resolve_check_states,
@@ -352,8 +353,6 @@ def converge_command(
             "max_rounds": max_rounds,
             "max_cost_usd": max_cost,
             "test_command": test_command,
-            "check_commands": check_commands or None,
-            "check_states": check_states or None,
             "parity_command": parity_command,
             "artifacts_path": resolved_artifacts,
         }.items()
@@ -371,6 +370,10 @@ def converge_command(
             ),
             **story_layer,
             **explicit,
+            # the check tables merge per key, explicit flags over the story's
+            **layer_check_tables(
+                story_layer, check_commands=check_commands, check_states=check_states
+            ),
             "review_profile": effective_profile,
             "reviewers": reviewers,
             "image": resolved_image,

@@ -247,6 +247,8 @@ def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
             {"project": "lens", "develop_review_profile": "thorough"},
         ),
     )
+    # the resolver's contract: the task layer's profile name arrives parsed
+    # on the settings (the real parse is pinned in the resolver tests)
     monkeypatch.setattr(
         review_cli,
         "resolve_project_settings",
@@ -255,6 +257,7 @@ def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
             test_command="make check",
             parity_command="make parity",
             check_states={"lint": "informational"},
+            review_profile_task=meta.get("develop_review_profile"),
         ),
     )
     monkeypatch.setattr(
@@ -525,6 +528,73 @@ def test_a_rejected_gate_setting_skips_the_gate(
     assert result.exit_code == 4, result.output
     assert "config" not in story_stubs
     assert friction.split(";")[0][:30] in result.output
+
+
+@pytest.mark.parametrize("bad", [123, "  "])
+def test_a_malformed_task_profile_skips_the_gate(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch, bad: object
+) -> None:
+    # PR #360 re-review 4: through the REAL resolver + layering (the story's
+    # project doc says minimal; the task's own develop_review_profile is
+    # malformed). Before the fix the task value vanished with no friction and
+    # no rejected key, and merge-gate gated — and would push — on minimal.
+    from lithos_loom.cli import review as review_cli
+    from lithos_loom.plugins.story_develop import daemon_io
+    from tests.support.fake_lithos import FakeLithosClient, make_note
+
+    doc = make_note(
+        "projects/lens/lens-project-context.md",
+        path="projects/lens/lens-project-context.md",
+        metadata={"develop_review_profile": "minimal"},
+        tags=("project-context",),
+    )
+    monkeypatch.setattr(
+        daemon_io, "LithosClient", lambda *a, **k: FakeLithosClient(notes=(doc,))
+    )
+    monkeypatch.setattr(
+        review_cli, "resolve_project_settings", daemon_io.resolve_project_settings
+    )
+    monkeypatch.setattr(
+        review_cli,
+        "fetch_task_metadata",
+        lambda url, task_id: ("T", {"project": "lens", "develop_review_profile": bad}),
+    )
+    result = runner.invoke(develop_app, ["merge-gate", "42", "--story", "story-9"])
+    assert result.exit_code == 4, result.output
+    assert "config" not in story_stubs
+    assert "task metadata.develop_review_profile" in result.output
+
+
+def test_explicit_check_flags_merge_per_key_over_the_story_tables(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #360 self-review: check_commands / check_states are TABLES, merged
+    # per key by the resolver (task over project). An explicit flag for ONE
+    # check must lay over the story's table the same way — never replace
+    # it, silently dropping the project's other overrides.
+    _story_settings(
+        monkeypatch,
+        image="ralph-sandbox:lens",
+        check_commands={"lint": "make lint", "typecheck": "make typecheck"},
+        check_states={"lint": "informational"},
+    )
+    result = runner.invoke(
+        develop_app,
+        [
+            "merge-gate",
+            "42",
+            "--story",
+            "story-9",
+            "--check-command",
+            "typecheck=pyright",
+            "--check-state",
+            "sast=off",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.check_commands == {"lint": "make lint", "typecheck": "pyright"}
+    assert cfg.check_states == {"lint": "informational", "sast": "off"}
 
 
 def test_the_block_on_red_migration_breadcrumb_does_not_skip_the_gate(

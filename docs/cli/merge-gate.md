@@ -74,9 +74,9 @@ re-resolved rather than a snapshot replayed (PRD S3 decision).
 |------|---------|
 | `CHANGE` | The PR: `#142`, `142`, or a GitHub PR URL. A bare range / branch is rejected — there is no PR to update. |
 | `--profile`, `-p` | Review Profile whose check-set gates the result (default: the story's, else the host's `default_review_profile` resolved through its `unknown_profile` policy, else `standard`). |
-| `--story TASK_ID` | Resolve the story's develop settings (project doc + task `develop_*`: profile, check-set, image, test command, parity) exactly as the daemon path does — the **current** config defending that project — as the base layer under any explicit flags. **Strict:** where the daemon would degrade to built-ins (no project slug / doc, a read failure, a malformed gate setting), merge-gate exits `config_unresolved` (4) and gates nothing. The watcher-dispatched run passes it. |
-| `--check-command NAME=CMD` | Override a check's command (repeatable). |
-| `--check-state NAME=STATE` | Override a check's blocking state (repeatable). |
+| `--story TASK_ID` | Resolve the story's develop settings (project doc + task `develop_*`: profile, check-set, image, test command, parity) exactly as the daemon path does — the **current** config defending that project — as the base layer under any explicit flags. **Strict:** where the daemon would degrade to built-ins (no project slug / doc, a read failure, a malformed gate setting — `develop_image` / `develop_test_command` / `develop_test_gate` / `develop_check_commands` / `develop_check_states` / `develop_parity_command` / `develop_review_profile`, at either layer), merge-gate exits `config_unresolved` (4) and gates nothing. The watcher-dispatched run passes it. |
+| `--check-command NAME=CMD` | Override a check's command (repeatable). Beside `--story`, merges **per key** over the story's `develop_check_commands` table — the resolver's own task-over-project shape — so overriding one check never drops the project's other overrides. |
+| `--check-state NAME=STATE` | Override a check's blocking state (repeatable). Beside `--story`, merges **per key** over the story's `develop_check_states` table. |
 | `--test-command` | Explicit `test` check command (beats detection). |
 | `--parity-command` | Repo-parity command, run as a required raw-exit check. |
 | `--image` | Sandbox image the checks run in. |

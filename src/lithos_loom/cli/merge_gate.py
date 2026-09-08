@@ -18,6 +18,7 @@ import typer
 
 from lithos_loom.cli.review import (
     StorySettingsUnresolved,
+    layer_check_tables,
     resolve_check_commands,
     resolve_check_states,
     story_settings_for,
@@ -211,19 +212,11 @@ def merge_gate_command(
         k: v
         for k, v in {
             "test_command": test_command,
-            "check_commands": check_commands or None,
-            "check_states": check_states or None,
             "parity_command": parity_command,
         }.items()
         if v is not None
     }
-    gate_keys = (
-        "test_gate",
-        "test_command",
-        "check_commands",
-        "check_states",
-        "parity_command",
-    )
+    gate_keys = ("test_gate", "test_command", "parity_command")
     develop_config = DevelopConfig(
         **{
             **dict(
@@ -234,6 +227,10 @@ def merge_gate_command(
             ),
             **{k: story_layer[k] for k in gate_keys if k in story_layer},
             **explicit,
+            # the check tables merge per key, explicit flags over the story's
+            **layer_check_tables(
+                story_layer, check_commands=check_commands, check_states=check_states
+            ),
             "review_profile": effective_profile,
             "image": resolved_image,
         }

@@ -165,11 +165,14 @@ class ProjectDevelopSettings:
     # project + per-task). None = no parity check.
     parity_command: str | None = None
     # Review Profile (#139). ``review_profile_project`` is the project-layer name
-    # (context-doc ``develop_review_profile``); :func:`apply_review_profile` then
-    # resolves task > project > host > builtin into ``review_profile`` (the
-    # resolved name) and ``review_profile_halt`` (an explicit-but-unknown name
-    # fails closed). Resolved but NOT yet applied to the panel/check-set (#140).
+    # (context-doc ``develop_review_profile``), ``review_profile_task`` the
+    # per-task one (task ``develop_review_profile``) — both parsed by the
+    # resolver, so a malformed value at either layer is a friction + a
+    # rejected key; :func:`apply_review_profile` then resolves task > project
+    # > host > builtin into ``review_profile`` (the resolved name) and
+    # ``review_profile_halt`` (an explicit-but-unknown name fails closed).
     review_profile_project: str | None = None
+    review_profile_task: str | None = None
     review_profile: str = DEFAULT_PROFILE_NAME
     review_profile_halt: bool = False
     frictions: tuple[str, ...] = ()
@@ -303,6 +306,7 @@ def _degraded_settings(
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,
         review_profile_project=scalars.review_profile_project,
+        review_profile_task=scalars.review_profile_task,
         context_read_failed=context_read_failed,
         frictions=tuple(frictions),
         degraded=True,
@@ -382,6 +386,7 @@ def resolve_project_settings(
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,
         review_profile_project=scalars.review_profile_project,
+        review_profile_task=scalars.review_profile_task,
         frictions=tuple(frictions),
         rejected_keys=scalars.rejected_keys,
     )
@@ -552,22 +557,22 @@ def load_review_profile_policy() -> tuple[str | None, str, tuple[str, ...]]:
 def apply_review_profile(
     settings: ProjectDevelopSettings,
     *,
-    task_value: object,
     host_default: str | None,
     unknown_profile: str,
 ) -> ProjectDevelopSettings:
     """Resolve the Review Profile (#139) and fold the outcome into *settings*.
 
-    Precedence: ``task_value`` > the project layer (``review_profile_project``) >
-    ``host_default`` > built-in ``standard``. Records the resolved name +
+    Precedence: the task layer (``review_profile_task``) > the project layer
+    (``review_profile_project``) > ``host_default`` > built-in ``standard``.
+    Both metadata layers arrive already parsed by the resolver — there is no
+    raw-value door here (PR #360 re-review 4). Records the resolved name +
     ``review_profile_halt`` (an explicit-but-unknown name fails closed) and merges
     the resolution's frictions. Resolves the *name* only; the profile's check-set is
     applied in :func:`develop.build_check_set` (#140 slice 1) and its persona panel by
     :func:`apply_review_profile_panel` (#140 slice 2).
     """
-    task_name = task_value.strip() if isinstance(task_value, str) else None
     resolution = resolve_profile(
-        task_value=task_name,
+        task_value=settings.review_profile_task,
         project_value=settings.review_profile_project,
         host_value=host_default,
         unknown_profile=unknown_profile,
@@ -848,7 +853,6 @@ def build_result_payload(
 
 def layer_run_settings(
     settings: ProjectDevelopSettings,
-    task_metadata: Mapping[str, Any],
     *,
     host_default_profile: str | None,
     unknown_profile: str,
@@ -872,7 +876,6 @@ def layer_run_settings(
     """
     settings = apply_review_profile(
         settings,
-        task_value=task_metadata.get("develop_review_profile"),
         host_default=host_default_profile,
         unknown_profile=unknown_profile,
     )

@@ -388,6 +388,27 @@ def parse_parity_command(value: object, *, where: str) -> str | None:
     return value.strip()
 
 
+def parse_review_profile(value: object, *, where: str) -> str | None:
+    """Validate a ``develop_review_profile`` NAME, or ``None`` (layer unset).
+
+    A non-empty string (stripped) or ``None``. The name is validated against
+    the profile catalogue later, by :func:`profiles.resolve_profile`, which
+    needs the host policy; this only rejects the shapes that are not a name
+    at all. Shared by the project layer and the per-task override so both
+    reject the same garbage identically — and so a strict consumer sees the
+    rejection structurally (PR #360 re-review 4: the task layer was the one
+    gate key parsed outside the resolver, and a non-string vanished with no
+    friction and no rejected key). Raises :class:`ValueError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{where}: review profile must be a non-empty string (got {value!r})"
+        )
+    return value.strip()
+
+
 def parse_bool_setting(value: object, *, where: str) -> bool | None:
     """Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 

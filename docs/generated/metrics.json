@@ -113,7 +113,7 @@
         "qualname": "lithos_loom.cli.project.import_project"
       },
       {
-        "complexity": 48,
+        "complexity": 46,
         "qualname": "lithos_loom.cli.converge.converge_command"
       },
       {
@@ -138,14 +138,14 @@
       },
       {
         "complexity": 27,
-        "qualname": "lithos_loom.cli.merge_gate.merge_gate_command"
+        "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
       },
       {
         "complexity": 27,
-        "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
+        "qualname": "lithos_loom.plugins.story_develop.converge.converge_pr"
       }
     ],
-    "total_functions": 1250
+    "total_functions": 1252
   },
   "domain": {
     "associations": 2,
@@ -362,13 +362,13 @@
       },
       "Cli": {
         "classes": 20,
-        "functions": 125,
+        "functions": 126,
         "largest_module": "lithos_loom.cli.project",
         "largest_module_lines": 1705,
-        "lines": 5864,
+        "lines": 5889,
         "modules": 13,
-        "public_symbols": 64,
-        "sloc": 4911
+        "public_symbols": 65,
+        "sloc": 4932
       },
       "Config": {
         "classes": 11,
@@ -452,13 +452,13 @@
       },
       "Plugins": {
         "classes": 64,
-        "functions": 386,
+        "functions": 387,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
-        "largest_module_lines": 1095,
-        "lines": 15185,
+        "largest_module_lines": 1103,
+        "lines": 15240,
         "modules": 45,
-        "public_symbols": 248,
-        "sloc": 12123
+        "public_symbols": 249,
+        "sloc": 12169
       },
       "ProjectContext": {
         "classes": 0,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 48298,
+    "total_lines": 48378,
     "total_modules": 143,
-    "total_sloc": 38598
+    "total_sloc": 38665
   },
   "tests": {
     "ratio": 1.61,
-    "src_lines": 48298,
-    "test_lines": 77769
+    "src_lines": 48378,
+    "test_lines": 77990
   }
 }

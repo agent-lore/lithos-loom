@@ -294,6 +294,32 @@ def resolve_reviewers(
     return panel if panel is not None else ()
 
 
+def layer_check_tables(
+    story_layer: Mapping[str, Any],
+    *,
+    check_commands: Mapping[str, str],
+    check_states: Mapping[str, str],
+) -> dict[str, dict[str, str]]:
+    """The ``check_commands`` / ``check_states`` tables an on-demand run gates
+    with: the explicit ``--check-command`` / ``--check-state`` flags laid PER
+    KEY over the story's tables — the same shape the resolver gives a task
+    table over the project one (#273). Never a whole-table replace: an
+    operator passing ``--check-state sast=off`` beside ``--story`` must not
+    silently drop the project's own lint command override (PR #360
+    self-review). Only non-empty tables are returned, so a caller splats the
+    result over its kwargs.
+    """
+    tables: dict[str, dict[str, str]] = {}
+    for key, explicit in (
+        ("check_commands", check_commands),
+        ("check_states", check_states),
+    ):
+        merged = {**story_layer.get(key, {}), **explicit}
+        if merged:
+            tables[key] = merged
+    return tables
+
+
 def resolve_check_commands(check_command: list[str] | None) -> dict[str, str]:
     """Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}``
     map (#273). Shared by ``review`` and ``converge``.
@@ -381,7 +407,7 @@ def gate_config_problems(settings: ProjectDevelopSettings) -> tuple[str, ...]:
         labels = [
             f
             for f in settings.frictions
-            if f.startswith((f"{key}:", f"{key} ", f"task metadata.{key}:"))
+            if f.startswith((f"{key}:", f"task metadata.{key}:"))
         ]
         problems.extend(labels or [f"{key} was rejected by its parser"])
     return tuple(problems)
@@ -409,7 +435,6 @@ def story_settings_for(
     section = getattr(host, "story_develop", None)
     settings = layer_run_settings(
         settings,
-        metadata,
         host_default_profile=(
             getattr(section, "default_review_profile", None) if section else None
         ),

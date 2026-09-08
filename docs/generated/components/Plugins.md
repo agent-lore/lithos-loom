@@ -24,7 +24,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | L | 2 | 14 |
+| `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
@@ -124,6 +124,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `parse_check_states` — Validate a per-check state-override map (#273 slice 2), or ``{}`` when absent.
 - def `parse_check_state_pairs` — Parse repeatable CLI ``NAME=STATE`` items into a validated state map (#273).
 - def `parse_parity_command` — Validate a ``parity_command`` override (#273 slice 3), or ``None``.
+- def `parse_review_profile` — Validate a ``develop_review_profile`` NAME, or ``None`` (layer unset).
 - def `parse_bool_setting` — Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 - def `parse_effort` — Validate + normalise a reasoning-effort level, or ``None``.
 - def `parse_reviewer_entry` — Validate one reviewer mapping into a :class:`ReviewerSpec`.

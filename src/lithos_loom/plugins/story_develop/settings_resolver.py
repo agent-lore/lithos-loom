@@ -35,6 +35,7 @@ from .config import (
     parse_image,
     parse_model,
     parse_parity_command,
+    parse_review_profile,
     parse_test_command,
 )
 
@@ -66,6 +67,10 @@ class ScalarSettings:
     test_gate: bool | None = None
     copilot_review: bool | None = None
     review_profile_project: str | None = None
+    # The per-task ``develop_review_profile`` name, parsed like the project
+    # one; the task > project > host precedence runs in
+    # daemon_io.apply_review_profile. None = the task layer is unset.
+    review_profile_task: str | None = None
     # #273: per-check command overrides ({check_name: command}), project-then-task
     # merged per-key. Empty when neither layer declares any.
     check_commands: dict[str, str] = field(default_factory=dict)
@@ -322,22 +327,37 @@ def _resolve_merged_map(
     return result
 
 
-def _resolve_review_profile_project(
-    meta: Mapping[str, Any], frictions: list[str], rejected: list[str] | None = None
-) -> str | None:
-    # Carry the project-layer name only; the full task > project > host resolution
-    # needs the host policy and runs in daemon_io.apply_review_profile.
-    raw_profile = meta.get("develop_review_profile")
-    if isinstance(raw_profile, str) and raw_profile.strip():
-        return raw_profile.strip()
-    if raw_profile is not None:
-        frictions.append(
-            f"develop_review_profile {raw_profile!r} invalid; ignoring "
-            "(must be a non-empty string)"
-        )
-        if rejected is not None:
-            rejected.append("develop_review_profile")
-    return None
+def _resolve_review_profile(
+    meta: Mapping[str, Any],
+    task_metadata: Mapping[str, Any],
+    frictions: list[str],
+    rejected: list[str] | None = None,
+) -> tuple[str | None, str | None]:
+    """``(project name, task name)`` — both layers carried UNRESOLVED: the full
+    task > project > host precedence needs the host policy and runs in
+    daemon_io.apply_review_profile. Both go through the shared parse atom so a
+    malformed value at either layer is a friction AND a rejected key (a
+    strict consumer decides on the key, never on prose)."""
+    key = "develop_review_profile"
+    project = _parse_or_friction(
+        parse_review_profile,
+        meta.get(key),
+        where=key,
+        suffix="; ignoring",
+        frictions=frictions,
+        fallback=None,
+        rejected=rejected,
+    )
+    task = _parse_or_friction(
+        parse_review_profile,
+        task_metadata.get(key),
+        where=f"{_TASK_WHERE_PREFIX}{key}",
+        suffix="; keeping project default",
+        frictions=frictions,
+        fallback=None,
+        rejected=rejected,
+    )
+    return project, task
 
 
 def resolve_scalar_settings(
@@ -366,7 +386,9 @@ def resolve_scalar_settings(
     fallback_chain = _resolve_fallback_chain(meta, frictions)
     max_rounds = _resolve_max_rounds(meta, frictions, rejected)
     max_cost_usd = _resolve_max_cost(meta, frictions, rejected)
-    review_profile_project = _resolve_review_profile_project(meta, frictions, rejected)
+    review_profile_project, review_profile_task = _resolve_review_profile(
+        meta, task_metadata, frictions, rejected
+    )
     # #273: appended LAST so the pinned friction prefix (coder, image, test_command,
     # test_gate, block_on_red, fallback_chain, max_rounds, max_cost, review_profile) is
     # unchanged — a new field's frictions must not reorder the existing contract.
@@ -424,6 +446,7 @@ def resolve_scalar_settings(
         max_rounds=max_rounds,
         max_cost_usd=max_cost_usd,
         review_profile_project=review_profile_project,
+        review_profile_task=review_profile_task,
         check_commands=check_commands,
         check_states=check_states,
         parity_command=parity_command,

@@ -22,7 +22,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.merge_gate` | S | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
-| `lithos_loom.cli.review` | M | 1 | 9 |
+| `lithos_loom.cli.review` | M | 1 | 10 |
 | `lithos_loom.cli.task` | M | 1 | 1 |
 
 ## Public API
@@ -105,6 +105,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `apply_model_policy` — Make every agent's model explicit, or fail closed as a usage error (#304).
 - def `resolve_acceptance_criteria` — Acceptance criteria precedence: ``--ac-file`` > ``--ac`` > PR body.
 - def `resolve_reviewers` — Explicit ``--reviewer`` names win; otherwise the profile's persona panel.
+- def `layer_check_tables` — The ``check_commands`` / ``check_states`` tables an on-demand run gates with: the explicit ``--check-command`` / ``--check-state`` flags laid PER KEY over the story's tables — the same shape the resolver gives a task table over the project one (#273). Never a whole-table replace: an operator passing ``--check-state sast=off`` beside ``--story`` must not silently drop the project's own lint command override (PR #360 self-review). Only non-empty tables are returned, so a caller splats the result over its kwargs.
 - def `resolve_check_commands` — Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}`` map (#273). Shared by ``review`` and ``converge``.
 - def `resolve_check_states` — Parse repeatable ``--check-state NAME=STATE`` into a ``{check: state}`` map (#273 slice 2). Shared by ``review`` and ``converge``.
 - class `StorySettingsUnresolved` — A strict story resolution could not stand on the project's CURRENT config: the project layer degraded to built-ins, or a gate-affecting setting was malformed and dropped. Carries the resolver's own reasons.
