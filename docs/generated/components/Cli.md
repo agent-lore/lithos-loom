@@ -19,9 +19,10 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
+| `lithos_loom.cli.merge_gate` | S | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
-| `lithos_loom.cli.review` | M | 0 | 7 |
+| `lithos_loom.cli.review` | M | 1 | 10 |
 | `lithos_loom.cli.task` | M | 1 | 1 |
 
 ## Public API
@@ -77,6 +78,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `collect_gate_rows` — Enumerate open gates and classify each (read-only).
 - def `render_report` — Render the gate listing as aligned text lines (pure).
 
+### `lithos_loom.cli.merge_gate`
+- def `merge_gate_command` — Trial-merge a PR into its current base and run the check-set on the result.
+
 ### `lithos_loom.cli.obsidian_sync`
 - def `show` — Print the resolved ``[obsidian_sync]`` block from the active config.
 
@@ -101,8 +105,12 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `apply_model_policy` — Make every agent's model explicit, or fail closed as a usage error (#304).
 - def `resolve_acceptance_criteria` — Acceptance criteria precedence: ``--ac-file`` > ``--ac`` > PR body.
 - def `resolve_reviewers` — Explicit ``--reviewer`` names win; otherwise the profile's persona panel.
+- def `layer_check_tables` — The ``check_commands`` / ``check_states`` tables an on-demand run gates with: the explicit ``--check-command`` / ``--check-state`` flags laid PER KEY over the story's tables — the same shape the resolver gives a task table over the project one (#273). Never a whole-table replace: an operator passing ``--check-state sast=off`` beside ``--story`` must not silently drop the project's own lint command override (PR #360 self-review). Only non-empty tables are returned, so a caller splats the result over its kwargs.
 - def `resolve_check_commands` — Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}`` map (#273). Shared by ``review`` and ``converge``.
 - def `resolve_check_states` — Parse repeatable ``--check-state NAME=STATE`` into a ``{check: state}`` map (#273 slice 2). Shared by ``review`` and ``converge``.
+- class `StorySettingsUnresolved` — A strict story resolution could not stand on the project's CURRENT config: the project layer degraded to built-ins, or a gate-affecting setting was malformed and dropped. Carries the resolver's own reasons.
+- def `gate_config_problems` — Why *settings* cannot stand as a project's CURRENT gate config.
+- def `story_settings_for` — The story's resolved develop settings — as :class:`DevelopConfig` overrides plus the settings themselves (the caller needs to know what was derived from what). The daemon's own resolution (project doc > task metadata > host policy), fetched from the loaded host's Lithos; the host policy (review-profile default + per-tool default models) comes from that SAME loaded config — never re-discovered from the ambient one (PR #361 review F3, the #305 rule). Frictions go to stderr; a missing story / unreachable Lithos is a hard error (an on-demand run that asked for a story must not silently proceed without it).
 
 ### `lithos_loom.cli.task`
 - class `UnknownProjectError` — `--project` matched neither a Lithos project-context doc nor a local `[projects]` entry. Carries the offending slug + the sorted set of known slugs so the CLI can render a helpful exit-2 message.

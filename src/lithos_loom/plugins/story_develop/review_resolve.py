@@ -39,7 +39,8 @@ class ResolvedChange:
     reads both to push fixes back to the PR branch, and to refuse a fork PR it
     cannot push to under origin credentials.
 
-    ``is_merged`` reports that the PR has already landed. It is a FLAG here, not
+    ``is_closed`` is the PR's state (closed, merged or not); ``is_merged`` that
+    it landed. ``is_merged`` is a FLAG here, not
     a refusal: reviewing a merged PR is a legitimate read-only operation, so only
     converge — which would push fixes that could never land — acts on it.
 
@@ -58,6 +59,7 @@ class ResolvedChange:
     head_branch: str = ""
     is_fork: bool = False
     is_merged: bool = False
+    is_closed: bool = False
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -113,17 +115,23 @@ def resolve_change(
     *,
     base_branch: str = "main",
     base_override: str | None = None,
+    allow_fork: bool = True,
 ) -> ResolvedChange:
     """Resolve *spec* into a :class:`ResolvedChange`.
 
     *spec* is one of: a GitHub PR (``#142`` / ``142`` / a PR URL), an explicit
     ``base..head`` ref range, or a single local ref / branch (whose base is its
     merge-base with *base_branch*). *base_override* forces the base sha for the
-    range / branch forms.
+    range / branch forms. With ``allow_fork=False`` a fork PR is answered from
+    GitHub's own metadata **before** anything is fetched — ``is_fork`` set,
+    ``base_sha`` empty — so a caller that must never pull a third-party head
+    into the operator's checkout (merge-gate, PRD S3) can refuse it cleanly.
     """
     number = _parse_pr_number(spec)
     if number is not None:
-        return _resolve_pr(repo, number, base_override=base_override)
+        return _resolve_pr(
+            repo, number, base_override=base_override, allow_fork=allow_fork
+        )
 
     if ".." in spec:
         base_ref, _, head_ref = spec.partition("..")
@@ -147,11 +155,24 @@ def resolve_change(
 
 
 def _resolve_pr(
-    repo: Path, number: str, *, base_override: str | None
+    repo: Path, number: str, *, base_override: str | None, allow_fork: bool = True
 ) -> ResolvedChange:
     pr = _gh_pr_view(repo, number)
     head_sha = pr.head_sha
     base_ref_name = pr.base_ref
+    is_fork = bool(pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo)
+    if is_fork and not allow_fork:
+        return ResolvedChange(
+            base_sha="",
+            head_sha=head_sha,
+            head_ref=f"#{number} ({pr.head_ref})".strip(),
+            title=pr.title,
+            body=pr.body,
+            head_branch=pr.head_ref,
+            is_fork=True,
+            is_merged=pr.merged,
+            is_closed=pr.state == "closed",
+        )
     # Fetch the PR head (works for forks too) and the base branch so both
     # commits are local before we materialise a worktree / diff against them.
     _git_fetch(repo, f"pull/{number}/head", base_ref_name)
@@ -175,6 +196,7 @@ def _resolve_pr(
         title=pr.title,
         body=pr.body,
         head_branch=pr.head_ref,
-        is_fork=bool(pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo),
+        is_fork=is_fork,
         is_merged=pr.merged,
+        is_closed=pr.state == "closed",
     )

@@ -243,3 +243,41 @@ def test_gh_pr_view_missing_pr_raises(
     monkeypatch.setattr(review_resolve, "github_call", lambda op: None)
     with pytest.raises(RuntimeError, match="PR #999 not found in o/r"):
         review_resolve._gh_pr_view(tmp_path, "999")
+
+
+def test_fork_pr_is_refused_before_any_fetch_when_forks_are_not_allowed(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #360 review F5: merge-gate must never fetch a third-party head into
+    # the operator's checkout — the fork verdict comes from the PR metadata
+    # GitHub already returned, before `pull/N/head` is fetched.
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, head_repo="x/fork")
+    )
+    change = review_resolve.resolve_change(tmp_path, "#142", allow_fork=False)
+    assert change.is_fork is True
+    assert change.head_sha == "h" * 40 and change.head_branch == "feature"
+    assert change.base_sha == ""  # never derived: nothing was fetched
+    assert stub_gh.fetches == [] and stub_gh.merge_base == []
+
+
+def test_allow_fork_default_still_fetches_a_fork(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, head_repo="x/fork")
+    )
+    change = review_resolve.resolve_change(tmp_path, "#142")
+    assert change.is_fork is True
+    assert stub_gh.fetches == [("pull/142/head", "main")]
+
+
+def test_resolved_pr_carries_its_open_or_closed_state(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert review_resolve.resolve_change(tmp_path, "#142").is_closed is False
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, merged=True)
+    )
+    change = review_resolve.resolve_change(tmp_path, "#142")
+    assert change.is_merged is True and change.is_closed is True

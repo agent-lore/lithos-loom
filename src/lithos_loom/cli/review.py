@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -31,7 +32,14 @@ from lithos_loom.plugins.story_develop.config import (
     parse_parity_command,
     parse_test_command,
 )
-from lithos_loom.plugins.story_develop.daemon_io import profile_panel
+from lithos_loom.plugins.story_develop.daemon_io import (
+    ProjectDevelopSettings,
+    fetch_task_metadata,
+    layer_run_settings,
+    profile_panel,
+    resolve_project_settings,
+    story_config_overrides,
+)
 from lithos_loom.plugins.story_develop.model_policy import resolve_config_models
 from lithos_loom.plugins.story_develop.personas import canonical_personas
 from lithos_loom.plugins.story_develop.profiles import (
@@ -286,6 +294,32 @@ def resolve_reviewers(
     return panel if panel is not None else ()
 
 
+def layer_check_tables(
+    story_layer: Mapping[str, Any],
+    *,
+    check_commands: Mapping[str, str],
+    check_states: Mapping[str, str],
+) -> dict[str, dict[str, str]]:
+    """The ``check_commands`` / ``check_states`` tables an on-demand run gates
+    with: the explicit ``--check-command`` / ``--check-state`` flags laid PER
+    KEY over the story's tables — the same shape the resolver gives a task
+    table over the project one (#273). Never a whole-table replace: an
+    operator passing ``--check-state sast=off`` beside ``--story`` must not
+    silently drop the project's own lint command override (PR #360
+    self-review). Only non-empty tables are returned, so a caller splats the
+    result over its kwargs.
+    """
+    tables: dict[str, dict[str, str]] = {}
+    for key, explicit in (
+        ("check_commands", check_commands),
+        ("check_states", check_states),
+    ):
+        merged = {**story_layer.get(key, {}), **explicit}
+        if merged:
+            tables[key] = merged
+    return tables
+
+
 def resolve_check_commands(check_command: list[str] | None) -> dict[str, str]:
     """Parse repeatable ``--check-command NAME=COMMAND`` into a ``{check: command}``
     map (#273). Shared by ``review`` and ``converge``.
@@ -313,3 +347,118 @@ def resolve_check_states(check_state: list[str] | None) -> dict[str, str]:
         return parse_check_state_pairs(check_state, where="--check-state")
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+class StorySettingsUnresolved(Exception):
+    """A strict story resolution could not stand on the project's CURRENT
+    config: the project layer degraded to built-ins, or a gate-affecting
+    setting was malformed and dropped. Carries the resolver's own reasons."""
+
+    def __init__(self, reasons: tuple[str, ...]) -> None:
+        super().__init__("; ".join(reasons))
+        self.reasons = reasons
+
+
+GATE_SETTING_KEYS: tuple[str, ...] = (
+    "develop_image",
+    "develop_test_command",
+    "develop_test_gate",
+    "develop_check_commands",
+    "develop_check_states",
+    "develop_parity_command",
+    "develop_review_profile",
+)
+"""The ``develop_*`` keys a deterministic gate consumes. A rejected value for
+any of these means the check-set that would run is NOT the project's; a
+rejected coder / model / round / cost value, a panel note, or a policy
+fallback changes nothing a gate runs."""
+
+
+def gate_config_problems(settings: ProjectDevelopSettings) -> tuple[str, ...]:
+    """Why *settings* cannot stand as a project's CURRENT gate config.
+
+    Empty when they can. Three things count (PR #360 re-review 2): the
+    project layer never resolved (``degraded``: no slug / no doc / read
+    failure), an explicit-but-unknown profile under ``halt``, and a
+    gate-affecting setting rejected by its parser — recognised by the
+    setting's key in the resolver's structural ``rejected_keys`` (never by
+    searching friction prose — the ``develop_block_on_red`` migration
+    breadcrumb names gate keys innocently). Everything else in
+    ``frictions`` — reviewer / coder / model / round / cost warnings, the
+    ``minimal`` gate-only note, the ``strongest`` fallback — is agent
+    configuration and does not touch what a gate runs.
+    """
+    problems: list[str] = []
+    if settings.degraded:
+        reasons = [f for f in settings.frictions if "built-in develop defaults" in f]
+        problems.extend(
+            reasons
+            or ["the project layer did not resolve; built-in defaults would apply"]
+        )
+    if settings.review_profile_halt:
+        problems.append("the review profile is not defined (unknown_profile=halt)")
+    # STRUCTURAL: the resolver names the keys its parsers rejected; the
+    # friction text is only looked up to label the reason (by its `where`
+    # prefix — never searched for key names, which a migration breadcrumb or
+    # a quoted value could mention innocently).
+    for key in settings.rejected_keys:
+        if key not in GATE_SETTING_KEYS:
+            continue
+        labels = [
+            f
+            for f in settings.frictions
+            if f.startswith((f"{key}:", f"task metadata.{key}:"))
+        ]
+        problems.extend(labels or [f"{key} was rejected by its parser"])
+    return tuple(problems)
+
+
+def story_settings_for(
+    host: Any, story: str, *, strict: bool = False
+) -> tuple[dict[str, Any], ProjectDevelopSettings]:
+    """The story's resolved develop settings — as :class:`DevelopConfig`
+    overrides plus the settings themselves (the caller needs to know what was
+    derived from what). The daemon's own resolution (project doc > task
+    metadata > host policy), fetched from the loaded host's Lithos; the host
+    policy (review-profile default + per-tool default models) comes from that
+    SAME loaded config — never re-discovered from the ambient one (PR #361
+    review F3, the #305 rule). Frictions go to stderr; a missing story /
+    unreachable Lithos is a hard error (an on-demand run that asked for a
+    story must not silently proceed without it)."""
+    url = host.orchestrator.lithos_url
+    try:
+        _title, metadata = fetch_task_metadata(url, story)
+    except Exception as exc:
+        typer.secho(f"error: --story {story}: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(2) from exc
+    settings = resolve_project_settings(url, metadata)
+    section = getattr(host, "story_develop", None)
+    settings = layer_run_settings(
+        settings,
+        host_default_profile=(
+            getattr(section, "default_review_profile", None) if section else None
+        ),
+        unknown_profile=getattr(section, "unknown_profile", "halt")
+        if section
+        else "halt",
+        default_models=host_default_models(host),
+    )
+    if strict:
+        # A zero-token pre-merge gate (merge-gate, PRD S3) must gate with the
+        # project's current config or not at all: the daemon's fail-open
+        # degrade would gate — and push — on a check-set known not to be
+        # the project's (PR #360 re-review F1) — while agent-side frictions
+        # (panel, coder, rounds) leave the check-set intact and pass.
+        problems = gate_config_problems(settings)
+        if problems:
+            raise StorySettingsUnresolved(problems)
+    for friction in settings.frictions:
+        typer.secho(f"[Friction] {friction}", err=True, fg=typer.colors.YELLOW)
+    if settings.review_profile_halt:
+        typer.secho(
+            "error: the story's review profile is not defined; not running",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+    return story_config_overrides(settings), settings

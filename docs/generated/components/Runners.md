@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | S | 1 | 11 |
+| `lithos_loom.runner.git` | S | 1 | 14 |
 | `lithos_loom.runner.worktree` | S | 0 | 5 |
 
 ## Public API
@@ -34,6 +34,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - class `RangeBase` — Where a branch's own work begins (PRD S5c).
 - def `base_ref_for` — Name the live base ref for *base_branch* as seen from *worktree*.
 - def `fork_point` — Resolve *base* to the sha the branch's own work starts from, right now.
+- def `is_ancestor` — Whether *ancestor* is reachable from *descendant* (a commit is its own).
 - def `commit_sha` — Resolve *ref* to its full commit SHA.
 - def `tree_sha` — Return the tree object *ref* points at — a commit's CONTENT identity.
 - def `commits_since` — Return full 40-char SHAs the BRANCH added since *since*, oldest first.
@@ -42,6 +43,8 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `apply_patch` — Apply the unified diff at *patch_path* to *worktree*'s working tree (#193).
 - def `log_between` — Return the branch's commit log from *base* to *head*, oldest first.
 - def `diff_stat` — Return ``git diff --stat base...HEAD`` — the branch's cumulative change.
+- def `merge` — Merge *ref* into *worktree*'s HEAD; return the conflicting paths.
+- def `delete_branch` — Delete local *branch* (``-D``: a throwaway trial-merge branch is never merged anywhere, so the safe ``-d`` would always refuse). Raises when the branch does not exist or is checked out.
 
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.

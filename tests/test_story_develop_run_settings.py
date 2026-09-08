@@ -16,7 +16,6 @@ def test_layering_applies_profile_panel_and_default_models() -> None:
     settings = ProjectDevelopSettings(review_profile_project="thorough")
     layered = layer_run_settings(
         settings,
-        {},
         host_default_profile="standard",
         unknown_profile="halt",
         default_models={"codex": "gpt-x", "claude": "claude-x"},
@@ -30,11 +29,13 @@ def test_layering_applies_profile_panel_and_default_models() -> None:
 def test_layering_task_profile_beats_project_and_explicit_panel_stays() -> None:
     panel = (ReviewerSpec(name="tests", tool="claude"),)
     settings = ProjectDevelopSettings(
-        review_profile_project="thorough", reviewers=panel, reviewers_explicit=True
+        review_profile_project="thorough",
+        review_profile_task="standard",
+        reviewers=panel,
+        reviewers_explicit=True,
     )
     layered = layer_run_settings(
         settings,
-        {"develop_review_profile": "standard"},
         host_default_profile=None,
         unknown_profile="halt",
         default_models={"claude": "claude-x"},

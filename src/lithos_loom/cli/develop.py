@@ -71,6 +71,14 @@ from lithos_loom.cli.converge import converge_command  # noqa: E402
 
 develop_app.command("converge")(converge_command)
 
+# `develop merge-gate` (PRD S3): trial-merge a PR's current base in a throwaway
+# worktree, name the conflicting paths or run the current check-set on the
+# merge result, and push the update when green and behind. Zero-token; the
+# github-watcher sweep drives it as a subprocess. Impl in `cli/merge_gate.py`.
+from lithos_loom.cli.merge_gate import merge_gate_command  # noqa: E402
+
+develop_app.command("merge-gate")(merge_gate_command)
+
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
 # Active-agent label when docker is unavailable: we can't tell which (if any)

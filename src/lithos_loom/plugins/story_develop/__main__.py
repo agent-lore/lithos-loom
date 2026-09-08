@@ -68,6 +68,7 @@ from .config import (
     parse_effort,
     parse_model,
     parse_parity_command,
+    parse_review_profile,
     parse_test_command,
 )
 from .daemon_io import (
@@ -478,7 +479,6 @@ def _daemon_main(args: argparse.Namespace) -> int:
     # default models: the one layering an on-demand `--story` run shares.
     settings = layer_run_settings(
         settings,
-        ctx.metadata,
         host_default_profile=profile_default,
         unknown_profile=unknown_policy,
         default_models=default_models,
@@ -737,8 +737,16 @@ def main(argv: list[str] | None = None) -> int:
         raw_issue = ctx.metadata.get("github_issue_url")
         github_issue_url = raw_issue if isinstance(raw_issue, str) else None
         if review_profile_task is None:
-            raw_profile = ctx.metadata.get("develop_review_profile")
-            review_profile_task = raw_profile if isinstance(raw_profile, str) else None
+            # The same parser the resolver applies at both metadata layers:
+            # a malformed value is a friction and inherits, never a silent
+            # drop (PR #360 re-review 4).
+            try:
+                review_profile_task = parse_review_profile(
+                    ctx.metadata.get("develop_review_profile"),
+                    where="task metadata.develop_review_profile",
+                )
+            except ValueError as exc:
+                print(f"[Friction] {exc}; ignoring", file=sys.stderr)
         print(f"developing Lithos task {ctx.task_id}: {ctx.title}")
     assert description is not None  # guaranteed by the validation above
 
