@@ -482,5 +482,6 @@ tags = ["trigger:story-develop"]
 # on_needs_human = "curl -d @- https://ntfy.sh/your-topic"
 #                            # any shell command; the notice arrives as JSON on
 #                            # stdin ({gate_id, story_id, story_title, project,
-#                            # route, reason, summary, run_id, github_ref}) — the
-#                            # escape hatch for ntfy / Pushover / Slack / mail
+#                            # route, reason, summary, run_id, github_ref,
+#                            # actions}) — the escape hatch for ntfy / Pushover /
+#                            # Slack / mail

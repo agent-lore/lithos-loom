@@ -27,7 +27,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 14 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
-| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 13 |
+| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 8 |
@@ -156,6 +156,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `post_frictions` — Post config-resolution breadcrumbs as one ``[Friction]`` finding.
 - def `escalation_block` — The result.json ``escalation`` block for a non-delivering run (b91177d2).
 - def `build_result_payload` — Map a :class:`DevelopResult` onto the result.json contract.
+- def `layer_run_settings` — The layers above :func:`resolve_project_settings`, in the daemon's order.
+- def `story_config_overrides` — The :class:`DevelopConfig` fields a story's resolved settings PIN.
+- def `fetch_task_metadata` — ``(title, metadata)`` of *task_id* from Lithos at *url* (raises on a missing task or an unreachable server — an on-demand run asked for a story must not silently proceed without it).
 
 ### `lithos_loom.plugins.story_develop.develop`
 - class `BlockingCheckOutcome` — A blocking raw-exit gate check (repo-parity / a per-check command override) that produced no ledger finding — captured so a final-round failure is named in the run result instead of only living in the round's output artifact (#273).

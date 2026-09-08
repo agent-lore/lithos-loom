@@ -831,3 +831,100 @@ def build_result_payload(
             resume["reviewer_sessions"] = sessions
         payload["resume"] = resume
     return payload, exit_code
+
+
+def layer_run_settings(
+    settings: ProjectDevelopSettings,
+    task_metadata: Mapping[str, Any],
+    *,
+    host_default_profile: str | None,
+    unknown_profile: str,
+    default_models: Mapping[str, str],
+    coder_model: str | None = None,
+    coder_effort: str | None = None,
+    reviewer_model: str | None = None,
+    reviewer_effort: str | None = None,
+) -> ProjectDevelopSettings:
+    """The layers above :func:`resolve_project_settings`, in the daemon's order.
+
+    Review Profile (task > project > host > builtin) → the profile's persona
+    panel when no reviewers were selected explicitly → route-level model /
+    effort fallbacks under the metadata → per-tool default models under
+    everything. One function so the daemon path and an on-demand run given a
+    ``--story`` (``converge`` dispatched by the watcher) resolve the SAME
+    settings for the same story — lens#78 (2026-09-07) ran at converge's
+    5-round CLI default while the project doc said 8. The host-config loads
+    (profile policy, default models) stay with the caller: they are the
+    seams tests and the CLI's ``--config`` control.
+    """
+    settings = apply_review_profile(
+        settings,
+        task_value=task_metadata.get("develop_review_profile"),
+        host_default=host_default_profile,
+        unknown_profile=unknown_profile,
+    )
+    settings = apply_review_profile_panel(settings)
+    settings = apply_cli_fallbacks(
+        settings,
+        coder_model=coder_model,
+        coder_effort=coder_effort,
+        reviewer_model=reviewer_model,
+        reviewer_effort=reviewer_effort,
+    )
+    return apply_tool_default_models(settings, default_models)
+
+
+def story_config_overrides(settings: ProjectDevelopSettings) -> dict[str, Any]:
+    """The :class:`DevelopConfig` fields a story's resolved settings PIN.
+
+    Only fields the metadata layers actually set are present, so a caller
+    lays them over its own defaults (``{**route_defaults, **overrides}``):
+    the daemon's route flags, or a CLI's explicit flags. The precedence is
+    the one the daemon has always applied — metadata REPLACES a fallback,
+    never disables it (an unset layer inherits; ADR 0010).
+    """
+    overrides: dict[str, Any] = {
+        "coder": settings.coder,
+        "coder_model": settings.coder_model,
+        "coder_effort": settings.coder_effort,
+        "reviewers": settings.reviewers,
+        "review_profile": settings.review_profile,
+        "artifacts_path": settings.artifacts_path,
+    }
+    if settings.max_rounds:
+        overrides["max_rounds"] = settings.max_rounds
+    if settings.max_cost_usd is not None:
+        overrides["max_cost_usd"] = settings.max_cost_usd
+    if settings.test_gate is not None:
+        overrides["test_gate"] = settings.test_gate
+    if settings.test_command is not None:
+        overrides["test_command"] = settings.test_command
+    if settings.check_commands:
+        overrides["check_commands"] = settings.check_commands
+    if settings.check_states:
+        overrides["check_states"] = settings.check_states
+    if settings.parity_command is not None:
+        overrides["parity_command"] = settings.parity_command
+    if settings.image:
+        overrides["image"] = settings.image
+    if settings.fallback_chain:
+        overrides["reviewer_fallback_chain"] = settings.fallback_chain
+    return overrides
+
+
+def fetch_task_metadata(url: str, task_id: str) -> tuple[str, Mapping[str, Any]]:
+    """``(title, metadata)`` of *task_id* from Lithos at *url* (raises on a
+    missing task or an unreachable server — an on-demand run asked for a
+    story must not silently proceed without it)."""
+
+    async def _fetch() -> tuple[str, Mapping[str, Any]]:
+        async with LithosClient(url, agent_id=AGENT_ID) as client:
+            task = await client.task_get(task_id=task_id)
+            if task is None:
+                raise LookupError(f"Lithos task {task_id!r} not found at {url}")
+            meta = getattr(task, "metadata", None)
+            return str(getattr(task, "title", "") or ""), (
+                meta if isinstance(meta, Mapping) else {}
+            )
+
+    return asyncio.run(_fetch())
