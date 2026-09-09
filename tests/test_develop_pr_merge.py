@@ -35,6 +35,7 @@ from lithos_loom.subscriptions._develop_pr_merge import (
     NUDGE_RECOVERED_KEY,
     reconcile_pr_gate,
 )
+from lithos_loom.subscriptions.dispatch_guards import READY_QUERY_LIMIT
 from tests.support import FakeLithosClient
 
 _PR_URL = "https://github.com/agent-lore/lithos-loom/pull/7"
@@ -343,6 +344,37 @@ async def test_gate_merged_recovery_nudges_only_the_dependents_it_released() -> 
     assert still_blocked not in [t.id for t in await client.task_ready()]
 
 
+async def test_gate_merged_recovery_survives_a_saturated_unrelated_frontier() -> None:
+    """Readiness is asked about the CANDIDATE, never about the instance. The
+    github-issue watcher materialises every unseen open issue on a watched
+    public repo as an edge-less — therefore immediately ready — task, so the
+    global ready count is a number a third party can inflate at will.
+    Conditioning the recovery on it let anyone with a GitHub account stall
+    every `pr` gate that takes this branch (no gate completed, no
+    [GateResolved], no dependent nudged — the very failure #350 removes). The
+    frontier query is narrowed to the candidate's own project + tags, so
+    unrelated ready work cannot deny the answer."""
+    client = FakeLithosClient(agent_id="a")
+    for i in range(READY_QUERY_LIMIT):  # unrelated, edge-less, all ready
+        await client.task_create(title=f"gh-issue-{i}", metadata={"project": "other"})
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+    await client.task_complete(task_id=story)  # an earlier sweep died mid-nudge
+    # The unnarrowed frontier really is saturated past the query limit…
+    assert len(await client.task_ready(limit=READY_QUERY_LIMIT)) >= READY_QUERY_LIMIT
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    # …and the gate resolves anyway, because the noise shares neither the
+    # dependent's project nor its trigger tag.
+    assert outcome == "merged"
+    assert (await _get(client, gate.id)).status == "completed"
+    nudges = [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+    assert [c["metadata"] for c in nudges] == [{}]
+
+
 async def test_gate_merged_recovery_defers_on_a_truncated_ready_frontier() -> None:
     """A FULL ready page makes *absence* from it meaningless, so an unconfirmed
     candidate is undetermined, not unreleased. Resolving the gate on the
@@ -378,6 +410,26 @@ async def test_gate_merged_recovery_defers_on_a_truncated_ready_frontier() -> No
         for c in client.calls_to("task_update")
         if c["task_id"] in {confirmed, unconfirmed}
     ]
+    # Deferring is silent otherwise — the gate just re-polls — so the story
+    # carries one breadcrumb naming the dependent loom could not classify…
+    breadcrumbs = [
+        f
+        for f in client.findings
+        if f["task_id"] == story and unconfirmed in f["summary"]
+    ]
+    assert len(breadcrumbs) == 1
+    assert breadcrumbs[0]["summary"].startswith("[Friction]")
+
+    # …and exactly one, however long the state persists.
+    assert (
+        await reconcile_pr_gate(
+            await _get(client, gate.id),
+            _github(_pr(state="closed", merged=True)),
+            _ctx(client),
+        )
+        == "error"
+    )
+    assert len([f for f in client.findings if unconfirmed in f["summary"]]) == 1
 
     # A frontier back under the limit classifies both → the gate resolves and
     # BOTH dependents are nudged, none lost to the truncated sweep.

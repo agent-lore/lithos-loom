@@ -50,6 +50,7 @@ __all__ = [
     "MERGE_STATE_TERMINAL",
     "MERGE_STATE_URL_KEY",
     "NUDGE_RECOVERED_KEY",
+    "NUDGE_UNDETERMINED_KEY",
     "is_pr_gate",
     "reconcile_pr_gate",
 ]
@@ -83,6 +84,12 @@ MERGE_STATE_URL_KEY = "develop_pr_merge_url"
 # sweep, forever, and each write is indistinguishable from the human edit the
 # #339 bootstrap-replay guard reads as authorization to re-run a failed story.
 NUDGE_RECOVERED_KEY = "develop_pr_merge_nudged"
+
+# Gate-metadata key de-duping the one-shot [Friction] posted when a recovery
+# sweep cannot classify a dependent. The deferral that follows is correct but
+# silent — the gate just stays open and re-polls — so the story gets one
+# task-level breadcrumb, scoped to the PR url, rather than one per sweep.
+NUDGE_UNDETERMINED_KEY = "develop_pr_merge_nudge_undetermined"
 
 # Marker values that mean "this PR url is resolved". A still-open PR leaves the
 # marker UNSET so the resolver re-polls next cycle.
@@ -560,7 +567,7 @@ async def _complete_story(
                 # a pure write with no new information. Nothing to nudge, and
                 # nothing to re-mark — the caller only has the gate left.
                 return _StoryCompletion([], recovered=True)
-            released = await _released_dependents(story_id, ctx)
+            released = await _released_dependents(story_id, gate, pr_url, ctx)
             if released is None:
                 return None
             return _StoryCompletion(released, recovered=True)
@@ -574,7 +581,12 @@ async def _complete_story(
 
 
 async def _released_dependents(
-    story_id: str, ctx: SubscriptionContext, *, limit: int = READY_QUERY_LIMIT
+    story_id: str,
+    gate: Any,
+    pr_url: str,
+    ctx: SubscriptionContext,
+    *,
+    limit: int = READY_QUERY_LIMIT,
 ) -> list[str] | None:
     """The story's dependents that this completion actually released, rebuilt
     without the lost ``unblocked`` response. ``None`` = could not tell, retry.
@@ -587,60 +599,133 @@ async def _released_dependents(
     bootstrap-replay guard reads as "a human asked for this again"
     (:func:`_nudge_unblocked` spells the hazard out).
 
-    So the candidates are intersected with Lithos's ready frontier rather than
-    filtered by a readiness rule of loom's own: readiness is Lithos's answer
-    (epic G), and it covers unmet gates and cycles, not just ``blocks``.
+    So each candidate is put to Lithos individually (:func:`_is_ready`) rather
+    than filtered by a readiness rule of loom's own: readiness is Lithos's
+    answer (epic G), and it covers unmet gates and cycles, not just ``blocks``.
 
-    Every candidate must come back **classified**. A full page means the
-    frontier was truncated, which makes absence from it meaningless — and
-    unlike the dispatch guard's version of this test (``on_ready_frontier``,
-    which merely defers one dispatch to the next event) there is no next look
-    here: the caller resolves the gate on this answer, and a resolved gate
-    leaves the swept open set for good. So an unclassifiable candidate returns
-    ``None`` and defers the whole resolution, exactly as an unreadable edge
-    list does. It is all-or-nothing on purpose — nudging the confirmed subset
-    would also burn the once-only :data:`NUDGE_RECOVERED_KEY` on an incomplete
-    fan-out, making the loss permanent.
+    Every candidate must come back **classified**, and an unclassifiable one
+    returns ``None`` to defer the whole resolution, exactly as an unreadable
+    edge list does. That matters more here than at the dispatch guard's version
+    of this test (``on_ready_frontier``, which merely defers one dispatch to the
+    next event): the caller resolves the gate on this answer, and a resolved
+    gate leaves the swept open set for good. It is all-or-nothing on purpose —
+    nudging the classified subset would also burn the once-only
+    :data:`NUDGE_RECOVERED_KEY` on an incomplete fan-out, making the loss
+    permanent.
     """
     candidates = await _blocks_dependents(story_id, ctx)
     if not candidates:
         return candidates  # None (read failed) or [] (no dependents) as-is
+    released: list[str] = []
+    for task_id in candidates:
+        verdict = await _is_ready(task_id, ctx, limit=limit)
+        if verdict is None:
+            await _undetermined_dependent(task_id, story_id, gate, pr_url, ctx)
+            return None
+        if verdict:
+            released.append(task_id)
+    return released
+
+
+async def _is_ready(
+    task_id: str, ctx: SubscriptionContext, *, limit: int
+) -> bool | None:
+    """Does Lithos currently offer *task_id* as ready work? ``None`` = it would
+    not say — a failed read, or a page too full for absence to mean anything.
+
+    ``task_ready`` has no per-task filter, so this is a membership test; what
+    matters is what the page is narrowed to. It is narrowed to **this
+    candidate's own** project and tag set, which is both the narrowing
+    ``READY_QUERY_LIMIT`` is sized for and the only one that cannot drop the
+    candidate itself — a ready task always appears in a page filtered by its
+    own attributes.
+
+    Enumerating the whole instance instead (as this did until #351 review r3)
+    made the answer hostage to unrelated ready work: the github-issue watcher
+    materialises every unseen open issue on a watched **public** repo as an
+    edge-less, therefore immediately-ready task, so the global ready count is
+    not loom's to bound — and once it crossed the limit, every ``pr`` gate
+    taking the recovery branch stopped resolving. Readiness must be a question
+    about the candidate, not about the instance.
+    """
     try:
-        # Unnarrowed: a `blocks` edge may cross projects, and the frontier page
-        # is wide (READY_QUERY_LIMIT) — a tag/project filter would silently drop
-        # a legitimate dependent for no saving on a path this rare.
-        ready = await ctx.lithos.task_ready(limit=limit, with_claims=False)
+        task = await ctx.lithos.task_get(task_id=task_id)
     except LithosClientError as exc:
         ctx.logger.warning(
-            "[Friction] pr-gate: reading the ready frontier to recover story "
-            "%s's released dependents failed (%s); leaving the gate open to "
-            "retry the nudge next sweep",
-            story_id,
+            "[Friction] pr-gate: reading dependent %s to check its readiness "
+            "failed (%s); leaving the gate open to retry the nudge next sweep",
+            task_id,
             exc,
         )
         return None
-    ready_ids = {task.id for task in ready}
-    released = [task_id for task_id in candidates if task_id in ready_ids]
-    if len(released) < len(candidates) and len(ready) >= limit:
-        # A FULL page means the frontier was truncated, so absence from it is
-        # "not seen", not "not ready" — and this is the caller's last chance to
-        # act: resolving the gate takes it out of the swept open set for good,
-        # so a candidate dropped here never gets its `task.updated` and waits
-        # for a restart, the exact failure #350 removes. Undetermined defers the
-        # whole resolution, all-or-nothing (partially nudging would also burn
-        # the once-only NUDGE_RECOVERED_KEY on an incomplete fan-out).
+    if task is None or task.status != "open":
+        # Deleted, or already completed/cancelled by someone else — there is
+        # nothing left to dispatch, so this is a definite "do not nudge".
+        return False
+    project = task.metadata.get("project")
+    try:
+        ready = await ctx.lithos.task_ready(
+            project=project if isinstance(project, str) else None,
+            tags=list(task.tags),
+            limit=limit,
+            with_claims=False,
+        )
+    except LithosClientError as exc:
         ctx.logger.warning(
-            "[Friction] pr-gate: the ready frontier hit its %d-task query limit "
-            "while recovering story %s's released dependents, so %d of %d could "
-            "not be classified; leaving the gate open to retry next sweep. Raise "
-            "READY_QUERY_LIMIT if a frontier this wide is expected.",
-            limit,
-            story_id,
-            len(candidates) - len(released),
-            len(candidates),
+            "[Friction] pr-gate: reading the ready frontier for dependent %s "
+            "failed (%s); leaving the gate open to retry the nudge next sweep",
+            task_id,
+            exc,
         )
         return None
-    return released
+    if any(candidate.id == task_id for candidate in ready):
+        return True
+    if len(ready) >= limit:
+        # A full page even at this narrowing: absence is "not seen", not "not
+        # ready". Undetermined — the caller defers rather than dropping it.
+        ctx.logger.warning(
+            "[Friction] pr-gate: the ready frontier for dependent %s's own "
+            "project/tags hit the %d-task query limit, so its readiness is "
+            "undetermined. Raise READY_QUERY_LIMIT if a frontier this wide is "
+            "expected.",
+            task_id,
+            limit,
+        )
+        return None
+    return False
+
+
+async def _undetermined_dependent(
+    task_id: str, story_id: str, gate: Any, pr_url: str, ctx: SubscriptionContext
+) -> None:
+    """Leave a task-level breadcrumb the first time a recovery sweep cannot
+    classify a dependent.
+
+    Deferring is the safe answer but a silent one — the gate stays open and
+    re-polls GitHub every sweep, with nothing on the story to say why. One
+    ``[Friction]`` on the story (marker on the GATE, scoped to the PR url, so a
+    persistent state does not re-post every sweep) puts it where an operator
+    looks. Best-effort: a breadcrumb that fails to land never changes the
+    caller's decision to defer.
+    """
+    if gate.metadata.get(NUDGE_UNDETERMINED_KEY) == pr_url:
+        return
+    await post_finding_then_mark(
+        ctx,
+        task_id=story_id,
+        summary=(
+            f"[Friction] pr-gate: PR {pr_url} merged and story {story_id} is "
+            f"already complete, but Lithos would not say whether dependent "
+            f"{task_id} is ready, so gate {gate.id} is left open and the nudge "
+            f"is retried next sweep. Nothing is lost yet; if this persists, "
+            f"check whether that task's project/tag frontier exceeds "
+            f"{READY_QUERY_LIMIT} ready tasks."
+        ),
+        marker={NUDGE_UNDETERMINED_KEY: pr_url},
+        subsystem="pr-gate",
+        retry_hint="will retry next sweep",
+        marker_task_id=gate.id,
+    )
 
 
 async def _complete_swallowing(
