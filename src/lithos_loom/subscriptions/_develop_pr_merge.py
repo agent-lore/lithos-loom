@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, NamedTuple
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
@@ -37,6 +37,7 @@ from lithos_loom.gates import (
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions.dispatch_guards import READY_QUERY_LIMIT
 from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
@@ -48,6 +49,7 @@ __all__ = [
     "MERGE_STATE_KEY",
     "MERGE_STATE_TERMINAL",
     "MERGE_STATE_URL_KEY",
+    "NUDGE_RECOVERED_KEY",
     "is_pr_gate",
     "reconcile_pr_gate",
 ]
@@ -70,6 +72,17 @@ GATE_RESOLVED = "[GateResolved]"
 # marker would suppress the new PR forever.
 MERGE_STATE_KEY = "develop_pr_merge_state"
 MERGE_STATE_URL_KEY = "develop_pr_merge_url"
+
+# Gate-metadata key recording that the RECOVERY fan-out (the graph fallback in
+# `_complete_story`, taken when the completion response is gone for good) has
+# already been nudged for this PR url. The merged branch writes no
+# MERGE_STATE_KEY marker — the gate leaving the open set is its de-dup — so a
+# gate whose own completion fails for a DURABLE reason stays in the swept open
+# set and re-enters the merged branch every sweep. This marker bounds that to
+# one fan-out: without it loom would re-write every released dependent once per
+# sweep, forever, and each write is indistinguishable from the human edit the
+# #339 bootstrap-replay guard reads as authorization to re-run a failed story.
+NUDGE_RECOVERED_KEY = "develop_pr_merge_nudged"
 
 # Marker values that mean "this PR url is resolved". A still-open PR leaves the
 # marker UNSET so the resolver re-polls next cycle.
@@ -343,15 +356,30 @@ async def _resolve_gate_merged(
     never retried. With the nudge ahead of it, an interrupted batch leaves the
     gate open and the next sweep re-enters this branch, where
     :func:`_complete_story` recovers the ids the lost response would have
-    named. Anything that leaves those ids *unknown* — a failed completion, or
-    a graph read that did not answer — returns ``False`` here rather than
-    resolving the gate, so the retry stays possible.
+    named — the story's ``blocks`` targets, intersected with Lithos's ready
+    frontier so a dependent still held by a sibling blocker is not written to,
+    and marked on the gate so a gate stuck open cannot re-send that fan-out
+    every sweep. Anything that leaves those ids *unknown* — a failed
+    completion, or a graph read that did not answer — returns ``False`` here
+    rather than resolving the gate, so the retry stays possible.
     """
     if story_id is not None:
-        to_nudge = await _complete_story(story_id, ctx)
-        if to_nudge is None:
+        completion = await _complete_story(story_id, gate, pr_url, ctx)
+        if completion is None:
             return False  # transient — leave gate open, retry next sweep
-        await _nudge_unblocked(to_nudge, story_id, ctx)
+        await _nudge_unblocked(completion.to_nudge, story_id, ctx)
+        if completion.recovered and completion.to_nudge:
+            # Durably record that this gate's recovery fan-out has been sent, so
+            # a gate stuck open on a failing completion cannot re-send it every
+            # sweep (see NUDGE_RECOVERED_KEY). Best-effort like the nudge
+            # itself: if the marker does not land the next sweep re-nudges,
+            # which is the pre-existing behaviour and no worse than it.
+            await write_marker(
+                ctx,
+                task_id=gate.id,
+                marker={NUDGE_RECOVERED_KEY: pr_url},
+                subsystem="pr-gate",
+            )
     if not await _complete_swallowing(gate.id, ctx, subject=f"gate {gate.id}"):
         return False
     if story_id is not None:
@@ -399,11 +427,14 @@ async def _nudge_unblocked(
     harmless; the claim decides.
 
     The write is not free of side effects, which is why the caller keeps this
-    set to the ids Lithos actually named: bumping ``updated_at`` consumes the
-    "nobody has edited it since it failed" evidence the #339 bootstrap-replay
-    guard reads (``dispatch_guards.declines_bootstrap_replay``), so nudging a
-    task that is not even ready could cost an unrequested re-run of a failed
-    story on the next restart.
+    set to ids Lithos has vouched for — the ones it named as unblocked, or on
+    the recovery path the ones it still reports ready
+    (:func:`_released_dependents`) — and sends the recovery fan-out at most
+    once per gate (:data:`NUDGE_RECOVERED_KEY`): bumping ``updated_at``
+    consumes the "nobody has edited it since it failed" evidence the #339
+    bootstrap-replay guard reads (``dispatch_guards.declines_bootstrap_replay``),
+    so nudging a task that is not even ready — or re-nudging one every sweep —
+    could cost an unrequested re-run of a failed story on the next restart.
 
     Best-effort. The story is completed by the time we get here, so a failed
     nudge must not undo the merge resolution: it posts ``[Friction]`` on the
@@ -444,9 +475,10 @@ async def _nudge_unblocked(
 async def _blocks_dependents(
     story_id: str, ctx: SubscriptionContext
 ) -> list[str] | None:
-    """The tasks the story ``blocks`` — the durable stand-in for a completion's
-    ``unblocked`` response once that response is gone (see
-    :func:`_complete_story`).
+    """The tasks the story ``blocks`` — the CANDIDATES for a completion's lost
+    ``unblocked`` response, which :func:`_released_dependents` then narrows to
+    the ones actually released (these edges name every dependent, released or
+    not).
 
     The graph edges are the record: unlike the response they survive a crash,
     so a retried sweep can still nudge. Returns ``None`` when the read itself
@@ -484,7 +516,20 @@ async def _post_friction(
         )
 
 
-async def _complete_story(story_id: str, ctx: SubscriptionContext) -> list[str] | None:
+class _StoryCompletion(NamedTuple):
+    """What :func:`_complete_story` learned: who to nudge, and whether those ids
+    came from the durable graph (the recovery path) instead of Lithos's own
+    ``unblocked`` response. Only a recovery fan-out needs bounding by
+    :data:`NUDGE_RECOVERED_KEY` — the authoritative path runs at most once,
+    because the completion that produced it cannot succeed twice."""
+
+    to_nudge: list[str]
+    recovered: bool
+
+
+async def _complete_story(
+    story_id: str, gate: Any, pr_url: str, ctx: SubscriptionContext
+) -> _StoryCompletion | None:
     """Complete the story and answer **who to nudge**, or ``None`` to retry.
 
     Three outcomes, deliberately kept apart (collapsing any two of them loses
@@ -497,16 +542,28 @@ async def _complete_story(story_id: str, ctx: SubscriptionContext) -> list[str] 
     * **already terminal** (``task_not_found`` — the issue close-mirror got
       there first, or an earlier sweep completed the story and died mid-nudge)
       → the response that would have named them is gone for good, so recover
-      the candidates from the durable graph (:func:`_blocks_dependents`).
+      the candidates from the durable graph — but only the ones Lithos still
+      reports ready (:func:`_released_dependents`), and only once per gate
+      (:data:`NUDGE_RECOVERED_KEY`).
     * **transient failure** (either the completion or that graph read) →
       ``None``: who to nudge is unknown, so the caller leaves the gate open
       and the next sweep tries the whole branch again.
     """
     try:
-        return await ctx.lithos.task_complete(task_id=story_id)
+        return _StoryCompletion(
+            await ctx.lithos.task_complete(task_id=story_id), recovered=False
+        )
     except LithosClientError as exc:
         if exc.code == "task_not_found":
-            return await _blocks_dependents(story_id, ctx)
+            if gate.metadata.get(NUDGE_RECOVERED_KEY) == pr_url:
+                # This gate's fan-out already went out; re-sending it would be
+                # a pure write with no new information. Nothing to nudge, and
+                # nothing to re-mark — the caller only has the gate left.
+                return _StoryCompletion([], recovered=True)
+            released = await _released_dependents(story_id, ctx)
+            if released is None:
+                return None
+            return _StoryCompletion(released, recovered=True)
         ctx.logger.warning(
             "[Friction] pr-gate: completing story %s failed (%s); "
             "will retry next sweep",
@@ -514,6 +571,61 @@ async def _complete_story(story_id: str, ctx: SubscriptionContext) -> list[str] 
             exc,
         )
         return None
+
+
+async def _released_dependents(
+    story_id: str, ctx: SubscriptionContext, *, limit: int = READY_QUERY_LIMIT
+) -> list[str] | None:
+    """The story's dependents that this completion actually released, rebuilt
+    without the lost ``unblocked`` response. ``None`` = could not tell, retry.
+
+    The graph alone OVER-approximates: :func:`_blocks_dependents` names every
+    outgoing ``blocks`` target, whereas ``unblocked`` named only those whose
+    *last* blocker was this story. With ``A → C``, ``A → D`` and ``B → D``,
+    completing ``A`` releases ``C`` alone — nudging ``D`` too would write to a
+    task that is not ready, bumping the ``updated_at`` the #339
+    bootstrap-replay guard reads as "a human asked for this again"
+    (:func:`_nudge_unblocked` spells the hazard out).
+
+    So the candidates are intersected with Lithos's ready frontier rather than
+    filtered by a readiness rule of loom's own: readiness is Lithos's answer
+    (epic G), and it covers unmet gates and cycles, not just ``blocks``.
+    Membership is a presence test, which is the safe direction under
+    truncation — a full page makes *absence* meaningless (so we warn and nudge
+    the subset we could confirm, leaving the restart bootstrap as the backstop
+    for the rest), while presence stays authoritative either way.
+    """
+    candidates = await _blocks_dependents(story_id, ctx)
+    if not candidates:
+        return candidates  # None (read failed) or [] (no dependents) as-is
+    try:
+        # Unnarrowed: a `blocks` edge may cross projects, and the frontier page
+        # is wide (READY_QUERY_LIMIT) — a tag/project filter would silently drop
+        # a legitimate dependent for no saving on a path this rare.
+        ready = await ctx.lithos.task_ready(limit=limit, with_claims=False)
+    except LithosClientError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: reading the ready frontier to recover story "
+            "%s's released dependents failed (%s); leaving the gate open to "
+            "retry the nudge next sweep",
+            story_id,
+            exc,
+        )
+        return None
+    ready_ids = {task.id for task in ready}
+    released = [task_id for task_id in candidates if task_id in ready_ids]
+    if len(ready) >= limit and len(released) < len(candidates):
+        ctx.logger.warning(
+            "pr-gate: the ready frontier hit its %d-task query limit while "
+            "recovering story %s's released dependents, so %d of %d could not "
+            "be confirmed ready and are left to the restart bootstrap. Raise "
+            "READY_QUERY_LIMIT if a frontier this wide is expected.",
+            limit,
+            story_id,
+            len(candidates) - len(released),
+            len(candidates),
+        )
+    return released
 
 
 async def _complete_swallowing(
