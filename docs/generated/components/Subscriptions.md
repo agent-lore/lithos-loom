@@ -15,7 +15,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._blocked_snapshot` | S | 1 | 0 |
-| `lithos_loom.subscriptions._develop_pr_merge` | L | 0 | 1 |
+| `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 1 |
+| `lithos_loom.subscriptions._develop_pr_nudge` | M | 2 | 2 |
 | `lithos_loom.subscriptions._findings` | S | 0 | 2 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
 | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |
@@ -66,6 +67,12 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._develop_pr_merge`
 - def `reconcile_pr_gate` — Resolve one open ``pr`` gate against its PR's merge state.
+
+### `lithos_loom.subscriptions._develop_pr_nudge`
+- def `nudge_unblocked` — Re-surface the dependents the story's completion just readied (#350).
+- class `RecoveryRecord` — The recovery path's durable state, kept on the GATE under :data:`NUDGE_RECOVERED_KEY` and scoped to the PR url (a re-develop into a replacement PR starts a fresh one).
+- class `NudgePlan` — What :func:`_complete_story` decided: who to nudge now, the recovery state to persist first (``None`` on the authoritative path, which needs none — the completion that produced it cannot succeed twice), and whether the gate must stay open for a later sweep to finish the job.
+- def `recover_dependents` — Rebuild the lost ``unblocked`` response from the durable graph.
 
 ### `lithos_loom.subscriptions._findings`
 - def `write_marker` — Write a de-dup marker via ``task_update``, swallowing ``task_not_found``.
