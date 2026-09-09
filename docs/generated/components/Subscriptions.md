@@ -28,6 +28,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_projection` | L | 0 | 1 |
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
+| `lithos_loom.subscriptions._project_settings` | S | 1 | 5 |
+| `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 9 |
@@ -35,10 +37,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
+| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 2 | 1 |
+| `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
+| `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
-| `lithos_loom.subscriptions.remediation_budget` | XS | 3 | 1 |
+| `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
-| `lithos_loom.subscriptions.remediation_outcome` | S | 0 | 3 |
+| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 8 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -102,6 +107,17 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions._project_context_projection`
 - def `make_handler` — Build a stateful ``project-context-projection`` handler bound to ``cfg``.
 
+### `lithos_loom.subscriptions._project_settings`
+- def `parse_origin` — ``owner/name`` from a GitHub remote url (ssh / https / ssh://), or ``None`` for anything else.
+- class `OriginRead` — What the sweep learned about a mapped checkout's ``origin``.
+- def `origin_read` — The checkout's ``origin`` via ``git remote get-url`` — milliseconds, no network — as an :class:`OriginRead`.
+- def `origin_repo` — :func:`origin_read`'s ``repo`` alone (``None`` when unresolvable).
+- def `resolve_project_repo` — ``(slug, repo_path)`` via gate metadata, falling back to the story's (gate creation records ``project`` only when the payload carried it). ``None`` when no slug is known or the slug is not mapped under ``[projects]``.
+- def `read_project_flag` — A boolean per-project dial from the context doc's metadata.
+
+### `lithos_loom.subscriptions._subprocess`
+- def `spawn_command` — Run *cmd*, return ``(returncode, combined output)``.
+
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
 
@@ -138,6 +154,27 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - class `IngestResult` — What one ingestion pass posted, for the remediation dispatcher (slice C).
 - def `ingest_external_reviews` — Ingest new review activity on one still-open gate's PR. Never raises.
 
+### `lithos_loom.subscriptions.merge_gate_dispatch`
+- def `spawn_merge_gate` — Default spawn: the merge-gate CLI, capped by whichever timeout the argv shape calls for (:func:`_subprocess.spawn_command`).
+- class `MergeGateSettings` — Host-side knobs the watcher child threads in from its config.
+- class `MergeGateDispatch` — Owns the per-project single-flight dispatch of ``develop merge-gate``.
+
+### `lithos_loom.subscriptions.merge_gate_outcome`
+- def `value_of`
+- def `write_record`
+- def `record_green` — Record a green gate; a pushed merge commit is loom's own push on the S5b budget (else observe_head reads it as a human push and resets the remediation counter — the invariant S5b exists for).
+- def `post_failed`
+- def `post_conflict`
+- def `post_push_failed`
+- def `post_repo_mismatch`
+- def `post_checkout_unresolved` — The sweep could not resolve the mapped checkout's origin: nothing is spawned (the child would only die in `gh` before any structured refusal), one ``[Friction]`` on the story naming why, settled on (path, reason) until the path changes or the read starts to answer.
+- def `post_config_unresolved`
+- def `post_crashed`
+
+### `lithos_loom.subscriptions.merge_gate_record`
+- class `MergeGateRecord` — The gate's parsed ``merge_gate`` marker: the re-run key + the outcome.
+- def `read_record` — Parse the gate's record; ``None`` for an absent / foreign-url marker (a replacement PR re-evaluates from scratch). Tolerant of a malformed field — it reads as unset, never raises.
+
 ### `lithos_loom.subscriptions.pr_landability`
 - def `classify_landability` — ``unknown`` / ``dirty`` / ``mergeable`` from the fetched PR.
 - def `check_landability` — Classify one still-open gate's PR and report a conflict once per ``(pr_url, base_sha, head_sha)``. Returns the state label. Never raises.
@@ -155,6 +192,11 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `post_finding` — Best-effort finding post (the story may have completed mid-run).
 - def `escalate_or_report` — PRD S5b: exhaustion → human gate; a gate that could not be raised is said so on the story instead of vanishing.
 - def `record_result` — Record a run that produced a JSON result: marker, finding, log, and the exhaustion escalation when the CLI reports it did not succeed.
+- def `refusal_key` — What the sweep observes about the mapped checkout — the settle key a repo-mismatch refusal (the sweep's own, or the CLI's) is de-duped on.
+- def `settled_refusal` — The kind of refusal (``repo_mismatch`` / ``checkout_unresolved``) already recorded for exactly this key — no spawn, no re-post until the mapping or the read moves — or ``None``.
+- def `post_checkout_unresolved_refusal` — The sweep could not resolve the mapped checkout's origin (PR #362 re-review 3 F1): no spawn, no round spent, the parked trigger kept, one ``[Friction]`` naming why; settled on (path, "") until the path changes or the read starts to answer.
+- def `post_repo_mismatch_refusal` — The sweep's own origin read refused the checkout: one ``[Friction]`` on the story per settle key, de-duped by a marker on the gate. Nothing else is written — no round spent, the parked trigger kept.
+- def `refund_repo_mismatch` — The CLI's authoritative ``--expect-repo`` check refused where the sweep's origin read passed: refund the reserved round, re-park the review trigger (the reservation consumed it), record the settle key so the sweep does not spawn again until the mapping or the remote url moves, and say so.
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.

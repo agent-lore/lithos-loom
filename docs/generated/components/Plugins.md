@@ -21,7 +21,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
-| `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
+| `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
@@ -40,7 +40,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 2 |
+| `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
@@ -49,7 +49,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
-| `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
+| `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 4 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
@@ -91,6 +91,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `DesiredCheck` — What a profile (or the default) *asks for* — the input to resolution.
 - class `CheckApplicabilityError` — A *required* desired check has no command for any detected ecosystem.
 - def `formatter_commands` — The write-mode formatter command for each detected ecosystem, in order.
+- def `catalog_commands` — The canonical per-ecosystem commands behind check *name*, or ``None`` for a check the catalog does not know. Read-only: what a settings fingerprint hashes so a catalog change moves it (PRD S3).
 - def `applies` — Whether the canonical check *name* applies to at least one detected ecosystem. ``applies(name, ())`` is always ``False`` — a markerless repo declares every check N/A.
 - def `resolve_check_set` — Resolve a *desired* check-set into concrete checks for *ecosystems*.
 
@@ -257,6 +258,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.merge_gate`
 - class `MergeGateCheck` — One check's outcome on the merge result, flattened for the record.
 - class `MergeGateResult` — The outcome of one trial merge + gate.
+- def `settings_fingerprint` — A short stable digest of the resolved gate SETTINGS — everything that decides which checks run and how they block, and nothing that needs a tree or is run-local.
 - def `config_fingerprint` — A short stable digest of *what gated*: the resolved checks, the image, the per-check timeout and the blocking threshold.
 - def `run_merge_gate` — Trial-merge *change*'s current base into its head and gate the result.
 
@@ -323,6 +325,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.review_resolve`
 - class `ResolvedChange` — A concrete change to review: the ``base..head`` commit pair + intent.
+- class `RepoMismatchError` — The checkout's ``origin`` is not the repository the caller expected.
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
 
 ### `lithos_loom.plugins.story_develop.rounds`

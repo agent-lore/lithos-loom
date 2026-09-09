@@ -52,7 +52,7 @@ import asyncio
 import contextlib
 import dataclasses
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -63,11 +63,19 @@ from lithos_loom.github_review_activity import ExternalReviewActivity
 from lithos_loom.github_review_streams import AuthorTrust
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
+from lithos_loom.subscriptions._project_settings import (
+    OriginRead,
+    origin_read,
+    read_project_flag,
+    resolve_project_repo,
+)
+from lithos_loom.subscriptions._subprocess import spawn_command
 from lithos_loom.subscriptions.external_reviews import (
     IngestResult,
     PendingMarkerProvider,
 )
 from lithos_loom.subscriptions.remediation_budget import (
+    PENDING_KEY,
     REMEDIATION_KEY,
     RemediationBudget,
     RemediationSettings,
@@ -75,8 +83,12 @@ from lithos_loom.subscriptions.remediation_budget import (
 )
 from lithos_loom.subscriptions.remediation_outcome import (
     escalate_or_report,
+    post_checkout_unresolved_refusal,
     post_finding,
+    post_repo_mismatch_refusal,
     record_result,
+    refund_repo_mismatch,
+    settled_refusal,
 )
 
 __all__ = [
@@ -84,22 +96,18 @@ __all__ = [
     "PENDING_KEY",
     "REMEDIATION_KEY",
     "ExternalRemediation",
+    "OriginRead",
     "RemediationBudget",
     "RemediationSettings",
+    "origin_read",
     "read_budget",
     "spawn_converge",
 ]
 
 
-# Gate-metadata key parking a batch deferred behind the busy single-flight
-# slot (PR #346 review F1): ingestion's high-water marks consume the batch,
-# so without a durable trigger a deferred dispatch would never happen if the
-# PR then went quiet. Url-scoped; consumed atomically with the budget
-# reservation on dispatch; survives restarts.
-PENDING_KEY = "external_remediation_pending"
-
 # Project-context metadata key: per-project dial for autonomous dispatch.
 CONVERGE_SETTING = "develop_external_review_converge"
+
 
 # Hard wall-clock cap on one converge subprocess, so a hung run can never hold
 # the global single-flight slot forever. Generous: a thorough multi-round
@@ -110,18 +118,9 @@ RUN_TIMEOUT_SECONDS = 4 * 3600
 _OUTPUT_TAIL_CHARS = 600
 
 Spawn = Callable[[list[str]], Awaitable[tuple[int, str]]]
-
-
-async def _end_process(proc: asyncio.subprocess.Process) -> None:
-    """Terminate → grace → kill; tolerant of an already-exited child."""
-    if proc.returncode is not None:
-        return
-    proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=10)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
+# Whether a merge-gate run is in flight on a PR url (PRD S3): the two
+# dispatchers hold each other per PR, since either may push to its branch.
+Hold = Callable[[str], bool]
 
 
 async def spawn_converge(cmd: list[str]) -> tuple[int, str]:
@@ -132,24 +131,10 @@ async def spawn_converge(cmd: list[str]) -> tuple[int, str]:
     **cancellation** (watcher shutdown, PR #346 review F5) ends the child
     too before re-raising: an orphaned converge could keep fixing and
     pushing after loom stopped, and a restarted watcher would violate the
-    global single-flight against it.
+    global single-flight against it. (:func:`_subprocess.spawn_command`,
+    shared with the merge-gate dispatcher.)
     """
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT_SECONDS)
-    except TimeoutError:
-        await _end_process(proc)
-        return -1, f"converge run exceeded {RUN_TIMEOUT_SECONDS}s and was killed"
-    except asyncio.CancelledError:
-        await _end_process(proc)
-        raise
-    return proc.returncode if proc.returncode is not None else -1, out.decode(
-        "utf-8", errors="replace"
-    )
+    return await spawn_command(cmd, timeout=RUN_TIMEOUT_SECONDS, label="converge run")
 
 
 class ExternalRemediation:
@@ -161,30 +146,49 @@ class ExternalRemediation:
     both at once — so the no-CAS ``task_update`` merge stays race-free.
     """
 
-    def __init__(self, settings: RemediationSettings, *, spawn: Spawn | None = None):
+    def __init__(
+        self,
+        settings: RemediationSettings,
+        *,
+        spawn: Spawn | None = None,
+        hold: Hold | None = None,
+    ):
         self._settings = settings
         self._spawn: Spawn = spawn if spawn is not None else spawn_converge
+        self._hold = hold
         self._task: asyncio.Task[None] | None = None
+        self._in_flight_pr_url = ""
 
     @property
     def busy(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    def busy_on(self, pr_url: str) -> bool:
+        """Whether a run is claimed or in flight on *pr_url* — the merge-gate
+        dispatcher's hold (PRD S3): a converge may push to that branch at
+        any moment, so a merge commit must wait. Claimed from the moment a
+        dispatch commits (before its reservation write, self-review of PR
+        #362: a probe finishing during that await must already see it) until
+        the run task ends."""
+        return self._in_flight_pr_url == pr_url
 
     async def observe_head(
         self, gate: Any, spec: PrGateSpec, pr: Any, ctx: SubscriptionContext
     ) -> RemediationBudget:
         """Track the PR head and apply the human-push reset. Never raises.
 
-        Inert while a run is in flight: loom's own converge may push at any
-        moment, so a moved head cannot be attributed (the run's completion
-        records its own push before the slot frees). If the run crashes
-        after pushing but before recording, the next sweep misattributes
-        that one push as human and resets — rare, and it errs toward more
-        remediation headroom, never a stuck loop.
+        Inert while a run is in flight — loom's own converge, OR a merge-gate
+        run on this PR (the ``hold``, PRD S3): either may push at any moment,
+        so a moved head cannot be attributed (each run's completion records
+        its own push before its slot frees). If a run crashes after pushing
+        but before recording, the next sweep misattributes that one push as
+        human and resets — rare, and it errs toward more remediation
+        headroom, never a stuck loop.
         """
         budget = read_budget(gate, spec.pr_url)
         head = getattr(pr, "head_sha", "") or ""
-        if self.busy or not head or head == budget.last_seen_head_sha:
+        held = self._hold is not None and self._hold(spec.pr_url)
+        if self.busy or held or not head or head == budget.last_seen_head_sha:
             return budget
         # A moved head is a HUMAN push unless it matches loom's own recorded
         # push; an empty previous sighting is first-time initialization only
@@ -411,6 +415,54 @@ class ExternalRemediation:
             )
             await self._clear_pending(gate.id, ctx)
             return "project_disabled"
+        if self._hold is not None and self._hold(spec.pr_url):
+            # PRD S3: a merge-gate run on this PR may push its merge commit
+            # at any moment; a converge dispatched beside it would lose its
+            # leased push and waste the round. The pending trigger (if
+            # parked) stays, so a later sweep resumes the dispatch.
+            ctx.logger.info(
+                "external-remediation: a merge-gate run is in flight on %s; "
+                "deferring dispatch (the pending trigger, if parked, resumes later)",
+                spec.pr_url,
+            )
+            return "deferred_merge_gate"
+        # The cheap origin read (PR #362 re-review 2 F2): a checkout that is
+        # not the gate's repo must not spend a round or consume the parked
+        # trigger — the debt stays parked and dispatches once the mapping is
+        # fixed. The CLI's --expect-repo remains the authoritative check.
+        read = await origin_read(repo)
+        origin = read.repo
+        seen = (origin or "").lower()
+        settled = settled_refusal(gate, spec, repo, seen)
+        if settled is not None:
+            # a refusal (the sweep's or the CLI's) already stands for exactly
+            # what the sweep observes; nothing runs until the mapping or the
+            # read moves
+            ctx.logger.debug(
+                "external-remediation: %s still settled for %s", settled, spec.pr_url
+            )
+            return settled
+        if origin is None:
+            # PR #362 re-review 3 F1: "cannot resolve" is a refusal, never
+            # permission to reserve a round and spawn a child that dies in gh
+            await post_checkout_unresolved_refusal(
+                ctx,
+                gate=gate,
+                story_id=story_id,
+                spec=spec,
+                repo=repo,
+                reason=read.reason,
+            )
+            return "checkout_unresolved"
+        if seen != spec.repo.lower():
+            await post_repo_mismatch_refusal(
+                ctx, gate=gate, story_id=story_id, spec=spec, repo=repo, origin=origin
+            )
+            return "repo_mismatch"
+        # Claim the PR NOW, ahead of the reservation write: the merge-gate
+        # dispatcher's hold reads busy_on, and a settings probe finishing
+        # during the await below must not start a run beside this one.
+        self._in_flight_pr_url = spec.pr_url
 
         # Reserve the round BEFORE the run (crash-safe: a lost refund wastes
         # one round; a lost increment would allow an unbounded retry loop) —
@@ -425,6 +477,7 @@ class ExternalRemediation:
                 metadata={REMEDIATION_KEY: budget.as_marker(), PENDING_KEY: None},
             )
         except LithosClientError as exc:
+            self._in_flight_pr_url = ""  # the claim goes with the reservation
             ctx.logger.warning(
                 "[Friction] external-remediation: budget reservation for gate "
                 "%s failed (%s); not dispatching — will retry next sweep",
@@ -501,71 +554,19 @@ class ExternalRemediation:
     async def _project_repo(
         self, gate: Any, story_id: str, ctx: SubscriptionContext
     ) -> tuple[str, Path] | None:
-        """``(slug, repo_path)`` via gate metadata, falling back to the story's
-        (gate creation records ``project`` only conditionally)."""
-        slug = gate.metadata.get("project")
-        if not isinstance(slug, str) or not slug:
-            slug = None
-            try:
-                story = await ctx.lithos.task_get(task_id=story_id)
-            except LithosClientError:
-                story = None
-            if story is not None:
-                candidate = story.metadata.get("project")
-                if isinstance(candidate, str) and candidate:
-                    slug = candidate
-        if slug is None:
-            return None
-        repo = self._settings.projects.get(slug)
-        return None if repo is None else (slug, repo)
+        """``(slug, repo_path)`` — :func:`_project_settings.resolve_project_repo`,
+        shared with the merge-gate dispatcher."""
+        return await resolve_project_repo(gate, story_id, self._settings.projects, ctx)
 
     async def _project_converge_enabled(
         self, slug: str, ctx: SubscriptionContext
     ) -> bool | None:
-        """The per-project dial, default **on** (ADR 0011 decision 6).
-
-        Reads the context doc's metadata directly (canonical path, then the
-        smallest ``project-context``-tagged doc — the same resolution
-        ``daemon_io._fetch_context_metadata`` applies; kept as a local
-        seven-liner rather than importing the Plugins component into
-        Subscriptions, which would add a cross-component edge for one read).
-
-        Tri-state (PR #346 re-review 2): a READABLE doc with the key absent
-        or malformed is the documented default-on (warned when malformed);
-        an UNREADABLE doc returns ``None`` — the project may hold an
-        explicit opt-out we cannot see, and an unknown safety dial must
-        never authorize a run (the caller fails closed and retries).
-        """
-        meta: Mapping[str, Any] | None = None
-        try:
-            note = await ctx.lithos.note_read(
-                path=f"projects/{slug}/{slug}-project-context.md"
-            )
-            if note is not None:
-                meta = note.metadata
-            else:
-                candidates = await ctx.lithos.note_list(
-                    path_prefix=f"projects/{slug}/", tags=["project-context"]
-                )
-                if candidates:
-                    meta = min(candidates, key=lambda n: n.path).metadata
-        except LithosClientError:
-            return None  # unreadable ≠ unset — the caller fails closed
-        raw = None if meta is None else meta.get(CONVERGE_SETTING)
-        if raw is None:
-            return True
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
-            return raw.strip().lower() == "true"
-        ctx.logger.warning(
-            "[Friction] external-remediation: project %r has malformed %s=%r; "
-            "treating as enabled",
-            slug,
-            CONVERGE_SETTING,
-            raw,
+        """The per-project dial, default **on** (ADR 0011 decision 6) — the
+        shared tri-state reader (:func:`_project_settings.read_project_flag`):
+        ``None`` for an unreadable doc, which the caller fails closed on."""
+        return await read_project_flag(
+            slug, CONVERGE_SETTING, ctx, subsystem="external-remediation"
         )
-        return True
 
     # ── the run itself ─────────────────────────────────────────────────
 
@@ -588,6 +589,11 @@ class ExternalRemediation:
             story_id,
             "--repo",
             str(repo),
+            # The checkout is pinned to the gate's repo (PR #362 review F2):
+            # a PR number resolves against the checkout's origin, so a stale
+            # [projects.<slug>].repo would otherwise act on owner/other#N.
+            "--expect-repo",
+            spec.repo,
             "--json",
             str(json_path),
         ]
@@ -633,6 +639,8 @@ class ExternalRemediation:
                 detail=detail,
                 ctx=ctx,
             )
+        finally:
+            self._in_flight_pr_url = ""
 
     async def _run_inner(
         self,
@@ -659,6 +667,24 @@ class ExternalRemediation:
         except (OSError, ValueError):
             data = None
 
+        if data is not None and data.get("status") == "repo_mismatch":
+            # The CLI's authoritative check refused (gh, redirect-aware —
+            # where the sweep's origin read passed): a configuration
+            # refusal, not a failed run — refunded, re-parked, never an
+            # exhaustion escalation.
+            await refund_repo_mismatch(
+                ctx,
+                gate_id=gate_id,
+                story_id=story_id,
+                spec=spec,
+                repo=repo,
+                origin_seen=((await origin_read(repo)).repo or "").lower(),
+                budget=budget,
+                budget_limit=self._settings.budget,
+                notifier=self._settings.notifier,
+                data=data,
+            )
+            return
         if data is not None:
             await self._record_result(gate_id, story_id, spec, budget, data, ctx)
             return

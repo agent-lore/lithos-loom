@@ -60,7 +60,10 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
     reply_body,
 )
 from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_profile
-from lithos_loom.plugins.story_develop.review_resolve import resolve_change
+from lithos_loom.plugins.story_develop.review_resolve import (
+    RepoMismatchError,
+    resolve_change,
+)
 
 # status -> process exit code. Review-green (nothing left for the operator to do)
 # is 0; a bad-input refusal (fork) is 2; everything else that needs a human is 1.
@@ -170,6 +173,15 @@ def converge_command(
     no_push: bool = typer.Option(
         False, "--no-push", help="Converge locally but do not push to the PR branch."
     ),
+    expect_repo: str | None = typer.Option(
+        None,
+        "--expect-repo",
+        help=(
+            "Refuse to act unless the checkout's origin is this owner/name — "
+            "a PR number resolves against the checkout, so an autonomous "
+            "caller pins it to the repo its gate names."
+        ),
+    ),
     from_github: bool = typer.Option(
         False,
         "--from-github",
@@ -234,7 +246,33 @@ def converge_command(
     repo = repo or Path.cwd()
     host = load_config(config)
 
-    resolved = resolve_change(repo, change, base_branch="main", base_override=base)
+    try:
+        resolved = resolve_change(
+            repo,
+            change,
+            base_branch="main",
+            base_override=base,
+            expect_repo=expect_repo,
+        )
+    except RepoMismatchError as exc:
+        typer.secho(f"error: {exc}; not acting", err=True, fg=typer.colors.RED)
+        if json_out is not None:
+            # a structured refusal the remediation dispatcher reads: refund,
+            # re-park, no exhaustion (PR #362 re-review 2)
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(
+                json.dumps(
+                    {
+                        "status": "repo_mismatch",
+                        "expected_repo": exc.expected,
+                        "actual_repo": exc.actual,
+                        "message": str(exc),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        raise typer.Exit(2) from exc
 
     # converge pushes fixes onto the PR head ref, so it needs a PR (a range /
     # branch spec has no pushable head branch). Reject those up front.

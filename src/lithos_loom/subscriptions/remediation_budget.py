@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from lithos_loom.notifications import NeedsHumanNotice
 
 __all__ = [
+    "PENDING_KEY",
     "REMEDIATION_KEY",
     "RemediationBudget",
     "RemediationNotifier",
@@ -28,6 +29,14 @@ __all__ = [
 
 # Gate-metadata key holding the S5b budget state.
 REMEDIATION_KEY = "external_remediation"
+
+# Gate-metadata key parking a batch deferred behind the busy single-flight
+# slot (PR #346 review F1): ingestion's high-water marks consume the batch,
+# so without a durable trigger a deferred dispatch would never happen if the
+# PR then went quiet. Url-scoped; consumed atomically with the budget
+# reservation on dispatch; re-parked by a structured CLI refusal; survives
+# restarts.
+PENDING_KEY = "external_remediation_pending"
 
 
 class RemediationNotifier(Protocol):

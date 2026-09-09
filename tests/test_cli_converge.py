@@ -48,8 +48,8 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         ),
     )
 
-    def fake_resolve(repo, spec, *, base_branch="main", base_override=None):
-        captured["resolve"] = {"spec": spec, "base_override": base_override}
+    def fake_resolve(repo, spec, *, base_branch="main", base_override=None, **kw):
+        captured["resolve"] = {"spec": spec, "base_override": base_override, **kw}
         return ResolvedChange(
             base_sha="b" * 40,
             head_sha="h" * 40,
@@ -808,6 +808,49 @@ def test_explicit_check_flags_merge_per_key_over_the_story_tables(
     cfg = story_stubs["config"]
     assert cfg.check_commands == {"lint": "make lint", "typecheck": "pyright"}
     assert cfg.check_states == {"lint": "informational", "sast": "off"}
+
+
+def test_expect_repo_reaches_the_resolver_and_a_mismatch_exits_2(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # PR #362 review F2 applies to converge too: the remediation dispatcher
+    # hands it a bare PR number against a project-mapped checkout.
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--expect-repo", "agent-lore/lithos-loom"],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["resolve"]["expect_repo"] == "agent-lore/lithos-loom"
+
+    from lithos_loom.cli import converge as converge_cli
+    from lithos_loom.plugins.story_develop.review_resolve import RepoMismatchError
+
+    def refuse(repo, spec, **kw):
+        raise RepoMismatchError(expected="o/right", actual="o/wrong")
+
+    monkeypatch.setattr(converge_cli, "resolve_change", refuse)
+    stubs.pop("config", None)
+    out = tmp_path / "r.json"
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--ac",
+            "x",
+            "--expect-repo",
+            "o/right",
+            "--json",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "config" not in stubs
+    assert "o/right" in result.output and "o/wrong" in result.output
+    # a structured refusal the remediation dispatcher can read (re-review 2)
+    record = json.loads(out.read_text())
+    assert record["status"] == "repo_mismatch"
+    assert record["expected_repo"] == "o/right" and record["actual_repo"] == "o/wrong"
 
 
 def test_story_settings_are_the_base_layer(story_stubs: dict) -> None:

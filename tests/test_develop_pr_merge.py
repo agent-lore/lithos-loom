@@ -365,13 +365,26 @@ def _remediation(tmp_path, *, budget: int = 2, spawn=None):
     )
 
 
-async def test_reconcile_still_open_dispatches_remediation(tmp_path) -> None:
+async def test_reconcile_still_open_dispatches_remediation(
+    tmp_path, monkeypatch
+) -> None:
     """The full still-open chain: head observed, batch ingested, converge
     dispatched, budget incremented on the gate."""
     import json as _json
     from pathlib import Path as _Path
 
-    from lithos_loom.subscriptions.external_remediation import REMEDIATION_KEY
+    from lithos_loom.subscriptions import external_remediation as rem_mod
+    from lithos_loom.subscriptions.external_remediation import (
+        REMEDIATION_KEY,
+        OriginRead,
+    )
+
+    # the mapped checkout resolves to the gate's repo (an unresolvable
+    # origin fails closed — PR #362 re-review 3)
+    async def resolvable(path: _Path) -> OriginRead:
+        return OriginRead("agent-lore/lithos-loom", "ok")
+
+    monkeypatch.setattr(rem_mod, "origin_read", resolvable)
 
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)
@@ -621,6 +634,54 @@ async def test_gate_merged_silent_review_marker_failure_defers() -> None:
     assert outcome == "merged"
     marked = await _get(client, gate.id)
     assert "external_review_seen" in marked.metadata
+
+
+async def test_still_open_branch_considers_the_merge_gate_after_remediation() -> None:
+    """PRD S3 watcher half: the still-open branch hands the fetched PR to the
+    merge-gate dispatcher AFTER landability + remediation, telling it whether
+    a remediation run is in flight on this PR (the mutual hold)."""
+    from dataclasses import replace
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    pr = replace(
+        _pr(state="open", merged=False),
+        head_sha="h" * 40,
+        base_sha="b" * 40,
+        base_ref="main",
+        mergeable=True,
+        mergeable_state="behind",
+    )
+    seen: list[dict[str, Any]] = []
+
+    class _MergeGate:
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            seen.append({"story": story_id, "head": pr.head_sha, "hold": hold})
+            return "dispatched"
+
+    class _Remediation:
+        def busy_on(self, pr_url: str) -> bool:
+            return pr_url == _PR_URL
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(pr),
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+    assert outcome == "still_open"
+    assert seen == [{"story": story, "head": "h" * 40, "hold": False}]
+
+    seen.clear()
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(pr),
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+        remediation=_Remediation(),  # type: ignore[arg-type]
+    )
+    assert outcome == "still_open"
+    assert seen == [{"story": story, "head": "h" * 40, "hold": True}]
 
 
 async def test_still_open_branch_checks_landability(caplog: Any) -> None:
