@@ -11,7 +11,7 @@ reviewer has seen these images yet. Approval is held until this pass.
 {gate_summary}
 
 {artifacts_note}
-
+{review_context}
 {severity_calibration}
 
 ## Your job

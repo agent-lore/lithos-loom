@@ -501,7 +501,6 @@ def test_merge_no_commit_conflict_leaves_the_merge_in_progress(
 
 
 def test_merge_no_commit_clean_stages_without_committing(tmp_git_repo: Path) -> None:
-    head = git.base_sha(tmp_git_repo)
     _run(tmp_git_repo, "switch", "-c", "story", "-q")
     _commit(tmp_git_repo, "own.txt", "story")
     head = git.base_sha(tmp_git_repo)

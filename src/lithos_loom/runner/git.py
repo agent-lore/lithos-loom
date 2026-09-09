@@ -294,6 +294,13 @@ def abort_merge(worktree: Path) -> None:
     _git(worktree, "merge", "--abort")
 
 
+def merge_head(worktree: Path) -> str | None:
+    """The sha an in-progress merge is merging (``MERGE_HEAD``), else None."""
+    marker = Path(_git(worktree, "rev-parse", "--git-path", "MERGE_HEAD"))
+    marker = marker if marker.is_absolute() else worktree / marker
+    return marker.read_text().strip() if marker.exists() else None
+
+
 def merge_in_progress(worktree: Path) -> bool:
     """Whether *worktree* has a merge in progress (``MERGE_HEAD`` set) —
     resolved through ``--git-path`` so a linked worktree's private git dir is

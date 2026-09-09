@@ -21,7 +21,7 @@ acceptance criteria below.
 {gate_summary}
 
 {artifacts_note}
-
+{review_context}
 {severity_calibration}
 
 ## Your job

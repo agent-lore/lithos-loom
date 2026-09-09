@@ -21,7 +21,7 @@ latest handoff is at `/workspace/.handoff/{coder_handoff_file}`.
 ## The outgoing reviewer's latest assessment
 
 {prior_review}
-
+{review_context}
 ## Your job
 
 1. Form your own view of the change against the acceptance criteria — you may

@@ -58,7 +58,6 @@ from .check_set import Check, CheckSetResult, render_check_summary
 from .config import HANDOFF_DIRNAME, DevelopConfig
 from .gate_findings import GateLedger
 from .handoff import max_severity, render_prompt
-from .loop_entry import LoopEntry as LoopEntry  # re-export: the entry contract
 from .sandbox_facts import for_prompt as _sandbox_section
 from .test_gate import GateResult
 from .turns import TurnResult
@@ -172,6 +171,7 @@ class RoundContext:
     coder_init_template: str = "converge_coder_init.md"
     coder_init_extra: Mapping[str, str] = field(default_factory=dict)
     pre_commit_guard: Callable[[Path], str | None] | None = None
+    review_context: str = ""
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -531,6 +531,7 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         reviewer_timeout=ctx.reviewer_timeout,
         coder_summary=ctx.coder_summary(config, 1) if round_no == 1 else "",
         services=ctx.services,
+        review_context=ctx.review_context,
     )
     ctx.review_cost += panel.cost
     ctx.final_reviews = panel.round_reviews
@@ -672,6 +673,7 @@ def _artifact_review_pass(
         coder_summary="",
         services=ctx.services,
         artifact_pass=True,
+        review_context=ctx.review_context,
     )
     ctx.review_cost += panel.cost
     # #291 round 4: COMBINE each reviewer's regular and artifact outcomes —

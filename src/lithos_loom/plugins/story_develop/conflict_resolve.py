@@ -30,6 +30,7 @@ __all__ = [
     "markers_guard",
     "prepare_conflict_intake",
     "render_conflict_brief",
+    "render_review_context",
 ]
 
 # Bounds on the brief: a conflict in a generated file can be thousands of
@@ -58,7 +59,9 @@ def prepare_conflict_intake(
     already contains the base tip, or the merge is clean (the base-move
     re-gate's job, PRD S3): the worktree is removed again and no agent runs.
     """
-    base_ref = change.base_ref or f"origin/{config.base_branch}"
+    # `--base <sha>` resolves to an empty base_ref with the sha in base_sha;
+    # the mode then merges THAT (PR #364 review F3), never `origin/<sha>`.
+    base_ref = change.base_ref or change.base_sha
     base_sha = git.commit_sha(config.repo, base_ref)
     if git.is_ancestor(config.repo, base_sha, change.head_sha):
         return None
@@ -186,22 +189,80 @@ def _conflicted_region(file: Path) -> list[str]:
 
 
 def markers_guard(
-    paths: tuple[str, ...], *, head_sha: str
+    paths: tuple[str, ...], *, head_sha: str, base_sha: str
 ) -> Callable[[Path], str | None]:
-    """The pre-commit guard: refuse a tree where any conflicted path still
-    carries markers — and refuse a tree at the PR head with NO merge in
-    progress (the coder abandoned the merge; a plain commit there would
-    "converge" without the base, and only the next re-gate would notice)."""
+    """The pre-commit guard — the host-side enforcement behind the prompt's
+    "never touch git state" (PR #364 review F2). It proves the INTENDED base
+    is what gets merged: no conflicted path may still carry markers; while a
+    merge is in progress it must be a merge of exactly *base_sha* onto the PR
+    head; and once HEAD has moved past the PR head, *base_sha* must be an
+    ancestor of it. Anything else — an aborted merge, a merge of something
+    else, an agent commit that skipped the merge — fails the round, so the
+    tree is never gated, reviewed or pushed."""
 
     def guard(wt: Path) -> str | None:
         marked = git.conflict_markers(wt, paths)
         if marked:
             return "conflict markers remain in: " + ", ".join(marked)
-        if git.commit_sha(wt) == head_sha and not git.merge_in_progress(wt):
+        merging = git.merge_head(wt)
+        head = git.commit_sha(wt)
+        if merging is not None:
+            if merging != base_sha:
+                return (
+                    f"MERGE_HEAD names {merging[:12]}, not the intended base "
+                    f"{base_sha[:12]} — the merge in progress is not the base merge"
+                )
+            if head != head_sha:
+                return (
+                    f"HEAD moved to {head[:12]} before the base merge was committed "
+                    f"(expected the PR head {head_sha[:12]})"
+                )
+            return None
+        if git.is_ancestor(wt, base_sha, head):
+            return None
+        if head == head_sha:
             return (
                 "the in-progress merge was abandoned in the worktree (no "
                 "MERGE_HEAD at the PR head) — nothing to commit as the merge"
             )
-        return None
+        return (
+            f"the intended base {base_sha[:12]} is not an ancestor of HEAD "
+            f"{head[:12]} — the merge was abandoned and something else committed"
+        )
 
     return guard
+
+
+def render_review_context(
+    paths: tuple[str, ...], *, head_sha: str, base_sha: str, base_ref: str
+) -> str:
+    """The panel's merge-shaped context (PR #364 review F1). The fork-point
+    diff the reviewers start from runs base tip → HEAD, so a conflicted path
+    resolved to the BASE version is absent from it — the PR's change silently
+    dropped. Name the paths and both parents and give each side's diff."""
+    listed = " ".join(paths)
+    return "\n".join(
+        [
+            "## This is a conflict-resolution merge",
+            "",
+            f"HEAD composes the PR branch (head `{head_sha[:12]}`) with its base "
+            f"`{base_ref}` @ `{base_sha[:12]}`; the coder resolved conflicts in:",
+            "",
+            *(f"- `{p}`" for p in paths),
+            "",
+            "The `git diff` above runs from the base tip, so it shows the PR's work "
+            "on the new base — and a conflicted path resolved to the base's version "
+            "is **absent** from it. Inspect the resolution from BOTH parents:",
+            "",
+            f"- `git -C /workspace diff {head_sha[:12]} HEAD -- {listed}` — what the "
+            "resolution did to the PR's side. A path missing from the base-side diff "
+            "but present here was resolved to the base version: confirm the PR's "
+            "intent survived (or was genuinely superseded) before approving.",
+            f"- `git -C /workspace diff {base_sha[:12]} HEAD -- {listed}` — what it "
+            "did to the base's landed work.",
+            "- `git -C /workspace show --cc <merge commit>` — the merge commit's own "
+            "combined diff (only the hunks that differ from BOTH parents).",
+            "",
+            "Approve only if both intents survive, correctly composed.",
+        ]
+    )

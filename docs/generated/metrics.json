@@ -121,7 +121,7 @@
         "qualname": "lithos_loom.cli.project.import_project"
       },
       {
-        "complexity": 48,
+        "complexity": 49,
         "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.config._parse_obsidian_sync"
       }
     ],
-    "total_functions": 1314
+    "total_functions": 1320
   },
   "domain": {
     "associations": 2,
@@ -262,13 +262,12 @@
       }
     },
     "cross_component_edges": 68,
-    "cross_component_module_edges": 287,
+    "cross_component_module_edges": 288,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
       [
         "lithos_loom.plugins.story_develop.agent_session",
-        "lithos_loom.plugins.story_develop.loop_entry",
         "lithos_loom.plugins.story_develop.panel",
         "lithos_loom.plugins.story_develop.rounds"
       ]
@@ -337,7 +336,7 @@
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._slugify",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._title_from_stem"
     ],
-    "tests_private_imports": 93
+    "tests_private_imports": 92
   },
   "size": {
     "components": {
@@ -453,13 +452,13 @@
       },
       "Plugins": {
         "classes": 68,
-        "functions": 399,
+        "functions": 404,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1103,
-        "lines": 15706,
-        "modules": 47,
-        "public_symbols": 258,
-        "sloc": 12566
+        "lines": 15909,
+        "modules": 48,
+        "public_symbols": 263,
+        "sloc": 12746
       },
       "ProjectContext": {
         "classes": 0,
@@ -483,13 +482,13 @@
       },
       "Runners": {
         "classes": 1,
-        "functions": 38,
+        "functions": 39,
         "largest_module": "lithos_loom.runner.git",
-        "largest_module_lines": 331,
-        "lines": 835,
+        "largest_module_lines": 338,
+        "lines": 842,
         "modules": 5,
-        "public_symbols": 30,
-        "sloc": 656
+        "public_symbols": 31,
+        "sloc": 661
       },
       "Sources": {
         "classes": 11,
@@ -552,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 50946,
-    "total_modules": 150,
-    "total_sloc": 40845
+    "total_lines": 51156,
+    "total_modules": 151,
+    "total_sloc": 41030
   },
   "tests": {
     "ratio": 1.6,
-    "src_lines": 50946,
-    "test_lines": 81319
+    "src_lines": 51156,
+    "test_lines": 81654
   }
 }

@@ -25,9 +25,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
-| `lithos_loom.plugins.story_develop.conflict_resolve` | S | 1 | 3 |
+| `lithos_loom.plugins.story_develop.conflict_resolve` | S | 1 | 4 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
-| `lithos_loom.plugins.story_develop.converge` | M | 2 | 1 |
+| `lithos_loom.plugins.story_develop.converge` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
@@ -44,7 +44,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.loop_entry` | XS | 1 | 0 |
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
-| `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
+| `lithos_loom.plugins.story_develop.panel` | M | 3 | 2 |
+| `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.pr_delivery` | M | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
@@ -138,7 +139,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `ConflictIntake` — A merge in progress, ready for the resolution round.
 - def `prepare_conflict_intake` — Merge the base's current tip into a throwaway worktree at the PR head, without committing. ``None`` when there is nothing to resolve — the head already contains the base tip, or the merge is clean (the base-move re-gate's job, PRD S3): the worktree is removed again and no agent runs.
 - def `render_conflict_brief` — The round-1 brief: the PR's intent, what landed on the base since the merge-base, and the conflicted hunks (bounded per path).
-- def `markers_guard` — The pre-commit guard: refuse a tree where any conflicted path still carries markers — and refuse a tree at the PR head with NO merge in progress (the coder abandoned the merge; a plain commit there would "converge" without the base, and only the next re-gate would notice).
+- def `markers_guard` — The pre-commit guard — the host-side enforcement behind the prompt's "never touch git state" (PR #364 review F2). It proves the INTENDED base is what gets merged: no conflicted path may still carry markers; while a merge is in progress it must be a merge of exactly *base_sha* onto the PR head; and once HEAD has moved past the PR head, *base_sha* must be an ancestor of it. Anything else — an aborted merge, a merge of something else, an agent commit that skipped the merge — fails the round, so the tree is never gated, reviewed or pushed.
+- def `render_review_context` — The panel's merge-shaped context (PR #364 review F1). The fork-point diff the reviewers start from runs base tip → HEAD, so a conflicted path resolved to the BASE version is absent from it — the PR's change silently dropped. Name the paths and both parents and give each side's diff.
 
 ### `lithos_loom.plugins.story_develop.containers`
 - def `container_name` — Stable, unique-per-run container name, e.g. ``loom-develop-ab12cd34-coder``.
@@ -288,6 +290,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `PanelRoundResult` — One round of the reviewer panel — the shared review primitive's result.
 - class `ReviewerState` — Mutable per-reviewer run state (container, session, tool, ledger).
 - def `run_panel_round` — Drive the reviewer panel for a single round — the one shared primitive.
+
+### `lithos_loom.plugins.story_develop.panel_prompts`
+- def `context_block` — The ``{review_context}`` slot's value: the block padded onto its own lines, or nothing — every reviewer template (round, re-review, artifact pass, reseed) renders it the same way.
+- def `reviewer_brief` — The optional per-reviewer focus paragraph + lane discipline for its prompts.
+- def `artifact_reviewer_brief` — The reviewer's responsibility on the ARTIFACT pass (#308 review).
+- def `round_prompt` — Render one reviewer's prompt for this round: ``(prompt, resume, review file override)``. *rstate* is the panel's ``ReviewerState`` (its ``spec``, ``ledger`` and last ``outcome`` are read).
 
 ### `lithos_loom.plugins.story_develop.personas`
 - def `canonical_personas` — The canonical reviewer personas, keyed by name (ADR 0003 §8).

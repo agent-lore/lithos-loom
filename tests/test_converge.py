@@ -789,6 +789,9 @@ def test_resolve_mode_seeds_the_loop_from_a_merge_in_progress(
         seen["guard_before"] = entry.pre_commit_guard(wt)
         (wt / "shared.txt").write_text("feature+base\n")  # the coder resolves it
         seen["guard_after"] = entry.pre_commit_guard(wt)
+        # the round commit (what develop()'s commit phase does on the host)
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "resolve"], cwd=wt, check=True)
         return _dev_result(wt, status="approved")
 
     monkeypatch.setattr(converge_mod, "develop", fake_develop)
@@ -868,7 +871,7 @@ def test_markers_guard_refuses_an_abandoned_merge(
     merge_base, head, base_tip = _seed_conflict(tmp_git_repo)
     subprocess.run(["git", "switch", "-q", "feature"], cwd=tmp_git_repo, check=True)
     assert git.merge_no_commit(tmp_git_repo, base_tip) == ["shared.txt"]
-    guard = markers_guard(("shared.txt",), head_sha=head)
+    guard = markers_guard(("shared.txt",), head_sha=head, base_sha=base_tip)
     marked = guard(tmp_git_repo)
     assert marked is not None and "shared.txt" in marked
 
@@ -883,3 +886,61 @@ def test_markers_guard_refuses_an_abandoned_merge(
     assert guard(tmp_git_repo) is None
     assert git.commit_all(tmp_git_repo, "resolve") is not None
     assert guard(tmp_git_repo) is None
+
+
+def test_resolve_mode_gives_the_panel_the_merge_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """PR #364 review F1: the panel must see the conflicted paths and both
+    parents — a resolution taking the base version is invisible in the
+    ordinary fork-point diff."""
+    merge_base, head, base_tip = _seed_conflict(tmp_git_repo)
+    _install(monkeypatch, blocking=False)
+    seen: dict = {}
+
+    def fake_develop(config, *, coder_timeout=3600, reviewer_timeout=3600, entry=None):
+        assert entry is not None
+        wt = entry.worktree_factory(config)
+        seen["context"] = entry.review_context
+        (wt / "shared.txt").write_text("feature+base\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "resolve"], cwd=wt, check=True)
+        return _dev_result(wt, status="approved")
+
+    monkeypatch.setattr(converge_mod, "develop", fake_develop)
+    result = converge_pr(
+        _config(tmp_path), _resolve_change(merge_base, head), resolve_conflicts=True
+    )
+    assert result.status == "converged"
+    assert "`shared.txt`" in seen["context"]
+    assert head[:12] in seen["context"] and base_tip[:12] in seen["context"]
+
+
+def test_resolve_mode_never_pushes_a_tree_without_the_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """PR #364 review F2, the belt to the guard's braces: whatever the loop
+    did, the push epilogue refuses a HEAD the intended base is not an
+    ancestor of — `push_to_pr_ref` only proves descent from the PR head."""
+    merge_base, head, base_tip = _seed_conflict(tmp_git_repo)
+    captured = _install(monkeypatch, blocking=False)
+
+    def fake_develop(config, *, coder_timeout=3600, reviewer_timeout=3600, entry=None):
+        assert entry is not None
+        wt = entry.worktree_factory(config)
+        # the loop "approved" a tree that abandoned the merge
+        from lithos_loom.runner import git as _git
+
+        _git.abort_merge(wt)
+        (wt / "extra.txt").write_text("x\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "not a merge"], cwd=wt, check=True)
+        return _dev_result(wt, status="approved")
+
+    monkeypatch.setattr(converge_mod, "develop", fake_develop)
+    result = converge_pr(
+        _config(tmp_path), _resolve_change(merge_base, head), resolve_conflicts=True
+    )
+    assert result.status == "failed" and not result.pushed
+    assert "push" not in captured
+    assert base_tip[:12] in result.message and "ancestor" in result.message
