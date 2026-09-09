@@ -193,8 +193,8 @@ async def post_push_failed(
     again = (
         "retried next sweep"
         if record.attempts < MAX_ATTEMPTS_PER_KEY
-        else "the green verdict stands; a settings change, a head push or a "
-        "base move re-gates"
+        else "the green verdict stands; a settings change, a head push, a "
+        "base move or a daemon restart re-gates"
     )
     await post_finding_then_mark(
         ctx,

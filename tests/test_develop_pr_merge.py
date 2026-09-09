@@ -82,9 +82,14 @@ async def _gate_with_story(
     return story, gate
 
 
-def _github(pr: PullRequest | None) -> AsyncMock:
+def _github(pr: PullRequest | None, *, base_tip: str | None = None) -> AsyncMock:
     github = AsyncMock()
     github.get_pull_request.return_value = pr
+    # the live base tip the sweep resolves; defaults to the PR's own base sha
+    # so a test that doesn't care sees no base move
+    github.get_branch_tip.return_value = (
+        base_tip if base_tip is not None else (pr.base_sha if pr else None)
+    )
     return github
 
 
@@ -707,3 +712,60 @@ async def test_still_open_branch_checks_landability(caplog: Any) -> None:
     findings = [f["summary"] for f in client._findings]
     assert any(s.startswith(PR_CONFLICTED) for s in findings)
     assert (await _get(client, gate.id)).metadata[LANDABILITY_KEY]["state"] == "dirty"
+
+
+async def test_still_open_branch_keys_the_base_move_on_the_live_tip() -> None:
+    """GitHub's PR payload snapshots ``base.sha`` at the PR's last update —
+    loom#352 carried a base four days and three merges stale, so a key built
+    from it never saw main move. The sweep reads the base branch's live tip
+    and hands THAT to landability and the merge-gate dispatcher; an
+    unreadable tip is "unknown" (neither consumer keys on it)."""
+    from dataclasses import replace
+
+    from lithos_loom.subscriptions.pr_landability import LANDABILITY_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    pr = replace(
+        _pr(state="open", merged=False),
+        head_sha="h" * 40,
+        base_sha="",  # the parser no longer fills it
+        base_ref="main",
+        mergeable=False,
+        mergeable_state="dirty",
+    )
+    seen: list[str] = []
+
+    class _MergeGate:
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            seen.append(pr.base_sha)
+            return "dispatched"
+
+    github = _github(pr, base_tip="t" * 40)
+    outcome = await reconcile_pr_gate(
+        gate,
+        github,
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+    assert outcome == "still_open"
+    github.get_branch_tip.assert_awaited_once_with("agent-lore/lithos-loom", "main")
+    assert seen == ["t" * 40]
+    marker = (await _get(client, gate.id)).metadata[LANDABILITY_KEY]
+    assert marker["base_sha"] == "t" * 40
+
+    # the tip cannot be read: nothing is keyed on a guessed base
+    seen.clear()
+    gone = _github(pr, base_tip=None)
+    gone.get_branch_tip.return_value = None
+    gate = await _get(client, gate.id)
+    before = dict(gate.metadata[LANDABILITY_KEY])
+    outcome = await reconcile_pr_gate(
+        gate,
+        gone,
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+    assert outcome == "still_open"
+    assert seen == [""]
+    assert (await _get(client, gate.id)).metadata[LANDABILITY_KEY] == before

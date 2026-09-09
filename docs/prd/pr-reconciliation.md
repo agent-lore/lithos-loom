@@ -344,6 +344,10 @@ panel checked, without opening Lithos.
 `GET /pulls/{n}` response already being fetched — `mergeable: bool | None`,
 `mergeable_state: str`, and **`base_sha: str`**. The third is not decoration:
 without it the sweep cannot tell "the base moved" from "nothing changed", and
+(*as shipped:* the payload's `base.sha` turned out to be a snapshot GitHub takes
+at the PR's last update — loom#352 carried one four days and three merges stale
+— so the sweep reads the base branch's live tip from `GET /git/ref/heads/<base>`
+instead and the parser leaves `base_sha` empty)
 today the dataclass carries `head_sha` / `base_ref` / `head_ref` but no base
 sha at all. On `still_open`, classify:
 

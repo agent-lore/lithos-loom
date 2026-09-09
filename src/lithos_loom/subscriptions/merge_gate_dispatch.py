@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -110,6 +111,10 @@ PROBE_TIMEOUT_SECONDS = 120
 # Record statuses retried on the SAME key, up to MAX_ATTEMPTS_PER_KEY (see
 # merge_gate_record): the run produced no verdict to stand on.
 _RETRYABLE: frozenset[str] = frozenset({"crashed", "push_failed", "repo_mismatch"})
+# ...and of those, the ones a daemon RESTART re-arms with a fresh pair: a
+# crash or a push that keeps failing may be loom's own bug, and the restart
+# is the operator's fix attempt (a repo mismatch settles on the origin read)
+_REBOOT_REARMS: frozenset[str] = frozenset({"crashed", "push_failed"})
 
 # Refusals about the mapped checkout, settled on (repo_path, origin_seen).
 _CHECKOUT_REFUSALS: frozenset[str] = frozenset({"repo_mismatch", "checkout_unresolved"})
@@ -167,8 +172,11 @@ class MergeGateDispatch:
         *,
         spawn: Spawn | None = None,
         hold: Hold | None = None,
+        boot_id: str | None = None,
     ):
         self._settings = settings
+        # one per daemon boot: a crashed key re-arms once per restart
+        self._boot_id = boot_id or uuid.uuid4().hex
         self._spawn: Spawn = spawn if spawn is not None else spawn_merge_gate
         self._hold = hold
         self._tasks: dict[str, asyncio.Task[None]] = {}  # project slug → run
@@ -416,8 +424,10 @@ class MergeGateDispatch:
         budget = read_budget(gate, spec.pr_url)
         if same_key and prior is not None:
             retry = prior.status in _RETRYABLE and prior.attempts < MAX_ATTEMPTS_PER_KEY
-            if retry:
-                attempts = prior.attempts + 1
+            # a crash from a previous boot: the restart IS the fix attempt
+            rebooted = prior.status in _REBOOT_REARMS and prior.boot_id != self._boot_id
+            if retry or rebooted:
+                attempts = 1 if rebooted else prior.attempts + 1
             elif prior.status not in _SETTINGS_DEPENDENT:
                 return "unchanged"  # settled by the shas; waits for a move
             else:
@@ -664,7 +674,9 @@ class MergeGateDispatch:
                 gate_id,
                 story_id,
                 spec,
-                MergeGateRecord(spec.pr_url, head, base, attempts=attempts),
+                MergeGateRecord(
+                    spec.pr_url, head, base, attempts=attempts, boot_id=self._boot_id
+                ),
                 f"raised {type(exc).__name__}: {exc}",
                 ctx,
             )
@@ -694,6 +706,7 @@ class MergeGateDispatch:
             attempts=attempts,
             repo_path=str(repo),
             origin_seen=origin_seen,
+            boot_id=self._boot_id,
         )
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
         if data is None and rc == 4:

@@ -239,3 +239,16 @@ async def test_marker_is_scoped_to_the_pr_url() -> None:
     gate = await _refresh(client, gate)
     await _run(client, gate, story, _pr(mergeable=False, mergeable_state="dirty"))
     assert len(_findings(client)) == 1
+
+
+async def test_unknown_base_tip_is_observed_nothing() -> None:
+    """The sweep could not read the base branch's live tip: the marker is
+    keyed on both shas, so with no base there is nothing honest to key on —
+    treat it like GitHub's "ask again", no finding and no marker."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    pr = _pr(mergeable=False, mergeable_state="dirty", base_sha="")
+    state = await _run(client, gate, story, pr)
+    assert state == "unknown"
+    assert await _marker(client, gate.id) is None
+    assert _findings(client) == []

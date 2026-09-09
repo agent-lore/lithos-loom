@@ -141,11 +141,16 @@ class PullRequest:
     converge (``review_resolve``) reads to refuse pushing to a fork branch under
     origin credentials.
 
-    ``mergeable`` / ``mergeable_state`` / ``base_sha`` (PRD S1 landability):
-    GitHub computes ``mergeable`` lazily and returns ``null`` on a cold fetch —
-    kept as ``None`` here, which the sweep reads as "ask again", never as
-    clean. ``base_sha`` is the base branch's tip at fetch time, so a base move
-    is observable from the sweep's stored marker.
+    ``mergeable`` / ``mergeable_state`` (PRD S1 landability): GitHub computes
+    ``mergeable`` lazily and returns ``null`` on a cold fetch — kept as
+    ``None`` here, which the sweep reads as "ask again", never as clean.
+
+    ``base_sha`` is the base branch's LIVE tip, and the parser leaves it
+    EMPTY: the payload's ``base.sha`` is a snapshot GitHub takes at the PR's
+    last update (loom#352 carried one four days and three merges stale), so
+    it can never key a base move. The sweep fills it from
+    :meth:`GitHubClient.get_branch_tip`; empty means "unknown" to every
+    consumer, never "unchanged".
     """
 
     repo: str
@@ -298,7 +303,7 @@ def parse_pull_request(row: dict[str, Any], *, repo: str) -> PullRequest:
         if isinstance(mergeable := row.get("mergeable"), bool)
         else None,
         mergeable_state=str(row.get("mergeable_state") or ""),
-        base_sha=str(base.get("sha") or ""),
+        # deliberately NOT base["sha"] — see the class docstring
     )
 
 

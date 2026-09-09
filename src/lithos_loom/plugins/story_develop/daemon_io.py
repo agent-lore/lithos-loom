@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping  # runtime: isinstance in fetch_task_metadata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -50,7 +51,7 @@ from .profiles import DEFAULT_PROFILE_NAME, get_profile, resolve_profile
 from .settings_resolver import resolve_scalar_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from datetime import datetime
 
     from .develop import DevelopResult
