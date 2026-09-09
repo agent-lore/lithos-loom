@@ -21,6 +21,7 @@ from lithos_loom.github_client import PullRequest
 from .github_access import github_call, repo_name_with_owner
 
 # A PR argument: ``#142``, bare ``142``, or a GitHub PR URL ending ``/pull/142``.
+_PR_URL_REPO_RE = re.compile(r"github\.com/([^/\s#?]+/[^/\s#?]+)/pull/\d+\b")
 _PR_URL_RE = re.compile(r"/pull/(\d+)\b")
 _PR_HASH_RE = re.compile(r"^#?(\d+)$")
 
@@ -39,19 +40,27 @@ class ResolvedChange:
     reads both to push fixes back to the PR branch, and to refuse a fork PR it
     cannot push to under origin credentials.
 
-    ``is_merged`` reports that the PR has already landed. It is a FLAG here, not
+    ``is_closed`` is the PR's state (closed, merged or not); ``is_merged`` that
+    it landed. ``is_merged`` is a FLAG here, not
     a refusal: reviewing a merged PR is a legitimate read-only operation, so only
     converge — which would push fixes that could never land — acts on it.
+
+    ``base_ref`` names the LIVE base the change lands on (``origin/main`` for a
+    PR, the base branch for a local branch, the typed base of a range) so a
+    base merge during a converge run moves the diff base with it (S5c). Empty
+    when the operator forced the base: an explicit sha is the base, full stop.
     """
 
     base_sha: str
     head_sha: str
     head_ref: str
+    base_ref: str = ""
     title: str = ""
     body: str = ""
     head_branch: str = ""
     is_fork: bool = False
     is_merged: bool = False
+    is_closed: bool = False
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -101,23 +110,55 @@ def _parse_pr_number(spec: str) -> str | None:
     return m.group(1) if m is not None else None
 
 
+class RepoMismatchError(RuntimeError):
+    """The checkout's ``origin`` is not the repository the caller expected.
+
+    A PR number resolves against the LOCAL checkout's origin, never against
+    any URL — so an autonomous caller that maps a project slug to a checkout
+    (the watcher's dispatchers, PRD S2 / S3) would act on ``owner/other#N``
+    if that mapping were stale. Raised before any GitHub call or fetch.
+    """
+
+    def __init__(self, *, expected: str, actual: str) -> None:
+        super().__init__(
+            f"checkout origin is {actual!r}, not the expected {expected!r}"
+        )
+        self.expected = expected
+        self.actual = actual
+
+
 def resolve_change(
     repo: Path,
     spec: str,
     *,
     base_branch: str = "main",
     base_override: str | None = None,
+    allow_fork: bool = True,
+    expect_repo: str | None = None,
 ) -> ResolvedChange:
     """Resolve *spec* into a :class:`ResolvedChange`.
 
     *spec* is one of: a GitHub PR (``#142`` / ``142`` / a PR URL), an explicit
     ``base..head`` ref range, or a single local ref / branch (whose base is its
     merge-base with *base_branch*). *base_override* forces the base sha for the
-    range / branch forms.
+    range / branch forms. With ``allow_fork=False`` a fork PR is answered from
+    GitHub's own metadata **before** anything is fetched — ``is_fork`` set,
+    ``base_sha`` empty — so a caller that must never pull a third-party head
+    into the operator's checkout (merge-gate, PRD S3) can refuse it cleanly.
+    With ``expect_repo`` (``owner/name``) a PR spec is pinned to that
+    repository: the checkout's origin is compared first and a mismatch raises
+    :class:`RepoMismatchError` before anything is fetched (PR #362 review F2).
     """
     number = _parse_pr_number(spec)
     if number is not None:
-        return _resolve_pr(repo, number, base_override=base_override)
+        return _resolve_pr(
+            repo,
+            number,
+            base_override=base_override,
+            allow_fork=allow_fork,
+            expect_repo=expect_repo,
+            spec=spec,
+        )
 
     if ".." in spec:
         base_ref, _, head_ref = spec.partition("..")
@@ -125,27 +166,65 @@ def resolve_change(
             base_sha=_rev_parse(repo, base_override or base_ref),
             head_sha=_rev_parse(repo, head_ref),
             head_ref=head_ref,
+            base_ref="" if base_override else base_ref,
         )
 
     head_sha = _rev_parse(repo, spec)
     if base_override is not None:
         base_sha = _rev_parse(repo, base_override)
+        live_base = ""
     else:
         base_sha = _merge_base(repo, base_branch, spec)
-    return ResolvedChange(base_sha=base_sha, head_sha=head_sha, head_ref=spec)
+        live_base = base_branch
+    return ResolvedChange(
+        base_sha=base_sha, head_sha=head_sha, head_ref=spec, base_ref=live_base
+    )
 
 
 def _resolve_pr(
-    repo: Path, number: str, *, base_override: str | None
+    repo: Path,
+    number: str,
+    *,
+    base_override: str | None,
+    allow_fork: bool = True,
+    expect_repo: str | None = None,
+    spec: str = "",
 ) -> ResolvedChange:
+    if expect_repo is not None:
+        # The URL's own repository, when the spec is a URL (the number is
+        # what selects the PR, so a URL naming another repo must not be
+        # quietly resolved in the checkout's) — then the checkout's origin.
+        # The same lenient shape _parse_pr_number accepts (http, www., a
+        # trailing path, a fragment) — the canonical ref parser is stricter
+        # and would silently skip the check for those forms (self-review).
+        url_repo = _PR_URL_REPO_RE.search(spec)
+        candidates = [url_repo.group(1)] if url_repo is not None else []
+        candidates.append(repo_name_with_owner(repo))
+        for candidate in candidates:
+            if candidate.strip().lower() != expect_repo.strip().lower():
+                raise RepoMismatchError(expected=expect_repo, actual=candidate)
     pr = _gh_pr_view(repo, number)
     head_sha = pr.head_sha
     base_ref_name = pr.base_ref
+    is_fork = bool(pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo)
+    if is_fork and not allow_fork:
+        return ResolvedChange(
+            base_sha="",
+            head_sha=head_sha,
+            head_ref=f"#{number} ({pr.head_ref})".strip(),
+            title=pr.title,
+            body=pr.body,
+            head_branch=pr.head_ref,
+            is_fork=True,
+            is_merged=pr.merged,
+            is_closed=pr.state == "closed",
+        )
     # Fetch the PR head (works for forks too) and the base branch so both
     # commits are local before we materialise a worktree / diff against them.
     _git_fetch(repo, f"pull/{number}/head", base_ref_name)
     if base_override:
         base_sha = _rev_parse(repo, base_override)
+        live_base = ""
     else:
         # Derive the PR's true diff base as the merge-base of the base branch
         # and the head (what GitHub diffs) rather than the PR object's base ref
@@ -154,13 +233,16 @@ def _resolve_pr(
         # also why not requesting the base OID at all sidesteps #207). The base
         # branch was just fetched, so its tip is local at origin/<base>.
         base_sha = _merge_base(repo, f"origin/{base_ref_name}", head_sha)
+        live_base = f"origin/{base_ref_name}"
     return ResolvedChange(
         base_sha=base_sha,
         head_sha=head_sha,
+        base_ref=live_base,
         head_ref=f"#{number} ({pr.head_ref})".strip(),
         title=pr.title,
         body=pr.body,
         head_branch=pr.head_ref,
-        is_fork=bool(pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo),
+        is_fork=is_fork,
         is_merged=pr.merged,
+        is_closed=pr.state == "closed",
     )

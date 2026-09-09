@@ -48,8 +48,8 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         ),
     )
 
-    def fake_resolve(repo, spec, *, base_branch="main", base_override=None):
-        captured["resolve"] = {"spec": spec, "base_override": base_override}
+    def fake_resolve(repo, spec, *, base_branch="main", base_override=None, **kw):
+        captured["resolve"] = {"spec": spec, "base_override": base_override, **kw}
         return ResolvedChange(
             base_sha="b" * 40,
             head_sha="h" * 40,
@@ -404,14 +404,17 @@ def test_exit_code_follows_status(stubs: dict, status: str, code: int) -> None:
 
 
 def _ext(comment_id, *, author="dave", trusted=True, body="a claim"):
+    from lithos_loom.github_review_activity import ReviewStream
+    from lithos_loom.github_review_streams import ReplyMode
     from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
 
     return ExternalFinding(
         author=author,
         source="human",
         trusted=trusted,
-        review_id=None,
-        comment_id=comment_id,
+        stream=ReviewStream.INLINE,
+        activity_id=comment_id,
+        reply_mode=ReplyMode.THREAD,
         thread_url=f"https://example/t/{comment_id}",
         head_sha="h" * 40,
         path="src/x.py",
@@ -587,3 +590,424 @@ def test_triage_rejected_exits_zero(stubs: dict, tmp_path: Path) -> None:
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+
+
+def test_from_github_answers_a_conversation_finding_on_the_conversation(
+    github_stubs: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conversation-comment finding (#353) has no thread to reply on; the
+    epilogue answers it with a conversation comment that names its target —
+    the shape the sweep and the fetch use to prove it handled."""
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import (
+        ExternalFinding,
+        ExternalOutcome,
+    )
+
+    url = "https://github.com/o/r/pull/142#issuecomment-5551158842"
+    from lithos_loom.github_review_activity import ReviewStream
+    from lithos_loom.github_review_streams import ReplyMode
+
+    finding = ExternalFinding(
+        author="davesnowdon",
+        source="human",
+        trusted=True,
+        stream=ReviewStream.CONVERSATION,
+        activity_id=5551158842,
+        reply_mode=ReplyMode.CONVERSATION,
+        thread_url=url,
+        head_sha="",
+        body="Verdict: two P1 gaps",
+    )
+    github_stubs["trusted"] = [finding]
+    pr_comments: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        converge_cli,
+        "post_pr_comment",
+        lambda repo, pr, body: pr_comments.append((pr, body)) or True,
+    )
+
+    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+        return ConvergeResult(
+            status="converged",
+            change=change,
+            pushed=True,
+            pushed_sha="p" * 40,
+            external_outcomes=(
+                ExternalOutcome("f-001", finding, "fixed", detail="bounded the work"),
+            ),
+            message="converged and pushed to feature",
+        )
+
+    import lithos_loom.cli.converge as cli_mod
+
+    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            [
+                "converge",
+                "#142",
+                "--repo",
+                str(tmp_path),
+                "--ac",
+                "do it",
+                "--from-github",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        cli_mod.converge_pr = saved
+
+    assert result.exit_code == 0
+    assert github_stubs["replies"] == []  # no thread to reply on
+    ((pr, body),) = pr_comments
+    assert pr == 142
+    assert body.startswith("Fixed in pppppppppp")
+    assert f"replying to {url}" in body
+
+
+def test_reply_transports_cover_every_reply_mode_and_none_posts_nothing(
+    github_stubs: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #356 re-review: the epilogue routes on the reply capability, never
+    the stream — the table is exhaustive, NONE answers nowhere, and a mode
+    without a transport fails loudly instead of being skipped."""
+    from lithos_loom.github_review_streams import ReplyMode
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    assert set(converge_cli.REPLY_TRANSPORTS) == set(ReplyMode)
+    summary = _ext(500)
+    summary = summary.__class__(**{**summary.__dict__, "reply_mode": ReplyMode.NONE})
+    github_stubs["trusted"] = [summary]
+    args = [
+        "converge",
+        "#142",
+        "--repo",
+        str(tmp_path),
+        "--ac",
+        "do it",
+        "--from-github",
+    ]
+
+    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+        return ConvergeResult(
+            status="converged",
+            change=change,
+            pushed=True,
+            pushed_sha="p" * 40,
+            external_outcomes=tuple(
+                ExternalOutcome(f"f-00{i}", f, "fixed", detail="x")
+                for i, f in enumerate(external_findings or (), 1)
+            ),
+        )
+
+    monkeypatch.setattr(converge_cli, "converge_pr", fake_converge_pr)
+    result = runner.invoke(develop_app, args, catch_exceptions=False)
+    assert result.exit_code == 0
+    assert github_stubs["replies"] == []  # NONE: nothing to answer on
+
+    github_stubs["trusted"] = [_ext(7)]
+    monkeypatch.setattr(converge_cli, "REPLY_TRANSPORTS", {ReplyMode.NONE: None})
+    with pytest.raises(LookupError):
+        runner.invoke(develop_app, args, catch_exceptions=False)
+
+
+# ── --story: the story's resolved develop settings are the base layer ────────
+#
+# lens#78 (2026-09-07): the watcher-dispatched converge ran at the CLI default
+# of 5 rounds while the lens project doc said 8 — converge resolved nothing
+# from the project. With --story it resolves exactly what the daemon path
+# would (project doc > task metadata > host policy); explicit flags still win.
+
+
+@pytest.fixture
+def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
+    from lithos_loom.cli import review as review_cli
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict = stubs
+    monkeypatch.setattr(
+        review_cli,
+        "fetch_task_metadata",
+        lambda url, task_id: (
+            captured.setdefault("fetched", []).append((url, task_id)) or "T",
+            {"project": "lens", "develop_review_profile": "thorough"},
+        ),
+    )
+    panel = (
+        ReviewerSpec(name="correctness", tool="codex"),
+        ReviewerSpec(name="tests", tool="claude"),
+    )
+    monkeypatch.setattr(
+        review_cli,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(
+            max_rounds=8,
+            image="ralph-sandbox:lens",
+            test_command="make check",
+            reviewers=panel,
+            reviewers_explicit=True,
+            coder="codex",
+            # the resolver's contract: the task's profile arrives parsed
+            review_profile_task=meta.get("develop_review_profile"),
+        ),
+    )
+    # the host config's Lithos is where the story is fetched from, and its
+    # [story_develop] section is the profile + default-model policy
+    monkeypatch.setattr(
+        converge_cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=Path("/tmp/w"), lithos_url="http://lithos.test"
+            ),
+            story_develop=SimpleNamespace(
+                default_models={"codex": "gpt-test", "claude": "claude-test"},
+                default_review_profile="standard",
+                unknown_profile="halt",
+            ),
+        ),
+    )
+    return captured
+
+
+def test_explicit_check_flags_merge_per_key_over_the_story_tables(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #360 self-review: an explicit --check-command / --check-state for
+    # ONE check lays over the story's table per key (the resolver's own
+    # task-over-project shape) — never a whole-table replace.
+    from lithos_loom.cli import review as review_cli
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        review_cli,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(
+            check_commands={"lint": "make lint", "typecheck": "make typecheck"},
+            check_states={"lint": "informational"},
+        ),
+    )
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--story",
+            "story-9",
+            "--check-command",
+            "typecheck=pyright",
+            "--check-state",
+            "sast=off",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.check_commands == {"lint": "make lint", "typecheck": "pyright"}
+    assert cfg.check_states == {"lint": "informational", "sast": "off"}
+
+
+def test_expect_repo_reaches_the_resolver_and_a_mismatch_exits_2(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # PR #362 review F2 applies to converge too: the remediation dispatcher
+    # hands it a bare PR number against a project-mapped checkout.
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--expect-repo", "agent-lore/lithos-loom"],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["resolve"]["expect_repo"] == "agent-lore/lithos-loom"
+
+    from lithos_loom.cli import converge as converge_cli
+    from lithos_loom.plugins.story_develop.review_resolve import RepoMismatchError
+
+    def refuse(repo, spec, **kw):
+        raise RepoMismatchError(expected="o/right", actual="o/wrong")
+
+    monkeypatch.setattr(converge_cli, "resolve_change", refuse)
+    stubs.pop("config", None)
+    out = tmp_path / "r.json"
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--ac",
+            "x",
+            "--expect-repo",
+            "o/right",
+            "--json",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "config" not in stubs
+    assert "o/right" in result.output and "o/wrong" in result.output
+    # a structured refusal the remediation dispatcher can read (re-review 2)
+    record = json.loads(out.read_text())
+    assert record["status"] == "repo_mismatch"
+    assert record["expected_repo"] == "o/right" and record["actual_repo"] == "o/wrong"
+
+
+def test_story_settings_are_the_base_layer(story_stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["converge", "#142", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    assert story_stubs["fetched"] == [("http://lithos.test", "story-9")]
+    cfg = story_stubs["config"]
+    assert cfg.max_rounds == 8  # the project's cap, not the CLI default
+    assert cfg.image == "ralph-sandbox:lens"
+    assert cfg.test_command == "make check"
+    assert cfg.coder == "codex"
+    # the task's develop_review_profile resolved through the same layering
+    assert cfg.review_profile == "thorough"
+    assert [s.name for s in cfg.reviewers] == ["correctness", "tests"]
+    # the story's PR body is still the acceptance-criteria source
+    assert cfg.acceptance_criteria == "the intent"
+
+
+def test_explicit_flags_win_over_the_story(story_stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--story",
+            "story-9",
+            "--max-rounds",
+            "3",
+            "--image",
+            "custom:img",
+            "--profile",
+            "standard",
+            "--reviewer",
+            "security",
+            "--test-command",
+            "make test",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.max_rounds == 3
+    assert cfg.image == "custom:img"
+    assert cfg.review_profile == "standard"
+    assert [s.name for s in cfg.reviewers] == ["security"]
+    assert cfg.test_command == "make test"
+
+
+def test_missing_story_is_a_hard_error(story_stubs: dict, monkeypatch) -> None:
+    def boom(url, task_id):
+        raise LookupError(f"Lithos task {task_id!r} not found")
+
+    from lithos_loom.cli import review as review_cli
+
+    monkeypatch.setattr(review_cli, "fetch_task_metadata", boom)
+    result = runner.invoke(develop_app, ["converge", "#142", "--story", "nope"])
+    assert result.exit_code == 2
+    assert "config" not in story_stubs  # never reached the loop
+
+
+def test_without_story_the_defaults_are_unchanged(stubs: dict) -> None:
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    cfg = stubs["config"]
+    assert cfg.review_profile == "standard"
+    assert cfg.image == DEFAULT_IMAGE
+    assert cfg.max_rounds == 5  # DevelopConfig's default
+
+
+# ── PR #361 review findings 3 + 4 ────────────────────────────────────────────
+
+
+def test_story_layer_reads_profile_policy_and_models_from_the_loaded_host(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 3: --config must be authoritative. The ambient loaders must not
+    # be consulted at all; the host the command loaded carries the policy.
+    from lithos_loom.plugins.story_develop import daemon_io
+
+    def boom(*a, **k):
+        raise AssertionError("ambient config must not be re-discovered")
+
+    monkeypatch.setattr(daemon_io, "load_review_profile_policy", boom)
+    monkeypatch.setattr(daemon_io, "load_tool_default_models", boom)
+    monkeypatch.setattr(daemon_io, "load_config", boom, raising=False)
+    from lithos_loom.cli import review as review_cli
+
+    monkeypatch.setattr(
+        review_cli,
+        "fetch_task_metadata",
+        lambda url, task_id: ("T", {"project": "lens"}),  # no task profile
+    )
+    monkeypatch.setattr(
+        converge_cli,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=Path("/tmp/w"), lithos_url="http://lithos.test"
+            ),
+            story_develop=SimpleNamespace(
+                default_models={"codex": "gpt-host", "claude": "claude-host"},
+                default_review_profile="thorough",
+                unknown_profile="halt",
+            ),
+        ),
+    )
+    result = runner.invoke(develop_app, ["converge", "#142", "--story", "story-9"])
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.review_profile == "thorough"  # the loaded host's default
+    assert cfg.coder_model == "gpt-host"  # the loaded host's default models
+
+
+def test_explicit_coder_drops_the_story_coders_derived_model(
+    story_stubs: dict,
+) -> None:
+    # Finding 4: the story resolved coder=codex → coder_model=gpt-test; an
+    # explicit --coder claude must not keep the Codex model.
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--story", "story-9", "--coder", "claude"]
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.coder == "claude"
+    assert cfg.coder_model == "claude-test"
+
+
+def test_explicit_profile_re_resolves_a_profile_derived_panel(
+    story_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 4: a panel the story DERIVED from its profile follows an
+    # explicit --profile; a panel the story pinned explicitly stays.
+    from lithos_loom.cli import review as review_cli
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    monkeypatch.setattr(
+        review_cli,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(max_rounds=8),  # no explicit panel
+    )
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--story", "story-9", "--profile", "standard"],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.review_profile == "standard"
+    assert {s.name for s in cfg.reviewers} == {"correctness", "security"}
+    assert cfg.max_rounds == 8  # the rest of the story layer still applies
+
+
+def test_explicit_profile_keeps_a_story_pinned_panel(story_stubs: dict) -> None:
+    # story_stubs pins reviewers_explicit=True with correctness + tests
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--story", "story-9", "--profile", "standard"],
+    )
+    assert result.exit_code == 0, result.output
+    cfg = story_stubs["config"]
+    assert cfg.review_profile == "standard"
+    assert [s.name for s in cfg.reviewers] == ["correctness", "tests"]

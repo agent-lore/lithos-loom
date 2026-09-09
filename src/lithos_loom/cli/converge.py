@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -25,10 +26,12 @@ import typer
 from lithos_loom.cli.review import (
     apply_model_policy,
     host_default_models,
+    layer_check_tables,
     resolve_acceptance_criteria,
     resolve_check_commands,
     resolve_check_states,
     resolve_reviewers,
+    story_settings_for,
 )
 from lithos_loom.config import GitHubWatcherConfig, load_config
 from lithos_loom.plugins.story_develop import engines
@@ -43,17 +46,24 @@ from lithos_loom.plugins.story_develop.config import (
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
 from lithos_loom.plugins.story_develop.external_reviews import (
+    ExternalFinding,
     GitHubError,
+    ReplyMode,
     fetch_external_findings,
+    issue_comment_reply_body,
     pr_number_from_spec,
 )
 from lithos_loom.plugins.story_develop.github_access import repo_name_with_owner
 from lithos_loom.plugins.story_develop.pr_delivery import (
+    post_pr_comment,
     post_thread_reply,
     reply_body,
 )
 from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_profile
-from lithos_loom.plugins.story_develop.review_resolve import resolve_change
+from lithos_loom.plugins.story_develop.review_resolve import (
+    RepoMismatchError,
+    resolve_change,
+)
 
 # status -> process exit code. Review-green (nothing left for the operator to do)
 # is 0; a bad-input refusal (fork) is 2; everything else that needs a human is 1.
@@ -75,8 +85,8 @@ def converge_command(
         help="The PR to converge: #142 / 142 / a GitHub PR URL. "
         "converge pushes fixes to the PR branch, so a bare range / branch is rejected.",
     ),
-    profile: str = typer.Option(
-        "standard",
+    profile: str | None = typer.Option(
+        None,
         "--profile",
         "-p",
         help="Review profile (selects panel + check-set).",
@@ -125,13 +135,14 @@ def converge_command(
         "enforces beyond the structured check-set (diagram drift, codegen, docs lint). "
         "Primary gate for ecosystems the catalog doesn't model (C/C++).",
     ),
-    image: str = typer.Option(
-        DEFAULT_IMAGE,
+    image: str | None = typer.Option(
+        None,
         "--image",
         help="Sandbox container image for the agents and the gate. Match the "
-        "project's develop_image — converge does not read project metadata, so "
-        "without this it runs the default image and a gate needing tooling that "
-        "image lacks (e.g. a browser) can never pass.",
+        "project's develop_image — without --story converge reads no project "
+        "metadata, so without this it runs the default image and a gate needing "
+        "tooling that image lacks (e.g. a browser) can never pass; --story "
+        "inherits develop_image, and this flag still wins.",
     ),
     artifacts_path: str | None = typer.Option(
         None,
@@ -162,15 +173,25 @@ def converge_command(
     no_push: bool = typer.Option(
         False, "--no-push", help="Converge locally but do not push to the PR branch."
     ),
+    expect_repo: str | None = typer.Option(
+        None,
+        "--expect-repo",
+        help=(
+            "Refuse to act unless the checkout's origin is this owner/name — "
+            "a PR number resolves against the checkout, so an autonomous "
+            "caller pins it to the repo its gate names."
+        ),
+    ),
     from_github: bool = typer.Option(
         False,
         "--from-github",
         help="Ingest the PR's external review findings (reviews + inline "
-        "comments) instead of running the local-panel intake: trusted ones "
-        "(allowlisted bots + write/admin humans) are triaged and, if they "
-        "survive, seed the fix loop directly; untrusted ones are printed but "
-        "never fed to an agent. Thread replies are posted for what was fixed "
-        "or rejected.",
+        "comments + conversation comments) instead of running the local-panel "
+        "intake: trusted ones (allowlisted bots + write/admin humans) are "
+        "triaged and, if they survive, seed the fix loop directly; untrusted "
+        "ones are printed but never fed to an agent. Replies are posted for "
+        "what was fixed or rejected (on the thread, or on the conversation "
+        "for a conversation comment).",
     ),
     repo: Path | None = typer.Option(
         None, "--repo", help="Repository to converge in (default: current directory)."
@@ -178,15 +199,25 @@ def converge_command(
     json_out: Path | None = typer.Option(
         None, "--json", help="Write the structured JSON summary to this path."
     ),
+    story: str | None = typer.Option(
+        None,
+        "--story",
+        help=(
+            "Lithos task id of the story behind this PR: resolve its project's "
+            "and its own develop_* settings (rounds, profile, panel, check-set, "
+            "image) exactly as the daemon path does; explicit flags still win."
+        ),
+    ),
     config: Path | None = typer.Option(None, "--config", help="Host config path."),
 ) -> None:
     """Converge an existing PR to review-green (panel + gate), then push."""
     # Fail closed on an unknown profile / coder before spending any containers,
     # through the same single known-set seams the rest of the code uses.
-    try:
-        get_profile(profile)
-    except UnknownProfileError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    if profile is not None:
+        try:
+            get_profile(profile)
+        except UnknownProfileError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     if coder is not None and not engines.is_supported(coder):
         raise typer.BadParameter(
             f"unsupported coder {coder!r}: expected {engines.supported_tools_phrase()}"
@@ -215,7 +246,33 @@ def converge_command(
     repo = repo or Path.cwd()
     host = load_config(config)
 
-    resolved = resolve_change(repo, change, base_branch="main", base_override=base)
+    try:
+        resolved = resolve_change(
+            repo,
+            change,
+            base_branch="main",
+            base_override=base,
+            expect_repo=expect_repo,
+        )
+    except RepoMismatchError as exc:
+        typer.secho(f"error: {exc}; not acting", err=True, fg=typer.colors.RED)
+        if json_out is not None:
+            # a structured refusal the remediation dispatcher reads: refund,
+            # re-park, no exhaustion (PR #362 re-review 2)
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(
+                json.dumps(
+                    {
+                        "status": "repo_mismatch",
+                        "expected_repo": exc.expected,
+                        "actual_repo": exc.actual,
+                        "message": str(exc),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        raise typer.Exit(2) from exc
 
     # converge pushes fixes onto the PR head ref, so it needs a PR (a range /
     # branch spec has no pushable head branch). Reject those up front.
@@ -239,7 +296,7 @@ def converge_command(
     # Fail closed on a blank image before any spend: a whitespace value would
     # reach `docker run` and die deep in the first container start.
     try:
-        resolved_image = parse_image(image, where="--image") or DEFAULT_IMAGE
+        explicit_image = parse_image(image, where="--image") if image else None
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     try:
@@ -249,7 +306,38 @@ def converge_command(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    reviewers = resolve_reviewers(profile, reviewer)
+    # A story's resolved settings are the BASE layer (the same profile → panel
+    # → default-model layering the daemon applies — lens#78 ran at the CLI
+    # default of 5 rounds while the project said 8); explicit flags win.
+    story_layer: dict = {}
+    story_settings = None
+    if story is not None:
+        story_layer, story_settings = story_settings_for(host, story)
+    effective_profile = profile or story_layer.get("review_profile") or "standard"
+    # A DERIVED value must follow the setting it was derived from (PR #361
+    # review F4): an explicit --coder drops the story coder's resolved model
+    # / effort (the model policy below re-fills them from the host), and an
+    # explicit --profile re-resolves a panel the story derived from ITS
+    # profile — while a panel the story pinned explicitly stays.
+    if (
+        coder is not None
+        and story_settings is not None
+        and coder != story_settings.coder
+    ):
+        story_layer.pop("coder_model", None)
+        story_layer.pop("coder_effort", None)
+    panel_derived = story_settings is not None and not story_settings.reviewers_explicit
+    if reviewer or story_layer.get("reviewers") is None:
+        reviewers = resolve_reviewers(effective_profile, reviewer)
+    elif (
+        profile is not None
+        and panel_derived
+        and profile != story_layer.get("review_profile")
+    ):
+        reviewers = resolve_reviewers(effective_profile, None)
+    else:
+        reviewers = story_layer["reviewers"]
+    resolved_image = explicit_image or story_layer.get("image") or DEFAULT_IMAGE
 
     external_findings = None
     gh_repo: str | None = None
@@ -294,29 +382,40 @@ def converge_command(
             raise typer.Exit(0)
         external_findings = tuple(trusted)
 
-    overrides: dict = {}
-    if coder is not None:
-        overrides["coder"] = coder
-    if max_rounds is not None:
-        overrides["max_rounds"] = max_rounds
-
+    # Explicit flags, only where given, laid over the story layer (if any),
+    # laid over the CLI defaults.
+    explicit: dict = {
+        k: v
+        for k, v in {
+            "coder": coder,
+            "max_rounds": max_rounds,
+            "max_cost_usd": max_cost,
+            "test_command": test_command,
+            "parity_command": parity_command,
+            "artifacts_path": resolved_artifacts,
+        }.items()
+        if v is not None
+    }
     develop_config = DevelopConfig(
-        repo=repo,
-        description=resolved.title or f"Converge {resolved.head_ref}",
-        work_dir=host.orchestrator.work_dir / "converge",
-        acceptance_criteria=criteria,
-        review_profile=profile,
-        reviewers=reviewers,
-        base_branch=base or "main",
-        max_cost_usd=max_cost,
-        test_command=test_command,
-        test_timeout=test_timeout,
-        check_commands=check_commands,
-        check_states=check_states,
-        parity_command=parity_command,
-        image=resolved_image,
-        artifacts_path=resolved_artifacts,
-        **overrides,
+        **{
+            **dict(
+                repo=repo,
+                description=resolved.title or f"Converge {resolved.head_ref}",
+                work_dir=host.orchestrator.work_dir / "converge",
+                acceptance_criteria=criteria,
+                base_branch=base or "main",
+                test_timeout=test_timeout,
+            ),
+            **story_layer,
+            **explicit,
+            # the check tables merge per key, explicit flags over the story's
+            **layer_check_tables(
+                story_layer, check_commands=check_commands, check_states=check_states
+            ),
+            "review_profile": effective_profile,
+            "reviewers": reviewers,
+            "image": resolved_image,
+        }
     )
     develop_config = apply_model_policy(
         develop_config,
@@ -377,21 +476,58 @@ def _render(result: ConvergeResult) -> str:
     return "\n".join(lines)
 
 
+# One transport per reply capability (PR #356 re-review): the epilogue routes
+# on the finding's ``reply_mode`` — never on its stream — so a new stream
+# that picks an existing capability in its adapter row is answered here
+# unchanged, and a new capability is a new member + a row here. Exhaustive
+# over ReplyMode (checked at import); ``None`` = nothing to answer on.
+Transport = Callable[[str, int, ExternalFinding, str], bool]
+
+
+def _reply_on_thread(repo: str, pr_number: int, f: ExternalFinding, body: str) -> bool:
+    return post_thread_reply(repo, pr_number, f.activity_id, body)
+
+
+def _reply_on_conversation(
+    repo: str, pr_number: int, f: ExternalFinding, body: str
+) -> bool:
+    return post_pr_comment(
+        repo, pr_number, issue_comment_reply_body(body, f.thread_url)
+    )
+
+
+REPLY_TRANSPORTS: dict[ReplyMode, Transport | None] = {
+    ReplyMode.NONE: None,
+    ReplyMode.THREAD: _reply_on_thread,
+    ReplyMode.CONVERSATION: _reply_on_conversation,
+}
+if set(REPLY_TRANSPORTS) != set(ReplyMode):
+    raise RuntimeError("REPLY_TRANSPORTS must cover every ReplyMode")
+
+
+def _reply_transport(mode: ReplyMode) -> Transport | None:
+    try:
+        return REPLY_TRANSPORTS[mode]
+    except KeyError:
+        raise LookupError(f"no reply transport for {mode!r}") from None
+
+
 def _post_external_replies(
     result: ConvergeResult, *, repo: str, pr_number: int
 ) -> None:
-    """Thread a reply onto each comment-backed external finding's thread.
+    """Answer each external finding where it was raised, by its reply mode.
 
     Only what actually happened is asserted: a *fixed* reply is posted only
     when the branch was pushed (its sha is the proof — an unpushed fix must
     not claim to have landed); rejections and disputes reply regardless.
-    Summary-only findings (no ``comment_id``) have no thread to reply on and
-    are left to the rendered summary. Best-effort: a failed reply logs via
-    ``post_thread_reply`` and the rest continue.
+    Findings whose mode is ``NONE`` (a summary review has no thread) are
+    left to the rendered summary. Best-effort: a failed reply logs via the
+    poster and the rest continue.
     """
     posted = 0
     for o in result.external_outcomes:
-        if o.finding.comment_id is None:
+        transport = _reply_transport(o.finding.reply_mode)
+        if transport is None:
             continue
         if o.disposition == "rejected":
             body = reply_body(
@@ -405,7 +541,7 @@ def _post_external_replies(
             )
         else:
             continue  # unaddressed, or a fix that never landed — assert nothing
-        if post_thread_reply(repo, pr_number, o.finding.comment_id, body):
+        if transport(repo, pr_number, o.finding, body):
             posted += 1
     if posted:
-        typer.echo(f"posted {posted} thread repl(ies) on {repo}#{pr_number}")
+        typer.echo(f"posted {posted} external review repl(ies) on {repo}#{pr_number}")

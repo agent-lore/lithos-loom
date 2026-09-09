@@ -31,45 +31,13 @@ from lithos_loom.bus import EventBus
 from lithos_loom.children import _boot
 from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.cursor_store import CursorStore
-from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.lithos_client import LithosClient
-from lithos_loom.notifications import Notifier
+from lithos_loom.notifications import build_notifier
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.subscriptions.escalation_resolver import EscalationResolver
 from lithos_loom.subscriptions.route_runner import RouteRunner
 
 logger = logging.getLogger(__name__)
-
-
-async def _build_notifier(cfg: LoomConfig, http: httpx.AsyncClient) -> Notifier:
-    """The push sinks for needs-human gates, from ``[notifications]``.
-
-    The GitHub mention sink needs an operator login (``[story_develop]
-    .operator_github_login``, #113) AND a working ``gh auth token``; either
-    missing stands the sink down with a log line rather than failing the
-    child — the gate + finding still land, only the push is lost.
-    """
-    notifications = cfg.notifications
-    login = cfg.story_develop.operator_github_login if cfg.story_develop else None
-    github: GitHubClient | None = None
-    if notifications.github_mention and login:
-        try:
-            github = await GitHubClient.create(http=http)
-        except GitHubError as exc:
-            logger.warning(
-                "route-runner child: github_mention notifications disabled — %s", exc
-            )
-    elif notifications.github_mention:
-        logger.info(
-            "route-runner child: github_mention notifications need "
-            "[story_develop].operator_github_login; standing down"
-        )
-    return Notifier(
-        desktop_toast=notifications.desktop_toast,
-        command=notifications.on_needs_human,
-        github_login=login if github is not None else None,
-        github=github,
-    )
 
 
 async def _amain(cfg: LoomConfig) -> int:
@@ -100,7 +68,7 @@ async def _amain(cfg: LoomConfig) -> int:
             cursor_store=cursor_store,
             cursor_name="task-events",
         )
-        notifier = await _build_notifier(cfg, http)
+        notifier = await build_notifier(cfg, http)
         project_repos = {slug: pc.repo for slug, pc in cfg.projects.items()}
         runners = [
             RouteRunner(

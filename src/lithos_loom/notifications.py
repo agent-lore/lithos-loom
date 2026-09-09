@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 from lithos_loom.github_client import parse_github_ref
+from lithos_loom.github_models import LOOM_NOTICE_MARKER
 
 __all__ = ["GitHubCommenter", "NeedsHumanNotice", "Notifier"]
 
@@ -54,9 +55,20 @@ _NOTIFY_SEND = "notify-send"
 _STDERR_TAIL_CHARS = 200
 
 
+REDISPATCH_ACTIONS = (
+    "complete it to re-dispatch the story (edit the story first if the brief "
+    "must change); cancel the story to abandon"
+)
+"""The route-runner's two actions: the gate holds a story the runner will
+develop again once it is completed. Every other escalation passes its own —
+an exhausted remediation's gate is a decision, not a re-dispatch (PR #361
+review F5: the push channel said "re-dispatch" where nothing would)."""
+
+
 @dataclass(frozen=True)
 class NeedsHumanNotice:
-    """What every sink renders: the gate, the story, and why loom stopped."""
+    """What every sink renders: the gate, the story, why loom stopped, and
+    what the operator can do about it."""
 
     gate_id: str
     story_id: str
@@ -69,6 +81,9 @@ class NeedsHumanNotice:
     github_ref: str | None = None
     """The story's linked GitHub issue or delivered PR url, when it has one —
     the target of the ``@mention`` sink."""
+    actions: str = REDISPATCH_ACTIONS
+    """The actions open to the operator, rendered verbatim after the gate id
+    in every sink that has room for them."""
 
     def as_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -85,9 +100,11 @@ class NeedsHumanNotice:
         return (
             f"@{login} [NeedsHuman] loom stopped on **{self.story_title}** "
             f"(`{self.reason}`): {self.summary}\n\n"
-            f"Gate `{self.gate_id}` in Lithos — complete it to re-dispatch the "
-            "story (edit the story first if the brief must change); cancel the "
-            "story to abandon."
+            f"Gate `{self.gate_id}` in Lithos — {self.actions}.\n\n"
+            # Posted under the operator's (trusted) login on a PR the watcher
+            # sweeps for conversation comments (#353): the marker keeps this
+            # notice out of the external-review stream.
+            f"{LOOM_NOTICE_MARKER}"
         )
 
 
@@ -218,3 +235,36 @@ def notice_github_ref(metadata: Any) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+async def build_notifier(cfg: Any, http: Any) -> Notifier:
+    """The push sinks for needs-human gates, from ``[notifications]``.
+
+    Shared by every daemon child that raises a loom ``human`` gate (the
+    route-runner's failed exit, the github-watcher's exhausted remediation).
+    The GitHub mention sink needs an operator login (``[story_develop]
+    .operator_github_login``, #113) AND a working ``gh auth token``; either
+    missing stands the sink down with a log line rather than failing the
+    child — the gate + finding still land, only the push is lost.
+    """
+    from .github_client import GitHubClient, GitHubError
+
+    notifications = cfg.notifications
+    login = cfg.story_develop.operator_github_login if cfg.story_develop else None
+    github: GitHubClient | None = None
+    if notifications.github_mention and login:
+        try:
+            github = await GitHubClient.create(http=http)
+        except GitHubError as exc:
+            logger.warning("github_mention notifications disabled — %s", exc)
+    elif notifications.github_mention:
+        logger.info(
+            "github_mention notifications need "
+            "[story_develop].operator_github_login; standing down"
+        )
+    return Notifier(
+        desktop_toast=notifications.desktop_toast,
+        command=notifications.on_needs_human,
+        github_login=login if github is not None else None,
+        github=github,
+    )

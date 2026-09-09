@@ -167,7 +167,9 @@ class ConvergeResult:
                 "finding_id": o.finding_id,
                 "author": o.finding.author,
                 "source": o.finding.source,
-                "comment_id": o.finding.comment_id,
+                "stream": o.finding.stream.value,
+                "activity_id": o.finding.activity_id,
+                "reply_mode": o.finding.reply_mode.value,
                 "thread_url": o.finding.thread_url,
                 "disposition": o.disposition,
                 "detail": o.detail,
@@ -178,6 +180,10 @@ class ConvergeResult:
             "deferred_findings": deferred,
             "external_outcomes": external,
             "status": self.status,
+            # The one success verdict (PR #361 review): a consumer that
+            # judged by `status == "converged"` read `triage_rejected` —
+            # every external claim refuted with evidence — as a failure.
+            "succeeded": self.succeeded,
             "head_ref": self.change.head_ref,
             "head_branch": self.change.head_branch,
             "base_sha": self.change.base_sha,
@@ -322,7 +328,7 @@ def converge_pr(
             worktree_factory=lambda cfg: worktree.create_on_branch(
                 cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent
             ),
-            base_override=change.base_sha,
+            base_override=git.RangeBase(change.base_sha, change.base_ref),
             intake_reviews=[dataclasses.replace(seed[0], findings=surviving)],
             intake_check_set=None,
             # The per-id acknowledgement contract (PR #345 re-review 1): the
@@ -463,7 +469,7 @@ def converge_pr(
         worktree_factory=lambda cfg: worktree.create_on_branch(
             cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent
         ),
-        base_override=change.base_sha,
+        base_override=git.RangeBase(change.base_sha, change.base_ref),
         intake_reviews=intake.panel.round_reviews,
         intake_check_set=intake.check_set,
     )

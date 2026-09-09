@@ -33,6 +33,7 @@ from lithos_loom.config import LoomConfig, RetryPolicy, load_config
 from lithos_loom.cursor_store import CursorStore
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.lithos_client import LithosClient, TaskClient
+from lithos_loom.notifications import build_notifier
 from lithos_loom.sources.github_issue_watcher import GitHubIssueWatcher
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
@@ -56,6 +57,10 @@ from lithos_loom.subscriptions._github_issue_sync import (
 from lithos_loom.subscriptions.external_remediation import (
     ExternalRemediation,
     RemediationSettings,
+)
+from lithos_loom.subscriptions.merge_gate_dispatch import (
+    MergeGateDispatch,
+    MergeGateSettings,
 )
 from lithos_loom.subscriptions.retry import run_with_retry
 
@@ -87,6 +92,7 @@ async def _run_reconcile_pass(
     pr_merge_enabled: bool,
     external_reviews_enabled: bool = False,
     remediation: ExternalRemediation | None = None,
+    merge_gate: MergeGateDispatch | None = None,
 ) -> None:
     """Single pass of the periodic Lithos→GH reconciliation sweep.
 
@@ -162,6 +168,7 @@ async def _run_reconcile_pass(
                 ctx,
                 ingest_reviews=external_reviews_enabled,
                 remediation=remediation,
+                merge_gate=merge_gate,
             )
         except Exception as exc:  # defensive — the reconcile catches its own
             logger.warning(
@@ -267,6 +274,9 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
             ) as lithos,
         ):
             github = await GitHubClient.create(http=http)
+            # The push sinks for the needs-human gate an exhausted remediation
+            # raises (PRD S5b) — same builder as the route-runner child.
+            notifier = await build_notifier(cfg, http)
             ctx = SubscriptionContext(
                 lithos=lithos,
                 logger=logging.getLogger("lithos_loom.subscriptions"),
@@ -413,6 +423,20 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
 
             reconcile_seconds = gh_cfg.reconcile_interval_minutes * 60
 
+            projects = {slug: pc.repo for slug, pc in cfg.projects.items()}
+            # PRD S3 (watcher half): the base-move re-gate dispatcher — one
+            # in-flight `develop merge-gate` per project. Built first so the
+            # remediation dispatcher can hold on its in-flight PRs.
+            merge_gate = MergeGateDispatch(
+                MergeGateSettings(
+                    enabled=gh_cfg.merge_gate_enabled,
+                    projects=projects,
+                    work_dir=cfg.orchestrator.work_dir,
+                    config_path=config_path,
+                ),
+                # the mutual hold, late-bound: remediation is built next
+                hold=lambda pr_url: remediation.busy_on(pr_url),
+            )
             # Slice C: the autonomous remediation dispatcher — one per child,
             # its in-flight task IS the global single-flight slot. Built even
             # when the budget is 0 (consider() then reports "disabled") so
@@ -421,10 +445,12 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                 RemediationSettings(
                     trusted_bots=gh_cfg.trusted_bots,
                     budget=gh_cfg.external_remediation_budget,
-                    projects={slug: pc.repo for slug, pc in cfg.projects.items()},
+                    projects=projects,
                     work_dir=cfg.orchestrator.work_dir,
                     config_path=config_path,
-                )
+                    notifier=notifier,
+                ),
+                hold=merge_gate.busy_on,
             )
 
             async def periodic_reconcile() -> None:
@@ -473,6 +499,7 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                             pr_merge_enabled=gh_cfg.pr_merge_poll_enabled,
                             external_reviews_enabled=gh_cfg.external_reviews_enabled,
                             remediation=remediation,
+                            merge_gate=merge_gate,
                         )
                     except Exception:
                         logger.exception(
@@ -497,6 +524,9 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                 # its cancellation-safe spawn terminates the converge child,
                 # so a stopped loom never leaves an orphan pushing to PRs.
                 await remediation.shutdown()
+                # ...and the in-flight merge-gate runs (same reasoning: a
+                # merge commit pushed after loom stopped is an orphan push).
+                await merge_gate.shutdown()
     finally:
         _boot.remove_stop_signals(loop, installed)
         logger.info("github-watcher child stopping")

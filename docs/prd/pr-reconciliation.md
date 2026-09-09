@@ -344,6 +344,10 @@ panel checked, without opening Lithos.
 `GET /pulls/{n}` response already being fetched — `mergeable: bool | None`,
 `mergeable_state: str`, and **`base_sha: str`**. The third is not decoration:
 without it the sweep cannot tell "the base moved" from "nothing changed", and
+(*as shipped:* the payload's `base.sha` turned out to be a snapshot GitHub takes
+at the PR's last update — loom#352 carried one four days and three merges stale
+— so the sweep reads the base branch's live tip from `GET /git/ref/heads/<base>`
+instead and the parser leaves `base_sha` empty)
 today the dataclass carries `head_sha` / `base_ref` / `head_ref` but no base
 sha at all. On `still_open`, classify:
 
@@ -405,7 +409,9 @@ comments has nothing to key on and would be reported forever or never. So:
   `submitted_at: datetime | None`.
 - The marker stores the highest-seen review id **and** the set of seen comment
   ids — reviews and inline comments are separate streams and neither subsumes
-  the other.
+  the other. (Post-hoc, #353: Conversation-tab comments are a **third** stream
+  with its own mark — the only channel open to the PR's own author, i.e. the
+  operator on every loom-delivered PR, which the first two streams missed.)
 - **Policy per state, declared not implied:** `CHANGES_REQUESTED` posts a
   finding; `COMMENTED` posts one only if it carries inline comments or a
   non-empty body; `APPROVED` and `DISMISSED` are recorded in the marker and
@@ -1059,11 +1065,11 @@ Reconciling explicitly, so the two do not drift:
 | # | slice | ships | cost |
 |---|---|---|---|
 | 0 | **S0 real task brief + PR body** — implemented, PR #333 **open** | the coder, the panel AC and the PR body all get the description | none |
-| 1 | S1 landability + `[PRConflicted]` | two fields, one branch, one marker | none |
+| 1 | S1 landability + `[PRConflicted]` — **shipped** (detection; the `behind` auto-update rides with S3) | two fields, one branch, one marker | none |
 | 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
-| 3 | S3 re-gate on base move | the merge-blindness fix | none |
+| 3 | S3 re-gate on base move — **shipped** (`develop merge-gate`: trial merge, conflicting paths, current check-set, green-and-behind push; the watcher half fires on `(head_sha, base_sha, settings fingerprint)` change, one in-flight run per project, `metadata.merge_gate` on the gate, `[MergeGateFailed]`, paths into `[PRConflicted]`, mutual per-PR hold with remediation) | the merge-blindness fix | none |
 | 4 | S4 prevention | graph edges + generated-file policy | none |
-| 5 | **S5c merge-aware ranges** | prerequisite: reviewers stop seeing other people's work | none |
+| 5 | **S5c merge-aware ranges** — **shipped** (`RangeBase` + `fork_point`, three-dot diffs, first-parent enumeration; the pair test is `tests/test_runner_git.py`) | prerequisite: reviewers stop seeing other people's work | none |
 | 6 | **S5a external-claim triage** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
 | 7 | **S5b remediation budget** | the two-bot loop terminates | none |
 | 8 | **S5 conflict convergence** | routine conflicts resolved without the operator | 1 attempt per sha pair |

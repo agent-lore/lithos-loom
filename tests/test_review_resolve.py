@@ -40,6 +40,8 @@ def test_resolves_explicit_ref_range(tmp_git_repo: Path) -> None:
 
     assert change.base_sha == base
     assert change.head_sha == head
+    # the typed base is the live ref for a range (S5c)
+    assert change.base_ref == base
     # a bare range carries no acceptance-criteria source
     assert change.title == ""
     assert change.body == ""
@@ -59,6 +61,7 @@ def test_resolves_local_branch_against_merge_base(tmp_git_repo: Path) -> None:
     assert change.base_sha == main_tip
     assert change.head_sha == head
     assert change.head_ref == "feature"
+    assert change.base_ref == "main"  # the base branch is the live ref (S5c)
 
 
 def test_base_override_wins_for_branch(tmp_git_repo: Path) -> None:
@@ -73,6 +76,8 @@ def test_base_override_wins_for_branch(tmp_git_repo: Path) -> None:
     assert change.base_sha == second
     assert change.head_sha == head
     assert first != second  # sanity: the override is not the default merge-base
+    # an operator-forced base IS the base — no live ref to move it (S5c)
+    assert change.base_ref == ""
 
 
 def test_unknown_ref_raises(tmp_git_repo: Path) -> None:
@@ -132,6 +137,8 @@ def test_resolves_pr_number(stub_gh: SimpleNamespace, tmp_path: Path) -> None:
     # (which is why #207's missing baseRefOid never mattered).
     assert change.base_sha == "m" * 40
     assert stub_gh.merge_base == [("origin/main", "h" * 40)]
+    # the remote-tracking base branch is the live ref converge merges (S5c)
+    assert change.base_ref == "origin/main"
     assert change.head_sha == "h" * 40
     # the PR body is the default acceptance-criteria source
     assert "adds a thing" in change.body
@@ -236,3 +243,127 @@ def test_gh_pr_view_missing_pr_raises(
     monkeypatch.setattr(review_resolve, "github_call", lambda op: None)
     with pytest.raises(RuntimeError, match="PR #999 not found in o/r"):
         review_resolve._gh_pr_view(tmp_path, "999")
+
+
+def test_fork_pr_is_refused_before_any_fetch_when_forks_are_not_allowed(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #360 review F5: merge-gate must never fetch a third-party head into
+    # the operator's checkout — the fork verdict comes from the PR metadata
+    # GitHub already returned, before `pull/N/head` is fetched.
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, head_repo="x/fork")
+    )
+    change = review_resolve.resolve_change(tmp_path, "#142", allow_fork=False)
+    assert change.is_fork is True
+    assert change.head_sha == "h" * 40 and change.head_branch == "feature"
+    assert change.base_sha == ""  # never derived: nothing was fetched
+    assert stub_gh.fetches == [] and stub_gh.merge_base == []
+
+
+def test_allow_fork_default_still_fetches_a_fork(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, head_repo="x/fork")
+    )
+    change = review_resolve.resolve_change(tmp_path, "#142")
+    assert change.is_fork is True
+    assert stub_gh.fetches == [("pull/142/head", "main")]
+
+
+def test_resolved_pr_carries_its_open_or_closed_state(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert review_resolve.resolve_change(tmp_path, "#142").is_closed is False
+    monkeypatch.setattr(
+        review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n, merged=True)
+    )
+    change = review_resolve.resolve_change(tmp_path, "#142")
+    assert change.is_merged is True and change.is_closed is True
+
+
+# ── PR #362 review F2: an autonomous run is pinned to the gate's repo ────────
+
+
+def test_expect_repo_mismatch_is_refused_before_any_github_call_or_fetch(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A PR number resolves against the CHECKOUT's origin; a stale
+    # [projects.<slug>].repo would trial-merge and push owner/wrong#42 for a
+    # gate on owner/right#42. The pin fails closed before anything is fetched.
+    monkeypatch.setattr(review_resolve, "repo_name_with_owner", lambda repo: "o/wrong")
+    called: list[object] = []
+    monkeypatch.setattr(
+        review_resolve, "github_call", lambda op: called.append(op) or _stub_pr("142")
+    )
+    with pytest.raises(review_resolve.RepoMismatchError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142", expect_repo="o/right")
+    assert exc.value.expected == "o/right" and exc.value.actual == "o/wrong"
+    assert "o/right" in str(exc.value) and "o/wrong" in str(exc.value)
+    assert called == [] and stub_gh.fetches == []  # no GitHub call, no fetch
+
+
+def test_expect_repo_match_is_case_insensitive_and_resolves(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        review_resolve, "repo_name_with_owner", lambda repo: "Agent-Lore/Lithos-Loom"
+    )
+    change = review_resolve.resolve_change(
+        tmp_path, "#142", expect_repo="agent-lore/lithos-loom"
+    )
+    assert change.head_sha == "h" * 40
+
+
+def test_no_expect_repo_never_asks_the_checkout(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # an operator's own `converge #142` keeps today's behaviour (no extra gh call)
+    def boom(repo):
+        raise AssertionError("repo_name_with_owner must not be called")
+
+    monkeypatch.setattr(review_resolve, "repo_name_with_owner", boom)
+    change = review_resolve.resolve_change(tmp_path, "#142")
+    assert change.head_sha == "h" * 40
+
+
+def test_expect_repo_checks_a_pr_urls_own_repo_too(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # self-review: only the checkout's origin was compared; a URL naming
+    # another repository resolved its NUMBER in the checkout's repo.
+    monkeypatch.setattr(review_resolve, "repo_name_with_owner", lambda repo: "o/right")
+    with pytest.raises(review_resolve.RepoMismatchError) as exc:
+        review_resolve.resolve_change(
+            tmp_path, "https://github.com/o/other/pull/142", expect_repo="o/right"
+        )
+    assert exc.value.actual == "o/other"
+    assert stub_gh.fetches == []
+    # the matching URL still resolves
+    change = review_resolve.resolve_change(
+        tmp_path, "https://github.com/O/Right/pull/142", expect_repo="o/right"
+    )
+    assert change.head_sha == "h" * 40
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/o/other/pull/142/files",
+        "http://github.com/o/other/pull/142",
+        "https://github.com/o/other/pull/142#issuecomment-1",
+        "https://www.github.com/o/other/pull/142",
+    ],
+)
+def test_expect_repo_checks_every_url_shape_the_number_parser_accepts(
+    stub_gh: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    # self-review: the number parser is lenient (trailing path, http, a
+    # fragment, www.) while the canonical ref parser is strict — a shape
+    # the first accepts and the second rejects skipped the URL-repo check.
+    monkeypatch.setattr(review_resolve, "repo_name_with_owner", lambda repo: "o/right")
+    with pytest.raises(review_resolve.RepoMismatchError) as exc:
+        review_resolve.resolve_change(tmp_path, url, expect_repo="o/right")
+    assert exc.value.actual == "o/other"
+    assert stub_gh.fetches == []

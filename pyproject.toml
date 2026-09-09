@@ -108,6 +108,8 @@ source_modules = [
     "lithos_loom.lithos_client",
     "lithos_loom.github_client",
     "lithos_loom.github_models",
+    "lithos_loom.github_review_activity",
+    "lithos_loom.github_review_streams",
     "lithos_loom.task_graph",
     "lithos_loom.task_line_parser",
     "lithos_loom.task_line",

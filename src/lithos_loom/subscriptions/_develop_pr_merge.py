@@ -8,7 +8,9 @@ github-watcher child's periodic reconcile sweep (``children/github_watcher.py``,
 which enumerates open tasks and holds a ``GitHubClient``), it reads the gate's
 PR merge state from GitHub and, on merge, completes the story **then** the gate;
 on closed-unmerged / deleted it leaves the gate open with a
-``[DeliveredPRClosed]`` finding.
+``[DeliveredPRClosed]`` finding; while still open it also reports
+landability (:mod:`.pr_landability`, PRD S1) and ingests external reviews
+(:mod:`.external_reviews`, PRD S2).
 
 De-dup lives in a single ``metadata.develop_pr_merge_state`` marker written on
 the GATE (mirrors ``github_state_snapshot``), scoped to the PR url it resolved
@@ -22,10 +24,12 @@ gate is now the sole merge-tracking and re-dispatch path.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
+    PrGateSpec,
     is_pr_gate,
     parse_pr_gate,
     waiter_of,
@@ -35,6 +39,8 @@ from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
+from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
+from lithos_loom.subscriptions.pr_landability import check_landability
 
 __all__ = [
     "DELIVERED_PR_CLOSED",
@@ -95,6 +101,37 @@ def _pr_merge_state(pr: Any) -> str:
 # the story then the gate.
 
 
+async def _live_base_tip(
+    github: Any, spec: PrGateSpec, pr: Any, ctx: SubscriptionContext
+) -> str:
+    """The base branch's current tip, or ``""`` when it cannot be read."""
+    branch = getattr(pr, "base_ref", "") or ""
+    if not branch:
+        return ""
+    try:
+        tip = await github.get_branch_tip(spec.repo, branch)
+    except GitHubError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: reading base tip %s@%s for %s failed (%s: %s); "
+            "landability + re-gate skipped this sweep",
+            spec.repo,
+            branch,
+            spec.pr_url,
+            type(exc).__name__,
+            exc,
+        )
+        return ""
+    if not tip:
+        ctx.logger.warning(
+            "[Friction] pr-gate: base branch %s@%s of %s not found; "
+            "landability + re-gate skipped this sweep",
+            spec.repo,
+            branch,
+            spec.pr_url,
+        )
+    return tip or ""
+
+
 async def reconcile_pr_gate(
     gate: Any,
     github: GitHubClient,
@@ -102,6 +139,7 @@ async def reconcile_pr_gate(
     *,
     ingest_reviews: bool = False,
     remediation: ExternalRemediation | None = None,
+    merge_gate: MergeGateDispatch | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -127,7 +165,11 @@ async def reconcile_pr_gate(
     ingestion is on), wraps that ingestion with the slice-C autonomy: the
     head observation + S5b budget *before* it (so exhaustion is stated in
     the finding body), the dispatch decision *after* it (on the batch it
-    posted). See :mod:`.external_remediation`.
+    posted). See :mod:`.external_remediation`. ``merge_gate``, when set, is
+    considered LAST on the still-open branch (PRD S3): it re-gates the PR
+    against its base's current tip on a key change, told whether a
+    remediation run is in flight on this PR so the two never push beside
+    each other. See :mod:`.merge_gate_dispatch`.
     """
     spec = parse_pr_gate(gate)
     if spec is None:
@@ -220,6 +262,14 @@ async def reconcile_pr_gate(
         return "closed_unmerged"
 
     # state == "open" — still in flight; re-poll next sweep (no merge marker).
+    # The base-move key for everything below is the base branch's LIVE tip
+    # (the PR payload's base.sha is a stale snapshot — see PullRequest);
+    # unreadable → "" and neither consumer keys on it this sweep.
+    pr = replace(pr, base_sha=await _live_base_tip(github, spec, pr, ctx))
+    # PRD S1: say so on the story when the PR cannot merge as it stands. Runs
+    # on every merge poll (no separate dial): it reads fields the fetch above
+    # already returned and writes only on a change.
+    await check_landability(gate, spec, story_id, pr, ctx)
     if ingest_reviews:
         budget = None
         note = None
@@ -258,6 +308,11 @@ async def reconcile_pr_gate(
                 )
             if label is not None:
                 ctx.logger.info("external-remediation: %s for %s", label, spec.pr_url)
+    if merge_gate is not None:
+        held = remediation is not None and remediation.busy_on(spec.pr_url)
+        verdict = await merge_gate.consider(gate, spec, story_id, pr, ctx, hold=held)
+        if verdict != "unchanged":
+            ctx.logger.info("merge-gate: %s for %s", verdict, spec.pr_url)
     return "still_open"
 
 

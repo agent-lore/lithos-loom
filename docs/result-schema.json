@@ -97,7 +97,7 @@
           "properties": {
             "reason": {
               "type": "string",
-              "enum": ["max_rounds", "stalled", "disputed", "cost_exceeded", "coder_failed", "reviewer_failed", "failed", "infra", "delivery", "contract_violation", "timeout", "resume_exhausted", "pr_closed_unmerged", "pr_gone", "unknown"]
+              "enum": ["max_rounds", "stalled", "disputed", "cost_exceeded", "coder_failed", "reviewer_failed", "failed", "infra", "delivery", "contract_violation", "timeout", "resume_exhausted", "pr_closed_unmerged", "pr_gone", "remediation_exhausted", "unknown"]
             },
             "summary": {"type": "string"},
             "brief": {"type": "object", "additionalProperties": true}

@@ -230,34 +230,57 @@ def test_resolve_invalid_review_profile_frictioned(fake_client) -> None:
     assert any("develop_review_profile" in f for f in settings.frictions)
 
 
+def test_resolve_review_profile_task_layer_rejected_structurally(
+    fake_client,
+) -> None:
+    # PR #360 re-review 4: a malformed TASK profile must leave the same record
+    # as a malformed project one — a friction and the key in rejected_keys —
+    # never a silent fall-through to the inherited profile.
+    fake_client.note = _ctx_note(
+        "projects/loom/loom-project-context.md",
+        {"develop_review_profile": "minimal"},
+    )
+    settings = resolve_project_settings(
+        "http://x", {"project": "loom", "develop_review_profile": 123}
+    )
+    assert settings.review_profile_project == "minimal"
+    assert settings.review_profile_task is None
+    assert "develop_review_profile" in settings.rejected_keys
+    assert any(
+        f.startswith("task metadata.develop_review_profile:")
+        for f in settings.frictions
+    )
+
+
 def test_apply_review_profile_precedence_task_project_host() -> None:
-    base = ProjectDevelopSettings(review_profile_project="minimal")
     # task wins over project + host
     s = apply_review_profile(
-        base, task_value="thorough", host_default="standard", unknown_profile="halt"
+        ProjectDevelopSettings(
+            review_profile_project="minimal", review_profile_task="thorough"
+        ),
+        host_default="standard",
+        unknown_profile="halt",
     )
     assert s.review_profile == "thorough"
     assert s.review_profile_halt is False
     assert s.frictions == ()
     # project (settings layer) wins when the task is unset
     s = apply_review_profile(
-        base, task_value=None, host_default="standard", unknown_profile="halt"
+        ProjectDevelopSettings(review_profile_project="minimal"),
+        host_default="standard",
+        unknown_profile="halt",
     )
     assert s.review_profile == "minimal"
     # host wins when task + project are both unset
     s = apply_review_profile(
-        ProjectDevelopSettings(),
-        task_value=None,
-        host_default="thorough",
-        unknown_profile="halt",
+        ProjectDevelopSettings(), host_default="thorough", unknown_profile="halt"
     )
     assert s.review_profile == "thorough"
 
 
 def test_apply_review_profile_unknown_name_halts() -> None:
     s = apply_review_profile(
-        ProjectDevelopSettings(),
-        task_value="thorogh",
+        ProjectDevelopSettings(review_profile_task="thorogh"),
         host_default=None,
         unknown_profile="halt",
     )
@@ -267,10 +290,7 @@ def test_apply_review_profile_unknown_name_halts() -> None:
 
 def test_apply_review_profile_unset_inherits_standard_silently() -> None:
     s = apply_review_profile(
-        ProjectDevelopSettings(),
-        task_value=None,
-        host_default=None,
-        unknown_profile="halt",
+        ProjectDevelopSettings(), host_default=None, unknown_profile="halt"
     )
     assert s.review_profile == "standard"
     assert s.review_profile_halt is False
@@ -1717,8 +1737,14 @@ def test_daemon_mode_halts_on_unknown_review_profile(
     from lithos_loom.plugins.story_develop import __main__ as main_mod
 
     captured: dict[str, Any] = {}
+    # the resolver's contract: the task layer's name arrives parsed on the
+    # settings (the stub mirrors that; the real parse is pinned elsewhere)
     monkeypatch.setattr(
-        main_mod, "resolve_project_settings", lambda url, meta: ProjectDevelopSettings()
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(
+            review_profile_task=meta.get("develop_review_profile")
+        ),
     )
     monkeypatch.setattr(
         main_mod,
@@ -2307,3 +2333,23 @@ def test_daemon_copilot_review_metadata_beats_route_flag(
         argv, _ = _daemon_args(tmp_git_repo, arm_dir, "--open-pr", *flag)
         assert main_mod.main(argv) == EXIT_SUCCEEDED
         assert seen["copilot_review"] is expected, (metadata_value, read_failed, flag)
+
+
+def test_fetch_task_metadata_round_trips_title_and_metadata(monkeypatch: Any) -> None:
+    """The on-demand ``--story`` path (converge / merge-gate) fetches the story
+    through this helper at RUNTIME — the live daemon crashed every merge-gate
+    run with ``name 'Mapping' is not defined`` because the name was imported
+    for type-checking only. Exercise the real function body, not a stub."""
+    from lithos_loom.plugins.story_develop import daemon_io
+    from tests.support import make_task
+
+    task = make_task("t1", title="Story", metadata={"project": "lithos-lens"})
+    monkeypatch.setattr(
+        daemon_io, "LithosClient", lambda *a, **k: FakeLithosClient(tasks=(task,))
+    )
+    assert daemon_io.fetch_task_metadata("http://lithos.test", "t1") == (
+        "Story",
+        {"project": "lithos-lens"},
+    )
+    with pytest.raises(LookupError):
+        daemon_io.fetch_task_metadata("http://lithos.test", "missing")

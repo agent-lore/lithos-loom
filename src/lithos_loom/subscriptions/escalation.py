@@ -28,7 +28,7 @@ in as ``[Friction]`` text — the pre-gate behaviour, as the fallback.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -37,7 +37,11 @@ from lithos_loom.gates import (
     STORY_HUMAN_GATE_ID_KEY,
     create_human_gate_best_effort,
 )
-from lithos_loom.notifications import NeedsHumanNotice, notice_github_ref
+from lithos_loom.notifications import (
+    REDISPATCH_ACTIONS,
+    NeedsHumanNotice,
+    notice_github_ref,
+)
 from lithos_loom.subscriptions.dispatch_guards import (
     AttemptStampStore,
     last_attempt_key,
@@ -46,10 +50,12 @@ from lithos_loom.subscriptions.dispatch_guards import (
 )
 
 __all__ = [
+    "REDISPATCH_ACTIONS",
     "Escalation",
     "clear_resolved_escalation",
     "escalate_with_failure",
     "escalation_from_result",
+    "raise_needs_human",
 ]
 
 logger = logging.getLogger(__name__)
@@ -181,9 +187,10 @@ def _needs_human_summary(
     escalation: Escalation,
     run_id: str | None,
     gate_id: str,
+    actions: str = REDISPATCH_ACTIONS,
 ) -> str:
     """The ``[NeedsHuman]`` finding: reason, summary, the run facts every
-    August rescue needed, the gate, and the two actions."""
+    August rescue needed, the gate, and the actions open to the operator."""
     b = escalation.brief
     facts: list[str] = []
     if run_id:
@@ -200,9 +207,110 @@ def _needs_human_summary(
     facts_part = f"; {', '.join(facts)}" if facts else ""
     return (
         f"[NeedsHuman] route {route}: {escalation.reason} — {escalation.summary}"
-        f"{facts_part}; gate {gate_id} — complete it to re-dispatch (edit the "
-        "story first if the brief must change), cancel the story to abandon"
+        f"{facts_part}; gate {gate_id} — {actions}"
     )
+
+
+RecordGate = Callable[[str], Awaitable[bool]]
+"""The caller's own record of the raised gate on its state (the runner's
+failed-attempt marker, the remediation dispatcher's budget marker). Returns
+whether the record landed; ``False`` is folded into the finding as friction."""
+
+
+async def raise_needs_human(
+    lithos: _EscalationClient,
+    *,
+    task_id: str,
+    route: str,
+    agent: str,
+    escalation: Escalation,
+    run_id: str | None = None,
+    notifier: _Notifier | None = None,
+    actions: str = REDISPATCH_ACTIONS,
+    record: RecordGate | None = None,
+    record_problem: str = "could not record the gate",
+) -> tuple[str | None, str | None]:
+    """Raise a loom ``human`` gate on *task_id* and tell the operator.
+
+    The shared core of every in-daemon escalation: a fresh story read (title,
+    project, GitHub link) → the gate (best-effort) → the caller's *record*
+    hook → the push sinks → the ``[NeedsHuman]`` finding with *actions*.
+    Returns ``(gate_id, problem)``: on a gate failure nothing else runs and
+    the caller applies its own fallback with *problem*. Never raises.
+    """
+    story_title = task_id
+    story_meta: Mapping[str, Any] = {}
+    try:
+        fresh = await lithos.task_get(task_id=task_id)
+    except Exception:
+        logger.exception("route %s: task_get for %s failed", route, task_id)
+        fresh = None
+    if fresh is not None:
+        story_title = str(getattr(fresh, "title", None) or story_title)
+        fresh_meta = getattr(fresh, "metadata", None)
+        if isinstance(fresh_meta, Mapping):
+            story_meta = fresh_meta
+    project = story_meta.get("project")
+    project_slug = project if isinstance(project, str) else None
+
+    gate_id, gate_problem = await create_human_gate_best_effort(
+        lithos,
+        story_id=task_id,
+        story_title=story_title,
+        project=project_slug,
+        agent=agent,
+        route=route,
+        reason=escalation.reason,
+        summary=escalation.summary,
+        run_id=run_id,
+        brief=escalation.brief,
+    )
+    if gate_id is None:
+        return None, gate_problem
+
+    problems: list[str] = []
+    if record is not None:
+        try:
+            recorded = await record(gate_id)
+        except Exception:
+            logger.exception("route %s: recording gate %s failed", route, gate_id)
+            recorded = False
+        if not recorded:
+            problems.append(record_problem)
+    logger.info("route %s: escalated %s to gate %s", route, task_id, gate_id)
+
+    if notifier is not None:
+        notice = NeedsHumanNotice(
+            gate_id=gate_id,
+            story_id=task_id,
+            story_title=story_title,
+            project=project_slug,
+            route=route,
+            reason=escalation.reason,
+            summary=escalation.summary,
+            run_id=run_id,
+            github_ref=notice_github_ref(dict(story_meta)),
+            actions=actions,
+        )
+        try:
+            problems.extend(await notifier.needs_human(notice))
+        except Exception:  # the notifier's own contract is never-raises
+            logger.exception("route %s: notifier failed for %s", route, task_id)
+            problems.append("notifier crashed")
+    summary = _needs_human_summary(
+        route=route,
+        escalation=escalation,
+        run_id=run_id,
+        gate_id=gate_id,
+        actions=actions,
+    )
+    if problems:
+        summary += " [Friction] " + "; ".join(problems)
+    try:
+        await lithos.finding_post(task_id=task_id, summary=summary, agent=agent)
+    except Exception:
+        logger.exception("route %s: finding_post failed for %s", route, task_id)
+    return gate_id, None
 
 
 async def escalate_with_failure(
@@ -233,36 +341,33 @@ async def escalate_with_failure(
     ``[Friction]`` text. Every step is best-effort and independently logged.
     """
     run = run_id if isinstance(run_id, str) and run_id else None
-    # A fresh snapshot: the plugin's end-of-run `task_update` (develop_* keys,
-    # a delivered PR url) post-dates the dispatch payload, and the gate's
-    # brief + the mention sink want the current story, not the one dispatched.
-    story_title = str(payload.get("title") or task_id)
-    story_meta: Mapping[str, Any] = payload.get("metadata") or {}
-    try:
-        fresh = await lithos.task_get(task_id=task_id)
-    except Exception:
-        logger.exception(
-            "route %s: task_get for %s failed; using the payload", route, task_id
-        )
-        fresh = None
-    if fresh is not None:
-        story_title = str(getattr(fresh, "title", None) or story_title)
-        fresh_meta = getattr(fresh, "metadata", None)
-        if isinstance(fresh_meta, Mapping):
-            story_meta = fresh_meta
-    project = story_meta.get("project")
 
-    gate_id, gate_problem = await create_human_gate_best_effort(
+    async def _record(gate_id: str) -> bool:
+        return await record_failed_attempt(
+            lithos,
+            task_id=task_id,
+            route=route,
+            agent=agent,
+            payload=payload,
+            run_id=run,
+            stamps=stamps,
+            gate_id=gate_id,
+        )
+
+    gate_id, gate_problem = await raise_needs_human(
         lithos,
-        story_id=task_id,
-        story_title=story_title,
-        project=project if isinstance(project, str) else None,
-        agent=agent,
+        task_id=task_id,
         route=route,
-        reason=escalation.reason,
-        summary=escalation.summary,
+        agent=agent,
+        escalation=escalation,
         run_id=run,
-        brief=escalation.brief,
+        notifier=notifier,
+        record=_record,
+        record_problem=(
+            "could not record the gate on the story (no marker written; the "
+            "gate alone guards re-dispatch, and the resolver nudges on an "
+            "absent provenance key, so completing the gate still retries)"
+        ),
     )
     if gate_id is None:
         detail = f"{escalation.reason} — {escalation.summary}"
@@ -278,52 +383,6 @@ async def escalate_with_failure(
             release=release,
         )
         return None
-
-    problems: list[str] = []
-    recorded = await record_failed_attempt(
-        lithos,
-        task_id=task_id,
-        route=route,
-        agent=agent,
-        payload=payload,
-        run_id=run,
-        stamps=stamps,
-        gate_id=gate_id,
-    )
-    if not recorded:
-        problems.append(
-            "could not record the gate on the story (no marker written; the "
-            "gate alone guards re-dispatch, and the resolver nudges on an "
-            "absent provenance key, so completing the gate still retries)"
-        )
-    summary = _needs_human_summary(
-        route=route, escalation=escalation, run_id=run, gate_id=gate_id
-    )
-    logger.info("RouteRunner %s: escalated %s to gate %s", route, task_id, gate_id)
-
-    if notifier is not None:
-        notice = NeedsHumanNotice(
-            gate_id=gate_id,
-            story_id=task_id,
-            story_title=story_title,
-            project=project if isinstance(project, str) else None,
-            route=route,
-            reason=escalation.reason,
-            summary=escalation.summary,
-            run_id=run,
-            github_ref=notice_github_ref(dict(story_meta)),
-        )
-        try:
-            problems.extend(await notifier.needs_human(notice))
-        except Exception:  # the notifier's own contract is never-raises
-            logger.exception("RouteRunner %s: notifier failed for %s", route, task_id)
-            problems.append("notifier crashed")
-    if problems:
-        summary += " [Friction] " + "; ".join(problems)
-    try:
-        await lithos.finding_post(task_id=task_id, summary=summary, agent=agent)
-    except Exception:
-        logger.exception("RouteRunner %s: finding_post failed for %s", route, task_id)
     if release:
         try:
             await lithos.task_release(task_id=task_id, aspect=route, agent=agent)

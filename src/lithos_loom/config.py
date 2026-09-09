@@ -300,6 +300,17 @@ class GitHubWatcherConfig:
     remediation slices may hand to a coder — comment bodies are third-party
     text on a prompt path.
     """
+    merge_gate_enabled: bool = True
+    """PRD S3 (watcher half): on every still-open ``pr`` gate the sweep
+    re-gates the PR against its base's CURRENT tip whenever the pair
+    ``(head_sha, base_sha)`` or the story's resolved gate settings change —
+    ``develop merge-gate --story`` as a subprocess, zero agent tokens, one
+    in-flight run per project. Green records and pushes the merge commit
+    when the PR was behind (append-only); red / errored posts
+    ``[MergeGateFailed]``; a conflict widens ``[PRConflicted]`` with the
+    paths. ``false`` keeps the sweep to detection. Per-project opt-out:
+    context-doc ``develop_merge_gate = false``.
+    """
     external_remediation_budget: int = 2
     """PRD S5b: max autonomous ``develop converge --from-github`` dispatches
     per delivered PR. The sweep-owned counter on the gate never resets on a
@@ -803,6 +814,7 @@ _GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
         "external_reviews_enabled",
         "trusted_bots",
         "external_remediation_budget",
+        "merge_gate_enabled",
     }
 )
 
@@ -900,6 +912,10 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
             f"non-empty strings (bot logins)"
         )
 
+    merge_gate_enabled = _optional_bool(
+        data, "merge_gate_enabled", True, config_path, "github_watcher"
+    )
+
     external_remediation_budget = _optional_int(
         data,
         "external_remediation_budget",
@@ -924,6 +940,7 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
         external_reviews_enabled=external_reviews_enabled,
         trusted_bots=tuple(trusted_bots_raw),
         external_remediation_budget=external_remediation_budget,
+        merge_gate_enabled=merge_gate_enabled,
     )
 
 

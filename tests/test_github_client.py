@@ -33,6 +33,7 @@ from lithos_loom.github_client import (
     GitHubRepoNotFoundError,
     GitHubTransportError,
     Issue,
+    IssueComment,
     PullRequest,
     PullRequestReview,
     PullRequestReviewComment,
@@ -1317,3 +1318,116 @@ async def test_collaborator_permission_404_means_none_not_repo_gone() -> None:
     async with httpx.AsyncClient() as http:
         client = GitHubClient(http=http, token="fake")
         assert await client.get_collaborator_permission(_REPO, "stranger") == "none"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_issue_comments_maps_fields_and_paginates() -> None:
+    """Conversation-tab comments live on the ISSUES comments endpoint (a PR is
+    an issue there) — the third external-review stream (#353)."""
+    base = f"https://api.github.com/repos/{_REPO}/issues/9/comments"
+    # Page-2 route first with an explicit matcher (first-match-wins), as in
+    # test_list_pull_request_reviews_paginates — the paramless page-1 route
+    # would otherwise re-match page 2 and loop on its own Link header.
+    respx.get(base, params={"page": "2"}).mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 5551158999, "user": {"login": "x"}, "body": ""}]
+        )
+    )
+    page1 = respx.get(base).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 5551158842,
+                    "user": {"login": "davesnowdon"},
+                    "body": "Verdict: not ready",
+                    "html_url": f"https://github.com/{_REPO}/pull/9#issuecomment-5551158842",
+                    "created_at": "2026-09-05T10:25:24Z",
+                    "updated_at": "2026-09-05T10:25:24Z",
+                }
+            ],
+            headers={"Link": f'<{base}?page=2>; rel="next"'},
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        comments = await client.list_issue_comments(_REPO, 9)
+    assert comments[0] == IssueComment(
+        comment_id=5551158842,
+        author="davesnowdon",
+        body="Verdict: not ready",
+        html_url=f"https://github.com/{_REPO}/pull/9#issuecomment-5551158842",
+        created_at=datetime(2026, 9, 5, 10, 25, 24, tzinfo=UTC),
+        updated_at=datetime(2026, 9, 5, 10, 25, 24, tzinfo=UTC),
+    )
+    assert [c.comment_id for c in comments] == [5551158842, 5551158999]
+    assert comments[1].body == "" and comments[1].updated_at is None
+    assert page1.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_issue_comments_pass_since_when_given() -> None:
+    route = respx.get(f"https://api.github.com/repos/{_REPO}/issues/9/comments").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        await client.list_issue_comments(
+            _REPO, 9, since=datetime(2026, 8, 30, tzinfo=UTC)
+        )
+    params = route.calls[0].request.url.params
+    assert params["since"] == "2026-08-30T00:00:00+00:00"
+    assert params["per_page"] == "100"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_pull_request_parse_carries_landability_fields() -> None:
+    """PRD S1: mergeable / mergeable_state come off the single-PR endpoint
+    the sweep already fetches; a null mergeable stays None. The payload's
+    ``base.sha`` is NOT the base tip — GitHub snapshots it at the PR's last
+    update (loom#352 carried a 4-days-stale base after three merges to
+    main), so the parser leaves ``base_sha`` empty for the sweep to resolve
+    from the live ref."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "number": 9,
+                "state": "open",
+                "merged": False,
+                "mergeable": None,
+                "mergeable_state": "unknown",
+                "head": {"sha": "h" * 40, "ref": "feature"},
+                "base": {"sha": "b" * 40, "ref": "main"},
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        pr = await client.get_pull_request(_REPO, 9)
+    assert pr is not None
+    assert pr.mergeable is None and pr.mergeable_state == "unknown"
+    assert pr.base_sha == "" and pr.head_sha == "h" * 40
+    assert pr.base_ref == "main"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_branch_tip_reads_the_live_ref() -> None:
+    """The base-move key (S1 landability, S3 re-gate) is the base branch's
+    CURRENT tip, read from the ref endpoint on every sweep."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/git/ref/heads/main").mock(
+        return_value=httpx.Response(
+            200, json={"ref": "refs/heads/main", "object": {"sha": "t" * 40}}
+        )
+    )
+    respx.get(f"https://api.github.com/repos/{_REPO}/git/ref/heads/gone").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        assert await client.get_branch_tip(_REPO, "main") == "t" * 40
+        assert await client.get_branch_tip(_REPO, "gone") is None

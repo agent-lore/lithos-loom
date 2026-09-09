@@ -231,8 +231,40 @@ def test_review_profile_project_blank_frictions() -> None:
     settings, frictions = _resolve({"develop_review_profile": "  "})
     assert settings.review_profile_project is None
     assert frictions == (
-        "develop_review_profile '  ' invalid; ignoring (must be a non-empty string)",
+        "develop_review_profile: review profile must be a non-empty string "
+        + "(got '  '); ignoring",
     )
+    assert settings.rejected_keys == ("develop_review_profile",)
+
+
+def test_review_profile_task_layer_is_carried_separately() -> None:
+    # Both layers travel unresolved: the task > project > host precedence needs
+    # the host policy and runs in daemon_io.apply_review_profile.
+    settings, frictions = _resolve(
+        {"develop_review_profile": "minimal"},
+        {"develop_review_profile": "  thorough "},
+    )
+    assert settings.review_profile_project == "minimal"
+    assert settings.review_profile_task == "thorough"
+    assert frictions == ()
+    assert settings.rejected_keys == ()
+
+
+@pytest.mark.parametrize("bad", [123, "", "   ", ["thorough"], True])
+def test_review_profile_task_layer_rejected_structurally(bad: object) -> None:
+    # PR #360 re-review 4: the task layer was the one gate key parsed outside
+    # the resolver — a non-string was dropped with no friction and no
+    # rejected key, so a strict consumer gated on the inherited profile.
+    settings, frictions = _resolve(
+        {"develop_review_profile": "minimal"}, {"develop_review_profile": bad}
+    )
+    assert settings.review_profile_task is None
+    assert settings.review_profile_project == "minimal"
+    assert frictions == (
+        "task metadata.develop_review_profile: review profile must be a "
+        + f"non-empty string (got {bad!r}); keeping project default",
+    )
+    assert settings.rejected_keys == ("develop_review_profile",)
 
 
 def test_block_on_red_deprecation_friction() -> None:
@@ -392,3 +424,47 @@ def test_bad_copilot_review_frictions_and_falls_back() -> None:
     settings, frictions = _resolve({"develop_copilot_review": "yes please"})
     assert settings.copilot_review is None
     assert len(frictions) == 1 and "develop_copilot_review" in frictions[0]
+
+
+# ── PR #360 re-review 3: the resolver records WHICH keys it rejected ─────────
+
+
+def test_rejected_keys_are_recorded_structurally_at_both_layers() -> None:
+    from lithos_loom.plugins.story_develop.settings_resolver import (
+        resolve_scalar_settings,
+    )
+
+    frictions: list[str] = []
+    scalars = resolve_scalar_settings(
+        {
+            "develop_image": "  ",
+            "develop_max_rounds": "x",
+            "develop_review_profile": 5,
+            "develop_block_on_red": True,  # inert legacy key: breadcrumb, no rejection
+        },
+        {"develop_check_states": {"lint": "bogus"}},
+        frictions,
+    )
+    assert scalars.rejected_keys == (
+        "develop_image",
+        "develop_max_rounds",
+        "develop_review_profile",
+        "develop_check_states",  # the task layer's, bare key
+    )
+    # the breadcrumb is still posted — it names gate keys, and is not one
+    assert any("develop_block_on_red" in f for f in frictions)
+
+
+def test_a_clean_resolution_rejects_nothing() -> None:
+    from lithos_loom.plugins.story_develop.settings_resolver import (
+        resolve_scalar_settings,
+    )
+
+    frictions: list[str] = []
+    scalars = resolve_scalar_settings(
+        {"develop_image": "img:x", "develop_parity_command": "make parity"},
+        {"develop_test_command": "make test"},
+        frictions,
+    )
+    assert scalars.rejected_keys == ()
+    assert frictions == []

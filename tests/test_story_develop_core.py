@@ -360,6 +360,35 @@ def test_approved_in_round_one_on_lgtm(
     )
 
 
+def test_daemon_path_measures_ranges_from_the_live_base_ref(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """S5c: develop() carries a RangeBase — the recorded start sha PLUS the live
+    base ref — and resolves the fork point at use, so a base merge mid-run moves
+    the range instead of leaking the base's commits into the review."""
+    from lithos_loom.runner import git
+
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+    start = git.base_sha(config.repo)
+    seen: list[git.RangeBase] = []
+    real_fork_point = git.fork_point
+
+    def spy(wt: Path, base: git.RangeBase) -> str:
+        seen.append(base)
+        return real_fork_point(wt, base)
+
+    monkeypatch.setattr(git, "fork_point", spy)
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    assert result.base_sha == start
+    assert seen, "no range was resolved through fork_point"
+    # the fixture repo has no origin, so the local base branch is the live ref
+    assert {b for b in seen} == {git.RangeBase(start_sha=start, ref="main")}
+    # the panel (round 1) and the final commit count both went through it
+    assert len(seen) >= 2
+
+
 def test_model_and_effort_threaded_to_agents(
     monkeypatch: pytest.MonkeyPatch, tmp_git_repo: Path, tmp_path: Path
 ) -> None:
@@ -2098,7 +2127,7 @@ def test_converge_entry_seeds_round_one_and_reuses_loop(
         worktree_factory=lambda cfg: worktree.create_on_branch(
             cfg.repo, head, cfg.description, parent=cfg.worktree_parent
         ),
-        base_override=base,
+        base_override=git.RangeBase(base),
         intake_reviews=intake,
         intake_check_set=intake_check_set,
     )

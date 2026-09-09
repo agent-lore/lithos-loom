@@ -45,6 +45,7 @@ def _change(
         base_sha=_BASE,
         head_sha=_HEAD,
         head_ref="#142 (feature)",
+        base_ref="origin/main",
         title="A PR",
         body="do the thing",
         head_branch=head_branch,
@@ -179,7 +180,9 @@ def test_blocking_intake_seeds_loop_and_pushes_on_approval(
 
     entry = captured["entry"]
     assert entry is not None
-    assert entry.base_override == _BASE  # PR merge-base, not the worktree HEAD
+    # PR merge-base (not the worktree HEAD) + the live base ref, so a base merge
+    # during the run moves the fork point (S5c)
+    assert entry.base_override == converge_mod.git.RangeBase(_BASE, "origin/main")
     assert entry.intake_reviews is panel.round_reviews  # seeded from the intake panel
     assert entry.intake_check_set == "cs"
     assert callable(entry.worktree_factory)
@@ -494,6 +497,7 @@ def test_converge_result_json_round_trips_the_documented_shape(
     assert data == {
         "deferred_findings": [],  # 819370e5: out-of-scope deferrals (none here)
         "status": "converged",
+        "succeeded": True,
         "head_ref": "#142 (feature)",
         "head_branch": "feature",
         "base_sha": _BASE,
@@ -514,14 +518,17 @@ def test_converge_result_json_round_trips_the_documented_shape(
 
 
 def _ext_finding(comment_id: int = 7, body: str = "leaks a handle"):
+    from lithos_loom.github_review_activity import ReviewStream
+    from lithos_loom.github_review_streams import ReplyMode
     from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
 
     return ExternalFinding(
         author="dave",
         source="human",
         trusted=True,
-        review_id=None,
-        comment_id=comment_id,
+        stream=ReviewStream.INLINE,
+        activity_id=comment_id,
+        reply_mode=ReplyMode.THREAD,
         thread_url=f"https://example/thread/{comment_id}",
         head_sha=_HEAD,
         path="src/x.py",
@@ -600,7 +607,7 @@ def test_external_mode_skips_intake_and_seeds_surviving_findings(
     assert by_id["f-001"].disposition == "rejected"
     assert "refutes" in by_id["f-001"].detail
     assert by_id["f-002"].disposition == "fixed"  # acked FIXED + approved loop
-    assert by_id["f-001"].finding.comment_id == 7
+    assert by_id["f-001"].finding.activity_id == 7
 
 
 def test_external_mode_all_rejected_builds_no_coder(

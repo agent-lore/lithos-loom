@@ -307,3 +307,88 @@ def test_notice_github_ref_prefers_the_issue_then_the_delivered_pr() -> None:
     assert notice_github_ref({}) is None
     assert notice_github_ref(None) is None
     assert notice_github_ref({"github_issue_url": ""}) is None
+
+
+async def test_github_mention_is_marked_as_loom_authored() -> None:
+    """The mention is posted under the operator's (trusted) login on a PR the
+    watcher sweeps for conversation comments (#353) — it must carry the marker
+    that keeps it out of the external-review stream."""
+    from lithos_loom.github_models import is_loom_pr_comment
+
+    commenter = _Commenter()
+    await Notifier(
+        desktop_toast=False, github_login="dave", github=commenter
+    ).needs_human(_NOTICE)
+    ((_, _, body),) = commenter.calls
+    assert is_loom_pr_comment(body)
+    assert body.startswith("@dave [NeedsHuman]")
+
+
+# ── build_notifier: the one builder every child uses ─────────────────────────
+
+
+async def test_build_notifier_stands_the_mention_sink_down_without_a_login() -> None:
+    from types import SimpleNamespace
+
+    from lithos_loom.notifications import build_notifier
+
+    cfg = SimpleNamespace(
+        notifications=SimpleNamespace(
+            desktop_toast=False, github_mention=True, on_needs_human="cmd"
+        ),
+        story_develop=None,  # no [story_develop] → no operator login
+    )
+    notifier = await build_notifier(cfg, http=None)
+    assert notifier.desktop_toast is False
+    assert notifier.command == "cmd"
+    assert notifier.github is None and notifier.github_login is None
+
+
+async def test_build_notifier_without_mention_never_touches_github(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from lithos_loom import github_client
+    from lithos_loom.notifications import build_notifier
+
+    async def boom(*a, **k):
+        raise AssertionError("GitHubClient.create must not be called")
+
+    monkeypatch.setattr(github_client.GitHubClient, "create", boom)
+    cfg = SimpleNamespace(
+        notifications=SimpleNamespace(
+            desktop_toast=True, github_mention=False, on_needs_human=None
+        ),
+        story_develop=SimpleNamespace(operator_github_login="dave"),
+    )
+    notifier = await build_notifier(cfg, http=None)
+    assert notifier.desktop_toast is True and notifier.github is None
+
+
+# ── PR #361 review finding 5: the push channel carries the gate's own actions ─
+
+
+def test_comment_body_renders_the_escalation_actions() -> None:
+    from lithos_loom.notifications import REDISPATCH_ACTIONS, NeedsHumanNotice
+
+    base = dict(
+        gate_id="g" * 36,
+        story_id="s-1",
+        story_title="Wire the thing",
+        project="p",
+        reason="remediation_exhausted",
+        summary="budget spent on PR 78",
+    )
+    remediation = NeedsHumanNotice(
+        route="external-remediation",
+        actions="push the fix branch by hand or re-run converge; complete the gate",
+        **base,
+    )
+    body = remediation.comment_body("dave")
+    assert "push the fix branch by hand" in body
+    assert "re-dispatch" not in body  # the runner's actions would mislead here
+    # the default is the runner's two actions, unchanged
+    runner = NeedsHumanNotice(route="story-develop", **base)
+    assert REDISPATCH_ACTIONS in runner.comment_body("dave")
+    assert "re-dispatch" in runner.comment_body("dave")

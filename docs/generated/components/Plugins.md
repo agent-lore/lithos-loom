@@ -21,16 +21,16 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
-| `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 3 |
+| `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.config` | L | 2 | 14 |
+| `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
-| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 13 |
+| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 7 |
+| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 8 |
 | `lithos_loom.plugins.story_develop.external_triage` | S | 1 | 2 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -40,6 +40,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
+| `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
@@ -48,7 +49,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
-| `lithos_loom.plugins.story_develop.review_resolve` | S | 1 | 1 |
+| `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 4 | 11 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
@@ -90,6 +91,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `DesiredCheck` — What a profile (or the default) *asks for* — the input to resolution.
 - class `CheckApplicabilityError` — A *required* desired check has no command for any detected ecosystem.
 - def `formatter_commands` — The write-mode formatter command for each detected ecosystem, in order.
+- def `catalog_commands` — The canonical per-ecosystem commands behind check *name*, or ``None`` for a check the catalog does not know. Read-only: what a settings fingerprint hashes so a catalog change moves it (PRD S3).
 - def `applies` — Whether the canonical check *name* applies to at least one detected ecosystem. ``applies(name, ())`` is always ``False`` — a markerless repo declares every check N/A.
 - def `resolve_check_set` — Resolve a *desired* check-set into concrete checks for *ecosystems*.
 
@@ -123,6 +125,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `parse_check_states` — Validate a per-check state-override map (#273 slice 2), or ``{}`` when absent.
 - def `parse_check_state_pairs` — Parse repeatable CLI ``NAME=STATE`` items into a validated state map (#273).
 - def `parse_parity_command` — Validate a ``parity_command`` override (#273 slice 3), or ``None``.
+- def `parse_review_profile` — Validate a ``develop_review_profile`` NAME, or ``None`` (layer unset).
 - def `parse_bool_setting` — Validate a boolean develop setting (``develop_test_gate`` etc.), or ``None``.
 - def `parse_effort` — Validate + normalise a reasoning-effort level, or ``None``.
 - def `parse_reviewer_entry` — Validate one reviewer mapping into a :class:`ReviewerSpec`.
@@ -155,6 +158,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `post_frictions` — Post config-resolution breadcrumbs as one ``[Friction]`` finding.
 - def `escalation_block` — The result.json ``escalation`` block for a non-delivering run (b91177d2).
 - def `build_result_payload` — Map a :class:`DevelopResult` onto the result.json contract.
+- def `layer_run_settings` — The layers above :func:`resolve_project_settings`, in the daemon's order.
+- def `story_config_overrides` — The :class:`DevelopConfig` fields a story's resolved settings PIN.
+- def `fetch_task_metadata` — ``(title, metadata)`` of *task_id* from Lithos at *url* (raises on a missing task or an unreachable server — an on-demand run asked for a story must not silently proceed without it).
 
 ### `lithos_loom.plugins.story_develop.develop`
 - class `BlockingCheckOutcome` — A blocking raw-exit gate check (repo-parity / a per-check command override) that produced no ledger finding — captured so a final-round failure is named in the run result instead of only living in the round's output artifact (#273).
@@ -173,6 +179,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.external_reviews`
 - class `ExternalFinding` — One external review finding, with enough provenance to reply to it.
+- def `finding_from_activity` — The intake's finding for one normalised row (#355): identity and the reply capability come from the row and its stream's adapter.
 - def `fetch_external_findings` — Fetch a PR's live external findings, split ``(trusted, untrusted)``.
 - def `findings_to_handoff_text` — Render external findings as a synthetic review handoff.
 - def `external_intake_reviews` — Build the synthetic intake that seeds converge's coder, plus the ``finding_id → ExternalFinding`` map the reply epilogue threads back on.
@@ -248,6 +255,13 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `post_results` — Post the run outcome back to the task. Returns True when fully posted.
 - def `complete_task` — Mark the task completed (``--complete-on-approval`` opt-in only).
 
+### `lithos_loom.plugins.story_develop.merge_gate`
+- class `MergeGateCheck` — One check's outcome on the merge result, flattened for the record.
+- class `MergeGateResult` — The outcome of one trial merge + gate.
+- def `settings_fingerprint` — A short stable digest of the resolved gate SETTINGS — everything that decides which checks run and how they block, and nothing that needs a tree or is run-local.
+- def `config_fingerprint` — A short stable digest of *what gated*: the resolved checks, the image, the per-check timeout and the blocking threshold.
+- def `run_merge_gate` — Trial-merge *change*'s current base into its head and gate the result.
+
 ### `lithos_loom.plugins.story_develop.model_policy`
 - def `apply_panel_default_models` — Fill each reviewer's model from the per-tool default where still unset.
 - def `active_model` — The model for *spec* running on the currently-active *tool*.
@@ -311,6 +325,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.review_resolve`
 - class `ResolvedChange` — A concrete change to review: the ``base..head`` commit pair + intent.
+- class `RepoMismatchError` — The checkout's ``origin`` is not the repository the caller expected.
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
 
 ### `lithos_loom.plugins.story_develop.rounds`

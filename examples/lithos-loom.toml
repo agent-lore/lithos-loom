@@ -386,10 +386,13 @@ tags = ["trigger:story-develop"]
 # # Set false to run the watcher for issue sync only.
 # external_reviews_enabled = true
 # # PRD S2 detection: on each still-open `pr` gate the sweep also reads the
-# # PR's reviews + inline review comments and posts anything new as a
-# # one-shot [ExternalReview] finding on the blocked story (CHANGES_REQUESTED
-# # always posts; COMMENTED only with content; APPROVED/DISMISSED are
-# # recorded silently). De-duped by high-water marks on the gate. Rides the
+# # PR's reviews + inline review comments + Conversation-tab comments (#353
+# # — the only channel open to the PR's own author, i.e. the operator on
+# # every loom-delivered PR) and posts anything new as a one-shot
+# # [ExternalReview] finding on the blocked story (CHANGES_REQUESTED always
+# # posts; COMMENTED only with content; APPROVED/DISMISSED are recorded
+# # silently; conversation comments post unless empty or loom-authored).
+# # De-duped by high-water marks on the gate. Rides the
 # # pr_merge_poll_enabled pass. Set false for a pure merge poll.
 # trusted_bots = ["copilot-pull-request-reviewer[bot]"]
 # # Bot logins whose findings may seed automated remediation (ADR 0011:
@@ -405,6 +408,17 @@ tags = ["trigger:story-develop"]
 # # with the exhaustion stated in the finding. 0 disables autonomous
 # # dispatch. Per-project opt-out: context-doc metadata
 # # `develop_external_review_converge = false` (default on).
+# merge_gate_enabled = true
+# # PRD S3 (watcher half): on each still-open `pr` gate the sweep re-gates
+# # the delivered PR against its base's CURRENT tip whenever the pair
+# # (head_sha, base_sha) or the story's resolved gate settings change —
+# # `develop merge-gate <pr> --story <id>` as a subprocess (zero agent
+# # tokens: trial merge + the project's current check-set), one in-flight
+# # run per project. Green pushes the merge commit onto the PR branch when
+# # it was behind (append-only); red / errored posts [MergeGateFailed] on
+# # the story; a conflict names the conflicting paths in [PRConflicted].
+# # Set false to keep the sweep to detection. Per-project opt-out:
+# # context-doc metadata `develop_merge_gate = false` (default on).
 
 # ── story-develop host-wide defaults ──────────────────────────────────
 #
@@ -479,5 +493,6 @@ tags = ["trigger:story-develop"]
 # on_needs_human = "curl -d @- https://ntfy.sh/your-topic"
 #                            # any shell command; the notice arrives as JSON on
 #                            # stdin ({gate_id, story_id, story_title, project,
-#                            # route, reason, summary, run_id, github_ref}) — the
-#                            # escape hatch for ntfy / Pushover / Slack / mail
+#                            # route, reason, summary, run_id, github_ref,
+#                            # actions}) — the escape hatch for ntfy / Pushover /
+#                            # Slack / mail

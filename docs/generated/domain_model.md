@@ -7,6 +7,20 @@
 
 ```mermaid
 classDiagram
+  class ExternalReviewActivity {
+    +stream ReviewStream
+    +activity_id int
+    +author str
+    +body str
+    +url str
+    +head_sha str
+    +path str
+    +line int | None
+    +review_state str
+    +owning_review_id int | None
+    +reply_to int | None
+    +updated_at datetime | None
+  }
   class GitHubAuthError
   class GitHubClient {
     +http httpx.AsyncClient
@@ -34,6 +48,14 @@ classDiagram
     +updated_at datetime
     +html_url str
   }
+  class IssueComment {
+    +comment_id int
+    +author str
+    +body str
+    +html_url str
+    +created_at datetime | None
+    +updated_at datetime | None
+  }
   class PullRequest {
     +repo str
     +number int
@@ -48,6 +70,9 @@ classDiagram
     +body str
     +head_repo str
     +base_repo str
+    +mergeable bool | None
+    +mergeable_state str
+    +base_sha str
   }
   class PullRequestReview {
     +author str

@@ -635,7 +635,7 @@ def run_panel_round(
     reviewers: list[ReviewerState],
     *,
     wt: Path,
-    base: str,
+    base: git.RangeBase,
     round_no: int,
     check_set: CheckSetResult | None,
     gate_ledger: GateLedger,
@@ -663,6 +663,9 @@ def run_panel_round(
     the first interrupted or invalid reviewer.
     """
     resolved = services if services is not None else Services.live()
+    # S5c: resolved per ROUND, not per run — a base merge in an earlier round
+    # moved the fork point, and every prompt slot below measures from it.
+    fork = git.fork_point(wt, base)
     # #283 slice 2: computed once per panel invocation, not per reviewer.
     artifacts_note_value = check_artifacts.render_artifacts_note(config)
     round_reviews: list[ReviewOutcome] = []
@@ -687,7 +690,7 @@ def run_panel_round(
                 sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
-                base_sha=base[:12],
+                base_sha=fork[:12],
                 artifacts_note=artifacts_note_value,
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
@@ -709,8 +712,8 @@ def run_panel_round(
                 sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 acceptance_criteria=config.effective_acceptance_criteria,
                 coder_summary=coder_summary,
-                base_sha=base[:12],
-                diff_stat=git.diff_stat(wt, base),
+                base_sha=fork[:12],
+                diff_stat=git.diff_stat(wt, fork),
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
@@ -727,10 +730,10 @@ def run_panel_round(
                 sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
-                base_sha=base[:12],
+                base_sha=fork[:12],
                 coder_handoff_file=handoff.coder_handoff_name(round_no),
                 open_findings=rstate.ledger.render_open(),
-                diff_stat=git.diff_stat(wt, base),
+                diff_stat=git.diff_stat(wt, fork),
                 gate_summary=render_check_summary(
                     check_set, for_coder=False, gate_ledger=gate_ledger
                 ),
@@ -750,7 +753,7 @@ def run_panel_round(
                 resume=review_resume,
                 prompt=review_prompt,
                 timeout=reviewer_timeout,
-                base=base,
+                base=fork,
                 review_file=review_file_override,
                 reseed_prompt_override=(review_prompt if artifact_pass else None),
                 # #291 round 3: the artifact handoff is not required to account

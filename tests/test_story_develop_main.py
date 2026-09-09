@@ -984,6 +984,60 @@ def test_main_task_id_resolves_description_and_posts(
     assert "results posted to task t-9" in out
 
 
+def test_main_task_id_malformed_review_profile_frictions_and_inherits(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """PR #360 re-review 4: the standalone --task-id path parses the task's
+    develop_review_profile through the shared parser — a non-string is a
+    friction and inherits, never a silent drop."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    captured: dict = {}
+
+    def fake_fetch(url, task_id):
+        return TaskContext(
+            task_id=task_id,
+            title="Add a flag",
+            description="Body.",
+            acceptance_criteria=None,
+            metadata={"develop_review_profile": 123},
+        )
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.1,
+            review_cost_usd=0.1,
+            message="ok",
+        )
+
+    monkeypatch.setattr(main_mod, "fetch_task_context", fake_fetch)
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **k: True)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+
+    rc = main_mod.main(["--repo", str(tmp_git_repo), "--task-id", "t-9"])
+    assert rc == 0
+    assert captured["config"].review_profile == "standard"
+    err = capsys.readouterr().err
+    assert (
+        "[Friction] task metadata.develop_review_profile: review profile must be "
+        + "a non-empty string (got 123); ignoring"
+    ) in err
+
+
 def test_main_rejects_task_id_with_description(tmp_git_repo: Path, capsys) -> None:
     # The task IS the description — a mixed source would let the audit trail
     # claim task X while developing unrelated text.

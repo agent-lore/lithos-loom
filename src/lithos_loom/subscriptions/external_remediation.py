@@ -28,7 +28,8 @@ The guard rails, all sweep-owned (ADR 0011 decision 3 — single writer):
   attributed).
 - **Own-sha skip** — material reviewing loom's own pushed sha is reported,
   never auto-remediated (it is almost always a re-review of the fix in
-  flight).
+  flight). A conversation comment (#353) reviews no sha, so it is never
+  own-sha: a human verdict after loom's push is exactly what must dispatch.
 - **Trust** — only allowlisted bots / write-admin humans' material triggers a
   dispatch (converge re-applies the same line to what it feeds the coder).
 - **Per-project dial** — context-doc ``develop_external_review_converge``
@@ -51,114 +52,75 @@ import asyncio
 import contextlib
 import dataclasses
 import sys
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
-from lithos_loom.github_client import GitHubClient, GitHubError
+from lithos_loom.github_client import GitHubClient
+from lithos_loom.github_review_activity import ExternalReviewActivity
+from lithos_loom.github_review_streams import AuthorTrust
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
-from lithos_loom.subscriptions.external_reviews import EXTERNAL_REVIEW, IngestResult
+from lithos_loom.subscriptions._project_settings import (
+    OriginRead,
+    origin_read,
+    read_project_flag,
+    resolve_project_repo,
+)
+from lithos_loom.subscriptions._subprocess import spawn_command
+from lithos_loom.subscriptions.external_reviews import (
+    IngestResult,
+    PendingMarkerProvider,
+)
+from lithos_loom.subscriptions.remediation_budget import (
+    PENDING_KEY,
+    REMEDIATION_KEY,
+    RemediationBudget,
+    RemediationSettings,
+    read_budget,
+)
+from lithos_loom.subscriptions.remediation_outcome import (
+    escalate_or_report,
+    post_checkout_unresolved_refusal,
+    post_finding,
+    post_repo_mismatch_refusal,
+    record_result,
+    refund_repo_mismatch,
+    settled_refusal,
+)
 
 __all__ = [
     "CONVERGE_SETTING",
     "PENDING_KEY",
     "REMEDIATION_KEY",
     "ExternalRemediation",
+    "OriginRead",
     "RemediationBudget",
     "RemediationSettings",
+    "origin_read",
     "read_budget",
     "spawn_converge",
 ]
 
-# Gate-metadata key holding the S5b budget state (see the module docstring).
-# A separate key from `external_review_seen` and the merge marker — no marker
-# may trip another's skip logic.
-REMEDIATION_KEY = "external_remediation"
-
-# Gate-metadata key parking a batch deferred behind the busy single-flight
-# slot (PR #346 review F1): ingestion's high-water marks consume the batch,
-# so without a durable trigger a deferred dispatch would never happen if the
-# PR then went quiet. Url-scoped; consumed atomically with the budget
-# reservation on dispatch; survives restarts.
-PENDING_KEY = "external_remediation_pending"
 
 # Project-context metadata key: per-project dial for autonomous dispatch.
 CONVERGE_SETTING = "develop_external_review_converge"
+
 
 # Hard wall-clock cap on one converge subprocess, so a hung run can never hold
 # the global single-flight slot forever. Generous: a thorough multi-round
 # converge is an hours-scale run.
 RUN_TIMEOUT_SECONDS = 4 * 3600
 
-_TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
-
 # The completion/friction findings quote at most this much subprocess output.
 _OUTPUT_TAIL_CHARS = 600
 
 Spawn = Callable[[list[str]], Awaitable[tuple[int, str]]]
-
-
-@dataclass(frozen=True)
-class RemediationBudget:
-    """The gate's parsed S5b budget state (fresh when absent / foreign-url)."""
-
-    pr_url: str
-    rounds_used: int = 0
-    last_loom_pushed_sha: str = ""
-    last_seen_head_sha: str = ""
-
-    def as_marker(self) -> dict[str, Any]:
-        return {
-            "pr_url": self.pr_url,
-            "rounds_used": self.rounds_used,
-            "last_loom_pushed_sha": self.last_loom_pushed_sha,
-            "last_seen_head_sha": self.last_seen_head_sha,
-        }
-
-
-def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
-    """Parse the gate's budget marker; fresh state for a foreign / absent url."""
-    raw = gate.metadata.get(REMEDIATION_KEY)
-    if not isinstance(raw, dict) or raw.get("pr_url") != pr_url:
-        return RemediationBudget(pr_url=pr_url)
-    rounds = raw.get("rounds_used")
-    loom_sha = raw.get("last_loom_pushed_sha")
-    seen_sha = raw.get("last_seen_head_sha")
-    return RemediationBudget(
-        pr_url=pr_url,
-        rounds_used=rounds if isinstance(rounds, int) and rounds >= 0 else 0,
-        last_loom_pushed_sha=loom_sha if isinstance(loom_sha, str) else "",
-        last_seen_head_sha=seen_sha if isinstance(seen_sha, str) else "",
-    )
-
-
-@dataclass(frozen=True)
-class RemediationSettings:
-    """Host-side knobs the watcher child threads in from its config."""
-
-    trusted_bots: tuple[str, ...]
-    budget: int
-    projects: Mapping[str, Path] = field(default_factory=dict)
-    work_dir: Path = Path(".")
-    # Forwarded to the subprocess as `-c` so it loads the same host config;
-    # None lets it fall back to env/CWD discovery (the child's own mode).
-    config_path: Path | None = None
-
-
-async def _end_process(proc: asyncio.subprocess.Process) -> None:
-    """Terminate → grace → kill; tolerant of an already-exited child."""
-    if proc.returncode is not None:
-        return
-    proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=10)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
+# Whether a merge-gate run is in flight on a PR url (PRD S3): the two
+# dispatchers hold each other per PR, since either may push to its branch.
+Hold = Callable[[str], bool]
 
 
 async def spawn_converge(cmd: list[str]) -> tuple[int, str]:
@@ -169,24 +131,10 @@ async def spawn_converge(cmd: list[str]) -> tuple[int, str]:
     **cancellation** (watcher shutdown, PR #346 review F5) ends the child
     too before re-raising: an orphaned converge could keep fixing and
     pushing after loom stopped, and a restarted watcher would violate the
-    global single-flight against it.
+    global single-flight against it. (:func:`_subprocess.spawn_command`,
+    shared with the merge-gate dispatcher.)
     """
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT_SECONDS)
-    except TimeoutError:
-        await _end_process(proc)
-        return -1, f"converge run exceeded {RUN_TIMEOUT_SECONDS}s and was killed"
-    except asyncio.CancelledError:
-        await _end_process(proc)
-        raise
-    return proc.returncode if proc.returncode is not None else -1, out.decode(
-        "utf-8", errors="replace"
-    )
+    return await spawn_command(cmd, timeout=RUN_TIMEOUT_SECONDS, label="converge run")
 
 
 class ExternalRemediation:
@@ -198,30 +146,49 @@ class ExternalRemediation:
     both at once — so the no-CAS ``task_update`` merge stays race-free.
     """
 
-    def __init__(self, settings: RemediationSettings, *, spawn: Spawn | None = None):
+    def __init__(
+        self,
+        settings: RemediationSettings,
+        *,
+        spawn: Spawn | None = None,
+        hold: Hold | None = None,
+    ):
         self._settings = settings
         self._spawn: Spawn = spawn if spawn is not None else spawn_converge
+        self._hold = hold
         self._task: asyncio.Task[None] | None = None
+        self._in_flight_pr_url = ""
 
     @property
     def busy(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    def busy_on(self, pr_url: str) -> bool:
+        """Whether a run is claimed or in flight on *pr_url* — the merge-gate
+        dispatcher's hold (PRD S3): a converge may push to that branch at
+        any moment, so a merge commit must wait. Claimed from the moment a
+        dispatch commits (before its reservation write, self-review of PR
+        #362: a probe finishing during that await must already see it) until
+        the run task ends."""
+        return self._in_flight_pr_url == pr_url
 
     async def observe_head(
         self, gate: Any, spec: PrGateSpec, pr: Any, ctx: SubscriptionContext
     ) -> RemediationBudget:
         """Track the PR head and apply the human-push reset. Never raises.
 
-        Inert while a run is in flight: loom's own converge may push at any
-        moment, so a moved head cannot be attributed (the run's completion
-        records its own push before the slot frees). If the run crashes
-        after pushing but before recording, the next sweep misattributes
-        that one push as human and resets — rare, and it errs toward more
-        remediation headroom, never a stuck loop.
+        Inert while a run is in flight — loom's own converge, OR a merge-gate
+        run on this PR (the ``hold``, PRD S3): either may push at any moment,
+        so a moved head cannot be attributed (each run's completion records
+        its own push before its slot frees). If a run crashes after pushing
+        but before recording, the next sweep misattributes that one push as
+        human and resets — rare, and it errs toward more remediation
+        headroom, never a stuck loop.
         """
         budget = read_budget(gate, spec.pr_url)
         head = getattr(pr, "head_sha", "") or ""
-        if self.busy or not head or head == budget.last_seen_head_sha:
+        held = self._hold is not None and self._hold(spec.pr_url)
+        if self.busy or held or not head or head == budget.last_seen_head_sha:
             return budget
         # A moved head is a HUMAN push unless it matches loom's own recorded
         # push; an empty previous sighting is first-time initialization only
@@ -237,7 +204,7 @@ class ExternalRemediation:
                 budget.last_loom_pushed_sha[:12] or "(never pushed)",
                 budget.rounds_used,
             )
-            budget = dataclasses.replace(budget, rounds_used=0, last_seen_head_sha=head)
+            budget = RemediationBudget(pr_url=spec.pr_url, last_seen_head_sha=head)
         else:
             budget = dataclasses.replace(budget, last_seen_head_sha=head)
         await write_marker(
@@ -323,7 +290,7 @@ class ExternalRemediation:
         budget: RemediationBudget,
         github: GitHubClient,
         ctx: SubscriptionContext,
-    ) -> Callable[[list[Any], list[Any]], Awaitable[dict[str, Any] | None]]:
+    ) -> PendingMarkerProvider:
         """The pending-trigger provider ingestion calls with the actionable
         batch just before its atomic marker write (PR #346 re-reviews 1+3).
 
@@ -338,15 +305,11 @@ class ExternalRemediation:
         """
 
         async def provider(
-            reviews: list[Any], comments: list[Any]
+            activities: list[ExternalReviewActivity],
         ) -> dict[str, Any] | None:
             if self._settings.budget <= 0 or story_id is None:
                 return None
-            batch = IngestResult(
-                posted=True,
-                actionable_reviews=list(reviews),
-                actionable_comments=list(comments),
-            )
+            batch = IngestResult(posted=True, actionable=list(activities))
             verdict = await self._dispatchable(batch, spec.repo, budget, github, ctx)
             if verdict != "yes":
                 return None
@@ -452,6 +415,54 @@ class ExternalRemediation:
             )
             await self._clear_pending(gate.id, ctx)
             return "project_disabled"
+        if self._hold is not None and self._hold(spec.pr_url):
+            # PRD S3: a merge-gate run on this PR may push its merge commit
+            # at any moment; a converge dispatched beside it would lose its
+            # leased push and waste the round. The pending trigger (if
+            # parked) stays, so a later sweep resumes the dispatch.
+            ctx.logger.info(
+                "external-remediation: a merge-gate run is in flight on %s; "
+                "deferring dispatch (the pending trigger, if parked, resumes later)",
+                spec.pr_url,
+            )
+            return "deferred_merge_gate"
+        # The cheap origin read (PR #362 re-review 2 F2): a checkout that is
+        # not the gate's repo must not spend a round or consume the parked
+        # trigger — the debt stays parked and dispatches once the mapping is
+        # fixed. The CLI's --expect-repo remains the authoritative check.
+        read = await origin_read(repo)
+        origin = read.repo
+        seen = (origin or "").lower()
+        settled = settled_refusal(gate, spec, repo, seen)
+        if settled is not None:
+            # a refusal (the sweep's or the CLI's) already stands for exactly
+            # what the sweep observes; nothing runs until the mapping or the
+            # read moves
+            ctx.logger.debug(
+                "external-remediation: %s still settled for %s", settled, spec.pr_url
+            )
+            return settled
+        if origin is None:
+            # PR #362 re-review 3 F1: "cannot resolve" is a refusal, never
+            # permission to reserve a round and spawn a child that dies in gh
+            await post_checkout_unresolved_refusal(
+                ctx,
+                gate=gate,
+                story_id=story_id,
+                spec=spec,
+                repo=repo,
+                reason=read.reason,
+            )
+            return "checkout_unresolved"
+        if seen != spec.repo.lower():
+            await post_repo_mismatch_refusal(
+                ctx, gate=gate, story_id=story_id, spec=spec, repo=repo, origin=origin
+            )
+            return "repo_mismatch"
+        # Claim the PR NOW, ahead of the reservation write: the merge-gate
+        # dispatcher's hold reads busy_on, and a settings probe finishing
+        # during the await below must not start a run beside this one.
+        self._in_flight_pr_url = spec.pr_url
 
         # Reserve the round BEFORE the run (crash-safe: a lost refund wastes
         # one round; a lost increment would allow an unbounded retry loop) —
@@ -466,6 +477,7 @@ class ExternalRemediation:
                 metadata={REMEDIATION_KEY: budget.as_marker(), PENDING_KEY: None},
             )
         except LithosClientError as exc:
+            self._in_flight_pr_url = ""  # the claim goes with the reservation
             ctx.logger.warning(
                 "[Friction] external-remediation: budget reservation for gate "
                 "%s failed (%s); not dispatching — will retry next sweep",
@@ -510,111 +522,57 @@ class ExternalRemediation:
         github: GitHubClient,
         ctx: SubscriptionContext,
     ) -> str:
-        """``"yes"`` / ``"no_trusted"`` / ``"own_sha_only"`` for the batch."""
-        items = [(r.author, r.commit_id) for r in ingest.actionable_reviews] + [
-            (c.author, c.commit_id or c.original_commit_id)
-            for c in ingest.actionable_comments
-        ]
-        trusted_cache: dict[str, bool] = {}
+        """``"yes"`` / ``"no_trusted"`` / ``"own_sha_only"`` for the batch.
+
+        A conversation comment carries no sha, so it is never own-sha: a
+        human verdict left after loom's push is exactly what must dispatch.
+        """
+        trust = self._author_trust(repo, github)
         any_trusted = False
-        for author, sha in items:
-            trusted = trusted_cache.get(author)
-            if trusted is None:
-                trusted = await self._trusted(author, repo, github, ctx)
-                trusted_cache[author] = trusted
-            if not trusted:
+        for a in ingest.actionable:
+            if not await trust.is_trusted(a.author):
                 continue
             any_trusted = True
-            if budget.last_loom_pushed_sha and sha == budget.last_loom_pushed_sha:
+            if (
+                budget.last_loom_pushed_sha
+                and a.head_sha == budget.last_loom_pushed_sha
+            ):
                 continue  # a re-review of loom's own fix in flight
             return "yes"
         return "own_sha_only" if any_trusted else "no_trusted"
 
-    async def _trusted(
-        self, author: str, repo: str, github: GitHubClient, ctx: SubscriptionContext
-    ) -> bool:
-        if author in self._settings.trusted_bots:
-            return True
-        try:
-            permission = await github.get_collaborator_permission(repo, author)
-        except GitHubError:
-            # Fail closed for dispatch: an unverifiable author never triggers
-            # an agent run. Detection already reported the material.
-            return False
-        return permission in _TRUSTED_PERMISSIONS
+    def _author_trust(self, repo: str, github: GitHubClient) -> AuthorTrust:
+        """Allowlisted bots + write/admin humans; an unverifiable author never
+        triggers an agent run (fail closed for dispatch — detection already
+        reported the material)."""
+
+        async def permission_of(author: str) -> str:
+            return await github.get_collaborator_permission(repo, author)
+
+        return AuthorTrust(permission_of, bots=self._settings.trusted_bots)
 
     async def _project_repo(
         self, gate: Any, story_id: str, ctx: SubscriptionContext
     ) -> tuple[str, Path] | None:
-        """``(slug, repo_path)`` via gate metadata, falling back to the story's
-        (gate creation records ``project`` only conditionally)."""
-        slug = gate.metadata.get("project")
-        if not isinstance(slug, str) or not slug:
-            slug = None
-            try:
-                story = await ctx.lithos.task_get(task_id=story_id)
-            except LithosClientError:
-                story = None
-            if story is not None:
-                candidate = story.metadata.get("project")
-                if isinstance(candidate, str) and candidate:
-                    slug = candidate
-        if slug is None:
-            return None
-        repo = self._settings.projects.get(slug)
-        return None if repo is None else (slug, repo)
+        """``(slug, repo_path)`` — :func:`_project_settings.resolve_project_repo`,
+        shared with the merge-gate dispatcher."""
+        return await resolve_project_repo(gate, story_id, self._settings.projects, ctx)
 
     async def _project_converge_enabled(
         self, slug: str, ctx: SubscriptionContext
     ) -> bool | None:
-        """The per-project dial, default **on** (ADR 0011 decision 6).
-
-        Reads the context doc's metadata directly (canonical path, then the
-        smallest ``project-context``-tagged doc — the same resolution
-        ``daemon_io._fetch_context_metadata`` applies; kept as a local
-        seven-liner rather than importing the Plugins component into
-        Subscriptions, which would add a cross-component edge for one read).
-
-        Tri-state (PR #346 re-review 2): a READABLE doc with the key absent
-        or malformed is the documented default-on (warned when malformed);
-        an UNREADABLE doc returns ``None`` — the project may hold an
-        explicit opt-out we cannot see, and an unknown safety dial must
-        never authorize a run (the caller fails closed and retries).
-        """
-        meta: Mapping[str, Any] | None = None
-        try:
-            note = await ctx.lithos.note_read(
-                path=f"projects/{slug}/{slug}-project-context.md"
-            )
-            if note is not None:
-                meta = note.metadata
-            else:
-                candidates = await ctx.lithos.note_list(
-                    path_prefix=f"projects/{slug}/", tags=["project-context"]
-                )
-                if candidates:
-                    meta = min(candidates, key=lambda n: n.path).metadata
-        except LithosClientError:
-            return None  # unreadable ≠ unset — the caller fails closed
-        raw = None if meta is None else meta.get(CONVERGE_SETTING)
-        if raw is None:
-            return True
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
-            return raw.strip().lower() == "true"
-        ctx.logger.warning(
-            "[Friction] external-remediation: project %r has malformed %s=%r; "
-            "treating as enabled",
-            slug,
-            CONVERGE_SETTING,
-            raw,
+        """The per-project dial, default **on** (ADR 0011 decision 6) — the
+        shared tri-state reader (:func:`_project_settings.read_project_flag`):
+        ``None`` for an unreadable doc, which the caller fails closed on."""
+        return await read_project_flag(
+            slug, CONVERGE_SETTING, ctx, subsystem="external-remediation"
         )
-        return True
 
     # ── the run itself ─────────────────────────────────────────────────
 
-    def _command(self, spec: PrGateSpec, repo: Path, json_path: Path) -> list[str]:
+    def _command(
+        self, spec: PrGateSpec, repo: Path, json_path: Path, story_id: str
+    ) -> list[str]:
         cmd = [
             sys.executable,
             "-m",
@@ -623,13 +581,24 @@ class ExternalRemediation:
             "converge",
             str(spec.pr_number),
             "--from-github",
+            # The story: converge resolves the project's + task's develop_*
+            # settings (rounds, profile, panel, check-set, image) the way the
+            # daemon path does — lens#78 ran at the CLI default of 5 rounds
+            # while the project said 8.
+            "--story",
+            story_id,
             "--repo",
             str(repo),
+            # The checkout is pinned to the gate's repo (PR #362 review F2):
+            # a PR number resolves against the checkout's origin, so a stale
+            # [projects.<slug>].repo would otherwise act on owner/other#N.
+            "--expect-repo",
+            spec.repo,
             "--json",
             str(json_path),
         ]
         if self._settings.config_path is not None:
-            cmd += ["-c", str(self._settings.config_path)]
+            cmd += ["--config", str(self._settings.config_path)]
         return cmd
 
     async def _run(
@@ -641,11 +610,37 @@ class ExternalRemediation:
         budget: RemediationBudget,
         ctx: SubscriptionContext,
     ) -> None:
-        """Run one converge subprocess and record its outcome. Never raises."""
+        """Run one converge subprocess and record its outcome. Never raises.
+
+        A crash anywhere in the run (spawning, the result file, recording)
+        still spent the reserved round, so it is reported on the story and —
+        if that was the last round — escalated like any other failed run
+        (PR #361 review F2: a swallowed exception was the silent exhaustion
+        this module exists to close, one layer up).
+        """
         try:
             await self._run_inner(gate_id, story_id, spec, repo, budget, ctx)
-        except Exception:  # noqa: BLE001 — the slot must always free cleanly
+        except Exception as exc:  # noqa: BLE001 — the slot must always free cleanly
             ctx.logger.exception("external-remediation: run for %s raised", spec.pr_url)
+            detail = f"{type(exc).__name__}: {exc}"
+            await self._post_finding(
+                story_id,
+                f"[Friction] external-remediation: converge --from-github for "
+                f"{spec.pr_url} crashed before recording a result ({detail}); "
+                f"the round is spent ({budget.rounds_used}/{self._settings.budget})",
+                ctx,
+            )
+            await self._escalate_if_exhausted(
+                gate_id,
+                story_id,
+                spec,
+                budget,
+                last_status="failed",
+                detail=detail,
+                ctx=ctx,
+            )
+        finally:
+            self._in_flight_pr_url = ""
 
     async def _run_inner(
         self,
@@ -662,7 +657,7 @@ class ExternalRemediation:
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.unlink(missing_ok=True)
 
-        rc, output = await self._spawn(self._command(spec, repo, json_path))
+        rc, output = await self._spawn(self._command(spec, repo, json_path, story_id))
 
         data: dict[str, Any] | None = None
         try:
@@ -672,6 +667,24 @@ class ExternalRemediation:
         except (OSError, ValueError):
             data = None
 
+        if data is not None and data.get("status") == "repo_mismatch":
+            # The CLI's authoritative check refused (gh, redirect-aware —
+            # where the sweep's origin read passed): a configuration
+            # refusal, not a failed run — refunded, re-parked, never an
+            # exhaustion escalation.
+            await refund_repo_mismatch(
+                ctx,
+                gate_id=gate_id,
+                story_id=story_id,
+                spec=spec,
+                repo=repo,
+                origin_seen=((await origin_read(repo)).repo or "").lower(),
+                budget=budget,
+                budget_limit=self._settings.budget,
+                notifier=self._settings.notifier,
+                data=data,
+            )
+            return
         if data is not None:
             await self._record_result(gate_id, story_id, spec, budget, data, ctx)
             return
@@ -693,6 +706,14 @@ class ExternalRemediation:
             )
             return
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
+        ctx.logger.warning(
+            "external-remediation: converge for %s finished: failed (exit %d) "
+            "without a result, round %d/%d spent",
+            spec.pr_url,
+            rc,
+            budget.rounds_used,
+            self._settings.budget,
+        )
         await self._post_finding(
             story_id,
             f"[Friction] external-remediation: converge --from-github for "
@@ -700,6 +721,15 @@ class ExternalRemediation:
             f"spent ({budget.rounds_used}/{self._settings.budget}). Output "
             f"tail: {tail}",
             ctx,
+        )
+        await self._escalate_if_exhausted(
+            gate_id,
+            story_id,
+            spec,
+            budget,
+            last_status="failed",
+            detail=f"converge exited {rc} without a result",
+            ctx=ctx,
         )
 
     async def _record_result(
@@ -711,56 +741,43 @@ class ExternalRemediation:
         data: dict[str, Any],
         ctx: SubscriptionContext,
     ) -> None:
-        status = data.get("status", "unknown")
-        pushed_sha = data.get("pushed_sha") or ""
-        if data.get("pushed") and pushed_sha:
-            # Loom's own push: recorded so the next sweep's head observation
-            # attributes it (no human-push reset) and own-sha material skips.
-            updated = dataclasses.replace(
-                budget,
-                last_loom_pushed_sha=pushed_sha,
-                last_seen_head_sha=pushed_sha,
-            )
-            await write_marker(
-                ctx,
-                task_id=gate_id,
-                marker={REMEDIATION_KEY: updated.as_marker()},
-                subsystem="external-remediation",
-            )
+        await record_result(
+            ctx,
+            gate_id=gate_id,
+            story_id=story_id,
+            spec=spec,
+            budget=budget,
+            budget_limit=self._settings.budget,
+            notifier=self._settings.notifier,
+            data=data,
+        )
 
-        lines = [
-            f"{EXTERNAL_REVIEW} remediation outcome for delivered PR "
-            f"{spec.pr_url}: {status} "
-            f"(round {budget.rounds_used}/{self._settings.budget})"
-        ]
-        if data.get("message"):
-            lines.append(f"- {data['message']}")
-        if pushed_sha:
-            lines.append(f"- pushed {pushed_sha[:12]} to the PR branch")
-        for o in data.get("external_outcomes") or []:
-            if not isinstance(o, dict):
-                continue
-            where = f" ({o['thread_url']})" if o.get("thread_url") else ""
-            detail = f" — {o['detail']}" if o.get("detail") else ""
-            lines.append(
-                f"- {o.get('finding_id', '?')} by {o.get('author', '?')}: "
-                f"{o.get('disposition', '?')}{detail}{where}"
-            )
-        cost = data.get("total_cost_usd")
-        if isinstance(cost, int | float):
-            lines.append(f"- spend ${cost:.2f}")
-        await self._post_finding(story_id, "\n".join(lines), ctx)
+    async def _escalate_if_exhausted(
+        self,
+        gate_id: str,
+        story_id: str,
+        spec: PrGateSpec,
+        budget: RemediationBudget,
+        *,
+        last_status: str,
+        detail: str,
+        ctx: SubscriptionContext,
+        cost: float | None = None,
+    ) -> None:
+        await escalate_or_report(
+            ctx,
+            gate_id=gate_id,
+            story_id=story_id,
+            spec=spec,
+            budget=budget,
+            budget_limit=self._settings.budget,
+            notifier=self._settings.notifier,
+            last_status=last_status,
+            detail=detail,
+            cost=cost,
+        )
 
     async def _post_finding(
         self, story_id: str, summary: str, ctx: SubscriptionContext
     ) -> None:
-        """Best-effort finding post (the story may have completed mid-run)."""
-        try:
-            await ctx.lithos.finding_post(task_id=story_id, summary=summary)
-        except LithosClientError as exc:
-            ctx.logger.warning(
-                "[Friction] external-remediation: posting outcome for story %s "
-                "failed (%s)",
-                story_id,
-                exc,
-            )
+        await post_finding(ctx, story_id, summary)
