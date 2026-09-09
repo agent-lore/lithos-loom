@@ -365,13 +365,26 @@ def _remediation(tmp_path, *, budget: int = 2, spawn=None):
     )
 
 
-async def test_reconcile_still_open_dispatches_remediation(tmp_path) -> None:
+async def test_reconcile_still_open_dispatches_remediation(
+    tmp_path, monkeypatch
+) -> None:
     """The full still-open chain: head observed, batch ingested, converge
     dispatched, budget incremented on the gate."""
     import json as _json
     from pathlib import Path as _Path
 
-    from lithos_loom.subscriptions.external_remediation import REMEDIATION_KEY
+    from lithos_loom.subscriptions import external_remediation as rem_mod
+    from lithos_loom.subscriptions.external_remediation import (
+        REMEDIATION_KEY,
+        OriginRead,
+    )
+
+    # the mapped checkout resolves to the gate's repo (an unresolvable
+    # origin fails closed — PR #362 re-review 3)
+    async def resolvable(path: _Path) -> OriginRead:
+        return OriginRead("agent-lore/lithos-loom", "ok")
+
+    monkeypatch.setattr(rem_mod, "origin_read", resolvable)
 
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)

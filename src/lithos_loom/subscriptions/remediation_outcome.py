@@ -9,6 +9,7 @@ and the budget is spent — escalate through :mod:`.remediation_escalation`.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from pathlib import Path
 from typing import Any
@@ -27,15 +28,20 @@ from lithos_loom.subscriptions.remediation_budget import (
 from lithos_loom.subscriptions.remediation_escalation import escalate_if_exhausted
 
 __all__ = [
+    "REFUND_RETRY_DELAYS",
     "REPO_MISMATCH_KEY",
     "escalate_or_report",
+    "post_checkout_unresolved_refusal",
     "post_finding",
     "post_repo_mismatch_refusal",
     "record_result",
     "refund_repo_mismatch",
     "refusal_key",
-    "refusal_settled",
+    "settled_refusal",
 ]
+
+# Backoff between attempts to land the refund's state write (seconds).
+REFUND_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0, 5.0)
 
 
 async def post_finding(ctx: SubscriptionContext, story_id: str, summary: str) -> None:
@@ -184,14 +190,65 @@ def refusal_key(spec: PrGateSpec, repo: Path, origin_seen: str) -> dict[str, str
     return {"pr_url": spec.pr_url, "repo_path": str(repo), "origin_seen": origin_seen}
 
 
-def refusal_settled(gate: Any, spec: PrGateSpec, repo: Path, origin_seen: str) -> bool:
-    """Whether a refusal is already recorded for exactly this key — no spawn,
-    no re-post until the mapping or the remote url moves."""
+def settled_refusal(
+    gate: Any, spec: PrGateSpec, repo: Path, origin_seen: str
+) -> str | None:
+    """The kind of refusal (``repo_mismatch`` / ``checkout_unresolved``)
+    already recorded for exactly this key — no spawn, no re-post until the
+    mapping or the read moves — or ``None``."""
     raw = gate.metadata.get(REPO_MISMATCH_KEY)
     if not isinstance(raw, dict):
-        return False
+        return None
     key = refusal_key(spec, repo, origin_seen)
-    return all(raw.get(k) == v for k, v in key.items())
+    if not all(raw.get(k) == v for k, v in key.items()):
+        return None
+    kind = raw.get("kind")
+    return kind if isinstance(kind, str) and kind else "repo_mismatch"
+
+
+async def post_checkout_unresolved_refusal(
+    ctx: SubscriptionContext,
+    *,
+    gate: Any,
+    story_id: str,
+    spec: PrGateSpec,
+    repo: Path,
+    reason: str,
+) -> None:
+    """The sweep could not resolve the mapped checkout's origin (PR #362
+    re-review 3 F1): no spawn, no round spent, the parked trigger kept, one
+    ``[Friction]`` naming why; settled on (path, "") until the path changes
+    or the read starts to answer."""
+    ctx.logger.warning(
+        "[Friction] external-remediation: checkout %s cannot be resolved (%s); "
+        "not dispatching for %s (the parked trigger, if any, waits)",
+        repo,
+        reason,
+        spec.pr_url,
+    )
+    await post_finding_then_mark(
+        ctx,
+        task_id=story_id,
+        summary=(
+            f"[Friction] external-remediation: the checkout mapped for this "
+            f"project ({repo}) cannot be resolved ({reason}: not a git checkout, "
+            f"no origin remote, or an origin that is not a GitHub url); no "
+            f"converge was dispatched and no budget round spent (PR "
+            f"{spec.pr_url}). Provision the checkout with origin {spec.repo}, or "
+            f"fix [projects.<slug>].repo and restart loom — the parked review "
+            f"trigger resumes then."
+        ),
+        marker={
+            REPO_MISMATCH_KEY: {
+                **refusal_key(spec, repo, ""),
+                "kind": "checkout_unresolved",
+                "actual_repo": f"unresolved:{reason}",
+            }
+        },
+        subsystem="external-remediation",
+        retry_hint="will retry next sweep",
+        marker_task_id=gate.id,
+    )
 
 
 async def post_repo_mismatch_refusal(
@@ -206,7 +263,11 @@ async def post_repo_mismatch_refusal(
     """The sweep's own origin read refused the checkout: one ``[Friction]``
     on the story per settle key, de-duped by a marker on the gate. Nothing
     else is written — no round spent, the parked trigger kept."""
-    current = {**refusal_key(spec, repo, origin.lower()), "actual_repo": origin}
+    current = {
+        **refusal_key(spec, repo, origin.lower()),
+        "kind": "repo_mismatch",
+        "actual_repo": origin,
+    }
     ctx.logger.warning(
         "[Friction] external-remediation: checkout %s has origin %s, not the "
         "gate's %s; not dispatching for %s (the parked trigger, if any, waits)",
@@ -241,40 +302,89 @@ async def refund_repo_mismatch(
     repo: Path,
     origin_seen: str,
     budget: RemediationBudget,
+    budget_limit: int,
+    notifier: RemediationNotifier | None,
     data: dict[str, Any],
 ) -> None:
     """The CLI's authoritative ``--expect-repo`` check refused where the
     sweep's origin read passed: refund the reserved round, re-park the
     review trigger (the reservation consumed it), record the settle key so
     the sweep does not spawn again until the mapping or the remote url
-    moves, and say so — never an exhaustion escalation. One write."""
+    moves, and say so.
+
+    The state write is STRICT (PR #362 re-review 3 F2): it is what keeps the
+    round and the review debt, so it is retried with backoff, and when it
+    still does not land the breadcrumb says exactly that — the round stays
+    spent, the trigger stays consumed — and an exhausted budget escalates
+    to a human like any other unconverged last round. Never a success
+    claim over state that did not land.
+    """
     actual = data.get("actual_repo") or "(unknown)"
     refund = dataclasses.replace(budget, rounds_used=max(0, budget.rounds_used - 1))
-    # State first, breadcrumb second (the inverse of the one-shot findings):
-    # the refund, the re-parked trigger and the settle key are what keep the
-    # next sweep from spending again — a finding that fails to post costs a
-    # line of history, a marker that fails to land costs a round and the
-    # review debt. The settle key makes a duplicate finding impossible.
-    await write_marker(
-        ctx,
-        task_id=gate_id,
-        marker={
-            REMEDIATION_KEY: refund.as_marker(),
-            PENDING_KEY: {"pr_url": spec.pr_url},
-            REPO_MISMATCH_KEY: {
-                **refusal_key(spec, repo, origin_seen),
-                "actual_repo": actual,
-            },
+    marker = {
+        REMEDIATION_KEY: refund.as_marker(),
+        PENDING_KEY: {"pr_url": spec.pr_url},
+        REPO_MISMATCH_KEY: {
+            **refusal_key(spec, repo, origin_seen),
+            "kind": "repo_mismatch",
+            "actual_repo": actual,
         },
-        subsystem="external-remediation",
+    }
+    failure: LithosClientError | None = None
+    for delay in (0.0, *REFUND_RETRY_DELAYS):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
+            failure = None
+            break
+        except LithosClientError as exc:
+            failure = exc
+    if failure is None:
+        await post_finding(
+            ctx,
+            story_id,
+            f"[Friction] external-remediation: converge refused to act on "
+            f"{spec.pr_url}: the checkout's origin is {actual}, not the gate's "
+            f"{spec.repo}; no agent ran, the round is refunded and the review "
+            f"trigger re-parked. Fix [projects.<slug>].repo (or the checkout's "
+            f"remote url) and restart loom — nothing runs until one of them "
+            f"changes.",
+        )
+        return
+    ctx.logger.warning(
+        "[Friction] external-remediation: refund for %s did not land after %d "
+        "attempts (%s); round %d/%d remains spent and the review trigger is "
+        "not re-parked",
+        spec.pr_url,
+        1 + len(REFUND_RETRY_DELAYS),
+        failure,
+        budget.rounds_used,
+        budget_limit,
     )
     await post_finding(
         ctx,
         story_id,
         f"[Friction] external-remediation: converge refused to act on "
-        f"{spec.pr_url}: the checkout's origin is {actual}, not the gate's "
-        f"{spec.repo}; no agent ran, the round is refunded and the review "
-        f"trigger re-parked. Fix [projects.<slug>].repo (or the checkout's "
-        f"remote url) and restart loom — nothing runs until one of them "
-        f"changes.",
+        f"{spec.pr_url} (the checkout's origin is {actual}, not the gate's "
+        f"{spec.repo}), but recording the refund did not land ({failure}): "
+        f"round {budget.rounds_used}/{budget_limit} remains spent and the review "
+        f"trigger is not re-parked — the material that triggered this run will "
+        f"not be re-dispatched until a human pushes to the branch or re-runs "
+        f"`develop converge --from-github`. Fix [projects.<slug>].repo and "
+        f"restart loom first.",
+    )
+    await escalate_or_report(
+        ctx,
+        gate_id=gate_id,
+        story_id=story_id,
+        spec=spec,
+        budget=budget,
+        budget_limit=budget_limit,
+        notifier=notifier,
+        last_status="repo_mismatch",
+        detail=(
+            f"converge refused the mis-mapped checkout ({actual}) and the refund "
+            f"could not be recorded ({failure})"
+        ),
     )

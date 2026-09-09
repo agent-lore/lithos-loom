@@ -37,6 +37,7 @@ from lithos_loom.subscriptions.merge_gate_dispatch import (
     MERGE_GATE_SETTING,
     MergeGateDispatch,
     MergeGateSettings,
+    OriginRead,
     read_record,
 )
 from lithos_loom.subscriptions.pr_landability import PR_CONFLICTED
@@ -54,6 +55,21 @@ _MERGE = "m" * 40
 _FP = "0123456789abcdef"
 
 import logging  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _resolvable_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every mapped checkout in these tests resolves to its gate's repo (the
+    real read needs a git checkout with an origin); a test that wants
+    another answer patches `origin_read` itself. PR #362 re-review 3: an
+    UNRESOLVABLE origin fails closed, so the default cannot be None."""
+    from lithos_loom.subscriptions import merge_gate_dispatch as mod
+
+    async def resolvable(path: Path) -> OriginRead:
+        repo = "agent-lore/other" if path.name == "repo-q" else "agent-lore/lithos-lens"
+        return OriginRead(repo, "ok")
+
+    monkeypatch.setattr(mod, "origin_read", resolvable)
 
 
 def _ctx(lithos: Any) -> SubscriptionContext:
@@ -977,10 +993,10 @@ async def test_a_mismatched_checkout_is_refused_before_any_spawn(
     story, gate = await _gate_with_story(client)
     origin = {"repo": "agent-lore/other"}
 
-    async def fake_origin(path: Path) -> str | None:
-        return origin["repo"]
+    async def fake_origin(path: Path) -> OriginRead:
+        return OriginRead(origin["repo"], "ok")
 
-    monkeypatch.setattr(mod, "origin_repo", fake_origin)
+    monkeypatch.setattr(mod, "origin_read", fake_origin)
     spawn, calls = _spawner(_record("green"))
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
 
@@ -1015,8 +1031,6 @@ async def test_a_settled_cli_mismatch_re_gates_once_the_mapping_changes(
     # restarting did nothing for the unchanged PR. The mapped checkout is
     # part of the record: a different path, or an origin that now matches,
     # is a fresh key.
-    from lithos_loom.subscriptions import merge_gate_dispatch as mod
-
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     await client.task_update(
@@ -1030,16 +1044,12 @@ async def test_a_settled_cli_mismatch_re_gates_once_the_mapping_changes(
                 "status": "repo_mismatch",
                 "attempts": 2,
                 "repo_path": str(tmp_path / "repo"),
-                "actual_repo": "agent-lore/other",
+                "actual_repo": "agent-lore/renamed",
+                "origin_seen": "agent-lore/lithos-lens",  # gh disagreed with the read
             }
         },
     )
     gate = await _refresh(client, gate.id)
-
-    async def unknown_origin(path: Path) -> str | None:
-        return None  # the cheap read cannot answer (as in every other test)
-
-    monkeypatch.setattr(mod, "origin_repo", unknown_origin)
     spawn, calls = _spawner(_record("green"))
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
     assert await _consider(client, gate, story, dispatch) == "unchanged"
@@ -1056,6 +1066,78 @@ async def test_a_settled_cli_mismatch_re_gates_once_the_mapping_changes(
     assert record is not None and record.status == "green" and record.attempts == 1
 
 
+@pytest.mark.parametrize("reason", ["missing", "no_origin", "unparseable"])
+async def test_an_unresolvable_checkout_is_refused_before_any_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    # PR #362 re-review 3 F1: "cannot resolve the origin" was permission to
+    # dispatch — the child then died in gh before any structured refusal,
+    # burning two crashed attempts that no mapping fix could re-arm. It is a
+    # refusal with a reason, settled on what the sweep observes, re-armed
+    # when the path changes or the read starts to answer.
+    from lithos_loom.subscriptions import merge_gate_dispatch as mod
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    read = {"value": OriginRead(None, reason)}
+
+    async def fake_read(path: Path) -> OriginRead:
+        return read["value"]
+
+    monkeypatch.setattr(mod, "origin_read", fake_read)
+    spawn, calls = _spawner(_record("green"))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, dispatch) == "checkout_unresolved"
+    assert calls == []
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] merge-gate")
+    assert reason in finding and str(tmp_path / "repo") in finding
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None
+    assert record.status == "checkout_unresolved" and record.origin_reason == reason
+    assert record.repo_path == str(tmp_path / "repo") and record.origin_seen == ""
+
+    assert await _consider(client, gate, story, dispatch) == "unchanged"
+    assert len(_findings(client)) == 1
+
+    # the checkout is provisioned in place: the same shas gate
+    read["value"] = OriginRead("agent-lore/lithos-lens", "ok")
+    gate = await _refresh(client, gate.id)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    assert len(_runs(calls)) == 1
+    record = read_record(await _refresh(client, gate.id), _PR_URL)
+    assert record is not None and record.status == "green" and record.attempts == 1
+
+
+async def test_an_unresolvable_checkout_re_arms_on_a_path_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.subscriptions import merge_gate_dispatch as mod
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def by_path(path: Path) -> OriginRead:
+        if path.name == "repo-fixed":
+            return OriginRead("agent-lore/lithos-lens", "ok")
+        return OriginRead(None, "missing")
+
+    monkeypatch.setattr(mod, "origin_read", by_path)
+    spawn, calls = _spawner(_record("green"))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "checkout_unresolved"
+    gate = await _refresh(client, gate.id)
+    remapped = MergeGateDispatch(
+        _settings(tmp_path, projects={"p": tmp_path / "repo-fixed"}), spawn=spawn
+    )
+    assert await _consider(client, gate, story, remapped) == "dispatched"
+    await _settle(remapped)
+    assert len(_runs(calls)) == 1
+
+
 async def test_a_cli_refusal_settles_even_when_the_cheap_read_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1070,10 +1152,10 @@ async def test_a_cli_refusal_settles_even_when_the_cheap_read_matches(
     story, gate = await _gate_with_story(client)
     origin = {"repo": "agent-lore/lithos-lens"}
 
-    async def fake_origin(path: Path) -> str | None:
-        return origin["repo"]
+    async def fake_origin(path: Path) -> OriginRead:
+        return OriginRead(origin["repo"], "ok")
 
-    monkeypatch.setattr(mod, "origin_repo", fake_origin)
+    monkeypatch.setattr(mod, "origin_read", fake_origin)
     spawn, calls = _spawner(
         {
             "status": "repo_mismatch",

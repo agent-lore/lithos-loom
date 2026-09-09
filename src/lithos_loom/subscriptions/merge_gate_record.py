@@ -72,6 +72,8 @@ class MergeGateRecord:
     # mismatch of either kind: the CLI's verdict and the cheap read can
     # disagree, so a mismatch re-arms only when what the sweep observes moves
     origin_seen: str = ""
+    # for a checkout_unresolved record: why the sweep's read could not answer
+    origin_reason: str = ""
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -90,6 +92,7 @@ class MergeGateRecord:
             "repo_path": self.repo_path,
             "actual_repo": self.actual_repo,
             "origin_seen": self.origin_seen,
+            "origin_reason": self.origin_reason,
         }
 
 
@@ -123,4 +126,5 @@ def read_record(gate: Any, pr_url: str) -> MergeGateRecord | None:
         repo_path=_s("repo_path"),
         actual_repo=_s("actual_repo"),
         origin_seen=_s("origin_seen"),
+        origin_reason=_s("origin_reason"),
     )

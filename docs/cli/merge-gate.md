@@ -146,8 +146,9 @@ mismatch is retried once on the same key, then waits for a head or base
 move). The settings probe runs as a background task, never inline in the
 sweep, acting only on the record it was scheduled for. Every run is pinned
 to the gate's repo twice: the sweep reads the mapped checkout's `origin`
-first (a mismatch spawns nothing and posts one `[Friction]`), and the run's
-own `--expect-repo` is the authoritative check. Either kind of mismatch
+first (a mismatch — or a read that cannot answer: no checkout, no origin,
+a non-GitHub origin — spawns nothing and posts one `[Friction]` naming why),
+and the run's own `--expect-repo` is the authoritative check. Either kind of mismatch
 settles on the mapped path plus the sweep's own origin read, and re-arms
 the same shas when one of those moves — the mapping or the checkout's
 remote url is the operator's lever. Per-project opt-out: context-doc

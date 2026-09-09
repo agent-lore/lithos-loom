@@ -55,6 +55,8 @@ from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark
 from lithos_loom.subscriptions._project_settings import (
+    OriginRead,
+    origin_read,
     origin_repo,
     parse_origin,
     read_project_flag,
@@ -62,6 +64,7 @@ from lithos_loom.subscriptions._project_settings import (
 )
 from lithos_loom.subscriptions._subprocess import spawn_command
 from lithos_loom.subscriptions.merge_gate_outcome import (
+    post_checkout_unresolved,
     post_config_unresolved,
     post_conflict,
     post_crashed,
@@ -88,6 +91,8 @@ __all__ = [
     "MergeGateDispatch",
     "MergeGateRecord",
     "MergeGateSettings",
+    "OriginRead",
+    "origin_read",
     "origin_repo",
     "parse_origin",
     "read_record",
@@ -105,6 +110,9 @@ PROBE_TIMEOUT_SECONDS = 120
 # Record statuses retried on the SAME key, up to MAX_ATTEMPTS_PER_KEY (see
 # merge_gate_record): the run produced no verdict to stand on.
 _RETRYABLE: frozenset[str] = frozenset({"crashed", "push_failed", "repo_mismatch"})
+
+# Refusals about the mapped checkout, settled on (repo_path, origin_seen).
+_CHECKOUT_REFUSALS: frozenset[str] = frozenset({"repo_mismatch", "checkout_unresolved"})
 
 # The findings quote at most this much subprocess output.
 _OUTPUT_TAIL_CHARS = 600
@@ -336,22 +344,50 @@ class MergeGateDispatch:
         # the gate's repo costs no subprocess, and a settled mismatch is a
         # fresh key the moment the mapping (path) or the origin changes —
         # the operator's fix must re-arm the same shas.
-        origin = await origin_repo(repo)
+        read = await origin_read(repo)
+        origin = read.repo
         seen = (origin or "").lower()
         matches = origin is not None and seen == spec.repo.lower()
         if (
             same_key
             and prior is not None
-            and prior.status == "repo_mismatch"
+            and prior.status in _CHECKOUT_REFUSALS
             and (prior.repo_path != str(repo) or seen != prior.origin_seen)
         ):
-            # A mismatch of either kind (the sweep's own read, or the CLI's
-            # authoritative gh check) settles on what the SWEEP observes —
-            # the two can disagree (a rename gh follows, a shape the read
-            # cannot parse), so "the read now matches" is never by itself a
-            # fresh key (self-review: that looped a spawn every sweep).
+            # A refusal about the checkout — a mismatch from the sweep's own
+            # read or the CLI's authoritative gh check, or a read that could
+            # not answer — settles on what the SWEEP observes: the two checks
+            # can disagree (a rename gh follows), so "the read now matches"
+            # is never by itself a fresh key (self-review: that looped a
+            # spawn every sweep); the path or the read moving is.
             same_key = False
-        if origin is not None and not matches:
+        if origin is None:
+            # PR #362 re-review 3 F1: "cannot resolve" was permission to
+            # dispatch, and the child then died in gh before any structured
+            # refusal — two crashed attempts no mapping fix could re-arm.
+            if (
+                same_key
+                and prior is not None
+                and prior.status == "checkout_unresolved"
+                and prior.origin_reason == read.reason
+            ):
+                return "unchanged"
+            await post_checkout_unresolved(
+                gate.id,
+                story_id,
+                spec,
+                MergeGateRecord(
+                    spec.pr_url,
+                    head,
+                    base,
+                    status="checkout_unresolved",
+                    repo_path=str(repo),
+                    origin_reason=read.reason,
+                ),
+                ctx,
+            )
+            return "checkout_unresolved"
+        if not matches:
             if same_key and prior is not None and prior.status == "repo_mismatch":
                 return "unchanged"
             await post_repo_mismatch(
@@ -650,7 +686,7 @@ class MergeGateDispatch:
         data = self._load(path)
         # the settle key for a repo mismatch: the sweep's own read, so a CLI
         # refusal re-arms only when the mapping or the remote url moves
-        origin_seen = ((await origin_repo(repo)) or "").lower()
+        origin_seen = ((await origin_read(repo)).repo or "").lower()
         record = MergeGateRecord(
             spec.pr_url,
             head,

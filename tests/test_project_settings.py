@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from lithos_loom.subscriptions.merge_gate_dispatch import origin_repo, parse_origin
+from lithos_loom.subscriptions.merge_gate_dispatch import (
+    OriginRead,
+    origin_read,
+    origin_repo,
+    parse_origin,
+)
 
 
 @pytest.mark.parametrize(
@@ -65,3 +70,37 @@ async def test_origin_repo_is_none_when_it_cannot_answer(tmp_path: Path) -> None
     assert await origin_repo(tmp_path / "missing") is None
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert await origin_repo(tmp_path) is None  # no origin remote
+
+
+async def test_origin_read_names_why_it_cannot_answer(tmp_path: Path) -> None:
+    # PR #362 re-review 3 F1: "cannot resolve" is a refusal with a reason the
+    # operator can act on, never permission to dispatch
+    assert await origin_read(tmp_path / "missing") == OriginRead(None, "missing")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert await origin_read(tmp_path) == OriginRead(None, "no_origin")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "https://gitlab.com/x/y",
+        ],
+        check=True,
+    )
+    assert await origin_read(tmp_path) == OriginRead(None, "unparseable")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:agent-lore/lithos-lens.git",
+        ],
+        check=True,
+    )
+    assert await origin_read(tmp_path) == OriginRead("agent-lore/lithos-lens", "ok")

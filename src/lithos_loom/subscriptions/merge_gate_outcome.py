@@ -35,6 +35,7 @@ from lithos_loom.subscriptions.remediation_budget import (
 )
 
 __all__ = [
+    "post_checkout_unresolved",
     "post_config_unresolved",
     "post_conflict",
     "post_crashed",
@@ -244,6 +245,44 @@ async def post_repo_mismatch(
             f"gate's {expected} (PR {spec.pr_url}); nothing was fetched, gated or "
             f"pushed. Fix [projects.<slug>].repo in the host config and restart "
             f"loom ({tail})."
+        ),
+        marker={MERGE_GATE_KEY: record.as_marker()},
+        subsystem="merge-gate",
+        retry_hint="will retry next sweep",
+        marker_task_id=gate_id,
+    )
+
+
+_UNRESOLVED_WHY = {
+    "missing": "is not a git checkout (no such directory, or no .git)",
+    "no_origin": "has no `origin` remote",
+    "unparseable": "has an `origin` that is not a GitHub url",
+    "error": "did not answer `git remote get-url origin` in time",
+}
+
+
+async def post_checkout_unresolved(
+    gate_id: str,
+    story_id: str,
+    spec: PrGateSpec,
+    record: MergeGateRecord,
+    ctx: SubscriptionContext,
+) -> None:
+    """The sweep could not resolve the mapped checkout's origin: nothing is
+    spawned (the child would only die in `gh` before any structured
+    refusal), one ``[Friction]`` on the story naming why, settled on
+    (path, reason) until the path changes or the read starts to answer."""
+    why = _UNRESOLVED_WHY.get(record.origin_reason, record.origin_reason)
+    await post_finding_then_mark(
+        ctx,
+        task_id=story_id,
+        summary=(
+            f"[Friction] merge-gate: the checkout mapped for this project "
+            f"({record.repo_path}) {why} ({record.origin_reason}); PR "
+            f"{spec.pr_url} is not re-gated against its base and nothing was "
+            f"spawned. Provision the checkout with origin {spec.repo}, or fix "
+            f"[projects.<slug>].repo in the host config and restart loom — "
+            f"checked again every sweep."
         ),
         marker={MERGE_GATE_KEY: record.as_marker()},
         subsystem="merge-gate",

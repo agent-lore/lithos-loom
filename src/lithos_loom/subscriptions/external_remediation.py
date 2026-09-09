@@ -64,7 +64,8 @@ from lithos_loom.github_review_streams import AuthorTrust
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
 from lithos_loom.subscriptions._project_settings import (
-    origin_repo,
+    OriginRead,
+    origin_read,
     read_project_flag,
     resolve_project_repo,
 )
@@ -82,11 +83,12 @@ from lithos_loom.subscriptions.remediation_budget import (
 )
 from lithos_loom.subscriptions.remediation_outcome import (
     escalate_or_report,
+    post_checkout_unresolved_refusal,
     post_finding,
     post_repo_mismatch_refusal,
     record_result,
     refund_repo_mismatch,
-    refusal_settled,
+    settled_refusal,
 )
 
 __all__ = [
@@ -94,8 +96,10 @@ __all__ = [
     "PENDING_KEY",
     "REMEDIATION_KEY",
     "ExternalRemediation",
+    "OriginRead",
     "RemediationBudget",
     "RemediationSettings",
+    "origin_read",
     "read_budget",
     "spawn_converge",
 ]
@@ -426,17 +430,31 @@ class ExternalRemediation:
         # not the gate's repo must not spend a round or consume the parked
         # trigger — the debt stays parked and dispatches once the mapping is
         # fixed. The CLI's --expect-repo remains the authoritative check.
-        origin = await origin_repo(repo)
+        read = await origin_read(repo)
+        origin = read.repo
         seen = (origin or "").lower()
-        if refusal_settled(gate, spec, repo, seen):
+        settled = settled_refusal(gate, spec, repo, seen)
+        if settled is not None:
             # a refusal (the sweep's or the CLI's) already stands for exactly
             # what the sweep observes; nothing runs until the mapping or the
-            # remote url moves
+            # read moves
             ctx.logger.debug(
-                "external-remediation: repo mismatch still settled for %s", spec.pr_url
+                "external-remediation: %s still settled for %s", settled, spec.pr_url
             )
-            return "repo_mismatch"
-        if origin is not None and seen != spec.repo.lower():
+            return settled
+        if origin is None:
+            # PR #362 re-review 3 F1: "cannot resolve" is a refusal, never
+            # permission to reserve a round and spawn a child that dies in gh
+            await post_checkout_unresolved_refusal(
+                ctx,
+                gate=gate,
+                story_id=story_id,
+                spec=spec,
+                repo=repo,
+                reason=read.reason,
+            )
+            return "checkout_unresolved"
+        if seen != spec.repo.lower():
             await post_repo_mismatch_refusal(
                 ctx, gate=gate, story_id=story_id, spec=spec, repo=repo, origin=origin
             )
@@ -660,8 +678,10 @@ class ExternalRemediation:
                 story_id=story_id,
                 spec=spec,
                 repo=repo,
-                origin_seen=((await origin_repo(repo)) or "").lower(),
+                origin_seen=((await origin_read(repo)).repo or "").lower(),
                 budget=budget,
+                budget_limit=self._settings.budget,
+                notifier=self._settings.notifier,
                 data=data,
             )
             return

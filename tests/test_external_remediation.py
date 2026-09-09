@@ -47,6 +47,7 @@ from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.external_remediation import (
     REMEDIATION_KEY,
     ExternalRemediation,
+    OriginRead,
     RemediationBudget,
     RemediationSettings,
     read_budget,
@@ -58,6 +59,18 @@ _PR_URL = "https://github.com/agent-lore/lithos-lens/pull/62"
 _HEAD = "h" * 40
 _LOOM_SHA = "a1" * 20
 _BOT = "copilot-pull-request-reviewer[bot]"
+
+
+@pytest.fixture(autouse=True)
+def _resolvable_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mapped checkout resolves to the gate's repo unless a test says
+    otherwise (PR #362 re-review 3: an unresolvable origin fails closed)."""
+    from lithos_loom.subscriptions import external_remediation as mod
+
+    async def resolvable(path: Path) -> OriginRead:
+        return OriginRead("agent-lore/lithos-lens", "ok")
+
+    monkeypatch.setattr(mod, "origin_read", resolvable)
 
 
 def _ctx(lithos: Any) -> SubscriptionContext:
@@ -1520,10 +1533,10 @@ async def test_a_mismatched_checkout_is_refused_before_any_spend(
     assert gate is not None
     origin = {"repo": "agent-lore/other"}
 
-    async def fake_origin(path: Path) -> str | None:
-        return origin["repo"]
+    async def fake_origin(path: Path) -> OriginRead:
+        return OriginRead(origin["repo"], "ok")
 
-    monkeypatch.setattr(mod, "origin_repo", fake_origin)
+    monkeypatch.setattr(mod, "origin_read", fake_origin)
     spawn, calls = _spawner(None)
     rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
 
@@ -1607,10 +1620,10 @@ async def test_a_cli_refusal_settles_until_the_mapping_or_origin_changes(
     story, gate = await _gate_with_story(client)
     origin = {"repo": "agent-lore/lithos-lens"}
 
-    async def fake_origin(path: Path) -> str | None:
-        return origin["repo"]
+    async def fake_origin(path: Path) -> OriginRead:
+        return OriginRead(origin["repo"], "ok")
 
-    monkeypatch.setattr(mod, "origin_repo", fake_origin)
+    monkeypatch.setattr(mod, "origin_read", fake_origin)
     spawn, calls = _spawner(
         {
             "status": "repo_mismatch",
@@ -1648,3 +1661,139 @@ async def test_a_cli_refusal_settles_until_the_mapping_or_origin_changes(
     assert rem._task is not None
     await rem._task
     assert len(calls) == 2
+
+
+# ── PR #362 re-review 3: unresolvable origins fail closed; refunds are strict ──
+
+
+@pytest.mark.parametrize("reason", ["missing", "no_origin", "unparseable"])
+async def test_an_unresolvable_checkout_is_refused_before_any_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    from lithos_loom.subscriptions import external_remediation as mod
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    read = {"value": OriginRead(None, reason)}
+
+    async def fake_read(path: Path) -> OriginRead:
+        return read["value"]
+
+    monkeypatch.setattr(mod, "origin_read", fake_read)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "checkout_unresolved"
+    assert calls == [] and rem.busy_on(_PR_URL) is False
+    assert (await _marker(client, gate.id)) is None  # nothing reserved
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] external-remediation")
+    assert reason in finding and str(tmp_path / "repo") in finding
+
+    gate = refreshed
+    assert await _consider(client, gate, story, rem) == "checkout_unresolved"
+    assert len(_findings(client)) == 1
+
+    read["value"] = OriginRead("agent-lore/lithos-lens", "ok")
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 1
+
+
+def _refusal_payload() -> dict[str, Any]:
+    return {
+        "status": "repo_mismatch",
+        "expected_repo": "agent-lore/lithos-lens",
+        "actual_repo": "agent-lore/renamed",
+        "message": "gh says renamed",
+    }
+
+
+async def test_a_refund_that_fails_transiently_still_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #362 re-review 3 F2: the refund's state write is what keeps the
+    # round and the review debt; a transient Lithos failure must be retried,
+    # not swallowed behind a success breadcrumb.
+    from lithos_loom.errors import LithosClientError
+    from lithos_loom.subscriptions import remediation_outcome
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    monkeypatch.setattr(remediation_outcome, "REFUND_RETRY_DELAYS", (0, 0, 0))
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    original = client.task_update
+    failures = {"left": 2}
+
+    async def flaky(**kw: Any) -> Any:
+        if REMEDIATION_KEY in (kw.get("metadata") or {}) and failures["left"] > 0:
+            failures["left"] -= 1
+            raise LithosClientError("internal", "blip")
+        return await original(**kw)
+
+    rem = ExternalRemediation(
+        _settings(tmp_path), spawn=_spawner(_refusal_payload(), rc=2)[0]
+    )
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    client.task_update = flaky  # type: ignore[method-assign]
+    assert rem._task is not None
+    await rem._task
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # refunded after the retries
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+    (finding,) = _findings(client)
+    assert "refunded" in finding and "re-parked" in finding
+
+
+async def test_a_refund_that_never_lands_is_reported_honestly_and_escalates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.errors import LithosClientError
+    from lithos_loom.subscriptions import remediation_outcome
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    monkeypatch.setattr(remediation_outcome, "REFUND_RETRY_DELAYS", (0, 0, 0))
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    original = client.task_update
+
+    async def failing(**kw: Any) -> Any:
+        if REMEDIATION_KEY in (kw.get("metadata") or {}):
+            raise LithosClientError("internal", "down")
+        return await original(**kw)
+
+    notifier = _RecordingNotifier()
+    rem = ExternalRemediation(
+        _settings(tmp_path, notifier=notifier),
+        spawn=_spawner(_refusal_payload(), rc=2)[0],
+    )
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    client.task_update = failing  # type: ignore[method-assign]
+    assert rem._task is not None
+    await rem._task
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 2  # the reservation stands
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert PENDING_KEY not in refreshed.metadata  # the debt is gone, and we say so
+    findings = _findings(client)
+    assert not any("is refunded" in f for f in findings)
+    assert any("did not land" in f and "not re-parked" in f for f in findings)
+    # the last round is spent with nothing done: a human decides
+    assert len(await _human_gates(client)) == 1
