@@ -15,7 +15,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._blocked_snapshot` | S | 1 | 0 |
-| `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 1 |
+| `lithos_loom.subscriptions._develop_pr_merge` | L | 0 | 1 |
 | `lithos_loom.subscriptions._findings` | S | 0 | 2 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
 | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |

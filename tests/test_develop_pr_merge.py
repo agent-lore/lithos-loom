@@ -172,6 +172,13 @@ async def test_gate_merged_story_completion_failure_is_not_counted_resolved() ->
     assert not any(f["summary"].startswith(GATE_RESOLVED) for f in client._findings)
 
 
+def _filler(task_id: str) -> Task:
+    """A ready task that is none of our business — padding for a frontier page."""
+    return Task(
+        id=task_id, title=task_id, status="open", tags=(), metadata={}, claims=()
+    )
+
+
 async def _blocked_dependent(client: FakeLithosClient, blocker: str) -> str:
     """A second tagged story the first one ``blocks`` — the T2-slice shape."""
     dependent = await client.task_create(
@@ -334,6 +341,59 @@ async def test_gate_merged_recovery_nudges_only_the_dependents_it_released() -> 
     ]
     # D is still blocked by B, so it must still be off the ready frontier.
     assert still_blocked not in [t.id for t in await client.task_ready()]
+
+
+async def test_gate_merged_recovery_defers_on_a_truncated_ready_frontier() -> None:
+    """A FULL ready page makes *absence* from it meaningless, so an unconfirmed
+    candidate is undetermined, not unreleased. Resolving the gate on the
+    confirmed subset would be final — the gate leaves the swept open set, so
+    the missing dependent never gets its `task.updated` and waits for a restart,
+    which is the exact failure #350 exists to remove. Undetermined therefore
+    defers the whole resolution (the module's standing rule), all-or-nothing:
+    nobody is nudged and the once-only recovery marker is NOT burned on a
+    partial fan-out."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    confirmed = await _blocked_dependent(client, story)
+    unconfirmed = await _blocked_dependent(client, story)
+    await client.task_complete(task_id=story)  # an earlier sweep died mid-nudge
+
+    async def _truncated_frontier(**kwargs: Any) -> list[Task]:
+        """A full page that happens to carry only one of the two candidates."""
+        limit = kwargs["limit"]
+        page = [_filler(f"other-{i}") for i in range(limit - 1)]
+        return [*page, await _get(client, confirmed)]
+
+    client.task_ready = _truncated_frontier  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+
+    assert outcome == "error"
+    assert (await _get(client, gate.id)).status == "open"
+    assert NUDGE_RECOVERED_KEY not in (await _get(client, gate.id)).metadata
+    assert not [
+        c
+        for c in client.calls_to("task_update")
+        if c["task_id"] in {confirmed, unconfirmed}
+    ]
+
+    # A frontier back under the limit classifies both → the gate resolves and
+    # BOTH dependents are nudged, none lost to the truncated sweep.
+    del client.task_ready  # back to the real implementation
+    outcome = await reconcile_pr_gate(
+        await _get(client, gate.id),
+        _github(_pr(state="closed", merged=True)),
+        _ctx(client),
+    )
+
+    assert outcome == "merged"
+    for dependent in (confirmed, unconfirmed):
+        nudges = [
+            c for c in client.calls_to("task_update") if c["task_id"] == dependent
+        ]
+        assert [c["metadata"] for c in nudges] == [{}]
 
 
 async def test_gate_merged_recovery_fan_out_is_written_once_per_gate() -> None:

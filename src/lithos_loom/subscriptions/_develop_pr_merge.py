@@ -590,10 +590,17 @@ async def _released_dependents(
     So the candidates are intersected with Lithos's ready frontier rather than
     filtered by a readiness rule of loom's own: readiness is Lithos's answer
     (epic G), and it covers unmet gates and cycles, not just ``blocks``.
-    Membership is a presence test, which is the safe direction under
-    truncation — a full page makes *absence* meaningless (so we warn and nudge
-    the subset we could confirm, leaving the restart bootstrap as the backstop
-    for the rest), while presence stays authoritative either way.
+
+    Every candidate must come back **classified**. A full page means the
+    frontier was truncated, which makes absence from it meaningless — and
+    unlike the dispatch guard's version of this test (``on_ready_frontier``,
+    which merely defers one dispatch to the next event) there is no next look
+    here: the caller resolves the gate on this answer, and a resolved gate
+    leaves the swept open set for good. So an unclassifiable candidate returns
+    ``None`` and defers the whole resolution, exactly as an unreadable edge
+    list does. It is all-or-nothing on purpose — nudging the confirmed subset
+    would also burn the once-only :data:`NUDGE_RECOVERED_KEY` on an incomplete
+    fan-out, making the loss permanent.
     """
     candidates = await _blocks_dependents(story_id, ctx)
     if not candidates:
@@ -614,17 +621,25 @@ async def _released_dependents(
         return None
     ready_ids = {task.id for task in ready}
     released = [task_id for task_id in candidates if task_id in ready_ids]
-    if len(ready) >= limit and len(released) < len(candidates):
+    if len(released) < len(candidates) and len(ready) >= limit:
+        # A FULL page means the frontier was truncated, so absence from it is
+        # "not seen", not "not ready" — and this is the caller's last chance to
+        # act: resolving the gate takes it out of the swept open set for good,
+        # so a candidate dropped here never gets its `task.updated` and waits
+        # for a restart, the exact failure #350 removes. Undetermined defers the
+        # whole resolution, all-or-nothing (partially nudging would also burn
+        # the once-only NUDGE_RECOVERED_KEY on an incomplete fan-out).
         ctx.logger.warning(
-            "pr-gate: the ready frontier hit its %d-task query limit while "
-            "recovering story %s's released dependents, so %d of %d could not "
-            "be confirmed ready and are left to the restart bootstrap. Raise "
+            "[Friction] pr-gate: the ready frontier hit its %d-task query limit "
+            "while recovering story %s's released dependents, so %d of %d could "
+            "not be classified; leaving the gate open to retry next sweep. Raise "
             "READY_QUERY_LIMIT if a frontier this wide is expected.",
             limit,
             story_id,
             len(candidates) - len(released),
             len(candidates),
         )
+        return None
     return released
 
 

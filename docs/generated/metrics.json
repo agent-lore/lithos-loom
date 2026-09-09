@@ -515,10 +515,10 @@
         "functions": 245,
         "largest_module": "lithos_loom.subscriptions.merge_gate_dispatch",
         "largest_module_lines": 798,
-        "lines": 11013,
+        "lines": 11028,
         "modules": 35,
         "public_symbols": 85,
-        "sloc": 8761
+        "sloc": 8768
       },
       "Supervisor": {
         "classes": 3,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 50781,
+    "total_lines": 50796,
     "total_modules": 148,
-    "total_sloc": 40697
+    "total_sloc": 40704
   },
   "tests": {
     "ratio": 1.6,
-    "src_lines": 50781,
-    "test_lines": 81312
+    "src_lines": 50796,
+    "test_lines": 81372
   }
 }
