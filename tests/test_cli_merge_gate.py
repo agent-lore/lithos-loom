@@ -88,6 +88,39 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     return captured
 
 
+def test_expect_repo_reaches_the_resolver(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["merge-gate", "#7", "--expect-repo", "agent-lore/lithos-loom"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["resolve"]["expect_repo"] == "agent-lore/lithos-loom"
+
+
+def test_expect_repo_mismatch_exits_2_with_a_record_and_runs_nothing(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # PR #362 review F2: a config mistake must fail closed before an
+    # autonomous write — and say so in the record the dispatcher reads.
+    from lithos_loom.plugins.story_develop.review_resolve import RepoMismatchError
+
+    def refuse(repo, spec, **kw):
+        raise RepoMismatchError(expected=kw["expect_repo"], actual="o/wrong")
+
+    monkeypatch.setattr(cli, "resolve_change", refuse)
+    out = tmp_path / "r.json"
+    result = runner.invoke(
+        develop_app,
+        ["merge-gate", "#7", "--expect-repo", "o/right", "--json", str(out)],
+    )
+    assert result.exit_code == 2, result.output
+    assert "config" not in stubs  # nothing ran, nothing fetched
+    assert "o/right" in result.output and "o/wrong" in result.output
+    record = json.loads(out.read_text())
+    assert record["status"] == "repo_mismatch"
+    assert record["expected_repo"] == "o/right"
+    assert record["actual_repo"] == "o/wrong"
+
+
 def test_record_carries_the_settings_fingerprint(stubs: dict, tmp_path: Path) -> None:
     from lithos_loom.plugins.story_develop.merge_gate import settings_fingerprint
 
@@ -199,7 +232,12 @@ def test_flags_reach_the_develop_config(stubs: dict, tmp_path: Path) -> None:
     assert cfg.test_timeout == 90
     assert cfg.work_dir == tmp_path / "work" / "merge-gate"
     assert cfg.description == "merge-gate #7"
-    assert stubs["resolve"] == {"repo": tmp_path, "spec": "#7", "allow_fork": False}
+    assert stubs["resolve"] == {
+        "repo": tmp_path,
+        "spec": "#7",
+        "allow_fork": False,
+        "expect_repo": None,
+    }
     # zero-token: no agents, so no acceptance criteria or models are demanded
     assert stubs["push"] is True and stubs["keep_worktree"] is False
 

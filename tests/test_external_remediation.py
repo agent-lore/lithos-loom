@@ -363,6 +363,8 @@ async def test_dispatch_happy_path_runs_converge_and_records_outcome(
     assert cmd[:2] == [sys.executable, "-m"]
     assert "lithos_loom" in cmd
     assert "converge" in cmd and "62" in cmd and "--from-github" in cmd
+    # PR #362 review F2: the checkout is pinned to the gate's repo
+    assert cmd[cmd.index("--expect-repo") + 1] == "agent-lore/lithos-lens"
     assert str(tmp_path / "repo") in cmd
 
     # Budget: incremented at dispatch; the push recorded as loom's own sha.
@@ -1456,3 +1458,42 @@ async def test_observe_head_is_inert_while_a_merge_gate_runs_on_the_pr() -> None
     assert budget.rounds_used == 2  # no reset
     assert budget.last_seen_head_sha == _HEAD  # and no observation recorded
     assert (await _marker(client, gate.id))["rounds_used"] == 2
+
+
+async def test_busy_on_holds_from_the_moment_dispatch_commits(tmp_path: Path) -> None:
+    # self-review: the hold was checked BEFORE the budget-reservation write
+    # and the in-flight url set only AFTER it — a merge-gate probe finishing
+    # during that await saw no run on the PR and started its own. The claim
+    # must be visible for the whole dispatch, not just once the task exists.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    original = client.task_update
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_update(**kw: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await original(**kw)
+
+    client.task_update = slow_update  # type: ignore[method-assign]
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    pending = asyncio.create_task(_consider(client, gate, story, rem))
+    await entered.wait()
+    assert rem.busy_on(_PR_URL) is True  # claimed while the reservation is out
+    release.set()
+    assert await pending == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert rem.busy_on(_PR_URL) is False
+
+
+async def test_a_failed_reservation_releases_the_claim(tmp_path: Path) -> None:
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    client.raise_on["task_update"] = LithosClientError("internal", "down")
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    assert await _consider(client, gate, story, rem) == "reservation_failed"
+    assert rem.busy_on(_PR_URL) is False

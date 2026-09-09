@@ -43,7 +43,10 @@ from lithos_loom.plugins.story_develop.profiles import (
     get_profile,
     resolve_profile,
 )
-from lithos_loom.plugins.story_develop.review_resolve import resolve_change
+from lithos_loom.plugins.story_develop.review_resolve import (
+    RepoMismatchError,
+    resolve_change,
+)
 
 __all__ = ["EXIT_CODES", "merge_gate_command"]
 
@@ -57,6 +60,8 @@ EXIT_CODES: dict[str, int] = {
     "conflict": 3,
     "fork_unsupported": 2,
     "pr_closed": 2,
+    # the checkout's origin is not the repo the caller pinned (--expect-repo)
+    "repo_mismatch": 2,
     # the project's current config could not be resolved — gated with
     # nothing rather than with built-ins (PRD S3: skipped loudly)
     "config_unresolved": 4,
@@ -110,6 +115,15 @@ def merge_gate_command(
         False,
         "--no-push",
         help="Gate only: never push the merge commit onto the PR branch.",
+    ),
+    expect_repo: str | None = typer.Option(
+        None,
+        "--expect-repo",
+        help=(
+            "Refuse to act unless the checkout's origin is this owner/name — "
+            "a PR number resolves against the checkout, so the watcher pins "
+            "each run to the repo its gate names."
+        ),
     ),
     resolve_only: bool = typer.Option(
         False,
@@ -258,7 +272,25 @@ def merge_gate_command(
 
     # Forks are answered from GitHub's metadata before any fetch: the sweep
     # must never pull a third-party head into the operator's checkout.
-    resolved = resolve_change(repo, change, base_branch="main", allow_fork=False)
+    try:
+        resolved = resolve_change(
+            repo, change, base_branch="main", allow_fork=False, expect_repo=expect_repo
+        )
+    except RepoMismatchError as exc:
+        # A config mistake fails closed before an autonomous write — and the
+        # record says so, since the sweep reads the record, not the log.
+        typer.echo(f"merge-gate {change}: repo_mismatch")
+        typer.echo(f"  {exc}; nothing was fetched or gated")
+        _write_json(
+            json_out,
+            {
+                "status": "repo_mismatch",
+                "expected_repo": exc.expected,
+                "actual_repo": exc.actual,
+                "message": str(exc),
+            },
+        )
+        raise typer.Exit(EXIT_CODES["repo_mismatch"]) from exc
     if not resolved.head_branch:
         raise typer.BadParameter(
             f"merge-gate takes a PR (it trial-merges the PR's base and may push "

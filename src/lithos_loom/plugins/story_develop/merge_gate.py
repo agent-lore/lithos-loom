@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ...runner import git, worktree
+from . import check_catalog, profiles
 from .check_runner import (
     build_check_set,
     check_result_blocks,
@@ -160,6 +161,13 @@ class MergeGateResult:
         }
 
 
+# Bump whenever the MEANING of a check changes in code without any of the
+# fingerprinted inputs moving — an adapter's severity mapping, the ledger
+# floor, the `uv run` wrapping rule. The profile declarations and catalog
+# commands are hashed directly; this covers what they cannot express.
+SETTINGS_FINGERPRINT_SCHEMA = 1
+
+
 def settings_fingerprint(config: DevelopConfig) -> str:
     """A short stable digest of the resolved gate SETTINGS — everything that
     decides which checks run and how they block, and nothing that needs a
@@ -172,8 +180,35 @@ def settings_fingerprint(config: DevelopConfig) -> str:
     an already-observed ``(head_sha, base_sha)`` when it changes — the
     "tightened check-set" case re-resolving the current config exists for.
     A tree-dependent change (a lockfile appears) moves the head sha anyway.
+
+    The profile is hashed by DEFINITION, not name (PR #362 review F4): a
+    loom upgrade that tightens what ``standard`` means must move the
+    fingerprint, so the resolved profile's check declarations and the
+    catalog commands behind them are part of it, plus
+    :data:`SETTINGS_FINGERPRINT_SCHEMA` for what code alone decides.
     """
+    try:
+        profile: profiles.ReviewProfile | None = profiles.get_profile(
+            config.review_profile
+        )
+    except profiles.UnknownProfileError:
+        profile = None
+    declared: list[Any] = (
+        [] if profile is None else [[c.name, c.state, c.stage] for c in profile.checks]
+    )
+    catalog: dict[str, dict[str, str]] = {}
+    for c in () if profile is None else profile.checks:
+        commands = check_catalog.catalog_commands(c.name)
+        if commands is not None:
+            catalog[c.name] = dict(sorted(commands.items()))
     payload = {
+        "schema": SETTINGS_FINGERPRINT_SCHEMA,
+        "profile": {
+            "name": config.review_profile,
+            "rank": None if profile is None else profile.strength_rank,
+            "checks": declared,
+        },
+        "catalog": catalog,
         "image": config.image,
         "test_timeout": config.test_timeout,
         "block_threshold": config.block_threshold,

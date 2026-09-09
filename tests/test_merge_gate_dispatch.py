@@ -124,13 +124,19 @@ def _record(
     status: str = "green",
     *,
     fp: str = _FP,
-    pushed: bool = False,
+    pushed: bool | None = None,
     verdict: str | None = None,
     checks: list[dict[str, Any]] | None = None,
     paths: list[str] | None = None,
+    push_error: str = "",
+    behind: bool = True,
 ) -> dict[str, Any]:
     if verdict is None:
         verdict = {"green": "GREEN", "red": "RED"}.get(status)
+    if pushed is None:
+        # a green run on a behind PR pushes its merge commit; anything else
+        # pushes nothing (an unpushed green-and-behind is a push FAILURE)
+        pushed = status == "green" and behind
     return {
         "status": status,
         "head_ref": "#62",
@@ -139,7 +145,7 @@ def _record(
         "base_sha": _BASE,
         "head_sha": _HEAD,
         "merge_sha": _MERGE if status not in ("conflict",) else "",
-        "behind": True,
+        "behind": behind,
         "conflicting_paths": paths or [],
         "checks": checks
         or (
@@ -164,7 +170,7 @@ def _record(
         "settings_fingerprint": fp,
         "pushed": pushed,
         "pushed_sha": _MERGE if pushed else "",
-        "push_error": "",
+        "push_error": push_error,
         "message": f"stubbed {status}",
     }
 
@@ -213,7 +219,7 @@ def _runs(calls: list[list[str]]) -> list[list[str]]:
 
 
 def _findings(client: FakeLithosClient) -> list[str]:
-    return [f["summary"] for f in client._findings]
+    return [f["summary"] for f in client.findings]
 
 
 async def _consider(
@@ -282,6 +288,8 @@ async def test_fork_is_recorded_once_and_never_fetched(tmp_path: Path) -> None:
 
     assert await _consider(client, gate, story, dispatch, pr=fork) == "fork_unsupported"
     assert calls == []
+    (finding,) = _findings(client)  # on the story, not just the host log
+    assert finding.startswith("[Friction] merge-gate") and "fork" in finding
     gate = await _refresh(client, gate.id)
     record = read_record(gate, _PR_URL)
     assert record is not None
@@ -290,28 +298,29 @@ async def test_fork_is_recorded_once_and_never_fetched(tmp_path: Path) -> None:
 
     # same shas next sweep: nothing to say again
     assert await _consider(client, gate, story, dispatch, pr=fork) == "unchanged"
-    assert calls == []
+    assert calls == [] and len(_findings(client)) == 1
 
 
-async def test_no_project_is_recorded_once(tmp_path: Path, caplog: Any) -> None:
+async def test_no_project_posts_friction_on_the_story_once(tmp_path: Path) -> None:
+    # PRD S3 + PR #362 review F3: an unmapped project is a one-shot [Friction]
+    # ON THE STORY (the operator action lives in Lithos / Lens, not the host
+    # log), and the record keeps it one-shot.
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client, project=None, story_project=None)
     spawn, calls = _spawner(_record())
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
 
-    with caplog.at_level(logging.WARNING):
-        assert await _consider(client, gate, story, dispatch) == "no_project"
+    assert await _consider(client, gate, story, dispatch) == "no_project"
     assert calls == []
-    assert any(
-        "[Friction] merge-gate" in r.message and "project" in r.message
-        for r in caplog.records
-    )
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] merge-gate")
+    assert "[projects]" in finding and "metadata.project" in finding
+    assert story in finding and _PR_URL in finding
     gate = await _refresh(client, gate.id)
     record = read_record(gate, _PR_URL)
     assert record is not None and record.status == "no_project"
-    caplog.clear()
     assert await _consider(client, gate, story, dispatch) == "unchanged"
-    assert not caplog.records
+    assert len(_findings(client)) == 1
 
 
 async def test_a_project_mapped_later_re_gates_on_the_same_key(tmp_path: Path) -> None:
@@ -502,11 +511,15 @@ async def test_unchanged_shas_probe_the_settings_and_skip_when_equal(
     await _settle(dispatch)
     gate = await _refresh(client, gate.id)
 
-    assert await _consider(client, gate, story, dispatch) == "unchanged"
+    # PR #362 review F5: the probe never blocks the sweep — it runs in the
+    # background and only a changed fingerprint starts a run
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
     assert len(_runs(calls)) == 1
     (probe,) = _probes(calls)
     assert "--resolve-only" in probe and "--story" in probe
     assert cmd_has_no_push_or_fetch(probe)
+    assert not dispatch.busy_on(_PR_URL)
 
 
 def cmd_has_no_push_or_fetch(cmd: list[str]) -> bool:
@@ -537,7 +550,7 @@ async def test_a_changed_settings_fingerprint_re_gates(tmp_path: Path) -> None:
     )
     gate = await _refresh(client, gate.id)
 
-    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    assert await _consider(client, gate, story, dispatch) == "probing"
     await _settle(dispatch)
     assert len(_probes(calls)) == 1 and len(_runs(calls)) == 1
     record = read_record(await _refresh(client, gate.id), _PR_URL)
@@ -611,7 +624,9 @@ async def test_red_posts_merge_gate_failed_naming_the_check_once(
     assert record is not None and record.status == "red" and record.verdict == "RED"
 
     # same key next sweep: probed, unchanged, nothing re-posted
-    assert await _consider(client, gate, story, dispatch) == "unchanged"
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
+    assert len(_runs(calls)) == 1
     assert len(_findings(client)) == 1
 
 
@@ -701,9 +716,10 @@ async def test_config_unresolved_posts_friction_once(tmp_path: Path) -> None:
     assert record is not None and record.status == "config_unresolved"
 
     # still unresolved next sweep (probe exits 4): nothing re-posted
-    assert await _consider(client, gate, story, dispatch) == "unchanged"
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
     assert len(_findings(client)) == 1
-    assert len(_probes(calls)) == 1
+    assert len(_probes(calls)) == 1 and len(_runs(calls)) == 1
 
 
 async def test_config_resolving_again_re_gates(tmp_path: Path) -> None:
@@ -725,7 +741,7 @@ async def test_config_resolving_again_re_gates(tmp_path: Path) -> None:
     gate = await _refresh(client, gate.id)
     spawn, calls = _spawner(_record("green"), probe=_probe(_FP))
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
-    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    assert await _consider(client, gate, story, dispatch) == "probing"
     await _settle(dispatch)
     assert len(_runs(calls)) == 1
 
@@ -781,18 +797,23 @@ async def test_a_zero_exit_without_a_record_is_a_crash_too(tmp_path: Path) -> No
     assert record is not None and record.status == "crashed"
 
 
-async def test_pr_closed_from_the_run_is_recorded_quietly(tmp_path: Path) -> None:
+async def test_pr_closed_from_the_run_writes_nothing(tmp_path: Path) -> None:
     # the sweep's own merge poll owns the closed / merged states; the run
-    # saying so is a race, not an event
+    # saying so is a race, not an event — and a record keyed on unchanged
+    # shas would freeze a PR reopened without a push (self-review)
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
-    spawn, _calls = _spawner(_record("pr_closed", verdict=None), rc=2)
+    spawn, calls = _spawner(_record("pr_closed", verdict=None), rc=2)
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
     assert await _consider(client, gate, story, dispatch) == "dispatched"
     await _settle(dispatch)
     assert _findings(client) == []
-    record = read_record(await _refresh(client, gate.id), _PR_URL)
-    assert record is not None and record.status == "pr_closed"
+    assert read_record(await _refresh(client, gate.id), _PR_URL) is None
+    # the sweep only asks again while GitHub says the PR is open, and then
+    # the run decides afresh
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    assert len(_runs(calls)) == 2
 
 
 async def test_a_failed_probe_retries_next_sweep(tmp_path: Path) -> None:
@@ -814,9 +835,335 @@ async def test_a_failed_probe_retries_next_sweep(tmp_path: Path) -> None:
     gate = await _refresh(client, gate.id)
     spawn, calls = _spawner(_record("green"), probe=None, probe_rc=1)
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
-    assert await _consider(client, gate, story, dispatch) == "probe_failed"
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
     assert _runs(calls) == []
     assert len(_findings(client)) == 0
+    # a failed probe writes nothing; the next sweep simply probes again
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
+    assert len(_probes(calls)) == 2 and _runs(calls) == []
+
+
+async def test_a_failed_push_is_a_friction_and_a_bounded_retry(tmp_path: Path) -> None:
+    # PR #362 review F1: `run_merge_gate` reports a push failure BESIDE a
+    # green verdict (behind + pushed=false + push_error). Recording that as
+    # a settled green left the PR behind forever with nothing on the story.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(
+        _record("green", pushed=False, push_error="remote rejected: lease"),
+        probe=_probe(_FP),
+    )
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] merge-gate")
+    assert "remote rejected: lease" in finding and "green" in finding.lower()
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None
+    assert record.status == "push_failed" and record.verdict == "GREEN"
+    assert record.behind is True and record.pushed_sha == ""
+    assert record.push_error == "remote rejected: lease" and record.attempts == 1
+    assert read_budget(gate, _PR_URL).last_loom_pushed_sha == ""  # nothing pushed
+
+    # one bounded retry on the same key...
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None and record.attempts == 2
+    assert len(_findings(client)) == 2
+
+    # ...then the verdict stands and only a settings change or a move re-gates
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
+    assert len(_runs(calls)) == 2 and len(_probes(calls)) == 1
+    assert await _consider(client, gate, story, dispatch, pr=_pr(base="c" * 40)) == (
+        "dispatched"
+    )
+    await _settle(dispatch)
+    assert len(_runs(calls)) == 3
+
+
+async def test_a_retried_push_that_lands_records_green(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            MERGE_GATE_KEY: {
+                "pr_url": _PR_URL,
+                "head_sha": _HEAD,
+                "base_sha": _BASE,
+                "settings_fingerprint": _FP,
+                "status": "push_failed",
+                "verdict": "GREEN",
+                "behind": True,
+                "push_error": "network",
+                "attempts": 1,
+            }
+        },
+    )
+    gate = await _refresh(client, gate.id)
+    spawn, _calls = _spawner(_record("green", pushed=True))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None and record.status == "green"
+    assert record.pushed_sha == _MERGE and record.push_error == ""
+    assert read_budget(gate, _PR_URL).last_loom_pushed_sha == _MERGE
+
+
+async def test_an_up_to_date_green_is_not_a_push_failure(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(_record("green", pushed=False, behind=False))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    record = read_record(await _refresh(client, gate.id), _PR_URL)
+    assert record is not None and record.status == "green"
+    assert _findings(client) == []
+
+
+async def test_repo_mismatch_posts_friction_and_is_bounded(tmp_path: Path) -> None:
+    # PR #362 review F2: the CLI refused to act on a checkout whose origin is
+    # not the gate's repo; the operator must hear it, and the sweep must not
+    # spawn it hourly forever.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(
+        {
+            "status": "repo_mismatch",
+            "expected_repo": "agent-lore/lithos-lens",
+            "actual_repo": "agent-lore/other",
+            "message": "checkout is agent-lore/other",
+        },
+        rc=2,
+    )
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] merge-gate")
+    assert "agent-lore/lithos-lens" in finding and "agent-lore/other" in finding
+    assert "[projects." in finding
+    record = read_record(await _refresh(client, gate.id), _PR_URL)
+    assert record is not None and record.status == "repo_mismatch"
+
+    gate = await _refresh(client, gate.id)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"  # once more
+    await _settle(dispatch)
+    gate = await _refresh(client, gate.id)
+    assert await _consider(client, gate, story, dispatch) == "unchanged"
+    assert len(_runs(calls)) == 2 and _probes(calls) == []
+
+
+async def test_the_run_argv_pins_the_gates_repo(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(_record("green"), probe=_probe(_FP))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    gate = await _refresh(client, gate.id)
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
+    for cmd in calls:  # the run AND the probe
+        assert cmd[cmd.index("--expect-repo") + 1] == "agent-lore/lithos-lens"
+
+
+async def test_a_slow_probe_never_blocks_the_sweep(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            MERGE_GATE_KEY: {
+                "pr_url": _PR_URL,
+                "head_sha": _HEAD,
+                "base_sha": _BASE,
+                "settings_fingerprint": _FP,
+                "status": "green",
+                "attempts": 1,
+            }
+        },
+    )
+    gate = await _refresh(client, gate.id)
+    release = asyncio.Event()
+    probes = 0
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        nonlocal probes
+        assert "--resolve-only" in cmd
+        probes += 1
+        await release.wait()
+        path = Path(cmd[cmd.index("--json") + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_probe(_FP)), encoding="utf-8")
+        return 0, ""
+
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await asyncio.sleep(0)
+    # a second sweep while the probe is still out: no second probe
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await asyncio.sleep(0)
+    assert probes == 1
+    release.set()
+    await _settle(dispatch)
+
+
+async def test_a_probe_that_finds_a_change_waits_for_a_busy_project_slot(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story_a, gate_a = await _gate_with_story(client)
+    story_b = await client.task_create(title="US8", metadata={"project": "p"})
+    gate_b_id = await create_pr_gate(
+        client,
+        story_id=story_b,
+        story_title="US8",
+        pr_url="https://github.com/agent-lore/lithos-lens/pull/63",
+        project="p",
+        agent="a",
+    )
+    await client.task_update(
+        task_id=gate_b_id,
+        metadata={
+            MERGE_GATE_KEY: {
+                "pr_url": "https://github.com/agent-lore/lithos-lens/pull/63",
+                "head_sha": _HEAD,
+                "base_sha": _BASE,
+                "settings_fingerprint": "stale",
+                "status": "green",
+                "attempts": 1,
+            }
+        },
+    )
+    gate_b = await _refresh(client, gate_b_id)
+    release = asyncio.Event()
+    runs: list[str] = []
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        path = Path(cmd[cmd.index("--json") + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if "--resolve-only" in cmd:
+            path.write_text(json.dumps(_probe(_FP)), encoding="utf-8")
+            return 0, ""
+        runs.append(cmd[cmd.index("--story") + 1])
+        await release.wait()
+        path.write_text(json.dumps(_record("green")), encoding="utf-8")
+        return 0, ""
+
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate_a, story_a, dispatch) == "dispatched"
+    # a busy slot defers BEFORE probing (a probe whose answer could not be
+    # acted on is a wasted subprocess); the next sweep probes
+    assert await _consider(client, gate_b, story_b, dispatch) == "deferred_busy"
+    await asyncio.sleep(0.01)
+    assert runs == [story_a]
+    release.set()
+    await _settle(dispatch)
+    assert runs == [story_a]
+    # the next sweep probes and, with the slot free, runs
+    assert await _consider(client, gate_b, story_b, dispatch) == "probing"
+    await _settle(dispatch)
+    assert runs == [story_a, story_b]
+
+
+async def test_a_probe_honours_the_hold_when_it_completes(tmp_path: Path) -> None:
+    # self-review: the hold was checked when the probe was SCHEDULED; a
+    # remediation dispatched on the same PR while the probe was out must
+    # still hold the run the probe would start (either may push).
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            MERGE_GATE_KEY: {
+                "pr_url": _PR_URL,
+                "head_sha": _HEAD,
+                "base_sha": _BASE,
+                "settings_fingerprint": "stale",
+                "status": "green",
+                "attempts": 1,
+            }
+        },
+    )
+    gate = await _refresh(client, gate.id)
+    release = asyncio.Event()
+    runs = 0
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        nonlocal runs
+        path = Path(cmd[cmd.index("--json") + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if "--resolve-only" in cmd:
+            await release.wait()
+            path.write_text(json.dumps(_probe(_FP)), encoding="utf-8")
+            return 0, ""
+        runs += 1
+        path.write_text(json.dumps(_record("green")), encoding="utf-8")
+        return 0, ""
+
+    held = {"on": False}
+    dispatch = MergeGateDispatch(
+        _settings(tmp_path), spawn=spawn, hold=lambda url: held["on"]
+    )
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await asyncio.sleep(0)
+    held["on"] = True  # a converge started on this PR meanwhile
+    release.set()
+    await _settle(dispatch)
+    assert runs == 0
+    assert dispatch.pending_probes() == 0  # finished probes are pruned
+
+    held["on"] = False
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await _settle(dispatch)
+    assert runs == 1
+    assert dispatch.pending_probes() == 0
+
+
+async def test_shutdown_cancels_an_in_flight_probe(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            MERGE_GATE_KEY: {
+                "pr_url": _PR_URL,
+                "head_sha": _HEAD,
+                "base_sha": _BASE,
+                "settings_fingerprint": _FP,
+                "status": "green",
+                "attempts": 1,
+            }
+        },
+    )
+    gate = await _refresh(client, gate.id)
+    cancelled = asyncio.Event()
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return 0, ""
+
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    await asyncio.sleep(0)
+    await dispatch.shutdown()
+    assert cancelled.is_set()
 
 
 # ── concurrency ────────────────────────────────────────────────────────
@@ -943,7 +1290,7 @@ def test_dispatch_argv_is_accepted_by_the_real_merge_gate_cli(
     monkeypatch.setattr(merge_gate_cli, "load_config", fake_load_config)
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=_spawner(None)[0])
     spec = PrGateSpec(repo="agent-lore/lithos-lens", pr_number=78, pr_url=_PR_URL)
-    cmd = dispatch._command(
+    cmd = dispatch.command(
         spec,
         tmp_path / "repo",
         tmp_path / "out.json",

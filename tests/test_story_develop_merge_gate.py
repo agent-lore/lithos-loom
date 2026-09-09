@@ -216,6 +216,55 @@ def test_settings_fingerprint_tracks_gate_settings_only(tmp_path: Path) -> None:
     assert all(len(fp) == 16 for fp in seen)
 
 
+def test_settings_fingerprint_sees_the_profile_definition_and_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #362 review F4: the name `standard` is stable across a loom upgrade
+    # that tightens what `standard` MEANS; the fingerprint must move with
+    # the resolved declaration (and the catalog commands behind it), or an
+    # unchanged sha pair suppresses exactly the re-gate the upgrade calls for.
+    from dataclasses import replace as dc_replace
+
+    from lithos_loom.plugins.story_develop import check_catalog, profiles
+
+    cfg = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path)
+    before = mg.settings_fingerprint(cfg)
+
+    standard = profiles.get_profile("standard")
+    tightened = dc_replace(
+        standard,
+        checks=standard.checks
+        + (profiles.ProfileCheck("semgrep", "required", "candidate"),),
+    )
+    real_get = profiles.get_profile
+    monkeypatch.setattr(
+        profiles,
+        "get_profile",
+        lambda name: tightened if name == "standard" else real_get(name),
+    )
+    after_profile = mg.settings_fingerprint(cfg)
+    assert after_profile != before
+
+    monkeypatch.setattr(profiles, "get_profile", real_get)
+    assert mg.settings_fingerprint(cfg) == before
+
+    real_commands = check_catalog.catalog_commands
+    lint = real_commands("lint")
+    assert lint is not None
+    monkeypatch.setattr(
+        check_catalog,
+        "catalog_commands",
+        lambda name: (
+            {**lint, "python": "ruff check --strict ."}
+            if name == "lint"
+            else real_commands(name)
+        ),
+    )
+    assert mg.settings_fingerprint(cfg) != before
+
+    assert mg.SETTINGS_FINGERPRINT_SCHEMA >= 1  # bumped when check semantics change
+
+
 def test_up_to_date_pr_gates_its_own_head_and_never_pushes(
     fx: Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

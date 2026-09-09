@@ -433,7 +433,9 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                     projects=projects,
                     work_dir=cfg.orchestrator.work_dir,
                     config_path=config_path,
-                )
+                ),
+                # the mutual hold, late-bound: remediation is built next
+                hold=lambda pr_url: remediation.busy_on(pr_url),
             )
             # Slice C: the autonomous remediation dispatcher — one per child,
             # its in-flight task IS the global single-flight slot. Built even

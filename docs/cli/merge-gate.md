@@ -65,8 +65,11 @@ The record carries two fingerprints. The **config fingerprint** is a digest
 of the resolved checks (name, command, state, stage), the image, the
 per-check timeout and the blocking threshold — what actually gated. The
 **settings fingerprint** is the resolved gate *settings* alone (image,
-timeout, threshold, profile, test command / gate, check tables, parity
-command): it needs no worktree, so `--resolve-only` reports it without a
+timeout, threshold, the profile by **definition** — its check declarations
+and the catalog commands behind them, so a loom upgrade that tightens what
+`standard` means moves it — plus a schema version for check semantics that
+live in code, test command / gate, check tables, parity command): it needs
+no worktree, so `--resolve-only` reports it without a
 fetch, a merge or a check, and it is what the watcher sweep's re-run key
 `(head_sha, base_sha, settings_fingerprint)` compares each pass — a tightened
 check-set re-gates an already-observed PR, which is precisely why the
@@ -88,6 +91,7 @@ anyway.
 | `--image` | Sandbox image the checks run in. |
 | `--test-timeout` | Per-check timeout in seconds. |
 | `--no-push` | Gate only; never push the merge commit. |
+| `--expect-repo OWNER/NAME` | Refuse to act unless the checkout's origin is this repository — compared **before** any fetch; a mismatch exits `repo_mismatch` (2) and, with `--json`, writes `{status: "repo_mismatch", expected_repo, actual_repo, message}`. A PR number resolves against the checkout, so the watcher pins every run to the repo its gate names (a stale `[projects.<slug>].repo` must never act on another repo's PR with the same number). |
 | `--resolve-only` | Resolve the gate settings (flags over the story's current config) and print their fingerprint — no fetch, no merge, no checks, no GitHub call. Still strict under `--story` (exit 4). With `--json`, writes `{status: "resolved", settings_fingerprint, image, review_profile}`. The watcher sweep's per-pass probe. |
 | `--keep-worktree` | Keep the throwaway worktree (the merged tree). |
 | `--repo` | Repository to work in (default: current directory). |
@@ -119,6 +123,7 @@ anyway.
 | `errored` | 1 | The check-set could not run (infrastructure); no verdict. |
 | `fork_unsupported` | 2 | A fork PR; refused from GitHub's metadata before any fetch. |
 | `pr_closed` | 2 | The PR is merged or closed; its branch is not a live target, nothing is trial-merged or pushed. |
+| `repo_mismatch` | 2 | `--expect-repo` named a repository and the checkout's origin is a different one; nothing was fetched, gated or pushed. |
 | `config_unresolved` | 4 | `--story` could not resolve the project's **current** config (no project slug, no context doc, a read failure, or a malformed gate-affecting setting); nothing was gated — S3 gates with the current config or not at all, never with built-in defaults. |
 | `conflict` | 3 | The base no longer merges; `conflicting_paths` names why. |
 
@@ -131,11 +136,15 @@ runs this command autonomously on every still-open `pr` gate whose
 per project, holding and held by external remediation per PR (either may
 push to the branch). The record lives in `metadata.merge_gate` on the gate.
 Green records (and a pushed merge commit is recorded as loom's own push on
-the remediation budget); red / errored posts `[MergeGateFailed]` on the
-story; a conflict widens `[PRConflicted]` with the conflicting paths; an
-unresolvable config or a crash posts `[Friction]` on the story (a crash is
-retried once on the same key, then waits for a head or base move). A fork PR
-is recorded once and never fetched. Per-project opt-out: context-doc
+the remediation budget); a green verdict whose push failed is `push_failed`
+— `[Friction]` with the push error, one retry on the same key, then the
+verdict stands until a settings change or a move; red / errored posts
+`[MergeGateFailed]` on the story; a conflict widens `[PRConflicted]` with
+the conflicting paths; an unresolvable config, an unmapped project, a fork,
+a repo mismatch or a crash posts `[Friction]` on the story (a crash or
+mismatch is retried once on the same key, then waits for a head or base
+move). The settings probe runs as a background task, never inline in the
+sweep, and every run is pinned with `--expect-repo` to the gate's repo. Per-project opt-out: context-doc
 `develop_merge_gate = false`. See SPECIFICATION §2.2.
 
 ## Requirements

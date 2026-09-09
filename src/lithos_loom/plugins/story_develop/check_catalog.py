@@ -28,7 +28,7 @@ default consults :func:`applies` only (its command keeps the tuned
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...runner.detection import Ecosystem
@@ -215,6 +215,14 @@ def formatter_commands(
 
 
 _BY_NAME: dict[str, CheckMapping] = {m.name: m for m in CANONICAL_CHECKS}
+
+
+def catalog_commands(name: str) -> Mapping[Ecosystem, str] | None:
+    """The canonical per-ecosystem commands behind check *name*, or ``None``
+    for a check the catalog does not know. Read-only: what a settings
+    fingerprint hashes so a catalog change moves it (PRD S3)."""
+    mapping = _BY_NAME.get(name)
+    return None if mapping is None else dict(mapping.commands)
 
 
 def _uv_run(command: str) -> str:

@@ -161,10 +161,13 @@ class ExternalRemediation:
         return self._task is not None and not self._task.done()
 
     def busy_on(self, pr_url: str) -> bool:
-        """Whether the in-flight run (if any) is remediating *pr_url* — the
-        merge-gate dispatcher's hold (PRD S3): a converge may push to that
-        branch at any moment, so a merge commit must wait."""
-        return self.busy and self._in_flight_pr_url == pr_url
+        """Whether a run is claimed or in flight on *pr_url* — the merge-gate
+        dispatcher's hold (PRD S3): a converge may push to that branch at
+        any moment, so a merge commit must wait. Claimed from the moment a
+        dispatch commits (before its reservation write, self-review of PR
+        #362: a probe finishing during that await must already see it) until
+        the run task ends."""
+        return self._in_flight_pr_url == pr_url
 
     async def observe_head(
         self, gate: Any, spec: PrGateSpec, pr: Any, ctx: SubscriptionContext
@@ -420,6 +423,10 @@ class ExternalRemediation:
                 spec.pr_url,
             )
             return "deferred_merge_gate"
+        # Claim the PR NOW, ahead of the reservation write: the merge-gate
+        # dispatcher's hold reads busy_on, and a settings probe finishing
+        # during the await below must not start a run beside this one.
+        self._in_flight_pr_url = spec.pr_url
 
         # Reserve the round BEFORE the run (crash-safe: a lost refund wastes
         # one round; a lost increment would allow an unbounded retry loop) —
@@ -434,6 +441,7 @@ class ExternalRemediation:
                 metadata={REMEDIATION_KEY: budget.as_marker(), PENDING_KEY: None},
             )
         except LithosClientError as exc:
+            self._in_flight_pr_url = ""  # the claim goes with the reservation
             ctx.logger.warning(
                 "[Friction] external-remediation: budget reservation for gate "
                 "%s failed (%s); not dispatching — will retry next sweep",
@@ -448,7 +456,6 @@ class ExternalRemediation:
             budget.rounds_used,
             self._settings.budget,
         )
-        self._in_flight_pr_url = spec.pr_url
         self._task = asyncio.create_task(
             self._run(gate.id, story_id, spec, repo, budget, ctx),
             name=f"external-remediation-{spec.pr_number}",
@@ -546,6 +553,11 @@ class ExternalRemediation:
             story_id,
             "--repo",
             str(repo),
+            # The checkout is pinned to the gate's repo (PR #362 review F2):
+            # a PR number resolves against the checkout's origin, so a stale
+            # [projects.<slug>].repo would otherwise act on owner/other#N.
+            "--expect-repo",
+            spec.repo,
             "--json",
             str(json_path),
         ]

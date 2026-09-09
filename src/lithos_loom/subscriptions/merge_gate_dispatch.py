@@ -26,17 +26,23 @@ What this module owns, all sweep-side (ADR 0011 decision 3 — single writer):
   branch, and a leased push beside another push loses (a wasted round).
 - **Every outcome is a one-shot record.** Green records (and a pushed merge
   commit is recorded as loom's own on the S5b budget, else the next sweep
-  would read it as a human push and reset the remediation counter). Red /
-  errored posts ``[MergeGateFailed]`` naming the check. A conflict widens
-  S1's ``[PRConflicted]`` with the conflicting paths — the trial merge is
-  the only source of that list. An unresolvable config or a crash posts
-  ``[Friction]`` on the story — never silent, never gated with built-ins.
+  would read it as a human push and reset the remediation counter). A green
+  verdict whose push FAILED is ``push_failed`` — a ``[Friction]`` with the
+  push error and a bounded retry, never a settled green (PR #362 review F1).
+  Red / errored posts ``[MergeGateFailed]`` naming the check. A conflict
+  widens S1's ``[PRConflicted]`` with the conflicting paths — the trial
+  merge is the only source of that list. An unresolvable config, an
+  unmapped project, a fork, a checkout that is not the gate's repo
+  (``--expect-repo``, review F2), or a crash posts ``[Friction]`` on the
+  story — never silent, never gated with built-ins.
+- **The settings probe never blocks the sweep** (review F5): it runs as a
+  background task per gate, and only a changed fingerprint starts a run
+  (under the project's slot, or on a later sweep if that slot is busy).
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
 from collections.abc import Awaitable, Callable, Mapping
@@ -44,21 +50,33 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
-from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions._findings import post_finding_then_mark
 from lithos_loom.subscriptions._project_settings import (
     read_project_flag,
     resolve_project_repo,
 )
 from lithos_loom.subscriptions._subprocess import spawn_command
-from lithos_loom.subscriptions.pr_landability import PR_CONFLICTED
-from lithos_loom.subscriptions.remediation_budget import (
-    REMEDIATION_KEY,
-    RemediationBudget,
-    read_budget,
+from lithos_loom.subscriptions.merge_gate_outcome import (
+    post_config_unresolved,
+    post_conflict,
+    post_crashed,
+    post_failed,
+    post_push_failed,
+    post_repo_mismatch,
+    record_green,
+    value_of,
+    write_record,
 )
+from lithos_loom.subscriptions.merge_gate_record import (
+    MAX_ATTEMPTS_PER_KEY,
+    MERGE_GATE_FAILED,
+    MERGE_GATE_KEY,
+    MergeGateRecord,
+    read_record,
+)
+from lithos_loom.subscriptions.remediation_budget import RemediationBudget, read_budget
 
 __all__ = [
     "MERGE_GATE_FAILED",
@@ -71,15 +89,6 @@ __all__ = [
     "spawn_merge_gate",
 ]
 
-# Stable, machine-parseable finding prefix (see AGENTS.md): the project's
-# current check-set went red (or could not verify) on the trial merge of a
-# delivered PR into its base's current tip — merging it now would break the
-# base.
-MERGE_GATE_FAILED = "[MergeGateFailed]"
-
-# Gate-metadata key holding the last re-gate record (the re-run key + outcome).
-MERGE_GATE_KEY = "merge_gate"
-
 # Project-context metadata key: per-project dial for the base-move re-gate.
 MERGE_GATE_SETTING = "develop_merge_gate"
 
@@ -88,22 +97,25 @@ MERGE_GATE_SETTING = "develop_merge_gate"
 RUN_TIMEOUT_SECONDS = 2 * 3600
 PROBE_TIMEOUT_SECONDS = 120
 
-# A crashed run (no record) is retried this many times on the SAME key, then
-# waits for the key to move — a host problem must not become an hourly loop.
-MAX_CRASH_ATTEMPTS = 2
+# Record statuses retried on the SAME key, up to MAX_ATTEMPTS_PER_KEY (see
+# merge_gate_record): the run produced no verdict to stand on.
+_RETRYABLE: frozenset[str] = frozenset({"crashed", "push_failed", "repo_mismatch"})
 
 # The findings quote at most this much subprocess output.
 _OUTPUT_TAIL_CHARS = 600
 
 # Record statuses whose outcome depends on the gate settings: an unchanged
 # sha pair re-gates when the probed fingerprint differs from the recorded
-# one. Everything else (conflict, fork, closed, no project) is settled by the
-# shas alone.
+# one. Everything else (conflict, fork, closed, no project, a crash or a
+# mismatch past its retries) is settled by the shas alone.
 _SETTINGS_DEPENDENT: frozenset[str] = frozenset(
-    {"green", "red", "errored", "no_checks", "config_unresolved"}
+    {"green", "red", "errored", "no_checks", "config_unresolved", "push_failed"}
 )
 
 Spawn = Callable[[list[str]], Awaitable[tuple[int, str]]]
+# Whether a remediation run is in flight on a PR url — re-checked the moment
+# a background probe would start a run, not only when it was scheduled.
+Hold = Callable[[str], bool]
 
 
 async def spawn_merge_gate(cmd: list[str]) -> tuple[int, str]:
@@ -114,69 +126,6 @@ async def spawn_merge_gate(cmd: list[str]) -> tuple[int, str]:
             cmd, timeout=PROBE_TIMEOUT_SECONDS, label="merge-gate settings probe"
         )
     return await spawn_command(cmd, timeout=RUN_TIMEOUT_SECONDS, label="merge-gate run")
-
-
-@dataclass(frozen=True)
-class MergeGateRecord:
-    """The gate's parsed ``merge_gate`` marker: the re-run key + the outcome.
-
-    ``head_sha`` / ``base_sha`` are the shas the SWEEP observed when it
-    dispatched (the key it compares next pass), not the run's own view.
-    ``attempts`` counts runs on this key (a crash retries a bounded number
-    of times); a fresh key starts at 1.
-    """
-
-    pr_url: str
-    head_sha: str
-    base_sha: str
-    settings_fingerprint: str = ""
-    status: str = ""
-    verdict: str | None = None
-    merge_sha: str = ""
-    pushed_sha: str = ""
-    config_fingerprint: str = ""
-    attempts: int = 0
-
-    def as_marker(self) -> dict[str, Any]:
-        return {
-            "pr_url": self.pr_url,
-            "head_sha": self.head_sha,
-            "base_sha": self.base_sha,
-            "settings_fingerprint": self.settings_fingerprint,
-            "status": self.status,
-            "verdict": self.verdict,
-            "merge_sha": self.merge_sha,
-            "pushed_sha": self.pushed_sha,
-            "config_fingerprint": self.config_fingerprint,
-            "attempts": self.attempts,
-        }
-
-
-def read_record(gate: Any, pr_url: str) -> MergeGateRecord | None:
-    """Parse the gate's record; ``None`` for an absent / foreign-url marker
-    (a replacement PR re-evaluates from scratch)."""
-    raw = gate.metadata.get(MERGE_GATE_KEY)
-    if not isinstance(raw, dict) or raw.get("pr_url") != pr_url:
-        return None
-
-    def _s(key: str) -> str:
-        value = raw.get(key)
-        return value if isinstance(value, str) else ""
-
-    attempts = raw.get("attempts")
-    verdict = raw.get("verdict")
-    return MergeGateRecord(
-        pr_url=pr_url,
-        head_sha=_s("head_sha"),
-        base_sha=_s("base_sha"),
-        settings_fingerprint=_s("settings_fingerprint"),
-        status=_s("status"),
-        verdict=verdict if isinstance(verdict, str) else None,
-        merge_sha=_s("merge_sha"),
-        pushed_sha=_s("pushed_sha"),
-        config_fingerprint=_s("config_fingerprint"),
-        attempts=attempts if isinstance(attempts, int) and attempts >= 0 else 0,
-    )
 
 
 @dataclass(frozen=True)
@@ -199,11 +148,19 @@ class MergeGateDispatch:
     the run task — never both at once for one gate.
     """
 
-    def __init__(self, settings: MergeGateSettings, *, spawn: Spawn | None = None):
+    def __init__(
+        self,
+        settings: MergeGateSettings,
+        *,
+        spawn: Spawn | None = None,
+        hold: Hold | None = None,
+    ):
         self._settings = settings
         self._spawn: Spawn = spawn if spawn is not None else spawn_merge_gate
+        self._hold = hold
         self._tasks: dict[str, asyncio.Task[None]] = {}  # project slug → run
         self._in_flight: dict[str, str] = {}  # project slug → pr url
+        self._probes: dict[str, asyncio.Task[None]] = {}  # gate id → probe
 
     # ── in-flight state ────────────────────────────────────────────────
 
@@ -219,22 +176,30 @@ class MergeGateDispatch:
             for slug, url in self._in_flight.items()
         )
 
+    def pending_probes(self) -> int:
+        """In-flight settings probes (finished ones are pruned)."""
+        return sum(1 for t in self._probes.values() if not t.done())
+
+    def _live(self) -> list[asyncio.Task[None]]:
+        return [
+            t for t in (*self._probes.values(), *self._tasks.values()) if not t.done()
+        ]
+
     async def drain(self) -> None:
-        """Await every in-flight run (tests; the sweep never waits)."""
-        tasks = [t for t in self._tasks.values() if not t.done()]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        """Await every in-flight probe and run (tests; the sweep never
+        waits). A probe may start a run as it finishes, so loop."""
+        while live := self._live():
+            await asyncio.gather(*live, return_exceptions=True)
 
     async def shutdown(self) -> None:
-        """Cancel + await the in-flight runs; the cancellation-safe spawn
-        terminates each merge-gate child, so a stopped loom never leaves an
-        orphan pushing merge commits."""
-        tasks = [t for t in self._tasks.values() if not t.done()]
-        for task in tasks:
+        """Cancel + await the in-flight probes and runs; the
+        cancellation-safe spawn terminates each merge-gate child, so a
+        stopped loom never leaves an orphan pushing merge commits."""
+        live = self._live()
+        for task in live:
             task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        if live:
+            await asyncio.gather(*live, return_exceptions=True)
 
     # ── the decision ───────────────────────────────────────────────────
 
@@ -272,17 +237,24 @@ class MergeGateDispatch:
             # operator's checkout; recorded once per key, not re-warned.
             if same_key and prior is not None and prior.status == "fork_unsupported":
                 return "unchanged"
-            await self._record(
-                gate.id,
-                MergeGateRecord(spec.pr_url, head, base, status="fork_unsupported"),
+            await post_finding_then_mark(
                 ctx,
-            )
-            ctx.logger.warning(
-                "[Friction] merge-gate: %s is a fork PR (%s → %s); not re-gated "
-                "(forks are out of scope for S3)",
-                spec.pr_url,
-                head_repo,
-                base_repo,
+                task_id=story_id,
+                summary=(
+                    f"[Friction] merge-gate: delivered PR {spec.pr_url} is a fork "
+                    f"PR ({head_repo} → {base_repo}); not re-gated against its base "
+                    f"(forks are out of scope for S3 — a third-party head is never "
+                    f"fetched into the operator's checkout); story {story_id} "
+                    f"remains blocked on gate {gate.id} for a human merge."
+                ),
+                marker={
+                    MERGE_GATE_KEY: MergeGateRecord(
+                        spec.pr_url, head, base, status="fork_unsupported"
+                    ).as_marker()
+                },
+                subsystem="merge-gate",
+                retry_hint="will retry next sweep",
+                marker_task_id=gate.id,
             )
             return "fork_unsupported"
 
@@ -292,17 +264,27 @@ class MergeGateDispatch:
         if project is None:
             if same_key and prior is not None and prior.status == "no_project":
                 return "unchanged"
-            await self._record(
-                gate.id,
-                MergeGateRecord(spec.pr_url, head, base, status="no_project"),
+            # On the story, once (PRD S3: "skipped with a one-shot [Friction],
+            # never silently" — the operator action lives in Lithos / Lens,
+            # not the host log; PR #362 review F3).
+            await post_finding_then_mark(
                 ctx,
-            )
-            ctx.logger.warning(
-                "[Friction] merge-gate: no project repo resolvable for gate %s "
-                "(%s); cannot re-gate — map the project under [projects] or "
-                "record metadata.project",
-                gate.id,
-                spec.pr_url,
+                task_id=story_id,
+                summary=(
+                    f"[Friction] merge-gate: no project repo resolvable for gate "
+                    f"{gate.id} (PR {spec.pr_url}, story {story_id}); the PR is "
+                    f"not re-gated against its base — map the project under "
+                    f"[projects] in the host config, or record metadata.project "
+                    f"on the story, then restart loom."
+                ),
+                marker={
+                    MERGE_GATE_KEY: MergeGateRecord(
+                        spec.pr_url, head, base, status="no_project"
+                    ).as_marker()
+                },
+                subsystem="merge-gate",
+                retry_hint="will retry next sweep",
+                marker_task_id=gate.id,
             )
             return "no_project"
         slug, repo = project
@@ -346,32 +328,62 @@ class MergeGateDispatch:
             return "deferred_busy"
 
         attempts = 1
+        # The S5b budget as of dispatch: remediation is held on this PR
+        # while the run is in flight and observe_head goes inert, so no
+        # other writer moves it — the fallback when the end-of-run re-read
+        # fails (a pushed merge commit MUST land as loom's own sha).
+        budget = read_budget(gate, spec.pr_url)
         if same_key and prior is not None:
-            if prior.status == "crashed":
-                if prior.attempts >= MAX_CRASH_ATTEMPTS:
-                    return "unchanged"  # waits for the key to move
+            retry = prior.status in _RETRYABLE and prior.attempts < MAX_ATTEMPTS_PER_KEY
+            if retry:
                 attempts = prior.attempts + 1
             elif prior.status not in _SETTINGS_DEPENDENT:
-                return "unchanged"
+                return "unchanged"  # settled by the shas; waits for a move
             else:
-                label, fingerprint = await self._probe(spec, repo, story_id, gate.id)
-                if fingerprint is None:
-                    ctx.logger.warning(
-                        "[Friction] merge-gate: settings probe for %s failed (%s); "
-                        "will retry next sweep",
-                        spec.pr_url,
-                        label,
-                    )
-                    return "probe_failed"
-                if fingerprint == prior.settings_fingerprint:
-                    return "unchanged"
-                ctx.logger.info(
-                    "merge-gate: settings for %s changed (%s → %s); re-gating",
-                    spec.pr_url,
-                    prior.settings_fingerprint or "(unresolved)",
-                    fingerprint or "(unresolved)",
+                # Probe in the background (PR #362 review F5): the sweep must
+                # not wait on a subprocess per unchanged gate. A changed
+                # fingerprint starts the run from inside the probe task.
+                probe = self._probes.get(gate.id)
+                if probe is not None and not probe.done():
+                    return "probing"
+                # prune finished probes so a long-lived daemon's map stays
+                # bounded by the gates currently probing, not ever probed
+                self._probes = {k: t for k, t in self._probes.items() if not t.done()}
+                self._probes[gate.id] = asyncio.create_task(
+                    self._probe_then_run(
+                        gate.id,
+                        story_id,
+                        spec,
+                        slug,
+                        repo,
+                        head,
+                        base,
+                        prior,
+                        budget,
+                        ctx,
+                    ),
+                    name=f"merge-gate-probe-{spec.pr_number}",
                 )
+                return "probing"
 
+        self._start_run(
+            gate.id, story_id, spec, slug, repo, head, base, attempts, budget, ctx
+        )
+        return "dispatched"
+
+    def _start_run(
+        self,
+        gate_id: str,
+        story_id: str,
+        spec: PrGateSpec,
+        slug: str,
+        repo: Path,
+        head: str,
+        base: str,
+        attempts: int,
+        budget: RemediationBudget,
+        ctx: SubscriptionContext,
+    ) -> None:
         ctx.logger.info(
             "merge-gate: dispatching merge-gate for %s (head %s, base %s, attempt %d)",
             spec.pr_url,
@@ -380,20 +392,73 @@ class MergeGateDispatch:
             attempts,
         )
         self._in_flight[slug] = spec.pr_url
-        # The S5b budget as of dispatch: remediation is held on this PR
-        # while the run is in flight and observe_head goes inert, so no
-        # other writer moves it — the fallback when the end-of-run re-read
-        # fails (a pushed merge commit MUST land as loom's own sha).
-        budget = read_budget(gate, spec.pr_url)
         self._tasks[slug] = asyncio.create_task(
-            self._run(gate.id, story_id, spec, repo, head, base, attempts, budget, ctx),
+            self._run(gate_id, story_id, spec, repo, head, base, attempts, budget, ctx),
             name=f"merge-gate-{spec.pr_number}",
         )
-        return "dispatched"
+
+    async def _probe_then_run(
+        self,
+        gate_id: str,
+        story_id: str,
+        spec: PrGateSpec,
+        slug: str,
+        repo: Path,
+        head: str,
+        base: str,
+        prior: MergeGateRecord,
+        budget: RemediationBudget,
+        ctx: SubscriptionContext,
+    ) -> None:
+        """The background probe: a changed fingerprint starts a run under
+        the project's slot; a busy slot leaves it for a later sweep (which
+        re-probes — cheap, and no state to get stale). Never raises."""
+        try:
+            label, fingerprint = await self._probe(spec, repo, story_id, gate_id)
+        except Exception:  # noqa: BLE001 — a probe must never take the sweep down
+            ctx.logger.exception(
+                "merge-gate: settings probe for %s raised", spec.pr_url
+            )
+            return
+        if fingerprint is None:
+            ctx.logger.warning(
+                "[Friction] merge-gate: settings probe for %s failed (%s); "
+                "will retry next sweep",
+                spec.pr_url,
+                label,
+            )
+            return
+        if fingerprint == prior.settings_fingerprint:
+            return
+        ctx.logger.info(
+            "merge-gate: settings for %s changed (%s → %s); re-gating",
+            spec.pr_url,
+            prior.settings_fingerprint or "(unresolved)",
+            fingerprint or "(unresolved)",
+        )
+        if self._hold is not None and self._hold(spec.pr_url):
+            # The hold was clear when the probe was scheduled; a remediation
+            # run started on this PR meanwhile (self-review) — either may
+            # push, so the run waits for a later sweep, which re-probes.
+            ctx.logger.info(
+                "merge-gate: a remediation run started on %s while its settings "
+                "were probed; re-gate deferred to a later sweep",
+                spec.pr_url,
+            )
+            return
+        if self.busy_for(slug):
+            ctx.logger.info(
+                "merge-gate: a run is in flight for project %r; %s re-gates on a "
+                "later sweep",
+                slug,
+                spec.pr_url,
+            )
+            return
+        self._start_run(gate_id, story_id, spec, slug, repo, head, base, 1, budget, ctx)
 
     # ── subprocess plumbing ────────────────────────────────────────────
 
-    def _command(
+    def command(
         self,
         spec: PrGateSpec,
         repo: Path,
@@ -416,6 +481,12 @@ class MergeGateDispatch:
             story_id,
             "--repo",
             str(repo),
+            # The checkout is pinned to the gate's repo (PR #362 review F2):
+            # a PR number resolves against the checkout's origin, so a stale
+            # [projects.<slug>].repo would otherwise trial-merge AND push
+            # owner/other#N.
+            "--expect-repo",
+            spec.repo,
             "--json",
             str(json_path),
         ]
@@ -452,7 +523,7 @@ class MergeGateDispatch:
         key compares), ``None`` when the probe itself failed."""
         path = self._json_path(gate_id, probe=True)
         rc, output = await self._spawn(
-            self._command(spec, repo, path, story_id, resolve_only=True)
+            self.command(spec, repo, path, story_id, resolve_only=True)
         )
         if rc == 4:
             return "config_unresolved", ""
@@ -484,7 +555,7 @@ class MergeGateDispatch:
             )
         except Exception as exc:  # noqa: BLE001 — the slot must always free cleanly
             ctx.logger.exception("merge-gate: run for %s raised", spec.pr_url)
-            await self._crashed(
+            await post_crashed(
                 gate_id,
                 story_id,
                 spec,
@@ -506,7 +577,7 @@ class MergeGateDispatch:
         ctx: SubscriptionContext,
     ) -> None:
         path = self._json_path(gate_id, probe=False)
-        rc, output = await self._spawn(self._command(spec, repo, path, story_id))
+        rc, output = await self._spawn(self.command(spec, repo, path, story_id))
         data = self._load(path)
         record = MergeGateRecord(spec.pr_url, head, base, attempts=attempts)
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
@@ -514,7 +585,7 @@ class MergeGateDispatch:
             # config_unresolved: the CLI exits before any run and writes no
             # record — the exit code IS the record (PRD S3: skipped loudly,
             # never gated with built-ins).
-            await self._config_unresolved(
+            await post_config_unresolved(
                 gate_id,
                 story_id,
                 spec,
@@ -524,7 +595,7 @@ class MergeGateDispatch:
             )
             return
         if data is None:
-            await self._crashed(
+            await post_crashed(
                 gate_id,
                 story_id,
                 spec,
@@ -540,13 +611,21 @@ class MergeGateDispatch:
         record = replace(
             record,
             status=status,
-            settings_fingerprint=self._str(data, "settings_fingerprint"),
+            settings_fingerprint=value_of(data, "settings_fingerprint"),
             verdict=verdict if isinstance(verdict, str) else None,
-            merge_sha=self._str(data, "merge_sha"),
-            pushed_sha=self._str(data, "pushed_sha") if data.get("pushed") else "",
-            config_fingerprint=self._str(data, "config_fingerprint"),
+            merge_sha=value_of(data, "merge_sha"),
+            pushed_sha=value_of(data, "pushed_sha") if data.get("pushed") else "",
+            config_fingerprint=value_of(data, "config_fingerprint"),
+            behind=data.get("behind") is True,
+            push_error=value_of(data, "push_error"),
         )
-        base_ref = self._str(data, "base_ref") or "the base branch"
+        if status == "green" and record.behind and not record.pushed_sha:
+            # A green verdict whose merge commit did NOT land (the CLI reports
+            # the push beside the verdict, never folded into it): the PR is
+            # still behind. Never a settled green (PR #362 review F1).
+            status = "push_failed"
+            record = replace(record, status=status)
+        base_ref = value_of(data, "base_ref") or "the base branch"
         ctx.logger.info(
             "merge-gate: run for %s finished: %s (verdict %s, exit %d)%s",
             spec.pr_url,
@@ -557,215 +636,34 @@ class MergeGateDispatch:
         )
 
         if status == "green":
-            await self._green(gate_id, record, budget, ctx)
+            await record_green(gate_id, record, budget, ctx)
+        elif status == "push_failed":
+            await post_push_failed(gate_id, story_id, spec, record, base_ref, ctx)
+        elif status == "repo_mismatch":
+            await post_repo_mismatch(gate_id, story_id, spec, record, data, ctx)
         elif status in ("red", "errored"):
-            await self._failed(gate_id, story_id, spec, record, data, base_ref, ctx)
+            await post_failed(gate_id, story_id, spec, record, data, base_ref, ctx)
         elif status == "conflict":
-            await self._conflict(gate_id, story_id, spec, record, data, base_ref, ctx)
+            await post_conflict(gate_id, story_id, spec, record, data, base_ref, ctx)
         elif status == "config_unresolved":
-            await self._config_unresolved(gate_id, story_id, spec, record, tail, ctx)
+            await post_config_unresolved(gate_id, story_id, spec, record, tail, ctx)
+        elif status == "pr_closed":
+            # The sweep's merge poll owns closed / merged; the run saying so
+            # is a race, not an event. Recording it on these shas would
+            # freeze a PR reopened without a push, so write nothing — the
+            # sweep asks again only while GitHub reports the PR open.
+            ctx.logger.info(
+                "merge-gate: %s was closed or merged by the time the run resolved "
+                "it; nothing recorded",
+                spec.pr_url,
+            )
         else:
-            # no_checks / pr_closed / fork_unsupported / anything new: a
-            # record, not an event — the merge poll owns closed and merged.
-            if status not in ("no_checks", "pr_closed", "fork_unsupported"):
+            # no_checks / fork_unsupported / anything new: a record, not an
+            # event.
+            if status not in ("no_checks", "fork_unsupported"):
                 ctx.logger.warning(
                     "[Friction] merge-gate: unrecognised status %r for %s; recorded",
                     status,
                     spec.pr_url,
                 )
-            await self._record(gate_id, record, ctx)
-
-    @staticmethod
-    def _str(data: Mapping[str, Any], key: str) -> str:
-        value = data.get(key)
-        return value if isinstance(value, str) else ""
-
-    async def _record(
-        self, gate_id: str, record: MergeGateRecord, ctx: SubscriptionContext
-    ) -> None:
-        await write_marker(
-            ctx,
-            task_id=gate_id,
-            marker={MERGE_GATE_KEY: record.as_marker()},
-            subsystem="merge-gate",
-        )
-
-    async def _green(
-        self,
-        gate_id: str,
-        record: MergeGateRecord,
-        budget: RemediationBudget,
-        ctx: SubscriptionContext,
-    ) -> None:
-        """Record a green gate; a pushed merge commit is loom's own push on
-        the S5b budget (else observe_head reads it as a human push and
-        resets the remediation counter — the invariant S5b exists for).
-
-        The push has already HAPPENED by now, so this must not fail into a
-        bare crash record. Prefer the gate's current budget (a fresh read);
-        fall back to the dispatch-time snapshot when Lithos will not answer
-        — no other writer moved it meanwhile: remediation is held on this
-        PR and observe_head is inert while the run is in flight. Record and
-        budget land in ONE write. The residual: that one write itself
-        failing (write_marker swallows) loses the sha, and the next sweep
-        resets the budget — rare, and it errs toward more headroom.
-        """
-        marker: dict[str, Any] = {MERGE_GATE_KEY: record.as_marker()}
-        if record.pushed_sha:
-            try:
-                fresh = await ctx.lithos.task_get(task_id=gate_id)
-            except LithosClientError as exc:
-                ctx.logger.warning(
-                    "[Friction] merge-gate: re-reading gate %s to record loom's "
-                    "push %s failed (%s); recording from the dispatch-time budget",
-                    gate_id,
-                    record.pushed_sha[:12],
-                    exc,
-                )
-                fresh = None
-            if fresh is not None:
-                budget = read_budget(fresh, record.pr_url)
-            marker[REMEDIATION_KEY] = replace(
-                budget, last_loom_pushed_sha=record.pushed_sha
-            ).as_marker()
-        await write_marker(ctx, task_id=gate_id, marker=marker, subsystem="merge-gate")
-
-    async def _failed(
-        self,
-        gate_id: str,
-        story_id: str,
-        spec: PrGateSpec,
-        record: MergeGateRecord,
-        data: Mapping[str, Any],
-        base_ref: str,
-        ctx: SubscriptionContext,
-    ) -> None:
-        rows = data.get("checks")
-        failing = [
-            c for c in (rows if isinstance(rows, list) else []) if not c.get("passed")
-        ]
-        named = "; ".join(
-            f"{c.get('name')} ({c.get('command')}) — "
-            + (
-                "errored, not verified"
-                if c.get("outcome") == "errored"
-                else "timed out"
-                if c.get("timed_out")
-                else f"exit {c.get('exit_code')}"
-            )
-            for c in failing
-        )
-        why = (
-            f"went {record.verdict}"
-            if record.verdict
-            else "could not be verified (a required check errored)"
-        )
-        await post_finding_then_mark(
-            ctx,
-            task_id=story_id,
-            summary=(
-                f"{MERGE_GATE_FAILED} merge-gate: delivered PR {spec.pr_url} would "
-                f"break {base_ref}: the project's current check-set {why} on the "
-                f"trial merge {record.merge_sha[:12]} (head {record.head_sha[:12]} "
-                f"+ base {record.base_sha[:12]}) — {named or 'no check named'}; "
-                f"story {story_id} remains blocked on gate {gate_id}. Fix on the PR "
-                f"branch (never rebase a delivered branch); the next sweep re-gates "
-                f"at the new head."
-            ),
-            marker={MERGE_GATE_KEY: record.as_marker()},
-            subsystem="merge-gate",
-            retry_hint="will retry next sweep",
-            marker_task_id=gate_id,
-        )
-
-    async def _conflict(
-        self,
-        gate_id: str,
-        story_id: str,
-        spec: PrGateSpec,
-        record: MergeGateRecord,
-        data: Mapping[str, Any],
-        base_ref: str,
-        ctx: SubscriptionContext,
-    ) -> None:
-        raw = data.get("conflicting_paths")
-        paths = [
-            p for p in (raw if isinstance(raw, list) else []) if isinstance(p, str)
-        ]
-        await post_finding_then_mark(
-            ctx,
-            task_id=story_id,
-            summary=(
-                f"{PR_CONFLICTED} merge-gate: delivered PR {spec.pr_url} conflicts "
-                f"with {base_ref} @ {record.base_sha[:12]} (head "
-                f"{record.head_sha[:12]}) in {len(paths)} path(s): "
-                f"{', '.join(paths) or '(unnamed)'}; story {story_id} remains "
-                f"blocked on gate {gate_id}. Resolve by merging {base_ref} into the "
-                f"PR branch (never rebase a delivered branch) and pushing; the next "
-                f"sweep re-evaluates at the new head."
-            ),
-            marker={MERGE_GATE_KEY: record.as_marker()},
-            subsystem="merge-gate",
-            retry_hint="will retry next sweep",
-            marker_task_id=gate_id,
-        )
-
-    async def _config_unresolved(
-        self,
-        gate_id: str,
-        story_id: str,
-        spec: PrGateSpec,
-        record: MergeGateRecord,
-        tail: str,
-        ctx: SubscriptionContext,
-    ) -> None:
-        await post_finding_then_mark(
-            ctx,
-            task_id=story_id,
-            summary=(
-                f"[Friction] merge-gate: the current config for story {story_id} "
-                f"(PR {spec.pr_url}) could not be resolved — nothing was gated "
-                f"(S3 gates with the project's current config or not at all): "
-                f"{tail}"
-            ),
-            marker={MERGE_GATE_KEY: record.as_marker()},
-            subsystem="merge-gate",
-            retry_hint="will retry next sweep",
-            marker_task_id=gate_id,
-        )
-
-    async def _crashed(
-        self,
-        gate_id: str,
-        story_id: str,
-        spec: PrGateSpec,
-        record: MergeGateRecord,
-        detail: str,
-        ctx: SubscriptionContext,
-    ) -> None:
-        record = replace(record, status="crashed")
-        ctx.logger.warning(
-            "merge-gate: run for %s crashed (attempt %d/%d): %s",
-            spec.pr_url,
-            record.attempts,
-            MAX_CRASH_ATTEMPTS,
-            detail,
-        )
-        await post_finding_then_mark(
-            ctx,
-            task_id=story_id,
-            summary=(
-                f"[Friction] merge-gate: develop merge-gate for {spec.pr_url} "
-                f"(story {story_id}) {detail} (attempt {record.attempts}/"
-                f"{MAX_CRASH_ATTEMPTS}"
-                + (
-                    "; retried next sweep)"
-                    if record.attempts < MAX_CRASH_ATTEMPTS
-                    else "; waits for a head or base move)"
-                )
-            ),
-            marker={MERGE_GATE_KEY: record.as_marker()},
-            subsystem="merge-gate",
-            retry_hint="will retry next sweep",
-            marker_task_id=gate_id,
-        )
+            await write_record(gate_id, record, ctx)

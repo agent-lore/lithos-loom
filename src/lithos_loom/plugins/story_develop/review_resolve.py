@@ -21,6 +21,7 @@ from lithos_loom.github_client import PullRequest
 from .github_access import github_call, repo_name_with_owner
 
 # A PR argument: ``#142``, bare ``142``, or a GitHub PR URL ending ``/pull/142``.
+_PR_URL_REPO_RE = re.compile(r"github\.com/([^/\s#?]+/[^/\s#?]+)/pull/\d+\b")
 _PR_URL_RE = re.compile(r"/pull/(\d+)\b")
 _PR_HASH_RE = re.compile(r"^#?(\d+)$")
 
@@ -109,6 +110,23 @@ def _parse_pr_number(spec: str) -> str | None:
     return m.group(1) if m is not None else None
 
 
+class RepoMismatchError(RuntimeError):
+    """The checkout's ``origin`` is not the repository the caller expected.
+
+    A PR number resolves against the LOCAL checkout's origin, never against
+    any URL — so an autonomous caller that maps a project slug to a checkout
+    (the watcher's dispatchers, PRD S2 / S3) would act on ``owner/other#N``
+    if that mapping were stale. Raised before any GitHub call or fetch.
+    """
+
+    def __init__(self, *, expected: str, actual: str) -> None:
+        super().__init__(
+            f"checkout origin is {actual!r}, not the expected {expected!r}"
+        )
+        self.expected = expected
+        self.actual = actual
+
+
 def resolve_change(
     repo: Path,
     spec: str,
@@ -116,6 +134,7 @@ def resolve_change(
     base_branch: str = "main",
     base_override: str | None = None,
     allow_fork: bool = True,
+    expect_repo: str | None = None,
 ) -> ResolvedChange:
     """Resolve *spec* into a :class:`ResolvedChange`.
 
@@ -126,11 +145,19 @@ def resolve_change(
     GitHub's own metadata **before** anything is fetched — ``is_fork`` set,
     ``base_sha`` empty — so a caller that must never pull a third-party head
     into the operator's checkout (merge-gate, PRD S3) can refuse it cleanly.
+    With ``expect_repo`` (``owner/name``) a PR spec is pinned to that
+    repository: the checkout's origin is compared first and a mismatch raises
+    :class:`RepoMismatchError` before anything is fetched (PR #362 review F2).
     """
     number = _parse_pr_number(spec)
     if number is not None:
         return _resolve_pr(
-            repo, number, base_override=base_override, allow_fork=allow_fork
+            repo,
+            number,
+            base_override=base_override,
+            allow_fork=allow_fork,
+            expect_repo=expect_repo,
+            spec=spec,
         )
 
     if ".." in spec:
@@ -155,8 +182,27 @@ def resolve_change(
 
 
 def _resolve_pr(
-    repo: Path, number: str, *, base_override: str | None, allow_fork: bool = True
+    repo: Path,
+    number: str,
+    *,
+    base_override: str | None,
+    allow_fork: bool = True,
+    expect_repo: str | None = None,
+    spec: str = "",
 ) -> ResolvedChange:
+    if expect_repo is not None:
+        # The URL's own repository, when the spec is a URL (the number is
+        # what selects the PR, so a URL naming another repo must not be
+        # quietly resolved in the checkout's) — then the checkout's origin.
+        # The same lenient shape _parse_pr_number accepts (http, www., a
+        # trailing path, a fragment) — the canonical ref parser is stricter
+        # and would silently skip the check for those forms (self-review).
+        url_repo = _PR_URL_REPO_RE.search(spec)
+        candidates = [url_repo.group(1)] if url_repo is not None else []
+        candidates.append(repo_name_with_owner(repo))
+        for candidate in candidates:
+            if candidate.strip().lower() != expect_repo.strip().lower():
+                raise RepoMismatchError(expected=expect_repo, actual=candidate)
     pr = _gh_pr_view(repo, number)
     head_sha = pr.head_sha
     base_ref_name = pr.base_ref

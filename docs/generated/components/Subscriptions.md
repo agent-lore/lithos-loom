@@ -37,7 +37,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
-| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 3 | 2 |
+| `lithos_loom.subscriptions.merge_gate_dispatch` | M | 2 | 1 |
+| `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 9 |
+| `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.remediation_budget` | XS | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
@@ -150,10 +152,23 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions.merge_gate_dispatch`
 - def `spawn_merge_gate` — Default spawn: the merge-gate CLI, capped by whichever timeout the argv shape calls for (:func:`_subprocess.spawn_command`).
-- class `MergeGateRecord` — The gate's parsed ``merge_gate`` marker: the re-run key + the outcome.
-- def `read_record` — Parse the gate's record; ``None`` for an absent / foreign-url marker (a replacement PR re-evaluates from scratch).
 - class `MergeGateSettings` — Host-side knobs the watcher child threads in from its config.
 - class `MergeGateDispatch` — Owns the per-project single-flight dispatch of ``develop merge-gate``.
+
+### `lithos_loom.subscriptions.merge_gate_outcome`
+- def `value_of`
+- def `write_record`
+- def `record_green` — Record a green gate; a pushed merge commit is loom's own push on the S5b budget (else observe_head reads it as a human push and resets the remediation counter — the invariant S5b exists for).
+- def `post_failed`
+- def `post_conflict`
+- def `post_push_failed`
+- def `post_repo_mismatch`
+- def `post_config_unresolved`
+- def `post_crashed`
+
+### `lithos_loom.subscriptions.merge_gate_record`
+- class `MergeGateRecord` — The gate's parsed ``merge_gate`` marker: the re-run key + the outcome.
+- def `read_record` — Parse the gate's record; ``None`` for an absent / foreign-url marker (a replacement PR re-evaluates from scratch). Tolerant of a malformed field — it reads as unset, never raises.
 
 ### `lithos_loom.subscriptions.pr_landability`
 - def `classify_landability` — ``unknown`` / ``dirty`` / ``mergeable`` from the fetched PR.
