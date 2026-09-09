@@ -109,6 +109,12 @@ async def check_landability(
         return state
     head_sha = getattr(pr, "head_sha", "") or ""
     base_sha = getattr(pr, "base_sha", "") or ""
+    if not base_sha or not head_sha:
+        ctx.logger.debug(
+            "pr-landability: %s base/head tip unknown this sweep; nothing to key on",
+            spec.pr_url,
+        )
+        return "unknown"
     marker = {
         LANDABILITY_KEY: {
             "pr_url": spec.pr_url,

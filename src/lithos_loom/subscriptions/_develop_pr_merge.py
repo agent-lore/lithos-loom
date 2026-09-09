@@ -23,10 +23,12 @@ gate is now the sole merge-tracking and re-dispatch path.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
+    PrGateSpec,
     is_pr_gate,
     parse_pr_gate,
     waiter_of,
@@ -96,6 +98,37 @@ def _pr_merge_state(pr: Any) -> str:
 # and the loom_delivered marker are gone): the runner creates a `pr` gate per
 # delivery, and this resolver owns the gate + its story — on merge it completes
 # the story then the gate.
+
+
+async def _live_base_tip(
+    github: Any, spec: PrGateSpec, pr: Any, ctx: SubscriptionContext
+) -> str:
+    """The base branch's current tip, or ``""`` when it cannot be read."""
+    branch = getattr(pr, "base_ref", "") or ""
+    if not branch:
+        return ""
+    try:
+        tip = await github.get_branch_tip(spec.repo, branch)
+    except GitHubError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: reading base tip %s@%s for %s failed (%s: %s); "
+            "landability + re-gate skipped this sweep",
+            spec.repo,
+            branch,
+            spec.pr_url,
+            type(exc).__name__,
+            exc,
+        )
+        return ""
+    if not tip:
+        ctx.logger.warning(
+            "[Friction] pr-gate: base branch %s@%s of %s not found; "
+            "landability + re-gate skipped this sweep",
+            spec.repo,
+            branch,
+            spec.pr_url,
+        )
+    return tip or ""
 
 
 async def reconcile_pr_gate(
@@ -228,6 +261,10 @@ async def reconcile_pr_gate(
         return "closed_unmerged"
 
     # state == "open" — still in flight; re-poll next sweep (no merge marker).
+    # The base-move key for everything below is the base branch's LIVE tip
+    # (the PR payload's base.sha is a stale snapshot — see PullRequest);
+    # unreadable → "" and neither consumer keys on it this sweep.
+    pr = replace(pr, base_sha=await _live_base_tip(github, spec, pr, ctx))
     # PRD S1: say so on the story when the PR cannot merge as it stands. Runs
     # on every merge poll (no separate dial): it reads fields the fetch above
     # already returned and writes only on a change.

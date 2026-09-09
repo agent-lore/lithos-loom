@@ -74,6 +74,10 @@ class MergeGateRecord:
     origin_seen: str = ""
     # for a checkout_unresolved record: why the sweep's read could not answer
     origin_reason: str = ""
+    # the dispatcher instance (one per daemon boot) that wrote a crashed /
+    # push_failed record: either may be loom's own bug and a restart is the
+    # operator's fix, so the same key gets a fresh bounded retry pair per boot
+    boot_id: str = ""
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -93,6 +97,7 @@ class MergeGateRecord:
             "actual_repo": self.actual_repo,
             "origin_seen": self.origin_seen,
             "origin_reason": self.origin_reason,
+            "boot_id": self.boot_id,
         }
 
 
@@ -127,4 +132,5 @@ def read_record(gate: Any, pr_url: str) -> MergeGateRecord | None:
         actual_repo=_s("actual_repo"),
         origin_seen=_s("origin_seen"),
         origin_reason=_s("origin_reason"),
+        boot_id=_s("boot_id"),
     )

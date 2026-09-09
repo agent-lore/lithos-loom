@@ -373,6 +373,22 @@ class GitHubClient:
         _raise_for_status(response, repo=repo)
         return parse_pull_request(response.json(), repo=repo)
 
+    async def get_branch_tip(self, repo: str, branch: str) -> str | None:
+        """The CURRENT tip sha of *branch* in *repo*; ``None`` when the ref
+        does not exist (404).
+
+        The base-move key (PRD S1 landability, S3 re-gate) must come from
+        here, not from the PR payload's ``base.sha``: GitHub snapshots that
+        at the PR's last update — loom#352 carried a base four days and
+        three merges stale — so a key built from it never sees the base move.
+        """
+        response = await self._get(f"/repos/{repo}/git/ref/heads/{branch}")
+        if response.status_code == 404:
+            return None
+        _raise_for_status(response, repo=repo)
+        sha = (response.json().get("object") or {}).get("sha")
+        return str(sha) if sha else None
+
     async def list_pull_request_reviews(
         self, repo: str, number: int
     ) -> list[PullRequestReview]:

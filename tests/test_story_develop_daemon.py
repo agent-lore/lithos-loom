@@ -2333,3 +2333,23 @@ def test_daemon_copilot_review_metadata_beats_route_flag(
         argv, _ = _daemon_args(tmp_git_repo, arm_dir, "--open-pr", *flag)
         assert main_mod.main(argv) == EXIT_SUCCEEDED
         assert seen["copilot_review"] is expected, (metadata_value, read_failed, flag)
+
+
+def test_fetch_task_metadata_round_trips_title_and_metadata(monkeypatch: Any) -> None:
+    """The on-demand ``--story`` path (converge / merge-gate) fetches the story
+    through this helper at RUNTIME — the live daemon crashed every merge-gate
+    run with ``name 'Mapping' is not defined`` because the name was imported
+    for type-checking only. Exercise the real function body, not a stub."""
+    from lithos_loom.plugins.story_develop import daemon_io
+    from tests.support import make_task
+
+    task = make_task("t1", title="Story", metadata={"project": "lithos-lens"})
+    monkeypatch.setattr(
+        daemon_io, "LithosClient", lambda *a, **k: FakeLithosClient(tasks=(task,))
+    )
+    assert daemon_io.fetch_task_metadata("http://lithos.test", "t1") == (
+        "Story",
+        {"project": "lithos-lens"},
+    )
+    with pytest.raises(LookupError):
+        daemon_io.fetch_task_metadata("http://lithos.test", "missing")

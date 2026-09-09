@@ -1632,3 +1632,63 @@ def test_dispatch_argv_is_accepted_by_the_real_merge_gate_cli(
     assert "No such option" not in result.output
     assert isinstance(result.exception, _Stop), result.output
     assert seen == [tmp_path / "host.toml"]
+
+
+async def test_a_daemon_restart_re_arms_a_crashed_key(tmp_path: Path) -> None:
+    """Two crashes on one key wait for the shas to move — but a crash is a
+    host / code problem and a RESTART is how the operator fixes it (the live
+    S3b rollout: every run crashed on a code bug; the fix + restart must run
+    them again on the same shas). A new dispatcher instance gets its own
+    bounded retry pair; the same instance still waits."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(None, rc=1, probe=_probe(_FP))
+    first_boot = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    for _ in range(2):
+        assert await _consider(client, gate, story, first_boot) == "dispatched"
+        await _settle(first_boot)
+        gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None and record.attempts == 2
+    assert await _consider(client, gate, story, first_boot) == "unchanged"
+
+    second_boot = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, second_boot) == "dispatched"
+    await _settle(second_boot)
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None and record.status == "crashed"
+    assert record.attempts == 1  # the new boot's own count
+    assert await _consider(client, gate, story, second_boot) == "dispatched"
+    await _settle(second_boot)
+    gate = await _refresh(client, gate.id)
+    assert await _consider(client, gate, story, second_boot) == "unchanged"
+    assert len(_runs(calls)) == 4
+
+
+async def test_a_daemon_restart_re_arms_an_exhausted_push_failure(
+    tmp_path: Path,
+) -> None:
+    """Same class as the crash: a push that keeps failing may be loom's own
+    bug (the push wrapper, a stale credential helper) and the restart is the
+    fix attempt — a new boot gets its own bounded pair on the same shas."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(
+        _record("green", pushed=False, push_error="lease"), probe=_probe(_FP)
+    )
+    first_boot = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    for _ in range(2):
+        assert await _consider(client, gate, story, first_boot) == "dispatched"
+        await _settle(first_boot)
+        gate = await _refresh(client, gate.id)
+    assert await _consider(client, gate, story, first_boot) == "probing"
+    await _settle(first_boot)
+    assert len(_runs(calls)) == 2
+
+    second_boot = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, second_boot) == "dispatched"
+    await _settle(second_boot)
+    record = read_record(await _refresh(client, gate.id), _PR_URL)
+    assert record is not None and record.status == "push_failed"
+    assert record.attempts == 1 and len(_runs(calls)) == 3

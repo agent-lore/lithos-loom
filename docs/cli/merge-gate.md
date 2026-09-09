@@ -143,7 +143,11 @@ verdict stands until a settings change or a move; red / errored posts
 the conflicting paths; an unresolvable config, an unmapped project, a fork,
 a repo mismatch or a crash posts `[Friction]` on the story (a crash or
 mismatch is retried once on the same key, then waits for a head or base
-move). The settings probe runs as a background task, never inline in the
+move — or, for a crash or a failed push, for a daemon restart: either may
+be loom's own bug and the restart is the fix attempt, so each boot gets its
+own bounded retry pair on the same shas). `base_sha` in the key is the base
+branch's **live tip** (`GET /git/ref/heads/<base>` each sweep), never the
+PR payload's stale `base.sha` snapshot. The settings probe runs as a background task, never inline in the
 sweep, acting only on the record it was scheduled for. Every run is pinned
 to the gate's repo twice: the sweep reads the mapped checkout's `origin`
 first (a mismatch — or a read that cannot answer: no checkout, no origin,

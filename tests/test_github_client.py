@@ -1385,8 +1385,12 @@ async def test_issue_comments_pass_since_when_given() -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_pull_request_parse_carries_landability_fields() -> None:
-    """PRD S1: mergeable / mergeable_state / base.sha come off the single-PR
-    endpoint the sweep already fetches; a null mergeable stays None."""
+    """PRD S1: mergeable / mergeable_state come off the single-PR endpoint
+    the sweep already fetches; a null mergeable stays None. The payload's
+    ``base.sha`` is NOT the base tip — GitHub snapshots it at the PR's last
+    update (loom#352 carried a 4-days-stale base after three merges to
+    main), so the parser leaves ``base_sha`` empty for the sweep to resolve
+    from the live ref."""
     respx.get(f"https://api.github.com/repos/{_REPO}/pulls/9").mock(
         return_value=httpx.Response(
             200,
@@ -1406,4 +1410,24 @@ async def test_pull_request_parse_carries_landability_fields() -> None:
         pr = await client.get_pull_request(_REPO, 9)
     assert pr is not None
     assert pr.mergeable is None and pr.mergeable_state == "unknown"
-    assert pr.base_sha == "b" * 40 and pr.head_sha == "h" * 40
+    assert pr.base_sha == "" and pr.head_sha == "h" * 40
+    assert pr.base_ref == "main"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_branch_tip_reads_the_live_ref() -> None:
+    """The base-move key (S1 landability, S3 re-gate) is the base branch's
+    CURRENT tip, read from the ref endpoint on every sweep."""
+    respx.get(f"https://api.github.com/repos/{_REPO}/git/ref/heads/main").mock(
+        return_value=httpx.Response(
+            200, json={"ref": "refs/heads/main", "object": {"sha": "t" * 40}}
+        )
+    )
+    respx.get(f"https://api.github.com/repos/{_REPO}/git/ref/heads/gone").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+    async with httpx.AsyncClient() as http:
+        client = GitHubClient(http=http, token="fake")
+        assert await client.get_branch_tip(_REPO, "main") == "t" * 40
+        assert await client.get_branch_tip(_REPO, "gone") is None
