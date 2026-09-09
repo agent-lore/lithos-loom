@@ -13,8 +13,8 @@
       },
       "Cli": {
         "functions_over_10": 20,
-        "max_complexity": 49,
-        "max_function": "lithos_loom.cli.project.import_project"
+        "max_complexity": 50,
+        "max_function": "lithos_loom.cli.converge.converge_command"
       },
       "Config": {
         "functions_over_10": 4,
@@ -57,7 +57,7 @@
         "max_function": "lithos_loom.notifications.build_notifier"
       },
       "Plugins": {
-        "functions_over_10": 34,
+        "functions_over_10": 35,
         "max_complexity": 97,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
@@ -102,7 +102,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 110,
+    "functions_over_10": 111,
     "top_functions": [
       {
         "complexity": 97,
@@ -113,15 +113,15 @@
         "qualname": "lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider"
       },
       {
+        "complexity": 50,
+        "qualname": "lithos_loom.cli.converge.converge_command"
+      },
+      {
         "complexity": 49,
         "qualname": "lithos_loom.cli.project.import_project"
       },
       {
         "complexity": 48,
-        "qualname": "lithos_loom.cli.converge.converge_command"
-      },
-      {
-        "complexity": 45,
         "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
@@ -133,19 +133,19 @@
         "qualname": "lithos_loom.main._print_dry_run_report"
       },
       {
+        "complexity": 30,
+        "qualname": "lithos_loom.plugins.story_develop.converge.converge_pr"
+      },
+      {
         "complexity": 29,
         "qualname": "lithos_loom.evals.review.case.load_case"
       },
       {
         "complexity": 28,
         "qualname": "lithos_loom.config._parse_obsidian_sync"
-      },
-      {
-        "complexity": 27,
-        "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
       }
     ],
-    "total_functions": 1300
+    "total_functions": 1314
   },
   "domain": {
     "associations": 2,
@@ -262,12 +262,13 @@
       }
     },
     "cross_component_edges": 68,
-    "cross_component_module_edges": 284,
+    "cross_component_module_edges": 287,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
       [
         "lithos_loom.plugins.story_develop.agent_session",
+        "lithos_loom.plugins.story_develop.loop_entry",
         "lithos_loom.plugins.story_develop.panel",
         "lithos_loom.plugins.story_develop.rounds"
       ]
@@ -365,10 +366,10 @@
         "functions": 127,
         "largest_module": "lithos_loom.cli.project",
         "largest_module_lines": 1705,
-        "lines": 6001,
+        "lines": 6017,
         "modules": 13,
         "public_symbols": 65,
-        "sloc": 5034
+        "sloc": 5050
       },
       "Config": {
         "classes": 11,
@@ -451,14 +452,14 @@
         "sloc": 224
       },
       "Plugins": {
-        "classes": 65,
-        "functions": 390,
+        "classes": 68,
+        "functions": 399,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1103,
-        "lines": 15362,
-        "modules": 45,
-        "public_symbols": 252,
-        "sloc": 12267
+        "lines": 15706,
+        "modules": 47,
+        "public_symbols": 258,
+        "sloc": 12566
       },
       "ProjectContext": {
         "classes": 0,
@@ -482,13 +483,13 @@
       },
       "Runners": {
         "classes": 1,
-        "functions": 33,
+        "functions": 38,
         "largest_module": "lithos_loom.runner.git",
-        "largest_module_lines": 260,
-        "lines": 764,
+        "largest_module_lines": 331,
+        "lines": 835,
         "modules": 5,
-        "public_symbols": 26,
-        "sloc": 601
+        "public_symbols": 30,
+        "sloc": 656
       },
       "Sources": {
         "classes": 11,
@@ -551,13 +552,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 50515,
-    "total_modules": 148,
-    "total_sloc": 40475
+    "total_lines": 50946,
+    "total_modules": 150,
+    "total_sloc": 40845
   },
   "tests": {
     "ratio": 1.6,
-    "src_lines": 50515,
-    "test_lines": 80948
+    "src_lines": 50946,
+    "test_lines": 81319
   }
 }

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -497,6 +498,7 @@ def test_converge_result_json_round_trips_the_documented_shape(
     assert data == {
         "deferred_findings": [],  # 819370e5: out-of-scope deferrals (none here)
         "status": "converged",
+        "conflict": None,  # resolve mode only (PRD S5)
         "succeeded": True,
         "head_ref": "#142 (feature)",
         "head_branch": "feature",
@@ -728,3 +730,156 @@ def test_external_mode_unacked_finding_stays_unaddressed_when_approved(
     by_id = {o.finding_id: o for o in result.external_outcomes}
     assert by_id["f-001"].disposition == "fixed"
     assert by_id["f-002"].disposition == "unaddressed"
+
+
+# ── S5 conflict convergence: resolve mode ─────────────────────────────────────
+
+
+def _seed_conflict(repo: Path, *, conflicting: bool = True) -> tuple[str, str, str]:
+    """main + feature both edit shared.txt (or not); returns
+    (merge-base, feature head, main tip)."""
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    (repo / "shared.txt").write_text("v0\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "seed")
+    merge_base = run("rev-parse", "HEAD")
+    run("switch", "-q", "-c", "feature")
+    (repo / ("shared.txt" if conflicting else "own.txt")).write_text("feature\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "feature work")
+    head = run("rev-parse", "HEAD")
+    run("switch", "-q", "main")
+    (repo / "shared.txt").write_text("base\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "feat: landed thing on main")
+    base_tip = run("rev-parse", "HEAD")
+    return merge_base, head, base_tip
+
+
+def _resolve_change(merge_base: str, head: str) -> ResolvedChange:
+    return ResolvedChange(
+        base_sha=merge_base,
+        head_sha=head,
+        head_ref="#142 (feature)",
+        base_ref="main",
+        title="A PR",
+        body="do the thing",
+        head_branch="feature",
+    )
+
+
+def test_resolve_mode_seeds_the_loop_from_a_merge_in_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    merge_base, head, base_tip = _seed_conflict(tmp_git_repo)
+    captured = _install(monkeypatch, blocking=False)
+    seen: dict = {}
+
+    def fake_develop(config, *, coder_timeout=3600, reviewer_timeout=3600, entry=None):
+        assert entry is not None and entry.pre_commit_guard is not None
+        wt = entry.worktree_factory(config)
+        seen["entry"] = entry
+        seen["merge_head"] = (wt / ".git").is_file()
+        seen["marked"] = "<<<<<<<" in (wt / "shared.txt").read_text()
+        seen["guard_before"] = entry.pre_commit_guard(wt)
+        (wt / "shared.txt").write_text("feature+base\n")  # the coder resolves it
+        seen["guard_after"] = entry.pre_commit_guard(wt)
+        return _dev_result(wt, status="approved")
+
+    monkeypatch.setattr(converge_mod, "develop", fake_develop)
+
+    result = converge_pr(
+        _config(tmp_path), _resolve_change(merge_base, head), resolve_conflicts=True
+    )
+
+    assert result.status == "converged" and result.pushed
+    assert "intake_ran" not in captured  # no panel intake: the merge IS the intake
+    entry = seen["entry"]
+    assert entry.coder_init_template == "resolve_coder_init.md"
+    brief = entry.coder_init_extra["conflict_brief"]
+    assert "shared.txt" in brief and "landed thing on main" in brief and "A PR" in brief
+    assert entry.intake_reviews == [] and entry.intake_check_set is None
+    assert entry.base_override.start_sha == merge_base
+    assert entry.base_override.ref == "main"
+    assert seen["marked"] and seen["merge_head"]
+    assert seen["guard_before"] and "shared.txt" in seen["guard_before"]
+    assert seen["guard_after"] is None
+    assert result.conflict is not None
+    assert result.conflict.paths == ("shared.txt",)
+    assert result.conflict.base_sha == base_tip
+    assert result.to_json()["conflict"] == {
+        "paths": ["shared.txt"],
+        "base_ref": "main",
+        "base_sha": base_tip,
+    }
+    assert captured["push"]["expected_remote_sha"] == head
+
+
+def test_resolve_mode_with_nothing_to_resolve_spends_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    merge_base, head, _tip = _seed_conflict(tmp_git_repo, conflicting=False)
+    captured = _install(monkeypatch, blocking=False)
+
+    result = converge_pr(
+        _config(tmp_path), _resolve_change(merge_base, head), resolve_conflicts=True
+    )
+
+    assert result.status == "no_conflict" and not result.succeeded
+    assert "entry" not in captured and "push" not in captured
+    assert result.to_json()["conflict"] is None
+    # the throwaway worktree is gone: only the repo and the work dir remain
+    leftover = sorted(p.name for p in tmp_path.iterdir() if p.is_dir())
+    assert leftover == [n for n in leftover if n in ("repo", "work")]
+
+
+def test_resolve_mode_is_exclusive_with_external_findings(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="resolve_conflicts"):
+        converge_pr(
+            _config(tmp_path),
+            _change(),
+            resolve_conflicts=True,
+            external_findings=("finding",),  # type: ignore[arg-type]
+        )
+
+
+def test_resolve_mode_refuses_a_fork_before_touching_git(tmp_path: Path) -> None:
+    result = converge_pr(
+        _config(tmp_path), _change(is_fork=True), resolve_conflicts=True
+    )
+    assert result.status == "fork_unsupported"
+
+
+def test_markers_guard_refuses_an_abandoned_merge(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """The prompt forbids `git merge --abort` but nothing else enforced it: a
+    coder that abandons the merge leaves a clean, marker-free tree at the PR
+    head — and a plain commit there would converge WITHOUT the base. The
+    guard refuses while HEAD is still the PR head and no merge is in progress."""
+    from lithos_loom.plugins.story_develop.conflict_resolve import markers_guard
+    from lithos_loom.runner import git
+
+    merge_base, head, base_tip = _seed_conflict(tmp_git_repo)
+    subprocess.run(["git", "switch", "-q", "feature"], cwd=tmp_git_repo, check=True)
+    assert git.merge_no_commit(tmp_git_repo, base_tip) == ["shared.txt"]
+    guard = markers_guard(("shared.txt",), head_sha=head)
+    marked = guard(tmp_git_repo)
+    assert marked is not None and "shared.txt" in marked
+
+    git.abort_merge(tmp_git_repo)
+    refused = guard(tmp_git_repo)
+    assert refused is not None and "abandoned" in refused
+
+    # a resolved, still-in-progress merge passes; so does any later round
+    # (HEAD moved past the PR head, MERGE_HEAD gone)
+    assert git.merge_no_commit(tmp_git_repo, base_tip) == ["shared.txt"]
+    (tmp_git_repo / "shared.txt").write_text("both\n")
+    assert guard(tmp_git_repo) is None
+    assert git.commit_all(tmp_git_repo, "resolve") is not None
+    assert guard(tmp_git_repo) is None

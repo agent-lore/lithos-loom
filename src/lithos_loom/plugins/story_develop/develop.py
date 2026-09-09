@@ -485,6 +485,11 @@ def develop(
         intake_reviews=entry.intake_reviews if entry is not None else None,
         intake_check_set=entry.intake_check_set if entry is not None else None,
         external_ack=entry.external_ack if entry is not None else "",
+        coder_init_template=(
+            entry.coder_init_template if entry is not None else "converge_coder_init.md"
+        ),
+        coder_init_extra=entry.coder_init_extra if entry is not None else {},
+        pre_commit_guard=entry.pre_commit_guard if entry is not None else None,
     )
 
     # The default outcome is "max_rounds" — the exit the loop lands on when it

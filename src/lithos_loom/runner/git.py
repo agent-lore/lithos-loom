@@ -176,7 +176,14 @@ def commit_all(
     # to leak .handoff/ into the deliverable commit).
     for p in exclude:
         _git(worktree, "reset", "-q", "--", p)
-    if not _git(worktree, "diff", "--cached", "--name-only"):
+    # A merge in progress is ALWAYS committed (PRD S5): a resolution that keeps
+    # HEAD's side everywhere leaves the staged tree equal to HEAD — an empty
+    # cached diff — yet the two-parent commit is exactly what records the base
+    # tip as an ancestor. Only outside a merge does "nothing staged" mean
+    # "nothing to commit".
+    if not merge_in_progress(worktree) and not _git(
+        worktree, "diff", "--cached", "--name-only"
+    ):
         return None
     _git(worktree, "commit", "-m", message)
     return base_sha(worktree)
@@ -251,6 +258,70 @@ def merge(worktree: Path, ref: str, *, message: str) -> list[str]:
         )
     _git(worktree, "merge", "--abort")
     return paths
+
+
+def merge_no_commit(worktree: Path, ref: str) -> list[str]:
+    """Merge *ref* into HEAD **without committing**; return the conflicting paths.
+
+    The S5 conflict-resolution intake: unlike :func:`merge` this leaves a
+    conflict IN PROGRESS — ``MERGE_HEAD`` set, the auto-merged paths staged,
+    the returned paths carrying conflict markers in the working tree — so a
+    coder can resolve them in place and :func:`commit_all` then produces a
+    real merge commit (parents: HEAD, then *ref*). A clean merge is staged
+    and uncommitted too (``MERGE_HEAD`` set, nothing to resolve); the caller
+    decides between :func:`abort_merge` and a commit. Always ``--no-ff``.
+    """
+    result = subprocess.run(
+        ["git", "merge", "--no-ff", "--no-commit", ref],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return []
+    unmerged = _git(worktree, "diff", "--name-only", "--diff-filter=U")
+    paths = unmerged.splitlines() if unmerged else []
+    if not paths:
+        raise RuntimeError(
+            f"git merge --no-commit {ref} failed (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    return paths
+
+
+def abort_merge(worktree: Path) -> None:
+    """Abandon an in-progress merge, restoring the pre-merge tree."""
+    _git(worktree, "merge", "--abort")
+
+
+def merge_in_progress(worktree: Path) -> bool:
+    """Whether *worktree* has a merge in progress (``MERGE_HEAD`` set) —
+    resolved through ``--git-path`` so a linked worktree's private git dir is
+    the one consulted."""
+    marker = Path(_git(worktree, "rev-parse", "--git-path", "MERGE_HEAD"))
+    return (marker if marker.is_absolute() else worktree / marker).exists()
+
+
+def _carries_markers(file: Path) -> bool:
+    """A ``<<<<<<< `` or ``>>>>>>> `` line is a marker on its own (a half-removed
+    conflict is still a broken file); a bare ``=======`` (a setext underline,
+    a banner) never is — git only writes it between the other two."""
+    with file.open("rb") as fh:
+        for raw in fh:
+            line = raw.rstrip(b"\r\n")
+            if line.startswith(b"<<<<<<< ") or line.startswith(b">>>>>>> "):
+                return True
+    return False
+
+
+def conflict_markers(worktree: Path, paths: Sequence[str]) -> list[str]:
+    """Of *paths*, those whose working-tree content still carries conflict
+    markers — the pre-commit guard for a resolution round (``git commit`` does
+    not refuse markers; the guard must). A path deleted as its resolution
+    carries none."""
+    return [
+        p for p in paths if (worktree / p).is_file() and _carries_markers(worktree / p)
+    ]
 
 
 def delete_branch(repo: Path, branch: str) -> None:

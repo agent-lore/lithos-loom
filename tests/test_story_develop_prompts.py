@@ -263,3 +263,17 @@ def test_external_triage_prompt_defaults_to_act_and_demands_evidence() -> None:
     assert "a reject without evidence is treated as proceed" in text
     assert "{findings}" in raw and "{handoff_file}" in raw
     assert "non-interactive turn" in text and "never background" in text
+
+
+def test_resolve_coder_init_tells_the_coder_the_merge_rules() -> None:
+    """S5: the conflict-resolution round-1 prompt — the merge is IN PROGRESS
+    in /workspace; the coder resolves the marked files honouring BOTH sides,
+    never runs git merge/commit/abort/reset, and writes the handoff."""
+    raw = load_prompt("resolve_coder_init.md")
+    slots = ("{acceptance_criteria}", "{conflict_brief}", "{handoff_file}")
+    for slot in (*slots, "{sandbox_facts}"):
+        assert slot in raw
+    text = " ".join(raw.lower().split())
+    assert "in progress" in text and "<<<<<<<" in raw
+    assert "both" in text
+    assert "do not commit" in text and "abort" in text

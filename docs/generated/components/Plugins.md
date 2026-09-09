@@ -25,8 +25,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
+| `lithos_loom.plugins.story_develop.conflict_resolve` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
-| `lithos_loom.plugins.story_develop.converge` | M | 1 | 1 |
+| `lithos_loom.plugins.story_develop.converge` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
@@ -40,6 +41,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
+| `lithos_loom.plugins.story_develop.loop_entry` | XS | 1 | 0 |
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
@@ -50,7 +52,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | L | 4 | 11 |
+| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 12 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -132,6 +134,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `load_develop_config` — Parse a ``--develop-config`` TOML file into reviewer specs.
 - class `DevelopConfig` — Everything ``develop()`` needs for one run.
 
+### `lithos_loom.plugins.story_develop.conflict_resolve`
+- class `ConflictIntake` — A merge in progress, ready for the resolution round.
+- def `prepare_conflict_intake` — Merge the base's current tip into a throwaway worktree at the PR head, without committing. ``None`` when there is nothing to resolve — the head already contains the base tip, or the merge is clean (the base-move re-gate's job, PRD S3): the worktree is removed again and no agent runs.
+- def `render_conflict_brief` — The round-1 brief: the PR's intent, what landed on the base since the merge-base, and the conflicted hunks (bounded per path).
+- def `markers_guard` — The pre-commit guard: refuse a tree where any conflicted path still carries markers — and refuse a tree at the PR head with NO merge in progress (the coder abandoned the merge; a plain commit there would "converge" without the base, and only the next re-gate would notice).
+
 ### `lithos_loom.plugins.story_develop.containers`
 - def `container_name` — Stable, unique-per-run container name, e.g. ``loom-develop-ab12cd34-coder``.
 - def `build_run_command` — Build the ``docker run`` argv for a long-lived idle agent container.
@@ -140,6 +148,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `stop_container` — Force-remove the container; never raises (teardown must be best-effort).
 
 ### `lithos_loom.plugins.story_develop.converge`
+- class `ConflictSummary` — Resolve mode (PRD S5): what the run set out to resolve.
 - class `ConvergeResult` — Outcome of a :func:`converge_pr` run.
 - def `converge_pr` — Run the review-convergence loop against an existing PR *change*.
 
@@ -255,6 +264,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `post_results` — Post the run outcome back to the task. Returns True when fully posted.
 - def `complete_task` — Mark the task completed (``--complete-on-approval`` opt-in only).
 
+### `lithos_loom.plugins.story_develop.loop_entry`
+- class `LoopEntry` — Overrides that let ``develop()`` enter its loop on an EXISTING PR branch instead of cutting a fresh worktree off a base (converge / ADR 0003 §9 "Shape 1").
+
 ### `lithos_loom.plugins.story_develop.merge_gate`
 - class `MergeGateCheck` — One check's outcome on the merge result, flattened for the record.
 - class `MergeGateResult` — The outcome of one trial merge + gate.
@@ -332,7 +344,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4).
 - class `CycleExit` — A terminal outcome of the develop loop.
 - class `RoundContext` — The explicit successor of ``develop()``'s locals bag (ARCH-1.S6).
-- class `LoopEntry` — Overrides that let ``develop()`` enter its loop on an EXISTING PR branch instead of cutting a fresh worktree off a base (converge / ADR 0003 §9 "Shape 1").
+- def `round1_coder_prompt` — The cold-start coder prompt: story-develop's ``coder_init.md``, or — on a converge entry (``intake_reviews`` set) — the entry's template seeded from the intake review + the PR's own commit log so the coder reconstructs intent before changing anything (ADR 0003 §9 Shape 1); a conflict resolution (PRD S5) swaps the template and adds its brief as extra slots.
 - def `coder_phase` — Build the coder prompt, run its (limit-paused) turn, salvage a missing handoff once (#114), and gate the round on a clean turn + a written handoff.
 - def `dispute_phase` — T7: record the coder's dispute marks from its handoff (round >= 2).
 - def `commit_round` — Commit a round's work as one commit, excluding the handoff dir.

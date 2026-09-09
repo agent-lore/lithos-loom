@@ -76,6 +76,7 @@ _EXIT_CODES = {
     "not_converged": 1,
     "merge_race": 1,
     "failed": 1,
+    "no_conflict": 0,
 }
 
 
@@ -192,6 +193,16 @@ def converge_command(
         "ones are printed but never fed to an agent. Replies are posted for "
         "what was fixed or rejected (on the thread, or on the conversation "
         "for a conversation comment).",
+    ),
+    resolve_conflicts: bool = typer.Option(
+        False,
+        "--resolve-conflicts",
+        help="PRD S5: merge the base's current tip into the PR head in a "
+        "throwaway worktree and, when it conflicts, have the coder resolve "
+        "the marked files; the project's check-set and the panel then judge "
+        "the composed tree and an approved run pushes the merge commit "
+        "(append-only). A clean merge exits `no_conflict` and spends nothing. "
+        "Exclusive with --from-github.",
     ),
     repo: Path | None = typer.Option(
         None, "--repo", help="Repository to converge in (default: current directory)."
@@ -339,6 +350,10 @@ def converge_command(
         reviewers = story_layer["reviewers"]
     resolved_image = explicit_image or story_layer.get("image") or DEFAULT_IMAGE
 
+    if resolve_conflicts and from_github:
+        raise typer.BadParameter(
+            "--resolve-conflicts and --from-github are exclusive modes"
+        )
     external_findings = None
     gh_repo: str | None = None
     pr_number: int | None = None
@@ -429,6 +444,7 @@ def converge_command(
         resolved,
         no_push=no_push,
         external_findings=external_findings,
+        resolve_conflicts=resolve_conflicts,
     )
 
     if from_github and gh_repo is not None and pr_number is not None:
