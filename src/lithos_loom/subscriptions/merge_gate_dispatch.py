@@ -50,10 +50,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark
 from lithos_loom.subscriptions._project_settings import (
+    origin_repo,
+    parse_origin,
     read_project_flag,
     resolve_project_repo,
 )
@@ -85,6 +88,8 @@ __all__ = [
     "MergeGateDispatch",
     "MergeGateRecord",
     "MergeGateSettings",
+    "origin_repo",
+    "parse_origin",
     "read_record",
     "spawn_merge_gate",
 ]
@@ -327,6 +332,46 @@ class MergeGateDispatch:
             )
             return "deferred_busy"
 
+        # The cheap origin read (PR #362 re-review 2): a checkout that is not
+        # the gate's repo costs no subprocess, and a settled mismatch is a
+        # fresh key the moment the mapping (path) or the origin changes —
+        # the operator's fix must re-arm the same shas.
+        origin = await origin_repo(repo)
+        seen = (origin or "").lower()
+        matches = origin is not None and seen == spec.repo.lower()
+        if (
+            same_key
+            and prior is not None
+            and prior.status == "repo_mismatch"
+            and (prior.repo_path != str(repo) or seen != prior.origin_seen)
+        ):
+            # A mismatch of either kind (the sweep's own read, or the CLI's
+            # authoritative gh check) settles on what the SWEEP observes —
+            # the two can disagree (a rename gh follows, a shape the read
+            # cannot parse), so "the read now matches" is never by itself a
+            # fresh key (self-review: that looped a spawn every sweep).
+            same_key = False
+        if origin is not None and not matches:
+            if same_key and prior is not None and prior.status == "repo_mismatch":
+                return "unchanged"
+            await post_repo_mismatch(
+                gate.id,
+                story_id,
+                spec,
+                MergeGateRecord(
+                    spec.pr_url,
+                    head,
+                    base,
+                    status="repo_mismatch",
+                    repo_path=str(repo),
+                    actual_repo=origin,
+                    origin_seen=seen,
+                ),
+                {"expected_repo": spec.repo, "actual_repo": origin},
+                ctx,
+            )
+            return "repo_mismatch"
+
         attempts = 1
         # The S5b budget as of dispatch: remediation is held on this PR
         # while the run is in flight and observe_head goes inert, so no
@@ -366,6 +411,11 @@ class MergeGateDispatch:
                 )
                 return "probing"
 
+        # A new key supersedes any probe still out for this gate (it captured
+        # the old shas; its answer could only start a stale run).
+        stale = self._probes.get(gate.id)
+        if stale is not None and not stale.done():
+            stale.cancel()
         self._start_run(
             gate.id, story_id, spec, slug, repo, head, base, attempts, budget, ctx
         )
@@ -451,6 +501,25 @@ class MergeGateDispatch:
                 "merge-gate: a run is in flight for project %r; %s re-gates on a "
                 "later sweep",
                 slug,
+                spec.pr_url,
+            )
+            return
+        # The probe captured the key when it was scheduled; a newer run may
+        # have written a newer record meanwhile (re-review 2 F3). Act only on
+        # the record we probed for.
+        try:
+            fresh = await ctx.lithos.task_get(task_id=gate_id)
+        except LithosClientError:
+            fresh = None
+        current = None if fresh is None else read_record(fresh, spec.pr_url)
+        if current is None or (current.head_sha, current.base_sha, current.status) != (
+            prior.head_sha,
+            prior.base_sha,
+            prior.status,
+        ):
+            ctx.logger.info(
+                "merge-gate: the record for %s moved while its settings were "
+                "probed; nothing started (the next sweep decides afresh)",
                 spec.pr_url,
             )
             return
@@ -579,7 +648,17 @@ class MergeGateDispatch:
         path = self._json_path(gate_id, probe=False)
         rc, output = await self._spawn(self.command(spec, repo, path, story_id))
         data = self._load(path)
-        record = MergeGateRecord(spec.pr_url, head, base, attempts=attempts)
+        # the settle key for a repo mismatch: the sweep's own read, so a CLI
+        # refusal re-arms only when the mapping or the remote url moves
+        origin_seen = ((await origin_repo(repo)) or "").lower()
+        record = MergeGateRecord(
+            spec.pr_url,
+            head,
+            base,
+            attempts=attempts,
+            repo_path=str(repo),
+            origin_seen=origin_seen,
+        )
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
         if data is None and rc == 4:
             # config_unresolved: the CLI exits before any run and writes no
@@ -618,6 +697,7 @@ class MergeGateDispatch:
             config_fingerprint=value_of(data, "config_fingerprint"),
             behind=data.get("behind") is True,
             push_error=value_of(data, "push_error"),
+            actual_repo=value_of(data, "actual_repo"),
         )
         if status == "green" and record.behind and not record.pushed_sha:
             # A green verdict whose merge commit did NOT land (the CLI reports

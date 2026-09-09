@@ -1497,3 +1497,154 @@ async def test_a_failed_reservation_releases_the_claim(tmp_path: Path) -> None:
     rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
     assert await _consider(client, gate, story, rem) == "reservation_failed"
     assert rem.busy_on(_PR_URL) is False
+
+
+# ── PR #362 re-review 2 F2: a repo mismatch must not spend a round ─────────
+
+
+async def test_a_mismatched_checkout_is_refused_before_any_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cheap origin check runs in the sweep, BEFORE the reservation: no
+    # round spent, the pending trigger stays parked, one [Friction] on the
+    # story — and fixing the mapping resumes the review debt.
+    from lithos_loom.subscriptions import external_remediation as mod
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    origin = {"repo": "agent-lore/other"}
+
+    async def fake_origin(path: Path) -> str | None:
+        return origin["repo"]
+
+    monkeypatch.setattr(mod, "origin_repo", fake_origin)
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "repo_mismatch"
+    assert calls == []
+    assert rem.busy_on(_PR_URL) is False
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}  # debt kept
+    assert (await _marker(client, gate.id)) is None  # nothing reserved
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] external-remediation")
+    assert "agent-lore/other" in finding and "agent-lore/lithos-lens" in finding
+    assert "[projects." in finding
+
+    # the next sweep (a fresh read of the gate): same mismatch, nothing re-posted
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert await _consider(client, gate, story, rem) == "repo_mismatch"
+    assert len(_findings(client)) == 1
+
+    # the mapping is fixed: the parked debt dispatches
+    origin["repo"] = "Agent-Lore/Lithos-Lens"  # case-insensitive
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 1
+
+
+async def test_a_cli_repo_mismatch_refunds_the_round_and_re_parks(
+    tmp_path: Path,
+) -> None:
+    # The CLI's authoritative check (gh, redirect-aware) may still refuse
+    # where the cheap origin read passed: a structured refusal, not a
+    # failed run — the round is refunded, the trigger re-parked, no
+    # exhaustion escalation even on the last round.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        {
+            "status": "repo_mismatch",
+            "expected_repo": "agent-lore/lithos-lens",
+            "actual_repo": "agent-lore/other",
+            "message": "checkout origin is agent-lore/other",
+        },
+        rc=2,
+    )
+    rem = ExternalRemediation(
+        _settings(tmp_path, notifier=_RecordingNotifier()), spawn=spawn
+    )
+    label = await _consider(client, gate, story, rem, rounds_used=1)  # last round
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # refunded
+    assert marker["needs_human_gate_id"] == ""
+    assert await _human_gates(client) == []
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}  # re-parked
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] external-remediation")
+    assert "agent-lore/other" in finding and "round" in finding
+
+
+async def test_a_cli_refusal_settles_until_the_mapping_or_origin_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # self-review: with the sweep's origin read matching and the CLI still
+    # refusing, every sweep spawned converge, refunded and re-posted. The
+    # refusal settles on what the sweep observes (path + its origin read)
+    # and re-arms only when one of those changes.
+    from lithos_loom.subscriptions import external_remediation as mod
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    origin = {"repo": "agent-lore/lithos-lens"}
+
+    async def fake_origin(path: Path) -> str | None:
+        return origin["repo"]
+
+    monkeypatch.setattr(mod, "origin_repo", fake_origin)
+    spawn, calls = _spawner(
+        {
+            "status": "repo_mismatch",
+            "expected_repo": "agent-lore/lithos-lens",
+            "actual_repo": "agent-lore/renamed",
+            "message": "gh says renamed",
+        },
+        rc=2,
+    )
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 1
+    assert (await _marker(client, gate.id))["rounds_used"] == 0  # refunded
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert gate.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}  # re-parked
+
+    # later sweeps: settled — no spawn, no new finding, the debt still parked
+    for _ in range(3):
+        assert await _consider(client, gate, story, rem) == "repo_mismatch"
+    assert len(calls) == 1 and len(_findings(client)) == 1
+
+    # the remote url changes: one fresh attempt
+    origin["repo"] = "agent-lore/renamed"
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert await _consider(client, gate, story, rem) == "repo_mismatch"  # pre-check
+    assert len(calls) == 1
+    origin["repo"] = "agent-lore/lithos-lens"
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 2

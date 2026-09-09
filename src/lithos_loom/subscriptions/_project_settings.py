@@ -13,6 +13,8 @@ Subscriptions for one lookup.
 
 from __future__ import annotations
 
+import asyncio
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,52 @@ from typing import Any
 from lithos_loom.errors import LithosClientError
 from lithos_loom.subscriptions import SubscriptionContext
 
-__all__ = ["read_project_flag", "resolve_project_repo"]
+__all__ = ["origin_repo", "parse_origin", "read_project_flag", "resolve_project_repo"]
+
+# Every remote-url shape `gh` resolves for GitHub: scp-like ssh, ssh:// with
+# an optional port, https with an optional user[:token]@ and optional www.
+_ORIGIN_RE = re.compile(
+    r"^(?:git@github\.com:"
+    r"|ssh://[^@/\s]+@github\.com(?::\d+)?/"
+    r"|https?://(?:[^@/\s]+@)?(?:www\.)?github\.com/)"
+    r"([^/\s]+/[^/\s]+?)(?:\.git)?/?$"
+)
+
+
+def parse_origin(url: str) -> str | None:
+    """``owner/name`` from a GitHub remote url (ssh / https / ssh://), or
+    ``None`` for anything else."""
+    m = _ORIGIN_RE.match(url.strip())
+    return None if m is None else m.group(1)
+
+
+async def origin_repo(path: Path) -> str | None:
+    """The checkout's ``origin`` as ``owner/name`` via ``git remote get-url``
+    — milliseconds, no network — or ``None`` when it cannot answer (no such
+    directory, no origin, not a GitHub url).
+
+    The cheap pre-check both dispatchers run in the sweep before spending
+    a budget round or a subprocess on a checkout that is not the gate's
+    repo (PR #362 re-review 2). The CLI's ``--expect-repo`` (``gh``,
+    redirect-aware) stays the authoritative check inside the run.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(path),
+            "remote",
+            "get-url",
+            "origin",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except (OSError, TimeoutError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return parse_origin(out.decode("utf-8", errors="replace"))
 
 
 async def resolve_project_repo(

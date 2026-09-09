@@ -811,7 +811,7 @@ def test_explicit_check_flags_merge_per_key_over_the_story_tables(
 
 
 def test_expect_repo_reaches_the_resolver_and_a_mismatch_exits_2(
-    stubs: dict, monkeypatch: pytest.MonkeyPatch
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # PR #362 review F2 applies to converge too: the remediation dispatcher
     # hands it a bare PR number against a project-mapped checkout.
@@ -830,12 +830,27 @@ def test_expect_repo_reaches_the_resolver_and_a_mismatch_exits_2(
 
     monkeypatch.setattr(converge_cli, "resolve_change", refuse)
     stubs.pop("config", None)
+    out = tmp_path / "r.json"
     result = runner.invoke(
-        develop_app, ["converge", "#142", "--ac", "x", "--expect-repo", "o/right"]
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--ac",
+            "x",
+            "--expect-repo",
+            "o/right",
+            "--json",
+            str(out),
+        ],
     )
     assert result.exit_code == 2, result.output
     assert "config" not in stubs
     assert "o/right" in result.output and "o/wrong" in result.output
+    # a structured refusal the remediation dispatcher can read (re-review 2)
+    record = json.loads(out.read_text())
+    assert record["status"] == "repo_mismatch"
+    assert record["expected_repo"] == "o/right" and record["actual_repo"] == "o/wrong"
 
 
 def test_story_settings_are_the_base_layer(story_stubs: dict) -> None:

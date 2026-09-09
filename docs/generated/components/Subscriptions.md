@@ -28,7 +28,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_projection` | L | 0 | 1 |
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
-| `lithos_loom.subscriptions._project_settings` | XS | 0 | 2 |
+| `lithos_loom.subscriptions._project_settings` | S | 0 | 4 |
 | `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
@@ -37,13 +37,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
-| `lithos_loom.subscriptions.merge_gate_dispatch` | M | 2 | 1 |
+| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 2 | 1 |
 | `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 9 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
-| `lithos_loom.subscriptions.remediation_budget` | XS | 3 | 1 |
+| `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
-| `lithos_loom.subscriptions.remediation_outcome` | S | 0 | 3 |
+| `lithos_loom.subscriptions.remediation_outcome` | S | 0 | 7 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -108,6 +108,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `make_handler` — Build a stateful ``project-context-projection`` handler bound to ``cfg``.
 
 ### `lithos_loom.subscriptions._project_settings`
+- def `parse_origin` — ``owner/name`` from a GitHub remote url (ssh / https / ssh://), or ``None`` for anything else.
+- def `origin_repo` — The checkout's ``origin`` as ``owner/name`` via ``git remote get-url`` — milliseconds, no network — or ``None`` when it cannot answer (no such directory, no origin, not a GitHub url).
 - def `resolve_project_repo` — ``(slug, repo_path)`` via gate metadata, falling back to the story's (gate creation records ``project`` only when the payload carried it). ``None`` when no slug is known or the slug is not mapped under ``[projects]``.
 - def `read_project_flag` — A boolean per-project dial from the context doc's metadata.
 
@@ -187,6 +189,10 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `post_finding` — Best-effort finding post (the story may have completed mid-run).
 - def `escalate_or_report` — PRD S5b: exhaustion → human gate; a gate that could not be raised is said so on the story instead of vanishing.
 - def `record_result` — Record a run that produced a JSON result: marker, finding, log, and the exhaustion escalation when the CLI reports it did not succeed.
+- def `refusal_key` — What the sweep observes about the mapped checkout — the settle key a repo-mismatch refusal (the sweep's own, or the CLI's) is de-duped on.
+- def `refusal_settled` — Whether a refusal is already recorded for exactly this key — no spawn, no re-post until the mapping or the remote url moves.
+- def `post_repo_mismatch_refusal` — The sweep's own origin read refused the checkout: one ``[Friction]`` on the story per settle key, de-duped by a marker on the gate. Nothing else is written — no round spent, the parked trigger kept.
+- def `refund_repo_mismatch` — The CLI's authoritative ``--expect-repo`` check refused where the sweep's origin read passed: refund the reserved round, re-park the review trigger (the reservation consumed it), record the settle key so the sweep does not spawn again until the mapping or the remote url moves, and say so — never an exhaustion escalation. One write.
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.

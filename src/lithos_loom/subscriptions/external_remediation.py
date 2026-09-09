@@ -64,6 +64,7 @@ from lithos_loom.github_review_streams import AuthorTrust
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
 from lithos_loom.subscriptions._project_settings import (
+    origin_repo,
     read_project_flag,
     resolve_project_repo,
 )
@@ -73,6 +74,7 @@ from lithos_loom.subscriptions.external_reviews import (
     PendingMarkerProvider,
 )
 from lithos_loom.subscriptions.remediation_budget import (
+    PENDING_KEY,
     REMEDIATION_KEY,
     RemediationBudget,
     RemediationSettings,
@@ -81,7 +83,10 @@ from lithos_loom.subscriptions.remediation_budget import (
 from lithos_loom.subscriptions.remediation_outcome import (
     escalate_or_report,
     post_finding,
+    post_repo_mismatch_refusal,
     record_result,
+    refund_repo_mismatch,
+    refusal_settled,
 )
 
 __all__ = [
@@ -96,15 +101,9 @@ __all__ = [
 ]
 
 
-# Gate-metadata key parking a batch deferred behind the busy single-flight
-# slot (PR #346 review F1): ingestion's high-water marks consume the batch,
-# so without a durable trigger a deferred dispatch would never happen if the
-# PR then went quiet. Url-scoped; consumed atomically with the budget
-# reservation on dispatch; survives restarts.
-PENDING_KEY = "external_remediation_pending"
-
 # Project-context metadata key: per-project dial for autonomous dispatch.
 CONVERGE_SETTING = "develop_external_review_converge"
+
 
 # Hard wall-clock cap on one converge subprocess, so a hung run can never hold
 # the global single-flight slot forever. Generous: a thorough multi-round
@@ -423,6 +422,25 @@ class ExternalRemediation:
                 spec.pr_url,
             )
             return "deferred_merge_gate"
+        # The cheap origin read (PR #362 re-review 2 F2): a checkout that is
+        # not the gate's repo must not spend a round or consume the parked
+        # trigger — the debt stays parked and dispatches once the mapping is
+        # fixed. The CLI's --expect-repo remains the authoritative check.
+        origin = await origin_repo(repo)
+        seen = (origin or "").lower()
+        if refusal_settled(gate, spec, repo, seen):
+            # a refusal (the sweep's or the CLI's) already stands for exactly
+            # what the sweep observes; nothing runs until the mapping or the
+            # remote url moves
+            ctx.logger.debug(
+                "external-remediation: repo mismatch still settled for %s", spec.pr_url
+            )
+            return "repo_mismatch"
+        if origin is not None and seen != spec.repo.lower():
+            await post_repo_mismatch_refusal(
+                ctx, gate=gate, story_id=story_id, spec=spec, repo=repo, origin=origin
+            )
+            return "repo_mismatch"
         # Claim the PR NOW, ahead of the reservation write: the merge-gate
         # dispatcher's hold reads busy_on, and a settings probe finishing
         # during the await below must not start a run beside this one.
@@ -631,6 +649,22 @@ class ExternalRemediation:
         except (OSError, ValueError):
             data = None
 
+        if data is not None and data.get("status") == "repo_mismatch":
+            # The CLI's authoritative check refused (gh, redirect-aware —
+            # where the sweep's origin read passed): a configuration
+            # refusal, not a failed run — refunded, re-parked, never an
+            # exhaustion escalation.
+            await refund_repo_mismatch(
+                ctx,
+                gate_id=gate_id,
+                story_id=story_id,
+                spec=spec,
+                repo=repo,
+                origin_seen=((await origin_repo(repo)) or "").lower(),
+                budget=budget,
+                data=data,
+            )
+            return
         if data is not None:
             await self._record_result(gate_id, story_id, spec, budget, data, ctx)
             return

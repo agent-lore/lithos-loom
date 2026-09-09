@@ -224,20 +224,26 @@ async def post_repo_mismatch(
 ) -> None:
     expected = value_of(data, "expected_repo") or spec.repo
     actual = value_of(data, "actual_repo") or "(unknown)"
-    again = (
-        "retried next sweep"
-        if record.attempts < MAX_ATTEMPTS_PER_KEY
-        else "waits for a head or base move after the mapping is fixed"
-    )
+    if record.attempts == 0:
+        # the sweep's own origin read refused it: nothing was spawned, and
+        # the same shas gate as soon as the mapping or the origin changes
+        tail = "checked again every sweep; no run until it matches"
+    elif record.attempts < MAX_ATTEMPTS_PER_KEY:
+        tail = f"attempt {record.attempts}/{MAX_ATTEMPTS_PER_KEY}; retried next sweep"
+    else:
+        tail = (
+            f"attempt {record.attempts}/{MAX_ATTEMPTS_PER_KEY}; the same shas gate "
+            "once the mapping or the origin changes"
+        )
     await post_finding_then_mark(
         ctx,
         task_id=story_id,
         summary=(
             f"[Friction] merge-gate: the checkout mapped for this project "
-            f"has origin {actual}, not the gate's {expected} (PR "
-            f"{spec.pr_url}); nothing was fetched, gated or pushed. Fix "
-            f"[projects.<slug>].repo in the host config and restart loom "
-            f"(attempt {record.attempts}/{MAX_ATTEMPTS_PER_KEY}; {again})."
+            f"({record.repo_path or 'unknown path'}) has origin {actual}, not the "
+            f"gate's {expected} (PR {spec.pr_url}); nothing was fetched, gated or "
+            f"pushed. Fix [projects.<slug>].repo in the host config and restart "
+            f"loom ({tail})."
         ),
         marker={MERGE_GATE_KEY: record.as_marker()},
         subsystem="merge-gate",

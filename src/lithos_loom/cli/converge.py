@@ -256,6 +256,22 @@ def converge_command(
         )
     except RepoMismatchError as exc:
         typer.secho(f"error: {exc}; not acting", err=True, fg=typer.colors.RED)
+        if json_out is not None:
+            # a structured refusal the remediation dispatcher reads: refund,
+            # re-park, no exhaustion (PR #362 re-review 2)
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(
+                json.dumps(
+                    {
+                        "status": "repo_mismatch",
+                        "expected_repo": exc.expected,
+                        "actual_repo": exc.actual,
+                        "message": str(exc),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
         raise typer.Exit(2) from exc
 
     # converge pushes fixes onto the PR head ref, so it needs a PR (a range /

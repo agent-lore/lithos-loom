@@ -144,7 +144,13 @@ the conflicting paths; an unresolvable config, an unmapped project, a fork,
 a repo mismatch or a crash posts `[Friction]` on the story (a crash or
 mismatch is retried once on the same key, then waits for a head or base
 move). The settings probe runs as a background task, never inline in the
-sweep, and every run is pinned with `--expect-repo` to the gate's repo. Per-project opt-out: context-doc
+sweep, acting only on the record it was scheduled for. Every run is pinned
+to the gate's repo twice: the sweep reads the mapped checkout's `origin`
+first (a mismatch spawns nothing and posts one `[Friction]`), and the run's
+own `--expect-repo` is the authoritative check. Either kind of mismatch
+settles on the mapped path plus the sweep's own origin read, and re-arms
+the same shas when one of those moves — the mapping or the checkout's
+remote url is the operator's lever. Per-project opt-out: context-doc
 `develop_merge_gate = false`. See SPECIFICATION §2.2.
 
 ## Requirements

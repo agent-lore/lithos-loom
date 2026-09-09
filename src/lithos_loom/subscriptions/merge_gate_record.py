@@ -62,6 +62,16 @@ class MergeGateRecord:
     attempts: int = 0
     behind: bool = False
     push_error: str = ""
+    # the checkout the run was mapped to, and what its origin turned out to
+    # be on a repo_mismatch — so fixing the mapping (a new path, or an origin
+    # that now matches) is a fresh key for the same shas
+    repo_path: str = ""
+    actual_repo: str = ""
+    # the sweep's OWN origin read (lower-cased owner/name, "" when unreadable)
+    # at the time of the record — with repo_path, the settle key for a repo
+    # mismatch of either kind: the CLI's verdict and the cheap read can
+    # disagree, so a mismatch re-arms only when what the sweep observes moves
+    origin_seen: str = ""
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -77,6 +87,9 @@ class MergeGateRecord:
             "attempts": self.attempts,
             "behind": self.behind,
             "push_error": self.push_error,
+            "repo_path": self.repo_path,
+            "actual_repo": self.actual_repo,
+            "origin_seen": self.origin_seen,
         }
 
 
@@ -107,4 +120,7 @@ def read_record(gate: Any, pr_url: str) -> MergeGateRecord | None:
         attempts=attempts if isinstance(attempts, int) and attempts >= 0 else 0,
         behind=raw.get("behind") is True,
         push_error=_s("push_error"),
+        repo_path=_s("repo_path"),
+        actual_repo=_s("actual_repo"),
+        origin_seen=_s("origin_seen"),
     )
