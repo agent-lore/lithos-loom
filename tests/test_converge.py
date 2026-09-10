@@ -912,7 +912,7 @@ def test_resolve_mode_gives_the_panel_the_merge_context(
         _config(tmp_path), _resolve_change(merge_base, head), resolve_conflicts=True
     )
     assert result.status == "converged"
-    assert "`shared.txt`" in seen["context"]
+    assert "shared.txt" in seen["context"].splitlines()
     assert head[:12] in seen["context"] and base_tip[:12] in seen["context"]
 
 

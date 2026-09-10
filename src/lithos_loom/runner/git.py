@@ -312,6 +312,32 @@ def unmerged_paths(worktree: Path) -> list[str]:
     ]
 
 
+def unmerged_entries(worktree: Path, path: str) -> dict[int, str]:
+    """*path*'s unmerged index entries while a merge is in progress: stage
+    (1 = base, 2 = ours, 3 = theirs) → blob mode (``100644`` / ``100755`` a
+    file, ``120000`` a symlink, ``160000`` a submodule). A modify/delete
+    lacks stage 2 or 3; a symlink conflict never carries textual markers
+    (and the worktree path FOLLOWS the link), so the mode is what to judge.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "-u", "-z", "--", path],
+        cwd=worktree,
+        capture_output=True,
+        check=True,
+    ).stdout
+    entries: dict[int, str] = {}
+    for entry in out.split(b"\0"):
+        if entry:
+            mode, _sha, stage = entry.split(b"\t", 1)[0].split()[:3]
+            entries[int(stage)] = mode.decode()
+    return entries
+
+
+def unmerged_stages(worktree: Path, path: str) -> set[int]:
+    """The index stages *path* has while unmerged — see :func:`unmerged_entries`."""
+    return set(unmerged_entries(worktree, path))
+
+
 def abort_merge(worktree: Path) -> None:
     """Abandon an in-progress merge, restoring the pre-merge tree."""
     _git(worktree, "merge", "--abort")

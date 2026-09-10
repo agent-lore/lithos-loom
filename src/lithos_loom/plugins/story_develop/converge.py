@@ -41,6 +41,7 @@ from ...runner import git, worktree
 from . import handoff, review_only
 from .config import DevelopConfig
 from .conflict_resolve import (
+    UnsupportedConflict,
     markers_guard,
     prepare_conflict_intake,
     render_review_context,
@@ -75,6 +76,7 @@ ConvergeStatus = Literal[
     "merge_race",
     "failed",
     "no_conflict",
+    "conflict_unsupported",
 ]
 
 
@@ -534,7 +536,23 @@ def _resolve_conflicts(
 ) -> ConvergeResult:
     """Resolve mode (PRD S5): the merge in progress is the intake; round 1
     resolves it, the loop's own gate + panel judge the composed tree."""
-    intake = prepare_conflict_intake(config, change)
+    try:
+        intake = prepare_conflict_intake(config, change)
+    except UnsupportedConflict as exc:
+        return ConvergeResult(
+            status="conflict_unsupported",
+            change=change,
+            conflict=ConflictSummary(
+                paths=exc.paths,
+                base_ref=change.base_ref or change.base_sha,
+                base_sha=exc.base_sha,
+            ),
+            message=(
+                f"PR {change.head_ref} conflicts with its base in a shape this "
+                f"mode cannot resolve by editing — {exc}; no agent ran, nothing "
+                "pushed; a human must resolve it"
+            ),
+        )
     if intake is None:
         return ConvergeResult(
             status="no_conflict",

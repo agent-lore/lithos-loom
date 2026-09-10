@@ -25,7 +25,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
-| `lithos_loom.plugins.story_develop.conflict_resolve` | M | 1 | 4 |
+| `lithos_loom.plugins.story_develop.conflict_resolve` | M | 2 | 5 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
@@ -136,9 +136,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `DevelopConfig` — Everything ``develop()`` needs for one run.
 
 ### `lithos_loom.plugins.story_develop.conflict_resolve`
+- class `UnsupportedConflict` — The merge conflicts in a shape this mode cannot resolve by editing (PR #364 review round 3): a binary file, a modify/delete, a path git left without textual markers. Nothing distinguishes a coder's resolution of such a path from an untouched one, and `git add -A` would then silently take whichever side git left in the tree — so the intake refuses before any agent runs, naming every such path.
 - class `ConflictIntake` — A merge in progress, ready for the resolution round.
 - def `prepare_conflict_intake` — Merge the base's current tip into a throwaway worktree at the PR head, without committing. ``None`` when there is nothing to resolve — the head already contains the base tip, or the merge is clean (the base-move re-gate's job, PRD S3): the worktree is removed again and no agent runs.
 - def `render_conflict_brief` — The round-1 brief: the PR's intent, what landed on the base since the merge-base, and the conflicted hunks (bounded per path).
+- def `fence` — A Markdown fence the *content* cannot close: one backtick longer than the longest backtick run inside it (PR #364 review round 3 — a path or a hunk containing ``` closed a fixed fence and became prompt prose).
 - def `markers_guard` — The pre-commit guard — the host-side enforcement behind the prompt's "never touch git state" (PR #364 review F2). It proves the INTENDED base is what gets merged: no conflicted path may still carry markers; while a merge is in progress it must be a merge of exactly *base_sha* onto the PR head; and once HEAD has moved past the PR head, *base_sha* must be an ancestor of it. Anything else — an aborted merge, a merge of something else, an agent commit that skipped the merge — fails the round, so the tree is never gated, reviewed or pushed.
 - def `render_review_context` — The panel's merge-shaped context (PR #364 review F1). The fork-point diff the reviewers start from runs base tip → HEAD, so a conflicted path resolved to the BASE version is absent from it — the PR's change silently dropped. Name the paths and both parents and give each side's diff.
 

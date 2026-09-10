@@ -15,6 +15,7 @@ by the pre-commit guard, never gated, reviewed or pushed.
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,11 +29,58 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ConflictIntake",
+    "UnsupportedConflict",
     "markers_guard",
     "prepare_conflict_intake",
     "render_conflict_brief",
     "render_review_context",
 ]
+
+
+class UnsupportedConflict(Exception):
+    """The merge conflicts in a shape this mode cannot resolve by editing
+    (PR #364 review round 3): a binary file, a modify/delete, a path git left
+    without textual markers. Nothing distinguishes a coder's resolution of
+    such a path from an untouched one, and `git add -A` would then silently
+    take whichever side git left in the tree — so the intake refuses before
+    any agent runs, naming every such path."""
+
+    def __init__(self, reasons: dict[str, str], *, base_sha: str = "") -> None:
+        self.paths = tuple(reasons)
+        self.reasons = dict(reasons)
+        self.base_sha = base_sha
+        super().__init__(
+            "conflict shape this mode cannot resolve by editing: "
+            + "; ".join(f"{p} ({r})" for p, r in reasons.items())
+        )
+
+
+def _unsupported(wt: Path, paths: list[str]) -> dict[str, str]:
+    """Why each of *paths* is NOT a text conflict with markers (empty = all fine)."""
+    reasons: dict[str, str] = {}
+    for path in paths:
+        file = wt / path
+        entries = git.unmerged_entries(wt, path)
+        modes = set(entries.values())
+        if not {2, 3} <= set(entries):
+            reasons[path] = "deleted on one side (modify/delete)"
+        elif "120000" in modes or file.is_symlink():
+            reasons[path] = "symlink"
+        elif "160000" in modes:
+            reasons[path] = "submodule"
+        elif not file.is_file():
+            reasons[path] = "not a regular file"
+        elif _looks_binary(file):
+            reasons[path] = "binary"
+        elif not git.conflict_markers(wt, [path]):
+            reasons[path] = "no conflict markers to resolve"
+    return reasons
+
+
+def _looks_binary(file: Path) -> bool:
+    with file.open("rb") as fh:
+        return b"\0" in fh.read(8000)
+
 
 # Bounds on the brief: a conflict in a generated file can be thousands of
 # lines; the coder reads the whole file in the sandbox anyway.
@@ -77,6 +125,10 @@ def prepare_conflict_intake(
         if not paths:
             git.abort_merge(wt)
             raise _CleanMerge
+        unsupported = _unsupported(wt, paths)
+        if unsupported:
+            git.abort_merge(wt)
+            raise UnsupportedConflict(unsupported, base_sha=base_sha)
         brief = render_conflict_brief(
             wt, change, base_ref=base_ref, base_sha=base_sha, paths=paths
         )
@@ -133,14 +185,17 @@ def render_conflict_brief(
         landed = landed[:_LANDED_COMMITS] + [
             f"… and {len(landed) - _LANDED_COMMITS} more"
         ]
+    paths_fence = fence("\n".join(paths))
     lines = [
         "## The conflict",
         "",
         f"Merging `{base_ref}` @ `{base_sha[:12]}` into the PR branch "
         f"`{change.head_branch}` (head `{change.head_sha[:12]}`) conflicts in "
-        f"{len(paths)} path(s):",
+        f"{len(paths)} path(s), one per line:",
         "",
-        *(f"- `{p}`" for p in paths),
+        paths_fence,
+        *paths,
+        paths_fence,
         "",
         "### The PR's intent",
         "",
@@ -157,8 +212,18 @@ def render_conflict_brief(
     ]
     for path in paths:
         hunk = _conflicted_region(wt / path)
-        lines += [f"#### `{path}`", "", "```", *hunk, "```", ""]
+        label = fence(path)
+        body = fence("\n".join(hunk))
+        lines += ["#### path:", label, path, label, "", body, *hunk, body, ""]
     return "\n".join(lines)
+
+
+def fence(content: str) -> str:
+    """A Markdown fence the *content* cannot close: one backtick longer than
+    the longest backtick run inside it (PR #364 review round 3 — a path or a
+    hunk containing ``` closed a fixed fence and became prompt prose)."""
+    longest = max((len(m) for m in re.findall(r"`+", content)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 def _conflicted_region(file: Path) -> list[str]:
@@ -206,6 +271,17 @@ def markers_guard(
         if marked:
             return "conflict markers remain in: " + ", ".join(marked)
         merging = git.merge_head(wt)
+        if merging is not None:
+            # belt to the intake's braces (PR #364 review round 3): whatever
+            # is still unmerged must be a text conflict the coder was given;
+            # any other unmerged entry is one `git add -A` would resolve blind
+            stray = [p for p in git.unmerged_paths(wt) if p not in paths]
+            if stray:
+                return (
+                    "unmerged path(s) outside the resolvable set: "
+                    + ", ".join(stray)
+                    + " — a conflict shape this mode cannot resolve by editing"
+                )
         head = git.commit_sha(wt)
         if merging is not None:
             if merging != base_sha:
@@ -260,15 +336,20 @@ def render_review_context(
         [*git, "rev-list", "--first-parent", "--reverse", f"{head_sha}..HEAD"]
     )
     show_merge = f'{shlex.join([*git, "show", "--cc"])} "$({merge_commit} | head -n 1)"'
+    paths_fence = fence("\n".join(paths))
+    cmd_fence = fence("\n".join((pr_side, base_side, show_merge)))
     lines = [
         "## This is a conflict-resolution merge",
         "",
         (
             f"HEAD composes the PR branch (head `{head_sha[:12]}`) with its base "
-            f"`{base_ref}` @ `{base_sha[:12]}`; the coder resolved conflicts in:"
+            f"`{base_ref}` @ `{base_sha[:12]}`; the coder resolved conflicts in "
+            "these paths (one per line):"
         ),
         "",
-        *(f"- `{p}`" for p in paths),
+        paths_fence,
+        *paths,
+        paths_fence,
         "",
         (
             "The `git diff` above runs from the base tip, so it shows the PR's "
@@ -284,24 +365,24 @@ def render_review_context(
             "before approving):"
         ),
         "",
-        "```",
+        cmd_fence,
         pr_side,
-        "```",
+        cmd_fence,
         "",
         "What it did to the base's landed work:",
         "",
-        "```",
+        cmd_fence,
         base_side,
-        "```",
+        cmd_fence,
         "",
         (
             "The merge commit's own combined diff (only hunks differing from "
             "BOTH parents):"
         ),
         "",
-        "```",
+        cmd_fence,
         show_merge,
-        "```",
+        cmd_fence,
         "",
         "Approve only if both intents survive, correctly composed.",
     ]

@@ -77,6 +77,7 @@ _EXIT_CODES = {
     "merge_race": 1,
     "failed": 1,
     "no_conflict": 0,
+    "conflict_unsupported": 1,
 }
 
 

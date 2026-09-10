@@ -13,6 +13,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.conflict_resolve import (
     markers_guard,
@@ -86,7 +88,7 @@ def test_review_context_names_paths_and_both_parent_diffs() -> None:
         base_sha="b" * 40,
         base_ref="origin/main",
     )
-    assert "`shared.txt`" in text and "`docs/x.md`" in text
+    assert "shared.txt" in text.splitlines() and "docs/x.md" in text.splitlines()
     # both parents in full, and a per-side diff command the reviewer can run
     # verbatim (pathspec magic off, `--` before the paths)
     assert f"--literal-pathspecs diff {'h' * 40} HEAD -- shared.txt docs/x.md" in text
@@ -198,3 +200,188 @@ def test_review_context_commands_are_shell_safe_and_literal() -> None:
     assert "<merge commit>" not in text and "<" not in "".join(commands)
     # the merge-commit command is one runnable line naming the PR head in full
     assert any("show --cc" in c and ("h" * 40) in c for c in commands)
+
+
+# ── round 3: non-text conflicts are refused, prompt fences cannot collide ────
+
+
+def _seed_binary_conflict(repo: Path) -> tuple[str, str, str]:
+    (repo / "blob.bin").write_bytes(b"v0\x00data")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "seed")
+    merge_base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "-c", "feature")
+    (repo / "blob.bin").write_bytes(b"feature\x00data")
+    _git(repo, "commit", "-q", "-am", "feature")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "main")
+    (repo / "blob.bin").write_bytes(b"base\x00data")
+    _git(repo, "commit", "-q", "-am", "base")
+    base_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "feature")
+    return merge_base, head, base_tip
+
+
+def _seed_modify_delete_conflict(repo: Path) -> tuple[str, str, str]:
+    (repo / "gone.txt").write_text("v0\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "seed")
+    merge_base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "-c", "feature")
+    (repo / "gone.txt").write_text("feature\n")
+    _git(repo, "commit", "-q", "-am", "feature edits it")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "main")
+    _git(repo, "rm", "-q", "gone.txt")
+    _git(repo, "commit", "-q", "-m", "base deletes it")
+    base_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "feature")
+    return merge_base, head, base_tip
+
+
+def _config(tmp_path: Path, repo: Path) -> DevelopConfig:
+    return DevelopConfig(
+        repo=repo,
+        description="A PR",
+        work_dir=tmp_path / "work",
+        acceptance_criteria="do the thing",
+    )
+
+
+def test_a_binary_conflict_is_refused_before_any_agent_runs(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """PR #364 review round 3: a binary conflict carries no textual markers,
+    so nothing distinguishes a coder's resolution from an untouched file —
+    and `git add -A` would then silently take whichever side git left in the
+    tree. The mode resolves TEXT conflicts only; anything else is refused at
+    intake, naming the paths, with the worktree removed and no coder spent."""
+    from lithos_loom.plugins.story_develop.conflict_resolve import UnsupportedConflict
+
+    merge_base, head, _tip = _seed_binary_conflict(tmp_git_repo)
+    with pytest.raises(UnsupportedConflict) as info:
+        prepare_conflict_intake(
+            _config(tmp_path, tmp_git_repo), _change(merge_base, head)
+        )
+    assert info.value.paths == ("blob.bin",)
+    assert "binary" in str(info.value)
+    assert not git.merge_in_progress(tmp_git_repo)
+    leftover = [p.name for p in tmp_path.iterdir() if p.is_dir() and p.name != "repo"]
+    assert leftover == [] or leftover == ["work"]
+
+
+def test_a_modify_delete_conflict_is_refused_before_any_agent_runs(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    from lithos_loom.plugins.story_develop.conflict_resolve import UnsupportedConflict
+
+    merge_base, head, _tip = _seed_modify_delete_conflict(tmp_git_repo)
+    with pytest.raises(UnsupportedConflict) as info:
+        prepare_conflict_intake(
+            _config(tmp_path, tmp_git_repo), _change(merge_base, head)
+        )
+    assert info.value.paths == ("gone.txt",)
+    assert "delete" in str(info.value)
+
+
+def test_guard_refuses_an_unmerged_path_outside_the_resolvable_set(
+    tmp_git_repo: Path,
+) -> None:
+    """Belt to the intake's braces: whatever is still unmerged in the index
+    at commit time must be one of the text conflicts the coder was given;
+    any other unmerged entry is a shape `git add -A` would resolve blindly."""
+    _merge_base, head, base_tip = _seed(tmp_git_repo)
+    guard = markers_guard((), head_sha=head, base_sha=base_tip)  # nothing given
+    assert git.merge_no_commit(tmp_git_repo, base_tip) == ["shared.txt"]
+    (tmp_git_repo / "shared.txt").write_text("both\n")
+    refused = guard(tmp_git_repo)
+    assert refused is not None and "shared.txt" in refused and "unmerged" in refused
+
+
+def _max_backtick_run(text: str) -> int:
+    import re
+
+    return max((len(m) for m in re.findall(r"`+", text)), default=0)
+
+
+def test_prompt_fences_cannot_be_closed_by_the_content(tmp_git_repo: Path) -> None:
+    """PR #364 review round 3: a path or a hunk containing ``` closed the
+    fixed three-backtick fences and turned data into prompt prose. Fences
+    are sized past the longest backtick run they enclose, and path labels
+    are never rendered as inline code."""
+    import re
+
+    from lithos_loom.plugins.story_develop.conflict_resolve import (
+        render_conflict_brief,
+    )
+
+    name = "we`ird.md"
+    (tmp_git_repo / name).write_text("v0\n")
+    _git(tmp_git_repo, "add", "-A")
+    _git(tmp_git_repo, "commit", "-q", "-m", "seed")
+    merge_base = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "-c", "feature")
+    (tmp_git_repo / name).write_text("feature\n```\nescaped?\n```\n")
+    _git(tmp_git_repo, "commit", "-q", "-am", "feature")
+    head = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "main")
+    (tmp_git_repo / name).write_text("base\n")
+    _git(tmp_git_repo, "commit", "-q", "-am", "base")
+    base_tip = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "feature")
+    assert git.merge_no_commit(tmp_git_repo, base_tip) == [name]
+
+    brief = render_conflict_brief(
+        tmp_git_repo,
+        _change(merge_base, head),
+        base_ref="main",
+        base_sha=base_tip,
+        paths=[name],
+    )
+    context = render_review_context(
+        (name,), head_sha=head, base_sha=base_tip, base_ref="main"
+    )
+    for text in (brief, context):
+        fences = [ln for ln in text.splitlines() if re.fullmatch(r"`{3,}", ln.strip())]
+        assert fences and len(fences) % 2 == 0
+        body = "\n".join(ln for ln in text.splitlines() if ln.strip() not in fences)
+        assert min(len(f.strip()) for f in fences) > _max_backtick_run(body)
+        assert f"`{name}`" not in text  # never an inline-code label
+
+
+def test_a_symlink_conflict_is_refused_before_any_agent_runs(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """Self-review of round 3: a conflicted SYMLINK has no markers of its own
+    and `is_file()` / `open()` follow it to some other file — which could even
+    carry marker-shaped lines — so the classifier must judge the index entry's
+    mode, not the followed content."""
+    import os
+
+    from lithos_loom.plugins.story_develop.conflict_resolve import UnsupportedConflict
+
+    (tmp_git_repo / "a.txt").write_text("<<<<<<< not a conflict\n=======\n>>>>>>> x\n")
+    (tmp_git_repo / "b.txt").write_text("b\n")
+    os.symlink("a.txt", tmp_git_repo / "link")
+    _git(tmp_git_repo, "add", "-A")
+    _git(tmp_git_repo, "commit", "-q", "-m", "seed")
+    merge_base = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "-c", "feature")
+    os.unlink(tmp_git_repo / "link")
+    os.symlink("b.txt", tmp_git_repo / "link")
+    _git(tmp_git_repo, "commit", "-q", "-am", "feature retargets")
+    head = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "main")
+    os.unlink(tmp_git_repo / "link")
+    (tmp_git_repo / "c.txt").write_text("c\n")
+    os.symlink("c.txt", tmp_git_repo / "link")
+    _git(tmp_git_repo, "add", "-A")
+    _git(tmp_git_repo, "commit", "-q", "-m", "base retargets")
+    _git(tmp_git_repo, "switch", "-q", "feature")
+
+    with pytest.raises(UnsupportedConflict) as info:
+        prepare_conflict_intake(
+            _config(tmp_path, tmp_git_repo), _change(merge_base, head)
+        )
+    assert info.value.paths == ("link",)
+    assert "symlink" in str(info.value)
