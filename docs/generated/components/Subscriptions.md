@@ -16,6 +16,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._blocked_snapshot` | S | 1 | 0 |
 | `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 1 |
+| `lithos_loom.subscriptions._develop_pr_nudge` | M | 2 | 2 |
 | `lithos_loom.subscriptions._findings` | S | 0 | 2 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
 | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |
@@ -32,7 +33,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
-| `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 9 |
+| `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 10 |
 | `lithos_loom.subscriptions.escalation` | M | 1 | 4 |
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
@@ -41,6 +42,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
+| `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
 | `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 8 |
@@ -66,6 +68,12 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._develop_pr_merge`
 - def `reconcile_pr_gate` — Resolve one open ``pr`` gate against its PR's merge state.
+
+### `lithos_loom.subscriptions._develop_pr_nudge`
+- def `nudge_unblocked` — Re-surface the dependents the story's completion just readied (#350).
+- class `RecoveryRecord` — The recovery path's durable state, kept on the GATE under :data:`NUDGE_RECOVERED_KEY` and scoped to the PR url (a re-develop into a replacement PR starts a fresh one).
+- class `NudgePlan` — What :func:`_complete_story` decided: who to nudge now, the recovery state to persist first (``None`` on the authoritative path, which needs none — the completion that produced it cannot succeed twice), and whether the gate must stay open for a later sweep to finish the job.
+- def `recover_dependents` — Rebuild the lost ``unblocked`` response from the durable graph.
 
 ### `lithos_loom.subscriptions._findings`
 - def `write_marker` — Write a de-dup marker via ``task_update``, swallowing ``task_not_found``.
@@ -129,6 +137,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `task_fingerprint` — Fingerprint of the operator-shaped task fields (title, description, tags — order-insensitive).
 - def `task_payload` — Build an event-shaped payload from a fresh :class:`Task` snapshot.
 - def `on_ready_frontier` — Is ``task_id`` on Lithos's ready frontier for this route? (US4)
+- def `classify_readiness` — Is *task* (a fresh snapshot) ready work, by Lithos's own answer?
 - class `AttemptStampStore` — Loom-local store for each failed attempt's ``updated_at`` stamp (#339).
 - def `failed_attempt_for_route` — The task's last-attempt marker, iff it records a FAILURE for ``route``.
 - def `declines_bootstrap_replay` — True iff a bootstrap replay of this payload must be declined (logged).
@@ -178,6 +187,10 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.pr_landability`
 - def `classify_landability` — ``unknown`` / ``dirty`` / ``mergeable`` from the fetched PR.
 - def `check_landability` — Classify one still-open gate's PR and report a conflict once per ``(pr_url, base_sha, head_sha)``. Returns the state label. Never raises.
+
+### `lithos_loom.subscriptions.ready_recheck`
+- def `delay_for` — Seconds to wait before the next re-check after *attempts* inconclusive ones: exponential from the base, capped.
+- class `ReadyRechecker` — Per-route re-check scheduler (see the module docstring).
 
 ### `lithos_loom.subscriptions.remediation_budget`
 - class `RemediationNotifier`

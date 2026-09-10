@@ -181,6 +181,7 @@ no tokens — an **existing** `--report-dir` can be re-derived offline:
 
 ```python
 from lithos_loom.evals.review.match import finding_count, review_blocked
+
 n_findings, blocked = finding_count(report), review_blocked(report)
 ```
 

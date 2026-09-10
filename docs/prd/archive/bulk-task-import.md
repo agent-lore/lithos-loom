@@ -224,18 +224,26 @@ Pure functions, no I/O. Shared with the future capture-macro tag-parsing PRD (Sl
 ```python
 from dataclasses import dataclass
 
+
 @dataclass(frozen=True)
 class ParsedTaskLine:
-    line_number: int       # 1-indexed source-file line number for error messages
-    indent: int            # leading-whitespace count, used for hierarchy
-    description: str       # task text after stripping `- [ ]`, tags, priority emojis
-    tags: tuple[str, ...]  # parsed `#foo` tags (no leading `#`), in source order, deduped
-    priority: str | None   # "highest" | "high" | "medium" | "low" | "lowest" | None
-    cross_project_tag: str | None  # `#project/<slug>` if present and != importing slug; None otherwise
+    line_number: int  # 1-indexed source-file line number for error messages
+    indent: int  # leading-whitespace count, used for hierarchy
+    description: str  # task text after stripping `- [ ]`, tags, priority emojis
+    tags: tuple[
+        str, ...
+    ]  # parsed `#foo` tags (no leading `#`), in source order, deduped
+    priority: str | None  # "highest" | "high" | "medium" | "low" | "lowest" | None
+    cross_project_tag: (
+        str | None
+    )  # `#project/<slug>` if present and != importing slug; None otherwise
     is_sequential_parent: bool  # parent has `[sequential]` marker in description
-    is_empty: bool         # description is empty after all stripping
+    is_empty: bool  # description is empty after all stripping
 
-def parse_doc(text: str, importing_slug: str) -> tuple[list[ParsedTaskLine], list[ValidationError], str]:
+
+def parse_doc(
+    text: str, importing_slug: str
+) -> tuple[list[ParsedTaskLine], list[ValidationError], str]:
     """Parse a Markdown doc into task lines, validation errors, and stripped body.
 
     Single pass over the text. Skips lines inside fenced code blocks (``` or ~~~)
@@ -255,10 +263,15 @@ Pure function. Takes `list[ParsedTaskLine]` and returns a list of `(line, depend
 @dataclass(frozen=True)
 class TaskCreatePlan:
     line: ParsedTaskLine
-    depends_on_line_numbers: tuple[int, ...]  # references resolved to task ids at execution time
+    depends_on_line_numbers: tuple[
+        int, ...
+    ]  # references resolved to task ids at execution time
     parallelizable: bool
 
-def build_plan(lines: list[ParsedTaskLine]) -> tuple[list[TaskCreatePlan], list[ValidationError]]:
+
+def build_plan(
+    lines: list[ParsedTaskLine],
+) -> tuple[list[TaskCreatePlan], list[ValidationError]]:
     """Build task-create plans with dependency edges from indentation.
 
     Per D63 top-level tasks are flat (no depends_on between them).
@@ -278,29 +291,51 @@ def build_plan(lines: list[ParsedTaskLine]) -> tuple[list[TaskCreatePlan], list[
 @project_app.command("import")
 def project_import(
     source: Path = typer.Argument(...),
-    slug: str | None = typer.Option(None, "--slug", "-s",
+    slug: str | None = typer.Option(
+        None,
+        "--slug",
+        "-s",
         help="Project slug. Optional in greenfield (defaults to slugified title/stem); "
-             "REQUIRED with --tasks-only."),
-    tags: str | None = typer.Option(None, "--tags",
-        help="Extra comma-separated tags for the project doc (ignored with --no-tasks-only-N/A)."),
-    tasks_only: bool = typer.Option(False, "--tasks-only",
+        "REQUIRED with --tasks-only.",
+    ),
+    tags: str | None = typer.Option(
+        None,
+        "--tags",
+        help="Extra comma-separated tags for the project doc (ignored with --no-tasks-only-N/A).",
+    ),
+    tasks_only: bool = typer.Option(
+        False,
+        "--tasks-only",
         help="Skip project doc creation; just import tasks against an existing project. "
-             "Requires --slug. Project must already exist in Lithos."),
-    no_tasks: bool = typer.Option(False, "--no-tasks",
+        "Requires --slug. Project must already exist in Lithos.",
+    ),
+    no_tasks: bool = typer.Option(
+        False,
+        "--no-tasks",
         help="Skip task extraction entirely; import only the project doc body. "
-             "Mutually exclusive with --tasks-only."),
-    force_tasks: bool = typer.Option(False, "--force-tasks",
+        "Mutually exclusive with --tasks-only.",
+    ),
+    force_tasks: bool = typer.Option(
+        False,
+        "--force-tasks",
         help="Delete all existing project tasks for this slug before importing. "
-             "Gated by an interactive y/n prompt unless --yes is also passed."),
-    yes: bool = typer.Option(False, "--yes", "-y",
-        help="Suppress the --force-tasks interactive confirmation. For scripted use."),
-    dry_run: bool = typer.Option(False, "--dry-run",
+        "Gated by an interactive y/n prompt unless --yes is also passed.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Suppress the --force-tasks interactive confirmation. For scripted use.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
         help="Print the full plan (doc + tasks + dependency edges) and exit "
-             "without writing to Lithos."),
+        "without writing to Lithos.",
+    ),
     output_format: str = typer.Option(_FORMAT_TEXT, "--format", "-f"),
     config: Path | None = typer.Option(None, "--config", "-c"),
-) -> None:
-    ...
+) -> None: ...
 ```
 
 Mutually-exclusive flag combinations:

@@ -16,7 +16,7 @@ import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -25,7 +25,11 @@ import pytest
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.config import RouteConfig, RouteMatch
 from lithos_loom.errors import LithosClientError, PluginContractError
+from lithos_loom.gates import create_pr_gate
+from lithos_loom.github_client import PullRequest
 from lithos_loom.lithos_client import Task
+from lithos_loom.subscriptions import SubscriptionContext
+from lithos_loom.subscriptions._develop_pr_merge import reconcile_pr_gate
 from lithos_loom.subscriptions.dispatch_guards import (
     READY_QUERY_LIMIT,
     AttemptStampStore,
@@ -34,6 +38,7 @@ from lithos_loom.subscriptions.dispatch_guards import (
     last_attempt_key,
     record_failed_attempt,
     task_fingerprint,
+    task_payload,
 )
 from lithos_loom.subscriptions.route_runner import RouteRunner
 from tests.support import FakeLithosClient, make_task
@@ -136,6 +141,8 @@ def _lithos_mock(*, ready_ids: tuple[str, ...] | None = None) -> AsyncMock:
     # → the runner falls back to the dispatch payload).
     lithos.task_create.return_value = "gate-1"
     lithos.task_get.return_value = None
+    # the readiness classifier's other half of the partition (PR #352 review)
+    lithos.task_blocked.return_value = []
     return lithos
 
 
@@ -158,6 +165,7 @@ def _make_runner(
             _ready(_AnyTaskId()) if ready_ids is None else _ready(*ready_ids)
         )
         lithos.task_complete.return_value = []
+        lithos.task_blocked.return_value = []
     runner = RouteRunner(
         route=route or _route(),
         bus=bus,
@@ -257,25 +265,97 @@ async def test_ready_query_omits_project_when_task_has_none(tmp_path: Path) -> N
     assert lithos.task_ready.await_args.kwargs["project"] is None
 
 
-async def test_runner_defers_and_warns_when_ready_frontier_is_truncated(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def _open_task(task_id: str = "task-1") -> Task:
+    return Task(
+        id=task_id,
+        title="t",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata={"project": "p"},
+        claims=(),
+    )
+
+
+async def test_runner_settles_a_truncated_frontier_from_the_blocked_page(
+    tmp_path: Path,
 ) -> None:
-    """A full page means the frontier was truncated, so absence from it is
-    NOT evidence of blocked-ness. Defer (the safe direction — the inverse
-    error would dispatch a blocked task) and say so loudly."""
+    """PR #352 review F2: a full ready page used to DROP the event (deferred,
+    never retried). Open work is ready XOR blocked, so the runner fetches the
+    task, re-asks by its own scope and reads the complete blocked page: the
+    task is not on it, so it is ready — and dispatched."""
     bus = EventBus()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
     lithos.task_ready.return_value = _ready(
         *(f"other-{i}" for i in range(READY_QUERY_LIMIT))
     )
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = []
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_called_once()
+
+
+async def test_runner_rechecks_an_undetermined_task_instead_of_dropping_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both pages full: the answer is genuinely unknown. The event is not
+    dropped — the runner re-asks after a delay (bounded; the restart's
+    bootstrap replay is the durable backstop) and dispatches once Lithos can
+    answer."""
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.01)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    full_ready = _ready(*(f"other-{i}" for i in range(READY_QUERY_LIMIT)))
+    full_blocked = [
+        SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
+        for i in range(READY_QUERY_LIMIT)
+    ]
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = full_blocked
+    answers = iter([full_ready, full_ready, full_ready, full_ready, _ready("task-1")])
+    lithos.task_ready.side_effect = lambda **kw: next(answers)
 
     with caplog.at_level(logging.WARNING):
         await bus.publish(_evt(payload=_payload()))
-        await _run_for(runner)
+        await _run_for(runner, seconds=0.5)
 
-    lithos.task_claim.assert_not_called()
-    assert "query limit" in caplog.text
-    assert "task-1" in caplog.text
+    assert "query limit" in caplog.text and "task-1" in caplog.text
+    lithos.task_claim.assert_called_once()
+
+
+async def test_runner_keeps_rechecking_until_lithos_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #352 review round 3: a capped bound re-created the original failure
+    (ten inconclusive checks, then the dependent waits for an edit or a
+    restart). One coalesced retry stays live, with capped backoff, until a
+    definitive answer — here twelve undetermined answers, then ready."""
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.005)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX_SECONDS", 0.005)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    full_ready = _ready(*(f"other-{i}" for i in range(READY_QUERY_LIMIT)))
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = [
+        SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
+        for i in range(READY_QUERY_LIMIT)
+    ]
+    # two ready reads per undetermined evaluation (the route's page, then the
+    # task's own scope): 24 full pages = 12 inconclusive evaluations
+    answers = iter([*([full_ready] * 24), _ready("task-1")])
+    lithos.task_ready.side_effect = lambda **kw: next(answers)
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner, seconds=0.8)
+
+    lithos.task_claim.assert_called_once()
+    assert lithos.task_blocked.await_count == 12
 
 
 # ── Newly-unblocked re-dispatch (US6) ──────────────────────────────────
@@ -468,6 +548,106 @@ async def test_blocks_edge_chain_dispatches_in_order_end_to_end(
 
     assert await _status("blocker") == "completed"
     assert await _status("dependent") == "completed"
+
+
+async def test_watcher_merge_nudge_dispatches_the_unblocked_dependent(
+    tmp_path: Path,
+) -> None:
+    """#350 across the two children, through the bus.
+
+    The github-watcher child completes a delivered story when its PR merges;
+    the route-runner child lives in a different process with no IPC, and the
+    story's own `task.completed` names the story, not its dependents. The
+    resolver's nudge closes that gap by using **Lithos as the bus**: a no-op
+    `task_update` on each newly-unblocked id, which Lithos re-emits as
+    `task.updated`. The `_relay` below stands in for the SSE source that
+    carries it to the runner; without the nudge nothing reaches the bus and
+    the dependent waits for a restart.
+    """
+    fake = FakeLithosClient(agent_id="lithos-orchestrator-test")
+    for tid in ("story", "dependent"):
+        fake.add_task(
+            make_task(
+                tid,
+                status="open",
+                tags=("trigger:story-develop",),
+                metadata={"project": "loom"},
+            )
+        )
+    fake.add_edge(from_task_id="story", to_task_id="dependent", type="blocks")
+    gate_id = await create_pr_gate(
+        fake,
+        story_id="story",
+        story_title="story",
+        pr_url="https://github.com/agent-lore/lithos-loom/pull/7",
+        project="loom",
+        agent="lithos-loom-agent",
+    )
+    gate = await fake.task_get(task_id=gate_id)
+    assert gate is not None
+
+    bus = EventBus()
+    original_update = fake.task_update
+
+    async def _relay(**kwargs: Any) -> Any:
+        """Stand-in for `LithosEventStream`: every task_update Lithos accepts
+        comes back to the runner's bus as a live `lithos.task.updated`."""
+        stamp = await original_update(**kwargs)
+        task = await fake.task_get(task_id=kwargs["task_id"])
+        if task is not None:
+            await bus.publish(
+                Event(
+                    type="lithos.task.updated",
+                    timestamp=datetime.now(UTC),
+                    payload=task_payload(task),
+                )
+            )
+        return stamp
+
+    fake.task_update = _relay  # type: ignore[method-assign]
+    runner = RouteRunner(
+        route=_route(),
+        bus=bus,
+        lithos=fake,
+        agent_id="lithos-orchestrator-test",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=AsyncMock(
+            return_value={
+                "schema_version": 1,
+                "task_id": "dependent",
+                "status": "succeeded",
+                "exit_code": 0,
+            }
+        ),
+    )
+
+    github = AsyncMock()
+    github.get_pull_request.return_value = PullRequest(
+        repo="agent-lore/lithos-loom",
+        number=7,
+        state="closed",
+        merged=True,
+        merged_at=datetime(2026, 9, 5, tzinfo=UTC),
+        merge_commit_sha="abc123",
+    )
+    outcome = await reconcile_pr_gate(
+        gate,
+        github,
+        SubscriptionContext(
+            lithos=fake,
+            logger=logging.getLogger("test-watcher"),
+            agent_id="lithos-loom-agent",
+        ),
+    )
+    assert outcome == "merged"
+
+    await _run_all(runner, seconds=0.3)
+
+    claimed = [c["task_id"] for c in fake.calls_to("task_claim")]
+    assert claimed == ["dependent"]
+    dependent = await fake.task_get(task_id="dependent")
+    assert dependent is not None and dependent.status == "completed"
 
 
 # ── Claim race ─────────────────────────────────────────────────────────
@@ -2857,3 +3037,85 @@ async def test_gate_resolved_nudge_resets_the_resume_budget(tmp_path: Path) -> N
 
     assert plugin_runner.await_count == 1  # the retry ran
     assert "task-1" not in runner._resume_counts
+
+
+async def test_runner_rechecks_after_a_transient_readiness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #352 review round 2: a transient Lithos error while answering
+    "is it ready?" must not consume the one event a nudge produced."""
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.01)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    answers = iter([LithosClientError("server_error", "boom"), _ready("task-1")])
+
+    def flaky(**kw):
+        a = next(answers)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    lithos.task_ready.side_effect = flaky
+    lithos.task_get.return_value = _open_task()
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner, seconds=0.4)
+
+    lithos.task_claim.assert_called_once()
+
+
+async def test_a_definitive_not_ready_answer_resets_the_recheck_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 10.0)  # never fires here
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    runner._rechecker._attempts["task-1"] = 7  # a spent budget from before
+    lithos.task_ready.return_value = _ready("other")  # complete page: not ready
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner)
+
+    assert runner._rechecker._attempts.get("task-1") is None
+
+
+async def test_runner_recovers_a_retry_dropped_by_a_full_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #352 review round 4, end to end: the route's queue is full when the
+    re-check republishes (the bus drops it silently); once the runner drains
+    the backlog the still-armed re-check fires again and the task is claimed
+    — no edit, no restart."""
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.02)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX_SECONDS", 0.02)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = [
+        SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
+        for i in range(READY_QUERY_LIMIT)
+    ]
+    full_ready = _ready(*(f"other-{i}" for i in range(READY_QUERY_LIMIT)))
+    answers = iter([full_ready, full_ready] + [_ready("task-1")] * 50)
+    lithos.task_ready.side_effect = lambda **kw: next(answers)
+
+    # one undetermined evaluation arms the re-check…
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner, seconds=0.01)
+    assert runner._rechecker.pending("task-1")
+    # …then the route's queue fills while the runner is busy elsewhere
+    for i in range(runner._subscription.queue.maxsize):
+        await bus.publish(_evt(payload=_payload(f"filler-{i}", status="completed")))
+    await asyncio.sleep(0.05)  # the re-check fires into the full queue: dropped
+    assert runner._subscription.drop_count >= 1
+    lithos.task_claim.assert_not_called()
+
+    await _run_for(runner, seconds=0.5)  # the runner drains; the retry fires again
+
+    lithos.task_claim.assert_called_once()
