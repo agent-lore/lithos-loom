@@ -47,7 +47,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
-| `lithos_loom.subscriptions.reconciliation_state` | M | 2 | 3 |
+| `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
 | `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 8 |
@@ -230,8 +230,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions.reconciliation_state`
 - class `Busy` — What this process has in flight on the PR right now.
+- class `Dispositions` — What each dispatcher SAID this sweep (its ``consider`` label) — the signal that tells "not required" from "required but not evaluated" (review #369 F1), and an escalation from a stale record (F3).
 - class `Derived`
-- def `derive_state` — The PR's state from the gate's markers + the fetched PR + what runs (see the module doc for the precedence). Pure; never raises on a malformed marker — a marker it cannot read is a marker that is absent.
+- def `derive_state` — The PR's state from the gate's markers + the fetched PR + what runs + what the dispatchers said (see the module doc for the precedence). Pure; never raises on a malformed marker — a marker it cannot read is a marker that is absent. The detail is truncated here, so what is compared is what is stored.
 - def `closed_state_marker` — The state keys for a closed / deleted PR, folded into the merge marker's own write so the two never disagree.
 - def `record_state` — Derive the still-open gate's state from the gate AS IT IS NOW and write it when it moved. Returns the new state on a transition, ``None`` otherwise (unchanged, a detail-only move, or a failed write — the next sweep re-derives). Never raises.
 

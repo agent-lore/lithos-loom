@@ -1447,3 +1447,86 @@ async def test_closed_pr_records_needs_human_in_the_same_marker_write() -> None:
     assert stored is not None
     assert stored.metadata[STATE_KEY] == "needs_human"
     assert len(client.calls_to("task_update")) == writes_before + 1
+
+
+async def test_an_unreadable_base_tip_never_records_ready_to_merge() -> None:
+    """Review #369 F1: the re-gate cannot run without the live base tip,
+    so a clean, mergeable PR is NOT ready — it is unevaluated."""
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            return "unknown_shas"
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(_open_pr())
+    github.get_branch_tip.side_effect = GitHubError("boom")
+
+    await reconcile_pr_gate(
+        gate,
+        github,
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] == "awaiting_review"
+
+
+async def test_a_re_gate_deferred_behind_another_pr_records_reconciling() -> None:
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            return "deferred_busy"
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+
+    await reconcile_pr_gate(
+        gate,
+        _github(_open_pr()),
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] == "reconciling"
+
+
+async def test_a_gate_closed_before_s7_is_backfilled_with_needs_human() -> None:
+    """Review #369 F2: the terminal guard returns before any fetch; a gate
+    marked closed before this shipped must still get its state — with no
+    GitHub call."""
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY, STATE_URL_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
+    )
+    gate = await _get(client, gate.id)
+    github = _github(None)
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome is None
+    github.get_pull_request.assert_not_awaited()
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] == "needs_human"
+    assert stored.metadata[STATE_URL_KEY] == _PR_URL
+    # and once backfilled, the guard is silent again
+    writes = len(client.calls_to("task_update"))
+    await reconcile_pr_gate(stored, github, _ctx(client))
+    assert len(client.calls_to("task_update")) == writes

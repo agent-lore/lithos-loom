@@ -50,7 +50,10 @@ from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
 from lithos_loom.subscriptions.pr_landability import check_landability
 from lithos_loom.subscriptions.reconciliation_state import (
+    STATE_KEY,
+    STATE_URL_KEY,
     Busy,
+    Dispositions,
     closed_state_marker,
     record_state,
 )
@@ -219,6 +222,20 @@ async def reconcile_pr_gate(
         # Already resolved THIS pr_url (a closed-unmerged / gone gate left open).
         # A merged gate is completed → out of the open set → never re-swept, so
         # it needs no marker; this guard only fires for the left-open states.
+        # PRD S7 (review #369 F2): a gate closed before the state existed is
+        # backfilled here — no GitHub call needed, the marker says it all.
+        if (
+            gate.metadata.get(STATE_URL_KEY) != spec.pr_url
+            or gate.metadata.get(STATE_KEY) != "needs_human"
+        ):
+            await write_marker(
+                ctx,
+                task_id=gate.id,
+                marker=closed_state_marker(
+                    spec.pr_url, str(gate.metadata.get(MERGE_STATE_KEY))
+                ),
+                subsystem="pr-gate",
+            )
         return None
 
     story_id = await waiter_of(ctx.lithos, gate.id)
@@ -290,6 +307,7 @@ async def reconcile_pr_gate(
         # must be held BEFORE remediation observes the head, or the merge
         # commit reads as a human push and resets the S5b budget
         await conflict_resolve.recover_debt(gate, spec, story_id, ctx)
+    said = Dispositions()
     if ingest_reviews:
         budget = None
         note = None
@@ -328,11 +346,13 @@ async def reconcile_pr_gate(
                 )
             if label is not None:
                 ctx.logger.info("external-remediation: %s for %s", label, spec.pr_url)
+            said = replace(said, remediation_exhausted=note is not None)
     if merge_gate is not None:
         held = remediation is not None and remediation.busy_on(spec.pr_url)
         verdict = await merge_gate.consider(gate, spec, story_id, pr, ctx, hold=held)
         if verdict != "unchanged":
             ctx.logger.info("merge-gate: %s for %s", verdict, spec.pr_url)
+        said = replace(said, regate=verdict)
     if conflict_resolve is not None:
         # PRD S5 (watcher half): resolve a conflict the merge-gate NAMED —
         # its record is the trigger, so this always runs after it; held
@@ -345,6 +365,7 @@ async def reconcile_pr_gate(
         )
         if label not in ("unchanged", "no_conflict"):
             ctx.logger.info("conflict-resolve: %s for %s", label, spec.pr_url)
+        said = replace(said, conflict=label)
     # PRD S7: the one writer of the gate's reconciliation state, after every
     # dispatcher has run — derived from the gate as it is NOW.
     await record_state(
@@ -361,6 +382,7 @@ async def reconcile_pr_gate(
             conflict_debt=conflict_resolve is not None
             and conflict_resolve.debt_on(spec.pr_url),
         ),
+        dispositions=said,
     )
     return "still_open"
 

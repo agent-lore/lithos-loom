@@ -51,13 +51,13 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Runners | 5 | 891 | 703 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 42 | 13362 | 10767 | 4 | 11 | 0.73 | 58 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 24 |
+| Subscriptions | 42 | 13461 | 10848 | 4 | 11 | 0.73 | 58 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 24 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
 | Tasks | 4 | 1223 | 948 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 3 |
 
 ## Size
 
-- Modules: **159**, lines: **54224**, SLOC: **43645**
+- Modules: **159**, lines: **54323**, SLOC: **43726**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -69,7 +69,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1414**, cyclomatic > 10: **118**
+- Functions: **1415**, cyclomatic > 10: **118**
 
 Top 10 most complex functions:
 
@@ -81,8 +81,8 @@ Top 10 most complex functions:
 | 49 | `lithos_loom.cli.project.import_project` |
 | 49 | `lithos_loom.plugins.story_develop.develop.develop` |
 | 44 | `lithos_loom.children.obsidian_sync._amain` |
-| 34 | `lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` |
-| 32 | `lithos_loom.subscriptions.reconciliation_state.derive_state` |
+| 41 | `lithos_loom.subscriptions.reconciliation_state._derive` |
+| 36 | `lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` |
 | 31 | `lithos_loom.subscriptions.conflict_resolve_dispatch.ConflictResolveDispatch.consider` |
 | 30 | `lithos_loom.main._print_dry_run_report` |
 
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.58** (85824 test lines / 54224 source lines)
+- Test-to-source line ratio: **1.58** (86004 test lines / 54323 source lines)

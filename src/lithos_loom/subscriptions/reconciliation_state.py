@@ -45,7 +45,6 @@ may describe the pre-push PR. The next sweep re-fetches and re-derives.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,12 +64,11 @@ __all__ = [
     "STATE_URL_KEY",
     "Busy",
     "Derived",
+    "Dispositions",
     "closed_state_marker",
     "derive_state",
     "record_state",
 ]
-
-logger = logging.getLogger(__name__)
 
 STATE_KEY = "reconciliation_state"
 DETAIL_KEY = "reconciliation_detail"
@@ -124,6 +122,32 @@ class Busy:
 
 
 @dataclass(frozen=True)
+class Dispositions:
+    """What each dispatcher SAID this sweep (its ``consider`` label) — the
+    signal that tells "not required" from "required but not evaluated"
+    (review #369 F1), and an escalation from a stale record (F3).
+
+    ``regate`` / ``conflict``: the label, or ``None`` when that dispatcher
+    is not configured on this host. ``remediation_exhausted``: the S5b
+    budget is spent, whether or not the human gate's id landed on it.
+    """
+
+    regate: str | None = None
+    conflict: str | None = None
+    remediation_exhausted: bool = False
+
+
+# A re-gate label that means the trial merge is not owed at all.
+_REGATE_NOT_REQUIRED = frozenset({"disabled", "project_disabled"})
+# A re-gate label that means the run is queued or under way.
+_REGATE_IN_PROGRESS = frozenset(
+    {"deferred_busy", "deferred_remediation", "probing", "dispatched"}
+)
+# A conflict-resolver outcome that is settled and handed to the operator.
+_CONFLICT_SETTLED = frozenset({"not_converged", "failed", "conflict_unsupported"})
+
+
+@dataclass(frozen=True)
 class Derived:
     state: str
     detail: str
@@ -149,11 +173,27 @@ def _str(value: object) -> str:
 
 
 def derive_state(
-    meta: Mapping[str, Any], *, pr: Any, pr_url: str, busy: Busy
+    meta: Mapping[str, Any],
+    *,
+    pr: Any,
+    pr_url: str,
+    busy: Busy,
+    dispositions: Dispositions | None = None,
 ) -> Derived:
-    """The PR's state from the gate's markers + the fetched PR + what runs
-    (see the module doc for the precedence). Pure; never raises on a
-    malformed marker — a marker it cannot read is a marker that is absent."""
+    """The PR's state from the gate's markers + the fetched PR + what runs +
+    what the dispatchers said (see the module doc for the precedence). Pure;
+    never raises on a malformed marker — a marker it cannot read is a marker
+    that is absent. The detail is truncated here, so what is compared is
+    what is stored."""
+    d = _derive(
+        meta, pr=pr, pr_url=pr_url, busy=busy, said=dispositions or Dispositions()
+    )
+    return Derived(d.state, d.detail[:DETAIL_MAX_CHARS])
+
+
+def _derive(
+    meta: Mapping[str, Any], *, pr: Any, pr_url: str, busy: Busy, said: Dispositions
+) -> Derived:
     merge_state = meta.get(_MERGE_STATE)
     if (
         isinstance(merge_state, str)
@@ -173,6 +213,15 @@ def derive_state(
         return Derived(
             "needs_human", f"conflict resolver refused: {conflict['status']}"
         )
+    if said.conflict == "escalated":
+        # authoritative: an open loom human gate waits on the story, whether
+        # or not the best-effort id write reached the record (review #369 F3)
+        return Derived("needs_human", "conflict escalated — a decision gate waits")
+    if conflict_now and _str(conflict.get("status")) in _CONFLICT_SETTLED:
+        return Derived(
+            "needs_human",
+            f"conflict unresolved ({conflict['status']}); handed to the operator",
+        )
 
     budget = _record(meta, _REMEDIATION, pr_url)
     if _str(budget.get("needs_human_gate_id")):
@@ -182,10 +231,15 @@ def derive_state(
             f"{budget['needs_human_gate_id']}",
         )
 
+    if said.remediation_exhausted:
+        return Derived("needs_human", "external-remediation budget exhausted")
+
     regate = _record(meta, _MERGE_GATE, pr_url)
     regate_now = _current_pair(regate, pr)
     if regate_now and _str(regate.get("status")) in _REFUSALS:
         return Derived("needs_human", f"merge-gate refused: {regate['status']}")
+    if said.regate in _REFUSALS:
+        return Derived("needs_human", f"merge-gate refused: {said.regate}")
 
     if busy.conflict_resolve or (
         conflict_now and _str(conflict.get("status")) == "running"
@@ -199,6 +253,8 @@ def derive_state(
         return Derived("reconciling", "external-review remediation in flight")
     if _record(meta, _REMEDIATION_PENDING, pr_url):
         return Derived("reconciling", "remediation trigger parked behind a busy run")
+    if said.regate in _REGATE_IN_PROGRESS:
+        return Derived("reconciling", f"re-gate {said.regate}")
 
     # The re-gate's OUTCOME is its `status` (green / red / errored / no_checks
     # / conflict / push_failed / crashed / a refusal); `verdict` is the
@@ -227,11 +283,24 @@ def derive_state(
         return Derived("awaiting_review", "GitHub: blocked (reviews/checks required)")
     if mergeable_state and mergeable_state != "clean":
         return Derived("awaiting_review", f"GitHub: {mergeable_state}")
-    if outcome == "green" or not regate_now:
-        return Derived("ready_to_merge", "landable; trial merge green or not required")
+    if outcome == "green":
+        return Derived("ready_to_merge", "landable; trial merge green")
     if outcome == "no_checks":
         return Derived("ready_to_merge", "landable; the project runs no checks")
-    return Derived("awaiting_review", f"trial merge {outcome}; awaiting the re-gate")
+    if outcome:
+        return Derived(
+            "awaiting_review", f"trial merge {outcome}; awaiting the re-gate"
+        )
+    # No current record. Absence is "not evaluated" unless the re-gate is
+    # not owed at all (review #369 F1): an unreadable base tip, no waiter, an
+    # unreadable project doc — none of these make a PR ready.
+    if said.regate is None or said.regate in _REGATE_NOT_REQUIRED:
+        return Derived("ready_to_merge", "landable; no trial merge required")
+    if not _str(getattr(pr, "base_sha", "")):
+        return Derived(
+            "awaiting_review", "live base tip unreadable; re-gate cannot run"
+        )
+    return Derived("awaiting_review", f"re-gate not yet evaluated ({said.regate})")
 
 
 def _closed_detail(merge_state: str) -> str:
@@ -260,7 +329,13 @@ def closed_state_marker(pr_url: str, merge_state: str) -> dict[str, Any]:
 
 
 async def record_state(
-    gate: Any, pr: Any, pr_url: str, ctx: SubscriptionContext, *, busy: Busy
+    gate: Any,
+    pr: Any,
+    pr_url: str,
+    ctx: SubscriptionContext,
+    *,
+    busy: Busy,
+    dispositions: Dispositions | None = None,
 ) -> str | None:
     """Derive the still-open gate's state from the gate AS IT IS NOW and
     write it when it moved. Returns the new state on a transition, ``None``
@@ -285,7 +360,9 @@ async def record_state(
         )
     raw_meta = getattr(fresh, "metadata", None)
     meta: Mapping[str, Any] = raw_meta if isinstance(raw_meta, Mapping) else {}
-    derived = derive_state(meta, pr=pr, pr_url=pr_url, busy=busy)
+    derived = derive_state(
+        meta, pr=pr, pr_url=pr_url, busy=busy, dispositions=dispositions
+    )
     same_pr = meta.get(STATE_URL_KEY) == pr_url
     previous = meta.get(STATE_KEY) if same_pr else None
     transition = derived.state != previous

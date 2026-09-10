@@ -366,3 +366,100 @@ def test_closed_state_marker_is_needs_human() -> None:
     assert marker[STATE_KEY] == "needs_human"
     assert marker[STATE_URL_KEY] == _URL
     assert "closed" in marker[DETAIL_KEY] and SINCE_KEY in marker
+
+
+# ── review #369: absence is not "not required"; escalation without an id ─
+
+
+from lithos_loom.subscriptions.reconciliation_state import Dispositions  # noqa: E402
+
+
+def _derive_d(meta: dict[str, Any], *, pr: _PR | None = None, **kw: Any):
+    busy = kw.pop("busy", Busy())
+    return derive_state(
+        meta, pr=pr or _PR(), pr_url=_URL, busy=busy, dispositions=Dispositions(**kw)
+    )
+
+
+def test_a_required_re_gate_that_has_not_run_is_not_ready() -> None:
+    """Review #369 F1: no current record means "not evaluated", not
+    "not required" — only a disabled dispatcher makes absence fine."""
+    for label in ("unknown_shas", "no_story", "project_settings_unavailable"):
+        d = _derive_d({}, regate=label)
+        assert d.state == "awaiting_review" and label in d.detail, label
+
+
+def test_a_re_gate_queued_behind_another_pr_is_reconciling() -> None:
+    for label in ("deferred_busy", "deferred_remediation", "probing", "dispatched"):
+        d = _derive_d({}, regate=label)
+        assert d.state == "reconciling" and "re-gate" in d.detail, label
+
+
+def test_an_unreadable_live_base_tip_is_never_ready() -> None:
+    pr = _PR()
+    pr.base_sha = ""  # the sweep's "could not read the base" sentinel
+    d = _derive_d({}, pr=pr, regate="unknown_shas")
+    assert d.state == "awaiting_review" and "base" in d.detail
+    d = _derive_d(_regate("green"), pr=pr, regate="unchanged")
+    assert d.state != "ready_to_merge"
+
+
+def test_a_disabled_or_unconfigured_re_gate_makes_absence_not_required() -> None:
+    assert _derive_d({}, regate=None).state == "ready_to_merge"
+    for label in ("disabled", "project_disabled"):
+        assert _derive_d({}, regate=label).state == "ready_to_merge", label
+
+
+def test_a_green_current_record_with_unchanged_label_is_ready() -> None:
+    assert _derive_d(_regate("green"), regate="unchanged").state == "ready_to_merge"
+
+
+def test_a_refusal_label_is_needs_human_even_without_a_record() -> None:
+    for label in ("repo_mismatch", "checkout_unresolved", "fork_unsupported"):
+        d = _derive_d({}, regate=label)
+        assert d.state == "needs_human" and label in d.detail, label
+
+
+def test_a_story_already_escalated_outranks_a_stale_running_record() -> None:
+    """Review #369 F3: the gate id write is best-effort; the resolver's
+    `escalated` disposition (an open human gate on the story) is the
+    authoritative signal and must not be shadowed by the `running` record."""
+    d = _derive_d(_conflict("running"), conflict="escalated")
+    assert d.state == "needs_human" and "decision" in d.detail
+
+
+def test_a_settled_conflict_outcome_without_a_gate_id_is_needs_human() -> None:
+    for status in ("not_converged", "failed", "conflict_unsupported"):
+        d = _derive_d(
+            _conflict(status), pr=_PR(mergeable=False, mergeable_state="dirty")
+        )
+        assert d.state == "needs_human" and status in d.detail, status
+
+
+def test_an_exhausted_budget_without_a_gate_id_is_needs_human() -> None:
+    d = _derive_d({}, remediation_exhausted=True, busy=Busy(merge_gate=True))
+    assert d.state == "needs_human" and "exhausted" in d.detail
+
+
+def test_the_detail_is_truncated_at_the_source() -> None:
+    from lithos_loom.subscriptions.reconciliation_state import DETAIL_MAX_CHARS
+
+    meta = _regate("push_failed", behind=True, pushed_sha="", push_error="x" * 500)
+    assert len(_derive(meta).detail) == DETAIL_MAX_CHARS
+
+
+async def test_record_is_idempotent_for_an_over_long_detail() -> None:
+    """Review #369 F4: compare what would be STORED, or a long push error
+    rewrites byte-identical state every sweep."""
+    client = FakeLithosClient(agent_id="a")
+    gate = await _gate(
+        client, _regate("push_failed", behind=True, pushed_sha="", push_error="x" * 500)
+    )
+    ctx = _ctx(client)
+    await record_state(gate, _PR(), _URL, ctx, busy=Busy())
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    writes = len(client.calls_to("task_update"))
+
+    assert await record_state(gate, _PR(), _URL, ctx, busy=Busy()) is None
+    assert len(client.calls_to("task_update")) == writes
