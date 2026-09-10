@@ -492,6 +492,73 @@ async def test_reconcile_pass_threads_the_merge_gate_to_the_gate_branch() -> Non
     assert seen == ["e" * 40]
 
 
+async def test_reconcile_pass_threads_conflict_resolution_to_the_gate_branch() -> None:
+    """PRD S5 watcher half: a supplied conflict-resolve dispatcher sees every
+    still-open pr gate's fetched PR."""
+    import logging
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.github_client import PullRequest
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.subscriptions import SubscriptionContext
+
+    gate = Task(
+        id="gate-1",
+        title="Awaiting merge: US9",
+        status="open",
+        tags=(),
+        metadata={
+            "gate_type": "pr",
+            "repo": "o/r",
+            "pr_number": 9,
+            "pr_url": "https://github.com/o/r/pull/9",
+        },
+        claims=(),
+        task_type="gate",
+    )
+    lithos = AsyncMock()
+    lithos.task_list = AsyncMock(return_value=[gate])
+    lithos.task_edge_list = AsyncMock(return_value=[])
+    github = AsyncMock()
+    github.get_pull_request = AsyncMock(
+        return_value=PullRequest(
+            repo="o/r",
+            number=9,
+            state="open",
+            merged=False,
+            merged_at=None,
+            merge_commit_sha=None,
+            head_sha="e" * 40,
+            base_sha="b" * 40,
+            mergeable=True,
+            mergeable_state="behind",
+        )
+    )
+    ctx = SubscriptionContext(
+        lithos=lithos, logger=logging.getLogger("test-gate"), agent_id="a"
+    )
+    seen: list[str] = []
+
+    class _Resolver:
+        async def recover_debt(self, gate, spec, story_id, ctx):
+            return None
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            seen.append(pr.head_sha)
+            return "unchanged"
+
+    await _run_reconcile_pass(
+        lithos=lithos,
+        push_handler=AsyncMock(),
+        ctx=ctx,
+        resolved_window=None,
+        github=github,
+        pr_merge_enabled=True,
+        conflict_resolve=_Resolver(),  # type: ignore[arg-type]
+    )
+    assert seen == ["e" * 40]
+
+
 async def test_reconcile_pass_threads_remediation_to_the_gate_branch() -> None:
     """Slice C: when a remediation dispatcher is supplied, the still-open gate
     branch observes the PR head through it (the S5b budget seam). Dispatch

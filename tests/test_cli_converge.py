@@ -69,7 +69,9 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         no_push=False,
         external_findings=None,
         resolve_conflicts=False,
+        expect_base=None,
     ):
+        captured["expect_base"] = expect_base
         captured["config"] = config
         captured["no_push"] = no_push
         captured["external_findings"] = external_findings
@@ -1052,3 +1054,49 @@ def test_no_conflict_exits_clean(stubs: dict) -> None:
         develop_app, ["converge", "#142", "--ac", "x", "--resolve-conflicts"]
     )
     assert result.exit_code == 0, result.output
+
+
+def test_expect_head_refuses_a_moved_head_before_anything(
+    stubs: dict, tmp_path: Path
+) -> None:
+    """PR #366 review F3: the watcher pins the run to the head it authorised."""
+    out = tmp_path / "out.json"
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--ac",
+            "x",
+            "--resolve-conflicts",
+            "--expect-head",
+            "x" * 40,
+            "--json",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "config" not in stubs  # converge_pr never ran
+    data = json.loads(out.read_text())
+    assert data["status"] == "head_moved"
+    assert data["expected_head"] == "x" * 40 and data["actual_head"] == "h" * 40
+
+
+def test_expect_head_and_base_reach_the_run_when_they_match(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--ac",
+            "x",
+            "--resolve-conflicts",
+            "--expect-head",
+            "h" * 40,
+            "--expect-base",
+            "t" * 40,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["resolve_conflicts"] is True
+    assert stubs["expect_base"] == "t" * 40

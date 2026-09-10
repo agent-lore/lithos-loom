@@ -25,7 +25,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
-| `lithos_loom.plugins.story_develop.conflict_resolve` | M | 2 | 5 |
+| `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
@@ -136,6 +136,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `DevelopConfig` — Everything ``develop()`` needs for one run.
 
 ### `lithos_loom.plugins.story_develop.conflict_resolve`
+- class `StaleTrigger` — The caller authorised a resolution against a specific base tip and it is no longer the base's tip (PR #366 review F3): the run must not spend or push on different inputs than the ones the watcher keyed on.
 - class `UnsupportedConflict` — The merge conflicts in a shape this mode cannot resolve by editing (PR #364 review round 3): a binary file, a modify/delete, a path git left without textual markers. Nothing distinguishes a coder's resolution of such a path from an untouched one, and `git add -A` would then silently take whichever side git left in the tree — so the intake refuses before any agent runs, naming every such path.
 - class `ConflictIntake` — A merge in progress, ready for the resolution round.
 - def `prepare_conflict_intake` — Merge the base's current tip into a throwaway worktree at the PR head, without committing. ``None`` when there is nothing to resolve — the head already contains the base tip, or the merge is clean (the base-move re-gate's job, PRD S3): the worktree is removed again and no agent runs.

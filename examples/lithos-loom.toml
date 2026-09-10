@@ -419,6 +419,19 @@ tags = ["trigger:story-develop"]
 # # the story; a conflict names the conflicting paths in [PRConflicted].
 # # Set false to keep the sweep to detection. Per-project opt-out:
 # # context-doc metadata `develop_merge_gate = false` (default on).
+# conflict_resolve_enabled = true
+# # PRD S5 (watcher half): on a still-open `pr` gate whose merge-gate record
+# # says `conflict` for the current (head_sha, base_sha), dispatch
+# # `develop converge <pr> --resolve-conflicts --story <id>` ONCE per sha
+# # pair — one run in flight at a time, held while remediation or the
+# # merge-gate is busy on that PR. A coder resolves the merge in a throwaway
+# # worktree, the composed tree runs the project's check-set and the panel,
+# # and an approved merge commit is pushed (recorded as loom's own push on
+# # the remediation budget) with `[ConflictResolved]` on the story. A run
+# # that ends not_converged / failed / conflict_unsupported raises a loom
+# # `human` gate on the story (`escalation_reason = conflict_unresolved`).
+# # Per-project opt-out: context-doc metadata `develop_conflict_resolve =
+# # false` (default on; fail-closed when the doc is unreadable).
 
 # ── story-develop host-wide defaults ──────────────────────────────────
 #

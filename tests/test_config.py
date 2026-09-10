@@ -762,6 +762,44 @@ def test_github_watcher_merge_gate_enabled(
         load_config()
 
 
+def test_github_watcher_conflict_resolve_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD S3 (watcher half): the base-move re-gate defaults on; false keeps
+    the sweep to detection; a non-bool is rejected."""
+    _write_config(tmp_path, monkeypatch, "[github_watcher]\n")
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.conflict_resolve_enabled is True
+
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            conflict_resolve_enabled = false
+            """
+        ),
+    )
+    cfg = load_config()
+    assert cfg.github_watcher is not None
+    assert cfg.github_watcher.conflict_resolve_enabled is False
+
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        dedent(
+            """
+            [github_watcher]
+            conflict_resolve_enabled = "yes"
+            """
+        ),
+    )
+    with pytest.raises(ConfigError, match="conflict_resolve_enabled"):
+        load_config()
+
+
 def test_github_watcher_external_remediation_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

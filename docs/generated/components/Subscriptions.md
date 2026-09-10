@@ -32,6 +32,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._project_settings` | S | 1 | 5 |
 | `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
+| `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
+| `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
+| `lithos_loom.subscriptions.conflict_resolve_record` | S | 2 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 10 |
 | `lithos_loom.subscriptions.escalation` | M | 1 | 4 |
@@ -128,6 +131,27 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
+
+### `lithos_loom.subscriptions.conflict_resolve_dispatch`
+- def `spawn_resolve` — Run the resolve subprocess (cancellation-safe, bounded).
+- class `ConflictResolveSettings` — Host-side knobs the watcher child threads in from its config.
+- class `ConflictResolveDispatch` — Owns the single-flight dispatch of ``develop converge --resolve-conflicts``.
+
+### `lithos_loom.subscriptions.conflict_resolve_outcome`
+- def `write_once` — One attempt at a gate write (the debt flush: one per sweep).
+- def `strict_write` — A write the dispatcher's bounds depend on: retried with backoff; the outcome is the caller's to honour.
+- def `write_record`
+- def `clear_breadcrumb`
+- def `post_finding`
+- def `post_friction` — The record FIRST (strict — it is the once-per-pair bound), then the breadcrumb; a breadcrumb that cannot post never erases the record.
+- def `paths_of`
+- def `story_escalated` — Does an OPEN loom human gate already wait on the story? The record on the gate is the once-per-key guard; this is the belt for a record that failed to land after the gate was raised (the story still names it), so a paid run is never repeated and a second gate never raised.
+- def `escalate` — The residue is a human's: raise the loom ``human`` gate on the story, once per sha pair (the record carries the gate id).
+
+### `lithos_loom.subscriptions.conflict_resolve_record`
+- class `ConflictResolveRecord` — The gate's ``conflict_resolve`` marker: the sha pair + the outcome.
+- def `read_record` — The gate's record; ``None`` for an absent / foreign-url marker.
+- class `Debt` — A pushed resolution whose record + budget write has not landed yet: the marker to flush and the finding to post once it does. Held in the dispatcher's memory; recoverable from the story breadcrumb after a restart.
 
 ### `lithos_loom.subscriptions.delivery_gate`
 - def `gate_and_release` — Gate a delivered task on human merge, then release (``completes_task =false``).

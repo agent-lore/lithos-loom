@@ -41,6 +41,7 @@ from ...runner import git, worktree
 from . import handoff, review_only
 from .config import DevelopConfig
 from .conflict_resolve import (
+    StaleTrigger,
     UnsupportedConflict,
     markers_guard,
     prepare_conflict_intake,
@@ -77,6 +78,7 @@ ConvergeStatus = Literal[
     "failed",
     "no_conflict",
     "conflict_unsupported",
+    "base_moved",
 ]
 
 
@@ -236,6 +238,7 @@ def converge_pr(
     reviewer_timeout: int = 3600,
     external_findings: tuple[ExternalFinding, ...] | None = None,
     resolve_conflicts: bool = False,
+    expect_base: str | None = None,
 ) -> ConvergeResult:
     """Run the review-convergence loop against an existing PR *change*.
 
@@ -310,6 +313,7 @@ def converge_pr(
             no_push=no_push,
             coder_timeout=coder_timeout,
             reviewer_timeout=reviewer_timeout,
+            expect_base=expect_base,
         )
 
     if external_findings is not None:
@@ -533,11 +537,21 @@ def _resolve_conflicts(
     no_push: bool,
     coder_timeout: int,
     reviewer_timeout: int,
+    expect_base: str | None = None,
 ) -> ConvergeResult:
     """Resolve mode (PRD S5): the merge in progress is the intake; round 1
     resolves it, the loop's own gate + panel judge the composed tree."""
     try:
-        intake = prepare_conflict_intake(config, change)
+        intake = prepare_conflict_intake(config, change, expect_base=expect_base)
+    except StaleTrigger as exc:
+        return ConvergeResult(
+            status="base_moved",
+            change=change,
+            message=(
+                f"PR {change.head_ref}: {exc}; nothing spent, nothing pushed — the "
+                "caller re-keys on the current pair"
+            ),
+        )
     except UnsupportedConflict as exc:
         return ConvergeResult(
             status="conflict_unsupported",

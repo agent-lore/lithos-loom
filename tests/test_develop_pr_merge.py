@@ -1282,3 +1282,114 @@ async def test_gate_merged_recovery_defers_on_a_raw_transport_failure() -> None:
     )
     assert outcome == "error"
     assert (await _get(client, gate.id)).status == "open"
+
+
+async def test_still_open_branch_considers_conflict_resolution_last() -> None:
+    """PRD S5 watcher half: the still-open branch hands the PR to the
+    conflict-resolve dispatcher AFTER the merge-gate (its record is the
+    trigger), held while EITHER other dispatcher is busy on this PR."""
+    from dataclasses import replace
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    pr = replace(
+        _pr(state="open", merged=False),
+        head_sha="h" * 40,
+        base_sha="b" * 40,
+        base_ref="main",
+        mergeable=False,
+        mergeable_state="dirty",
+    )
+    order: list[str] = []
+    seen: list[dict[str, Any]] = []
+
+    class _MergeGate:
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            order.append("merge-gate")
+            return "unchanged"
+
+        def busy_on(self, pr_url: str) -> bool:
+            return pr_url == _PR_URL
+
+    class _Resolver:
+        async def recover_debt(self, gate, spec, story_id, ctx):
+            return None
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            order.append("conflict-resolve")
+            seen.append({"story": story_id, "head": pr.head_sha, "hold": hold})
+            return "dispatched"
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(pr),
+        _ctx(client),
+        conflict_resolve=_Resolver(),  # type: ignore[arg-type]
+    )
+    assert outcome == "still_open"
+    assert seen == [{"story": story, "head": "h" * 40, "hold": False}]
+
+    seen.clear()
+    order.clear()
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(pr),
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+        conflict_resolve=_Resolver(),  # type: ignore[arg-type]
+    )
+    assert outcome == "still_open"
+    assert order == ["merge-gate", "conflict-resolve"]
+    assert seen == [{"story": story, "head": "h" * 40, "hold": True}]
+
+
+async def test_still_open_branch_recovers_a_debt_before_observing_the_head() -> None:
+    """A restarted resolver re-arms a held debt from the story breadcrumb
+    BEFORE remediation observes the head — else the merge commit reads as a
+    human push and the budget resets."""
+    from dataclasses import replace
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    pr = replace(
+        _pr(state="open", merged=False),
+        head_sha="h" * 40,
+        base_sha="b" * 40,
+        base_ref="main",
+        mergeable=True,
+        mergeable_state="clean",
+    )
+    order: list[str] = []
+
+    class _Resolver:
+        async def recover_debt(self, gate, spec, story_id, ctx):
+            order.append("recover")
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            order.append("consider")
+            return "no_conflict"
+
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+    class _Remediation:
+        async def observe_head(self, gate, spec, pr, ctx):
+            order.append("observe")
+            return None
+
+        def exhaustion_note(self, budget):
+            return None
+
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(pr),
+        _ctx(client),
+        ingest_reviews=True,
+        remediation=_Remediation(),  # type: ignore[arg-type]
+        conflict_resolve=_Resolver(),  # type: ignore[arg-type]
+    )
+    assert outcome == "still_open"
+    assert order[:2] == ["recover", "observe"] and order[-1] == "consider"

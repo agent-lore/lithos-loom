@@ -29,12 +29,26 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ConflictIntake",
+    "StaleTrigger",
     "UnsupportedConflict",
     "markers_guard",
     "prepare_conflict_intake",
     "render_conflict_brief",
     "render_review_context",
 ]
+
+
+class StaleTrigger(Exception):
+    """The caller authorised a resolution against a specific base tip and it
+    is no longer the base's tip (PR #366 review F3): the run must not spend
+    or push on different inputs than the ones the watcher keyed on."""
+
+    def __init__(self, *, expected: str, actual: str) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"the base tip moved: expected {expected[:12]}, found {actual[:12]}"
+        )
 
 
 class UnsupportedConflict(Exception):
@@ -101,7 +115,7 @@ class ConflictIntake:
 
 
 def prepare_conflict_intake(
-    config: DevelopConfig, change: ResolvedChange
+    config: DevelopConfig, change: ResolvedChange, *, expect_base: str | None = None
 ) -> ConflictIntake | None:
     """Merge the base's current tip into a throwaway worktree at the PR head,
     without committing. ``None`` when there is nothing to resolve — the head
@@ -112,6 +126,8 @@ def prepare_conflict_intake(
     # the mode then merges THAT (PR #364 review F3), never `origin/<sha>`.
     base_ref = change.base_ref or change.base_sha
     base_sha = git.commit_sha(config.repo, base_ref)
+    if expect_base is not None and base_sha != expect_base:
+        raise StaleTrigger(expected=expect_base, actual=base_sha)
     if git.is_ancestor(config.repo, base_sha, change.head_sha):
         return None
     wt = worktree.create_on_branch(

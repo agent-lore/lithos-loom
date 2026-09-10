@@ -42,6 +42,9 @@ from lithos_loom.subscriptions._develop_pr_nudge import (
     recover_dependents,
 )
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions.conflict_resolve_dispatch import (
+    ConflictResolveDispatch,
+)
 from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
@@ -146,6 +149,7 @@ async def reconcile_pr_gate(
     ingest_reviews: bool = False,
     remediation: ExternalRemediation | None = None,
     merge_gate: MergeGateDispatch | None = None,
+    conflict_resolve: ConflictResolveDispatch | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -276,6 +280,11 @@ async def reconcile_pr_gate(
     # on every merge poll (no separate dial): it reads fields the fetch above
     # already returned and writes only on a change.
     await check_landability(gate, spec, story_id, pr, ctx)
+    if conflict_resolve is not None:
+        # PRD S5: a resolver push whose record did not land before a restart
+        # must be held BEFORE remediation observes the head, or the merge
+        # commit reads as a human push and resets the S5b budget
+        await conflict_resolve.recover_debt(gate, spec, story_id, ctx)
     if ingest_reviews:
         budget = None
         note = None
@@ -319,6 +328,18 @@ async def reconcile_pr_gate(
         verdict = await merge_gate.consider(gate, spec, story_id, pr, ctx, hold=held)
         if verdict != "unchanged":
             ctx.logger.info("merge-gate: %s for %s", verdict, spec.pr_url)
+    if conflict_resolve is not None:
+        # PRD S5 (watcher half): resolve a conflict the merge-gate NAMED —
+        # its record is the trigger, so this always runs after it; held
+        # while either other dispatcher may push to this PR.
+        held = (remediation is not None and remediation.busy_on(spec.pr_url)) or (
+            merge_gate is not None and merge_gate.busy_on(spec.pr_url)
+        )
+        label = await conflict_resolve.consider(
+            gate, spec, story_id, pr, ctx, hold=held
+        )
+        if label not in ("unchanged", "no_conflict"):
+            ctx.logger.info("conflict-resolve: %s for %s", label, spec.pr_url)
     return "still_open"
 
 

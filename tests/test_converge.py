@@ -944,3 +944,18 @@ def test_resolve_mode_never_pushes_a_tree_without_the_base(
     assert result.status == "failed" and not result.pushed
     assert "push" not in captured
     assert base_tip[:12] in result.message and "ancestor" in result.message
+
+
+def test_resolve_mode_reports_a_moved_base_without_spending(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    merge_base, head, _tip = _seed_conflict(tmp_git_repo)
+    captured = _install(monkeypatch, blocking=False)
+    result = converge_pr(
+        _config(tmp_path),
+        _resolve_change(merge_base, head),
+        resolve_conflicts=True,
+        expect_base="0" * 40,
+    )
+    assert result.status == "base_moved" and not result.succeeded
+    assert "entry" not in captured and "push" not in captured

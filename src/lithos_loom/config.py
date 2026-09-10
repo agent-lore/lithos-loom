@@ -311,6 +311,14 @@ class GitHubWatcherConfig:
     paths. ``false`` keeps the sweep to detection. Per-project opt-out:
     context-doc ``develop_merge_gate = false``.
     """
+    conflict_resolve_enabled: bool = True
+    """PRD S5 (watcher half): on a still-open ``pr`` gate whose merge-gate
+    record says ``conflict`` for the current ``(head, base)``, dispatch
+    ``develop converge --resolve-conflicts --story <id>`` once per sha pair —
+    a coder resolves the merge, the composed tree is gated + reviewed, an
+    approved merge commit is pushed; anything else raises a needs-human gate.
+    Per-project opt-out: context-doc metadata ``develop_conflict_resolve``.
+    """
     external_remediation_budget: int = 2
     """PRD S5b: max autonomous ``develop converge --from-github`` dispatches
     per delivered PR. The sweep-owned counter on the gate never resets on a
@@ -815,6 +823,7 @@ _GITHUB_WATCHER_KEYS: frozenset[str] = frozenset(
         "trusted_bots",
         "external_remediation_budget",
         "merge_gate_enabled",
+        "conflict_resolve_enabled",
     }
 )
 
@@ -915,6 +924,9 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
     merge_gate_enabled = _optional_bool(
         data, "merge_gate_enabled", True, config_path, "github_watcher"
     )
+    conflict_resolve_enabled = _optional_bool(
+        data, "conflict_resolve_enabled", True, config_path, "github_watcher"
+    )
 
     external_remediation_budget = _optional_int(
         data,
@@ -941,6 +953,7 @@ def _parse_github_watcher(data: Any, config_path: Path) -> GitHubWatcherConfig |
         trusted_bots=tuple(trusted_bots_raw),
         external_remediation_budget=external_remediation_budget,
         merge_gate_enabled=merge_gate_enabled,
+        conflict_resolve_enabled=conflict_resolve_enabled,
     )
 
 
