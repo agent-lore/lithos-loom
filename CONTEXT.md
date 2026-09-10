@@ -57,8 +57,8 @@ dialogue-based** cycle.
 - **engine** — the per-tool adapter concentrating everything story-develop must know to run
   a coder/reviewer with a specific CLI tool (`claude` or `codex`): its identity + capabilities
   (`meters_cost_usd` — codex reports tokens not USD, #102; `mints_session_handle` — codex mints
-  a `thread_id` on turn 1 while claude echoes the caller's uuid; `supports_effort` — codex depth
-  is model-driven), how to provision its **container** (config mount + env var, auth files,
+  a `thread_id` on turn 1 while claude echoes the caller's uuid; `supports_effort` — both wired
+  engines honour the canonical level, codex via a `model_reasoning_effort` config override), how to provision its **container** (config mount + env var, auth files,
   skills), how to build one turn's CLI argv (bare — reused host-side, session-less, by the
   review-correctness eval judge — or wrapped in `docker exec`), how to parse that turn's
   structured output into a turn result, and where it writes its **session** transcript.

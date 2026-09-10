@@ -217,13 +217,14 @@ def test_exec_command_codex_resume_passes_thread_id() -> None:
     assert cmd[-1] == "p"
 
 
-def test_exec_command_codex_model_flag_and_effort_ignored() -> None:
+def test_exec_command_codex_model_flag_and_effort_config_override() -> None:
     cmd = _exec_cmd(
         name="c", tool="codex", prompt="p", session_id="s", model="o3", effort="high"
     )
     assert cmd[cmd.index("-m") + 1] == "o3"
-    # codex depth is model-driven; the claude `--effort` knob is not emitted.
+    # codex has no --effort flag; the level rides on its config override.
     assert "--effort" not in cmd
+    assert cmd[cmd.index("-c") + 1] == "model_reasoning_effort=high"
 
 
 def test_run_command_codex_env_mount_and_auth() -> None:

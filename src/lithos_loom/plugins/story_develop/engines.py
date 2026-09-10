@@ -73,7 +73,7 @@ class Engine(Protocol):
     name: str  # registry key, state.json value, default_models key
     meters_cost_usd: bool  # claude True; codex reports tokens, not USD (#102)
     mints_session_handle: bool  # codex mints thread_id turn-1; claude echoes uuid
-    supports_effort: bool  # codex depth is model-driven — no effort knob
+    supports_effort: bool  # cli_argv maps the canonical effort level onto the tool
 
     # container provisioning
     config_mount: str  # in-container config/transcript mountpoint
@@ -285,11 +285,29 @@ class ClaudeEngine(_BaseEngine):
         return any(projects.glob(f"*/{session_id}.jsonl"))
 
 
+# Canonical (claude) effort levels → codex's `model_reasoning_effort` config
+# values. Codex has no --effort flag, but every `codex exec` accepts the generic
+# `-c key=value` config override, and `model_reasoning_effort` is the key its
+# config.toml uses for reasoning depth. The two ladders agree up to `xhigh`;
+# claude's `max` has no codex counterpart and coerces to codex's top level. A
+# run inside the sandbox mounts auth files only (no config.toml), so without
+# this override every codex agent ran at the CLI's builtin default depth — an
+# operator pinning `high` on the host was not getting it in-container (#303
+# for the model; the same drift, one knob over).
+_CODEX_REASONING_EFFORT: dict[str, str] = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "xhigh",
+}
+
+
 class CodexEngine(_BaseEngine):
     name = "codex"
     meters_cost_usd = False  # reports tokens, not USD — the #102 boundary
     mints_session_handle = True  # thread_id from turn-1 thread.started
-    supports_effort = False  # depth is model-driven — no effort knob
+    supports_effort = True  # via `-c model_reasoning_effort=` (see the map above)
 
     # CODEX_HOME (NOT CODEX_CONFIG_DIR, which codex ignores — feasibility gate);
     # mounted under the work-dir, never /tmp.
@@ -319,9 +337,10 @@ class CodexEngine(_BaseEngine):
         #   resume: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
         # The thread_id is minted on turn 1 (thread.started) and passed
         # positionally to resume; the working dir is set by `docker exec -w`, so
-        # the -C/--cd flag `resume` lacks is not needed. `effort` is ignored
-        # (codex depth is model-driven). A bare host-side invocation
-        # (session_id=None) is never a resume, so it degrades to plain `exec`.
+        # the -C/--cd flag `resume` lacks is not needed. `effort` rides on the
+        # `-c model_reasoning_effort=` config override (accepted by `exec` and
+        # `exec resume` alike). A bare host-side invocation (session_id=None)
+        # is never a resume, so it degrades to plain `exec`.
         if resume and session_id is not None:
             subcommand = ["exec", "resume", session_id]
         else:
@@ -334,6 +353,8 @@ class CodexEngine(_BaseEngine):
         ]
         if model:
             argv += ["-m", model]
+        if effort:
+            argv += ["-c", f"model_reasoning_effort={_CODEX_REASONING_EFFORT[effort]}"]
         argv += [prompt]
         return argv
 

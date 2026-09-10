@@ -98,9 +98,10 @@ def resolve_panel(
     :func:`parse_reviewer_overrides`. Specs are rebuilt with
     ``dataclasses.replace`` — the shared cached registry is never mutated.
 
-    Engine capability crossings are normalised last (effort is a claude-only
-    knob — codex depth is model-driven): an **explicitly overridden** effort on
-    a no-effort engine is rejected, because the requested lever could never
+    Engine capability crossings are normalised last (both wired engines honour
+    effort today; the guard covers a future engine without a knob): an
+    **explicitly overridden** effort on a no-effort engine is rejected,
+    because the requested lever could never
     fire and the paid arm would silently run identical to control; an effort
     merely **inherited** from a persona across a ``tool`` swap is cleared, so
     the returned panel (and hence ``summary.json``) is the *effective* runtime
@@ -146,7 +147,7 @@ def _normalise_effort(spec: ReviewerSpec, overrides: ReviewerOverrides) -> Revie
     if "effort" in overrides.get(spec.name, {}):
         raise ValueError(
             f"--reviewer-override {spec.name}.effort={spec.effort}: tool "
-            f"{spec.tool!r} has no effort knob (depth is model-driven) — the "
+            f"{spec.tool!r} has no effort knob — the "
             "requested lever could never fire, so the arm would run identical "
             "to control"
         )

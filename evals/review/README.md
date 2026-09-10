@@ -219,13 +219,15 @@ Semantics:
   panel: a case whose panel lacks the persona runs unmodified (full-benchmark
   sweeps mix panels), while the persona *name* is still validated against the
   registry so a typo fails closed. Later duplicates win.
-- **Effort is a claude-only knob** (codex depth is model-driven —
-  `supports_effort=False`): an explicit `PERSONA.effort=` override whose
-  effective engine has no effort knob is **rejected** — the requested lever
-  could never fire, so the paid arm would silently run identical to control.
-  An effort merely *inherited* from a persona across a `PERSONA.tool=codex`
-  swap is **cleared**, so `summary.json` always records the *effective*
-  runtime configuration, never a recorded-but-ignored setting.
+- **Effort is a real lever on both wired engines** (claude `--effort`, codex
+  `-c model_reasoning_effort=`; `max` coerces to codex's `xhigh`), so a
+  `PERSONA.effort=` override on a codex persona is a genuine arm. The
+  capability guard stays for any engine without a knob: an explicit
+  `PERSONA.effort=` override whose effective engine cannot apply it is
+  **rejected** — the requested lever could never fire, so the paid arm would
+  silently run identical to control — and an effort merely *inherited*
+  across a `PERSONA.tool=` swap onto such an engine is **cleared**, so
+  `summary.json` always records the *effective* runtime configuration.
 - Everything validates **before any paid run** (exit 2, no containers) —
   including the capability check above, which resolves every selected case's
   panel up front.

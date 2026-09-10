@@ -132,7 +132,7 @@ def review(
 
     # Fail closed BEFORE any paid run: overrides parse up front, then EVERY
     # selected case's effective panel is resolved (unknown profile/reviewer,
-    # gate-only profile, capability crossings like effort-on-codex) — a typo
+    # gate-only profile, an effort lever on an engine without a knob) — a typo
     # or a no-op lever aborts the whole invocation, not one case into a sweep.
     try:
         overrides = parse_reviewer_overrides(reviewer_override or [])
