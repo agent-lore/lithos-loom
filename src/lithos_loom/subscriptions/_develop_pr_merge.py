@@ -42,6 +42,9 @@ from lithos_loom.subscriptions._develop_pr_nudge import (
     recover_dependents,
 )
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions.conflict_resolve_dispatch import (
+    ConflictResolveDispatch,
+)
 from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
@@ -146,6 +149,7 @@ async def reconcile_pr_gate(
     ingest_reviews: bool = False,
     remediation: ExternalRemediation | None = None,
     merge_gate: MergeGateDispatch | None = None,
+    conflict_resolve: ConflictResolveDispatch | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -319,6 +323,18 @@ async def reconcile_pr_gate(
         verdict = await merge_gate.consider(gate, spec, story_id, pr, ctx, hold=held)
         if verdict != "unchanged":
             ctx.logger.info("merge-gate: %s for %s", verdict, spec.pr_url)
+    if conflict_resolve is not None:
+        # PRD S5 (watcher half): resolve a conflict the merge-gate NAMED —
+        # its record is the trigger, so this always runs after it; held
+        # while either other dispatcher may push to this PR.
+        held = (remediation is not None and remediation.busy_on(spec.pr_url)) or (
+            merge_gate is not None and merge_gate.busy_on(spec.pr_url)
+        )
+        label = await conflict_resolve.consider(
+            gate, spec, story_id, pr, ctx, hold=held
+        )
+        if label not in ("unchanged", "no_conflict"):
+            ctx.logger.info("conflict-resolve: %s for %s", label, spec.pr_url)
     return "still_open"
 
 

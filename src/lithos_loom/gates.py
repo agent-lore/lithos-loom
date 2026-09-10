@@ -124,6 +124,10 @@ ESCALATION_REASONS: frozenset[str] = frozenset(
         "timeout",
         # a usage-limited run exhausted its T10 re-dispatch budget
         "resume_exhausted",
+        # github-watcher (PRD S5): loom could not resolve the delivered PR's
+        # conflict with its base — the composed tree did not converge, or the
+        # conflict is a shape a coder cannot edit (binary, modify/delete)
+        "conflict_unresolved",
         # github-watcher: the delivered PR closed unmerged / was deleted (04c2448b)
         "pr_closed_unmerged",
         "pr_gone",

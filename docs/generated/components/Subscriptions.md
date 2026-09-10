@@ -32,6 +32,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._project_settings` | S | 1 | 5 |
 | `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
+| `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 3 | 2 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 10 |
 | `lithos_loom.subscriptions.escalation` | M | 1 | 4 |
@@ -128,6 +129,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
+
+### `lithos_loom.subscriptions.conflict_resolve_dispatch`
+- def `spawn_resolve` — Run the resolve subprocess (cancellation-safe, bounded).
+- class `ConflictResolveSettings` — Host-side knobs the watcher child threads in from its config.
+- class `ConflictResolveRecord` — The gate's ``conflict_resolve`` marker: the sha pair + the outcome.
+- def `read_record` — The gate's record; ``None`` for an absent / foreign-url marker.
+- class `ConflictResolveDispatch` — Owns the single-flight dispatch of ``develop converge --resolve-conflicts``.
 
 ### `lithos_loom.subscriptions.delivery_gate`
 - def `gate_and_release` — Gate a delivered task on human merge, then release (``completes_task =false``).
