@@ -425,12 +425,12 @@ def parse_bool_setting(value: object, *, where: str) -> bool | None:
 
 
 # Reasoning-effort levels. There is no universal cross-tool effort vocabulary:
-# Claude's `--effort` is low/medium/high/xhigh/max; Codex has NO effort flag
-# (depth is implicit in model choice — o3 vs gpt-4o); OpenCode's `--variant` is
-# high/max/minimal. So Loom adopts CLAUDE'S levels as canonical (Claude is the
-# only wired agent today). When other tools land (#94), each tool's `Engine`
-# (`cli_argv`) maps this canonical level onto that tool's mechanism
-# (Codex: pick the model; OpenCode: map to a `--variant`), coercing as needed.
+# Claude's `--effort` is low/medium/high/xhigh/max; Codex has no effort flag but
+# takes `model_reasoning_effort` (minimal/low/medium/high/xhigh) as a config
+# override; OpenCode's `--variant` is high/max/minimal. So Loom adopts CLAUDE'S
+# levels as canonical, and each tool's `Engine` (`cli_argv`) maps the canonical
+# level onto that tool's mechanism, coercing as needed (Codex: `max` → `xhigh`;
+# a not-yet-wired OpenCode would map to a `--variant`).
 VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 

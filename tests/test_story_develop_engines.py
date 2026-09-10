@@ -103,7 +103,7 @@ def test_codex_capabilities() -> None:
     assert e.name == "codex"
     assert e.meters_cost_usd is False  # tokens, not USD — the #102 boundary
     assert e.mints_session_handle is True  # thread_id from turn-1 thread.started
-    assert e.supports_effort is False  # depth is model-driven
+    assert e.supports_effort is True  # via `-c model_reasoning_effort=`
 
 
 # ── cli_argv (bare tool argv) + build_exec_argv (docker exec wrapper) ───────
@@ -163,10 +163,43 @@ def test_codex_cli_argv_resume_passes_thread_id_positionally() -> None:
     assert argv[-1] == "p"
 
 
-def test_codex_cli_argv_model_flag_and_effort_ignored() -> None:
+def test_codex_cli_argv_model_flag_and_effort_config_override() -> None:
+    # codex has no --effort flag; the canonical level rides on the generic
+    # `-c key=value` config override as `model_reasoning_effort`.
     argv = CodexEngine().cli_argv(prompt="p", session_id="s", model="o3", effort="high")
     assert argv[argv.index("-m") + 1] == "o3"
-    assert "--effort" not in argv  # codex depth is model-driven
+    assert "--effort" not in argv
+    assert argv[argv.index("-c") + 1] == "model_reasoning_effort=high"
+    assert argv[-1] == "p"  # the override precedes the positional prompt
+
+
+def test_codex_cli_argv_effort_max_coerces_to_xhigh() -> None:
+    # Claude's canonical ladder tops out at `max`; codex's at `xhigh`.
+    argv = CodexEngine().cli_argv(prompt="p", session_id="s", effort="max")
+    assert argv[argv.index("-c") + 1] == "model_reasoning_effort=xhigh"
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh"])
+def test_codex_cli_argv_effort_levels_pass_through(level: str) -> None:
+    argv = CodexEngine().cli_argv(prompt="p", session_id="s", effort=level)
+    assert argv[argv.index("-c") + 1] == f"model_reasoning_effort={level}"
+
+
+def test_codex_cli_argv_omits_effort_override_when_none() -> None:
+    argv = CodexEngine().cli_argv(prompt="p", session_id="s")
+    assert "-c" not in argv and not any("model_reasoning_effort" in a for a in argv)
+
+
+def test_codex_cli_argv_effort_survives_resume() -> None:
+    argv = CodexEngine().cli_argv(
+        prompt="p", session_id="t-1", resume=True, effort="high"
+    )
+    assert argv[argv.index("-c") + 1] == "model_reasoning_effort=high"
+    assert argv[argv.index("resume") + 1] == "t-1"
+
+
+def test_codex_engine_supports_effort() -> None:
+    assert CodexEngine().supports_effort is True
 
 
 def test_codex_cli_argv_session_id_none_is_plain_exec() -> None:

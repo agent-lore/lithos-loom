@@ -8,9 +8,12 @@ zero-config default stays the single generalist ``code-quality`` reviewer (see
 ``daemon_io.BUILTIN_REVIEWERS``). The selectable *bundle/dial* is #139.
 
 Engines are heterogeneous on purpose — different tools have different blind spots
-(#94). ``effort`` is honoured by claude only (codex depth is model-driven, see the
-codex :class:`~lithos_loom.plugins.story_develop.engines.Engine`), so it is set only
-on the claude personas.
+(#94). Both engines honour ``effort`` (claude via ``--effort``, codex via the
+``model_reasoning_effort`` config override — see
+:mod:`~lithos_loom.plugins.story_develop.engines`), and the registry pins a level
+on every reasoning-bound persona — ``xhigh`` for security, ``high`` for the codex
+trio — so a run gets the same depth in the sandbox as the operator's hand review.
+Per-reviewer project config and ``--reviewer-override`` still override it.
 ``model`` is left ``None`` (inherits the route / project default) rather than
 hard-pinning a possibly-stale model id; operators may pin a cheaper model per
 persona (e.g. ``dependency-hygiene``) via project config.
@@ -24,12 +27,15 @@ from .config import ReviewerSpec
 from .handoff import load_prompt
 
 # (name, tool, effort, block_threshold) — the §8 table with the operator's
-# correctness=codex override. effort is None for codex personas (model-driven).
+# correctness=codex override. The codex personas pin `high` — the depth the
+# operator reviews at by hand (2026-09-10); before the engine honoured effort
+# they ran at the sandbox CLI's builtin default. dependency-hygiene stays on the
+# claude default: a cheap vetting pass, not a reasoning-bound one.
 _PERSONA_SPECS: tuple[tuple[str, str, str | None, str], ...] = (
-    ("correctness", "codex", None, "major"),
+    ("correctness", "codex", "high", "major"),
     ("security", "claude", "xhigh", "minor"),
-    ("architecture", "codex", None, "major"),
-    ("test-quality", "codex", None, "minor"),
+    ("architecture", "codex", "high", "major"),
+    ("test-quality", "codex", "high", "minor"),
     ("dependency-hygiene", "claude", None, "minor"),
 )
 

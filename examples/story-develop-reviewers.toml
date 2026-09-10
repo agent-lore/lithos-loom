@@ -13,12 +13,12 @@
 #                   to draw from [story_develop.default_models] for the
 #                   reviewer's tool (#304 — an agent with no model from any
 #                   layer fails the run closed; there is no silent agent-CLI
-#                   default). For codex this is the `-m` model (codex depth
-#                   is model-driven)
+#                   default). For codex this is the `-m` model
 #   effort          reasoning level: low | medium | high | xhigh | max; omit
 #                   to inherit the agent default. NOT a token budget — these
-#                   are Claude's --effort levels (the canonical set). Ignored
-#                   for codex agents (#94), whose depth follows the model
+#                   are Claude's --effort levels (the canonical set). Codex
+#                   agents get it as `-c model_reasoning_effort=` (`max`
+#                   coerces to codex's top level, `xhigh`)
 #
 # The run is approved only when ALL reviewers pass their OWN threshold in the
 # same round. (With --reviewer instead of --develop-config, the blanket
@@ -44,13 +44,13 @@ change's blast radius, not just its diff.
 """
 
 # A codex reviewer alongside the claude ones — heterogeneous panels catch more
-# because different engines have different blind spots (#94). `effort` is
-# omitted: codex depth is model-driven, so set `model` instead if you want to
-# pin the engine's reasoning level.
+# because different engines have different blind spots (#94). Without `effort`
+# codex runs at its CLI default depth; pin it like any other reviewer.
 [[reviewers]]
 name = "code-review"
 tool = "codex"
 block_threshold = "major"
+effort = "high"
 system_prompt = """
 Review for correctness, edge cases, and API misuse — a second engine's read on
 the same diff.

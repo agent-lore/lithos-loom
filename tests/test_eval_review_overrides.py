@@ -110,9 +110,8 @@ def test_default_panel_is_case_derived() -> None:
 
 
 def test_override_applies_to_present_persona() -> None:
-    # security is the claude persona, so the effort lever is real here (an
-    # effort override on a codex persona is rejected — see the capability
-    # crossing tests below)
+    # security is the claude persona; the same lever is real on the codex
+    # personas too (see the capability crossing tests below)
     overrides = parse_reviewer_overrides(
         ["security.model=some-model", "security.effort=low"]
     )
@@ -182,37 +181,62 @@ def test_overrides_apply_on_top_of_profile_panel() -> None:
     assert by_name["security"].model is None
 
 
-# ── engine capability crossings: effort is a claude-only knob ────────────────
-# Codex has supports_effort=False (depth is model-driven), so an effort lever
-# on a codex reviewer would silently run identical to control — poison for a
-# paid A/B. Explicitly requested no-ops are REJECTED; effort merely inherited
-# from a persona across a tool swap is CLEARED so the recorded panel is the
+# ── engine capability crossings ───────────────────────────────────────────────
+# Both wired engines honour the canonical effort level (claude via --effort,
+# codex via `-c model_reasoning_effort=`), so an effort lever on either persona
+# is a real arm. The no-op guard stays for any future engine without a knob: an
+# explicitly requested effort it cannot apply is REJECTED (a paid arm that ran
+# identical to control would poison the A/B), and an effort merely inherited
+# across a tool swap onto such an engine is CLEARED so the recorded panel is the
 # effective runtime configuration.
 
 
-def test_effort_override_on_non_effort_engine_is_rejected() -> None:
-    # correctness is a codex persona — the requested lever could never fire
+def test_effort_override_on_codex_persona_is_applied() -> None:
+    # correctness is a codex persona — the lever fires via model_reasoning_effort
+    overrides = parse_reviewer_overrides(["correctness.effort=xhigh"])
+    _, panel = resolve_panel(_case(), overrides=overrides)
+    by_name = {s.name: s for s in panel}
+    assert by_name["correctness"].tool == "codex"
+    assert by_name["correctness"].effort == "xhigh"
+
+
+def test_tool_swap_to_codex_keeps_inherited_effort() -> None:
+    # security is claude + effort=xhigh; codex honours the level, so it is kept
+    overrides = parse_reviewer_overrides(["security.tool=codex"])
+    _, panel = resolve_panel(_case(personas=("security",)), overrides=overrides)
+    (spec,) = panel
+    assert spec.tool == "codex"
+    assert spec.effort == "xhigh"
+
+
+class _NoEffortEngine:
+    supports_effort = False
+
+
+def test_effort_override_on_non_effort_engine_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lithos_loom.evals.review import overrides as overrides_mod
+
+    monkeypatch.setattr(
+        overrides_mod.engines, "get_engine", lambda _tool: _NoEffortEngine()
+    )
     overrides = parse_reviewer_overrides(["correctness.effort=xhigh"])
     with pytest.raises(ValueError, match="effort"):
         resolve_panel(_case(), overrides=overrides)
 
 
-def test_tool_swap_to_codex_clears_inherited_effort() -> None:
-    # security is claude + effort=xhigh; swapping the tool must not RECORD an
-    # effort codex will ignore
-    overrides = parse_reviewer_overrides(["security.tool=codex"])
-    _, panel = resolve_panel(_case(personas=("security",)), overrides=overrides)
-    (spec,) = panel
-    assert spec.tool == "codex"
-    assert spec.effort is None
+def test_inherited_effort_on_non_effort_engine_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lithos_loom.evals.review import overrides as overrides_mod
 
-
-def test_tool_swap_to_codex_with_explicit_effort_is_rejected() -> None:
-    overrides = parse_reviewer_overrides(
-        ["security.tool=codex", "security.effort=high"]
+    monkeypatch.setattr(
+        overrides_mod.engines, "get_engine", lambda _tool: _NoEffortEngine()
     )
-    with pytest.raises(ValueError, match="effort"):
-        resolve_panel(_case(personas=("security",)), overrides=overrides)
+    _, panel = resolve_panel(_case(personas=("security",)))
+    (spec,) = panel
+    assert spec.effort is None
 
 
 def test_tool_swap_to_claude_with_effort_is_accepted() -> None:

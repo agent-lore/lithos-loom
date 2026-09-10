@@ -518,12 +518,22 @@ def test_gate_only_profile_without_reviewer_fails_before_any_run(
     assert seen == []
 
 
+class _NoEffortEngine:
+    supports_effort = False
+
+
 def test_capability_crossing_override_fails_before_any_run(
     monkeypatch: pytest.MonkeyPatch, cases_dir: Path
 ) -> None:
-    # Syntactically valid, but correctness runs codex (no effort knob): the
-    # requested lever could never fire, so the whole invocation must abort —
-    # every case's panel resolves BEFORE the first paid run.
+    # Syntactically valid, but the effective engine has no effort knob (both
+    # wired engines do today, so stand in one that does not): the requested
+    # lever could never fire, so the whole invocation must abort — every
+    # case's panel resolves BEFORE the first paid run.
+    from lithos_loom.evals.review import overrides as overrides_mod
+
+    monkeypatch.setattr(
+        overrides_mod.engines, "get_engine", lambda _tool: _NoEffortEngine()
+    )
     seen = _stub_run_case(monkeypatch)
     result = runner.invoke(
         eval_app,

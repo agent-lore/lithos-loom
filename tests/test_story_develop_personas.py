@@ -69,11 +69,14 @@ def test_engine_and_threshold_map_matches_the_decision() -> None:
     ) == ("claude", "minor")
 
 
-def test_codex_personas_carry_no_effort() -> None:
-    # effort is honoured by claude only; codex depth is model-driven (containers.py).
+def test_codex_personas_pin_high_effort() -> None:
+    # The codex trio reasons at `high` (the operator's hand-review depth); the
+    # engine passes it as `-c model_reasoning_effort=high`, so the sandbox run
+    # no longer silently falls to the CLI's builtin default.
     p = canonical_personas()
     for name in ("correctness", "architecture", "test-quality"):
-        assert p[name].effort is None
+        assert p[name].effort == "high"
+    assert p["dependency-hygiene"].effort is None  # cheap vetting pass
 
 
 def test_each_brief_is_one_dimension_with_an_explicit_deferral() -> None:

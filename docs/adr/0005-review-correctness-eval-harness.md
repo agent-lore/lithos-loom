@@ -256,8 +256,10 @@ arm-to-arm; a multi-arm sweep is N invocations, and a matrix orchestrator is
 deliberately deferred until the manual RH-2/RH-8 arms prove tedious.
 
 Engine capability crossings are normalised at resolution (review round 1):
-effort is a claude-only knob (`CodexEngine.supports_effort = False` — depth is
-model-driven), so an **explicitly overridden** effort on a no-effort engine is
+at the time of writing effort was a claude-only knob (`CodexEngine.supports_effort
+= False`; since 2026-09 codex honours it too via `-c model_reasoning_effort=`, so
+the guard below now applies only to a future engine without a knob), so an
+**explicitly overridden** effort on a no-effort engine is
 rejected — the requested lever could never fire, and a paid arm would silently
 run identical to control while `summary.json` claimed otherwise — while an
 effort merely **inherited** across a `tool` swap is cleared, keeping the
