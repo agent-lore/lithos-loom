@@ -60,12 +60,13 @@ from .config import (
 from .findings import DeferredFinding, collect_deferred
 from .gate_findings import GateFinding
 from .handoff import HandoffError
+from .loop_entry import LoopEntry
 from .panel import (
     ReviewOutcome,
     findings_by_severity,
     run_panel_round,
 )
-from .rounds import CycleExit, LoopEntry, RoundContext, Services, run_round
+from .rounds import CycleExit, RoundContext, Services, run_round
 from .test_gate import GateResult
 
 logger = logging.getLogger(__name__)
@@ -485,6 +486,12 @@ def develop(
         intake_reviews=entry.intake_reviews if entry is not None else None,
         intake_check_set=entry.intake_check_set if entry is not None else None,
         external_ack=entry.external_ack if entry is not None else "",
+        coder_init_template=(
+            entry.coder_init_template if entry is not None else "converge_coder_init.md"
+        ),
+        coder_init_extra=entry.coder_init_extra if entry is not None else {},
+        pre_commit_guard=entry.pre_commit_guard if entry is not None else None,
+        review_context=entry.review_context if entry is not None else "",
     )
 
     # The default outcome is "max_rounds" — the exit the loop lands on when it

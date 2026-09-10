@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | S | 1 | 14 |
+| `lithos_loom.runner.git` | M | 1 | 22 |
 | `lithos_loom.runner.worktree` | S | 0 | 5 |
 
 ## Public API
@@ -44,6 +44,14 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `log_between` — Return the branch's commit log from *base* to *head*, oldest first.
 - def `diff_stat` — Return ``git diff --stat base...HEAD`` — the branch's cumulative change.
 - def `merge` — Merge *ref* into *worktree*'s HEAD; return the conflicting paths.
+- def `merge_no_commit` — Merge *ref* into HEAD **without committing**; return the conflicting paths.
+- def `unmerged_paths` — The paths still unmerged in the index, exactly as named on disk.
+- def `unmerged_entries` — *path*'s unmerged index entries while a merge is in progress: stage (1 = base, 2 = ours, 3 = theirs) → blob mode (``100644`` / ``100755`` a file, ``120000`` a symlink, ``160000`` a submodule). A modify/delete lacks stage 2 or 3; a symlink conflict never carries textual markers (and the worktree path FOLLOWS the link), so the mode is what to judge.
+- def `unmerged_stages` — The index stages *path* has while unmerged — see :func:`unmerged_entries`.
+- def `abort_merge` — Abandon an in-progress merge, restoring the pre-merge tree.
+- def `merge_head` — The sha an in-progress merge is merging (``MERGE_HEAD``), else None.
+- def `merge_in_progress` — Whether *worktree* has a merge in progress (``MERGE_HEAD`` set) — resolved through ``--git-path`` so a linked worktree's private git dir is the one consulted.
+- def `conflict_markers` — Of *paths*, those whose working-tree content still carries conflict markers — the pre-commit guard for a resolution round (``git commit`` does not refuse markers; the guard must). A path deleted as its resolution carries none.
 - def `delete_branch` — Delete local *branch* (``-D``: a throwaway trial-merge branch is never merged anywhere, so the safe ``-d`` would always refuse). Raises when the branch does not exist or is checked out.
 
 ### `lithos_loom.runner.worktree`

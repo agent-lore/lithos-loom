@@ -573,3 +573,43 @@ def test_resumed_run_reads_provenance_from_disk(tmp_path: Path) -> None:
     # and the candidate run changed nothing, so no extra artifact pass is due.
     assert exit_ is not None and exit_.status == "approved"
     assert ctx.artifact_capture_notice is None
+
+
+def test_commit_phase_honours_the_pre_commit_guard(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """S5: a conflict-resolution round must not commit a tree that still carries
+    conflict markers — the guard's reason is the round's failure, and nothing
+    is committed."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    (tmp_git_repo / "shared.txt").write_text("<<<<<<< HEAD\n")
+    ctx.pre_commit_guard = lambda wt: "conflict markers remain in: shared.txt"
+
+    exit_ = rounds_mod.commit_phase(ctx, 1)
+
+    assert exit_ is not None and exit_.status == "failed"
+    assert "conflict markers remain in: shared.txt" in (exit_.failure_reason or "")
+    after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    assert after == before and ctx.new_commit is None
+
+
+def test_round1_coder_prompt_uses_the_entry_template_and_extra_slots(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.intake_reviews = []
+    ctx.coder_init_template = "resolve_coder_init.md"
+    ctx.coder_init_extra = {"conflict_brief": "CONFLICT-BRIEF-MARKER"}
+    ctx.wt = tmp_git_repo
+    ctx.base = rounds_mod.git.RangeBase(rounds_mod.git.base_sha(tmp_git_repo))
+
+    prompt = rounds_mod.round1_coder_prompt(ctx)
+
+    assert "CONFLICT-BRIEF-MARKER" in prompt
+    assert "merge" in prompt.lower() and "conflict" in prompt.lower()

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import panel as panel_mod
+from lithos_loom.plugins.story_develop import panel_prompts as panel_prompts_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
 from lithos_loom.plugins.story_develop.gate_findings import GateLedger
 from lithos_loom.plugins.story_develop.handoff import Finding
@@ -54,7 +55,9 @@ def _stub_render(monkeypatch: pytest.MonkeyPatch) -> None:
     # test is the loop + ledger + aggregation, not the rendered text. Patch on
     # the panel module — run_panel_round now reads these off its own globals.
     monkeypatch.setattr(panel_mod.git, "diff_stat", lambda wt, base: "1 file")
-    monkeypatch.setattr(panel_mod, "render_check_summary", lambda *a, **k: "GATE: pass")
+    monkeypatch.setattr(
+        panel_prompts_mod, "render_check_summary", lambda *a, **k: "GATE: pass"
+    )
 
 
 def _install_reviewer_stub(
@@ -84,6 +87,7 @@ def _install_reviewer_stub(
         review_file=None,
         reseed_prompt_override=None,
         skip_lifecycle_validation=False,
+        review_context="",
     ):
         name = rstate.spec.name
         calls.append(
@@ -1075,3 +1079,109 @@ def test_diff_rounds_keep_their_lane_discipline(
     )
 
     assert "do not report outside your lane" in calls[0]["prompt"].lower()
+
+
+def test_review_context_reaches_every_round_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #364 review F1 (PRD S5): a conflict resolution hands the panel a
+    merge-shaped context — the conflicted paths and both parents — and it
+    must land in the round-1 review AND every re-review; without one the
+    prompts carry nothing extra (no unrendered slot)."""
+    config = _config(tmp_path)
+    reviewers = [_reviewer("correctness", tmp_path)]
+    calls = _install_reviewer_stub(monkeypatch)
+
+    for round_no in (1, 2):
+        panel_mod.run_panel_round(
+            config,
+            reviewers,
+            wt=config.repo,
+            base=panel_mod.git.RangeBase("0" * 40),
+            round_no=round_no,
+            check_set=None,
+            gate_ledger=GateLedger(),
+            budget=panel_mod.PauseBudget(0),
+            reviewer_timeout=60,
+            coder_summary="the coder did the work",
+            review_context="## MERGE-CONTEXT-MARKER",
+        )
+    assert all("## MERGE-CONTEXT-MARKER" in c["prompt"] for c in calls)
+
+    _run(config, reviewers, round_no=1)
+    assert "MERGE-CONTEXT-MARKER" not in calls[-1]["prompt"]
+    assert "{review_context}" not in calls[-1]["prompt"]
+
+
+def test_review_context_reaches_the_artifact_pass_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #364 self-review: the artifact pass is a reviewer prompt too — a
+    conflict resolution on a project with visual checks must not lose the
+    merge shape on that pass."""
+    config = _config(tmp_path)
+    reviewers = [_reviewer("correctness", tmp_path)]
+    calls = _install_reviewer_stub(monkeypatch)
+    panel_mod.run_panel_round(
+        config,
+        reviewers,
+        wt=config.repo,
+        base=panel_mod.git.RangeBase("0" * 40),
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        artifact_pass=True,
+        review_context="## MERGE-CONTEXT-MARKER",
+    )
+    assert "## MERGE-CONTEXT-MARKER" in calls[0]["prompt"]
+
+
+def test_review_context_survives_a_usage_limit_reseed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #364 self-review: a reviewer that hits a usage limit is reseeded
+    on a fresh engine from `reviewer_reseed.md` — the merge shape must ride
+    along or the replacement can LGTM a resolution that dropped the PR."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    rstate = _ReviewerState(
+        ReviewerSpec(name="correctness", fallback_chain=("codex",)),
+        "cid-correctness",
+        [],
+        tmp_path,
+    )
+    monkeypatch.setattr(panel_mod.containers, "stop_container", lambda c: None)
+    monkeypatch.setattr(panel_mod.containers, "start_container", lambda cmd: "cid2")
+    monkeypatch.setattr(panel_mod, "build_run_cmd", lambda *a, **k: ("cid2", ["cmd"]))
+    prompts: list[str] = []
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _limited_turn()
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+        ).write_text(_ART_LGTM)
+        return _ok_turn(session_id)
+
+    panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base=panel_mod.git.RangeBase("0" * 40),
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+        review_context="## MERGE-CONTEXT-MARKER",
+    )
+    assert len(prompts) == 2
+    assert all("## MERGE-CONTEXT-MARKER" in p for p in prompts)
