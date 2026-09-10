@@ -255,6 +255,40 @@ async def on_ready_frontier(
     half of the partition. ``None`` is the honest residue — both pages
     full — which the caller re-checks rather than drops.
     """
+    try:
+        return await _on_ready_frontier(
+            lithos,
+            task_id=task_id,
+            tags=tags,
+            metadata=metadata,
+            route=route,
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001 — an exhausted transport retry re-raises the RAW exception
+        # PR #352 review round 2: a transient read failure used to escape to
+        # the runner's loop, which logs and moves on — the event, and the
+        # nudge it carried, gone. Unreadable is undetermined: re-checked.
+        # Broad on purpose: the client re-raises the last raw transport
+        # exception once its retries are spent, not a LithosClientError.
+        logger.warning(
+            "RouteRunner %s: could not read %s's readiness (%s); treating it as "
+            "undetermined and re-checking shortly",
+            route,
+            task_id,
+            exc,
+        )
+        return None
+
+
+async def _on_ready_frontier(
+    lithos: _ReadinessClient,
+    *,
+    task_id: str,
+    tags: tuple[str, ...],
+    metadata: Mapping[str, Any],
+    route: str,
+    limit: int,
+) -> bool | None:
     project = metadata.get("project")
     ready = await lithos.task_ready(
         tags=list(tags),

@@ -42,7 +42,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
-| `lithos_loom.subscriptions.ready_recheck` | XS | 1 | 0 |
+| `lithos_loom.subscriptions.ready_recheck` | S | 1 | 0 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
 | `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 8 |

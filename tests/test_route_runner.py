@@ -3035,3 +3035,47 @@ async def test_gate_resolved_nudge_resets_the_resume_budget(tmp_path: Path) -> N
 
     assert plugin_runner.await_count == 1  # the retry ran
     assert "task-1" not in runner._resume_counts
+
+
+async def test_runner_rechecks_after_a_transient_readiness_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #352 review round 2: a transient Lithos error while answering
+    "is it ready?" must not consume the one event a nudge produced."""
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.01)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    answers = iter([LithosClientError("server_error", "boom"), _ready("task-1")])
+
+    def flaky(**kw):
+        a = next(answers)
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+    lithos.task_ready.side_effect = flaky
+    lithos.task_get.return_value = _open_task()
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner, seconds=0.4)
+
+    lithos.task_claim.assert_called_once()
+
+
+async def test_a_definitive_not_ready_answer_resets_the_recheck_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 10.0)  # never fires here
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    runner._rechecker._attempts["task-1"] = 7  # a spent budget from before
+    lithos.task_ready.return_value = _ready("other")  # complete page: not ready
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner)
+
+    assert runner._rechecker._attempts.get("task-1") is None

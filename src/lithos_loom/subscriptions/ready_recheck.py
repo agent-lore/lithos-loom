@@ -42,16 +42,30 @@ class ReadyRechecker:
         self._bus = bus
         self._lithos = lithos
         self._route = route
-        self._attempts: dict[str, int] = {}
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._attempts: dict[str, int] = {}  # spent by re-checks that RAN
+        self._pending: dict[str, asyncio.Task[None]] = {}  # one sleeper per task
+
+    def pending(self, task_id: str) -> bool:
+        return task_id in self._pending
+
+    def pending_count(self) -> int:
+        return len(self._pending)
 
     def settled(self, task_id: str) -> None:
-        """Lithos answered — the task's re-check budget starts fresh."""
+        """Lithos answered definitively (ready, not ready, gone, terminal):
+        the task's re-check budget starts fresh and any sleeper is dropped."""
         self._attempts.pop(task_id, None)
+        sleeper = self._pending.pop(task_id, None)
+        if sleeper is not None:
+            sleeper.cancel()
 
     def schedule(self, task_id: str) -> bool:
-        """Re-ask about *task_id* after the delay; ``False`` when the bound is
-        spent and the task is left to the bootstrap replay."""
+        """Re-ask about *task_id* after the delay. Coalesced: a task with a
+        sleeper already pending gets no second one (duplicate events must not
+        spend the budget — only a re-check that RUNS does). ``False`` when the
+        bound is spent and the task is left to the bootstrap replay."""
+        if task_id in self._pending:
+            return True
         attempts = self._attempts.get(task_id, 0)
         if attempts >= READY_RECHECK_MAX:
             logger.warning(
@@ -63,19 +77,19 @@ class ReadyRechecker:
                 attempts,
             )
             return False
-        self._attempts[task_id] = attempts + 1
         task = asyncio.create_task(
             self._recheck(task_id), name=f"ready-recheck-{task_id}"
         )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._pending[task_id] = task
         return True
 
     async def _recheck(self, task_id: str) -> None:
         await asyncio.sleep(READY_RECHECK_SECONDS)
+        self._attempts[task_id] = self._attempts.get(task_id, 0) + 1
         try:
             task = await self._lithos.task_get(task_id=task_id)
             if task is None or task.status != "open":
+                self._attempts.pop(task_id, None)  # gone / terminal: definitive
                 return
             await self._bus.publish(
                 Event(
@@ -87,7 +101,13 @@ class ReadyRechecker:
             )
         except Exception:
             logger.exception(
-                "RouteRunner %s: could not re-check readiness of %s",
+                "RouteRunner %s: could not re-check readiness of %s; re-asking",
                 self._route,
                 task_id,
             )
+            self._pending.pop(task_id, None)
+            self.schedule(task_id)  # a failed read is itself undetermined
+            return
+        finally:
+            if self._pending.get(task_id) is asyncio.current_task():
+                self._pending.pop(task_id, None)

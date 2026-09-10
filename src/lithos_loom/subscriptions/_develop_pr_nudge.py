@@ -308,7 +308,7 @@ async def _is_ready(
     route-runner's dispatch guard so the two children never disagree."""
     try:
         task = await ctx.lithos.task_get(task_id=task_id)
-    except LithosClientError as exc:
+    except Exception as exc:  # noqa: BLE001 — raw transport failures too
         ctx.logger.warning(
             "[Friction] pr-gate: reading dependent %s to check its readiness "
             "failed (%s); it stays unclassified this sweep",
@@ -322,7 +322,7 @@ async def _is_ready(
         return False
     try:
         verdict = await classify_readiness(ctx.lithos, task, limit=limit)
-    except LithosClientError as exc:
+    except Exception as exc:  # noqa: BLE001 — raw transport failures too
         ctx.logger.warning(
             "[Friction] pr-gate: reading the frontier for dependent %s failed "
             "(%s); it stays unclassified this sweep",

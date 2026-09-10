@@ -270,6 +270,7 @@ class RouteRunner:
         if ready is None:
             self._rechecker.schedule(task_id)
             return
+        self._rechecker.settled(task_id)  # any definitive answer: fresh budget
         if not ready:
             logger.info(
                 "RouteRunner %s: deferring %s — not on Lithos's ready frontier",
@@ -277,7 +278,6 @@ class RouteRunner:
                 task_id,
             )
             return
-        self._rechecker.settled(task_id)
 
         try:
             await self.lithos.task_claim(

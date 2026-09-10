@@ -120,3 +120,49 @@ async def test_frontier_guard_falls_back_to_the_own_scope_on_a_full_page() -> No
         ["trigger:story-develop"],
         sorted(_TAGS),
     ]
+
+
+async def test_a_transient_read_error_is_undetermined_not_an_exception() -> None:
+    """PR #352 review round 2: a failed `task_ready` / `task_get` used to
+    escape to the runner's loop, which logs and moves on — the event, and
+    the nudge it carried, gone. It is an undetermined answer instead, which
+    the runner re-checks."""
+    from lithos_loom.errors import LithosClientError
+
+    client = FakeLithosClient()
+    dep = await _candidate(client, blocked=False)
+
+    async def boom(**kwargs):
+        raise LithosClientError("server_error", "boom")
+
+    client.task_ready = boom  # type: ignore[method-assign]
+    verdict = await on_ready_frontier(
+        client,
+        task_id=dep,
+        tags=("trigger:story-develop",),
+        metadata={"project": "p"},
+        route="story-develop",
+        limit=_LIMIT,
+    )
+    assert verdict is None
+
+
+async def test_an_exhausted_transport_failure_is_undetermined_too() -> None:
+    """The client re-raises the RAW last exception once its transport retries
+    are spent — not a LithosClientError. Same answer: undetermined."""
+    client = FakeLithosClient()
+    dep = await _candidate(client, blocked=False)
+
+    async def dead(**kwargs):
+        raise RuntimeError("SSE stream closed")
+
+    client.task_ready = dead  # type: ignore[method-assign]
+    verdict = await on_ready_frontier(
+        client,
+        task_id=dep,
+        tags=("trigger:story-develop",),
+        metadata={"project": "p"},
+        route="story-develop",
+        limit=_LIMIT,
+    )
+    assert verdict is None

@@ -1259,3 +1259,26 @@ async def test_still_open_branch_keys_the_base_move_on_the_live_tip() -> None:
     assert outcome == "still_open"
     assert seen == [""]
     assert (await _get(client, gate.id)).metadata[LANDABILITY_KEY] == before
+
+
+async def test_gate_merged_recovery_defers_on_a_raw_transport_failure() -> None:
+    """An exhausted transport retry re-raises the raw exception; recovery must
+    treat it like any unreadable candidate — gate open, retried next sweep —
+    not crash the sweep."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+    await client.task_complete(task_id=story)  # an earlier sweep died mid-nudge
+    real_get = client.task_get
+
+    async def dead(*, task_id: str):
+        if task_id == dependent:
+            raise RuntimeError("SSE stream closed")
+        return await real_get(task_id=task_id)
+
+    client.task_get = dead  # type: ignore[method-assign]
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=True)), _ctx(client)
+    )
+    assert outcome == "error"
+    assert (await _get(client, gate.id)).status == "open"
