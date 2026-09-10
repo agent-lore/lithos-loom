@@ -16,7 +16,7 @@ import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -141,6 +141,8 @@ def _lithos_mock(*, ready_ids: tuple[str, ...] | None = None) -> AsyncMock:
     # → the runner falls back to the dispatch payload).
     lithos.task_create.return_value = "gate-1"
     lithos.task_get.return_value = None
+    # the readiness classifier's other half of the partition (PR #352 review)
+    lithos.task_blocked.return_value = []
     return lithos
 
 
@@ -163,6 +165,7 @@ def _make_runner(
             _ready(_AnyTaskId()) if ready_ids is None else _ready(*ready_ids)
         )
         lithos.task_complete.return_value = []
+        lithos.task_blocked.return_value = []
     runner = RouteRunner(
         route=route or _route(),
         bus=bus,
@@ -262,25 +265,95 @@ async def test_ready_query_omits_project_when_task_has_none(tmp_path: Path) -> N
     assert lithos.task_ready.await_args.kwargs["project"] is None
 
 
-async def test_runner_defers_and_warns_when_ready_frontier_is_truncated(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def _open_task(task_id: str = "task-1") -> Task:
+    return Task(
+        id=task_id,
+        title="t",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata={"project": "p"},
+        claims=(),
+    )
+
+
+async def test_runner_settles_a_truncated_frontier_from_the_blocked_page(
+    tmp_path: Path,
 ) -> None:
-    """A full page means the frontier was truncated, so absence from it is
-    NOT evidence of blocked-ness. Defer (the safe direction — the inverse
-    error would dispatch a blocked task) and say so loudly."""
+    """PR #352 review F2: a full ready page used to DROP the event (deferred,
+    never retried). Open work is ready XOR blocked, so the runner fetches the
+    task, re-asks by its own scope and reads the complete blocked page: the
+    task is not on it, so it is ready — and dispatched."""
     bus = EventBus()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
     lithos.task_ready.return_value = _ready(
         *(f"other-{i}" for i in range(READY_QUERY_LIMIT))
     )
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = []
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_called_once()
+
+
+async def test_runner_rechecks_an_undetermined_task_instead_of_dropping_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both pages full: the answer is genuinely unknown. The event is not
+    dropped — the runner re-asks after a delay (bounded; the restart's
+    bootstrap replay is the durable backstop) and dispatches once Lithos can
+    answer."""
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.01)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    full_ready = _ready(*(f"other-{i}" for i in range(READY_QUERY_LIMIT)))
+    full_blocked = [
+        SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
+        for i in range(READY_QUERY_LIMIT)
+    ]
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = full_blocked
+    answers = iter([full_ready, full_ready, full_ready, full_ready, _ready("task-1")])
+    lithos.task_ready.side_effect = lambda **kw: next(answers)
 
     with caplog.at_level(logging.WARNING):
         await bus.publish(_evt(payload=_payload()))
-        await _run_for(runner)
+        await _run_for(runner, seconds=0.5)
+
+    assert "query limit" in caplog.text and "task-1" in caplog.text
+    lithos.task_claim.assert_called_once()
+
+
+async def test_ready_rechecks_are_bounded(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.005)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX", 2)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    lithos.task_ready.return_value = _ready(
+        *(f"other-{i}" for i in range(READY_QUERY_LIMIT))
+    )
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = [
+        SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
+        for i in range(READY_QUERY_LIMIT)
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        await bus.publish(_evt(payload=_payload()))
+        await _run_for(runner, seconds=0.4)
 
     lithos.task_claim.assert_not_called()
-    assert "query limit" in caplog.text
-    assert "task-1" in caplog.text
+    # the first evaluation + READY_RECHECK_MAX re-checks, then it stops and
+    # says so (the restart bootstrap is the backstop)
+    assert lithos.task_blocked.await_count == 1 + 2
+    assert "bootstrap" in caplog.text
 
 
 # ── Newly-unblocked re-dispatch (US6) ──────────────────────────────────

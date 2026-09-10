@@ -22,8 +22,10 @@ trustworthy:
   whether it is actually released. That rebuild is the delicate half — it
   over-approximates if taken raw, it can be denied by a saturated frontier
   page, and it must not write to a task that is not ready — so it carries its
-  own state on the gate (:class:`RecoveryRecord`) and its own bound
-  (:data:`RECOVERY_UNDETERMINED_MAX_SWEEPS`).
+  own state on the gate (:class:`RecoveryRecord`) and keeps the gate OPEN
+  until Lithos can classify every candidate (PR #352 review: the gate is
+  the only retry surface that survives, so it is never made terminal while
+  a candidate that may have been released is unaccounted for).
 """
 
 from __future__ import annotations
@@ -34,12 +36,14 @@ from typing import Any, NamedTuple
 from lithos_loom.errors import LithosClientError
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark
-from lithos_loom.subscriptions.dispatch_guards import READY_QUERY_LIMIT
+from lithos_loom.subscriptions.dispatch_guards import (
+    READY_QUERY_LIMIT,
+    classify_readiness,
+)
 
 __all__ = [
     "NUDGE_RECOVERED_KEY",
     "NUDGE_UNDETERMINED_KEY",
-    "RECOVERY_UNDETERMINED_MAX_SWEEPS",
     "NudgePlan",
     "RecoveryRecord",
     "nudge_unblocked",
@@ -62,15 +66,6 @@ NUDGE_RECOVERED_KEY = "develop_pr_merge_nudged"
 # silent — the gate just stays open and re-polls — so the story gets one
 # task-level breadcrumb, scoped to the PR url, rather than one per sweep.
 NUDGE_UNDETERMINED_KEY = "develop_pr_merge_nudge_undetermined"
-
-# How many consecutive sweeps may end with a candidate loom cannot classify
-# before it stops deferring the gate. Deferring is the safe answer but an
-# unbounded one: the gate never completes, never posts [GateResolved] and
-# re-polls GitHub every sweep on a resolution that may never land. At the
-# bound the resolver gives up on the residue LOUDLY — a finding naming the
-# exact ids — and resolves the merged gate, which is what the PR's state
-# actually says.
-RECOVERY_UNDETERMINED_MAX_SWEEPS = 3
 
 
 async def nudge_unblocked(
@@ -189,8 +184,9 @@ class RecoveryRecord(NamedTuple):
 
     ``nudged`` is what has already been re-surfaced — never nudged again, so a
     gate that stays open cannot re-mint ``updated_at`` evidence for the #339
-    guard. ``undetermined`` counts the consecutive sweeps that ended with a
-    candidate loom could not classify, which is what bounds the deferral.
+    guard. ``undetermined`` (0/1) records that a sweep has ended with a
+    candidate loom could not classify; it is a flag, not a count, so a
+    steady undetermined state rewrites nothing on the gate.
     """
 
     pr_url: str
@@ -265,12 +261,14 @@ async def recover_dependents(
     the gate's :class:`RecoveryRecord` (never nudged twice), and only the
     residue keeps the gate open.
 
-    **And the deferral is bounded.** After
-    :data:`RECOVERY_UNDETERMINED_MAX_SWEEPS` consecutive sweeps that still
-    cannot classify everything, it stops: an unbounded defer means a gate that
-    never completes, never posts ``[GateResolved]`` and re-polls GitHub for
-    ever. Giving up is announced on the story, naming the ids — the residue is
-    then a human's to touch, not something loom silently forgot.
+    **And the deferral is NOT bounded** (PR #352 review F1). Completing the
+    gate is the durable "resolved" transition — it leaves the swept open set,
+    and nothing after it can ever emit a released dependent's event. So the
+    gate stays open until every candidate is definitively ready, blocked or
+    terminal; one breadcrumb on the story names the residue (de-duped on the
+    gate), and the classifier's partition fallback makes "undetermined" need
+    BOTH frontier pages full or a failed read — a transient state, not a
+    steady one.
     """
     record = _recovery_record(gate, pr_url)
     candidates = await _blocks_dependents(story_id, ctx)
@@ -291,17 +289,13 @@ async def recover_dependents(
         return NudgePlan(
             released, record=record._replace(nudged=(*record.nudged, *released))
         )
-    sweeps = record.undetermined + 1
-    if sweeps >= RECOVERY_UNDETERMINED_MAX_SWEEPS:
-        await _give_up_on(unknown, story_id, gate, pr_url, ctx)
-        return NudgePlan(
-            released, record=record._replace(nudged=(*record.nudged, *released))
-        )
     await _undetermined_dependents(unknown, story_id, gate, pr_url, ctx)
+    # An open-forever gate must not be a write-forever gate: the record is
+    # rewritten only when it changed (a newly nudged id, or the first
+    # undetermined sweep) — a steady undetermined state makes no writes.
+    updated = record._replace(nudged=(*record.nudged, *released), undetermined=1)
     return NudgePlan(
-        released,
-        record=record._replace(nudged=(*record.nudged, *released), undetermined=sweeps),
-        defer=True,
+        released, record=updated if updated != record else None, defer=True
     )
 
 
@@ -309,25 +303,9 @@ async def _is_ready(
     task_id: str, ctx: SubscriptionContext, *, limit: int
 ) -> bool | None:
     """Does Lithos currently offer *task_id* as ready work? ``None`` = it would
-    not say — a failed read, or pages too full for absence to mean anything.
-
-    ``task_ready`` has no per-task filter, so this is a membership test; what
-    matters is what the page is narrowed to. It is narrowed to **this
-    candidate's own** project and tag set, which is both the narrowing
-    ``READY_QUERY_LIMIT`` is sized for and the only one that cannot drop the
-    candidate itself — a ready task always appears in a page filtered by its
-    own attributes. Enumerating the whole instance instead (as this did until
-    #351 review r3) made the answer hostage to unrelated ready work: the
-    github-issue watcher materialises every unseen open issue on a watched
-    **public** repo as an edge-less, therefore immediately-ready task.
-
-    That narrowing is only as selective as the candidate, though — a task with
-    neither project nor tags narrows to nothing. So a full ready page falls
-    back to the other half of the partition: ready and blocked together cover
-    every open work task, so **finding** the candidate among the blocked
-    settles it as not-released even when the ready page could not. Only a
-    candidate missing from both, with at least one page full, is undetermined.
-    """
+    not say — a failed read, or both frontier pages full. The classification
+    itself is :func:`~.dispatch_guards.classify_readiness`, shared with the
+    route-runner's dispatch guard so the two children never disagree."""
     try:
         task = await ctx.lithos.task_get(task_id=task_id)
     except LithosClientError as exc:
@@ -342,47 +320,26 @@ async def _is_ready(
         # Deleted, or already completed/cancelled by someone else — there is
         # nothing left to dispatch, so this is a definite "do not nudge".
         return False
-    project = task.metadata.get("project")
-    scope: dict[str, Any] = {
-        "project": project if isinstance(project, str) else None,
-        "tags": list(task.tags),
-        "limit": limit,
-    }
     try:
-        ready = await ctx.lithos.task_ready(**scope, with_claims=False)
+        verdict = await classify_readiness(ctx.lithos, task, limit=limit)
     except LithosClientError as exc:
         ctx.logger.warning(
-            "[Friction] pr-gate: reading the ready frontier for dependent %s "
-            "failed (%s); it stays unclassified this sweep",
+            "[Friction] pr-gate: reading the frontier for dependent %s failed "
+            "(%s); it stays unclassified this sweep",
             task_id,
             exc,
         )
         return None
-    if any(candidate.id == task_id for candidate in ready):
-        return True
-    if len(ready) < limit:
-        return False  # a complete page — absence is an answer
-    try:
-        blocked = await ctx.lithos.task_blocked(**scope)
-    except LithosClientError as exc:
+    if verdict is None:
         ctx.logger.warning(
-            "[Friction] pr-gate: reading the blocked frontier for dependent %s "
-            "failed (%s); it stays unclassified this sweep",
+            "[Friction] pr-gate: dependent %s is on neither the ready nor the "
+            "blocked page for its own project/tags and both pages hit the "
+            "%d-task query limit, so its readiness is undetermined. Raise "
+            "READY_QUERY_LIMIT if a frontier this wide is expected.",
             task_id,
-            exc,
+            limit,
         )
-        return None
-    if any(entry.task.id == task_id for entry in blocked):
-        return False  # settled from the other side of the partition
-    ctx.logger.warning(
-        "[Friction] pr-gate: dependent %s is on neither the ready nor the "
-        "blocked page for its own project/tags, and the ready page hit the "
-        "%d-task query limit, so its readiness is undetermined. Raise "
-        "READY_QUERY_LIMIT if a frontier this wide is expected.",
-        task_id,
-        limit,
-    )
-    return None
+    return verdict
 
 
 async def _undetermined_dependents(
@@ -398,8 +355,9 @@ async def _undetermined_dependents(
     Deferring is the safe answer but a silent one — the gate stays open and
     re-polls GitHub, with nothing on the story to say why. One ``[Friction]``
     on the story (marker on the GATE, scoped to the PR url, so a persistent
-    state does not re-post every sweep) puts it where an operator looks.
-    Best-effort: a breadcrumb that fails to land never changes the decision.
+    state does not re-post every sweep — PR #352 review F3) puts it where an
+    operator looks. Best-effort: a breadcrumb that fails to land never
+    changes the decision.
     """
     if gate.metadata.get(NUDGE_UNDETERMINED_KEY) == pr_url:
         return
@@ -410,53 +368,15 @@ async def _undetermined_dependents(
             f"[Friction] pr-gate: PR {pr_url} merged and story {story_id} is "
             f"already complete, but Lithos would not say whether {_listed(task_ids)} "
             f"ready, so gate {gate.id} is left open and the nudge is retried "
-            f"next sweep (up to {RECOVERY_UNDETERMINED_MAX_SWEEPS} sweeps). If "
-            f"this persists, check whether that task's project/tag frontier "
-            f"exceeds {READY_QUERY_LIMIT} ready tasks."
+            f"every sweep until Lithos answers. If this persists, check whether "
+            f"that task's project/tag frontier exceeds {READY_QUERY_LIMIT} tasks "
+            f"on BOTH the ready and blocked pages — or touch the task: any edit "
+            f"emits the task.updated that dispatches it."
         ),
         marker={NUDGE_UNDETERMINED_KEY: pr_url},
         subsystem="pr-gate",
         retry_hint="will retry next sweep",
         marker_task_id=gate.id,
-    )
-
-
-async def _give_up_on(
-    task_ids: Sequence[str],
-    story_id: str,
-    gate: Any,
-    pr_url: str,
-    ctx: SubscriptionContext,
-) -> None:
-    """Announce the residue the resolver is about to stop waiting on.
-
-    The bound has to end in something an operator can act on, or it just moves
-    the silence: this names the exact ids, so the recovery loom could not
-    finish is a one-line manual touch rather than a mystery. Posted on the
-    story (which is complete — the PR merged, that part is settled) rather
-    than raised as a ``human`` gate: a gate blocks an OPEN task and its
-    documented action is "complete it to re-dispatch", neither of which means
-    anything for a finished story.
-    """
-    await _post_friction(
-        story_id,
-        ctx,
-        summary=(
-            f"[Friction] pr-gate: PR {pr_url} merged and story {story_id} is "
-            f"complete, but after {RECOVERY_UNDETERMINED_MAX_SWEEPS} sweeps "
-            f"Lithos still would not say whether {_listed(task_ids)} ready, so "
-            f"loom gave up waiting and resolved gate {gate.id} on the merge. "
-            f"If any of those tasks is ready and tagged for a route, touch it "
-            f"(any edit emits the task.updated that dispatches it); a daemon "
-            f"restart does the same for all of them."
-        ),
-    )
-    ctx.logger.warning(
-        "[Friction] pr-gate: gave up classifying %s after %d sweeps; resolving "
-        "gate %s on the merge anyway",
-        list(task_ids),
-        RECOVERY_UNDETERMINED_MAX_SWEEPS,
-        gate.id,
     )
 
 

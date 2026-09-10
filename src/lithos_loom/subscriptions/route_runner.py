@@ -64,6 +64,7 @@ from lithos_loom.subscriptions.escalation import (
     escalation_from_result,
 )
 from lithos_loom.subscriptions.escalation_resolver import GATE_RESOLVED_ORIGIN
+from lithos_loom.subscriptions.ready_recheck import ReadyRechecker
 
 __all__ = ["PluginRunFn", "RouteRunner"]
 
@@ -159,6 +160,10 @@ class RouteRunner:
         # failed-retry guard — beside the SSE cursor, same durability class.
         self._attempt_stamps = AttemptStampStore(
             self.work_dir_base / "route-runner" / "attempt_stamps"
+        )
+        # PR #352 review F2: an undetermined readiness is re-asked, not dropped.
+        self._rechecker = ReadyRechecker(
+            bus=self.bus, lithos=self.lithos, route=self.route.name
         )
         self._subscription: Subscription = self.bus.subscribe(
             event_types=_HANDLED_EVENT_TYPES,
@@ -261,13 +266,18 @@ class RouteRunner:
         # check below defers it, including across a restart's bootstrap
         # replay (US11 retired the `loom_delivered` short-circuit). FAILED
         # stories are the decline above; readiness guards blocked + gated.
-        if not await self._is_ready(task_id, metadata):
+        ready = await self._is_ready(task_id, metadata)
+        if ready is None:
+            self._rechecker.schedule(task_id)
+            return
+        if not ready:
             logger.info(
                 "RouteRunner %s: deferring %s — not on Lithos's ready frontier",
                 self.route.name,
                 task_id,
             )
             return
+        self._rechecker.settled(task_id)
 
         try:
             await self.lithos.task_claim(
@@ -308,9 +318,9 @@ class RouteRunner:
         )
         await self._run_claimed_task(task_id, payload)
 
-    async def _is_ready(self, task_id: str, metadata: Mapping[str, Any]) -> bool:
+    async def _is_ready(self, task_id: str, metadata: Mapping[str, Any]) -> bool | None:
         """Membership test on Lithos's ready frontier — see
-        ``dispatch_guards.on_ready_frontier`` (US4)."""
+        ``dispatch_guards.on_ready_frontier`` (US4). ``None`` = undetermined."""
         return await on_ready_frontier(
             self.lithos,
             task_id=task_id,

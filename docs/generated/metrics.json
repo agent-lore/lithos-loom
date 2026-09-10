@@ -87,7 +87,7 @@
         "max_function": "lithos_loom.cursor_store.CursorStore._load"
       },
       "Subscriptions": {
-        "functions_over_10": 19,
+        "functions_over_10": 18,
         "max_complexity": 58,
         "max_function": "lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider"
       },
@@ -102,7 +102,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 111,
+    "functions_over_10": 110,
     "top_functions": [
       {
         "complexity": 97,
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
       }
     ],
-    "total_functions": 1311
+    "total_functions": 1318
   },
   "domain": {
     "associations": 2,
@@ -262,7 +262,7 @@
       }
     },
     "cross_component_edges": 68,
-    "cross_component_module_edges": 285,
+    "cross_component_module_edges": 286,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
@@ -511,14 +511,14 @@
         "sloc": 439
       },
       "Subscriptions": {
-        "classes": 26,
-        "functions": 251,
-        "largest_module": "lithos_loom.subscriptions.merge_gate_dispatch",
-        "largest_module_lines": 798,
-        "lines": 11295,
-        "modules": 36,
-        "public_symbols": 89,
-        "sloc": 8998
+        "classes": 28,
+        "functions": 258,
+        "largest_module": "lithos_loom.subscriptions.route_runner",
+        "largest_module_lines": 800,
+        "lines": 11399,
+        "modules": 37,
+        "public_symbols": 91,
+        "sloc": 9089
       },
       "Supervisor": {
         "classes": 3,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 51063,
-    "total_modules": 149,
-    "total_sloc": 40934
+    "total_lines": 51167,
+    "total_modules": 150,
+    "total_sloc": 41025
   },
   "tests": {
     "ratio": 1.6,
-    "src_lines": 51063,
-    "test_lines": 81493
+    "src_lines": 51167,
+    "test_lines": 81738
   }
 }

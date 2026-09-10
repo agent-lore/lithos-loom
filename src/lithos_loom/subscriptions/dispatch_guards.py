@@ -204,14 +204,41 @@ class _GuardClient(Protocol):
     ) -> Any: ...
 
 
+class _ReadinessClient(Protocol):
+    """What the readiness classifier needs — narrower than the guard client,
+    so escalation's and the stamp store's callers stay type-compatible."""
+
+    async def task_ready(
+        self,
+        *,
+        project: str | None = None,
+        tags: list[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
+        limit: int = 50,
+        with_claims: bool = True,
+    ) -> Any: ...
+
+    async def task_blocked(
+        self,
+        *,
+        project: str | None = None,
+        tags: list[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
+        limit: int = 50,
+    ) -> Any: ...
+
+    async def task_get(self, *, task_id: str) -> Any: ...
+
+
 async def on_ready_frontier(
-    lithos: _GuardClient,
+    lithos: _ReadinessClient,
     *,
     task_id: str,
     tags: tuple[str, ...],
     metadata: Mapping[str, Any],
     route: str,
-) -> bool:
+    limit: int = READY_QUERY_LIMIT,
+) -> bool | None:
     """Is ``task_id`` on Lithos's ready frontier for this route? (US4)
 
     Readiness — every ``blocks`` predecessor completed, no unmet gate, no
@@ -221,33 +248,86 @@ async def on_ready_frontier(
     ``task_ready`` has no per-task filter, so this is a membership test
     over a frontier narrowed to the route's tags and (when the task
     declares one) its project. A *full* page means the frontier was
-    truncated, which makes absence from it meaningless — so that case is
-    reported as not-ready-yet rather than trusted, and logged. Deferring
-    is the safe direction: the inverse mistake would dispatch a task whose
-    blocker is still open, which is exactly what this gate exists to stop.
+    truncated, which makes absence from it meaningless — so that case falls
+    through to :func:`classify_readiness` on a FRESH read of the task (PR
+    #352 review F2: the event used to be dropped here, and a nudge for a
+    released dependent with it): its own, narrower scope, then the other
+    half of the partition. ``None`` is the honest residue — both pages
+    full — which the caller re-checks rather than drops.
     """
     project = metadata.get("project")
     ready = await lithos.task_ready(
         tags=list(tags),
         project=project if isinstance(project, str) else None,
-        limit=READY_QUERY_LIMIT,
+        limit=limit,
         # Claims never exclude a task from the frontier (collision-safety
         # comes from the runner's atomic claim), so don't pay to fetch them.
         with_claims=False,
     )
     if any(task.id == task_id for task in ready):
         return True
-    if len(ready) >= READY_QUERY_LIMIT:
+    if len(ready) < limit:
+        return False  # a complete page — absence is an answer
+    task = await lithos.task_get(task_id=task_id)
+    if task is None or task.status != "open":
+        return False  # gone, or terminal — nothing to dispatch
+    verdict = await classify_readiness(lithos, task, limit=limit)
+    if verdict is None:
         logger.warning(
-            "RouteRunner %s: ready frontier for tags %s hit the %d-task query "
-            "limit, so %s's readiness is undetermined — deferring. Raise "
+            "RouteRunner %s: the ready AND blocked pages for %s's own scope "
+            "(project %s, tags %s) both hit the %d-task query limit, so its "
+            "readiness is undetermined — re-checking shortly. Raise "
             "READY_QUERY_LIMIT if a frontier this wide is expected.",
             route,
-            list(tags),
-            READY_QUERY_LIMIT,
             task_id,
+            task.metadata.get("project"),
+            list(task.tags),
+            limit,
         )
-    return False
+    return verdict
+
+
+async def classify_readiness(
+    lithos: _ReadinessClient, task: Any, *, limit: int = READY_QUERY_LIMIT
+) -> bool | None:
+    """Is *task* (a fresh snapshot) ready work, by Lithos's own answer?
+
+    ``True`` / ``False`` when Lithos can say; ``None`` when it would not —
+    the ONE classifier both the route-runner's dispatch guard and the
+    pr-gate resolver's recovery use (PR #352 review F1 + F2), so the two
+    children never disagree about the same task.
+
+    ``task_ready`` has no per-task filter and no pagination, so this is a
+    membership test whose only lever is the narrowing. It narrows to the
+    task's **own** project and full tag set — the one scope that cannot drop
+    the task itself: a ready task always appears on a page filtered by its
+    own attributes. When that page is still full, the other half of the
+    partition answers: open, non-gate/epic work is ready XOR blocked, so a
+    COMPLETE blocked page for the same scope that lacks the task settles it
+    as ready, and finding it there settles it as not. Only both pages full
+    is undetermined — the caller decides how to wait (the runner re-checks,
+    the resolver keeps its gate open); nothing dispatches or nudges on a
+    guess.
+    """
+    if getattr(task, "task_type", "task") in ("gate", "epic"):
+        return False  # never ready WORK — the frontier excludes them
+    project = task.metadata.get("project")
+    scope: dict[str, Any] = {
+        "project": project if isinstance(project, str) else None,
+        "tags": list(task.tags),
+        "limit": limit,
+    }
+    ready = await lithos.task_ready(**scope, with_claims=False)
+    if any(candidate.id == task.id for candidate in ready):
+        return True
+    if len(ready) < limit:
+        return False  # a complete page — absence is an answer
+    blocked = await lithos.task_blocked(**scope)
+    if any(entry.task.id == task.id for entry in blocked):
+        return False  # settled from the other side of the partition
+    if len(blocked) < limit:
+        return True  # open, in scope, on neither page, blocked page complete
+    return None
 
 
 def _fs_slug(value: str, *, max_len: int = 60) -> str:

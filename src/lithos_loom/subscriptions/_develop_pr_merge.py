@@ -354,8 +354,9 @@ async def _resolve_gate_merged(
     blocker is not written to, and written
     into a record on the gate so nobody is nudged twice. That recovery makes
     progress per candidate: the ones it can classify are nudged now, and only
-    an unclassifiable residue keeps the gate open — for a bounded number of
-    sweeps, after which it says so on the story and resolves anyway. A failed
+    an unclassifiable residue keeps the gate open — for as long as it takes
+    Lithos to answer (the gate is the only retry surface that survives its
+    own completion), with one breadcrumb on the story. A failed
     completion or an unreadable edge list still returns ``False`` here without
     nudging anyone, so that retry stays possible.
     """
