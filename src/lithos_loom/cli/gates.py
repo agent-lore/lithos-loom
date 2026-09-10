@@ -51,6 +51,7 @@ from lithos_loom.gates import (
     waiter_of,
 )
 from lithos_loom.lithos_client import Task, TaskClient
+from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
 
 __all__ = [
     "HEALTH_MALFORMED",
@@ -101,6 +102,8 @@ class GateRow:
     health: str
     escalation_reason: str | None = None
     escalation_summary: str | None = None
+    # PRD S7: a `pr` gate's reconciliation state (`metadata.reconciliation_state`)
+    state: str | None = None
 
     @property
     def pr_label(self) -> str:
@@ -156,7 +159,13 @@ def classify_gate(gate: Task, waiter_id: str | None, waiter: Task | None) -> Gat
         health=health,
         escalation_reason=human_spec.reason if human_spec else None,
         escalation_summary=human_spec.summary if human_spec else None,
+        state=_state_of(gate) if gate_type == GATE_TYPE_PR else None,
     )
+
+
+def _state_of(gate: Task) -> str | None:
+    raw = (gate.metadata or {}).get(STATE_KEY)
+    return raw if isinstance(raw, str) and raw else None
 
 
 async def collect_gate_rows(client: TaskClient) -> list[GateRow]:
@@ -193,12 +202,13 @@ def render_report(rows: list[GateRow]) -> list[str]:
     if not rows:
         return ["no open gates"]
 
-    headers = ("GATE", "TYPE", "REF", "WAITER", "WAITER STATUS", "HEALTH")
+    headers = ("GATE", "TYPE", "REF", "STATE", "WAITER", "WAITER STATUS", "HEALTH")
     cells = [
         (
             row.gate_id,
             row.gate_type,
             row.ref_label,
+            row.state or _NO_REF,
             row.waiter_id or _NO_REF,
             row.waiter_status or _NO_REF,
             row.health,

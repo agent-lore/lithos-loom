@@ -722,6 +722,7 @@ async def test_a_pushed_resolution_whose_write_fails_holds_until_it_lands(
     assert not [f for f in _findings(client) if f.startswith(CONFLICT_RESOLVED)]
     assert any(f.startswith("[Friction] conflict-resolve") for f in _findings(client))
     assert dispatch.busy_on(_PR_URL)  # the debt holds the PR
+    assert dispatch.debt_on(_PR_URL)  # held, nothing running (PRD S7)
     gate = await _refresh(client, gate.id)
     assert read_budget(gate, _PR_URL).last_loom_pushed_sha == ""
 
@@ -733,6 +734,7 @@ async def test_a_pushed_resolution_whose_write_fails_holds_until_it_lands(
     assert read_budget(gate, _PR_URL).last_loom_pushed_sha == _PUSHED
     assert any(f.startswith(CONFLICT_RESOLVED) for f in _findings(client))
     assert not dispatch.busy_on(_PR_URL)
+    assert not dispatch.debt_on(_PR_URL)
 
 
 async def test_a_repo_mismatch_refusal_re_arms_when_the_mapping_moves(
@@ -776,6 +778,7 @@ async def test_a_clean_resolution_leaves_no_hold_behind(tmp_path: Path) -> None:
     assert await _consider(client, gate, story, dispatch) == "dispatched"
     await dispatch.drain()
     assert not dispatch.busy_on(_PR_URL)
+    assert not dispatch.debt_on(_PR_URL)
     story_task = await client.task_get(task_id=story)
     assert story_task is not None
     assert story_task.metadata.get(PUSHED_BREADCRUMB_KEY) is None
@@ -823,6 +826,7 @@ async def test_a_held_debt_survives_a_restart_through_the_story_breadcrumb(
     assert spec is not None
     await rebooted.recover_debt(gate, spec, story, _ctx(client))
     assert rebooted.busy_on(_PR_URL)  # held again, before anyone observes the head
+    assert rebooted.debt_on(_PR_URL)
 
     fail["on"] = False
     assert await _consider(client, gate, story, rebooted, pr=_pr(head=_PUSHED)) == (

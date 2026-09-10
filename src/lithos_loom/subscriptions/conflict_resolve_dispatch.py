@@ -171,6 +171,11 @@ class ConflictResolveDispatch:
             pr_url in self._debts
         )
 
+    def debt_on(self, pr_url: str) -> bool:
+        """A pushed resolution whose record + budget write has not landed:
+        held, but nothing is running (the state row says so — PRD S7)."""
+        return pr_url in self._debts
+
     async def drain(self) -> None:
         if self._task is not None:
             await asyncio.gather(self._task, return_exceptions=True)

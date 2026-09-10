@@ -49,6 +49,11 @@ from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
 from lithos_loom.subscriptions.pr_landability import check_landability
+from lithos_loom.subscriptions.reconciliation_state import (
+    Busy,
+    closed_state_marker,
+    record_state,
+)
 
 __all__ = [
     "DELIVERED_PR_CLOSED",
@@ -340,6 +345,23 @@ async def reconcile_pr_gate(
         )
         if label not in ("unchanged", "no_conflict"):
             ctx.logger.info("conflict-resolve: %s for %s", label, spec.pr_url)
+    # PRD S7: the one writer of the gate's reconciliation state, after every
+    # dispatcher has run — derived from the gate as it is NOW.
+    await record_state(
+        gate,
+        pr,
+        spec.pr_url,
+        ctx,
+        busy=Busy(
+            remediation=remediation is not None and remediation.busy_on(spec.pr_url),
+            merge_gate=merge_gate is not None and merge_gate.busy_on(spec.pr_url),
+            conflict_resolve=conflict_resolve is not None
+            and conflict_resolve.busy_on(spec.pr_url)
+            and not conflict_resolve.debt_on(spec.pr_url),
+            conflict_debt=conflict_resolve is not None
+            and conflict_resolve.debt_on(spec.pr_url),
+        ),
+    )
     return "still_open"
 
 
@@ -508,7 +530,11 @@ async def _gate_closed(
     on the GATE stops the dead PR being re-polled and re-reported every sweep.
     """
     reason = "no longer exists (404)" if marker == "gone" else "was closed unmerged"
-    gate_marker = {MERGE_STATE_KEY: marker, MERGE_STATE_URL_KEY: pr_url}
+    gate_marker = {
+        MERGE_STATE_KEY: marker,
+        MERGE_STATE_URL_KEY: pr_url,
+        **closed_state_marker(pr_url, marker),  # PRD S7: one write, never apart
+    }
     if story_id is None:
         # Orphan gate (no waiter): nothing to post the finding on. Just mark it.
         await write_marker(
