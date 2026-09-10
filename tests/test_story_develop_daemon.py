@@ -1959,13 +1959,54 @@ def test_daemon_mode_cli_model_effort_fallback_used(
     assert cfg.coder_model == "opus" and cfg.coder_effort == "xhigh"
     # Zero-config now resolves the `standard` persona panel (#140 slice 2). The route
     # --reviewer-model fills each persona's unset model; --reviewer-effort fills only
-    # where unset, so a persona's own effort (security=xhigh, #137) is respected, not
-    # blanket-downgraded.
+    # where unset, so a persona's own effort (security=xhigh, correctness=high, #137)
+    # is respected, not blanket-downgraded. (The fill-where-unset half is pinned by
+    # test_daemon_mode_route_reviewer_effort_fills_unset_persona below.)
     by_name = {s.name: s for s in cfg.reviewers}
     assert sorted(by_name) == ["correctness", "security"]
     assert all(s.model == "sonnet" for s in cfg.reviewers)  # model unset on both
-    assert by_name["correctness"].effort == "medium"  # was unset -> filled
+    assert by_name["correctness"].effort == "high"  # persona's own effort respected
     assert by_name["security"].effort == "xhigh"  # persona's own effort respected
+
+
+def test_daemon_mode_route_reviewer_effort_fills_unset_persona(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Route --reviewer-effort fills a persona that pins no effort of its own."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+    from lithos_loom.plugins.story_develop.personas import canonical_personas
+
+    captured: dict[str, Any] = {}
+    # dependency-hygiene is the one canonical persona with no pinned effort.
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_project_settings",
+        lambda url, meta: ProjectDevelopSettings(
+            reviewers=(canonical_personas()["dependency-hygiene"],),
+            reviewers_explicit=True,
+        ),
+    )
+    monkeypatch.setattr(main_mod, "post_frictions", lambda *a: None)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **kw: True)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    argv, _ = _daemon_args(
+        tmp_git_repo,
+        tmp_path,
+        "--reviewer-model",
+        "sonnet",
+        "--reviewer-effort",
+        "medium",
+    )
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    (spec,) = captured["config"].reviewers
+    assert spec.name == "dependency-hygiene"
+    assert spec.effort == "medium"  # was unset -> filled by the route fallback
 
 
 def test_daemon_mode_metadata_image_flows_into_config(
