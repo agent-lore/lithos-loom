@@ -36,7 +36,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import shlex
 import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -54,7 +53,9 @@ from lithos_loom.subscriptions.dispatch_guards import (
     clear_superseded_failure,
     declines_bootstrap_replay,
     on_ready_frontier,
+    project_of,
     release_with_failure,
+    resolve_command,
     task_payload,
 )
 from lithos_loom.subscriptions.escalation import (
@@ -142,6 +143,9 @@ class RouteRunner:
         fired once when a run ends without delivering and a needs-human gate
         is raised (b91177d2). ``None`` → no push; the gate + finding still
         land (the pull surfaces).
+    admission:
+        Serial admission (PRD S6, ``subscriptions.admission.Admission``), asked
+        after readiness, before the claim, on PR-producing routes only.
     """
 
     route: RouteConfig
@@ -154,6 +158,7 @@ class RouteRunner:
     plugin_runner: PluginRunFn = field(default=run_plugin)
     project_repos: Mapping[str, Path] = field(default_factory=dict)
     notifier: Any = None
+    admission: Any = None
 
     def __post_init__(self) -> None:
         # #339: per-(route, task) updated_at stamps for the exact
@@ -270,15 +275,42 @@ class RouteRunner:
         if ready is None:
             self._rechecker.schedule(task_id)
             return
-        self._rechecker.settled(task_id)  # any definitive answer: fresh budget
         if not ready:
+            self._rechecker.settled(task_id)  # a definitive answer: fresh budget
             logger.info(
                 "RouteRunner %s: deferring %s — not on Lithos's ready frontier",
                 self.route.name,
                 task_id,
             )
             return
+        # S6: PR-producing routes claim only under the project's delivered-PR limit.
+        admission = None if self.route.completes_task else self.admission
+        if admission is not None:
+            verdict = await admission.admit(
+                route=self.route.name, task_id=task_id, project=project_of(metadata)
+            )
+            if not verdict.admitted:
+                logger.info(
+                    "RouteRunner %s: holding %s — %s (%d delivered PR(s) open, "
+                    "%d escalated, %d in flight; %s)",
+                    self.route.name,
+                    task_id,
+                    verdict.reason,
+                    verdict.open_gates,
+                    verdict.escalated,
+                    verdict.in_flight,
+                    verdict.limits,
+                )
+                self._rechecker.schedule(task_id, why="held by serial admission")
+                return
+        self._rechecker.settled(task_id)  # admitted: fresh budget
+        try:
+            await self._claim_and_run(task_id, payload)
+        finally:
+            if admission is not None:  # the reservation ends with the run
+                admission.release(task_id, route=self.route.name)
 
+    async def _claim_and_run(self, task_id: str, payload: Mapping[str, Any]) -> None:
         try:
             await self.lithos.task_claim(
                 task_id=task_id, aspect=self.route.name, agent=self.agent_id
@@ -340,10 +372,8 @@ class RouteRunner:
         normal ``_handle`` path (ready check, then collision-safe claim)
         applies unchanged. Double-evaluation is harmless; the claim decides.
 
-        Never raises. The task is already completed by the time we get here,
-        so a failure nudging its dependents must not surface as a run error.
-        A dropped nudge is recoverable — a later event, or the restart
-        bootstrap, re-surfaces the task.
+        Never raises: the task is already completed, so a failed nudge must not
+        surface as a run error; a later event or the bootstrap re-surfaces it.
         """
         for unblocked_id in task_ids:
             try:
@@ -371,42 +401,9 @@ class RouteRunner:
 
     # ── claimed-task lifecycle ────────────────────────────────────────
 
-    def _resolve_command(self, payload: Mapping[str, Any]) -> str:
-        """Substitute the optional ``{{repo}}`` token from the projects map.
-
-        Resolution is keyed off ``task.metadata.project`` against the host's
-        ``[projects.*]`` table, so the repo a plugin acts on is derived from
-        the task's own project rather than hard-coded per route. Raises
-        :class:`PluginContractError` when the token is present but
-        unresolvable — the caller releases the claim with a finding (a
-        misconfigured route + unroutable task is a config error, not a plugin
-        failure). Routes without the token are returned unchanged.
-        """
-        command = self.route.command
-        if "{{repo}}" not in command:
-            return command
-        metadata = payload.get("metadata") or {}
-        slug = metadata.get("project") if isinstance(metadata, Mapping) else None
-        if not isinstance(slug, str) or not slug:
-            raise PluginContractError(
-                "route command uses the {{repo}} token but the task has no "
-                "metadata.project to resolve it against"
-            )
-        repo = self.project_repos.get(slug)
-        if repo is None:
-            raise PluginContractError(
-                f"route command uses the {{repo}} token but project {slug!r} "
-                "is not registered in [projects.*] on this host"
-            )
-        # shlex.quote: the resolved command is tokenised with shlex.split in
-        # plugin_runner._build_argv, so a repo path containing spaces (or
-        # shell metacharacters) must be quoted or it would split into several
-        # argv elements and truncate --repo.
-        return command.replace("{{repo}}", shlex.quote(str(repo)))
-
     async def _run_claimed_task(self, task_id: str, payload: Mapping[str, Any]) -> None:
         try:
-            command = self._resolve_command(payload)
+            command = resolve_command(self.route.command, payload, self.project_repos)
         except PluginContractError as exc:
             # Token present but unresolvable: release with a finding before
             # any work-dir / plugin spend, same as a contract violation.

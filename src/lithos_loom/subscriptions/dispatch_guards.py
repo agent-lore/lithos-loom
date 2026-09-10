@@ -81,11 +81,13 @@ import json
 import logging
 import os
 import re
+import shlex
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from lithos_loom.errors import PluginContractError
 from lithos_loom.gates import STORY_HUMAN_GATE_ID_KEY
 
 __all__ = [
@@ -149,6 +151,46 @@ def task_fingerprint(payload: Mapping[str, Any]) -> str:
 # such a frontier, so ask for far more and treat a full page as undetermined
 # rather than as "not ready" (see `on_ready_frontier`).
 READY_QUERY_LIMIT = 500
+
+
+def project_of(metadata: Any) -> str | None:
+    """``metadata.project`` when it is a non-empty string, else ``None``."""
+    slug = metadata.get("project") if isinstance(metadata, Mapping) else None
+    return slug if isinstance(slug, str) and slug else None
+
+
+def resolve_command(
+    command: str, payload: Mapping[str, Any], project_repos: Mapping[str, Path]
+) -> str:
+    """Substitute the optional ``{{repo}}`` token from the projects map.
+
+    Resolution is keyed off ``task.metadata.project`` against the host's
+    ``[projects.*]`` table, so the repo a plugin acts on is derived from the
+    task's own project rather than hard-coded per route. Raises
+    :class:`PluginContractError` when the token is present but unresolvable
+    — the runner releases the claim with a finding (a misconfigured route +
+    unroutable task is a config error, not a plugin failure). Commands
+    without the token are returned unchanged.
+    """
+    if "{{repo}}" not in command:
+        return command
+    slug = project_of(payload.get("metadata") or {})
+    if slug is None:
+        raise PluginContractError(
+            "route command uses the {{repo}} token but the task has no "
+            "metadata.project to resolve it against"
+        )
+    repo = project_repos.get(slug)
+    if repo is None:
+        raise PluginContractError(
+            f"route command uses the {{repo}} token but project {slug!r} "
+            "is not registered in [projects.*] on this host"
+        )
+    # shlex.quote: the resolved command is tokenised with shlex.split in
+    # plugin_runner._build_argv, so a repo path containing spaces (or shell
+    # metacharacters) must be quoted or it would split into several argv
+    # elements and truncate --repo.
+    return command.replace("{{repo}}", shlex.quote(str(repo)))
 
 
 def task_payload(task: Any) -> dict[str, Any]:

@@ -65,6 +65,7 @@ class ReadyRechecker:
         self._route = route
         self._attempts: dict[str, int] = {}  # inconclusive re-checks that RAN
         self._pending: dict[str, asyncio.Task[None]] = {}  # one sleeper per task
+        self._why: dict[str, str] = {}  # what the task is waiting on, for the nag
 
     def pending(self, task_id: str) -> bool:
         return task_id in self._pending
@@ -79,24 +80,30 @@ class ReadyRechecker:
         """Lithos answered definitively (ready, not ready, gone, terminal):
         the task's backoff starts fresh and any sleeper is dropped."""
         self._attempts.pop(task_id, None)
+        self._why.pop(task_id, None)
         sleeper = self._pending.pop(task_id, None)
         if sleeper is not None:
             sleeper.cancel()
 
-    def schedule(self, task_id: str) -> None:
+    def schedule(self, task_id: str, *, why: str | None = None) -> None:
         """Re-ask about *task_id* after the current backoff. Coalesced: a task
         with a sleeper already pending gets no second one (duplicate events
-        must not spend the budget — only a re-check that RUNS does)."""
+        must not spend the budget — only a re-check that RUNS does). *why*
+        names what the task waits on, for the periodic nag (default: an
+        undetermined readiness; S6 admission passes its own)."""
+        if why is not None:
+            self._why[task_id] = why
         if task_id in self._pending:
             return
         attempts = self.attempts(task_id)
         if attempts and attempts % _NAG_EVERY == 0:
             logger.warning(
-                "RouteRunner %s: %s's readiness is still undetermined after %d "
-                "re-checks; asking again in %.0fs and until Lithos answers "
-                "(any edit to the task, or a restart, re-asks too)",
+                "RouteRunner %s: %s is still %s after %d re-checks; asking again "
+                "in %.0fs and until Lithos answers (any edit to the task, or a "
+                "restart, re-asks too)",
                 self._route,
                 task_id,
+                self._why.get(task_id, "waiting on an undetermined readiness"),
                 attempts,
                 delay_for(attempts),
             )

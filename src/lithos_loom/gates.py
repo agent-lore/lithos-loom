@@ -267,6 +267,10 @@ async def create_pr_gate(
         "pr_number": ref.number,
         "required_state": "merged",
         "pr_url": pr_url,
+        # provenance for readers that hold many gates and must not pay an
+        # edge read per gate (S6 admission's escalated-gate test); the
+        # waits_on_gate edge stays the authoritative link
+        "story_id": story_id,
     }
     if project:
         metadata["project"] = project

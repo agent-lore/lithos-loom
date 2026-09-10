@@ -34,6 +34,11 @@ from lithos_loom.cursor_store import CursorStore
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.notifications import build_notifier
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
+from lithos_loom.subscriptions.admission import (
+    Admission,
+    AdmissionLimits,
+    AdmissionWaker,
+)
 from lithos_loom.subscriptions.escalation_resolver import EscalationResolver
 from lithos_loom.subscriptions.route_runner import RouteRunner
 
@@ -70,6 +75,16 @@ async def _amain(cfg: LoomConfig) -> int:
         )
         notifier = await build_notifier(cfg, http)
         project_repos = {slug: pc.repo for slug, pc in cfg.projects.items()}
+        # S6 serial admission: one gate shared by every PR-producing route,
+        # so the per-project count is one view, not one per route.
+        admission = Admission(
+            lithos=lithos,
+            agent_id=cfg.orchestrator.agent_id,
+            defaults=AdmissionLimits(
+                limit=cfg.orchestrator.max_open_delivered_prs,
+                total=cfg.orchestrator.max_open_delivered_prs_total,
+            ),
+        )
         runners = [
             RouteRunner(
                 route=route,
@@ -80,15 +95,17 @@ async def _amain(cfg: LoomConfig) -> int:
                 retain_failed_workdirs=cfg.orchestrator.retain_failed_workdirs,
                 project_repos=project_repos,
                 notifier=notifier,
+                admission=admission,
             )
             for route in cfg.routes
         ]
         resolver = EscalationResolver(
             bus=bus, lithos=lithos, agent_id=cfg.orchestrator.agent_id
         )
+        waker = AdmissionWaker(bus=bus, lithos=lithos, admission=admission)
         logger.info(
             "route-runner child: starting event-stream + %d route runners (%s) "
-            "+ escalation resolver",
+            "+ escalation resolver + admission waker",
             len(runners),
             ", ".join(r.route.name for r in runners),
         )
@@ -100,6 +117,7 @@ async def _amain(cfg: LoomConfig) -> int:
                 for r in runners
             ),
             asyncio.create_task(resolver.run(), name="escalation-resolver"),
+            asyncio.create_task(waker.run(), name="admission-waker"),
         ]
 
         try:

@@ -14,6 +14,7 @@ Subscriptions for one lookup.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,9 +29,13 @@ __all__ = [
     "origin_read",
     "origin_repo",
     "parse_origin",
+    "project_count",
     "read_project_flag",
+    "read_project_metadata",
     "resolve_project_repo",
 ]
+
+logger = logging.getLogger(__name__)
 
 # Every remote-url shape `gh` resolves for GitHub: scp-like ssh, ssh:// with
 # an optional port, https with an optional user[:token]@ and optional www.
@@ -131,6 +136,54 @@ async def resolve_project_repo(
     return None if repo is None else (slug, repo)
 
 
+async def read_project_metadata(lithos: Any, slug: str) -> Mapping[str, Any] | None:
+    """The project-context doc's metadata — the home of every per-project
+    dial. Canonical path first, then the smallest ``project-context``-tagged
+    doc under the project (the resolution ``daemon_io._fetch_context_metadata``
+    applies). ``{}`` when no doc exists (readable, keyless); ``None`` when
+    Lithos could not be read — the two are different answers to a caller
+    that must fail closed."""
+    try:
+        note = await lithos.note_read(path=f"projects/{slug}/{slug}-project-context.md")
+        if note is not None:
+            return note.metadata
+        candidates = await lithos.note_list(
+            path_prefix=f"projects/{slug}/", tags=["project-context"]
+        )
+    except (LithosClientError, OSError):
+        return None
+    if candidates:
+        return min(candidates, key=lambda n: n.path).metadata
+    return {}
+
+
+def project_count(
+    meta: Mapping[str, Any],
+    key: str,
+    default: int,
+    *,
+    subsystem: str,
+    slug: str,
+) -> int:
+    """A non-negative integer per-project dial from already-read metadata.
+    Absent → *default*; present but not a non-negative ``int`` (``bool``
+    rejected) → *default* with a warning."""
+    raw = meta.get(key)
+    if raw is None:
+        return default
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    logger.warning(
+        "[Friction] %s: project %r has malformed %s=%r; using %d",
+        subsystem,
+        slug,
+        key,
+        raw,
+        default,
+    )
+    return default
+
+
 async def read_project_flag(
     slug: str,
     key: str,
@@ -147,22 +200,10 @@ async def read_project_flag(
     see, and an unknown safety dial must never authorize an autonomous run
     (the caller fails closed and retries).
     """
-    meta: Mapping[str, Any] | None = None
-    try:
-        note = await ctx.lithos.note_read(
-            path=f"projects/{slug}/{slug}-project-context.md"
-        )
-        if note is not None:
-            meta = note.metadata
-        else:
-            candidates = await ctx.lithos.note_list(
-                path_prefix=f"projects/{slug}/", tags=["project-context"]
-            )
-            if candidates:
-                meta = min(candidates, key=lambda n: n.path).metadata
-    except LithosClientError:
+    meta = await read_project_metadata(ctx.lithos, slug)
+    if meta is None:
         return None  # unreadable ≠ unset — the caller fails closed
-    raw = None if meta is None else meta.get(key)
+    raw = meta.get(key)
     if raw is None:
         return default
     if isinstance(raw, bool):

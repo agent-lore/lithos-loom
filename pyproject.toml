@@ -106,6 +106,7 @@ source_modules = [
     "lithos_loom.config",
     "lithos_loom.errors",
     "lithos_loom.lithos_client",
+    "lithos_loom.lithos_types",
     "lithos_loom.github_client",
     "lithos_loom.github_models",
     "lithos_loom.github_review_activity",
@@ -182,6 +183,7 @@ forbidden_modules = [
     "lithos_loom.plugins.story_develop.lithos_io",
     "lithos_loom.config",
     "lithos_loom.lithos_client",
+    "lithos_loom.lithos_types",
 ]
 
 [[tool.importlinter.contracts]]

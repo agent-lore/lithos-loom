@@ -17,6 +17,15 @@ work_dir = "/tmp/lithos-loom"
 max_concurrency = 4
 log_level = "info"
 retain_failed_workdirs = true
+# Serial admission (PRD pr-reconciliation S6): a PR-producing route claims a
+# ready story only while the project's open `pr` gates (delivered-but-unmerged
+# PRs, escalated ones excluded) are under this limit. 0 = unlimited. Override
+# per project with the same key in the project-context doc's metadata.
+max_open_delivered_prs = 1
+# The backstop: every open `pr` gate, escalated ones included. Reaching it stops
+# dispatch for the project and posts [AdmissionHeld]. 0 = unlimited, otherwise
+# must be >= max_open_delivered_prs.
+max_open_delivered_prs_total = 3
 
 [projects.lithos-lens]
 repo = "/home/you/projects/lithos/code/lithos-lens"

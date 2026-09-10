@@ -63,6 +63,7 @@ async def test_create_pr_gate_creates_a_gate_with_pr_metadata() -> None:
         "required_state": "merged",
         "pr_url": _PR_URL,
         "project": "loom",
+        "story_id": story,
     }
     assert gate.title == "Awaiting merge: US42"
 
