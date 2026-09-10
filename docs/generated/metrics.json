@@ -513,12 +513,12 @@
       "Subscriptions": {
         "classes": 36,
         "functions": 314,
-        "largest_module": "lithos_loom.subscriptions.route_runner",
-        "largest_module_lines": 800,
-        "lines": 13011,
+        "largest_module": "lithos_loom.subscriptions.merge_gate_dispatch",
+        "largest_module_lines": 798,
+        "lines": 13017,
         "modules": 41,
         "public_symbols": 115,
-        "sloc": 10475
+        "sloc": 10479
       },
       "Supervisor": {
         "classes": 3,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 53863,
+    "total_lines": 53869,
     "total_modules": 158,
-    "total_sloc": 43346
+    "total_sloc": 43350
   },
   "tests": {
     "ratio": 1.58,
-    "src_lines": 53863,
-    "test_lines": 85303
+    "src_lines": 53869,
+    "test_lines": 85370
   }
 }

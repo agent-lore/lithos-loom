@@ -283,12 +283,11 @@ class RouteRunner:
                 task_id,
             )
             return
-        # S6: a PR-producing route claims a ready story only while the project's
-        # delivered-but-unmerged PRs (+ runs in flight) are under the limit.
+        # S6: PR-producing routes claim only under the project's delivered-PR limit.
         admission = None if self.route.completes_task else self.admission
         if admission is not None:
             verdict = await admission.admit(
-                task_id=task_id, project=project_of(metadata)
+                route=self.route.name, task_id=task_id, project=project_of(metadata)
             )
             if not verdict.admitted:
                 logger.info(
@@ -309,7 +308,7 @@ class RouteRunner:
             await self._claim_and_run(task_id, payload)
         finally:
             if admission is not None:  # the reservation ends with the run
-                admission.release(task_id)
+                admission.release(task_id, route=self.route.name)
 
     async def _claim_and_run(self, task_id: str, payload: Mapping[str, Any]) -> None:
         try:
@@ -373,10 +372,8 @@ class RouteRunner:
         normal ``_handle`` path (ready check, then collision-safe claim)
         applies unchanged. Double-evaluation is harmless; the claim decides.
 
-        Never raises. The task is already completed by the time we get here,
-        so a failure nudging its dependents must not surface as a run error.
-        A dropped nudge is recoverable — a later event, or the restart
-        bootstrap, re-surfaces the task.
+        Never raises: the task is already completed, so a failed nudge must not
+        surface as a run error; a later event or the bootstrap re-surfaces it.
         """
         for unblocked_id in task_ids:
             try:

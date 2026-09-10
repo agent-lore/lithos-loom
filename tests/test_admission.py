@@ -33,6 +33,7 @@ from tests.support import FakeLithosClient, make_note
 
 _PROJECT = "lens"
 _AGENT = "loom"
+_ROUTE = "story-develop"
 
 
 def _admission(
@@ -112,14 +113,16 @@ async def test_projectless_stories_share_one_bucket_bounded_by_projectless_gates
     story = await _story(client, project=None)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=None)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=None)
 
     assert not verdict.admitted and verdict.reason == "limit"
     assert verdict.open_gates == 1
     assert adm.deferred(None) == frozenset({story})
     # and the project bucket does not see the projectless gate
     lens = await _story(client, "lens story")
-    assert (await adm.admit(task_id=lens, project=_PROJECT)).open_gates == 1
+    assert (
+        await adm.admit(route=_ROUTE, task_id=lens, project=_PROJECT)
+    ).open_gates == 1
 
 
 async def test_projectless_admission_reserves_in_flight_too() -> None:
@@ -127,8 +130,8 @@ async def test_projectless_admission_reserves_in_flight_too() -> None:
     first = await _story(client, "first", project=None)
     second = await _story(client, "second", project=None)
     adm = _admission(client, limit=1)
-    assert (await adm.admit(task_id=first, project=None)).admitted
-    assert not (await adm.admit(task_id=second, project=None)).admitted
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=None)).admitted
+    assert not (await adm.admit(route=_ROUTE, task_id=second, project=None)).admitted
     assert not client.called("note_read")  # no context doc to consult
 
 
@@ -138,7 +141,7 @@ async def test_under_the_limit_admits_and_reads_only_the_projects_pr_gates() -> 
     story = await _story(client)
     adm = _admission(client)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.admitted and verdict.reason == "admitted"
     assert verdict.open_gates == 0
@@ -153,7 +156,7 @@ async def test_at_the_limit_refuses_and_remembers_the_story() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.reason == "limit"
     assert verdict.open_gates == 1 and verdict.escalated == 0
@@ -166,10 +169,10 @@ async def test_admission_releases_a_previously_deferred_story() -> None:
     _delivered_story, gate = await _delivered(client, number=1)
     story = await _story(client)
     adm = _admission(client, limit=1)
-    assert not (await adm.admit(task_id=story, project=_PROJECT)).admitted
+    assert not (await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)).admitted
 
     await client.task_complete(task_id=gate, agent=_AGENT)
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.admitted
     assert adm.deferred(_PROJECT) == frozenset()
@@ -185,7 +188,7 @@ async def test_an_escalated_gate_does_not_count_against_the_limit() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.admitted
     assert verdict.open_gates == 1 and verdict.escalated == 1
@@ -218,7 +221,7 @@ async def test_an_escalated_gate_is_found_via_its_edge_when_it_predates_story_id
     story = await _story(client)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.admitted and verdict.escalated == 1
 
@@ -238,7 +241,7 @@ async def test_the_operators_own_human_gate_does_not_escalate_a_pr_gate() -> Non
     story = await _story(client)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.escalated == 0
 
@@ -251,7 +254,7 @@ async def test_a_resolved_escalation_counts_again() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.escalated == 0
 
@@ -268,8 +271,8 @@ async def test_the_total_cap_counts_escalated_gates_and_posts_held_once() -> Non
     second = await _story(client, "second")
     adm = _admission(client, limit=1, total=3)
 
-    v1 = await adm.admit(task_id=first, project=_PROJECT)
-    v2 = await adm.admit(task_id=second, project=_PROJECT)
+    v1 = await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)
+    v2 = await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
 
     assert not v1.admitted and v1.reason == "total_cap"
     assert not v2.admitted and v2.reason == "total_cap"
@@ -289,7 +292,7 @@ async def test_the_total_cap_wins_over_an_unlimited_admission_limit() -> None:
     story = await _story(client)
     adm = _admission(client, limit=0, total=2)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.reason == "total_cap"
 
@@ -300,7 +303,7 @@ async def test_zero_on_both_dials_means_unlimited() -> None:
     story = await _story(client)
     adm = _admission(client, limit=0, total=0)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.admitted and verdict.reason == "unlimited"
     assert not client.called("task_list")
@@ -313,7 +316,7 @@ async def test_the_context_doc_overrides_the_host_defaults() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1, total=3)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.admitted
     assert verdict.limits == AdmissionLimits(limit=2, total=5)
@@ -325,7 +328,7 @@ async def test_a_malformed_or_negative_dial_falls_back_to_the_default() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1, total=3)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.limits == AdmissionLimits(limit=1, total=3)
 
@@ -336,7 +339,7 @@ async def test_a_total_below_the_limit_is_raised_to_the_limit() -> None:
     story = await _story(client)
     adm = _admission(client)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.limits == AdmissionLimits(limit=4, total=4)
 
@@ -354,7 +357,7 @@ async def test_an_unreadable_context_doc_holds_the_story() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1, total=3)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.reason == "unreadable"
     assert adm.deferred(_PROJECT) == frozenset({story})
@@ -373,7 +376,7 @@ async def test_an_unreadable_gate_list_refuses_and_defers() -> None:
     story = await _story(client)
     adm = _admission(client)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.reason == "unreadable"
     assert adm.deferred(_PROJECT) == frozenset({story})
@@ -395,7 +398,7 @@ async def test_an_unreadable_human_gate_list_counts_every_gate() -> None:
     client.task_list = flaky_task_list  # type: ignore[method-assign]
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.reason == "limit"
     assert verdict.escalated == 0
@@ -437,7 +440,7 @@ async def _deferred_behind(client: FakeLithosClient, adm: Admission) -> tuple[st
     """A story refused behind one delivered PR: ``(story_id, gate_id)``."""
     _delivered_story, gate = await _delivered(client, number=1)
     story = await _story(client, "waiting")
-    assert not (await adm.admit(task_id=story, project=_PROJECT)).admitted
+    assert not (await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)).admitted
     return story, gate
 
 
@@ -542,22 +545,22 @@ async def test_an_admitted_story_holds_its_slot_until_its_run_ends() -> None:
     second = await _story(client, "second")
     adm = _admission(client, limit=1)
 
-    assert (await adm.admit(task_id=first, project=_PROJECT)).admitted
-    refused = await adm.admit(task_id=second, project=_PROJECT)
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)).admitted
+    refused = await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
     assert not refused.admitted and refused.reason == "limit"
     assert refused.open_gates == 0 and refused.in_flight == 1
     assert adm.deferred(_PROJECT) == frozenset({second})
 
-    adm.release(first)
-    assert (await adm.admit(task_id=second, project=_PROJECT)).admitted
+    adm.release(first, route=_ROUTE)
+    assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
 
 
 async def test_re_admitting_an_in_flight_story_does_not_count_itself() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
     story = await _story(client)
     adm = _admission(client, limit=1)
-    assert (await adm.admit(task_id=story, project=_PROJECT)).admitted
-    again = await adm.admit(task_id=story, project=_PROJECT)
+    assert (await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)).admitted
+    again = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
     assert again.admitted and again.in_flight == 0
 
 
@@ -567,9 +570,9 @@ async def test_in_flight_counts_against_the_total_cap_too() -> None:
     first = await _story(client, "first")
     second = await _story(client, "second")
     adm = _admission(client, limit=0, total=2)
-    assert (await adm.admit(task_id=first, project=_PROJECT)).admitted
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)).admitted
 
-    verdict = await adm.admit(task_id=second, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
 
     assert not verdict.admitted and verdict.reason == "total_cap"
 
@@ -578,12 +581,14 @@ async def test_a_closed_gate_wakes_but_an_in_flight_story_still_holds() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
     adm = _admission(client, limit=1)
     first = await _story(client, "first")
-    assert (await adm.admit(task_id=first, project=_PROJECT)).admitted
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)).admitted
     second = await _story(client, "second")
-    assert not (await adm.admit(task_id=second, project=_PROJECT)).admitted
+    assert not (
+        await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
+    ).admitted
     # the run ends without a PR (failed): the slot frees with the release
-    adm.release(first)
-    assert (await adm.admit(task_id=second, project=_PROJECT)).admitted
+    adm.release(first, route=_ROUTE)
+    assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
 
 
 # ── the held finding re-arms (self-review MEDIUM) ────────────────────────
@@ -599,13 +604,17 @@ async def test_the_held_finding_fires_again_after_the_cap_clears() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1, total=3)
 
-    assert (await adm.admit(task_id=story, project=_PROJECT)).reason == "total_cap"
+    assert (
+        await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
+    ).reason == "total_cap"
     await client.task_complete(task_id=gates[0], agent=_AGENT)
-    assert (await adm.admit(task_id=story, project=_PROJECT)).admitted
-    adm.release(story)
+    assert (await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)).admitted
+    adm.release(story, route=_ROUTE)
     await _delivered(client, number=4)
     other = await _story(client, "other")
-    assert (await adm.admit(task_id=other, project=_PROJECT)).reason == "total_cap"
+    assert (
+        await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)
+    ).reason == "total_cap"
 
     assert [f["task_id"] for f in client.findings] == [story, other]
 
@@ -619,7 +628,7 @@ async def test_the_total_cap_verdict_carries_the_real_escalated_count() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1, total=3)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert verdict.reason == "total_cap"
     assert verdict.open_gates == 3 and verdict.escalated == 2
@@ -656,7 +665,8 @@ async def test_concurrent_admits_serialise_per_project() -> None:
     adm = _admission(client, limit=1)
 
     va, vb = await asyncio.gather(
-        adm.admit(task_id=a, project=_PROJECT), adm.admit(task_id=b, project=_PROJECT)
+        adm.admit(route=_ROUTE, task_id=a, project=_PROJECT),
+        adm.admit(route=_ROUTE, task_id=b, project=_PROJECT),
     )
 
     assert [va.admitted, vb.admitted].count(True) == 1
@@ -680,7 +690,8 @@ async def test_concurrent_admits_post_held_once() -> None:
     adm = _admission(client, limit=1, total=3)
 
     await asyncio.gather(
-        adm.admit(task_id=a, project=_PROJECT), adm.admit(task_id=b, project=_PROJECT)
+        adm.admit(route=_ROUTE, task_id=a, project=_PROJECT),
+        adm.admit(route=_ROUTE, task_id=b, project=_PROJECT),
     )
 
     assert len(client.findings) == 1
@@ -713,7 +724,7 @@ async def test_a_raw_transport_error_on_any_read_refuses_and_defers(
     setattr(client, failing, boom)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.reason == "unreadable"
     assert adm.deferred(_PROJECT) == frozenset({story})
@@ -740,7 +751,7 @@ async def test_a_human_gate_without_its_edge_does_not_escalate() -> None:
     story = await _story(client)
     adm = _admission(client, limit=1)
 
-    verdict = await adm.admit(task_id=story, project=_PROJECT)
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
 
     assert not verdict.admitted and verdict.escalated == 0
 
@@ -750,7 +761,7 @@ async def test_a_closed_projectless_gate_wakes_projectless_deferred_stories() ->
     adm = _admission(client, limit=1)
     _d, gate = await _delivered(client, number=1, project=None)
     story = await _story(client, "waiting", project=None)
-    assert not (await adm.admit(task_id=story, project=None)).admitted
+    assert not (await adm.admit(route=_ROUTE, task_id=story, project=None)).admitted
     bus = EventBus()
     probe = _probe(bus)
     waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
@@ -760,3 +771,59 @@ async def test_a_closed_projectless_gate_wakes_projectless_deferred_stories() ->
     await _run_for(waker)
 
     assert probe.queue.get_nowait().payload["id"] == story
+
+
+# ── review #368 round 2: the reservation is (route, story) ───────────────
+
+
+async def test_two_pr_producing_routes_on_one_story_each_take_a_slot() -> None:
+    """A task may match several routes; two PR-producing ones are two runs
+    that deliver two PRs. Keyed by story alone, the second admission saw
+    its own reservation as free."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    story = await _story(client)
+    real_task_list = client.task_list
+
+    async def yielding_task_list(**kwargs: Any) -> Any:
+        await asyncio.sleep(0)
+        return await real_task_list(**kwargs)
+
+    client.task_list = yielding_task_list  # type: ignore[method-assign]
+    adm = _admission(client, limit=1)
+
+    va, vb = await asyncio.gather(
+        adm.admit(route="story-develop", task_id=story, project=_PROJECT),
+        adm.admit(route="story-develop-fast", task_id=story, project=_PROJECT),
+    )
+
+    assert [va.admitted, vb.admitted].count(True) == 1
+
+
+async def test_a_release_frees_only_that_routes_reservation() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    story = await _story(client, "first")
+    other = await _story(client, "other")
+    adm = _admission(client, limit=1)
+    assert (await adm.admit(route="a", task_id=story, project=_PROJECT)).admitted
+
+    adm.release(story, route="b")  # a route that never held it
+    assert not (await adm.admit(route="a", task_id=other, project=_PROJECT)).admitted
+    adm.release(story, route="a")
+    assert (await adm.admit(route="a", task_id=other, project=_PROJECT)).admitted
+
+
+async def test_admitting_one_route_keeps_another_routes_deferral() -> None:
+    """The deferred set is keyed like the reservation: route B being admitted
+    must not forget route A's wait on the same story, or the waker's fast
+    nudge for A degrades to the sleeper's backoff."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    _d, gate = await _delivered(client, number=1)
+    story = await _story(client)
+    adm = _admission(client, limit=1)
+    assert not (await adm.admit(route="a", task_id=story, project=_PROJECT)).admitted
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    assert (await adm.admit(route="b", task_id=story, project=_PROJECT)).admitted
+
+    assert adm.deferred(_PROJECT) == frozenset({story})
+    adm.forget(story)  # the story left the open set: every route's wait ends
+    assert adm.deferred(_PROJECT) == frozenset()

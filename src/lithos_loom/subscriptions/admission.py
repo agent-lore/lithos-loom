@@ -10,10 +10,11 @@ lens PRs happened.
 false``) claims a ready story, :class:`Admission` counts the project's OPEN
 ``pr`` gates — one filtered ``task_list`` — and refuses at the limit
 (``max_open_delivered_prs``, default 1). It counts *gates* plus this
-process's admitted-but-not-yet-delivered runs — not claims: that is the
-distinction the concurrency knob missed, and the in-flight reservation is
-what stops a second PR-producing route on the same project slipping a story
-past the count while the first is still running. Escalated gates —
+process's admitted-but-not-yet-delivered ``(route, story)`` runs — not
+claims: that is the distinction the concurrency knob missed, and the
+in-flight reservation is what stops a second PR-producing route on the same
+project slipping a story (even the same story) past the count while the
+first is still running. Escalated gates —
 whose story carries an open loom ``human`` gate — do not count against the
 limit (operator decision, 2026-08-24: a decision the operator owes is not
 loom's work-in-progress, and counting it would turn operator latency into a
@@ -118,8 +119,8 @@ class AdmissionVerdict:
     limits: AdmissionLimits = AdmissionLimits()
     pr_urls: tuple[str, ...] = ()
     in_flight: int = 0
-    """Other stories this process admitted into the project whose run has
-    not ended yet — counted like a gate, since each will deliver one."""
+    """Other ``(route, story)`` runs this process admitted into the bucket
+    that have not ended yet — counted like a gate, since each delivers one."""
 
 
 class Admission:
@@ -137,39 +138,47 @@ class Admission:
         self._lithos = lithos
         self._agent_id = agent_id
         self._defaults = defaults
-        self._deferred: dict[str, set[str]] = {}  # bucket → refused story ids
-        self._in_flight: dict[str, set[str]] = {}  # bucket → admitted, running
+        # bucket → (route, story) refusals still waiting
+        self._deferred: dict[str, set[tuple[str, str]]] = {}
+        # bucket → (route, story) reservations: admitted, run not yet ended
+        self._in_flight: dict[str, set[tuple[str, str]]] = {}
         self._held_notified: set[str] = set()  # buckets told [AdmissionHeld]
         self._locks: dict[str, asyncio.Lock] = {}
 
     def deferred(self, project: str | None) -> frozenset[str]:
-        """Stories refused for *project*'s bucket and not yet admitted or
-        forgotten."""
-        return frozenset(self._deferred.get(_bucket(project), ()))
+        """Stories some route was refused for *project*'s bucket and still
+        waits on (the waker republishes each once; the bus fans it out to
+        every matching route)."""
+        return frozenset(t for _r, t in self._deferred.get(_bucket(project), ()))
 
     def forget(self, task_id: str) -> None:
-        """Drop *task_id* from every bucket's deferred set (it was admitted,
-        or it is no longer open)."""
+        """The story is no longer open: every route's wait on it ends."""
         for waiting in self._deferred.values():
-            waiting.discard(task_id)
+            waiting.difference_update({w for w in waiting if w[1] == task_id})
 
-    def release(self, task_id: str) -> None:
-        """The admitted story's run ended (delivered, failed, interrupted, or
-        the claim was lost): its reservation is no longer needed — a
-        delivered one is now counted by its ``pr`` gate."""
+    def release(self, task_id: str, *, route: str) -> None:
+        """*route*'s run of the admitted story ended (delivered, failed,
+        interrupted, or the claim was lost): its reservation is no longer
+        needed — a delivered one is now counted by its ``pr`` gate. Keyed by
+        ``(route, story)`` (review #368 round 2): a task may match several
+        PR-producing routes, each a run that delivers its own PR, so each
+        takes a slot and one route's release never erases another's."""
         for running in self._in_flight.values():
-            running.discard(task_id)
+            running.discard((route, task_id))
 
-    def _defer(self, bucket: str, task_id: str) -> None:
-        self._deferred.setdefault(bucket, set()).add(task_id)
+    def _defer(self, bucket: str, route: str, task_id: str) -> None:
+        self._deferred.setdefault(bucket, set()).add((route, task_id))
 
-    def _admit(self, bucket: str, task_id: str) -> None:
-        self.forget(task_id)
-        self._in_flight.setdefault(bucket, set()).add(task_id)
+    def _admit(self, bucket: str, route: str, task_id: str) -> None:
+        # only THIS route's wait ends (round 2: another route's stays keyed)
+        self._deferred.get(bucket, set()).discard((route, task_id))
+        self._in_flight.setdefault(bucket, set()).add((route, task_id))
         self._held_notified.discard(bucket)  # the cap cleared: re-arm the finding
 
-    async def admit(self, *, task_id: str, project: str | None) -> AdmissionVerdict:
-        """Decide whether *task_id* may be claimed now (see the module doc).
+    async def admit(
+        self, *, route: str, task_id: str, project: str | None
+    ) -> AdmissionVerdict:
+        """Decide whether *route* may claim *task_id* now (see the module doc).
 
         Never raises: ``LithosClient._invoke`` re-raises the raw transport
         exception once its reconnects are spent, and an escaped exception
@@ -181,7 +190,7 @@ class Admission:
         lock = self._locks.setdefault(bucket, asyncio.Lock())
         async with lock:
             try:
-                return await self._decide(task_id, project, bucket)
+                return await self._decide(route, task_id, project, bucket)
             except Exception:
                 logger.exception(
                     "%s: cannot decide admission for %s (bucket %r); holding it "
@@ -190,21 +199,21 @@ class Admission:
                     task_id,
                     bucket,
                 )
-                self._defer(bucket, task_id)
+                self._defer(bucket, route, task_id)
                 return AdmissionVerdict(False, "unreadable")
 
     async def _decide(
-        self, task_id: str, project: str | None, bucket: str
+        self, route: str, task_id: str, project: str | None, bucket: str
     ) -> AdmissionVerdict:
         limits = await self._limits_for(project)
         if limits is None:
-            self._defer(bucket, task_id)
+            self._defer(bucket, route, task_id)
             return AdmissionVerdict(False, "unreadable")
         if limits.limit == 0 and limits.total == 0:
-            self._admit(bucket, task_id)
+            self._admit(bucket, route, task_id)
             return AdmissionVerdict(True, "unlimited", limits=limits)
         gates = await self._open_gates(GATE_TYPE_PR, project)
-        running = len(self._in_flight.get(bucket, set()) - {task_id})
+        running = len(self._in_flight.get(bucket, set()) - {(route, task_id)})
         total = len(gates) + running
         urls = tuple(_url_of(g) for g in gates)
         at_cap = bool(limits.total) and total >= limits.total
@@ -213,18 +222,18 @@ class Admission:
         if at_cap or at_limit:
             escalated = await self._escalated_count(project, gates)
         if at_cap:
-            self._defer(bucket, task_id)
+            self._defer(bucket, route, task_id)
             await self._notify_held(task_id, bucket, gates, limits, escalated, running)
             return AdmissionVerdict(
                 False, "total_cap", len(gates), escalated, limits, urls, running
             )
         if at_limit and total - escalated >= limits.limit:
-            self._defer(bucket, task_id)
+            self._defer(bucket, route, task_id)
             self._held_notified.discard(bucket)  # under the cap: re-arm
             return AdmissionVerdict(
                 False, "limit", len(gates), escalated, limits, urls, running
             )
-        self._admit(bucket, task_id)
+        self._admit(bucket, route, task_id)
         return AdmissionVerdict(
             True, "admitted", len(gates), escalated, limits, urls, running
         )

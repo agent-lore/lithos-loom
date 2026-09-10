@@ -3133,16 +3133,16 @@ class _StubAdmission:
 
         self._answers = list(admitted)
         self._limits = AdmissionLimits(limit=1, total=3)
-        self.calls: list[tuple[str, str | None]] = []
-        self.released: list[str] = []
+        self.calls: list[tuple[str, str, str | None]] = []
+        self.released: list[tuple[str, str]] = []
 
-    def release(self, task_id: str) -> None:
-        self.released.append(task_id)
+    def release(self, task_id: str, *, route: str) -> None:
+        self.released.append((task_id, route))
 
-    async def admit(self, *, task_id: str, project: str | None) -> Any:
+    async def admit(self, *, route: str, task_id: str, project: str | None) -> Any:
         from lithos_loom.subscriptions.admission import AdmissionVerdict
 
-        self.calls.append((task_id, project))
+        self.calls.append((route, task_id, project))
         admitted = self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
         return AdmissionVerdict(
             admitted=admitted,
@@ -3171,7 +3171,7 @@ async def test_runner_defers_a_refused_story_and_rechecks(tmp_path: Path) -> Non
     await _run_for(runner)
 
     lithos.task_claim.assert_not_awaited()
-    assert admission.calls == [("task-1", "lens")]
+    assert admission.calls == [("story-develop", "task-1", "lens")]
     # the re-check sleeper is the fallback nudge; the waker is the fast path
     assert runner._rechecker.pending("task-1") is True
 
@@ -3250,7 +3250,7 @@ async def test_runner_releases_the_admission_slot_when_the_run_ends(
     await _run_for(runner)
 
     lithos.task_claim.assert_awaited_once()
-    assert admission.released == ["task-1"]
+    assert admission.released == [("task-1", "story-develop")]
 
 
 async def test_runner_releases_the_admission_slot_on_a_lost_claim(
@@ -3263,4 +3263,4 @@ async def test_runner_releases_the_admission_slot_on_a_lost_claim(
     await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
     await _run_for(runner)
 
-    assert admission.released == ["task-1"]
+    assert admission.released == [("task-1", "story-develop")]
