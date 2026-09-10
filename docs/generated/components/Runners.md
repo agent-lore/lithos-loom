@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | M | 1 | 19 |
+| `lithos_loom.runner.git` | M | 1 | 20 |
 | `lithos_loom.runner.worktree` | S | 0 | 5 |
 
 ## Public API
@@ -45,6 +45,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `diff_stat` — Return ``git diff --stat base...HEAD`` — the branch's cumulative change.
 - def `merge` — Merge *ref* into *worktree*'s HEAD; return the conflicting paths.
 - def `merge_no_commit` — Merge *ref* into HEAD **without committing**; return the conflicting paths.
+- def `unmerged_paths` — The paths still unmerged in the index, exactly as named on disk.
 - def `abort_merge` — Abandon an in-progress merge, restoring the pre-merge tree.
 - def `merge_head` — The sha an in-progress merge is merging (``MERGE_HEAD``), else None.
 - def `merge_in_progress` — Whether *worktree* has a merge in progress (``MERGE_HEAD`` set) — resolved through ``--git-path`` so a linked worktree's private git dir is the one consulted.

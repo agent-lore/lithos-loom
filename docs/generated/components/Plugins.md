@@ -25,7 +25,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
-| `lithos_loom.plugins.story_develop.conflict_resolve` | S | 1 | 4 |
+| `lithos_loom.plugins.story_develop.conflict_resolve` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.converge` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |

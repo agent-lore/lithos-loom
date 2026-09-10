@@ -248,8 +248,7 @@ def merge(worktree: Path, ref: str, *, message: str) -> list[str]:
     )
     if result.returncode == 0:
         return []
-    unmerged = _git(worktree, "diff", "--name-only", "--diff-filter=U")
-    paths = unmerged.splitlines() if unmerged else []
+    paths = unmerged_paths(worktree)
     if not paths:
         # not a conflict — a bad ref, a dirty tree, an unrelated failure
         raise RuntimeError(
@@ -279,14 +278,38 @@ def merge_no_commit(worktree: Path, ref: str) -> list[str]:
     )
     if result.returncode == 0:
         return []
-    unmerged = _git(worktree, "diff", "--name-only", "--diff-filter=U")
-    paths = unmerged.splitlines() if unmerged else []
+    paths = unmerged_paths(worktree)
     if not paths:
         raise RuntimeError(
             f"git merge --no-commit {ref} failed (exit {result.returncode}): "
             f"{result.stderr.strip()}"
         )
     return paths
+
+
+def unmerged_paths(worktree: Path) -> list[str]:
+    """The paths still unmerged in the index, exactly as named on disk.
+
+    NUL-delimited (``-z``): the line form C-quotes non-ASCII paths and splits
+    a path containing a newline, so a guard or brief reading it would inspect
+    pseudo-paths while the real file kept its markers (PR #364 review).
+    """
+    result = subprocess.run(
+        ["git", "diff", "-z", "--name-only", "--diff-filter=U"],
+        cwd=worktree,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git diff -z --name-only --diff-filter=U failed "
+            f"(exit {result.returncode}): "
+            f"{result.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    return [
+        p.decode("utf-8", errors="surrogateescape")
+        for p in result.stdout.split(b"\0")
+        if p
+    ]
 
 
 def abort_merge(worktree: Path) -> None:

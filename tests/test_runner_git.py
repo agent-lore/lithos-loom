@@ -567,3 +567,54 @@ def test_conflict_markers_ignores_a_bare_separator_line(tmp_git_repo: Path) -> N
     assert git.conflict_markers(
         tmp_git_repo, ["doc.md", "half.txt", "full.txt", "missing.txt"]
     ) == ["half.txt", "full.txt"]
+
+
+def test_merge_no_commit_reports_unusual_conflict_paths_losslessly(
+    tmp_git_repo: Path,
+) -> None:
+    """PR #364 review round 2: `--name-only` C-quotes non-ASCII paths and a
+    newline splits one path in two — the guard and the brief would then look
+    at pseudo-paths while the real file keeps its markers. NUL-delimited
+    listing is lossless."""
+    _run(tmp_git_repo, "config", "core.quotePath", "true")  # git's default
+    names = ["café.md", "with space.txt", "new\nline.txt"]
+    for n in names:
+        (tmp_git_repo / n).write_text("v0\n")
+    _run(tmp_git_repo, "add", "-A")
+    _run(tmp_git_repo, "commit", "-q", "-m", "seed")
+    _run(tmp_git_repo, "switch", "-c", "story", "-q")
+    for n in names:
+        (tmp_git_repo / n).write_text("story\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "story")
+    _run(tmp_git_repo, "switch", "main", "-q")
+    for n in names:
+        (tmp_git_repo / n).write_text("base\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "base")
+    base_tip = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "story", "-q")
+
+    paths = git.merge_no_commit(tmp_git_repo, base_tip)
+
+    assert sorted(paths) == sorted(names)
+    assert sorted(git.conflict_markers(tmp_git_repo, paths)) == sorted(names)
+
+
+def test_merge_reports_unusual_conflict_paths_losslessly(tmp_git_repo: Path) -> None:
+    """The S3 merge-gate's conflict list (`[PRConflicted]` names these paths)
+    shares the NUL-delimited listing — a `café.md` conflict is reported as
+    `café.md`, not as git's C-quoted display form."""
+    _run(tmp_git_repo, "config", "core.quotePath", "true")
+    (tmp_git_repo / "café.md").write_text("v0\n")
+    _run(tmp_git_repo, "add", "-A")
+    _run(tmp_git_repo, "commit", "-q", "-m", "seed")
+    _run(tmp_git_repo, "switch", "-c", "story", "-q")
+    (tmp_git_repo / "café.md").write_text("story\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "story")
+    _run(tmp_git_repo, "switch", "main", "-q")
+    (tmp_git_repo / "café.md").write_text("base\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "base")
+    base_tip = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "story", "-q")
+
+    assert git.merge(tmp_git_repo, base_tip, message="m") == ["café.md"]
+    assert not (tmp_git_repo / ".git" / "MERGE_HEAD").exists()  # still aborted

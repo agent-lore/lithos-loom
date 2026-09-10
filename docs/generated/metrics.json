@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.config._parse_obsidian_sync"
       }
     ],
-    "total_functions": 1320
+    "total_functions": 1321
   },
   "domain": {
     "associations": 2,
@@ -455,10 +455,10 @@
         "functions": 404,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1103,
-        "lines": 15909,
+        "lines": 15949,
         "modules": 48,
         "public_symbols": 263,
-        "sloc": 12746
+        "sloc": 12783
       },
       "ProjectContext": {
         "classes": 0,
@@ -482,13 +482,13 @@
       },
       "Runners": {
         "classes": 1,
-        "functions": 39,
+        "functions": 40,
         "largest_module": "lithos_loom.runner.git",
-        "largest_module_lines": 338,
-        "lines": 842,
+        "largest_module_lines": 361,
+        "lines": 865,
         "modules": 5,
-        "public_symbols": 31,
-        "sloc": 661
+        "public_symbols": 32,
+        "sloc": 681
       },
       "Sources": {
         "classes": 11,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 51156,
+    "total_lines": 51219,
     "total_modules": 151,
-    "total_sloc": 41030
+    "total_sloc": 41087
   },
   "tests": {
     "ratio": 1.6,
-    "src_lines": 51156,
-    "test_lines": 81654
+    "src_lines": 51219,
+    "test_lines": 81740
   }
 }

@@ -15,6 +15,7 @@ by the pre-commit guard, never gated, reviewed or pushed.
 from __future__ import annotations
 
 import logging
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -239,30 +240,69 @@ def render_review_context(
     """The panel's merge-shaped context (PR #364 review F1). The fork-point
     diff the reviewers start from runs base tip → HEAD, so a conflicted path
     resolved to the BASE version is absent from it — the PR's change silently
-    dropped. Name the paths and both parents and give each side's diff."""
-    listed = " ".join(paths)
-    return "\n".join(
-        [
-            "## This is a conflict-resolution merge",
-            "",
-            f"HEAD composes the PR branch (head `{head_sha[:12]}`) with its base "
-            f"`{base_ref}` @ `{base_sha[:12]}`; the coder resolved conflicts in:",
-            "",
-            *(f"- `{p}`" for p in paths),
-            "",
-            "The `git diff` above runs from the base tip, so it shows the PR's work "
-            "on the new base — and a conflicted path resolved to the base's version "
-            "is **absent** from it. Inspect the resolution from BOTH parents:",
-            "",
-            f"- `git -C /workspace diff {head_sha[:12]} HEAD -- {listed}` — what the "
-            "resolution did to the PR's side. A path missing from the base-side diff "
-            "but present here was resolved to the base version: confirm the PR's "
-            "intent survived (or was genuinely superseded) before approving.",
-            f"- `git -C /workspace diff {base_sha[:12]} HEAD -- {listed}` — what it "
-            "did to the base's landed work.",
-            "- `git -C /workspace show --cc <merge commit>` — the merge commit's own "
-            "combined diff (only the hunks that differ from BOTH parents).",
-            "",
-            "Approve only if both intents survive, correctly composed.",
-        ]
+    dropped. Name the paths and both parents and give each side's diff.
+
+    Every command is a shell-quoted argv (paths are repository-controlled:
+    spaces, quotes, ``;``, ``$()``, globs, a leading ``:`` — and the reviewer
+    is told to run these verbatim), with pathspec magic disabled and the shas
+    in full (PR #364 review round 2).
+    """
+    git = ["git", "-C", "/workspace"]
+    pr_side = shlex.join(
+        [*git, "--literal-pathspecs", "diff", head_sha, "HEAD", "--", *paths]
     )
+    base_side = shlex.join(
+        [*git, "--literal-pathspecs", "diff", base_sha, "HEAD", "--", *paths]
+    )
+    # the merge commit is the first first-parent commit after the PR head; the
+    # inner rev-list is fixed text, so the substitution is safe to run as is
+    merge_commit = shlex.join(
+        [*git, "rev-list", "--first-parent", "--reverse", f"{head_sha}..HEAD"]
+    )
+    show_merge = f'{shlex.join([*git, "show", "--cc"])} "$({merge_commit} | head -n 1)"'
+    lines = [
+        "## This is a conflict-resolution merge",
+        "",
+        (
+            f"HEAD composes the PR branch (head `{head_sha[:12]}`) with its base "
+            f"`{base_ref}` @ `{base_sha[:12]}`; the coder resolved conflicts in:"
+        ),
+        "",
+        *(f"- `{p}`" for p in paths),
+        "",
+        (
+            "The `git diff` above runs from the base tip, so it shows the PR's "
+            "work on the new base — and a conflicted path resolved to the base's "
+            "version is **absent** from it. Inspect the resolution from BOTH "
+            "parents, running these exactly as written:"
+        ),
+        "",
+        (
+            "What the resolution did to the PR's side (a path missing from the "
+            "base-side diff but present here was resolved to the base version "
+            "— confirm the PR's intent survived, or was genuinely superseded, "
+            "before approving):"
+        ),
+        "",
+        "```",
+        pr_side,
+        "```",
+        "",
+        "What it did to the base's landed work:",
+        "",
+        "```",
+        base_side,
+        "```",
+        "",
+        (
+            "The merge commit's own combined diff (only hunks differing from "
+            "BOTH parents):"
+        ),
+        "",
+        "```",
+        show_merge,
+        "```",
+        "",
+        "Approve only if both intents survive, correctly composed.",
+    ]
+    return "\n".join(lines)

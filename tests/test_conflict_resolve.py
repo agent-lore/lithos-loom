@@ -87,10 +87,10 @@ def test_review_context_names_paths_and_both_parent_diffs() -> None:
         base_ref="origin/main",
     )
     assert "`shared.txt`" in text and "`docs/x.md`" in text
-    # both parents, and a per-side diff command the reviewer can run verbatim
-    assert f"git -C /workspace diff {'h' * 12}" in text
-    assert f"git -C /workspace diff {'b' * 12}" in text
-    assert "-- shared.txt docs/x.md" in text
+    # both parents in full, and a per-side diff command the reviewer can run
+    # verbatim (pathspec magic off, `--` before the paths)
+    assert f"--literal-pathspecs diff {'h' * 40} HEAD -- shared.txt docs/x.md" in text
+    assert f"--literal-pathspecs diff {'b' * 40} HEAD -- shared.txt docs/x.md" in text
     assert "origin/main" in text
     # the trap is spelled out: a path absent from the base-side diff was
     # resolved to the base version — check the PR's intent survived
@@ -163,3 +163,38 @@ def test_intake_merges_the_resolved_base_sha_when_base_ref_is_empty(
     assert intake is not None
     assert intake.base_sha == base_tip and intake.paths == ("shared.txt",)
     assert git.merge_in_progress(intake.worktree)
+
+
+def test_review_context_commands_are_shell_safe_and_literal() -> None:
+    """PR #364 review round 2: conflicted paths are repository-controlled and
+    the reviewer is told to run the commands verbatim — every argv must be
+    shell-quoted, pathspec magic disabled, shas in full, and the merge-commit
+    command runnable as written."""
+    import shlex
+
+    paths = (
+        "docs/My File.md",
+        "weird;echo INJECTED",
+        "glob*.txt",
+        ":leading-colon.txt",
+        "quote'd.txt",
+        "dollar$(id).txt",
+    )
+    text = render_review_context(
+        paths, head_sha="h" * 40, base_sha="b" * 40, base_ref="origin/main"
+    )
+    commands = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("git -C /workspace")
+    ]
+    assert len(commands) >= 3
+    for cmd in commands[:2]:
+        argv = shlex.split(cmd)
+        assert argv[:4] == ["git", "-C", "/workspace", "--literal-pathspecs"]
+        assert "--" in argv and argv[argv.index("--") + 1 :] == list(paths)
+        assert ("h" * 40) in argv or ("b" * 40) in argv  # full shas, not prefixes
+    assert not any("echo INJECTED" in c and ";" in shlex.split(c)[-1] for c in [])
+    assert "<merge commit>" not in text and "<" not in "".join(commands)
+    # the merge-commit command is one runnable line naming the PR head in full
+    assert any("show --cc" in c and ("h" * 40) in c for c in commands)
