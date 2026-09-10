@@ -3081,3 +3081,41 @@ async def test_a_definitive_not_ready_answer_resets_the_recheck_budget(
     await _run_for(runner)
 
     assert runner._rechecker._attempts.get("task-1") is None
+
+
+async def test_runner_recovers_a_retry_dropped_by_a_full_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #352 review round 4, end to end: the route's queue is full when the
+    re-check republishes (the bus drops it silently); once the runner drains
+    the backlog the still-armed re-check fires again and the task is claimed
+    — no edit, no restart."""
+    from lithos_loom.subscriptions import ready_recheck as rr
+
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.02)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX_SECONDS", 0.02)
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    lithos.task_get.return_value = _open_task()
+    lithos.task_blocked.return_value = [
+        SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
+        for i in range(READY_QUERY_LIMIT)
+    ]
+    full_ready = _ready(*(f"other-{i}" for i in range(READY_QUERY_LIMIT)))
+    answers = iter([full_ready, full_ready] + [_ready("task-1")] * 50)
+    lithos.task_ready.side_effect = lambda **kw: next(answers)
+
+    # one undetermined evaluation arms the re-check…
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner, seconds=0.01)
+    assert runner._rechecker.pending("task-1")
+    # …then the route's queue fills while the runner is busy elsewhere
+    for i in range(runner._subscription.queue.maxsize):
+        await bus.publish(_evt(payload=_payload(f"filler-{i}", status="completed")))
+    await asyncio.sleep(0.05)  # the re-check fires into the full queue: dropped
+    assert runner._subscription.drop_count >= 1
+    lithos.task_claim.assert_not_called()
+
+    await _run_for(runner, seconds=0.5)  # the runner drains; the retry fires again
+
+    lithos.task_claim.assert_called_once()

@@ -8,8 +8,10 @@ re-asks by republishing the task onto the bus as a synthetic
 ``lithos.task.updated`` (origin :data:`READY_RECHECK_ORIGIN`) after a delay
 that backs off exponentially to a cap, and it **never gives up** (PR #352
 review round 3: a bounded retry re-created the original failure once the
-bound was spent): one coalesced sleeper per task stays live until a
-definitive answer — ready, not ready, gone, terminal — resets it. In-process
+bound was spent): one coalesced sleeper per task stays armed — re-armed
+after every republish, because the bus is fire-and-forget and a full route
+queue drops an event silently — until a definitive answer (ready, not
+ready, gone, terminal) resets it. In-process
 state, deliberately: a restart's bootstrap replay re-asks every open task
 anyway.
 """
@@ -110,7 +112,11 @@ class ReadyRechecker:
         try:
             task = await self._lithos.task_get(task_id=task_id)
             if task is None or task.status != "open":
-                self._attempts.pop(task_id, None)  # gone / terminal: definitive
+                # gone / terminal: definitive — nothing to re-arm, and no
+                # stale pending entry left behind
+                self._attempts.pop(task_id, None)
+                if self._pending.get(task_id) is asyncio.current_task():
+                    self._pending.pop(task_id, None)
                 return
             await self._bus.publish(
                 Event(
@@ -126,9 +132,11 @@ class ReadyRechecker:
                 self._route,
                 task_id,
             )
+        # Acknowledgement-based (PR #352 review round 4): the bus is
+        # fire-and-forget — a full route queue drops the republish silently —
+        # so "published" is not "delivered". Re-arm the next sleeper NOW; only
+        # the runner's definitive answer (`settled()`) ends the retry, and an
+        # inconclusive one (`schedule()`) simply finds this sleeper pending.
+        if self._pending.get(task_id) is asyncio.current_task():
             self._pending.pop(task_id, None)
-            self.schedule(task_id)  # a failed read is itself undetermined
-            return
-        finally:
-            if self._pending.get(task_id) is asyncio.current_task():
-                self._pending.pop(task_id, None)
+        self.schedule(task_id)
