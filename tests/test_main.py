@@ -86,7 +86,14 @@ def test_dry_run_lists_matched_routes_per_task(
     assert "abc123" in result.output
     assert "route:prd-decompose" in result.output
     assert fake.calls_to("task_list") == [
-        {"status": "open", "with_claims": True, "resolved_since": None}
+        {
+            "status": "open",
+            "with_claims": True,
+            "resolved_since": None,
+            "tags": None,
+            "metadata_match": None,
+            "task_type": None,
+        }
     ]
 
 

@@ -29,14 +29,15 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_projection` | L | 0 | 1 |
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
-| `lithos_loom.subscriptions._project_settings` | S | 1 | 5 |
+| `lithos_loom.subscriptions._project_settings` | S | 1 | 7 |
 | `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
+| `lithos_loom.subscriptions.admission` | M | 4 | 0 |
 | `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
 | `lithos_loom.subscriptions.conflict_resolve_record` | S | 2 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
-| `lithos_loom.subscriptions.dispatch_guards` | M | 1 | 10 |
+| `lithos_loom.subscriptions.dispatch_guards` | L | 1 | 12 |
 | `lithos_loom.subscriptions.escalation` | M | 1 | 4 |
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
@@ -124,6 +125,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `origin_read` — The checkout's ``origin`` via ``git remote get-url`` — milliseconds, no network — as an :class:`OriginRead`.
 - def `origin_repo` — :func:`origin_read`'s ``repo`` alone (``None`` when unresolvable).
 - def `resolve_project_repo` — ``(slug, repo_path)`` via gate metadata, falling back to the story's (gate creation records ``project`` only when the payload carried it). ``None`` when no slug is known or the slug is not mapped under ``[projects]``.
+- def `read_project_metadata` — The project-context doc's metadata — the home of every per-project dial. Canonical path first, then the smallest ``project-context``-tagged doc under the project (the resolution ``daemon_io._fetch_context_metadata`` applies). ``{}`` when no doc exists (readable, keyless); ``None`` when Lithos could not be read — the two are different answers to a caller that must fail closed.
+- def `project_count` — A non-negative integer per-project dial from already-read metadata. Absent → *default*; present but not a non-negative ``int`` (``bool`` rejected) → *default* with a warning.
 - def `read_project_flag` — A boolean per-project dial from the context doc's metadata.
 
 ### `lithos_loom.subscriptions._subprocess`
@@ -131,6 +134,12 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
+
+### `lithos_loom.subscriptions.admission`
+- class `AdmissionLimits` — ``limit`` bounds non-escalated open ``pr`` gates; ``total`` bounds all of them. ``0`` = unlimited.
+- class `AdmissionVerdict` — What :meth:`Admission.admit` decided and why.
+- class `Admission` — The per-process admission gate every PR-producing route consults.
+- class `AdmissionWaker` — One subscriber per route-runner child: when a ``pr`` gate closes or a loom ``human`` gate escalates one, republish that project's deferred stories so the runner re-asks admission now rather than after the re-check backoff. A nudge only — the sleeper is the fallback.
 
 ### `lithos_loom.subscriptions.conflict_resolve_dispatch`
 - def `spawn_resolve` — Run the resolve subprocess (cancellation-safe, bounded).
@@ -159,6 +168,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.dispatch_guards`
 - def `last_attempt_key` — The task-metadata key holding ``route``'s last failed attempt.
 - def `task_fingerprint` — Fingerprint of the operator-shaped task fields (title, description, tags — order-insensitive).
+- def `project_of` — ``metadata.project`` when it is a non-empty string, else ``None``.
+- def `resolve_command` — Substitute the optional ``{{repo}}`` token from the projects map.
 - def `task_payload` — Build an event-shaped payload from a fresh :class:`Task` snapshot.
 - def `on_ready_frontier` — Is ``task_id`` on Lithos's ready frontier for this route? (US4)
 - def `classify_readiness` — Is *task* (a fresh snapshot) ready work, by Lithos's own answer?

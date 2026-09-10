@@ -123,6 +123,16 @@ class OrchestratorConfig:
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     log_level: LogLevel = DEFAULT_LOG_LEVEL
     retain_failed_workdirs: bool = True
+    max_open_delivered_prs: int = 1
+    """Serial admission (PRD pr-reconciliation S6): how many open ``pr``
+    gates — delivered-but-unmerged PRs, escalated ones excluded — a project
+    may hold before a PR-producing route stops claiming its ready stories.
+    ``0`` = unlimited. Per-project override: the same key in the context
+    doc's metadata."""
+    max_open_delivered_prs_total: int = 3
+    """The looser backstop: open ``pr`` gates INCLUDING escalated ones.
+    Reaching it stops dispatch and posts ``[AdmissionHeld]``. ``0`` =
+    unlimited; otherwise must be ``>= max_open_delivered_prs``."""
 
 
 @dataclass(frozen=True)
@@ -546,6 +556,17 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
     retain_failed = _optional_bool(
         data, "retain_failed_workdirs", True, config_path, "orchestrator"
     )
+    max_open = _optional_count(
+        data, "max_open_delivered_prs", 1, config_path, "orchestrator"
+    )
+    max_open_total = _optional_count(
+        data, "max_open_delivered_prs_total", 3, config_path, "orchestrator"
+    )
+    if max_open_total and max_open and max_open_total < max_open:
+        raise ConfigError(
+            f"{config_path}: orchestrator.max_open_delivered_prs_total must be 0 "
+            "or >= max_open_delivered_prs"
+        )
     return OrchestratorConfig(
         agent_id=agent_id,
         lithos_url=lithos_url,
@@ -553,6 +574,8 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
         max_concurrency=max_concurrency,
         log_level=log_level,
         retain_failed_workdirs=retain_failed,
+        max_open_delivered_prs=max_open,
+        max_open_delivered_prs_total=max_open_total,
     )
 
 
@@ -1164,6 +1187,16 @@ def _optional_int(
     raw = d.get(key, default)
     if not isinstance(raw, int):
         raise ConfigError(f"{path}: {scope}.{key} must be an integer")
+    return raw
+
+
+def _optional_count(
+    d: dict[str, Any], key: str, default: int, path: Path, scope: str
+) -> int:
+    """A non-negative integer (``bool`` is an ``int`` subclass and is rejected)."""
+    raw = d.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ConfigError(f"{path}: {scope}.{key} must be an integer >= 0")
     return raw
 
 

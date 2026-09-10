@@ -11,11 +11,19 @@ Async MCP-over-SSE client to the Lithos server (task/note CRUD, event stream, de
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.lithos_client` | XL | 12 | 0 |
+| `lithos_loom.lithos_client` | XL | 5 | 0 |
+| `lithos_loom.lithos_types` | S | 7 | 0 |
 
 ## Public API
 
 ### `lithos_loom.lithos_client`
+- class `TaskClient` — The task-facing Lithos surface: list / read / lifecycle / claim.
+- class `NoteClient` — The note-facing Lithos surface: read / write / list / delete.
+- class `FindingClient` — The finding-facing Lithos surface: post a finding against a task.
+- class `LithosClientProtocol` — The full role surface — for callers/tests that span more than one role (e.g. story-develop uses tasks + findings; project-import uses tasks + notes). ``LithosClient`` and the shared test fake both satisfy it.
+- class `LithosClient` — MCP-over-SSE client for the Lithos server.
+
+### `lithos_loom.lithos_types`
 - class `Task` — A Lithos task as returned by ``lithos_task_list``, ``lithos_task_status``, and ``lithos_task_get`` (lithos#294).
 - class `Note` — A full Lithos KB document as returned by ``lithos_read``.
 - class `NoteSummary` — Lightweight ``Note`` projection returned by ``lithos_list``.
@@ -23,11 +31,6 @@ Async MCP-over-SSE client to the Lithos server (task/note CRUD, event stream, de
 - class `TaskEdge` — One typed relation between two tasks, as returned by ``lithos_task_edge_list``.
 - class `Blocker` — Why a task is not ready, as returned inside ``lithos_task_blocked``.
 - class `BlockedTask` — A not-ready task plus its structured blocker reasons.
-- class `TaskClient` — The task-facing Lithos surface: list / read / lifecycle / claim.
-- class `NoteClient` — The note-facing Lithos surface: read / write / list / delete.
-- class `FindingClient` — The finding-facing Lithos surface: post a finding against a task.
-- class `LithosClientProtocol` — The full role surface — for callers/tests that span more than one role (e.g. story-develop uses tasks + findings; project-import uses tasks + notes). ``LithosClient`` and the shared test fake both satisfy it.
-- class `LithosClient` — MCP-over-SSE client for the Lithos server.
 
 ## Dependencies
 

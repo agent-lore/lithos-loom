@@ -277,16 +277,28 @@ class FakeLithosClient:
         status: str | None = None,
         with_claims: bool = False,
         resolved_since: datetime | None = None,
+        tags: list[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
+        task_type: str | None = None,
     ) -> list[Task]:
         self._record(
             "task_list",
             status=status,
             with_claims=with_claims,
             resolved_since=resolved_since,
+            tags=tags,
+            metadata_match=metadata_match,
+            task_type=task_type,
         )
         tasks = list(self._tasks.values())
         if status is not None:
             tasks = [t for t in tasks if t.status == status]
+        if tags:
+            tasks = [t for t in tasks if all(tag in t.tags for tag in tags)]
+        if metadata_match:
+            tasks = [t for t in tasks if _metadata_matches(t.metadata, metadata_match)]
+        if task_type is not None:
+            tasks = [t for t in tasks if t.task_type == task_type]
         if resolved_since is not None:
             tasks = [
                 t

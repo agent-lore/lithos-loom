@@ -1578,6 +1578,7 @@ async def test_completes_task_false_creates_pr_gate(
         "gate_type": "pr",
         "repo": "agent-lore/lithos-loom",
         "pr_number": 7,
+        "story_id": "task-1",
         "required_state": "merged",
         "pr_url": _PR_URL,
         "project": "p",
@@ -3119,3 +3120,147 @@ async def test_runner_recovers_a_retry_dropped_by_a_full_queue(
     await _run_for(runner, seconds=0.5)  # the runner drains; the retry fires again
 
     lithos.task_claim.assert_called_once()
+
+
+# ── serial admission (PRD pr-reconciliation S6) ─────────────────────────
+
+
+class _StubAdmission:
+    """An admission gate answering a scripted sequence of verdicts."""
+
+    def __init__(self, *admitted: bool) -> None:
+        from lithos_loom.subscriptions.admission import AdmissionLimits
+
+        self._answers = list(admitted)
+        self._limits = AdmissionLimits(limit=1, total=3)
+        self.calls: list[tuple[str, str | None]] = []
+        self.released: list[str] = []
+
+    def release(self, task_id: str) -> None:
+        self.released.append(task_id)
+
+    async def admit(self, *, task_id: str, project: str | None) -> Any:
+        from lithos_loom.subscriptions.admission import AdmissionVerdict
+
+        self.calls.append((task_id, project))
+        admitted = self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+        return AdmissionVerdict(
+            admitted=admitted,
+            reason="admitted" if admitted else "limit",
+            open_gates=0 if admitted else 1,
+            escalated=0,
+            limits=self._limits,
+        )
+
+
+def _delivering_runner(
+    bus: EventBus, work_dir: Path, admission: Any
+) -> tuple[RouteRunner, AsyncMock]:
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=work_dir, route=_route(completes_task=False)
+    )
+    runner.admission = admission
+    return runner, lithos
+
+
+async def test_runner_defers_a_refused_story_and_rechecks(tmp_path: Path) -> None:
+    bus = EventBus()
+    admission = _StubAdmission(False)
+    runner, lithos = _delivering_runner(bus, tmp_path, admission)
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_awaited()
+    assert admission.calls == [("task-1", "lens")]
+    # the re-check sleeper is the fallback nudge; the waker is the fast path
+    assert runner._rechecker.pending("task-1") is True
+
+
+async def test_runner_claims_an_admitted_story(tmp_path: Path) -> None:
+    bus = EventBus()
+    admission = _StubAdmission(True)
+    runner, lithos = _delivering_runner(bus, tmp_path, admission)
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    assert runner._rechecker.pending("task-1") is False
+
+
+async def test_completing_routes_never_consult_admission(tmp_path: Path) -> None:
+    """Only a PR-producing route (``completes_task = false``) leaves a
+    delivered PR behind; an ordinary route has nothing to serialise."""
+    bus = EventBus()
+    admission = _StubAdmission(False)
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, route=_route(completes_task=True)
+    )
+    runner.admission = admission
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    assert admission.calls == []
+
+
+async def test_admission_is_asked_only_for_a_ready_story(tmp_path: Path) -> None:
+    bus = EventBus()
+    admission = _StubAdmission(True)
+    runner, lithos = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        route=_route(completes_task=False),
+        ready_ids=("someone-else",),
+    )
+    runner.admission = admission
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_awaited()
+    assert admission.calls == []
+
+
+async def test_admission_recheck_nudge_claims_once_admitted(tmp_path: Path) -> None:
+    from lithos_loom.subscriptions.admission import ADMISSION_RECHECK_ORIGIN
+
+    bus = EventBus()
+    admission = _StubAdmission(False, True)
+    runner, lithos = _delivering_runner(bus, tmp_path, admission)
+    payload = _payload(metadata={"project": "lens"})
+    await bus.publish(_evt(payload=payload))
+    await _run_for(runner)
+    lithos.task_claim.assert_not_awaited()
+
+    await bus.publish(
+        _evt("lithos.task.updated", payload=payload, origin=ADMISSION_RECHECK_ORIGIN)
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    assert runner._rechecker.pending("task-1") is False
+
+
+async def test_runner_releases_the_admission_slot_when_the_run_ends(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    admission = _StubAdmission(True)
+    runner, lithos = _delivering_runner(bus, tmp_path, admission)
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    assert admission.released == ["task-1"]
+
+
+async def test_runner_releases_the_admission_slot_on_a_lost_claim(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    admission = _StubAdmission(True)
+    runner, lithos = _delivering_runner(bus, tmp_path, admission)
+    lithos.task_claim.side_effect = LithosClientError("claim_failed", "taken")
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    assert admission.released == ["task-1"]

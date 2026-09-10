@@ -2658,3 +2658,30 @@ async def test_task_complete_returns_empty_when_no_unblocked_key() -> None:
     degrades to an empty unblocked set rather than raising."""
     client, _ = _client_with_session(_content({"success": True}))
     assert await client.task_complete(task_id="blocker") == []
+
+
+async def test_task_list_forwards_the_graph_filters_only_when_given() -> None:
+    """S6 admission counts a project's open ``pr`` gates with one filtered
+    read; the pre-filter wire shape stays identical when nothing is passed."""
+    client, session = _client_with_session(_content({"tasks": []}))
+    await client.task_list(status="open")
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_list", arguments={"with_claims": False, "status": "open"}
+    )
+    session.call_tool.reset_mock()
+    await client.task_list(
+        status="open",
+        task_type="gate",
+        tags=["project:lens"],
+        metadata_match={"gate_type": "pr", "project": "lens"},
+    )
+    session.call_tool.assert_awaited_once_with(
+        "lithos_task_list",
+        arguments={
+            "with_claims": False,
+            "status": "open",
+            "tags": ["project:lens"],
+            "metadata_match": {"gate_type": "pr", "project": "lens"},
+            "task_type": "gate",
+        },
+    )

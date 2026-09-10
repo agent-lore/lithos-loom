@@ -46,7 +46,14 @@ async def test_task_list_filters_by_status_and_records() -> None:
     got = await client.task_list(status="open")
     assert [t.id for t in got] == ["t1"]
     assert client.calls_to("task_list") == [
-        {"status": "open", "with_claims": False, "resolved_since": None}
+        {
+            "status": "open",
+            "with_claims": False,
+            "resolved_since": None,
+            "tags": None,
+            "metadata_match": None,
+            "task_type": None,
+        }
     ]
 
 

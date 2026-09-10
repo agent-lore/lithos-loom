@@ -1238,3 +1238,60 @@ def test_notifications_rejects_ill_typed_values(
     _write_config(tmp_path, monkeypatch, body)
     with pytest.raises(ConfigError, match="notifications"):
         load_config()
+
+
+# ── serial admission dials (PRD pr-reconciliation S6) ────────────────────
+
+
+def test_admission_dials_default_to_one_and_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, monkeypatch, "")
+    cfg = load_config()
+    assert cfg.orchestrator.max_open_delivered_prs == 1
+    assert cfg.orchestrator.max_open_delivered_prs_total == 3
+
+
+def test_admission_dials_parse_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        _MINIMAL_ORCHESTRATOR_TOML.replace(
+            'lithos_url = "http://localhost:8765"',
+            'lithos_url = "http://localhost:8765"\n'
+            "max_open_delivered_prs = 0\n"
+            "max_open_delivered_prs_total = 6\n",
+        )
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    cfg = load_config()
+    assert cfg.orchestrator.max_open_delivered_prs == 0
+    assert cfg.orchestrator.max_open_delivered_prs_total == 6
+
+
+@pytest.mark.parametrize(
+    ("body", "fragment"),
+    [
+        ("max_open_delivered_prs = -1\n", "max_open_delivered_prs must be"),
+        ("max_open_delivered_prs = true\n", "max_open_delivered_prs must be"),
+        ("max_open_delivered_prs_total = 2.5\n", "max_open_delivered_prs_total"),
+        (
+            "max_open_delivered_prs = 4\nmax_open_delivered_prs_total = 2\n",
+            "max_open_delivered_prs_total must be 0 or >= max_open_delivered_prs",
+        ),
+    ],
+)
+def test_admission_dials_reject_bad_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, fragment: str
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        _MINIMAL_ORCHESTRATOR_TOML.replace(
+            'lithos_url = "http://localhost:8765"',
+            'lithos_url = "http://localhost:8765"\n' + body,
+        )
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match=fragment):
+        load_config()
