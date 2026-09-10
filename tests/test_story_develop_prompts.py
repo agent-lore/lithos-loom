@@ -15,9 +15,9 @@ import pytest
 from lithos_loom.plugins.story_develop.config import ReviewerSpec
 from lithos_loom.plugins.story_develop.develop import _coder_handoff_nudge
 from lithos_loom.plugins.story_develop.handoff import load_prompt
-from lithos_loom.plugins.story_develop.panel import (
+from lithos_loom.plugins.story_develop.panel_prompts import (
     SEVERITY_CALIBRATION,
-    _reviewer_brief,
+    reviewer_brief,
 )
 
 
@@ -147,14 +147,14 @@ def test_severity_calibration_defines_all_three_levels() -> None:
 
 def test_reviewer_brief_adds_focus_discipline_when_a_focus_is_set() -> None:
     spec = ReviewerSpec(name="security", system_prompt="Find injection bugs.")
-    brief = _reviewer_brief(spec)
+    brief = reviewer_brief(spec)
     assert "Find injection bugs." in brief
     assert "Stay strictly within this focus" in brief
 
 
 def test_reviewer_brief_is_empty_for_the_generalist_default() -> None:
     # The zero-config code-quality reviewer has no focus; its prompt is unchanged.
-    assert _reviewer_brief(ReviewerSpec(name="code-quality")) == ""
+    assert reviewer_brief(ReviewerSpec(name="code-quality")) == ""
 
 
 def test_reviewer_templates_carry_the_artifacts_note_slot() -> None:
@@ -263,3 +263,17 @@ def test_external_triage_prompt_defaults_to_act_and_demands_evidence() -> None:
     assert "a reject without evidence is treated as proceed" in text
     assert "{findings}" in raw and "{handoff_file}" in raw
     assert "non-interactive turn" in text and "never background" in text
+
+
+def test_resolve_coder_init_tells_the_coder_the_merge_rules() -> None:
+    """S5: the conflict-resolution round-1 prompt — the merge is IN PROGRESS
+    in /workspace; the coder resolves the marked files honouring BOTH sides,
+    never runs git merge/commit/abort/reset, and writes the handoff."""
+    raw = load_prompt("resolve_coder_init.md")
+    slots = ("{acceptance_criteria}", "{conflict_brief}", "{handoff_file}")
+    for slot in (*slots, "{sandbox_facts}"):
+        assert slot in raw
+    text = " ".join(raw.lower().split())
+    assert "in progress" in text and "<<<<<<<" in raw
+    assert "both" in text
+    assert "do not commit" in text and "abort" in text

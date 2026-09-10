@@ -447,3 +447,174 @@ def test_delete_branch_removes_a_non_checked_out_branch(tmp_git_repo: Path) -> N
     assert names.strip() == ""
     with pytest.raises(RuntimeError):
         git.delete_branch(tmp_git_repo, "throwaway")  # already gone → loud
+
+
+# ── S5 conflict convergence: a merge left IN PROGRESS for a coder to resolve ──
+
+
+def _conflicting_branches(repo: Path) -> tuple[str, str]:
+    """story + main both edit shared.txt; returns (story head, main tip)."""
+    (repo / "shared.txt").write_text("v0\n")
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-m", "seed")
+    _run(repo, "switch", "-c", "story", "-q")
+    (repo / "shared.txt").write_text("story\n")
+    _commit(repo, "own.txt", "story")
+    head = git.base_sha(repo)
+    _run(repo, "switch", "main", "-q")
+    (repo / "shared.txt").write_text("base\n")
+    _commit(repo, "base.txt", "base")
+    base_tip = git.base_sha(repo)
+    _run(repo, "switch", "story", "-q")
+    return head, base_tip
+
+
+def test_merge_no_commit_conflict_leaves_the_merge_in_progress(
+    tmp_git_repo: Path,
+) -> None:
+    head, base_tip = _conflicting_branches(tmp_git_repo)
+
+    paths = git.merge_no_commit(tmp_git_repo, base_tip)
+
+    assert paths == ["shared.txt"]
+    # in progress: HEAD unmoved, MERGE_HEAD names the base, markers in the file
+    assert git.base_sha(tmp_git_repo) == head
+    assert (tmp_git_repo / ".git" / "MERGE_HEAD").read_text().strip() == base_tip
+    assert "<<<<<<<" in (tmp_git_repo / "shared.txt").read_text()
+    assert git.conflict_markers(tmp_git_repo, paths) == ["shared.txt"]
+
+    # a resolution without markers clears the guard, and committing everything
+    # yields a REAL merge commit (parents: story head, then the base tip)
+    (tmp_git_repo / "shared.txt").write_text("story+base\n")
+    assert git.conflict_markers(tmp_git_repo, paths) == []
+    merged = git.commit_all(tmp_git_repo, "resolve")
+    assert merged is not None
+    parents = subprocess.run(
+        ["git", "log", "-1", "--format=%P", merged],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert parents == [head, base_tip]
+    assert not (tmp_git_repo / ".git" / "MERGE_HEAD").exists()
+
+
+def test_merge_no_commit_clean_stages_without_committing(tmp_git_repo: Path) -> None:
+    _run(tmp_git_repo, "switch", "-c", "story", "-q")
+    _commit(tmp_git_repo, "own.txt", "story")
+    head = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "main", "-q")
+    _commit(tmp_git_repo, "base.txt", "base")
+    base_tip = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "story", "-q")
+
+    assert git.merge_no_commit(tmp_git_repo, base_tip) == []
+    assert git.base_sha(tmp_git_repo) == head  # nothing committed
+    assert (tmp_git_repo / ".git" / "MERGE_HEAD").exists()
+    git.abort_merge(tmp_git_repo)
+    assert not (tmp_git_repo / ".git" / "MERGE_HEAD").exists()
+    assert git.has_uncommitted_changes(tmp_git_repo) is False
+
+
+def test_conflict_markers_reports_only_paths_still_marked(tmp_git_repo: Path) -> None:
+    (tmp_git_repo / "a.txt").write_text("<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> base\n")
+    (tmp_git_repo / "b.txt").write_text("clean\n")
+    _run(tmp_git_repo, "add", "-A")
+    assert git.conflict_markers(tmp_git_repo, ["a.txt", "b.txt"]) == ["a.txt"]
+    assert git.conflict_markers(tmp_git_repo, []) == []
+
+
+def test_commit_all_records_a_keep_ours_resolution_as_a_merge_commit(
+    tmp_git_repo: Path,
+) -> None:
+    """Self-review of the S5 CLI half: resolving every conflict by keeping
+    HEAD's side leaves the staged tree EQUAL to HEAD — an empty cached diff —
+    but the merge still has to be recorded (a two-parent commit is what makes
+    the base tip an ancestor). The empty-diff short-circuit must not apply
+    while a merge is in progress."""
+    head, base_tip = _conflicting_branches(tmp_git_repo)
+    assert git.merge_no_commit(tmp_git_repo, base_tip) == ["shared.txt"]
+    assert git.merge_in_progress(tmp_git_repo)
+    (tmp_git_repo / "shared.txt").write_text("story\n")  # keep ours
+    _run(tmp_git_repo, "add", "shared.txt")
+    assert git.conflict_markers(tmp_git_repo, ["shared.txt"]) == []
+
+    merged = git.commit_all(tmp_git_repo, "resolve: keep ours")
+
+    assert merged is not None and merged != head
+    parents = subprocess.run(
+        ["git", "log", "-1", "--format=%P", merged],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert parents == [head, base_tip]
+    assert not git.merge_in_progress(tmp_git_repo)
+    # and with no merge in progress the short-circuit still holds
+    assert git.commit_all(tmp_git_repo, "nothing") is None
+
+
+def test_conflict_markers_ignores_a_bare_separator_line(tmp_git_repo: Path) -> None:
+    """A setext underline / banner of exactly seven '=' is not a conflict;
+    only the three-marker shape (<<<<<<< … ======= … >>>>>>>) counts."""
+    (tmp_git_repo / "doc.md").write_text("Title\n=======\n\nbody\n")
+    (tmp_git_repo / "half.txt").write_text("<<<<<<< HEAD\nours\n=======\ntheirs\n")
+    (tmp_git_repo / "full.txt").write_text(
+        "x\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> base\ny\n"
+    )
+    assert git.conflict_markers(
+        tmp_git_repo, ["doc.md", "half.txt", "full.txt", "missing.txt"]
+    ) == ["half.txt", "full.txt"]
+
+
+def test_merge_no_commit_reports_unusual_conflict_paths_losslessly(
+    tmp_git_repo: Path,
+) -> None:
+    """PR #364 review round 2: `--name-only` C-quotes non-ASCII paths and a
+    newline splits one path in two — the guard and the brief would then look
+    at pseudo-paths while the real file keeps its markers. NUL-delimited
+    listing is lossless."""
+    _run(tmp_git_repo, "config", "core.quotePath", "true")  # git's default
+    names = ["café.md", "with space.txt", "new\nline.txt"]
+    for n in names:
+        (tmp_git_repo / n).write_text("v0\n")
+    _run(tmp_git_repo, "add", "-A")
+    _run(tmp_git_repo, "commit", "-q", "-m", "seed")
+    _run(tmp_git_repo, "switch", "-c", "story", "-q")
+    for n in names:
+        (tmp_git_repo / n).write_text("story\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "story")
+    _run(tmp_git_repo, "switch", "main", "-q")
+    for n in names:
+        (tmp_git_repo / n).write_text("base\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "base")
+    base_tip = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "story", "-q")
+
+    paths = git.merge_no_commit(tmp_git_repo, base_tip)
+
+    assert sorted(paths) == sorted(names)
+    assert sorted(git.conflict_markers(tmp_git_repo, paths)) == sorted(names)
+
+
+def test_merge_reports_unusual_conflict_paths_losslessly(tmp_git_repo: Path) -> None:
+    """The S3 merge-gate's conflict list (`[PRConflicted]` names these paths)
+    shares the NUL-delimited listing — a `café.md` conflict is reported as
+    `café.md`, not as git's C-quoted display form."""
+    _run(tmp_git_repo, "config", "core.quotePath", "true")
+    (tmp_git_repo / "café.md").write_text("v0\n")
+    _run(tmp_git_repo, "add", "-A")
+    _run(tmp_git_repo, "commit", "-q", "-m", "seed")
+    _run(tmp_git_repo, "switch", "-c", "story", "-q")
+    (tmp_git_repo / "café.md").write_text("story\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "story")
+    _run(tmp_git_repo, "switch", "main", "-q")
+    (tmp_git_repo / "café.md").write_text("base\n")
+    _run(tmp_git_repo, "commit", "-q", "-am", "base")
+    base_tip = git.base_sha(tmp_git_repo)
+    _run(tmp_git_repo, "switch", "story", "-q")
+
+    assert git.merge(tmp_git_repo, base_tip, message="m") == ["café.md"]
+    assert not (tmp_git_repo / ".git" / "MERGE_HEAD").exists()  # still aborted

@@ -14,7 +14,7 @@ adding no new loop of its own (ADR 0004 §1 — the fix loop is single-sourced):
    (the same rule review-only's report applies) decides whether it blocks. A
    non-blocking intake short-circuits to ``already_clean`` before any coder
    container is built (the cheapest path for the common re-check).
-2. **Fix loop** — :func:`develop` entered via a :class:`~.rounds.LoopEntry` that
+2. **Fix loop** — :func:`develop` entered via a :class:`~.loop_entry.LoopEntry` that
    positions a committable worktree at the PR head, diffs against the PR
    merge-base, and seeds round 1's cold-start coder from the intake review
    (converge PR 2). The loop's own ``approved`` / ``disputed`` / ``stalled`` /
@@ -40,6 +40,12 @@ from typing import Literal
 from ...runner import git, worktree
 from . import handoff, review_only
 from .config import DevelopConfig
+from .conflict_resolve import (
+    UnsupportedConflict,
+    markers_guard,
+    prepare_conflict_intake,
+    render_review_context,
+)
 from .develop import DevelopResult, develop
 from .external_reviews import (
     CoderAck,
@@ -52,9 +58,9 @@ from .external_reviews import (
 )
 from .external_triage import triage_external_findings
 from .findings import DeferredFinding
+from .loop_entry import LoopEntry
 from .pr_delivery import ForkPushUnsupported, MergeRaceDetected, push_to_pr_ref
 from .review_resolve import ResolvedChange
-from .rounds import LoopEntry
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +75,25 @@ ConvergeStatus = Literal[
     "merged",
     "merge_race",
     "failed",
+    "no_conflict",
+    "conflict_unsupported",
 ]
+
+
+@dataclass(frozen=True)
+class ConflictSummary:
+    """Resolve mode (PRD S5): what the run set out to resolve."""
+
+    paths: tuple[str, ...]
+    base_ref: str
+    base_sha: str
+
+    def to_json(self) -> dict:
+        return {
+            "paths": list(self.paths),
+            "base_ref": self.base_ref,
+            "base_sha": self.base_sha,
+        }
 
 
 @dataclass(frozen=True)
@@ -121,6 +145,9 @@ class ConvergeResult:
     # rejections (with evidence) + the coder's round-1 claims — for the
     # caller's thread-reply epilogue. Empty on the local-panel path.
     external_outcomes: tuple[ExternalOutcome, ...] = ()
+    # Resolve mode (PRD S5): the conflict this run addressed; None on the
+    # other modes and on a `no_conflict` exit.
+    conflict: ConflictSummary | None = None
 
     @property
     def deferred_findings(self) -> tuple[DeferredFinding, ...]:
@@ -180,6 +207,7 @@ class ConvergeResult:
             "deferred_findings": deferred,
             "external_outcomes": external,
             "status": self.status,
+            "conflict": self.conflict.to_json() if self.conflict else None,
             # The one success verdict (PR #361 review): a consumer that
             # judged by `status == "converged"` read `triage_rejected` —
             # every external claim refuted with evidence — as a failure.
@@ -207,6 +235,7 @@ def converge_pr(
     coder_timeout: int = 3600,
     reviewer_timeout: int = 3600,
     external_findings: tuple[ExternalFinding, ...] | None = None,
+    resolve_conflicts: bool = False,
 ) -> ConvergeResult:
     """Run the review-convergence loop against an existing PR *change*.
 
@@ -232,6 +261,8 @@ def converge_pr(
         )
     if config.max_rounds < 1:
         raise ValueError(f"max_rounds must be >= 1, got {config.max_rounds}")
+    if resolve_conflicts and external_findings is not None:
+        raise ValueError("resolve_conflicts and external_findings are exclusive modes")
     # Same fail-fast rationale for the change itself: converge delivers to a PR
     # head branch. A range/branch-resolved change (no pushable branch) would
     # spend the whole intake + loop and then die in the push epilogue with a
@@ -270,6 +301,15 @@ def converge_pr(
                 f"PR {change.head_ref} head is on a fork; converge cannot push "
                 "fixes back under origin credentials"
             ),
+        )
+
+    if resolve_conflicts:
+        return _resolve_conflicts(
+            config,
+            change,
+            no_push=no_push,
+            coder_timeout=coder_timeout,
+            reviewer_timeout=reviewer_timeout,
         )
 
     if external_findings is not None:
@@ -486,6 +526,97 @@ def converge_pr(
     )
 
 
+def _resolve_conflicts(
+    config: DevelopConfig,
+    change: ResolvedChange,
+    *,
+    no_push: bool,
+    coder_timeout: int,
+    reviewer_timeout: int,
+) -> ConvergeResult:
+    """Resolve mode (PRD S5): the merge in progress is the intake; round 1
+    resolves it, the loop's own gate + panel judge the composed tree."""
+    try:
+        intake = prepare_conflict_intake(config, change)
+    except UnsupportedConflict as exc:
+        return ConvergeResult(
+            status="conflict_unsupported",
+            change=change,
+            conflict=ConflictSummary(
+                paths=exc.paths,
+                base_ref=change.base_ref or change.base_sha,
+                base_sha=exc.base_sha,
+            ),
+            message=(
+                f"PR {change.head_ref} conflicts with its base in a shape this "
+                f"mode cannot resolve by editing — {exc}; no agent ran, nothing "
+                "pushed; a human must resolve it"
+            ),
+        )
+    if intake is None:
+        return ConvergeResult(
+            status="no_conflict",
+            change=change,
+            message=(
+                f"PR {change.head_ref} merges cleanly with its base "
+                f"({change.base_ref or config.base_branch}) — nothing to resolve; "
+                "the base-move re-gate handles a clean merge"
+            ),
+        )
+    summary = ConflictSummary(
+        paths=intake.paths, base_ref=intake.base_ref, base_sha=intake.base_sha
+    )
+    entry = LoopEntry(
+        worktree_factory=lambda _cfg: intake.worktree,
+        # the fork point moves to the base tip once round 1 commits the merge
+        base_override=git.RangeBase(change.base_sha, intake.base_ref),
+        intake_reviews=[],
+        intake_check_set=None,
+        coder_init_template="resolve_coder_init.md",
+        coder_init_extra={"conflict_brief": intake.brief},
+        pre_commit_guard=markers_guard(
+            intake.paths, head_sha=change.head_sha, base_sha=intake.base_sha
+        ),
+        review_context=render_review_context(
+            intake.paths,
+            head_sha=change.head_sha,
+            base_sha=intake.base_sha,
+            base_ref=intake.base_ref,
+        ),
+    )
+    result = _loop_and_deliver(
+        config,
+        change,
+        entry,
+        no_push=no_push,
+        coder_timeout=coder_timeout,
+        reviewer_timeout=reviewer_timeout,
+        pre_loop_cost=0.0,
+        intake_deferred=(),
+        external_epilogue=None,
+        deliverable=_contains_base(intake.base_sha),
+    )
+    return dataclasses.replace(result, conflict=summary)
+
+
+def _contains_base(base_sha: str) -> Callable[[DevelopResult], str | None]:
+    """Resolve mode's delivery precondition (PR #364 review F2): the push
+    epilogue proves descent from the PR head only, so before pushing an
+    approved tree prove the intended base is an ancestor of it — a loop that
+    somehow approved a tree without the merge is `failed`, never pushed."""
+
+    def check(result: DevelopResult) -> str | None:
+        head = git.commit_sha(result.worktree)
+        if git.is_ancestor(result.worktree, base_sha, head):
+            return None
+        return (
+            f"the intended base {base_sha[:12]} is not an ancestor of the "
+            f"approved HEAD {head[:12]} — the base merge did not land; not pushed"
+        )
+
+    return check
+
+
 def _loop_and_deliver(
     config: DevelopConfig,
     change: ResolvedChange,
@@ -497,8 +628,13 @@ def _loop_and_deliver(
     pre_loop_cost: float,
     intake_deferred: tuple[DeferredFinding, ...],
     external_epilogue: Callable[[DevelopResult], tuple[ExternalOutcome, ...]] | None,
+    deliverable: Callable[[DevelopResult], str | None] | None = None,
 ) -> ConvergeResult:
-    """The shared fix-loop + push tail (single-sourced across both modes).
+    """The shared fix-loop + push tail (single-sourced across all modes).
+
+    ``deliverable``, when set, is a precondition checked on an APPROVED
+    result before the push epilogue; a non-None reason makes the run
+    ``failed`` (nothing pushed).
 
     ``pre_loop_cost`` is whatever was spent before the loop — the local-panel
     intake, or external mode's triage turn — and lands in the result's
@@ -539,6 +675,19 @@ def _loop_and_deliver(
             intake_deferred=intake_deferred,
             external_outcomes=external_outcomes,
             message=result.message,
+        )
+
+    refused = deliverable(result) if deliverable is not None else None
+    if refused is not None:
+        return ConvergeResult(
+            status="failed",
+            change=change,
+            develop_result=result,
+            fixer_commits=fixer_commits,
+            intake_cost_usd=pre_loop_cost,
+            intake_deferred=intake_deferred,
+            external_outcomes=external_outcomes,
+            message=refused,
         )
 
     # --- push epilogue: fast-forward the fixed branch onto the PR head ref ---

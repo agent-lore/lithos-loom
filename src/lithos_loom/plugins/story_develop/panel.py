@@ -40,7 +40,7 @@ from .agent_session import (
     build_run_cmd,
     resume_after_from,
 )
-from .check_set import CheckSetResult, render_check_summary
+from .check_set import CheckSetResult
 from .config import DevelopConfig
 from .findings import FindingLedger, reviewer_validator
 from .gate_findings import GateLedger
@@ -52,6 +52,11 @@ from .handoff import (
     render_prompt,
 )
 from .model_policy import active_model
+from .panel_prompts import (
+    context_block,
+    reviewer_brief,
+    round_prompt,
+)
 from .rounds import Services
 from .sandbox_facts import for_prompt as _sandbox_section
 from .turns import TurnResult
@@ -112,90 +117,6 @@ class PanelRoundResult:
 
 
 # --- prompt / rendering helpers --------------------------------------------
-
-
-# Shared severity rubric injected into every reviewer prompt (#137, ADR 0003 §8)
-# so the panel calibrates the same way; the orchestrator then applies each
-# reviewer's per-persona ``block_threshold`` to decide what actually blocks.
-SEVERITY_CALIBRATION = """## Severity calibration
-
-Give each finding the severity the orchestrator will weigh against this
-reviewer's threshold. Calibrate consistently across the panel:
-
-- **critical** — a security vulnerability, a data-loss risk, or a correctness
-  defect that breaks an acceptance criterion.
-- **major** — a real bug or a significant quality / maintainability problem that
-  should be fixed before merge.
-- **minor** — a style, naming, or low-impact maintainability nit; recorded but
-  usually non-blocking.
-
-Assign the honest severity — do not inflate to force a block or deflate to dodge
-one. The threshold decision is the orchestrator's, not yours."""
-
-
-def _reviewer_brief(spec) -> str:
-    """The optional per-reviewer focus paragraph + lane discipline for its prompts.
-
-    A focused persona (``system_prompt`` set) is told to stay strictly in its
-    dimension so the panel does not produce N overlapping general reviews. The
-    generalist default (no ``system_prompt``) is unchanged — empty string.
-    """
-    if not spec.system_prompt:
-        return ""
-    return (
-        f"\n## Your focus\n\n{spec.system_prompt}\n\n"
-        "**Stay strictly within this focus.** Record only findings in this "
-        "dimension — another reviewer owns the rest; do not report outside your "
-        "lane.\n"
-    )
-
-
-def _artifact_reviewer_brief(spec) -> str:
-    """The reviewer's responsibility on the ARTIFACT pass (#308 review).
-
-    Deliberately **not** the code-review brief, and this is a documented
-    exception to ``ReviewerSpec.system_prompt`` — see below, it was measured.
-
-    Those briefs narrow hard: "judge only what this change does to the
-    dependencies — nothing else", "find ways this change can be abused —
-    nothing else", plus the stay-in-your-lane rule :func:`_reviewer_brief`
-    appends; ``dependency-hygiene`` adds "if it adds or bumps no dependency, a
-    quick LGTM is the right answer". On a pass about screenshots that is a
-    licence to rubber-stamp, so injecting them handed every persona but
-    ``correctness`` two incompatible orders.
-
-    Re-attaching the brief as an *additive* lens with its narrowing language
-    explicitly suspended was tried, because dropping it discards a project pool's
-    configured speciality (#308 review 2). Measured on ``lens22-artifact-prewrap``
-    with ``dependency-hygiene``, K=3 — the catch never moved, and the clean
-    render is the only thing that changed:
-
-    ==================================  ======  ==========================
-    artifact brief                      catch   known-good runs that BLOCK
-    ==================================  ======  ==========================
-    mandate only (this)                 3/3     0/3
-    + brief re-attached, suspended       3/3     3/3  (1-4 findings each)
-    + brief re-attached, scope-guarded   3/3     2/3  (1 finding each)
-    ==================================  ======  ==========================
-
-    A reviewer holding approval on correct pages is a broken gate, and the
-    residue is exactly the sharpened-eye-turned-noise failure mode: on the
-    *fixed* render it filed "the top-level heading has no space above it".
-    A speciality worth having on this surface (accessibility, brand,
-    design-system) is better served by a reviewer that *is* one than by a
-    dependency reviewer wearing its hat — the artifact panel's composition is
-    RH-9's question. Engine, model and block threshold still vary per persona.
-    """
-    return (
-        "\n## Your focus\n\n"
-        f"You are the **{spec.name}** reviewer. This is not a code review: on "
-        "this pass you are the only reviewer looking at these rendered pages, "
-        "so **every rendering defect is yours to report** — whichever code "
-        "dimension it would otherwise belong to, and however much it reads as "
-        "styling. That widens what you look **for**, not what counts as a "
-        "defect: report what a user would experience as wrong on the page in "
-        "front of you, never work this change did not claim to do.\n"
-    )
 
 
 def _read_review(path: Path) -> tuple[ReviewHandoff | None, str | None]:
@@ -459,6 +380,7 @@ def _run_reviewer_with_reaction(
     review_file: str | None = None,
     reseed_prompt_override: str | None = None,
     skip_lifecycle_validation: bool = False,
+    review_context: str = "",
 ) -> tuple[ReviewOutcome, float, bool, datetime | None]:
     """One reviewer's round, with the T5 usage-limit reaction wrapped around it.
 
@@ -545,7 +467,7 @@ def _run_reviewer_with_reaction(
             reseed_prompt = reseed_prompt_override or render_prompt(
                 handoff.load_prompt("reviewer_reseed.md"),
                 reviewer=name,
-                reviewer_brief=_reviewer_brief(rstate.spec),
+                reviewer_brief=reviewer_brief(rstate.spec),
                 sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
@@ -555,6 +477,7 @@ def _run_reviewer_with_reaction(
                     rstate.outcome.findings if rstate.outcome else []
                 ),
                 prior_review=_prior_review_text(config, round_no, name),
+                review_context=context_block(review_context),
                 review_file=(
                     review_file or handoff.reviewer_handoff_name(round_no, name)
                 ),
@@ -644,6 +567,7 @@ def run_panel_round(
     coder_summary: str,
     services: Services | None = None,
     artifact_pass: bool = False,
+    review_context: str = "",
 ) -> PanelRoundResult:
     """Drive the reviewer panel for a single round — the one shared primitive.
 
@@ -659,8 +583,10 @@ def run_panel_round(
     round's outcomes are returned in panel order. Round 1 renders
     ``reviewer_round.md`` (with the coder's ``coder_summary``); later rounds
     render ``reviewer_rereview.md`` (with the reviewer's open findings + the
-    coder's handoff) and resume the reviewer's session. The panel stops early at
-    the first interrupted or invalid reviewer.
+    coder's handoff) and resume the reviewer's session. ``review_context`` is
+    an extra block every round's prompt carries (PRD S5: the conflict
+    resolution's merge shape). The panel stops early at the first interrupted
+    or invalid reviewer.
     """
     resolved = services if services is not None else Services.live()
     # S5c: resolved per ROUND, not per run — a base merge in an earlier round
@@ -675,73 +601,19 @@ def run_panel_round(
     invalid_reviewer: str | None = None
     for rstate in reviewers:
         name = rstate.spec.name
-        review_file_override: str | None = None
-        if artifact_pass:
-            # #283 (PR #291 review): a panel-only pass shown the artifacts the
-            # candidate checks collected AFTER this round's regular review —
-            # its own handoff file, so the round's review is never clobbered.
-            review_file_override = handoff.reviewer_handoff_name(
-                round_no, f"{name}_artifacts"
-            )
-            review_prompt = render_prompt(
-                handoff.load_prompt("reviewer_artifacts.md"),
-                reviewer=name,
-                reviewer_brief=_artifact_reviewer_brief(rstate.spec),
-                sandbox_facts=_sandbox_section(config.image, for_coder=False),
-                round_no=str(round_no),
-                acceptance_criteria=config.effective_acceptance_criteria,
-                base_sha=fork[:12],
-                artifacts_note=artifacts_note_value,
-                gate_summary=render_check_summary(
-                    check_set, for_coder=False, gate_ledger=gate_ledger
-                ),
-                severity_calibration=SEVERITY_CALIBRATION,
-                review_file=review_file_override,
-            )
-            # Resume only a session a prior round actually minted: in develop
-            # the pass follows this round's regular review (resume, unchanged);
-            # in review-only artifact-only mode (RH-3) the panel is fresh, and
-            # resume=True would hand `claude --resume` a session that does not
-            # exist, failing every turn before it starts.
-            review_resume = rstate.outcome is not None
-        elif round_no == 1:
-            review_prompt = render_prompt(
-                handoff.load_prompt("reviewer_round.md"),
-                reviewer=name,
-                reviewer_brief=_reviewer_brief(rstate.spec),
-                sandbox_facts=_sandbox_section(config.image, for_coder=False),
-                acceptance_criteria=config.effective_acceptance_criteria,
-                coder_summary=coder_summary,
-                base_sha=fork[:12],
-                diff_stat=git.diff_stat(wt, fork),
-                gate_summary=render_check_summary(
-                    check_set, for_coder=False, gate_ledger=gate_ledger
-                ),
-                artifacts_note=artifacts_note_value,
-                severity_calibration=SEVERITY_CALIBRATION,
-                review_file=handoff.reviewer_handoff_name(1, name),
-            )
-            review_resume = False
-        else:
-            review_prompt = render_prompt(
-                handoff.load_prompt("reviewer_rereview.md"),
-                reviewer=name,
-                reviewer_brief=_reviewer_brief(rstate.spec),
-                sandbox_facts=_sandbox_section(config.image, for_coder=False),
-                round_no=str(round_no),
-                acceptance_criteria=config.effective_acceptance_criteria,
-                base_sha=fork[:12],
-                coder_handoff_file=handoff.coder_handoff_name(round_no),
-                open_findings=rstate.ledger.render_open(),
-                diff_stat=git.diff_stat(wt, fork),
-                gate_summary=render_check_summary(
-                    check_set, for_coder=False, gate_ledger=gate_ledger
-                ),
-                artifacts_note=artifacts_note_value,
-                severity_calibration=SEVERITY_CALIBRATION,
-                review_file=handoff.reviewer_handoff_name(round_no, name),
-            )
-            review_resume = True
+        review_prompt, review_resume, review_file_override = round_prompt(
+            config,
+            rstate,
+            round_no=round_no,
+            fork=fork,
+            wt=wt,
+            check_set=check_set,
+            gate_ledger=gate_ledger,
+            coder_summary=coder_summary,
+            artifacts_note=artifacts_note_value,
+            artifact_pass=artifact_pass,
+            review_context=review_context,
+        )
 
         review, rev_cost, rev_interrupted, rev_resume_after = (
             _run_reviewer_with_reaction(
@@ -760,6 +632,7 @@ def run_panel_round(
                 # for the code review's open ids — it neither lists nor
                 # reassesses them.
                 skip_lifecycle_validation=artifact_pass,
+                review_context=review_context,
             )
         )
         cost += rev_cost

@@ -62,10 +62,18 @@ def stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
 
     monkeypatch.setattr(converge_cli, "resolve_change", fake_resolve)
 
-    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+    def fake_converge_pr(
+        config,
+        change,
+        *,
+        no_push=False,
+        external_findings=None,
+        resolve_conflicts=False,
+    ):
         captured["config"] = config
         captured["no_push"] = no_push
         captured["external_findings"] = external_findings
+        captured["resolve_conflicts"] = resolve_conflicts
         return ConvergeResult(
             status=captured.get("status", "converged"),
             change=change,
@@ -452,7 +460,9 @@ def test_from_github_threads_findings_and_replies(
     github_stubs["untrusted"] = [_ext(9, author="stranger", trusted=False)]
 
     # converge_pr stub returns per-finding outcomes: one fixed, one rejected.
-    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
         github_stubs["external_findings"] = external_findings
         return ConvergeResult(
             status="converged",
@@ -547,7 +557,9 @@ def test_from_github_unpushed_fix_asserts_nothing_on_the_thread(
     trusted = [_ext(7)]
     github_stubs["trusted"] = trusted
 
-    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
         return ConvergeResult(
             status="not_converged",
             change=change,
@@ -627,7 +639,9 @@ def test_from_github_answers_a_conversation_finding_on_the_conversation(
         lambda repo, pr, body: pr_comments.append((pr, body)) or True,
     )
 
-    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
         return ConvergeResult(
             status="converged",
             change=change,
@@ -691,7 +705,9 @@ def test_reply_transports_cover_every_reply_mode_and_none_posts_nothing(
         "--from-github",
     ]
 
-    def fake_converge_pr(config, change, *, no_push=False, external_findings=None):
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
         return ConvergeResult(
             status="converged",
             change=change,
@@ -1011,3 +1027,28 @@ def test_explicit_profile_keeps_a_story_pinned_panel(story_stubs: dict) -> None:
     cfg = story_stubs["config"]
     assert cfg.review_profile == "standard"
     assert [s.name for s in cfg.reviewers] == ["correctness", "tests"]
+
+
+def test_resolve_conflicts_flag_selects_the_mode(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--resolve-conflicts"]
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["resolve_conflicts"] is True and stubs["external_findings"] is None
+
+
+def test_resolve_conflicts_is_exclusive_with_from_github(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--resolve-conflicts", "--from-github"],
+    )
+    assert result.exit_code == 2
+    assert "config" not in stubs
+
+
+def test_no_conflict_exits_clean(stubs: dict) -> None:
+    stubs["status"] = "no_conflict"
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--resolve-conflicts"]
+    )
+    assert result.exit_code == 0, result.output

@@ -38,7 +38,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -167,6 +167,11 @@ class RoundContext:
     # mode's per-id acknowledgement contract (PR #345 re-review 1); empty on
     # the local-panel path.
     external_ack: str = ""
+    # conflict resolution (PRD S5) — see LoopEntry
+    coder_init_template: str = "converge_coder_init.md"
+    coder_init_extra: Mapping[str, str] = field(default_factory=dict)
+    pre_commit_guard: Callable[[Path], str | None] | None = None
+    review_context: str = ""
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -184,33 +189,6 @@ class RoundContext:
     # prompt's gate summary so the loop can fix the capture instead of
     # stalling silently. Cleared once delivered.
     artifact_capture_notice: str | None = None
-
-
-@dataclass(frozen=True)
-class LoopEntry:
-    """Overrides that let ``develop()`` enter its loop on an EXISTING PR branch
-    instead of cutting a fresh worktree off a base (converge / ADR 0003 §9
-    "Shape 1").
-
-    ``worktree_factory`` builds the committable worktree — converge positions a
-    fresh local branch at the PR head so the coder's commits land on it and can
-    be pushed back. ``base_override`` is the PR's merge-base (the review + gate
-    diff base, not the worktree HEAD) paired with the live base ref, so a base
-    merge during the run moves the fork point (S5c). ``intake_reviews`` /
-    ``intake_check_set``
-    seed round 1's cold-start coder from the intake review of the PR (there is no
-    prior coder session to resume — converge is a fresh process). The default
-    ``entry=None`` on ``develop()`` is the story-develop path, unchanged.
-    """
-
-    worktree_factory: Callable[[DevelopConfig], Path]
-    base_override: git.RangeBase
-    intake_reviews: list[ReviewOutcome]
-    intake_check_set: CheckSetResult | None
-    # External mode (PRD S2): the per-id acknowledgement contract block for
-    # the round-1 coder prompt's `{external_ack}` slot. Empty (the default)
-    # renders nothing — the local-panel converge path is unchanged.
-    external_ack: str = ""
 
 
 def _combine_review_outcomes(
@@ -248,6 +226,47 @@ def _combine_review_outcomes(
     return combined
 
 
+def round1_coder_prompt(ctx: RoundContext) -> str:
+    """The cold-start coder prompt: story-develop's ``coder_init.md``, or — on a
+    converge entry (``intake_reviews`` set) — the entry's template seeded from
+    the intake review + the PR's own commit log so the coder reconstructs
+    intent before changing anything (ADR 0003 §9 Shape 1); a conflict
+    resolution (PRD S5) swaps the template and adds its brief as extra slots."""
+    config = ctx.config
+    if ctx.intake_reviews is not None:
+        return render_prompt(
+            handoff.load_prompt(ctx.coder_init_template),
+            acceptance_criteria=config.effective_acceptance_criteria,
+            commit_log=(
+                git.log_between(ctx.wt, git.fork_point(ctx.wt, ctx.base))
+                or "(no commits in range)"
+            ),
+            findings=ctx.render_panel_findings(ctx.intake_reviews),
+            gate_summary=render_check_summary(
+                ctx.intake_check_set, for_coder=True, gate_ledger=ctx.gate_ledger
+            ),
+            handoff_file=handoff.coder_handoff_name(1),
+            sandbox_facts=_sandbox_section(config.image, for_coder=True),
+            external_ack=ctx.external_ack,
+            **ctx.coder_init_extra,
+        )
+    # T8: an EXPLICIT acceptance criteria (flag / task metadata) gets its own
+    # section; when it merely falls back to the description, repeating it
+    # would be noise.
+    ac_section = (
+        f"\n## Acceptance criteria\n\n{config.acceptance_criteria}\n"
+        if config.acceptance_criteria
+        else ""
+    )
+    return render_prompt(
+        handoff.load_prompt("coder_init.md"),
+        description=config.description,
+        acceptance_criteria_section=ac_section,
+        handoff_file=handoff.coder_handoff_name(1),
+        sandbox_facts=_sandbox_section(config.image, for_coder=True),
+    )
+
+
 def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Build the coder prompt, run its (limit-paused) turn, salvage a missing
     handoff once (#114), and gate the round on a clean turn + a written handoff.
@@ -257,44 +276,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """
     config = ctx.config
     if round_no == 1:
-        if ctx.intake_reviews is not None:
-            # converge (ADR 0003 §9 Shape 1): round 1 is a cold-start FIX of an
-            # existing PR the coder did NOT author. Seed the turn with the intake
-            # review + the PR's own commit log (base..head) so it reconstructs
-            # intent before changing anything. Still resume=False — this is the
-            # process's first coder turn, so it maps onto develop()'s existing
-            # round-1 (no session to resume), differing only in the prompt.
-            coder_prompt = render_prompt(
-                handoff.load_prompt("converge_coder_init.md"),
-                acceptance_criteria=config.effective_acceptance_criteria,
-                commit_log=(
-                    git.log_between(ctx.wt, git.fork_point(ctx.wt, ctx.base))
-                    or "(no commits in range)"
-                ),
-                findings=ctx.render_panel_findings(ctx.intake_reviews),
-                gate_summary=render_check_summary(
-                    ctx.intake_check_set, for_coder=True, gate_ledger=ctx.gate_ledger
-                ),
-                handoff_file=handoff.coder_handoff_name(1),
-                sandbox_facts=_sandbox_section(config.image, for_coder=True),
-                external_ack=ctx.external_ack,
-            )
-        else:
-            # T8: an EXPLICIT acceptance criteria (flag / task metadata) gets its
-            # own section; when it merely falls back to the description, repeating
-            # it would be noise.
-            ac_section = (
-                f"\n## Acceptance criteria\n\n{config.acceptance_criteria}\n"
-                if config.acceptance_criteria
-                else ""
-            )
-            coder_prompt = render_prompt(
-                handoff.load_prompt("coder_init.md"),
-                description=config.description,
-                acceptance_criteria_section=ac_section,
-                handoff_file=handoff.coder_handoff_name(1),
-                sandbox_facts=_sandbox_section(config.image, for_coder=True),
-            )
+        coder_prompt = round1_coder_prompt(ctx)
         coder_resume = False
     else:
         assert ctx.final_reviews  # set by the prior round's reviews
@@ -440,8 +422,18 @@ def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Commit the round's work (excluding the handoff dir) and auto-format it in
     place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
 
-    Exit: C ``failed`` (round 1 produced no commit).
+    Exit: C ``failed`` (round 1 produced no commit, or the entry's pre-commit
+    guard refused the tree — PRD S5: conflict markers left behind).
     """
+    if ctx.pre_commit_guard is not None:
+        refused = ctx.pre_commit_guard(ctx.wt)
+        if refused:
+            ctx.new_commit = None
+            return CycleExit(
+                status="failed",
+                failure_reason=f"round {round_no}: {refused}",
+                resume_after=None,
+            )
     new_commit = commit_round(
         ctx.wt, f"story-develop r{round_no}: {ctx.config.description}"
     )
@@ -539,6 +531,7 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         reviewer_timeout=ctx.reviewer_timeout,
         coder_summary=ctx.coder_summary(config, 1) if round_no == 1 else "",
         services=ctx.services,
+        review_context=ctx.review_context,
     )
     ctx.review_cost += panel.cost
     ctx.final_reviews = panel.round_reviews
@@ -680,6 +673,7 @@ def _artifact_review_pass(
         coder_summary="",
         services=ctx.services,
         artifact_pass=True,
+        review_context=ctx.review_context,
     )
     ctx.review_cost += panel.cost
     # #291 round 4: COMBINE each reviewer's regular and artifact outcomes —
