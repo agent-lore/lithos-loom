@@ -280,6 +280,11 @@ async def reconcile_pr_gate(
     # on every merge poll (no separate dial): it reads fields the fetch above
     # already returned and writes only on a change.
     await check_landability(gate, spec, story_id, pr, ctx)
+    if conflict_resolve is not None:
+        # PRD S5: a resolver push whose record did not land before a restart
+        # must be held BEFORE remediation observes the head, or the merge
+        # commit reads as a human push and resets the S5b budget
+        await conflict_resolve.recover_debt(gate, spec, story_id, ctx)
     if ingest_reviews:
         budget = None
         note = None

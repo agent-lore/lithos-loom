@@ -385,3 +385,30 @@ def test_a_symlink_conflict_is_refused_before_any_agent_runs(
         )
     assert info.value.paths == ("link",)
     assert "symlink" in str(info.value)
+
+
+def test_intake_refuses_a_moved_base(tmp_path: Path, tmp_git_repo: Path) -> None:
+    """PR #366 review F3: the watcher authorised a (head, base) pair; the
+    child must not spend on a different base tip. `expect_base` is checked
+    before any worktree exists."""
+    from lithos_loom.plugins.story_develop.conflict_resolve import StaleTrigger
+
+    _merge_base, head, base_tip = _seed(tmp_git_repo)
+    config = DevelopConfig(
+        repo=tmp_git_repo,
+        description="A PR",
+        work_dir=tmp_path / "work",
+        acceptance_criteria="do the thing",
+    )
+    with pytest.raises(StaleTrigger) as info:
+        prepare_conflict_intake(
+            config, _change(_merge_base, head), expect_base="0" * 40
+        )
+    assert info.value.expected == "0" * 40 and info.value.actual == base_tip
+    leftover = [p.name for p in tmp_path.iterdir() if p.is_dir() and p.name != "repo"]
+    assert leftover in ([], ["work"])
+    # the right base passes
+    intake = prepare_conflict_intake(
+        config, _change(_merge_base, head), expect_base=base_tip
+    )
+    assert intake is not None and intake.base_sha == base_tip

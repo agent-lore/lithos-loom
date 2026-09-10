@@ -78,6 +78,7 @@ _EXIT_CODES = {
     "failed": 1,
     "no_conflict": 0,
     "conflict_unsupported": 1,
+    "base_moved": 0,
 }
 
 
@@ -205,6 +206,19 @@ def converge_command(
         "(append-only). A clean merge exits `no_conflict` and spends nothing. "
         "Exclusive with --from-github.",
     ),
+    expect_head: str | None = typer.Option(
+        None,
+        "--expect-head",
+        help="Refuse before anything runs unless the PR's current head is this "
+        "sha (an autonomous caller pins the run to the head it authorised; "
+        "with --json a mismatch writes {status: head_moved}).",
+    ),
+    expect_base: str | None = typer.Option(
+        None,
+        "--expect-base",
+        help="With --resolve-conflicts: refuse before any agent runs unless the "
+        "base's current tip is this sha (status base_moved).",
+    ),
     repo: Path | None = typer.Option(
         None, "--repo", help="Repository to converge in (default: current directory)."
     ),
@@ -285,6 +299,30 @@ def converge_command(
                 encoding="utf-8",
             )
         raise typer.Exit(2) from exc
+    if expect_head is not None and resolved.head_sha != expect_head:
+        # PR #366 review F3: the watcher keyed the run on a head that moved
+        # meanwhile — spending or pushing on another head would record the
+        # attempt against the wrong pair and hide a human push from the
+        # remediation budget. Nothing ran; the caller re-keys.
+        typer.secho(
+            f"the PR head moved: expected {expect_head[:12]}, found "
+            f"{resolved.head_sha[:12]}; nothing to do",
+            fg=typer.colors.YELLOW,
+        )
+        if json_out is not None:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(
+                json.dumps(
+                    {
+                        "status": "head_moved",
+                        "expected_head": expect_head,
+                        "actual_head": resolved.head_sha,
+                        "message": "the PR head moved before the run started",
+                    },
+                    indent=2,
+                )
+            )
+        raise typer.Exit(0)
 
     # converge pushes fixes onto the PR head ref, so it needs a PR (a range /
     # branch spec has no pushable head branch). Reject those up front.
@@ -446,6 +484,7 @@ def converge_command(
         no_push=no_push,
         external_findings=external_findings,
         resolve_conflicts=resolve_conflicts,
+        expect_base=expect_base,
     )
 
     if from_github and gh_repo is not None and pr_number is not None:

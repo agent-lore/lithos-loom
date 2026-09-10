@@ -40,13 +40,8 @@ from pathlib import Path
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
-from lithos_loom.gates import (
-    ESCALATION_SUMMARY_MAX_CHARS,
-    STORY_HUMAN_GATE_ID_KEY,
-    PrGateSpec,
-)
+from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
-from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 from lithos_loom.subscriptions._project_settings import (
     OriginRead,
     origin_read,
@@ -54,12 +49,34 @@ from lithos_loom.subscriptions._project_settings import (
     resolve_project_repo,
 )
 from lithos_loom.subscriptions._subprocess import spawn_command
-from lithos_loom.subscriptions.escalation import Escalation, raise_needs_human
+from lithos_loom.subscriptions.conflict_resolve_outcome import (
+    clear_breadcrumb,
+    escalate,
+    paths_of,
+    post_finding,
+    post_friction,
+    story_escalated,
+    strict_write,
+    write_once,
+    write_record,
+)
+from lithos_loom.subscriptions.conflict_resolve_record import (
+    CONFLICT_ACTIONS,
+    CONFLICT_RESOLVE_KEY,
+    CONFLICT_RESOLVE_SETTING,
+    CONFLICT_RESOLVED,
+    PUSHED_BREADCRUMB_KEY,
+    STRICT_WRITE_DELAYS,
+    ConflictResolveRecord,
+    Debt,
+    read_record,
+)
 from lithos_loom.subscriptions.merge_gate_record import (
     read_record as read_merge_record,
 )
 from lithos_loom.subscriptions.remediation_budget import (
     REMEDIATION_KEY,
+    RemediationBudget,
     RemediationNotifier,
     read_budget,
 )
@@ -69,7 +86,9 @@ __all__ = [
     "CONFLICT_RESOLVED",
     "CONFLICT_RESOLVE_KEY",
     "CONFLICT_RESOLVE_SETTING",
+    "PUSHED_BREADCRUMB_KEY",
     "RUN_TIMEOUT_SECONDS",
+    "STRICT_WRITE_DELAYS",
     "ConflictResolveDispatch",
     "ConflictResolveRecord",
     "ConflictResolveSettings",
@@ -78,16 +97,6 @@ __all__ = [
     "read_record",
     "spawn_resolve",
 ]
-
-# Stable, machine-parseable finding prefix (see AGENTS.md): loom resolved a
-# delivered PR's conflict with its base and pushed the merge commit.
-CONFLICT_RESOLVED = "[ConflictResolved]"
-
-# Gate-metadata key holding the last resolution record (the sha pair + outcome).
-CONFLICT_RESOLVE_KEY = "conflict_resolve"
-
-# Per-project opt-out on the context doc's metadata (default on).
-CONFLICT_RESOLVE_SETTING = "develop_conflict_resolve"
 
 # A resolution is a coder session plus a panel loop: same ceiling as remediation.
 RUN_TIMEOUT_SECONDS = 4 * 3600
@@ -98,16 +107,6 @@ _OUTPUT_TAIL_CHARS = 600
 _ESCALATE: frozenset[str] = frozenset(
     {"not_converged", "failed", "conflict_unsupported"}
 )
-
-CONFLICT_ACTIONS = (
-    "the story stays behind its pr gate; resolve the conflict by merging the "
-    "base into the PR branch by hand (never rebase a delivered branch) — a "
-    "human push re-keys every sweep — or re-run `develop converge <pr> "
-    "--resolve-conflicts --story <id>` with a higher --max-rounds; complete "
-    "this gate once decided"
-)
-"""What the operator can do about an unresolved conflict — none of it is a
-re-dispatch of the story, so the runner's two actions would mislead here."""
 
 
 async def spawn_resolve(cmd: list[str]) -> tuple[int, str]:
@@ -133,58 +132,6 @@ class ConflictResolveSettings:
     notifier: RemediationNotifier | None = None
 
 
-@dataclass(frozen=True)
-class ConflictResolveRecord:
-    """The gate's ``conflict_resolve`` marker: the sha pair + the outcome."""
-
-    pr_url: str
-    head_sha: str
-    base_sha: str
-    status: str = ""
-    attempts: int = 0
-    pushed_sha: str = ""
-    needs_human_gate_id: str = ""
-    boot_id: str = ""
-    message: str = ""
-
-    def as_marker(self) -> dict[str, Any]:
-        return {
-            "pr_url": self.pr_url,
-            "head_sha": self.head_sha,
-            "base_sha": self.base_sha,
-            "status": self.status,
-            "attempts": self.attempts,
-            "pushed_sha": self.pushed_sha,
-            "needs_human_gate_id": self.needs_human_gate_id,
-            "boot_id": self.boot_id,
-            "message": self.message,
-        }
-
-
-def read_record(gate: Any, pr_url: str) -> ConflictResolveRecord | None:
-    """The gate's record; ``None`` for an absent / foreign-url marker."""
-    raw = gate.metadata.get(CONFLICT_RESOLVE_KEY)
-    if not isinstance(raw, dict) or raw.get("pr_url") != pr_url:
-        return None
-
-    def _s(key: str) -> str:
-        value = raw.get(key)
-        return value if isinstance(value, str) else ""
-
-    attempts = raw.get("attempts")
-    return ConflictResolveRecord(
-        pr_url=pr_url,
-        head_sha=_s("head_sha"),
-        base_sha=_s("base_sha"),
-        status=_s("status"),
-        attempts=attempts if isinstance(attempts, int) and attempts >= 0 else 0,
-        pushed_sha=_s("pushed_sha"),
-        needs_human_gate_id=_s("needs_human_gate_id"),
-        boot_id=_s("boot_id"),
-        message=_s("message"),
-    )
-
-
 class ConflictResolveDispatch:
     """Owns the single-flight dispatch of ``develop converge --resolve-conflicts``."""
 
@@ -202,6 +149,12 @@ class ConflictResolveDispatch:
         self._boot_id = boot_id or uuid.uuid4().hex
         self._task: asyncio.Task[None] | None = None
         self._in_flight_pr_url = ""
+        # every (pr_url, head, base) this boot has spent on — the in-memory
+        # half of the once-per-pair bound, which no failed write can erase
+        self._attempted: set[tuple[str, str, str]] = set()
+        # post-push writes that have not landed yet: pr_url → the marker to
+        # flush + the finding to post once it does; the PR stays held
+        self._debts: dict[str, Debt] = {}
 
     # ── in-flight state ────────────────────────────────────────────────
 
@@ -210,8 +163,13 @@ class ConflictResolveDispatch:
 
     def busy_on(self, pr_url: str) -> bool:
         """The other dispatchers' hold: a merge commit + fixes may land on
-        this PR's branch at any moment."""
-        return self.busy() and self._in_flight_pr_url == pr_url
+        this PR's branch at any moment — or HAVE landed and the write naming
+        the push as loom's own has not (a held debt): remediation's head
+        observation must stay inert until it does, or it reads the merge
+        commit as a human push and resets the S5b budget."""
+        return (self.busy() and self._in_flight_pr_url == pr_url) or (
+            pr_url in self._debts
+        )
 
     async def drain(self) -> None:
         if self._task is not None:
@@ -240,6 +198,10 @@ class ConflictResolveDispatch:
         """Decide for one still-open ``pr`` gate; returns a label for the log."""
         if not self._settings.enabled:
             return "disabled"
+        if spec.pr_url in self._debts:
+            # a pushed resolution whose record + budget write has not landed:
+            # flush it before anything else (the PR stays held meanwhile)
+            return await self._settle_debt(spec.pr_url, ctx)
         if story_id is None:
             return "no_story"
         head = getattr(pr, "head_sha", "") or ""
@@ -253,16 +215,25 @@ class ConflictResolveDispatch:
             or (merge.head_sha, merge.base_sha) != (head, base)
         ):
             return "no_conflict"  # nothing current to resolve; S3 decides first
+        if (spec.pr_url, head, base) in self._attempted:
+            return "unchanged"  # this boot already spent on the pair
         prior = read_record(gate, spec.pr_url)
-        attempts = 1
-        if prior is not None and (prior.head_sha, prior.base_sha) == (head, base):
-            # one attempt per sha pair (PRD S5) — except a crash, which a
-            # restart re-arms once (the operator's fix attempt)
-            if prior.status == "crashed" and prior.boot_id != self._boot_id:
-                attempts = 1
-            else:
+        same_key = prior is not None and (prior.head_sha, prior.base_sha) == (
+            head,
+            base,
+        )
+        if same_key and prior is not None:
+            # one attempt per sha pair (PRD S5). Re-armed only by: a crash or
+            # an abandoned reservation from ANOTHER boot (a restart is the
+            # operator's fix attempt), or — decided below, once the sweep has
+            # observed the checkout — a repo-mismatch refusal whose settle key
+            # moved (PR #366 review F4).
+            rebooted = prior.status in ("crashed", "running") and (
+                prior.boot_id != self._boot_id
+            )
+            if not rebooted and prior.status != "repo_mismatch":
                 return "unchanged"
-        if await _story_escalated(story_id, ctx):
+        if await story_escalated(story_id, ctx):
             return "escalated"  # a human gate already waits on this story
         if hold:
             return "held"
@@ -286,6 +257,38 @@ class ConflictResolveDispatch:
             return "checkout_unresolved"
         if seen.repo.lower() != spec.repo.lower():
             return "repo_mismatch"  # the merge-gate refused and said so already
+        if (
+            same_key
+            and prior is not None
+            and prior.status == "repo_mismatch"
+            and (prior.repo_path, prior.origin_seen) == (str(repo), seen.repo.lower())
+        ):
+            return "unchanged"  # the refusal settled on what the sweep still sees
+        attempts = 1
+        # reserve the attempt on the gate BEFORE the spawn (PR #366 review
+        # F2): the once-per-pair bound must not depend on a breadcrumb the
+        # crashed run's outcome path may fail to write
+        reservation = ConflictResolveRecord(
+            spec.pr_url,
+            head,
+            base,
+            status="running",
+            attempts=attempts,
+            boot_id=self._boot_id,
+            repo_path=str(repo),
+            origin_seen=seen.repo.lower(),
+        )
+        if not await strict_write(
+            gate.id, {CONFLICT_RESOLVE_KEY: reservation.as_marker()}, ctx
+        ):
+            ctx.logger.warning(
+                "[Friction] conflict-resolve: could not reserve the attempt on "
+                "gate %s for %s; nothing spawned (retried next sweep)",
+                gate.id,
+                spec.pr_url,
+            )
+            return "reserve_failed"
+        self._attempted.add((spec.pr_url, head, base))
         ctx.logger.info(
             "conflict-resolve: dispatching converge --resolve-conflicts for %s "
             "(head %s, base %s, attempt %d)",
@@ -295,16 +298,88 @@ class ConflictResolveDispatch:
             attempts,
         )
         self._in_flight_pr_url = spec.pr_url
+        budget = read_budget(gate, spec.pr_url)  # the dispatch-time snapshot
         self._task = asyncio.create_task(
-            self._run(gate.id, story_id, spec, repo, head, base, attempts, ctx),
+            self._run(gate.id, story_id, spec, repo, reservation, budget, ctx),
             name=f"conflict-resolve-{spec.pr_number}",
         )
         return "dispatched"
 
+    async def _settle_debt(self, pr_url: str, ctx: SubscriptionContext) -> str:
+        debt = self._debts[pr_url]
+        if not await write_once(debt.gate_id, debt.marker, ctx):
+            return "debt_pending"
+        del self._debts[pr_url]
+        await clear_breadcrumb(debt.story_id, ctx)
+        await post_finding(debt.story_id, debt.summary, ctx)
+        return "debt_settled"
+
+    async def recover_debt(
+        self,
+        gate: Any,
+        spec: PrGateSpec,
+        story_id: str | None,
+        ctx: SubscriptionContext,
+    ) -> None:
+        """Re-arm a held debt a previous boot left behind: the story's
+        breadcrumb names a push the gate's budget does not yet know as
+        loom's own. Called by the sweep BEFORE remediation observes the head,
+        so the PR is held from the first sweep after a restart. Never raises."""
+        if story_id is None or spec.pr_url in self._debts:
+            return
+        try:
+            story = await ctx.lithos.task_get(task_id=story_id)
+        except LithosClientError:
+            return  # retried next sweep; the hold is what matters and it is cheap
+        crumb = None if story is None else story.metadata.get(PUSHED_BREADCRUMB_KEY)
+        if not isinstance(crumb, dict) or crumb.get("pr_url") != spec.pr_url:
+            return
+        pushed = crumb.get("pushed_sha")
+        if not isinstance(pushed, str) or not pushed:
+            return
+        budget = read_budget(gate, spec.pr_url)
+        if budget.last_loom_pushed_sha == pushed:
+            await clear_breadcrumb(story_id, ctx)  # it landed after all
+            return
+        record = read_record(gate, spec.pr_url)
+        if record is None or record.pushed_sha != pushed:
+            record = ConflictResolveRecord(
+                spec.pr_url,
+                head_sha=str(crumb.get("head_sha") or ""),
+                base_sha=str(crumb.get("base_sha") or ""),
+                status="converged",
+                attempts=1,
+                pushed_sha=pushed,
+                message="recovered from the story breadcrumb after a restart",
+            )
+        marker = {
+            CONFLICT_RESOLVE_KEY: record.as_marker(),
+            REMEDIATION_KEY: replace(budget, last_loom_pushed_sha=pushed).as_marker(),
+        }
+        summary = (
+            f"{CONFLICT_RESOLVED} conflict-resolve: loom's push {pushed[:12]} onto "
+            f"{spec.pr_url} (a conflict resolution recorded after a restart) is "
+            f"now on the record; the next sweep re-gates at the new head."
+        )
+        self._debts[spec.pr_url] = Debt(gate.id, story_id, marker, summary)
+        ctx.logger.warning(
+            "conflict-resolve: recovered a held debt for %s from the story "
+            "breadcrumb (push %s not yet on the budget); holding the PR",
+            spec.pr_url,
+            pushed[:12],
+        )
+
     # ── the run ────────────────────────────────────────────────────────
 
     def command(
-        self, spec: PrGateSpec, repo: Path, json_path: Path, story_id: str
+        self,
+        spec: PrGateSpec,
+        repo: Path,
+        json_path: Path,
+        story_id: str,
+        *,
+        head: str = "",
+        base: str = "",
     ) -> list[str]:
         cmd = [
             sys.executable,
@@ -323,6 +398,12 @@ class ConflictResolveDispatch:
             "--json",
             str(json_path),
         ]
+        # PR #366 review F3: the child re-fetches the PR — pin it to the pair
+        # the sweep authorised, or it could spend and push on other inputs
+        if head:
+            cmd += ["--expect-head", head]
+        if base:
+            cmd += ["--expect-base", base]
         if self._settings.config_path is not None:
             cmd += ["--config", str(self._settings.config_path)]
         return cmd
@@ -351,22 +432,18 @@ class ConflictResolveDispatch:
         story_id: str,
         spec: PrGateSpec,
         repo: Path,
-        head: str,
-        base: str,
-        attempts: int,
+        record: ConflictResolveRecord,
+        budget: RemediationBudget,
         ctx: SubscriptionContext,
     ) -> None:
         """One resolve subprocess and its outcome. Never raises."""
-        record = ConflictResolveRecord(
-            spec.pr_url, head, base, attempts=attempts, boot_id=self._boot_id
-        )
         try:
-            await self._run_inner(gate_id, story_id, spec, repo, record, ctx)
+            await self._run_inner(gate_id, story_id, spec, repo, record, budget, ctx)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — the slot must always free cleanly
             ctx.logger.exception("conflict-resolve: run for %s raised", spec.pr_url)
-            await _post_friction(
+            await post_friction(
                 gate_id,
                 story_id,
                 replace(record, status="crashed", message=f"raised {exc!r}"[:300]),
@@ -383,14 +460,24 @@ class ConflictResolveDispatch:
         spec: PrGateSpec,
         repo: Path,
         record: ConflictResolveRecord,
+        budget: RemediationBudget,
         ctx: SubscriptionContext,
     ) -> None:
         path = self._json_path(gate_id)
-        rc, output = await self._spawn(self.command(spec, repo, path, story_id))
+        rc, output = await self._spawn(
+            self.command(
+                spec,
+                repo,
+                path,
+                story_id,
+                head=record.head_sha,
+                base=record.base_sha,
+            )
+        )
         data = self._load(path)
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
         if data is None:
-            await _post_friction(
+            await post_friction(
                 gate_id,
                 story_id,
                 replace(record, status="crashed", message=f"exit {rc}"),
@@ -406,7 +493,11 @@ class ConflictResolveDispatch:
             "conflict-resolve: run for %s finished: %s", spec.pr_url, status
         )
         if status == "repo_mismatch":
-            await _post_friction(
+            # the child refused before touching anything: nothing was spent,
+            # so the boot's memory of the pair must not block the re-arm the
+            # settle key (mapped path + origin) grants when either moves
+            self._attempted.discard((spec.pr_url, record.head_sha, record.base_sha))
+            await post_friction(
                 gate_id,
                 story_id,
                 record,
@@ -416,204 +507,101 @@ class ConflictResolveDispatch:
                 ctx,
             )
         elif status == "converged" and data.get("pushed") is True:
-            await _record_resolved(gate_id, story_id, spec, record, data, ctx)
+            await self._record_resolved(
+                gate_id, story_id, spec, record, data, budget, ctx
+            )
         elif status in _ESCALATE:
-            await _escalate(gate_id, story_id, spec, record, data, self._settings, ctx)
+            await escalate(
+                gate_id,
+                story_id,
+                spec,
+                record,
+                data,
+                self._settings.notifier,
+                ctx,
+            )
         else:
-            # no_conflict / merge_race / merged / fork_unsupported / an
-            # unpushed converge: the world moved on, or nothing to do —
-            # the sweep's other halves own what comes next.
-            await _write_record(gate_id, record, ctx)
+            # no_conflict / head_moved / base_moved / merge_race / merged /
+            # fork_unsupported / an unpushed converge: the world moved on, or
+            # nothing to do — the sweep's other halves own what comes next.
+            await write_record(gate_id, record, ctx)
 
-
-async def _story_escalated(story_id: str, ctx: SubscriptionContext) -> bool:
-    """Does an OPEN loom human gate already wait on the story? The record on
-    the gate is the once-per-key guard; this is the belt for a record that
-    failed to land after the gate was raised (the story still names it), so
-    a paid run is never repeated and a second gate never raised."""
-    try:
-        story = await ctx.lithos.task_get(task_id=story_id)
-        if story is None:
-            return False
-        gate_id = story.metadata.get(STORY_HUMAN_GATE_ID_KEY)
-        if not isinstance(gate_id, str) or not gate_id:
-            return False
-        human = await ctx.lithos.task_get(task_id=gate_id)
-    except LithosClientError:
-        return True  # unknown is not permission for a paid run; retried next sweep
-    return human is not None and human.status == "open"
-
-
-# ── outcomes ───────────────────────────────────────────────────────────
-
-
-async def _write_record(
-    gate_id: str, record: ConflictResolveRecord, ctx: SubscriptionContext
-) -> bool:
-    return await write_marker(
-        ctx,
-        task_id=gate_id,
-        marker={CONFLICT_RESOLVE_KEY: record.as_marker()},
-        subsystem="conflict-resolve",
-    )
-
-
-async def _post_friction(
-    gate_id: str,
-    story_id: str,
-    record: ConflictResolveRecord,
-    detail: str,
-    ctx: SubscriptionContext,
-) -> None:
-    await post_finding_then_mark(
-        ctx,
-        task_id=story_id,
-        summary=(
-            f"[Friction] conflict-resolve: resolving {record.pr_url}'s conflict "
-            f"with its base @ {record.base_sha[:12]} (head {record.head_sha[:12]}) "
-            f"{detail} (attempt {record.attempts}; a daemon restart retries a "
-            f"crash once, a head or base move re-keys it)"
-        ),
-        marker={CONFLICT_RESOLVE_KEY: record.as_marker()},
-        subsystem="conflict-resolve",
-        retry_hint="will retry after a restart or a move",
-        marker_task_id=gate_id,
-    )
-
-
-def _paths_of(data: Mapping[str, Any]) -> list[str]:
-    conflict = data.get("conflict")
-    raw = conflict.get("paths") if isinstance(conflict, dict) else None
-    return [p for p in (raw if isinstance(raw, list) else []) if isinstance(p, str)]
-
-
-async def _record_resolved(
-    gate_id: str,
-    story_id: str,
-    spec: PrGateSpec,
-    record: ConflictResolveRecord,
-    data: Mapping[str, Any],
-    ctx: SubscriptionContext,
-) -> None:
-    """Converged + pushed: the merge commit is loom's own push on the S5b
-    budget — record and budget in ONE write, made FIRST (the push has
-    happened; a breadcrumb that cannot post must never cost the budget its
-    sha, and the resolver's trigger is gone once the head moved, so nothing
-    would re-derive it) — then say what landed."""
-    pushed = str(data.get("pushed_sha") or "")
-    record = replace(record, pushed_sha=pushed)
-    marker: dict[str, Any] = {CONFLICT_RESOLVE_KEY: record.as_marker()}
-    try:
-        fresh = await ctx.lithos.task_get(task_id=gate_id)
-    except LithosClientError:
-        fresh = None
-    if fresh is not None and pushed:
-        budget = read_budget(fresh, spec.pr_url)
-        marker[REMEDIATION_KEY] = replace(
-            budget, last_loom_pushed_sha=pushed
-        ).as_marker()
-    await write_marker(
-        ctx, task_id=gate_id, marker=marker, subsystem="conflict-resolve"
-    )
-    paths = _paths_of(data)
-    rounds = data.get("rounds")
-    cost = data.get("total_cost_usd")
-    summary = (
-        f"{CONFLICT_RESOLVED} conflict-resolve: delivered PR {spec.pr_url}'s "
-        f"conflict with its base @ {record.base_sha[:12]} in "
-        f"{len(paths)} path(s) ({', '.join(paths) or 'unnamed'}) was resolved "
-        f"by loom and pushed as {pushed[:12]} onto the PR branch after "
-        f"{rounds} round(s) (${cost}); the composed tree passed the "
-        f"project's check-set and the panel. The next sweep re-gates at the "
-        f"new head."
-    )
-    try:
-        await ctx.lithos.finding_post(task_id=story_id, summary=summary)
-    except LithosClientError as exc:
-        ctx.logger.warning(
-            "[Friction] conflict-resolve: posting %s for story %s failed (%s); "
-            "the record and the budget landed",
-            CONFLICT_RESOLVED,
+    async def _record_resolved(
+        self,
+        gate_id: str,
+        story_id: str,
+        spec: PrGateSpec,
+        record: ConflictResolveRecord,
+        data: Mapping[str, Any],
+        budget: RemediationBudget,
+        ctx: SubscriptionContext,
+    ) -> None:
+        """Converged + pushed: the merge commit is loom's own push on the S5b
+        budget — record and budget in ONE write, made FIRST and STRICTLY
+        (PR #366 review F1): the push has happened, and once the head moved
+        the trigger is gone, so nothing would re-derive a lost sha. The
+        budget comes from a fresh read of the gate, else the dispatch-time
+        snapshot (no other writer moved it: the PR was held). A write that
+        still does not land becomes a held debt — the PR stays `busy_on`
+        (remediation's head observation inert), the story gets an honest
+        [Friction], and the next sweeps retry the write; the success finding
+        posts only once it landed."""
+        pushed = str(data.get("pushed_sha") or "")
+        record = replace(record, pushed_sha=pushed)
+        # the breadcrumb first, on the STORY: survives a gate write outage and
+        # a restart (recover_debt reads it) — cleared once the record landed
+        await write_once(
             story_id,
-            exc,
-        )
-
-
-async def _escalate(
-    gate_id: str,
-    story_id: str,
-    spec: PrGateSpec,
-    record: ConflictResolveRecord,
-    data: Mapping[str, Any],
-    settings: ConflictResolveSettings,
-    ctx: SubscriptionContext,
-) -> None:
-    """The residue is a human's: raise the loom ``human`` gate on the story,
-    once per sha pair (the record carries the gate id)."""
-    paths = _paths_of(data)
-    brief: dict[str, Any] = {
-        "pr_url": spec.pr_url,
-        "head_sha": record.head_sha,
-        "base_sha": record.base_sha,
-        "paths": paths,
-        "status": record.status,
-        "rounds": data.get("rounds"),
-        "fixer_commits": data.get("fixer_commits"),
-        "cost_usd": data.get("total_cost_usd"),
-        "message": record.message,
-    }
-    escalation = Escalation(
-        reason="conflict_unresolved",
-        summary=(
-            f"loom could not resolve {spec.pr_url}'s conflict with its base "
-            f"@ {record.base_sha[:12]} in {', '.join(paths) or 'unnamed paths'} "
-            f"— run {record.status}: {record.message}"
-        )[:ESCALATION_SUMMARY_MAX_CHARS],
-        brief=brief,
-    )
-
-    async def _record(human_gate_id: str) -> bool:
-        ok = await _write_record(
-            gate_id, replace(record, needs_human_gate_id=human_gate_id), ctx
+            {
+                PUSHED_BREADCRUMB_KEY: {
+                    "pr_url": spec.pr_url,
+                    "pushed_sha": pushed,
+                    "head_sha": record.head_sha,
+                    "base_sha": record.base_sha,
+                }
+            },
+            ctx,
         )
         try:
-            await ctx.lithos.task_update(
-                task_id=story_id,
-                agent=ctx.agent_id,
-                metadata={STORY_HUMAN_GATE_ID_KEY: human_gate_id},
-            )
+            fresh = await ctx.lithos.task_get(task_id=gate_id)
         except LithosClientError as exc:
             ctx.logger.warning(
-                "[Friction] conflict-resolve: recording gate %s on story %s "
-                "failed (%s)",
-                human_gate_id,
-                story_id,
+                "[Friction] conflict-resolve: re-reading gate %s to record loom's "
+                "push %s failed (%s); recording from the dispatch-time budget",
+                gate_id,
+                pushed[:12],
                 exc,
             )
-            return False
-        return ok
-
-    human_gate_id, problem = await raise_needs_human(
-        ctx.lithos,
-        task_id=story_id,
-        route="conflict-resolve",
-        agent=ctx.agent_id,
-        escalation=escalation,
-        notifier=settings.notifier,
-        actions=CONFLICT_ACTIONS,
-        record=_record,
-        record_problem=(
-            "could not record the gate on the resolve record / story — a "
-            "restart may raise a second gate for the same conflict"
-        ),
-    )
-    if human_gate_id is None:
-        # the record still lands, so the same sha pair is never re-run
-        await _post_friction(
-            gate_id,
+            fresh = None
+        if fresh is not None:
+            budget = read_budget(fresh, spec.pr_url)
+        marker: dict[str, Any] = {
+            CONFLICT_RESOLVE_KEY: record.as_marker(),
+            REMEDIATION_KEY: replace(budget, last_loom_pushed_sha=pushed).as_marker(),
+        }
+        paths = paths_of(data)
+        summary = (
+            f"{CONFLICT_RESOLVED} conflict-resolve: delivered PR {spec.pr_url}'s "
+            f"conflict with its base @ {record.base_sha[:12]} in "
+            f"{len(paths)} path(s) ({', '.join(paths) or 'unnamed'}) was resolved "
+            f"by loom and pushed as {pushed[:12]} onto the PR branch after "
+            f"{data.get('rounds')} round(s) (${data.get('total_cost_usd')}); the "
+            f"composed tree passed the project's check-set and the panel. The "
+            f"next sweep re-gates at the new head."
+        )
+        if await strict_write(gate_id, marker, ctx):
+            await clear_breadcrumb(story_id, ctx)
+            await post_finding(story_id, summary, ctx)
+            return
+        self._debts[spec.pr_url] = Debt(gate_id, story_id, marker, summary)
+        await post_finding(
             story_id,
-            record,
-            f"ended {record.status} and the needs-human gate could not be raised "
-            f"({problem or 'unknown'}); the conflict is a human's to resolve",
+            (
+                f"[Friction] conflict-resolve: loom resolved {spec.pr_url}'s conflict "
+                f"and pushed {pushed[:12]}, but recording that push on gate "
+                f"{gate_id} did not land after {len(STRICT_WRITE_DELAYS) + 1} "
+                f"attempts; the PR stays held and the record is retried every "
+                f"sweep until it lands (nothing else acts on this PR meanwhile)"
+            ),
             ctx,
         )

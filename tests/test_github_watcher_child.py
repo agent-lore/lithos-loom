@@ -540,6 +540,9 @@ async def test_reconcile_pass_threads_conflict_resolution_to_the_gate_branch() -
     seen: list[str] = []
 
     class _Resolver:
+        async def recover_debt(self, gate, spec, story_id, ctx):
+            return None
+
         async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
             seen.append(pr.head_sha)
             return "unchanged"
