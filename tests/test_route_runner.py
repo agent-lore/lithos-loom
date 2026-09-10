@@ -327,33 +327,35 @@ async def test_runner_rechecks_an_undetermined_task_instead_of_dropping_it(
     lithos.task_claim.assert_called_once()
 
 
-async def test_ready_rechecks_are_bounded(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+async def test_runner_keeps_rechecking_until_lithos_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """PR #352 review round 3: a capped bound re-created the original failure
+    (ten inconclusive checks, then the dependent waits for an edit or a
+    restart). One coalesced retry stays live, with capped backoff, until a
+    definitive answer — here twelve undetermined answers, then ready."""
     from lithos_loom.subscriptions import ready_recheck as rr
 
     monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.005)
-    monkeypatch.setattr(rr, "READY_RECHECK_MAX", 2)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX_SECONDS", 0.005)
     bus = EventBus()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
-    lithos.task_ready.return_value = _ready(
-        *(f"other-{i}" for i in range(READY_QUERY_LIMIT))
-    )
+    full_ready = _ready(*(f"other-{i}" for i in range(READY_QUERY_LIMIT)))
     lithos.task_get.return_value = _open_task()
     lithos.task_blocked.return_value = [
         SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
         for i in range(READY_QUERY_LIMIT)
     ]
+    # two ready reads per undetermined evaluation (the route's page, then the
+    # task's own scope): 24 full pages = 12 inconclusive evaluations
+    answers = iter([*([full_ready] * 24), _ready("task-1")])
+    lithos.task_ready.side_effect = lambda **kw: next(answers)
 
-    with caplog.at_level(logging.WARNING):
-        await bus.publish(_evt(payload=_payload()))
-        await _run_for(runner, seconds=0.4)
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner, seconds=0.8)
 
-    lithos.task_claim.assert_not_called()
-    # the first evaluation + READY_RECHECK_MAX re-checks, then it stops and
-    # says so (the restart bootstrap is the backstop)
-    assert lithos.task_blocked.await_count == 1 + 2
-    assert "bootstrap" in caplog.text
+    lithos.task_claim.assert_called_once()
+    assert lithos.task_blocked.await_count == 12
 
 
 # ── Newly-unblocked re-dispatch (US6) ──────────────────────────────────

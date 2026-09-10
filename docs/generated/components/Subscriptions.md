@@ -42,7 +42,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
-| `lithos_loom.subscriptions.ready_recheck` | S | 1 | 0 |
+| `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
 | `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 8 |
@@ -189,7 +189,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `check_landability` — Classify one still-open gate's PR and report a conflict once per ``(pr_url, base_sha, head_sha)``. Returns the state label. Never raises.
 
 ### `lithos_loom.subscriptions.ready_recheck`
-- class `ReadyRechecker` — Per-route bounded re-check scheduler (see the module docstring).
+- def `delay_for` — Seconds to wait before the next re-check after *attempts* inconclusive ones: exponential from the base, capped.
+- class `ReadyRechecker` — Per-route re-check scheduler (see the module docstring).
 
 ### `lithos_loom.subscriptions.remediation_budget`
 - class `RemediationNotifier`

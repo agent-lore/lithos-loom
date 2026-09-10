@@ -22,11 +22,11 @@ async def _drain(seconds: float = 0.05) -> None:
     await asyncio.sleep(seconds)
 
 
-async def test_one_sleeper_per_task_and_budget_spent_per_recheck(
+async def test_one_sleeper_per_task_and_attempts_count_runs_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.01)
-    monkeypatch.setattr(rr, "READY_RECHECK_MAX", 2)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX_SECONDS", 0.01)
     client = FakeLithosClient()
     client.add_task(make_task("t1", status="open"))
     bus = EventBus()
@@ -35,16 +35,34 @@ async def test_one_sleeper_per_task_and_budget_spent_per_recheck(
 
     # ten duplicate events for one undetermined task: ONE sleeper
     for _ in range(10):
-        assert checker.schedule("t1") is True
+        checker.schedule("t1")
     assert checker.pending("t1") is True and checker.pending_count() == 1
     await _drain()
     assert sub.queue.qsize() == 1  # one republish
     assert checker.pending("t1") is False
-    # the budget was spent by the re-check that ran, not by the ten events
-    assert checker.schedule("t1") is True
-    await _drain()
-    assert sub.queue.qsize() == 2
-    assert checker.schedule("t1") is False  # the bound (2) is spent now
+    assert checker.attempts("t1") == 1  # spent by the re-check that ran
+    # PR #352 review round 3: never a terminal refusal — the retry stays
+    # live, with backoff, until a definitive answer
+    for _ in range(30):
+        checker.schedule("t1")
+        await _drain()
+    assert checker.attempts("t1") == 31 and sub.queue.qsize() == 31
+
+
+def test_backoff_grows_and_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 60.0)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX_SECONDS", 900.0)
+    assert [rr.delay_for(n) for n in (0, 1, 2, 3, 4, 5, 50)] == [
+        60.0,
+        120.0,
+        240.0,
+        480.0,
+        900.0,
+        900.0,
+        900.0,
+    ]
+    # a task stuck for days: the exponent must not overflow a float
+    assert rr.delay_for(5000) == 900.0
 
 
 async def test_a_failed_recheck_read_retries_itself(
@@ -67,19 +85,21 @@ async def test_a_failed_recheck_read_retries_itself(
     sub = bus.subscribe(event_types=["lithos.task.updated"], name="probe")
     checker = rr.ReadyRechecker(bus=bus, lithos=client, route="r")
 
-    assert checker.schedule("t1") is True
+    checker.schedule("t1")
     await _drain(0.1)
     assert calls["n"] == 2 and sub.queue.qsize() == 1
 
 
-async def test_settled_resets_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_settled_resets_the_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rr, "READY_RECHECK_SECONDS", 0.01)
-    monkeypatch.setattr(rr, "READY_RECHECK_MAX", 1)
+    monkeypatch.setattr(rr, "READY_RECHECK_MAX_SECONDS", 0.01)
     client = FakeLithosClient()
     client.add_task(make_task("t1", status="open"))
     checker = rr.ReadyRechecker(bus=EventBus(), lithos=client, route="r")
-    assert checker.schedule("t1") is True
+    checker.schedule("t1")
     await _drain()
-    assert checker.schedule("t1") is False
+    checker.schedule("t1")
+    await _drain()
+    assert checker.attempts("t1") == 2
     checker.settled("t1")  # a definitive answer — any of True / False / gone
-    assert checker.schedule("t1") is True
+    assert checker.attempts("t1") == 0 and checker.pending("t1") is False
