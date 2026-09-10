@@ -150,7 +150,7 @@ async def read_project_metadata(lithos: Any, slug: str) -> Mapping[str, Any] | N
         candidates = await lithos.note_list(
             path_prefix=f"projects/{slug}/", tags=["project-context"]
         )
-    except LithosClientError:
+    except (LithosClientError, OSError):
         return None
     if candidates:
         return min(candidates, key=lambda n: n.path).metadata

@@ -11,6 +11,7 @@ re-evaluated when a gate in its project closes or escalates.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 from typing import Any
 
@@ -44,20 +45,22 @@ def _admission(
     )
 
 
-async def _story(client: FakeLithosClient, title: str = "story") -> str:
+async def _story(
+    client: FakeLithosClient, title: str = "story", *, project: str | None = _PROJECT
+) -> str:
     return await client.task_create(
         title=title,
         agent=_AGENT,
         tags=["trigger:story-develop"],
-        metadata={"project": _PROJECT},
+        metadata={"project": project} if project else {},
     )
 
 
 async def _delivered(
-    client: FakeLithosClient, *, number: int, project: str = _PROJECT
+    client: FakeLithosClient, *, number: int, project: str | None = _PROJECT
 ) -> tuple[str, str]:
     """A story with an open ``pr`` gate: ``(story_id, gate_id)``."""
-    story = await _story(client, f"delivered {number}")
+    story = await _story(client, f"delivered {number}", project=project)
     gate = await create_pr_gate(
         client,
         story_id=story,
@@ -97,12 +100,36 @@ def _context_doc(client: FakeLithosClient, metadata: dict[str, Any]) -> None:
 # ── the verdict ──────────────────────────────────────────────────────────
 
 
-async def test_no_project_is_admitted_without_reading_gates() -> None:
+async def test_projectless_stories_share_one_bucket_bounded_by_projectless_gates() -> (
+    None
+):
+    """Review #368 F1: a route with an absolute repo path needs no project,
+    and its stories deliver projectless ``pr`` gates. They are not exempt —
+    they share one bucket under the host defaults."""
     client = FakeLithosClient(agent_id=_AGENT)
-    adm = _admission(client)
-    verdict = await adm.admit(task_id="s", project=None)
-    assert verdict.admitted and verdict.reason == "no_project"
-    assert not client.called("task_list")
+    await _delivered(client, number=1, project=None)
+    await _delivered(client, number=2)  # lens: a different bucket
+    story = await _story(client, project=None)
+    adm = _admission(client, limit=1)
+
+    verdict = await adm.admit(task_id=story, project=None)
+
+    assert not verdict.admitted and verdict.reason == "limit"
+    assert verdict.open_gates == 1
+    assert adm.deferred(None) == frozenset({story})
+    # and the project bucket does not see the projectless gate
+    lens = await _story(client, "lens story")
+    assert (await adm.admit(task_id=lens, project=_PROJECT)).open_gates == 1
+
+
+async def test_projectless_admission_reserves_in_flight_too() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    first = await _story(client, "first", project=None)
+    second = await _story(client, "second", project=None)
+    adm = _admission(client, limit=1)
+    assert (await adm.admit(task_id=first, project=None)).admitted
+    assert not (await adm.admit(task_id=second, project=None)).admitted
+    assert not client.called("note_read")  # no context doc to consult
 
 
 async def test_under_the_limit_admits_and_reads_only_the_projects_pr_gates() -> None:
@@ -402,7 +429,7 @@ async def _run_for(waker: AdmissionWaker, *, seconds: float = 0.1) -> None:
     task = asyncio.create_task(waker.run())
     await asyncio.sleep(seconds)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with contextlib.suppress(asyncio.CancelledError):
         await task
 
 
@@ -576,7 +603,7 @@ async def test_the_held_finding_fires_again_after_the_cap_clears() -> None:
     await client.task_complete(task_id=gates[0], agent=_AGENT)
     assert (await adm.admit(task_id=story, project=_PROJECT)).admitted
     adm.release(story)
-    _d, _g = await _delivered(client, number=4)
+    await _delivered(client, number=4)
     other = await _story(client, "other")
     assert (await adm.admit(task_id=other, project=_PROJECT)).reason == "total_cap"
 
@@ -605,3 +632,131 @@ async def test_the_total_cap_verdict_carries_the_real_escalated_count() -> None:
         if (c["metadata_match"] or {}).get("gate_type") == "human"
     ]
     assert len(humans) == 1
+
+
+# ── review #368: atomic per-project transition, transport errors, edges ──
+
+
+async def test_concurrent_admits_serialise_per_project() -> None:
+    """Review #368 F2: two route runners share one Admission; with an
+    escalated PR at the limit, both could snapshot an empty in-flight set
+    across the human-gate read and both admit. The transition is locked."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    delivered, _gate = await _delivered(client, number=1)
+    await _escalate(client, delivered)
+    a = await _story(client, "a")
+    b = await _story(client, "b")
+    real_task_list = client.task_list
+
+    async def yielding_task_list(**kwargs: Any) -> Any:
+        await asyncio.sleep(0)  # a real Lithos read suspends here
+        return await real_task_list(**kwargs)
+
+    client.task_list = yielding_task_list  # type: ignore[method-assign]
+    adm = _admission(client, limit=1)
+
+    va, vb = await asyncio.gather(
+        adm.admit(task_id=a, project=_PROJECT), adm.admit(task_id=b, project=_PROJECT)
+    )
+
+    assert [va.admitted, vb.admitted].count(True) == 1
+    assert len(adm.deferred(_PROJECT)) == 1
+
+
+async def test_concurrent_admits_post_held_once() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    for n in (1, 2, 3):
+        delivered, _gate = await _delivered(client, number=n)
+        await _escalate(client, delivered)
+    a = await _story(client, "a")
+    b = await _story(client, "b")
+    real_task_list = client.task_list
+
+    async def yielding_task_list(**kwargs: Any) -> Any:
+        await asyncio.sleep(0)
+        return await real_task_list(**kwargs)
+
+    client.task_list = yielding_task_list  # type: ignore[method-assign]
+    adm = _admission(client, limit=1, total=3)
+
+    await asyncio.gather(
+        adm.admit(task_id=a, project=_PROJECT), adm.admit(task_id=b, project=_PROJECT)
+    )
+
+    assert len(client.findings) == 1
+
+
+@pytest.mark.parametrize("failing", ["task_list", "note_read", "task_edge_list"])
+async def test_a_raw_transport_error_on_any_read_refuses_and_defers(
+    failing: str,
+) -> None:
+    """Review #368 F3: ``LithosClient._invoke`` re-raises the raw transport
+    exception after its reconnect attempts; it must hold the story (so the
+    sleeper re-asks), never escape and drop the event."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    delivered = await _story(client, "old")
+    gate = await client.task_create(
+        title="Awaiting merge: old",
+        agent=_AGENT,
+        task_type="gate",
+        metadata={"gate_type": "pr", "project": _PROJECT, "pr_number": 7},
+    )
+    await client.task_edge_upsert(
+        from_task_id=gate, to_task_id=delivered, type="waits_on_gate", agent=_AGENT
+    )
+    await _escalate(client, delivered)
+    story = await _story(client)
+
+    async def boom(**kwargs: Any) -> Any:
+        raise RuntimeError("stream closed")
+
+    setattr(client, failing, boom)
+    adm = _admission(client, limit=1)
+
+    verdict = await adm.admit(task_id=story, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "unreadable"
+    assert adm.deferred(_PROJECT) == frozenset({story})
+
+
+async def test_a_human_gate_without_its_edge_does_not_escalate() -> None:
+    """Review #368 F4: the ``waits_on_gate`` edge is the authority; a gate
+    task whose edge never landed (creation is not atomic) blocks nothing,
+    so it must not free a slot."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    delivered, _gate = await _delivered(client, number=1)
+    await client.task_create(
+        title="Needs human: delivered",
+        agent=_AGENT,
+        task_type="gate",
+        metadata={
+            "gate_type": "human",
+            "raised_by": "loom",
+            "project": _PROJECT,
+            "story_id": delivered,
+            "escalation_reason": "conflict_unresolved",
+        },
+    )
+    story = await _story(client)
+    adm = _admission(client, limit=1)
+
+    verdict = await adm.admit(task_id=story, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.escalated == 0
+
+
+async def test_a_closed_projectless_gate_wakes_projectless_deferred_stories() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    _d, gate = await _delivered(client, number=1, project=None)
+    story = await _story(client, "waiting", project=None)
+    assert not (await adm.admit(task_id=story, project=None)).admitted
+    bus = EventBus()
+    probe = _probe(bus)
+    waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
+
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    await bus.publish(_gate_event(client, gate, type_="lithos.task.completed"))
+    await _run_for(waker)
+
+    assert probe.queue.get_nowait().payload["id"] == story
