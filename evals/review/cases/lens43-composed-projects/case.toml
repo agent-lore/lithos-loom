@@ -112,6 +112,22 @@ not decisive at K=5 — either pay K≈20 or treat the panel as "sometimes sees
 it", which for an auto-push decision means "cannot be relied on". A 0/5 has
 a 95% CI reaching ~52%: it is "no evidence the panel sees it", never
 "confirmed never".
+
+FIRST READING (2026-09-11, report ~/lithos-loom-eval-reports/
+s8-composed-first-2026-09-11; panel = correctness on codex gpt-5.6-sol high;
+judge = claude-opus-5): catch 5/5 (95% CI 57–100%), severity-correct 5/5
+(3 major, 2 critical), defect-scoped fp 0/5, gate green (lint / typecheck /
+sast / test all ran, none blocked) on every sample of both heads. AUDITED:
+all five findings reach the project filter from the tree — each names
+`matches_filters` applying `filters.projects` (twenty lines above the helper,
+never in an added line), traces it through `DashboardData.healthy` to the
+stripe, and gives a concrete `?project=` reproduction. Under the decision
+rule this is "rely on compositional review". Noise: the known-good blocked
+4/5 on findings shared by both heads and unrelated to the seed (the pre-0.4
+fallback still sending `resolved_since`; `_is_nothing_to_show` ignoring a
+non-empty ready read under a completion race; `healthy` not tied to empty
+open sections) — those are claims about what SHIPPED to lens main and are
+escape-review material for lens, not this case's fp.
 """
 ac_provenance = "replay"   # the real T1-S12 AC the story was developed against —
                            # the projects rule is NOT in it; it lives in the tree
