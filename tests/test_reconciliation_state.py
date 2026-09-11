@@ -531,7 +531,9 @@ def test_the_probe_s_settled_answers_each_land_on_the_safe_side() -> None:
         d = _derive_d(_regate("green"), regate=label)
         assert d.state == "awaiting_review", label
         assert "unconfirmed" in d.detail, label
-    assert _derive_d(_regate("green"), regate="dispatched").state == "reconciling"
+    running = Busy(merge_gate=True)
+    d = _derive_d(_regate("green"), regate="dispatched", busy=running)
+    assert d.state == "reconciling"
     assert _derive_d(_regate("green"), regate="deferred_busy").state == "reconciling"
 
 
@@ -547,3 +549,37 @@ def test_a_probe_never_masks_an_unsafe_recorded_outcome() -> None:
 def test_a_probe_with_no_current_record_is_still_not_ready() -> None:
     d = _derive_d({}, regate="probing")
     assert d.state == "awaiting_review"
+
+
+# ── review #369 round 4: a run that finished during the re-read is not in progress ─
+
+
+def test_a_dispatched_run_that_already_finished_reads_from_its_record() -> None:
+    """`dispatched` is captured when the run starts; the gate is re-read
+    afterwards. A conflict or a refusal takes seconds, so the run can finish
+    inside that window — the busy signal is then false and the fresh record
+    on the current pair IS the verdict, never masked as reconciling."""
+    idle = Busy(merge_gate=False)
+    assert _derive_d(_regate("red"), regate="dispatched", busy=idle).state == (
+        "gate_failed"
+    )
+    assert _derive_d(_regate("conflict"), regate="dispatched", busy=idle).state == (
+        "behind"
+    )
+    # the newest verdict for the current key confirms itself
+    d = _derive_d(_regate("green"), regate="dispatched", busy=idle)
+    assert d.state == "ready_to_merge"
+
+
+def test_a_dispatched_run_still_in_flight_masks_the_stale_record() -> None:
+    running = Busy(merge_gate=True)
+    for status in ("green", "red", "conflict"):
+        d = _derive_d(_regate(status), regate="dispatched", busy=running)
+        assert d.state == "reconciling", status
+
+
+def test_a_dispatched_run_with_no_record_on_the_pair_is_still_reconciling() -> None:
+    """Finished without a record on this pair (died before writing): the
+    next sweep re-dispatches; until then it is owed, not evaluated."""
+    d = _derive_d(_regate("green", head="f" * 40), regate="dispatched")
+    assert d.state == "reconciling"

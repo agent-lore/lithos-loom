@@ -140,7 +140,8 @@ class Dispositions:
 # A re-gate label that means the trial merge is not owed at all.
 _REGATE_NOT_REQUIRED = frozenset({"disabled", "project_disabled"})
 # A re-gate label that means a run that could CHANGE the verdict is queued
-# or under way — it masks the recorded outcome.
+# or under way — it masks the recorded outcome. `dispatched` counts only
+# while the run is in flight (the busy signal) or has left no record yet.
 _REGATE_IN_PROGRESS = frozenset({"deferred_busy", "deferred_remediation", "dispatched"})
 # A re-gate label that confirms the recorded outcome still stands: the key
 # matched outright — the shas, or the settings fingerprint the probe re-read.
@@ -261,13 +262,21 @@ def _derive(
         return Derived("reconciling", "external-review remediation in flight")
     if _record(meta, _REMEDIATION_PENDING, pr_url):
         return Derived("reconciling", "remediation trigger parked behind a busy run")
-    if said.regate in _REGATE_IN_PROGRESS:
-        return Derived("reconciling", f"re-gate {said.regate}")
-
     # The re-gate's OUTCOME is its `status` (green / red / errored / no_checks
     # / conflict / push_failed / crashed / a refusal); `verdict` is the
     # GitHub-style RED / GREEN / None beside it and never the classifier.
     outcome = _str(regate.get("status")) if regate_now else ""
+    # `dispatched` is captured when the run starts and the gate is re-read
+    # afterwards; a conflict or a refusal takes seconds, so the run can be
+    # over by now (busy is false past the check above). Its record on the
+    # current pair is then the freshest verdict for this key and confirms
+    # itself — never masked as reconciling (review #369 round 4). With no
+    # record on the pair the run is still owed.
+    regate_label = (
+        "unchanged" if said.regate == "dispatched" and outcome else said.regate
+    )
+    if regate_label in _REGATE_IN_PROGRESS:
+        return Derived("reconciling", f"re-gate {regate_label}")
     if outcome in ("red", "errored"):
         return Derived("gate_failed", f"trial merge check-set: {outcome}")
     if outcome == "conflict":
@@ -298,8 +307,8 @@ def _derive(
         # rounds 2-3). A fail-closed disposition, a probe that failed /
         # crashed / never answered, or a superseded record outranks it.
         if (
-            said.regate is None
-            or said.regate in _REGATE_NOT_REQUIRED | _REGATE_CONFIRMS
+            regate_label is None
+            or regate_label in _REGATE_NOT_REQUIRED | _REGATE_CONFIRMS
         ):
             what = (
                 "trial merge green"
@@ -309,7 +318,7 @@ def _derive(
             return Derived("ready_to_merge", f"landable; {what}")
         return Derived(
             "awaiting_review",
-            f"prior trial merge {outcome} unconfirmed ({said.regate})",
+            f"prior trial merge {outcome} unconfirmed ({regate_label})",
         )
     if outcome:
         return Derived(

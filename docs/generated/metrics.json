@@ -129,7 +129,7 @@
         "qualname": "lithos_loom.children.obsidian_sync._amain"
       },
       {
-        "complexity": 41,
+        "complexity": 43,
         "qualname": "lithos_loom.subscriptions.reconciliation_state._derive"
       },
       {
@@ -515,10 +515,10 @@
         "functions": 329,
         "largest_module": "lithos_loom.subscriptions.route_runner",
         "largest_module_lines": 797,
-        "lines": 13623,
+        "lines": 13632,
         "modules": 43,
         "public_symbols": 126,
-        "sloc": 10956
+        "sloc": 10959
       },
       "Supervisor": {
         "classes": 3,
@@ -551,13 +551,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 54505,
+    "total_lines": 54514,
     "total_modules": 160,
-    "total_sloc": 43847
+    "total_sloc": 43850
   },
   "tests": {
     "ratio": 1.59,
-    "src_lines": 54505,
-    "test_lines": 86507
+    "src_lines": 54514,
+    "test_lines": 86545
   }
 }
