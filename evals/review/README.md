@@ -587,6 +587,55 @@ CLIs): the sibling checkout must exist and contain the case's `base` commit
 self-contained in the case dir, so nothing in the customer repo needs tags or
 kept-alive commits.
 
+### Composed-tree cases (PRD pr-reconciliation S8)
+
+S5 has the panel review a **composed tree** — a delivered story's content on
+top of its base branch's *current* tip, after other PRs landed — and pushes the
+merge commit on approval. That is a diff shape the corpus never had: the
+defect may live only in the RELATION between the story's diff and code the
+base gained meanwhile, so neither side's own review could ever have seen it.
+`lens43-composed-projects` is the first such case, built from the real
+occurrence (lens #43 vs the #44/#45 pair; `filters_narrow_the_board` ignored
+the `projects` filter T1-S9 added after it was written). The recipe, for the
+next one:
+
+- **`base` is the base branch's tip after the other PRs landed**, not the
+  story's own merge-base — the panel must be able to read the newer code as
+  the tree it reviews against.
+- **The known-good is the operator's real resolution**; the defect head is
+  that same tree with the resolution undone (a "plausible wrong merge") and
+  the project's generated docs regenerated, so the pair is minimal.
+- **Seed on a tree the project's own check-set passes** — the pair must be
+  green on both heads or the gate, not the panel, is what the case measures.
+  (lens's merge commit e1965aa fails its 800-line budget; the pre-squash tip
+  does not.) The preflight test pins that no test at either head catches the
+  seeded term.
+- **No ADDED line may give the defect away.** A composed diff legitimately
+  carries base-tree context lines and hunk headers — that is the tree, and
+  S5's panel gets the same — but an added line that states the inconsistency
+  outright (a docstring enumerating the newer filter, a test exercising it)
+  turns the case into an in-diff-consistency probe: a catch would bound
+  compositional review from above and say nothing about it. Strip such lines
+  from BOTH heads (the pair stays minimal), say so in the description, and
+  pin the absence in the preflight test. Then **audit a catch** before
+  reading it as compositional: the finding's reasoning must reach the newer
+  code from the tree, not from the diff.
+- **Declare the residue.** A head that is the merged PR itself has none the
+  project did not already ship; a head from an earlier point may still carry
+  escapes fixed later — declare them or move the seed.
+- **State the decision rule in the description** before the first run. No
+  panel has ever been shown the composition, so the prior is undefined and
+  the first run is a single-arm characterisation, not the two-arm A/B of the
+  power table above: ≥4/5 → rely on compositional review (audited); 0/5 →
+  S5 narrows to check-set-only auto-push for non-semantic conflicts (a 0/5
+  has a 95% CI reaching ~52% — "no evidence it sees it", never "confirmed
+  never"); 1–3/5 → not decisive at K=5, pay K≈20 or treat as unreliable.
+
+`lens43-composed-projects` is a **constructed** case, not a minted escape:
+nothing in §"Escape review" applies to it (no external finding, and bucket 1
+is false by construction — no panel reviewed this diff). It is unmeasured
+until its first K=5 run.
+
 ### Preflight: patches are materialised in the gate
 
 `test_shipped_patch_cases_materialise` (tests/test_eval_review_patch.py) applies

@@ -1,0 +1,157 @@
+[case]
+id = "lens43-composed-projects"
+description = """
+PRD pr-reconciliation S8 "composed-tree review" — the first case of that
+shape, CONSTRUCTED from a real occurrence (not a minted escape: no external
+finding sits behind it, and no panel ever reviewed this diff). lens PR #43
+(T1-S12, story-develop run f2e46eef) was delivered against lens main 6199396;
+while it awaited merge, #44 (T1-S10) and #45 (T1-S9: the project filter)
+landed, moving main to 6e2fcf0. Both PRs are individually correct. Their
+COMPOSITION is not: T1-S12's `filters_narrow_the_board` helper (the guard
+that withholds the dashboard's whole-system claims — the "All systems
+healthy" stripe, the empty-corpus panel — on a narrowed board) was written
+when the filter vocabulary was tags/agent/status, and T1-S9 added `projects`
+to `TaskFilters` after it. Composed without the extra term, a shared
+`?project=<slug>` board feeds one project's rows to the stripe and turns them
+into a system-wide claim. No merge driver can see this, and no panel ever saw
+the composed code: it did not exist until the operator resolved the conflict
+(lens e1965aa, "Merge main (T1-S9, T1-S10) into T1-S12"), and the operator's
+resolution IS the fix — `or bool(filters.projects)` plus the docstring
+paragraph that names T1-S9 (verified: the term is absent at the delivered
+head d53126a, where it was not yet needed, and present at e1965aa).
+
+WHAT THE CASE MEASURES: S5 (conflict resolution) has loom's panel review the
+composed tree — the story's content on top of the base branch's CURRENT tip —
+and pushes the merge commit on approval. This case is that exact diff shape:
+base = the base branch's tip after the pair landed (6e2fcf0); the head is the
+story's full merged content on top of it. The question is whether the panel
+finds a defect that lives in the RELATION between the diff (the helper, added
+by the story) and the base tree (the `TaskFilters.projects` field, the
+`matches_projects` predicate twenty lines above the helper in the same
+module). NO ADDED LINE in the diff names the project filter — the preflight
+test pins that. What the diff does carry is what any composed diff carries:
+context lines and hunk headers from the base (a `projects: tuple[str, ...]`
+context line in the `DashboardData` hunk; the `task_filtering.py` hunk header
+naming `matches_filters`). That is the tree, and it is exactly the evidence
+S5's panel gets, so it stays. If the panel cannot find the defect, S5 narrows
+to check-set-only auto-push for non-semantic conflicts (PRD S8) — a
+narrowing, not a redesign.
+
+AUDIT RULE FOR A CATCH: before a catch is read as compositional review, read
+the finding's reasoning — it must reach the project filter from the tree
+(`TaskFilters.projects`, `matches_projects`, the `?project=` vocabulary), not
+from an inconsistency inside the diff. After the neutralisation below there
+is no such inconsistency left to find, but the rule stands for every re-seed.
+
+NEUTRALISED GIVEAWAYS (both heads): the seed tree 41a43c8 carries two lines
+from the post-merge commit 8f8d24b that would have made the defect an
+in-diff inconsistency — the `task_card_url` docstring in `web.py` enumerating
+"project/tag/agent", and the card-link test's `&project=influx` URL parameter
+plus its `assert "project=influx" in href`. Both are removed from BOTH heads
+(docstring reads "tag/agent"; the test keeps its tag/agent/since assertions),
+then ruff-formatted and lens's `docs/generated/` metrics regenerated. The
+known-good therefore differs from the #43 squash merge 1e34d44 in exactly
+`web.py`, `tests/test_tasks_mvp.py` and the two metrics files — pinned by the
+preflight test — and is otherwise what shipped to lens main.
+
+PANEL-ONLY BY CONSTRUCTION: the lens check-set is blind to this defect. No
+test at either head references `filters_narrow_the_board` at all, and the
+narrowed-board regression test is parametrised over tags/agent/status only
+(the operator's merge added no test for the projects term). Verified
+2026-09-11 while authoring: BOTH heads pass lens's own `make check` (ruff,
+pyright, pytest incl. `tests/guardrail/` — 593 passed). That overlaps the
+`standard` profile's check-set (format/lint/typecheck/test) but is not the
+harness's own gate run; the first `eval review` run confirms gate-green on
+both heads before its numbers are read.
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout. Patch form
+(#193) so nothing in the lens repo needs a kept-alive commit: `base` 6e2fcf0
+is a lens `main` ancestor (the #45 squash merge).
+
+PAIRING — a MINIMAL pair, unlike lens43-degraded-contract's 289 shape. The
+two heads differ ONLY in the resolution (`or bool(filters.projects)` + its
+docstring paragraph in `task_filtering.py`) and the regenerated metrics —
+pinned by the preflight test. Every other finding is shared by both heads
+and reads as noise (README §"Noise"), not as a defect-scoped false positive.
+
+WHY 41a43c8 AND NOT THE MERGE COMMIT e1965aa: e1965aa fails lens's own
+800-line module budget (`frontier.py` 880 lines; split out two commits later
+in 0347ec4), which would turn the gate red on both heads and confound the
+measurement; and e1965aa still carries both lens43-degraded-contract escapes
+(fixed at 6907906 / 8f8d24b), which would make this a multi-defect head
+measuring ranking (RH-5). At 41a43c8 both are fixed (`frontier_fallback` and
+`rolled_up_only` are present), so the declared set below is the whole seeded
+set.
+
+RH-5 DECLARATION: one seeded defect, on a head that is otherwise the merged
+PR itself — any residue is what shipped to lens main on 2026-08-23.
+Present-but-undeclared, deliberately: the same boolean also counts a
+non-default status set as narrowing, which over-withholds the stripe on a
+`?status=open` board (lens later split that into
+`filters_narrow_the_open_side`, #47). It is over-conservative, not unsound,
+at this head's contract, so it is NOT a declared defect and NOT a match —
+the mechanism says so, so the judge is steered and a reviewer filing it does
+not score.
+
+MDE, STATED BEFORE ANY PAID ARM (README §"How many samples"): the prior is
+UNDEFINED — no panel has ever been shown this composition. (The five-round
+zero-finding run on d53126a is not evidence either way: the helper was
+correct for that tree, which had no project filter.) This is a single-arm
+characterisation, not the two-arm A/B the README's power table describes,
+so read it with a decision rule, not as a rate: ≥4/5 → compositional review
+is relied upon (subject to the audit rule above); 0/5 → S5 narrows to
+check-set-only auto-push for non-semantic conflicts; 1–3/5 → the case is
+not decisive at K=5 — either pay K≈20 or treat the panel as "sometimes sees
+it", which for an auto-push decision means "cannot be relied on". A 0/5 has
+a 95% CI reaching ~52%: it is "no evidence the panel sees it", never
+"confirmed never".
+"""
+ac_provenance = "replay"   # the real T1-S12 AC the story was developed against —
+                           # the projects rule is NOT in it; it lives in the tree
+tier = "frontier"          # a new, unmeasured class (S8) — headline signal
+repo = "../lithos-lens"
+base = "6e2fcf0ccb106c05a09a4e48b0e9dee709a8f3cf"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+# `file` is the FIX site. A reviewer may anchor the same finding at the harm
+# site instead (frontier.py, where filters_narrowed is computed; tasks.py,
+# where DashboardData.healthy consumes it) — the structured matcher misses
+# that phrasing and the judge rescues it; tests/test_eval_review_match.py
+# documents the blind spot.
+file = "src/lithos_lens/task_filtering.py"
+keywords = [
+    "filters_narrow_the_board",
+    "narrowed board",
+    "narrowing",
+    "system-wide",
+    "healthy",
+    "stripe",
+    "?project=",
+]
+min_severity = "major"
+mechanism = """
+filters_narrow_the_board (added by this diff, called by frontier.py to decide
+whether the dashboard may make its whole-system claims — the "All systems
+healthy" stripe and the empty-corpus panel) treats only tags, agent and a
+non-default status set as narrowing. But TaskFilters in this tree ALSO carries
+`projects` (multi-valued, the T1-S9 `?project=` filter, applied by
+matches_projects in the same module), and the section partition + terminal
+reads the stripe is derived from are filtered by it — so a board narrowed to
+one project's rows reports "All systems healthy" (or the empty-corpus panel)
+as a system-wide claim it cannot support. The helper must count `projects` as
+narrowing, exactly like tags/agent. A finding that names the project filter
+being ignored by the narrowing / healthy-stripe guard is a match, whichever
+file it is anchored at. NOT a match: a finding that the non-default status
+set is over-counted as narrowing (a different, over-conservative behaviour —
+lens later split it into filters_narrow_the_open_side, #47); the §14 flat
+fallback on frontier failures; the epics/gates rolled-up rows and the healthy
+claim; project-convention consistency or performance findings elsewhere in
+task_filtering.py; any other stripe condition.
+"""

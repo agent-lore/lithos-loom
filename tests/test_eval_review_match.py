@@ -898,3 +898,67 @@ def test_backfill_history_topic_adjacent_finding_is_not_a_catch() -> None:
         ),
     )
     assert score.caught is False
+
+
+# ── lens43-composed: single-expected precision on a project-heavy file ────────
+# task_filtering.py is almost entirely project-convention code, so the keyword
+# set must not let a same-file project finding score; and the finding may be
+# anchored at the harm site (frontier.py / tasks.py) rather than the fix site,
+# which the structured matcher cannot follow — documented, the judge rescues it.
+
+_LENS_FILTERING = "src/lithos_lens/task_filtering.py"
+_LENS_FRONTIER = "src/lithos_lens/frontier.py"
+
+
+def _lens43_composed() -> Case:
+    return load_case(_SHIPPED_CASES_DIR / "lens43-composed-projects")
+
+
+def test_lens43_composed_projects_finding_is_caught() -> None:
+    score = score_run(
+        _lens43_composed(),
+        _split_report(
+            (
+                _LENS_FILTERING,
+                "filters_narrow_the_board counts tags, agent and a non-default "
+                "status set as narrowing but never TaskFilters.projects, so a "
+                "?project= board still lets the All systems healthy stripe make "
+                "its system-wide claim over one project's rows",
+            )
+        ),
+    )
+    assert score.caught is True
+
+
+def test_lens43_composed_same_file_project_finding_is_not_a_catch() -> None:
+    # A same-file project-convention performance finding must not satisfy
+    # the narrowing expected — the file is full of `project` identifiers.
+    score = score_run(
+        _lens43_composed(),
+        _split_report(
+            (
+                _LENS_FILTERING,
+                "task_projects re-reads both project conventions on every row "
+                "and should memoize the slug lookup per task",
+            )
+        ),
+    )
+    assert score.caught is False
+
+
+def test_lens43_composed_harm_site_anchored_finding_is_a_structured_miss() -> None:
+    # Known structured blind spot: the same defect reported where it bites
+    # (frontier.py computes filters_narrowed) rather than where it is fixed
+    # misses the file anchor. Live, the mechanism judge matches it; this pins
+    # that a `--no-judge` number under-counts such phrasings.
+    score = score_run(
+        _lens43_composed(),
+        _split_report(
+            (
+                _LENS_FRONTIER,
+                "filters_narrowed ignores the project filter, so the All systems "
+                "healthy stripe renders on a ?project= board",
+            )
+        ),
+    )
+    assert score.caught is False

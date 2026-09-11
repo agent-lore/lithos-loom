@@ -794,3 +794,133 @@ def test_lens43_fixture_pins_both_contract_violations(
         assert "not self.rolled_up_only" in good_tasks
     finally:
         cleanup()
+
+
+_LENS43C_FILTERING = "src/lithos_lens/task_filtering.py"
+_LENS43C_TASKS = "src/lithos_lens/tasks.py"
+_LENS43C_WEB = "src/lithos_lens/web.py"
+_LENS43C_MVP_TESTS = "tests/test_tasks_mvp.py"
+_LENS43C_FRONTIER_TESTS = "tests/test_frontier.py"
+_LENS43C_TERM = "or bool(filters.projects)"
+_LENS43C_DOC = "``project`` narrows like tag/agent"
+_LENS43C_METRICS = ["docs/generated/metrics.json", "docs/generated/metrics.md"]
+# lens PR #43's squash merge — the tree the known-good is derived from.
+_LENS43C_SQUASH = "1e34d4457749b5705fa800d1c968302d3119dfdc"
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _tests_mentioning(repo: Path, sha: str, needle: str) -> list[str]:
+    # `git grep -l` exits 1 on no match — not an error here.
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "grep", "-l", needle, sha, "--", "tests"],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode in (0, 1), proc.stderr
+    return proc.stdout.split()
+
+
+def test_lens43_composed_fixture_pins_the_missing_projects_term(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRD pr-reconciliation S8 (composed-tree review): the seeded head is the
+    # merged lens #43 content on top of lens main AFTER #44/#45 landed, minus
+    # the one term the operator's conflict resolution added — `projects`
+    # never counts as narrowing, so a ?project= board makes the healthy
+    # stripe's system-wide claim. The known-good is that resolution (lens
+    # 41a43c8, tree-identical to the squash merge) with two post-merge
+    # giveaway lines neutralised in BOTH heads. Pinned here, as a pair:
+    # the base already carries the projects filter (what makes the defect
+    # compositional); no ADDED line in the diff names it (else a catch would
+    # be an in-diff inconsistency, not tree-reading); the two heads differ in
+    # nothing but the resolution + regenerated metrics; the known-good is the
+    # squash merge but for the neutralisation; and no test at either head
+    # touches the helper, so the case is panel-only by construction.
+    case = load_case(_SHIPPED_CASES_DIR / "lens43-composed-projects")
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    # Compositional: the base (post-T1-S9) already has the projects filter on
+    # TaskFilters specifically (DashboardData carries a same-named field —
+    # slice the class so that one cannot satisfy this).
+    base_tasks = _blob_at(repo, case.base, _LENS43C_TASKS)
+    task_filters = base_tasks.partition("class TaskFilters")[2].partition("class ")[0]
+    assert "projects: tuple[str, ...] = ()" in task_filters
+    # ...and the story's diff never ADDS a line naming the project filter
+    # (`project:` is the tag convention, not the filter).
+    assert case.case_dir is not None
+    defect_patch = (case.case_dir / "feature-with-defect.patch").read_text()
+    added = [
+        ln
+        for ln in defect_patch.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    ]
+    assert not [ln for ln in added if "project" in ln.lower() and "project:" not in ln]
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        good_head = resolved.known_good_head or ""
+        buggy = _blob_at(repo, resolved.head, _LENS43C_FILTERING)
+        good = _blob_at(repo, good_head, _LENS43C_FILTERING)
+        assert "def filters_narrow_the_board" in buggy
+        assert "def filters_narrow_the_board" in good
+        # The defect: the helper exists at both heads; only the known-good
+        # counts projects as narrowing (and says why in its docstring).
+        assert _LENS43C_TERM not in buggy
+        assert _LENS43C_DOC not in buggy
+        assert _LENS43C_TERM in good
+        assert _LENS43C_DOC in good
+
+        # Minimal pair: nothing but the resolution and lens's regenerated
+        # metrics separates the two heads.
+        changed = _git_out(repo, "diff", "--name-only", resolved.head, good_head)
+        assert sorted(changed.split()) == sorted(
+            [*_LENS43C_METRICS, _LENS43C_FILTERING]
+        )
+
+        # The known-good is the squash merge but for the neutralised giveaways
+        # (+ the metrics they move) — a regeneration from another ref pair
+        # cannot satisfy this.
+        if _commit_exists(repo, _LENS43C_SQUASH):
+            vs_squash = _git_out(
+                repo, "diff", "--name-only", _LENS43C_SQUASH, good_head
+            )
+            assert sorted(vs_squash.split()) == sorted(
+                [*_LENS43C_METRICS, _LENS43C_WEB, _LENS43C_MVP_TESTS]
+            )
+        for sha in (resolved.head, good_head):
+            assert "project/tag/agent" not in _blob_at(repo, sha, _LENS43C_WEB)
+            # (the base's own ?project=influx tests stay — only the card-link
+            # test's parameter + assertion were removed)
+            mvp_tests = _blob_at(repo, sha, _LENS43C_MVP_TESTS)
+            assert "agent=planner&project=influx" not in mvp_tests
+            assert 'assert "project=influx" in href' not in mvp_tests
+
+        # Panel-only: no test at either head references the helper at all,
+        # and the narrowed-board regression test is parametrised over
+        # tags / agent / status only — lens's check-set passes the seeded
+        # head exactly as it passes the known-good (verified live while
+        # authoring).
+        for sha in (resolved.head, good_head):
+            assert _tests_mentioning(repo, sha, "filters_narrow_the_board") == []
+            tests_blob = _blob_at(repo, sha, _LENS43C_FRONTIER_TESTS)
+            narrowed = "def test_healthy_is_withheld_on_a_narrowed_board"
+            assert narrowed in tests_blob
+            before = tests_blob.partition(narrowed)[0]
+            assert "@pytest.mark.parametrize" in before
+            params = before.rsplit("@pytest.mark.parametrize", 1)[1]
+            assert "projects" not in params
+    finally:
+        cleanup()
