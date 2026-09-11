@@ -155,7 +155,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `post_finding`
 - def `post_friction` — The record FIRST (strict — it is the once-per-pair bound), then the breadcrumb; a breadcrumb that cannot post never erases the record.
 - def `paths_of`
-- def `story_escalated` — Does an OPEN loom human gate already wait on the story? The record on the gate is the once-per-key guard; this is the belt for a record that failed to land after the gate was raised (the story still names it), so a paid run is never repeated and a second gate never raised.
+- def `story_escalation` — Does an OPEN loom human gate already wait on the story? ``escalated`` when one does, ``clear`` when none does, ``unknown`` when Lithos could not say (PR #369 review round 2: "cannot read" is kept distinct from a confirmed gate — the state must not claim a decision that was never raised, and a paid run must not start on an unknown either).
 - def `escalate` — The residue is a human's: raise the loom ``human`` gate on the story, once per sha pair (the record carries the gate id).
 
 ### `lithos_loom.subscriptions.conflict_resolve_record`

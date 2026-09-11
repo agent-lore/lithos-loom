@@ -175,7 +175,6 @@ def test_a_held_conflict_debt_is_reconciling_not_resolving() -> None:
 
 def test_a_running_conflict_resolver_is_resolving_conflict() -> None:
     assert _derive({}, busy=Busy(conflict_resolve=True)).state == "resolving_conflict"
-    assert _derive(_conflict("running")).state == "resolving_conflict"
 
 
 def test_resolving_conflict_outranks_reconciling() -> None:
@@ -390,7 +389,7 @@ def test_a_required_re_gate_that_has_not_run_is_not_ready() -> None:
 
 
 def test_a_re_gate_queued_behind_another_pr_is_reconciling() -> None:
-    for label in ("deferred_busy", "deferred_remediation", "probing", "dispatched"):
+    for label in ("deferred_busy", "deferred_remediation", "dispatched"):
         d = _derive_d({}, regate=label)
         assert d.state == "reconciling" and "re-gate" in d.detail, label
 
@@ -463,3 +462,67 @@ async def test_record_is_idempotent_for_an_over_long_detail() -> None:
 
     assert await record_state(gate, _PR(), _URL, ctx, busy=Busy()) is None
     assert len(client.calls_to("task_update")) == writes
+
+
+# ── review #369 round 2: a prior verdict needs confirming; a record is not a process ─
+
+
+def test_a_prior_green_is_confirmed_only_by_an_unchanged_re_gate() -> None:
+    """A green record for the current pair may describe an older check-set;
+    only `unchanged` (the dispatcher re-read the settings and found the key
+    intact) confirms it. A fail-closed disposition outranks it."""
+    assert _derive_d(_regate("green"), regate="unchanged").state == "ready_to_merge"
+    for label in ("project_settings_unavailable", "no_story", "unknown_shas"):
+        d = _derive_d(_regate("green"), regate=label)
+        assert d.state == "awaiting_review" and label in d.detail, label
+        d = _derive_d(_regate("no_checks"), regate=label)
+        assert d.state == "awaiting_review", label
+
+
+def test_a_prior_green_with_no_dispatcher_configured_is_still_ready() -> None:
+    assert _derive_d(_regate("green"), regate=None).state == "ready_to_merge"
+
+
+def test_a_persisted_running_record_is_not_a_live_process() -> None:
+    """`running` is a reservation that may have died with its boot; only the
+    in-memory busy signal proves a resolver is running. A stale one on a
+    dirty PR is `behind` (the conflict is real, nobody is on it)."""
+    d = _derive_d(
+        _conflict("running"),
+        pr=_PR(mergeable=False, mergeable_state="dirty"),
+        conflict="unchanged",
+    )
+    assert d.state == "behind"
+    d = _derive_d(_conflict("running"), busy=Busy(conflict_resolve=True))
+    assert d.state == "resolving_conflict"
+
+
+def test_an_unavailable_escalation_lookup_falls_through_conservatively() -> None:
+    d = _derive_d(
+        _conflict("running"),
+        pr=_PR(mergeable=False, mergeable_state="dirty"),
+        conflict="escalation_unknown",
+    )
+    assert d.state == "behind"
+
+
+# ── review #369 round 3: `probing` re-verifies a settled outcome; it confirms it ─
+
+
+def test_a_background_probe_confirms_the_recorded_outcome_rather_than_masking_it() -> (
+    None
+):
+    """The live dispatcher answers `probing` on EVERY sweep for a settled,
+    settings-dependent record (the probe re-reads the fingerprint and starts
+    a run only if it moved), so `probing` is the common steady state of a
+    green PR — it must surface the outcome, not hide it as reconciling."""
+    assert _derive_d(_regate("green"), regate="probing").state == "ready_to_merge"
+    assert _derive_d(_regate("no_checks"), regate="probing").state == "ready_to_merge"
+    assert _derive_d(_regate("red"), regate="probing").state == "gate_failed"
+    meta = _regate("push_failed", behind=True, pushed_sha="", push_error="rejected")
+    assert _derive_d(meta, regate="probing").state == "behind"
+
+
+def test_a_probe_with_no_current_record_is_still_not_ready() -> None:
+    d = _derive_d({}, regate="probing")
+    assert d.state == "awaiting_review"

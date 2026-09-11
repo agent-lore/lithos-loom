@@ -139,10 +139,15 @@ class Dispositions:
 
 # A re-gate label that means the trial merge is not owed at all.
 _REGATE_NOT_REQUIRED = frozenset({"disabled", "project_disabled"})
-# A re-gate label that means the run is queued or under way.
-_REGATE_IN_PROGRESS = frozenset(
-    {"deferred_busy", "deferred_remediation", "probing", "dispatched"}
-)
+# A re-gate label that means a run that could CHANGE the verdict is queued
+# or under way — it masks the recorded outcome.
+_REGATE_IN_PROGRESS = frozenset({"deferred_busy", "deferred_remediation", "dispatched"})
+# A re-gate label that confirms the recorded outcome still stands: the key
+# matched outright (`unchanged`), or the dispatcher is re-verifying the
+# settings fingerprint in the background (`probing` — its steady-state answer
+# for every settled, settings-dependent record; a moved fingerprint becomes
+# `dispatched` on a later sweep). Review #369 round 3.
+_REGATE_CONFIRMS = frozenset({"unchanged", "probing"})
 # A conflict-resolver outcome that is settled and handed to the operator.
 _CONFLICT_SETTLED = frozenset({"not_converged", "failed", "conflict_unsupported"})
 
@@ -241,9 +246,10 @@ def _derive(
     if said.regate in _REFUSALS:
         return Derived("needs_human", f"merge-gate refused: {said.regate}")
 
-    if busy.conflict_resolve or (
-        conflict_now and _str(conflict.get("status")) == "running"
-    ):
+    # Only the in-memory busy signal proves a resolver is running: a
+    # persisted `running` is a reservation that may have died with its boot
+    # (review #369 round 2), and a stale one on a dirty PR reads as `behind`.
+    if busy.conflict_resolve:
         return Derived("resolving_conflict", "converge --resolve-conflicts running")
     if busy.conflict_debt:
         return Derived("reconciling", "resolved conflict pushed; record write pending")
@@ -283,10 +289,25 @@ def _derive(
         return Derived("awaiting_review", "GitHub: blocked (reviews/checks required)")
     if mergeable_state and mergeable_state != "clean":
         return Derived("awaiting_review", f"GitHub: {mergeable_state}")
-    if outcome == "green":
-        return Derived("ready_to_merge", "landable; trial merge green")
-    if outcome == "no_checks":
-        return Derived("ready_to_merge", "landable; the project runs no checks")
+    if outcome in ("green", "no_checks"):
+        # A prior safe verdict may describe an older check-set; only a
+        # dispatcher that re-read the settings and found the key intact
+        # (`unchanged`) — or no dispatcher at all — confirms it (review #369
+        # round 2). A fail-closed disposition outranks it.
+        if (
+            said.regate is None
+            or said.regate in _REGATE_NOT_REQUIRED | _REGATE_CONFIRMS
+        ):
+            what = (
+                "trial merge green"
+                if outcome == "green"
+                else "the project runs no checks"
+            )
+            return Derived("ready_to_merge", f"landable; {what}")
+        return Derived(
+            "awaiting_review",
+            f"prior trial merge {outcome} unconfirmed ({said.regate})",
+        )
     if outcome:
         return Derived(
             "awaiting_review", f"trial merge {outcome}; awaiting the re-gate"

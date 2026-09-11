@@ -39,7 +39,7 @@ __all__ = [
     "paths_of",
     "post_finding",
     "post_friction",
-    "story_escalated",
+    "story_escalation",
     "strict_write",
     "write_once",
     "write_record",
@@ -122,22 +122,29 @@ def paths_of(data: Mapping[str, Any]) -> list[str]:
     return [p for p in (raw if isinstance(raw, list) else []) if isinstance(p, str)]
 
 
-async def story_escalated(story_id: str, ctx: SubscriptionContext) -> bool:
-    """Does an OPEN loom human gate already wait on the story? The record on
-    the gate is the once-per-key guard; this is the belt for a record that
-    failed to land after the gate was raised (the story still names it), so
-    a paid run is never repeated and a second gate never raised."""
+async def story_escalation(story_id: str, ctx: SubscriptionContext) -> str:
+    """Does an OPEN loom human gate already wait on the story? ``escalated``
+    when one does, ``clear`` when none does, ``unknown`` when Lithos could
+    not say (PR #369 review round 2: "cannot read" is kept distinct from a
+    confirmed gate — the state must not claim a decision that was never
+    raised, and a paid run must not start on an unknown either).
+
+    The record on the gate is the once-per-key guard; this is the belt for a
+    record that failed to land after the gate was raised (the story still
+    names it), so a paid run is never repeated and a second gate never
+    raised — and the belt is what the reconciliation state reads, so it
+    speaks before any record-based early return."""
     try:
         story = await ctx.lithos.task_get(task_id=story_id)
         if story is None:
-            return False
+            return "clear"
         gate_id = story.metadata.get(STORY_HUMAN_GATE_ID_KEY)
         if not isinstance(gate_id, str) or not gate_id:
-            return False
+            return "clear"
         human = await ctx.lithos.task_get(task_id=gate_id)
-    except LithosClientError:
-        return True  # unknown is not permission for a paid run; retried next sweep
-    return human is not None and human.status == "open"
+    except (LithosClientError, OSError):
+        return "unknown"
+    return "escalated" if human is not None and human.status == "open" else "clear"
 
 
 async def escalate(

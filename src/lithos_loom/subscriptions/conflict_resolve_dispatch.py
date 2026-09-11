@@ -55,7 +55,7 @@ from lithos_loom.subscriptions.conflict_resolve_outcome import (
     paths_of,
     post_finding,
     post_friction,
-    story_escalated,
+    story_escalation,
     strict_write,
     write_once,
     write_record,
@@ -220,6 +220,15 @@ class ConflictResolveDispatch:
             or (merge.head_sha, merge.base_sha) != (head, base)
         ):
             return "no_conflict"  # nothing current to resolve; S3 decides first
+        # The story-side belt speaks FIRST (PR #369 review round 2): an open
+        # loom human gate on the story is the state the operator must see,
+        # and it must not hide behind "unchanged" when the gate-id write
+        # that would have put it on the record failed.
+        escalation = await story_escalation(story_id, ctx)
+        if escalation == "escalated":
+            return "escalated"  # a human gate already waits on this story
+        if escalation == "unknown":
+            return "escalation_unknown"  # not permission for a paid run
         if (spec.pr_url, head, base) in self._attempted:
             return "unchanged"  # this boot already spent on the pair
         prior = read_record(gate, spec.pr_url)
@@ -238,8 +247,6 @@ class ConflictResolveDispatch:
             )
             if not rebooted and prior.status != "repo_mismatch":
                 return "unchanged"
-        if await story_escalated(story_id, ctx):
-            return "escalated"  # a human gate already waits on this story
         if hold:
             return "held"
         if self.busy():
