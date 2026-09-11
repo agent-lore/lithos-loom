@@ -389,10 +389,14 @@ tags = ["trigger:story-develop"]
 # # the sole merge-tracking path since US11): for each open `pr` gate
 # # (task_type="gate", gate_type="pr") it polls the PR and, on merge,
 # # completes the gated story then the gate ([GateResolved]);
-# # closed-unmerged / deleted leaves the gate OPEN with a one-shot
-# # [DeliveredPRClosed] on the story (never cancels — a cancelled gate
-# # would strand the story).
-# # Set false to run the watcher for issue sync only.
+# # closed-unmerged / deleted supersedes the gate with a loom `human`
+# # gate on the story ([NeedsHuman]: work landed elsewhere → complete the
+# # story; re-develop → complete the gate; abandon → cancel the story)
+# # and completes the pr gate (never cancels — a cancelled gate would
+# # strand the story); the human gate keeps polling the PR so a
+# # reopen-and-merge still resolves the story.
+# # Set false to run the watcher for issue sync only (loom human gates
+# # whose waiter is already resolved are still tidied up).
 # external_reviews_enabled = true
 # # PRD S2 detection: on each still-open `pr` gate the sweep also reads the
 # # PR's reviews + inline review comments + Conversation-tab comments (#353

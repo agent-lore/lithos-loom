@@ -7,8 +7,9 @@ the PR. This module resolves those gates: called per-open-gate by the
 github-watcher child's periodic reconcile sweep (``children/github_watcher.py``,
 which enumerates open tasks and holds a ``GitHubClient``), it reads the gate's
 PR merge state from GitHub and, on merge, completes the story **then** the gate;
-on closed-unmerged / deleted it leaves the gate open with a
-``[DeliveredPRClosed]`` finding; while still open it also reports
+on closed-unmerged / deleted it supersedes the gate with a loom ``human`` gate on
+the story and completes it (:mod:`.pr_gate_stranding`, 04c2448b), with a
+``[DeliveredPRClosed]`` finding as the audit trail; while still open it also reports
 landability (:mod:`.pr_landability`, PRD S1) and ingests external reviews
 (:mod:`.external_reviews`, PRD S2).
 
@@ -30,6 +31,7 @@ from typing import Any
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
     PrGateSpec,
+    is_loom_human_gate,
     is_pr_gate,
     parse_pr_gate,
     waiter_of,
@@ -42,13 +44,21 @@ from lithos_loom.subscriptions._develop_pr_nudge import (
     nudge_unblocked,
     recover_dependents,
 )
-from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions._findings import complete_swallowing, write_marker
 from lithos_loom.subscriptions.conflict_resolve_dispatch import (
     ConflictResolveDispatch,
 )
 from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
+from lithos_loom.subscriptions.pr_gate_stranding import (
+    DELIVERED_PR_CLOSED,
+    MERGE_STATE_KEY,
+    MERGE_STATE_URL_KEY,
+    STRANDING_REASONS,
+    convert_stranded_gate,
+    human_gate_pr,
+)
 from lithos_loom.subscriptions.pr_landability import check_landability
 from lithos_loom.subscriptions.reconciliation_state import (
     STATE_KEY,
@@ -58,6 +68,7 @@ from lithos_loom.subscriptions.reconciliation_state import (
     closed_state_marker,
     record_state,
 )
+from lithos_loom.subscriptions.remediation_budget import RemediationNotifier
 
 # A deferred reconciliation-state write: the sweep awaits these after every
 # gate has been through the dispatchers (PR #369 round 3).
@@ -70,28 +81,15 @@ __all__ = [
     "MERGE_STATE_TERMINAL",
     "MERGE_STATE_URL_KEY",
     "StateSettle",
+    "is_loom_human_gate",
     "is_pr_gate",
+    "reconcile_human_pr_gate",
     "reconcile_pr_gate",
 ]
-
-# Stable, machine-parseable finding prefix (see AGENTS.md): a delivered PR
-# reached a closed-without-merge end state (closed unmerged, or deleted), so the
-# task is left open for a human rather than completed.
-DELIVERED_PR_CLOSED = "[DeliveredPRClosed]"
 
 # A `pr` gate was resolved on merge (Epic H): the gate + its story are completed
 # and this finding records why the story unblocked — gate type, PR, resolver.
 GATE_RESOLVED = "[GateResolved]"
-
-# Gate-metadata keys carrying the de-dup marker (written on the GATE). The marker
-# is SCOPED to the PR url it resolved (MERGE_STATE_URL_KEY): the resolver skips a
-# gate only when its resolved state is terminal AND the recorded url still
-# matches the gate's PR url. So when a rejected PR is abandoned and the story is
-# re-developed into a REPLACEMENT PR (a fresh url), the recorded url no longer
-# matches and the resolver re-evaluates the new PR — without that scoping a stale
-# marker would suppress the new PR forever.
-MERGE_STATE_KEY = "develop_pr_merge_state"
-MERGE_STATE_URL_KEY = "develop_pr_merge_url"
 
 
 # Marker values that mean "this PR url is resolved". A still-open PR leaves the
@@ -165,6 +163,7 @@ async def reconcile_pr_gate(
     merge_gate: MergeGateDispatch | None = None,
     conflict_resolve: ConflictResolveDispatch | None = None,
     settle_later: list[StateSettle] | None = None,
+    notifier: RemediationNotifier | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -176,12 +175,11 @@ async def reconcile_pr_gate(
     On **merge** the gate + its story are completed (story-first, so a crash can
     never leave the story open-and-ready — the mark-then-complete hazard the
     story sweep's docstring warns of) and a ``[GateResolved]`` finding is posted
-    on the story. On **closed-unmerged / deleted** the gate is left OPEN (so the
-    story stays correctly ``blocker_unsatisfiable`` — a cancelled gate would be
-    terminal and unrecoverable through any Loom surface), a ``[DeliveredPRClosed]``
-    finding is posted on the story, and a url-scoped marker on the GATE stops the
-    dead PR being re-polled. A still-open PR re-polls next sweep; a transient
-    GitHub failure retries.
+    on the story. On **closed-unmerged / deleted** the gate is superseded by a
+    loom ``human`` gate on the story and completed (:func:`_gate_closed`,
+    04c2448b), with a ``[DeliveredPRClosed]`` finding on the story as the audit
+    trail; *notifier* is that escalation's push sinks. A still-open PR re-polls
+    next sweep; a transient GitHub failure retries.
 
     ``ingest_reviews`` additionally runs the external-review ingestion
     (:mod:`.external_reviews`, PRD S2) on the still-open branch — the one place
@@ -229,8 +227,27 @@ async def reconcile_pr_gate(
         # Already resolved THIS pr_url (a closed-unmerged / gone gate left open).
         # A merged gate is completed → out of the open set → never re-swept, so
         # it needs no marker; this guard only fires for the left-open states.
-        # PRD S7 (review #369 F2): a gate closed before the state existed is
-        # backfilled here — no GitHub call needed, the marker says it all.
+        merge_state = str(gate.metadata.get(MERGE_STATE_KEY))
+        if merge_state in STRANDING_REASONS:
+            try:
+                story_id = await waiter_of(ctx.lithos, gate.id)
+            except (LithosClientError, OSError) as exc:
+                ctx.logger.warning(
+                    "[Friction] pr-gate: reading gate %s's waiter failed (%s); "
+                    "will retry next sweep",
+                    gate.id,
+                    exc,
+                )
+                return "error"
+            if story_id is not None:
+                # 04c2448b: a gate still open under the old contract (stranded
+                # before this shipped, or a conversion that did not finish)
+                # converts here — the marker says it all, no GitHub call.
+                return await _gate_closed(
+                    gate, story_id, spec, merge_state, ctx, notifier
+                )
+        # PRD S7 (review #369 F2): an orphan gate closed before the state
+        # existed is backfilled here — no GitHub call needed.
         if (
             gate.metadata.get(STATE_URL_KEY) != spec.pr_url
             or gate.metadata.get(STATE_KEY) != "needs_human"
@@ -262,8 +279,7 @@ async def reconcile_pr_gate(
         return "error"
 
     if pr is None:  # 404 — PR or repo gone (permanent, cf. #69)
-        await _gate_closed(gate, story_id, spec.pr_url, "gone", ctx)
-        return "gone"
+        return await _gate_closed(gate, story_id, spec, "gone", ctx, notifier)
 
     state = _pr_merge_state(pr)
     if state == "merged":
@@ -297,8 +313,7 @@ async def reconcile_pr_gate(
         # doesn't count an un-landed resolution as resolved.
         return "error"
     if state == "closed_unmerged":
-        await _gate_closed(gate, story_id, spec.pr_url, "closed_unmerged", ctx)
-        return "closed_unmerged"
+        return await _gate_closed(gate, story_id, spec, state, ctx, notifier)
 
     # state == "open" — still in flight; re-poll next sweep (no merge marker).
     # The base-move key for everything below is the base branch's LIVE tip
@@ -480,7 +495,9 @@ async def _resolve_gate_merged(
             # so the next sweep can finish the job. Reported as `error`, not
             # `merged` — the resolution has not landed.
             return False
-    if not await _complete_swallowing(gate.id, ctx, subject=f"gate {gate.id}"):
+    if not await complete_swallowing(
+        ctx, task_id=gate.id, subject=f"gate {gate.id}", subsystem="pr-gate"
+    ):
         return False
     if story_id is not None:
         summary = (
@@ -541,74 +558,88 @@ async def _complete_story(
         return None
 
 
-async def _complete_swallowing(
-    task_id: str, ctx: SubscriptionContext, *, subject: str
-) -> bool:
-    """``task_complete`` swallowing ``task_not_found`` (already terminal).
-
-    Returns ``True`` when the task is now terminal (completed here or already
-    was), ``False`` on a transient error the caller should retry next sweep.
-    The story has its own variant (:func:`_complete_story`) because it also
-    has to answer *who this released*.
-    """
-    try:
-        await ctx.lithos.task_complete(task_id=task_id)
-    except LithosClientError as exc:
-        if exc.code == "task_not_found":
-            return True  # already terminal — fine
-        ctx.logger.warning(
-            "[Friction] pr-gate: completing %s failed (%s); will retry next sweep",
-            subject,
-            exc,
-        )
-        return False
-    return True
-
-
 async def _gate_closed(
     gate: Any,
     story_id: str | None,
-    pr_url: str,
+    spec: PrGateSpec,
     marker: str,
     ctx: SubscriptionContext,
-) -> None:
-    """PR closed-unmerged or deleted: leave the gate OPEN, tell the operator.
-
-    The gate is *not* cancelled — a cancelled gate is terminal and its story
-    would be permanently ``blocker_unsatisfiable`` with no Loom surface to
-    recover it (no ``task_reopen`` / edge-delete wrapper). Left open, the story
-    stays correctly blocked with a ``⛔`` in the vault, and the operator's
-    recovery is to complete the gate (proceed) or re-point it at a replacement
-    PR. A ``[DeliveredPRClosed]`` finding goes on the story; a url-scoped marker
-    on the GATE stops the dead PR being re-polled and re-reported every sweep.
+    notifier: RemediationNotifier | None,
+) -> str:
+    """PR closed-unmerged or deleted: supersede the ``pr`` gate with a loom
+    ``human`` gate on the story and complete it
+    (:func:`~.pr_gate_stranding.convert_stranded_gate`, 04c2448b / #268) —
+    never cancel it: a cancelled gate is terminal and its story would be
+    permanently ``blocker_unsatisfiable``. An orphan gate (no waiter) has no
+    story to escalate; it just keeps its url-scoped marker + state so the dead
+    PR is not re-polled. Returns the sweep's outcome label.
     """
-    reason = "no longer exists (404)" if marker == "gone" else "was closed unmerged"
-    gate_marker = {
-        MERGE_STATE_KEY: marker,
-        MERGE_STATE_URL_KEY: pr_url,
-        **closed_state_marker(pr_url, marker),  # PRD S7: one write, never apart
-    }
-    if story_id is None:
-        # Orphan gate (no waiter): nothing to post the finding on. Just mark it.
-        await write_marker(
-            ctx, task_id=gate.id, marker=gate_marker, subsystem="pr-gate"
-        )
-        ctx.logger.warning(
-            "[Friction] pr-gate: gate %s has no waiter; PR %s %s",
-            gate.id,
-            pr_url,
-            reason,
-        )
-        return
-    await post_finding_then_mark(
+    if story_id is not None:
+        return await convert_stranded_gate(gate, story_id, spec, marker, notifier, ctx)
+    await write_marker(
         ctx,
-        task_id=story_id,
-        summary=(
-            f"{DELIVERED_PR_CLOSED} pr-gate: delivered PR {pr_url} {reason}; "
-            f"story {story_id} left blocked on gate {gate.id} for a human"
-        ),
-        marker=gate_marker,
+        task_id=gate.id,
+        marker={
+            MERGE_STATE_KEY: marker,
+            MERGE_STATE_URL_KEY: spec.pr_url,
+            **closed_state_marker(spec.pr_url, marker),  # PRD S7: one write
+        },
         subsystem="pr-gate",
-        retry_hint="will retry next sweep",
-        marker_task_id=gate.id,
     )
+    ctx.logger.warning(
+        "[Friction] pr-gate: gate %s has no waiter; PR %s %s",
+        gate.id,
+        spec.pr_url,
+        "no longer exists (404)" if marker == "gone" else "was closed unmerged",
+    )
+    return marker
+
+
+async def reconcile_human_pr_gate(
+    gate: Any, github: GitHubClient, ctx: SubscriptionContext
+) -> str | None:
+    """Poll the PR a stranding ``human`` gate was raised for (04c2448b): a
+    closed PR that is **reopened and merged** resolves exactly as the ``pr``
+    gate would have — story first, then the gate, ``[GateResolved]`` on the
+    story. Anything else (still closed, reopened but unmerged, deleted) is
+    the operator's decision and writes nothing.
+
+    Returns the merge-poll outcome label, ``error`` on a transient GitHub /
+    Lithos failure (retried next sweep), or ``None`` for a gate that is not a
+    stranding gate. Bounded by the human gate's own lifetime — completing or
+    cancelling it ends the poll — so no thrash guard is needed.
+    """
+    spec = human_gate_pr(gate)
+    if spec is None:
+        return None
+    try:
+        story_id = await waiter_of(ctx.lithos, gate.id)
+    except (LithosClientError, OSError) as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: reading human gate %s's waiter failed (%s); "
+            "will retry next sweep",
+            gate.id,
+            exc,
+        )
+        return "error"
+    try:
+        pr = await github.get_pull_request(spec.repo, spec.pr_number)
+    except GitHubError as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: fetching %s#%d for human gate %s failed (%s: %s); "
+            "will retry next sweep",
+            spec.repo,
+            spec.pr_number,
+            gate.id,
+            type(exc).__name__,
+            exc,
+        )
+        return "error"
+    if pr is None:
+        return "gone"
+    state = _pr_merge_state(pr)
+    if state != "merged":
+        return state
+    if await _resolve_gate_merged(gate, story_id, spec.pr_url, pr, ctx):
+        return "merged"
+    return "error"

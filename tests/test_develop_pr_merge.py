@@ -658,41 +658,6 @@ async def test_gate_merged_nudge_failure_posts_friction_and_still_resolves() -> 
     assert any(f["summary"].startswith(GATE_RESOLVED) for f in client.findings)
 
 
-async def test_gate_closed_unmerged_leaves_gate_open_and_warns() -> None:
-    """Closed-unmerged: the gate is LEFT OPEN (never cancelled — a cancelled
-    gate is terminal and its story would be unrecoverable), a [DeliveredPRClosed]
-    finding lands on the story, and the gate is marked so the dead PR isn't
-    re-polled."""
-    client = FakeLithosClient(agent_id="a")
-    story, gate = await _gate_with_story(client)
-    github = _github(_pr(state="closed", merged=False))
-
-    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
-
-    assert outcome == "closed_unmerged"
-    # Gate + story both still open; story still blocked.
-    assert (await _get(client, gate.id)).status == "open"
-    assert (await _get(client, story)).status == "open"
-    assert [bt.task.id for bt in await client.task_blocked(project="p")] == [story]
-    # Finding on the STORY; marker on the GATE.
-    findings = [f["summary"] for f in client._findings]
-    assert any(s.startswith(DELIVERED_PR_CLOSED) for s in findings)
-    marked_gate = await _get(client, gate.id)
-    assert marked_gate.metadata[MERGE_STATE_KEY] == "closed_unmerged"
-    assert marked_gate.metadata[MERGE_STATE_URL_KEY] == _PR_URL
-
-
-async def test_gate_deleted_pr_leaves_gate_open() -> None:
-    client = FakeLithosClient(agent_id="a")
-    story, gate = await _gate_with_story(client)
-
-    outcome = await reconcile_pr_gate(gate, _github(None), _ctx(client))
-
-    assert outcome == "gone"
-    assert (await _get(client, gate.id)).status == "open"
-    assert (await _get(client, gate.id)).metadata[MERGE_STATE_KEY] == "gone"
-
-
 async def test_gate_still_open_pr_is_a_noop() -> None:
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)
@@ -719,19 +684,27 @@ async def test_gate_transient_github_error_retries_next_sweep() -> None:
     assert MERGE_STATE_KEY not in (await _get(client, gate.id)).metadata
 
 
-async def test_gate_already_resolved_for_this_url_is_skipped() -> None:
-    """A closed-unmerged gate carries a terminal marker scoped to its url; the
-    next sweep skips it without a GitHub call."""
+async def test_orphan_gate_already_resolved_for_this_url_is_skipped() -> None:
+    """A closed-unmerged ORPHAN gate carries a terminal marker scoped to its url;
+    the next sweep skips it without a GitHub call. (A gate with a waiter
+    converts instead — see the stranding tests below.)"""
     client = FakeLithosClient(agent_id="a")
-    story, gate = await _gate_with_story(client)
-    await client.task_update(
-        task_id=gate.id,
-        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
+    gate_id = await client.task_create(
+        title="orphan",
+        task_type="gate",
+        metadata={
+            "gate_type": "pr",
+            "repo": "agent-lore/lithos-loom",
+            "pr_number": 7,
+            "pr_url": _PR_URL,
+            MERGE_STATE_KEY: "closed_unmerged",
+            MERGE_STATE_URL_KEY: _PR_URL,
+        },
     )
-    refreshed = await client.task_get(task_id=gate.id)
+    gate = await _get(client, gate_id)
     github = AsyncMock()
 
-    outcome = await reconcile_pr_gate(refreshed, github, _ctx(client))
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
 
     assert outcome is None
     github.get_pull_request.assert_not_awaited()
@@ -1433,20 +1406,24 @@ async def test_still_open_sweep_records_the_reconciliation_state() -> None:
 
 
 async def test_closed_pr_records_needs_human_in_the_same_marker_write() -> None:
+    """The merge marker and the reconciliation state never disagree: on the
+    PR GATE they land in one task_update (the conversion adds its superseded
+    key to that same write)."""
     from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
 
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)
     github = _github(_pr(state="closed", merged=False))
-    writes_before = len(client.calls_to("task_update"))
 
     outcome = await reconcile_pr_gate(gate, github, _ctx(client))
 
     assert outcome == "closed_unmerged"
-    stored = await client.task_get(task_id=gate.id)
-    assert stored is not None
-    assert stored.metadata[STATE_KEY] == "needs_human"
-    assert len(client.calls_to("task_update")) == writes_before + 1
+    gate_writes = [
+        c["metadata"] for c in client.calls_to("task_update") if c["task_id"] == gate.id
+    ]
+    assert len(gate_writes) == 1
+    assert gate_writes[0][MERGE_STATE_KEY] == "closed_unmerged"
+    assert gate_writes[0][STATE_KEY] == "needs_human"
 
 
 async def test_an_unreadable_base_tip_never_records_ready_to_merge() -> None:
@@ -1503,19 +1480,26 @@ async def test_a_re_gate_deferred_behind_another_pr_records_reconciling() -> Non
     assert stored.metadata[STATE_KEY] == "reconciling"
 
 
-async def test_a_gate_closed_before_s7_is_backfilled_with_needs_human() -> None:
-    """Review #369 F2: the terminal guard returns before any fetch; a gate
-    marked closed before this shipped must still get its state — with no
-    GitHub call."""
+async def test_an_orphan_gate_closed_before_s7_is_backfilled_with_needs_human() -> None:
+    """Review #369 F2: the terminal guard returns before any fetch; an orphan
+    gate marked closed before this shipped must still get its state — with no
+    GitHub call. (A gate WITH a waiter converts to a human gate instead.)"""
     from lithos_loom.subscriptions.reconciliation_state import STATE_KEY, STATE_URL_KEY
 
     client = FakeLithosClient(agent_id="a")
-    story, gate = await _gate_with_story(client)
-    await client.task_update(
-        task_id=gate.id,
-        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
+    gate_id = await client.task_create(
+        title="orphan",
+        task_type="gate",
+        metadata={
+            "gate_type": "pr",
+            "repo": "agent-lore/lithos-loom",
+            "pr_number": 7,
+            "pr_url": _PR_URL,
+            MERGE_STATE_KEY: "closed_unmerged",
+            MERGE_STATE_URL_KEY: _PR_URL,
+        },
     )
-    gate = await _get(client, gate.id)
+    gate = await _get(client, gate_id)
     github = _github(None)
 
     outcome = await reconcile_pr_gate(gate, github, _ctx(client))
@@ -1671,3 +1655,678 @@ async def test_a_settled_re_gate_never_defers_its_state_write() -> None:
     )
     assert settles == []
     assert STATE_KEY in (await _get(client, gate.id)).metadata
+
+
+# ── a stranded pr gate becomes a human gate (04c2448b / #268) ──────────
+
+
+def _human_gates(client: FakeLithosClient) -> list[Task]:
+    from lithos_loom.gates import is_loom_human_gate
+
+    return [t for t in client._tasks.values() if is_loom_human_gate(t)]
+
+
+class _Notifier:
+    def __init__(self) -> None:
+        self.notices: list[Any] = []
+
+    async def needs_human(self, notice: Any) -> list[str]:
+        self.notices.append(notice)
+        return []
+
+
+async def test_gate_closed_unmerged_converts_to_a_human_gate() -> None:
+    """The stranding becomes ONE blocker with ONE action: a loom `human` gate
+    on the story (reason pr_closed_unmerged, brief naming the PR and the
+    superseded pr gate), the pr gate completed, the story still blocked —
+    on the human gate now — with [DeliveredPRClosed] + [NeedsHuman] on it."""
+    from lithos_loom.gates import STORY_HUMAN_GATE_ID_KEY, parse_human_gate
+    from lithos_loom.subscriptions.pr_gate_stranding import SUPERSEDED_BY_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(_pr(state="closed", merged=False))
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome == "closed_unmerged"
+    humans = _human_gates(client)
+    assert len(humans) == 1
+    human = humans[0]
+    spec = parse_human_gate(human)
+    assert spec is not None
+    assert spec.reason == "pr_closed_unmerged"
+    assert spec.route == "pr-gate"
+    assert spec.brief["pr_url"] == _PR_URL
+    assert spec.brief["superseded_pr_gate_id"] == gate.id
+    assert human.status == "open"
+    # the pr gate: superseded, marked, completed
+    pr_gate = await _get(client, gate.id)
+    assert pr_gate.status == "completed"
+    assert pr_gate.metadata[SUPERSEDED_BY_KEY] == human.id
+    assert pr_gate.metadata[MERGE_STATE_KEY] == "closed_unmerged"
+    assert pr_gate.metadata[MERGE_STATE_URL_KEY] == _PR_URL
+    # the story: open, blocked on the human gate only, provenance recorded
+    stored = await _get(client, story)
+    assert stored.status == "open"
+    assert stored.metadata[STORY_HUMAN_GATE_ID_KEY] == human.id
+    blocked = await client.task_blocked(project="p")
+    assert [bt.task.id for bt in blocked] == [story]
+    assert [b.task_id for b in blocked[0].blockers] == [human.id]
+    summaries = [f["summary"] for f in client.findings if f["task_id"] == story]
+    assert sum(s.startswith(DELIVERED_PR_CLOSED) for s in summaries) == 1
+    assert sum(s.startswith("[NeedsHuman]") for s in summaries) == 1
+    assert any(human.id in s and "pr_closed_unmerged" in s for s in summaries)
+
+
+async def test_gate_deleted_pr_converts_with_pr_gone() -> None:
+    from lithos_loom.gates import parse_human_gate
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+
+    outcome = await reconcile_pr_gate(gate, _github(None), _ctx(client))
+
+    assert outcome == "gone"
+    assert (await _get(client, gate.id)).status == "completed"
+    (human,) = _human_gates(client)
+    spec = parse_human_gate(human)
+    assert spec is not None and spec.reason == "pr_gone"
+
+
+async def test_conversion_raises_the_human_gate_before_completing_the_pr_gate() -> None:
+    """The story must never be momentarily unblocked: at the instant the pr
+    gate completes, the human gate already holds the story."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    blockers_at_completion: list[list[str]] = []
+    original = client.task_complete
+
+    async def _spy(**kwargs: Any) -> Any:
+        blocked = await client.task_blocked(project="p")
+        blockers_at_completion.append(
+            [b.task_id for bt in blocked if bt.task.id == story for b in bt.blockers]
+        )
+        return await original(**kwargs)
+
+    client.task_complete = _spy  # type: ignore[method-assign]
+
+    await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    (human,) = _human_gates(client)
+    assert blockers_at_completion == [[gate.id, human.id]]
+
+
+async def test_conversion_reuses_an_escalation_already_open_on_the_story() -> None:
+    """A story already behind a loom human gate (say, conflict_unresolved) gets
+    no second gate: the pr gate is superseded by the one that exists."""
+    from lithos_loom.gates import STORY_HUMAN_GATE_ID_KEY, create_human_gate
+    from lithos_loom.subscriptions.pr_gate_stranding import SUPERSEDED_BY_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    existing = await create_human_gate(
+        client,
+        story_id=story,
+        story_title="US7",
+        project="p",
+        agent="a",
+        route="conflict-resolve",
+        reason="conflict_unresolved",
+        summary="could not resolve",
+    )
+    await client.task_update(
+        task_id=story, metadata={STORY_HUMAN_GATE_ID_KEY: existing}
+    )
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert outcome == "closed_unmerged"
+    assert [h.id for h in _human_gates(client)] == [existing]
+    pr_gate = await _get(client, gate.id)
+    assert pr_gate.status == "completed"
+    assert pr_gate.metadata[SUPERSEDED_BY_KEY] == existing
+    summaries = [f["summary"] for f in client.findings if f["task_id"] == story]
+    assert sum(s.startswith(DELIVERED_PR_CLOSED) for s in summaries) == 1
+    assert not any(s.startswith("[NeedsHuman]") for s in summaries)
+
+
+async def test_conversion_is_idempotent_after_a_failed_pr_gate_completion() -> None:
+    """The superseded marker on the PR GATE is the idempotency key: a sweep
+    that raised the gate but could not complete the pr gate leaves the marker,
+    and the next sweep completes it without a second human gate or finding —
+    and without a GitHub call (the terminal marker says it all)."""
+    from lithos_loom.subscriptions.pr_gate_stranding import SUPERSEDED_BY_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    original = client.task_complete
+
+    async def _gate_completion_fails(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == gate.id:
+            raise LithosClientError("internal", "boom")
+        return await original(**kwargs)
+
+    client.task_complete = _gate_completion_fails  # type: ignore[method-assign]
+    first = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+    assert first == "error"
+    stuck = await _get(client, gate.id)
+    assert stuck.status == "open"
+    (human,) = _human_gates(client)
+    assert stuck.metadata[SUPERSEDED_BY_KEY] == human.id
+
+    client.task_complete = original  # type: ignore[method-assign]
+    github = AsyncMock()
+    second = await reconcile_pr_gate(stuck, github, _ctx(client))
+
+    assert second == "closed_unmerged"
+    github.get_pull_request.assert_not_awaited()
+    assert (await _get(client, gate.id)).status == "completed"
+    assert [h.id for h in _human_gates(client)] == [human.id]
+    summaries = [f["summary"] for f in client.findings if f["task_id"] == story]
+    assert sum(s.startswith(DELIVERED_PR_CLOSED) for s in summaries) == 1
+    assert sum(s.startswith("[NeedsHuman]") for s in summaries) == 1
+
+
+async def test_a_gate_stranded_before_this_shipped_converts_on_its_next_sweep() -> None:
+    """Self-migrating: a gate left open under the old contract (terminal
+    marker, no superseded key) converts on the next sweep, no GitHub call."""
+    from lithos_loom.subscriptions.pr_gate_stranding import SUPERSEDED_BY_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
+    )
+    gate = await _get(client, gate.id)
+    github = AsyncMock()
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome == "closed_unmerged"
+    github.get_pull_request.assert_not_awaited()
+    (human,) = _human_gates(client)
+    pr_gate = await _get(client, gate.id)
+    assert pr_gate.status == "completed"
+    assert pr_gate.metadata[SUPERSEDED_BY_KEY] == human.id
+    assert (await _get(client, story)).status == "open"
+
+
+async def test_conversion_falls_back_to_the_open_gate_when_no_human_gate_lands() -> (
+    None
+):
+    """No human gate → the pre-change contract exactly: the pr gate stays OPEN
+    with its url-scoped marker + needs_human state, [DeliveredPRClosed] on the
+    story says the gate could not be raised. The next sweep retries the raise
+    (via the terminal guard) and, once it lands, converts — without a second
+    [DeliveredPRClosed]."""
+    from lithos_loom.subscriptions.pr_gate_stranding import SUPERSEDED_BY_KEY
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    original = client.task_create
+
+    async def _gate_creation_fails(**kwargs: Any) -> Any:
+        if kwargs.get("task_type") == "gate":
+            raise LithosClientError("internal", "boom")
+        return await original(**kwargs)
+
+    client.task_create = _gate_creation_fails  # type: ignore[method-assign]
+    first = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert first == "closed_unmerged"
+    assert _human_gates(client) == []
+    stuck = await _get(client, gate.id)
+    assert stuck.status == "open"
+    assert stuck.metadata[MERGE_STATE_KEY] == "closed_unmerged"
+    assert stuck.metadata[STATE_KEY] == "needs_human"
+    assert SUPERSEDED_BY_KEY not in stuck.metadata
+    summaries = [f["summary"] for f in client.findings if f["task_id"] == story]
+    assert len(summaries) == 1
+    assert summaries[0].startswith(DELIVERED_PR_CLOSED)
+    assert "[Friction]" in summaries[0]
+
+    client.task_create = original  # type: ignore[method-assign]
+    github = AsyncMock()
+    second = await reconcile_pr_gate(stuck, github, _ctx(client))
+
+    assert second == "closed_unmerged"
+    github.get_pull_request.assert_not_awaited()
+    (human,) = _human_gates(client)
+    assert (await _get(client, gate.id)).status == "completed"
+    summaries = [f["summary"] for f in client.findings if f["task_id"] == story]
+    assert sum(s.startswith(DELIVERED_PR_CLOSED) for s in summaries) == 1
+    assert sum(s.startswith("[NeedsHuman]") and human.id in s for s in summaries) == 1
+
+
+async def test_conversion_defers_when_the_story_s_escalation_cannot_be_read() -> None:
+    """ "Cannot read" is not "clear": a second human gate must never be raised
+    on a story that may already carry one. Nothing is written; next sweep."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    original = client.task_get
+
+    async def _story_unreadable(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == story:
+            raise LithosClientError("internal", "boom")
+        return await original(**kwargs)
+
+    client.task_get = _story_unreadable  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert outcome == "error"
+    assert _human_gates(client) == []
+    stuck = await _get(client, gate.id)
+    assert stuck.status == "open"
+    assert MERGE_STATE_KEY not in stuck.metadata
+    assert client.findings == []
+
+
+async def test_conversion_fires_the_push_sinks() -> None:
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    notifier = _Notifier()
+
+    await reconcile_pr_gate(
+        gate,
+        _github(_pr(state="closed", merged=False)),
+        _ctx(client),
+        notifier=notifier,  # type: ignore[arg-type]
+    )
+
+    (notice,) = notifier.notices
+    (human,) = _human_gates(client)
+    assert (notice.gate_id, notice.story_id, notice.reason) == (
+        human.id,
+        story,
+        "pr_closed_unmerged",
+    )
+
+
+async def test_orphan_gate_closed_is_only_marked() -> None:
+    """No waiter → no story to escalate; the gate keeps its marker and stays
+    open for the `gates` CLI's `orphan` row."""
+    client = FakeLithosClient(agent_id="a")
+    gate_id = await client.task_create(
+        title="orphan",
+        task_type="gate",
+        metadata={
+            "gate_type": "pr",
+            "repo": "agent-lore/lithos-loom",
+            "pr_number": 7,
+            "pr_url": _PR_URL,
+        },
+    )
+    gate = await client.task_get(task_id=gate_id)
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert outcome == "closed_unmerged"
+    stored = await _get(client, gate_id)
+    assert stored.status == "open"
+    assert stored.metadata[MERGE_STATE_KEY] == "closed_unmerged"
+    assert _human_gates(client) == []
+    # and the terminal guard keeps it quiet afterwards
+    github = AsyncMock()
+    assert await reconcile_pr_gate(stored, github, _ctx(client)) is None
+    github.get_pull_request.assert_not_awaited()
+
+
+# ── the stranding human gate polls its PR (reopen → merge) ──────────────
+
+
+async def _stranded(client: FakeLithosClient) -> tuple[str, Task]:
+    """A story whose delivered PR closed unmerged, now behind a human gate."""
+    story, gate = await _gate_with_story(client)
+    await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+    (human,) = _human_gates(client)
+    return story, human
+
+
+async def test_reopened_and_merged_pr_resolves_the_human_gate_story_first() -> None:
+    from lithos_loom.subscriptions._develop_pr_merge import reconcile_human_pr_gate
+
+    client = FakeLithosClient(agent_id="a")
+    story, human = await _stranded(client)
+    completed_order: list[str] = []
+    original = client.task_complete
+
+    async def _spy(**kwargs: Any) -> Any:
+        completed_order.append(kwargs["task_id"])
+        return await original(**kwargs)
+
+    client.task_complete = _spy  # type: ignore[method-assign]
+    github = _github(_pr(state="closed", merged=True))
+
+    outcome = await reconcile_human_pr_gate(human, github, _ctx(client))
+
+    assert outcome == "merged"
+    github.get_pull_request.assert_awaited_once_with("agent-lore/lithos-loom", 7)
+    assert completed_order == [story, human.id]
+    assert (await _get(client, story)).status == "completed"
+    assert (await _get(client, human.id)).status == "completed"
+    summaries = [f["summary"] for f in client.findings if f["task_id"] == story]
+    assert any(s.startswith(GATE_RESOLVED) and human.id in s for s in summaries)
+
+
+@pytest.mark.parametrize(
+    ("pr", "expected"),
+    [
+        (_pr(state="closed", merged=False), "closed_unmerged"),
+        (_pr(state="open", merged=False), "still_open"),
+        (None, "gone"),
+    ],
+)
+async def test_an_unmerged_pr_leaves_the_human_gate_alone(
+    pr: PullRequest | None, expected: str
+) -> None:
+    """Still closed, reopened-but-unmerged, or deleted: the decision stays the
+    operator's — nothing is written, the gate keeps polling."""
+    from lithos_loom.subscriptions._develop_pr_merge import reconcile_human_pr_gate
+
+    client = FakeLithosClient(agent_id="a")
+    story, human = await _stranded(client)
+    writes = len(client.mutating_calls)
+
+    outcome = await reconcile_human_pr_gate(human, _github(pr), _ctx(client))
+
+    assert outcome == expected
+    assert len(client.mutating_calls) == writes
+    assert (await _get(client, human.id)).status == "open"
+
+
+async def test_a_human_gate_for_another_reason_is_not_polled() -> None:
+    from lithos_loom.gates import create_human_gate
+    from lithos_loom.subscriptions._develop_pr_merge import reconcile_human_pr_gate
+
+    client = FakeLithosClient(agent_id="a")
+    story = await client.task_create(title="US7", metadata={"project": "p"})
+    gate_id = await create_human_gate(
+        client,
+        story_id=story,
+        story_title="US7",
+        project="p",
+        agent="a",
+        route="story-develop",
+        reason="max_rounds",
+        summary="ran out of rounds",
+        brief={"pr_url": _PR_URL},
+    )
+    github = AsyncMock()
+
+    outcome = await reconcile_human_pr_gate(
+        await _get(client, gate_id), github, _ctx(client)
+    )
+
+    assert outcome is None
+    github.get_pull_request.assert_not_awaited()
+
+
+async def test_human_gate_poll_transient_github_error_retries_next_sweep() -> None:
+    from lithos_loom.subscriptions._develop_pr_merge import reconcile_human_pr_gate
+
+    client = FakeLithosClient(agent_id="a")
+    story, human = await _stranded(client)
+    github = AsyncMock()
+    github.get_pull_request.side_effect = GitHubError("rate limited")
+
+    assert await reconcile_human_pr_gate(human, github, _ctx(client)) == "error"
+    assert (await _get(client, human.id)).status == "open"
+
+
+# ── review round 1: the guard is the EDGE, and a finished story is not escalated ──
+
+
+async def test_a_partial_record_never_raises_a_second_gate() -> None:
+    """A Lithos write outage after the human gate landed (marker, story
+    provenance and pr-gate completion all fail in one sweep) must not make the
+    next sweep raise a SECOND gate: the story's blocking gates are read from
+    its waits_on_gate edges, never from the provenance key."""
+    from lithos_loom.subscriptions.pr_gate_stranding import SUPERSEDED_BY_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    update, complete = client.task_update, client.task_complete
+
+    async def _no_writes(**kwargs: Any) -> Any:
+        raise LithosClientError("internal", "outage")
+
+    client.task_update = _no_writes  # type: ignore[method-assign]
+    client.task_complete = _no_writes  # type: ignore[method-assign]
+    first = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+    assert first == "error"
+    (human,) = _human_gates(client)
+    stuck = await _get(client, gate.id)
+    assert stuck.status == "open" and SUPERSEDED_BY_KEY not in stuck.metadata
+
+    client.task_update, client.task_complete = update, complete  # type: ignore[method-assign]
+    second = await reconcile_pr_gate(
+        stuck, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert second == "closed_unmerged"
+    assert [h.id for h in _human_gates(client)] == [human.id]
+    done = await _get(client, gate.id)
+    assert done.status == "completed"
+    assert done.metadata[SUPERSEDED_BY_KEY] == human.id
+    blocked = await client.task_blocked(project="p")
+    assert [b.task_id for b in blocked[0].blockers] == [human.id]
+    summaries = [f["summary"] for f in client.findings if f["task_id"] == story]
+    assert sum(s.startswith("[NeedsHuman]") for s in summaries) == 1
+
+
+@pytest.mark.parametrize("terminal", ["completed", "cancelled"])
+async def test_a_terminal_story_is_not_escalated(terminal: str) -> None:
+    """The #268 shape itself: the work landed via another PR, the issue mirror
+    completed the story, then the superseded PR was closed. Nothing to decide
+    — no gate, no finding, no toast; the pr gate is marked and completed."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    if terminal == "completed":
+        await client.task_complete(task_id=story)
+    else:
+        await client.task_cancel(task_id=story)
+    notifier = _Notifier()
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(_pr(state="closed", merged=False)),
+        _ctx(client),
+        notifier=notifier,  # type: ignore[arg-type]
+    )
+
+    assert outcome == "closed_unmerged"
+    assert _human_gates(client) == []
+    assert notifier.notices == []
+    assert client.findings == []
+    done = await _get(client, gate.id)
+    assert done.status == "completed"
+    assert done.metadata[MERGE_STATE_KEY] == "closed_unmerged"
+
+
+async def test_a_stale_provenance_key_is_not_trusted() -> None:
+    """`needs_human_gate_id` is provenance, never a guard: a key naming an open
+    task that does not block this story must not be "reused" — that would
+    complete the pr gate on a story nothing holds."""
+    from lithos_loom.gates import STORY_HUMAN_GATE_ID_KEY, create_human_gate
+    from lithos_loom.subscriptions.pr_gate_stranding import SUPERSEDED_BY_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    other_story = await client.task_create(title="other", metadata={"project": "p"})
+    others_gate = await create_human_gate(
+        client,
+        story_id=other_story,
+        story_title="other",
+        project="p",
+        agent="a",
+        route="story-develop",
+        reason="max_rounds",
+        summary="x",
+    )
+    await client.task_update(
+        task_id=story, metadata={STORY_HUMAN_GATE_ID_KEY: others_gate}
+    )
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert outcome == "closed_unmerged"
+    mine = [h for h in _human_gates(client) if h.id != others_gate]
+    assert len(mine) == 1
+    assert (await _get(client, gate.id)).metadata[SUPERSEDED_BY_KEY] == mine[0].id
+    blocked = {
+        bt.task.id: [b.task_id for b in bt.blockers]
+        for bt in await client.task_blocked(project="p")
+    }
+    assert blocked[story] == [mine[0].id]
+
+
+async def test_the_stranding_gate_s_brief_offers_the_three_choices() -> None:
+    """The gate's description is what the operator reads on the gate page and
+    in lens; it must carry the stranding's own actions, not the runner's
+    "complete → re-dispatch" pair (ticking it re-develops work that may have
+    already landed)."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+
+    await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    (human,) = _human_gates(client)
+    assert human.description is not None
+    assert "complete the STORY" in human.description
+    assert "loom re-dispatches the story" not in human.description
+    assert "Cancelling the gate" in human.description  # the standing warning
+
+
+async def test_fallback_on_a_pre_s7_gate_backfills_the_state() -> None:
+    """A gate stranded before S7 (marker, no state) whose human gate cannot be
+    raised still gets its reconciliation_state — the backfill the old guard
+    did."""
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
+    )
+    gate = await _get(client, gate.id)
+    original = client.task_create
+
+    async def _gate_creation_fails(**kwargs: Any) -> Any:
+        if kwargs.get("task_type") == "gate":
+            raise LithosClientError("internal", "boom")
+        return await original(**kwargs)
+
+    client.task_create = _gate_creation_fails  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(gate, AsyncMock(), _ctx(client))
+
+    assert outcome == "closed_unmerged"
+    stuck = await _get(client, gate.id)
+    assert stuck.status == "open"
+    assert stuck.metadata[STATE_KEY] == "needs_human"
+
+
+async def test_human_gate_poll_lithos_failure_is_an_error() -> None:
+    from lithos_loom.subscriptions._develop_pr_merge import reconcile_human_pr_gate
+
+    client = FakeLithosClient(agent_id="a")
+    story, human = await _stranded(client)
+
+    async def _edges_fail(**kwargs: Any) -> Any:
+        raise LithosClientError("internal", "boom")
+
+    client.task_edge_list = _edges_fail  # type: ignore[method-assign]
+    github = _github(_pr(state="closed", merged=True))
+
+    assert await reconcile_human_pr_gate(human, github, _ctx(client)) == "error"
+    assert (await _get(client, human.id)).status == "open"
+
+
+# ── review round 2 ────────────────────────────────────────────────────────
+
+
+async def _story_under_conflict_gate(client: FakeLithosClient) -> tuple[str, Any, str]:
+    from lithos_loom.gates import create_human_gate
+
+    story, gate = await _gate_with_story(client)
+    existing = await create_human_gate(
+        client,
+        story_id=story,
+        story_title="US7",
+        project="p",
+        agent="a",
+        route="conflict-resolve",
+        reason="conflict_unresolved",
+        summary="could not resolve the merge",
+        brief={"pr_url": _PR_URL, "paths": ["a.py"]},
+    )
+    return story, gate, existing
+
+
+async def test_reuse_completes_the_pr_gate_even_when_its_marker_write_fails() -> None:
+    """Once a human gate holds the story, completing the pr gate is safe; an
+    operator who ticks the human gate while the pr gate's completion is still
+    owed would otherwise ready a story the runner declines with no re-check."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate, existing = await _story_under_conflict_gate(client)
+    original = client.task_update
+
+    async def _gate_marker_fails(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == gate.id:
+            raise LithosClientError("internal", "boom")
+        return await original(**kwargs)
+
+    client.task_update = _gate_marker_fails  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert outcome == "closed_unmerged"
+    assert (await _get(client, gate.id)).status == "completed"
+    assert [h.id for h in _human_gates(client)] == [existing]
+
+
+async def test_a_reused_gate_is_told_its_pr_died() -> None:
+    """The gate the operator reads must not keep saying "re-run converge" on a
+    PR that is closed: its brief gains the stranding facts and its summary
+    says so."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate, existing = await _story_under_conflict_gate(client)
+
+    await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    human = await _get(client, existing)
+    brief = human.metadata["run_brief"]
+    assert brief["paths"] == ["a.py"]  # the original brief is kept
+    assert brief["superseded_pr_gate_id"] == gate.id
+    assert brief["pr_state"] == "closed_unmerged"
+    assert "closed unmerged" in human.metadata["escalation_summary"]
+    assert human.metadata["escalation_reason"] == "conflict_unresolved"

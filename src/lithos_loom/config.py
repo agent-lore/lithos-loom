@@ -290,10 +290,13 @@ class GitHubWatcherConfig:
 
     When on (default), the sweep checks every open ``pr`` gate (``task_type=gate``,
     ``gate_type=pr``): a merged PR completes the blocked story then the gate; a
-    closed-unmerged or deleted PR leaves the gate open with a one-shot
-    ``[DeliveredPRClosed]`` finding. Piggybacks the ``reconcile_interval_minutes``
-    cadence. Set ``false`` to run the watcher for issue sync only without the
-    gate resolver.
+    closed-unmerged or deleted PR supersedes the gate with a loom ``human`` gate
+    on the story and completes it (04c2448b — ``[DeliveredPRClosed]`` +
+    ``[NeedsHuman]`` on the story), and that human gate then polls the PR so a
+    reopen-and-merge still resolves the story. Piggybacks the
+    ``reconcile_interval_minutes`` cadence. Set ``false`` to run the watcher for
+    issue sync only without the gate resolver (loom human gates whose waiter is
+    already resolved are still tidied up).
     """
     external_reviews_enabled: bool = True
     """Whether the sweep also ingests external review activity on still-open

@@ -12,6 +12,7 @@ import asyncio
 import sys
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 from lithos_loom.children.github_watcher import _run_reconcile_pass
 
@@ -117,7 +118,6 @@ async def test_reconcile_pass_redispatches_gh_linked_tasks() -> None:
     close event."""
     import logging
     from datetime import UTC, datetime, timedelta
-    from typing import Any
     from unittest.mock import AsyncMock
 
     from lithos_loom.lithos_client import Task
@@ -192,7 +192,6 @@ async def test_reconcile_pass_skips_terminal_scan_when_window_disabled() -> None
     entirely while the open-task title sweep still runs.
     """
     import logging
-    from typing import Any
     from unittest.mock import AsyncMock
 
     from lithos_loom.lithos_client import Task
@@ -750,3 +749,200 @@ async def test_reconcile_pass_settles_probing_gates_after_every_probe_launched()
         for c in lithos.task_update.call_args_list
     ]
     assert written.count("ready_to_merge") == 2
+
+
+# ── loom human gates in the sweep: hygiene + the stranding poll (04c2448b) ──
+
+
+async def _sweep_client() -> Any:
+    from tests.support import FakeLithosClient
+
+    return FakeLithosClient(agent_id="a")
+
+
+def _sweep_ctx(lithos: Any) -> Any:
+    import logging
+
+    from lithos_loom.subscriptions import SubscriptionContext
+
+    return SubscriptionContext(
+        lithos=lithos, logger=logging.getLogger("test-human-gate"), agent_id="a"
+    )
+
+
+async def _loom_human_gate(
+    client: Any, *, reason: str = "max_rounds", brief: dict[str, Any] | None = None
+) -> tuple[str, str]:
+    from lithos_loom.gates import create_human_gate
+
+    story = await client.task_create(title="US7", metadata={"project": "p"})
+    gate_id = await create_human_gate(
+        client,
+        story_id=story,
+        story_title="US7",
+        project="p",
+        agent="a",
+        route="story-develop",
+        reason=reason,
+        summary="stopped",
+        brief=brief,
+    )
+    return story, gate_id
+
+
+async def test_reconcile_pass_completes_loom_human_gates_whose_waiter_resolved() -> (
+    None
+):
+    """The sweep keeps loom's own gates honest: a story completed or cancelled
+    by hand leaves its human gate open on every board until this runs. The
+    operator's own human gates are never touched."""
+    from unittest.mock import AsyncMock
+
+    client = await _sweep_client()
+    done_story, done_gate = await _loom_human_gate(client)
+    await client.task_complete(task_id=done_story)
+    live_story, live_gate = await _loom_human_gate(client)
+    # an operator's own human gate on a resolved story: theirs to run
+    own_story = await client.task_create(title="mine")
+    own_gate = await client.task_create(
+        title="my gate", task_type="gate", metadata={"gate_type": "human"}
+    )
+    await client.task_edge_upsert(
+        from_task_id=own_gate, to_task_id=own_story, type="waits_on_gate", agent="a"
+    )
+    await client.task_complete(task_id=own_story)
+
+    await _run_reconcile_pass(
+        lithos=client,
+        push_handler=AsyncMock(),
+        ctx=_sweep_ctx(client),
+        resolved_window=None,
+        github=AsyncMock(),
+        pr_merge_enabled=False,
+    )
+
+    async def _status(task_id: str) -> str:
+        task = await client.task_get(task_id=task_id)
+        assert task is not None
+        return task.status
+
+    assert await _status(done_gate) == "completed"
+    assert await _status(live_gate) == "open"
+    assert await _status(own_gate) == "open"
+
+
+async def test_reconcile_pass_polls_stranding_human_gates_for_a_merge() -> None:
+    """A human gate raised for a closed PR watches that PR: reopened and merged
+    → the story is completed (first), then the gate."""
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.github_client import PullRequest
+
+    client = await _sweep_client()
+    story, gate_id = await _loom_human_gate(
+        client,
+        reason="pr_closed_unmerged",
+        brief={"pr_url": "https://github.com/o/r/pull/9"},
+    )
+    github = AsyncMock()
+    github.get_pull_request = AsyncMock(
+        return_value=PullRequest(
+            repo="o/r",
+            number=9,
+            state="closed",
+            merged=True,
+            merged_at=None,
+            merge_commit_sha="sha9",
+        )
+    )
+
+    await _run_reconcile_pass(
+        lithos=client,
+        push_handler=AsyncMock(),
+        ctx=_sweep_ctx(client),
+        resolved_window=None,
+        github=github,
+        pr_merge_enabled=True,
+    )
+
+    github.get_pull_request.assert_awaited_once_with("o/r", 9)
+    assert [c["task_id"] for c in client.calls_to("task_complete")] == [story, gate_id]
+
+
+async def test_reconcile_pass_does_not_poll_stranding_gates_when_pr_poll_disabled() -> (
+    None
+):
+    from unittest.mock import AsyncMock
+
+    client = await _sweep_client()
+    await _loom_human_gate(
+        client,
+        reason="pr_closed_unmerged",
+        brief={"pr_url": "https://github.com/o/r/pull/9"},
+    )
+    github = AsyncMock()
+
+    await _run_reconcile_pass(
+        lithos=client,
+        push_handler=AsyncMock(),
+        ctx=_sweep_ctx(client),
+        resolved_window=None,
+        github=github,
+        pr_merge_enabled=False,
+    )
+
+    github.get_pull_request.assert_not_awaited()
+
+
+async def test_reconcile_pass_threads_the_notifier_to_the_gate_branch() -> None:
+    """The stranding conversion fires the push sinks — the same notifier the
+    other two dispatchers hold, handed to the sweep."""
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.gates import create_pr_gate
+    from lithos_loom.github_client import PullRequest
+
+    class _Notifier:
+        def __init__(self) -> None:
+            self.notices: list[Any] = []
+
+        async def needs_human(self, notice: Any) -> list[str]:
+            self.notices.append(notice)
+            return []
+
+    client = await _sweep_client()
+    story = await client.task_create(title="US7", metadata={"project": "p"})
+    await create_pr_gate(
+        client,
+        story_id=story,
+        story_title="US7",
+        pr_url="https://github.com/o/r/pull/9",
+        project="p",
+        agent="a",
+    )
+    github = AsyncMock()
+    github.get_pull_request = AsyncMock(
+        return_value=PullRequest(
+            repo="o/r",
+            number=9,
+            state="closed",
+            merged=False,
+            merged_at=None,
+            merge_commit_sha=None,
+        )
+    )
+    notifier = _Notifier()
+
+    await _run_reconcile_pass(
+        lithos=client,
+        push_handler=AsyncMock(),
+        ctx=_sweep_ctx(client),
+        resolved_window=None,
+        github=github,
+        pr_merge_enabled=True,
+        notifier=notifier,  # type: ignore[arg-type]
+    )
+
+    (notice,) = notifier.notices
+    assert notice.story_id == story
+    assert notice.reason == "pr_closed_unmerged"

@@ -15,9 +15,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._atomic_write` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._awaiting_review` | S | 0 | 1 |
 | `lithos_loom.subscriptions._blocked_snapshot` | S | 1 | 0 |
-| `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 1 |
+| `lithos_loom.subscriptions._develop_pr_merge` | M | 0 | 2 |
 | `lithos_loom.subscriptions._develop_pr_nudge` | M | 2 | 2 |
-| `lithos_loom.subscriptions._findings` | S | 0 | 2 |
+| `lithos_loom.subscriptions._findings` | S | 0 | 3 |
 | `lithos_loom.subscriptions._github_issue_push` | M | 0 | 1 |
 | `lithos_loom.subscriptions._github_issue_sync` | M | 0 | 1 |
 | `lithos_loom.subscriptions._human_actionable` | S | 0 | 3 |
@@ -46,6 +46,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.merge_gate_dispatch` | L | 1 | 0 |
 | `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
+| `lithos_loom.subscriptions.pr_gate_stranding` | M | 1 | 4 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
 | `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
@@ -74,6 +75,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._develop_pr_merge`
 - def `reconcile_pr_gate` — Resolve one open ``pr`` gate against its PR's merge state.
+- def `reconcile_human_pr_gate` — Poll the PR a stranding ``human`` gate was raised for (04c2448b): a closed PR that is **reopened and merged** resolves exactly as the ``pr`` gate would have — story first, then the gate, ``[GateResolved]`` on the story. Anything else (still closed, reopened but unmerged, deleted) is the operator's decision and writes nothing.
 
 ### `lithos_loom.subscriptions._develop_pr_nudge`
 - def `nudge_unblocked` — Re-surface the dependents the story's completion just readied (#350).
@@ -84,6 +86,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions._findings`
 - def `write_marker` — Write a de-dup marker via ``task_update``, swallowing ``task_not_found``.
 - def `post_finding_then_mark` — Post a one-shot prefixed finding, then write a scoped de-dup marker.
+- def `complete_swallowing` — ``task_complete`` swallowing ``task_not_found`` (already terminal).
 
 ### `lithos_loom.subscriptions._github_issue_push`
 - def `make_handler` — Build a stateful handler closing over the shared GitHub client.
@@ -227,6 +230,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.merge_gate_record`
 - class `MergeGateRecord` — The gate's parsed ``merge_gate`` marker: the re-run key + the outcome.
 - def `read_record` — Parse the gate's record; ``None`` for an absent / foreign-url marker (a replacement PR re-evaluates from scratch). Tolerant of a malformed field — it reads as unset, never raises.
+
+### `lithos_loom.subscriptions.pr_gate_stranding`
+- class `StoryEscalation` — What Lithos says about the story: its ``status`` (``""`` when it no longer exists), the open loom ``human`` gate that **blocks** it — read from its incoming ``waits_on_gate`` edges, never from the provenance key (``needs_human_gate_id`` is provenance only: it can be stale, absent after a partial write, or name a gate that holds a different story) — and its metadata (for the brief).
+- def `story_escalation_state` — Read the story and the loom ``human`` gates that hold it.
+- def `convert_stranded_gate` — Supersede a ``pr`` gate whose PR is *merge_state* (``closed_unmerged`` / ``gone``) with a loom ``human`` gate on *story_id*, then complete it.
+- def `human_gate_pr` — The PR a stranding gate was raised for, or ``None`` for any other gate (an operator's own human gate, a conflict / remediation escalation — those carry a ``pr_url`` too but are not merge-polled — or an unparseable url).
+- def `complete_if_waiter_resolved` — Complete a loom ``human`` gate whose waiter is already terminal.
 
 ### `lithos_loom.subscriptions.pr_landability`
 - def `classify_landability` — ``unknown`` / ``dirty`` / ``mergeable`` from the fetched PR.

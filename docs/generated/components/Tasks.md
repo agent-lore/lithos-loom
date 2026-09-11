@@ -27,7 +27,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 - def `is_pr_gate` — Whether *task* is a ``pr`` gate (type + ``gate_type`` metadata).
 - def `parse_pr_gate` — Read a ``pr`` gate's watched PR out of its metadata, or ``None``.
 - def `human_gate_brief` — The gate's description: the decision brief an operator reads before acting, so the investigation is not redone by hand.
-- def `create_human_gate` — Raise a loom ``human`` gate on *story_id* and link it (the escalation primitive).
+- def `create_human_gate` — Raise a loom ``human`` gate on *story_id* and link it (the escalation primitive). *actions* is the caller's own "what to do" for the brief (see :func:`human_gate_brief`); the runner's pair when ``None``.
 - def `create_human_gate_best_effort` — Raise a loom ``human`` gate, degrading instead of raising.
 - def `is_human_gate` — Whether *task* is a ``human`` gate — loom's or the operator's own.
 - def `is_loom_human_gate` — Whether *task* is a ``human`` gate loom raised (``raised_by=loom``).

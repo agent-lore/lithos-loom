@@ -463,3 +463,62 @@ def test_parse_human_gate_returns_none_without_a_reason() -> None:
         "g", task_type="gate", metadata={"gate_type": "human", "raised_by": "loom"}
     )
     assert parse_human_gate(gate) is None
+
+
+# ── the brief's actions follow the caller (review of 04c2448b) ─────────
+
+
+def test_human_gate_brief_default_actions_are_the_runner_s_pair() -> None:
+    from lithos_loom.gates import human_gate_brief
+
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="max_rounds",
+        summary="x",
+        run_id=None,
+        brief=None,
+    )
+    assert "Complete this gate → loom re-dispatches the story" in text
+    assert "Cancelling the gate" in text
+
+
+def test_human_gate_brief_renders_the_caller_s_actions() -> None:
+    from lithos_loom.gates import human_gate_brief
+
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="pr_closed_unmerged",
+        summary="x",
+        run_id=None,
+        brief=None,
+        actions=(
+            "if the work landed complete the STORY; to re-develop complete this gate"
+        ),
+    )
+    assert "complete the STORY" in text
+    assert "loom re-dispatches the story" not in text
+    assert "Cancelling the gate" in text
+
+
+async def test_create_human_gate_puts_the_actions_in_the_description() -> None:
+    from lithos_loom.gates import create_human_gate
+    from tests.support import FakeLithosClient
+
+    client = FakeLithosClient(agent_id="a")
+    story = await client.task_create(title="US7")
+    gate_id = await create_human_gate(
+        client,
+        story_id=story,
+        story_title="US7",
+        project=None,
+        agent="a",
+        route="pr-gate",
+        reason="pr_closed_unmerged",
+        summary="x",
+        actions="complete the STORY if the work landed",
+    )
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None and gate.description is not None
+    assert "complete the STORY if the work landed" in gate.description
