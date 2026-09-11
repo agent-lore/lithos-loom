@@ -1593,6 +1593,8 @@ class _ProbingMergeGate:
         ("probing", False, "awaiting_review"),  # the probe never answered
         ("probe_failed", False, "awaiting_review"),
         ("dispatched", True, "reconciling"),  # the fingerprint moved; a run started
+        # #369 round 4: the run finished before the re-read — its record speaks
+        ("dispatched", False, "ready_to_merge"),
     ],
 )
 async def test_a_probing_re_gate_records_the_probe_s_answer_not_its_promise(
