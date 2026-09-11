@@ -23,6 +23,7 @@ gate is now the sole merge-tracking and re-dispatch path.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
@@ -58,12 +59,17 @@ from lithos_loom.subscriptions.reconciliation_state import (
     record_state,
 )
 
+# A deferred reconciliation-state write: the sweep awaits these after every
+# gate has been through the dispatchers (PR #369 round 3).
+StateSettle = Callable[[], Awaitable[None]]
+
 __all__ = [
     "DELIVERED_PR_CLOSED",
     "GATE_RESOLVED",
     "MERGE_STATE_KEY",
     "MERGE_STATE_TERMINAL",
     "MERGE_STATE_URL_KEY",
+    "StateSettle",
     "is_pr_gate",
     "reconcile_pr_gate",
 ]
@@ -158,6 +164,7 @@ async def reconcile_pr_gate(
     remediation: ExternalRemediation | None = None,
     merge_gate: MergeGateDispatch | None = None,
     conflict_resolve: ConflictResolveDispatch | None = None,
+    settle_later: list[StateSettle] | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -366,24 +373,48 @@ async def reconcile_pr_gate(
         if label not in ("unchanged", "no_conflict"):
             ctx.logger.info("conflict-resolve: %s for %s", label, spec.pr_url)
         said = replace(said, conflict=label)
+
     # PRD S7: the one writer of the gate's reconciliation state, after every
     # dispatcher has run — derived from the gate as it is NOW.
-    await record_state(
-        gate,
-        pr,
-        spec.pr_url,
-        ctx,
-        busy=Busy(
-            remediation=remediation is not None and remediation.busy_on(spec.pr_url),
-            merge_gate=merge_gate is not None and merge_gate.busy_on(spec.pr_url),
-            conflict_resolve=conflict_resolve is not None
-            and conflict_resolve.busy_on(spec.pr_url)
-            and not conflict_resolve.debt_on(spec.pr_url),
-            conflict_debt=conflict_resolve is not None
-            and conflict_resolve.debt_on(spec.pr_url),
-        ),
-        dispositions=said,
-    )
+    async def write_state(regate: str | None) -> None:
+        # busy is read at WRITE time: a probe that found a moved fingerprint
+        # starts its run as it settles
+        await record_state(
+            gate,
+            pr,
+            spec.pr_url,
+            ctx,
+            busy=Busy(
+                remediation=remediation is not None
+                and remediation.busy_on(spec.pr_url),
+                merge_gate=merge_gate is not None and merge_gate.busy_on(spec.pr_url),
+                conflict_resolve=conflict_resolve is not None
+                and conflict_resolve.busy_on(spec.pr_url)
+                and not conflict_resolve.debt_on(spec.pr_url),
+                conflict_debt=conflict_resolve is not None
+                and conflict_resolve.debt_on(spec.pr_url),
+            ),
+            dispositions=replace(said, regate=regate),
+        )
+
+    if merge_gate is None or said.regate != "probing":
+        await write_state(said.regate)
+        return "still_open"
+    # `probing` is the dispatcher's promise, not its answer (PR #369 round
+    # 3): the probe it just scheduled may still confirm the recorded verdict,
+    # fail, or find a moved fingerprint and start a red run. The state is
+    # written from what the probe FOUND — after every gate's probe is out
+    # when the sweep collects the settles (review #362 F5: the sweep never
+    # serialises on a subprocess per gate), inline otherwise.
+    dispatcher = merge_gate
+
+    async def settle() -> None:
+        await write_state(await dispatcher.settle_probe(gate.id))
+
+    if settle_later is None:
+        await settle()
+    else:
+        settle_later.append(settle)
     return "still_open"
 
 

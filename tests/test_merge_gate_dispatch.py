@@ -1615,9 +1615,11 @@ def test_dispatch_argv_is_accepted_by_the_real_merge_gate_cli(
         raise _Stop
 
     monkeypatch.setattr(merge_gate_cli, "load_config", fake_load_config)
-    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=_spawner(None)[0])
+    from lithos_loom.subscriptions.merge_gate_command import build_command
+
     spec = PrGateSpec(repo="agent-lore/lithos-lens", pr_number=78, pr_url=_PR_URL)
-    cmd = dispatch.command(
+    cmd = build_command(
+        _settings(tmp_path),
         spec,
         tmp_path / "repo",
         tmp_path / "out.json",
@@ -1692,3 +1694,141 @@ async def test_a_daemon_restart_re_arms_an_exhausted_push_failure(
     record = read_record(await _refresh(client, gate.id), _PR_URL)
     assert record is not None and record.status == "push_failed"
     assert record.attempts == 1 and len(_runs(calls)) == 3
+
+
+# ── settle_probe: the probe's ANSWER, for the state writer (review #369 r3) ──
+
+
+async def _green_at_fp(client: FakeLithosClient, gate: Any, fp: str = _FP) -> Any:
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            MERGE_GATE_KEY: {
+                "pr_url": _PR_URL,
+                "head_sha": _HEAD,
+                "base_sha": _BASE,
+                "settings_fingerprint": fp,
+                "status": "green",
+                "attempts": 1,
+            }
+        },
+    )
+    return await _refresh(client, gate.id)
+
+
+async def test_settle_probe_answers_unchanged_once_the_fingerprint_matched(
+    tmp_path: Path,
+) -> None:
+    """`consider()` says `probing` when it SCHEDULES the probe; the sweep's
+    state writer needs what the probe FOUND. A matching fingerprint is the
+    one answer that confirms the recorded verdict."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _green_at_fp(client, gate)
+    spawn, calls = _spawner(_record("green"), probe=_probe(_FP))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    assert await dispatch.settle_probe(gate.id) == "unchanged"
+    assert len(_probes(calls)) == 1 and _runs(calls) == []
+    assert not dispatch.busy_on(_PR_URL)
+
+
+async def test_settle_probe_answers_dispatched_when_the_fingerprint_moved(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _green_at_fp(client, gate)
+    inner, calls = _spawner(_record("red", fp="new-fp"), probe=_probe("new-fp"))
+    run_release = asyncio.Event()
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        if "--resolve-only" not in cmd:
+            await run_release.wait()  # a real run is minutes, not a tick
+        return await inner(cmd)
+
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    assert await dispatch.settle_probe(gate.id) == "dispatched"
+    # the run the probe started is in flight — the busy signal the state
+    # writer reads at write time
+    assert dispatch.busy_on(_PR_URL)
+    run_release.set()
+    await _settle(dispatch)
+    assert len(_runs(calls)) == 1
+
+
+async def test_settle_probe_answers_probe_failed_when_the_probe_itself_fails(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _green_at_fp(client, gate)
+    spawn, calls = _spawner(_record("green"), probe=None, probe_rc=1)
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    assert await dispatch.settle_probe(gate.id) == "probe_failed"
+    assert _runs(calls) == []
+
+
+async def test_settle_probe_answers_deferred_when_a_hold_appeared_meanwhile(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _green_at_fp(client, gate)
+    held = [False]
+    spawn, calls = _spawner(_record("green", fp="new-fp"), probe=_probe("new-fp"))
+
+    async def holding_spawn(cmd: list[str]) -> tuple[int, str]:
+        held[0] = True  # a remediation run starts while the probe is out
+        return await spawn(cmd)
+
+    dispatch = MergeGateDispatch(
+        _settings(tmp_path), spawn=holding_spawn, hold=lambda url: held[0]
+    )
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    assert await dispatch.settle_probe(gate.id) == "deferred_remediation"
+    assert _runs(calls) == []
+
+
+async def test_settle_probe_stays_probing_while_the_probe_is_still_out(
+    tmp_path: Path,
+) -> None:
+    """Review #369 round 3's repro: a green record at fingerprint `old`, a
+    probe that is deliberately blocked and will find `new` + start a red
+    re-gate. Until it answers, the dispatcher must not vouch for the green;
+    once it does, the answer is the run it started."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _green_at_fp(client, gate, fp="old")
+    release = asyncio.Event()
+    run_release = asyncio.Event()
+    inner, calls = _spawner(_record("red", fp="new"), probe=_probe("new"))
+
+    async def blocked_spawn(cmd: list[str]) -> tuple[int, str]:
+        await (release if "--resolve-only" in cmd else run_release).wait()
+        return await inner(cmd)
+
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=blocked_spawn)
+    assert await _consider(client, gate, story, dispatch) == "probing"
+    assert await dispatch.settle_probe(gate.id, timeout=0.01) == "probing"
+    assert not dispatch.busy_on(_PR_URL)
+    # the timed-out wait must not have cancelled the probe
+    assert dispatch.pending_probes() == 1
+
+    release.set()
+    assert await dispatch.settle_probe(gate.id) == "dispatched"
+    assert dispatch.busy_on(_PR_URL)
+    run_release.set()
+    await _settle(dispatch)
+    record = read_record(await _refresh(client, gate.id), _PR_URL)
+    assert record is not None and record.status == "red"
+
+
+async def test_settle_probe_without_a_probe_is_probing(tmp_path: Path) -> None:
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=_spawner(None)[0])
+    assert await dispatch.settle_probe("no-such-gate") == "probing"

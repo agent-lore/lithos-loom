@@ -42,7 +42,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
-| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 2 | 1 |
+| `lithos_loom.subscriptions.merge_gate_command` | S | 1 | 6 |
+| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 1 | 0 |
 | `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
@@ -199,9 +200,16 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - class `IngestResult` — What one ingestion pass posted, for the remediation dispatcher (slice C).
 - def `ingest_external_reviews` — Ingest new review activity on one still-open gate's PR. Never raises.
 
-### `lithos_loom.subscriptions.merge_gate_dispatch`
-- def `spawn_merge_gate` — Default spawn: the merge-gate CLI, capped by whichever timeout the argv shape calls for (:func:`_subprocess.spawn_command`).
+### `lithos_loom.subscriptions.merge_gate_command`
 - class `MergeGateSettings` — Host-side knobs the watcher child threads in from its config.
+- def `spawn_merge_gate` — Default spawn: the merge-gate CLI, capped by whichever timeout the argv shape calls for (:func:`_subprocess.spawn_command`).
+- def `build_command`
+- def `json_path_for`
+- def `load_json`
+- def `output_tail`
+- def `probe_settings` — ``(label, fingerprint)``: the story's current settings fingerprint, ``""`` when the config is unresolvable (exit 4 — that IS a state the key compares), ``None`` when the probe itself failed.
+
+### `lithos_loom.subscriptions.merge_gate_dispatch`
 - class `MergeGateDispatch` — Owns the per-project single-flight dispatch of ``develop merge-gate``.
 
 ### `lithos_loom.subscriptions.merge_gate_outcome`

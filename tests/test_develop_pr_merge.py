@@ -1530,3 +1530,142 @@ async def test_a_gate_closed_before_s7_is_backfilled_with_needs_human() -> None:
     writes = len(client.calls_to("task_update"))
     await reconcile_pr_gate(stored, github, _ctx(client))
     assert len(client.calls_to("task_update")) == writes
+
+
+# ── a probing re-gate: the state written is the probe's ANSWER (#369 r3) ──
+
+
+def _landable_pr() -> PullRequest:
+    from dataclasses import replace
+
+    return replace(
+        _open_pr(),
+        base_ref="main",
+        base_sha="b" * 40,
+        mergeable=True,
+        mergeable_state="clean",
+    )
+
+
+async def _green_gate(client: FakeLithosClient, gate: Any) -> Any:
+    from lithos_loom.subscriptions.merge_gate_record import MergeGateRecord
+
+    record = MergeGateRecord(
+        pr_url=_PR_URL,
+        head_sha="e" * 40,
+        base_sha="b" * 40,
+        status="green",
+        verdict="GREEN",
+    )
+    await client.task_update(
+        task_id=gate.id, metadata={"merge_gate": record.as_marker()}
+    )
+    return await _get(client, gate.id)
+
+
+class _ProbingMergeGate:
+    """`consider` schedules a probe (`probing`); `settle_probe` is what it
+    found. `busy` is read at WRITE time — a probe that started a run flips it."""
+
+    def __init__(self, answer: str, *, busy_after: bool = False) -> None:
+        self.answer = answer
+        self.busy_after = busy_after
+        self.calls: list[str] = []
+        self._busy = False
+
+    def busy_on(self, pr_url: str) -> bool:
+        return self._busy
+
+    async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+        self.calls.append("consider")
+        return "probing"
+
+    async def settle_probe(self, gate_id: str) -> str:
+        self.calls.append("settle")
+        self._busy = self.busy_after
+        return self.answer
+
+
+@pytest.mark.parametrize(
+    ("answer", "busy_after", "expected"),
+    [
+        ("unchanged", False, "ready_to_merge"),
+        ("probing", False, "awaiting_review"),  # the probe never answered
+        ("probe_failed", False, "awaiting_review"),
+        ("dispatched", True, "reconciling"),  # the fingerprint moved; a run started
+    ],
+)
+async def test_a_probing_re_gate_records_the_probe_s_answer_not_its_promise(
+    answer: str, busy_after: bool, expected: str
+) -> None:
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    gate = await _green_gate(client, gate)
+    dispatcher = _ProbingMergeGate(answer, busy_after=busy_after)
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(_landable_pr()),
+        _ctx(client),
+        merge_gate=dispatcher,  # type: ignore[arg-type]
+    )
+
+    assert outcome == "still_open"
+    assert dispatcher.calls == ["consider", "settle"]
+    stored = await _get(client, gate.id)
+    assert stored.metadata[STATE_KEY] == expected
+
+
+async def test_a_probing_re_gate_can_defer_its_state_write_to_the_sweep() -> None:
+    """The sweep collects the settles and awaits them after every gate has
+    launched its probe (review #362 F5: probes run concurrently, the sweep
+    never serialises on a subprocess per gate). Nothing is written before."""
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    gate = await _green_gate(client, gate)
+    dispatcher = _ProbingMergeGate("unchanged")
+    settles: list[Any] = []
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(_landable_pr()),
+        _ctx(client),
+        merge_gate=dispatcher,  # type: ignore[arg-type]
+        settle_later=settles,
+    )
+
+    assert outcome == "still_open"
+    assert dispatcher.calls == ["consider"]
+    assert STATE_KEY not in (await _get(client, gate.id)).metadata
+    assert len(settles) == 1
+    await settles[0]()
+    assert dispatcher.calls == ["consider", "settle"]
+    assert (await _get(client, gate.id)).metadata[STATE_KEY] == "ready_to_merge"
+
+
+async def test_a_settled_re_gate_never_defers_its_state_write() -> None:
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            return "unchanged"
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    settles: list[Any] = []
+    await reconcile_pr_gate(
+        gate,
+        _github(_open_pr()),
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+        settle_later=settles,
+    )
+    assert settles == []
+    assert STATE_KEY in (await _get(client, gate.id)).metadata

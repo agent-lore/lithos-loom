@@ -143,11 +143,13 @@ _REGATE_NOT_REQUIRED = frozenset({"disabled", "project_disabled"})
 # or under way — it masks the recorded outcome.
 _REGATE_IN_PROGRESS = frozenset({"deferred_busy", "deferred_remediation", "dispatched"})
 # A re-gate label that confirms the recorded outcome still stands: the key
-# matched outright (`unchanged`), or the dispatcher is re-verifying the
-# settings fingerprint in the background (`probing` — its steady-state answer
-# for every settled, settings-dependent record; a moved fingerprint becomes
-# `dispatched` on a later sweep). Review #369 round 3.
-_REGATE_CONFIRMS = frozenset({"unchanged", "probing"})
+# matched outright — the shas, or the settings fingerprint the probe re-read.
+# `probing` is NOT one: `consider()` says it when it SCHEDULES the background
+# probe, before anything is compared (review #369 round 3); the sweep asks
+# the dispatcher for the probe's settled answer (`settle_probe`) before it
+# writes this gate's state, so a `probing` that reaches the derivation is a
+# probe that never answered in time — unconfirmed.
+_REGATE_CONFIRMS = frozenset({"unchanged"})
 # A conflict-resolver outcome that is settled and handed to the operator.
 _CONFLICT_SETTLED = frozenset({"not_converged", "failed", "conflict_unsupported"})
 
@@ -293,7 +295,8 @@ def _derive(
         # A prior safe verdict may describe an older check-set; only a
         # dispatcher that re-read the settings and found the key intact
         # (`unchanged`) — or no dispatcher at all — confirms it (review #369
-        # round 2). A fail-closed disposition outranks it.
+        # rounds 2-3). A fail-closed disposition, a probe that failed /
+        # crashed / never answered, or a superseded record outranks it.
         if (
             said.regate is None
             or said.regate in _REGATE_NOT_REQUIRED | _REGATE_CONFIRMS

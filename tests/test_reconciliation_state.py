@@ -506,21 +506,42 @@ def test_an_unavailable_escalation_lookup_falls_through_conservatively() -> None
     assert d.state == "behind"
 
 
-# ── review #369 round 3: `probing` re-verifies a settled outcome; it confirms it ─
+# ── review #369 round 3: `probing` is a promise, not a confirmation ─────────
 
 
-def test_a_background_probe_confirms_the_recorded_outcome_rather_than_masking_it() -> (
-    None
-):
-    """The live dispatcher answers `probing` on EVERY sweep for a settled,
-    settings-dependent record (the probe re-reads the fingerprint and starts
-    a run only if it moved), so `probing` is the common steady state of a
-    green PR — it must surface the outcome, not hide it as reconciling."""
-    assert _derive_d(_regate("green"), regate="probing").state == "ready_to_merge"
-    assert _derive_d(_regate("no_checks"), regate="probing").state == "ready_to_merge"
+def test_a_scheduled_probe_does_not_confirm_a_prior_safe_verdict() -> None:
+    """`consider()` answers `probing` the moment it SCHEDULES the background
+    fingerprint probe — before it has compared anything. The probe may still
+    fail, find a moved fingerprint and start a red run, or defer. Only its
+    settled answer (`unchanged`) confirms the recorded green; a promise
+    leaves the PR unconfirmed (review #369 round 3)."""
+    d = _derive_d(_regate("green"), regate="probing")
+    assert d.state == "awaiting_review"
+    assert "unconfirmed" in d.detail and "probing" in d.detail
+    assert _derive_d(_regate("no_checks"), regate="probing").state == "awaiting_review"
+    assert _derive_d(_regate("green"), regate="unchanged").state == "ready_to_merge"
+    assert _derive_d(_regate("no_checks"), regate="unchanged").state == "ready_to_merge"
+
+
+def test_the_probe_s_settled_answers_each_land_on_the_safe_side() -> None:
+    """What the probe actually reports once awaited: a failed or crashed probe
+    confirms nothing; a superseded record confirms nothing; a moved
+    fingerprint that started a run is in progress."""
+    for label in ("probe_failed", "probe_crashed", "superseded"):
+        d = _derive_d(_regate("green"), regate=label)
+        assert d.state == "awaiting_review", label
+        assert "unconfirmed" in d.detail, label
+    assert _derive_d(_regate("green"), regate="dispatched").state == "reconciling"
+    assert _derive_d(_regate("green"), regate="deferred_busy").state == "reconciling"
+
+
+def test_a_probe_never_masks_an_unsafe_recorded_outcome() -> None:
+    """The conservative direction is free: red / behind stay visible while the
+    probe is out, whatever it answers."""
     assert _derive_d(_regate("red"), regate="probing").state == "gate_failed"
     meta = _regate("push_failed", behind=True, pushed_sha="", push_error="rejected")
     assert _derive_d(meta, regate="probing").state == "behind"
+    assert _derive_d(_regate("red"), regate="probe_failed").state == "gate_failed"
 
 
 def test_a_probe_with_no_current_record_is_still_not_ready() -> None:
