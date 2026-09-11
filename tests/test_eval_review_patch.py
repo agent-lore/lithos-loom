@@ -6,6 +6,7 @@ this stays in ``make check``.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -867,7 +868,8 @@ def test_lens43_composed_fixture_pins_the_missing_projects_term(
         for ln in defect_patch.splitlines()
         if ln.startswith("+") and not ln.startswith("+++")
     ]
-    assert not [ln for ln in added if "project" in ln.lower() and "project:" not in ln]
+    stripped = [re.sub(r"[Pp]roject:", "", ln) for ln in added]
+    assert not [ln for ln in stripped if "project" in ln.lower()]
 
     resolved, cleanup = patch.materialise_patch_heads(case)
     try:
@@ -901,7 +903,10 @@ def test_lens43_composed_fixture_pins_the_missing_projects_term(
                 [*_LENS43C_METRICS, _LENS43C_WEB, _LENS43C_MVP_TESTS]
             )
         for sha in (resolved.head, good_head):
-            assert "project/tag/agent" not in _blob_at(repo, sha, _LENS43C_WEB)
+            web = _blob_at(repo, sha, _LENS43C_WEB)
+            assert "project/tag/agent" not in web
+            assert "tag/agent ride along" not in web  # the under-enumerating reword
+            assert "the active filters ride along" in web
             # (the base's own ?project=influx tests stay — only the card-link
             # test's parameter + assertion were removed)
             mvp_tests = _blob_at(repo, sha, _LENS43C_MVP_TESTS)

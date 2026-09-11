@@ -1615,7 +1615,7 @@ index 2e97b5e..9f2b93b 100644
      </div>
  
 diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
-index 845c74c..59e0777 100644
+index 845c74c..2193d76 100644
 --- a/src/lithos_lens/web.py
 +++ b/src/lithos_lens/web.py
 @@ -40,7 +40,7 @@ from lithos_lens.lithos_client import (
@@ -1678,7 +1678,7 @@ index 845c74c..59e0777 100644
 +    """Link a summary card to the board it actually counts.
 +
 +    The card's number is computed over the ACTIVE filters, so the link has to
-+    carry them: tag/agent ride along (rebuilt from the request through
++    carry them: the active filters ride along (rebuilt from the request through
 +    the same allowlist as every other generated tasks URL), the card supplies
 +    the status it counts, and ``since`` is the resolved window this page is
 +    showing rather than whatever the request did or did not say. Dropping the

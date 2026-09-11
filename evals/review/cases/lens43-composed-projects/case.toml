@@ -30,10 +30,16 @@ by the story) and the base tree (the `TaskFilters.projects` field, the
 `matches_projects` predicate twenty lines above the helper in the same
 module). NO ADDED LINE in the diff names the project filter — the preflight
 test pins that. What the diff does carry is what any composed diff carries:
-context lines and hunk headers from the base (a `projects: tuple[str, ...]`
-context line in the `DashboardData` hunk; the `task_filtering.py` hunk header
-naming `matches_filters`). That is the tree, and it is exactly the evidence
-S5's panel gets, so it stays. If the panel cannot find the defect, S5 narrows
+context lines and hunk headers from the base — the `task_filtering.py`
+import hunk's context names `DEFAULT_PROJECT_CONVENTION`,
+`DEFAULT_PROJECT_TAG_KEY` and `ProjectConvention`; `frontier.py`'s import
+hunk carries `invalid_project_metadata` / `project_convention_conflict`; a
+`projects: tuple[str, ...]` context line sits in the `DashboardData` hunk;
+the `task_filtering.py` hunk header names `matches_filters`; and the
+`task_card_url` docstring (reworded in both heads to "the active filters
+ride along" so it enumerates nothing) points at an allowlist that lives in
+the tree. That is the tree, and it is exactly the evidence S5's panel gets,
+so it stays. If the panel cannot find the defect, S5 narrows
 to check-set-only auto-push for non-semantic conflicts (PRD S8) — a
 narrowing, not a redesign.
 
@@ -48,7 +54,8 @@ from the post-merge commit 8f8d24b that would have made the defect an
 in-diff inconsistency — the `task_card_url` docstring in `web.py` enumerating
 "project/tag/agent", and the card-link test's `&project=influx` URL parameter
 plus its `assert "project=influx" in href`. Both are removed from BOTH heads
-(docstring reads "tag/agent"; the test keeps its tag/agent/since assertions),
+(docstring reads "the active filters"; the test keeps its tag/agent/since
+assertions),
 then ruff-formatted and lens's `docs/generated/` metrics regenerated. The
 known-good therefore differs from the #43 squash merge 1e34d44 in exactly
 `web.py`, `tests/test_tasks_mvp.py` and the two metrics files — pinned by the

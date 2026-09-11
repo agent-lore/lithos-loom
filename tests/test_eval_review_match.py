@@ -962,3 +962,24 @@ def test_lens43_composed_harm_site_anchored_finding_is_a_structured_miss() -> No
         ),
     )
     assert score.caught is False
+
+
+def test_lens43_composed_status_narrowing_finding_is_a_structured_false_hit() -> None:
+    # The one same-file phrasing that clears the keyword set while NOT being
+    # the defect: the non-default status set over-counted as narrowing (lens
+    # later split it into filters_narrow_the_open_side, #47). The case's
+    # mechanism steers the judge off it; the structured matcher has no such
+    # steer, so a --no-judge number credits it. Pinned so the divergence is
+    # known rather than discovered mid-run.
+    score = score_run(
+        _lens43_composed(),
+        _split_report(
+            (
+                _LENS_FILTERING,
+                "filters_narrow_the_board treats any non-default status set as "
+                "narrowing, so ?status=open withholds the healthy stripe though "
+                "it hides nothing the stripe depends on",
+            )
+        ),
+    )
+    assert score.caught is True
