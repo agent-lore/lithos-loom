@@ -23,6 +23,7 @@ gate is now the sole merge-tracking and re-dispatch path.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
@@ -49,6 +50,18 @@ from lithos_loom.subscriptions.external_remediation import ExternalRemediation
 from lithos_loom.subscriptions.external_reviews import ingest_external_reviews
 from lithos_loom.subscriptions.merge_gate_dispatch import MergeGateDispatch
 from lithos_loom.subscriptions.pr_landability import check_landability
+from lithos_loom.subscriptions.reconciliation_state import (
+    STATE_KEY,
+    STATE_URL_KEY,
+    Busy,
+    Dispositions,
+    closed_state_marker,
+    record_state,
+)
+
+# A deferred reconciliation-state write: the sweep awaits these after every
+# gate has been through the dispatchers (PR #369 round 3).
+StateSettle = Callable[[], Awaitable[None]]
 
 __all__ = [
     "DELIVERED_PR_CLOSED",
@@ -56,6 +69,7 @@ __all__ = [
     "MERGE_STATE_KEY",
     "MERGE_STATE_TERMINAL",
     "MERGE_STATE_URL_KEY",
+    "StateSettle",
     "is_pr_gate",
     "reconcile_pr_gate",
 ]
@@ -150,6 +164,7 @@ async def reconcile_pr_gate(
     remediation: ExternalRemediation | None = None,
     merge_gate: MergeGateDispatch | None = None,
     conflict_resolve: ConflictResolveDispatch | None = None,
+    settle_later: list[StateSettle] | None = None,
 ) -> str | None:
     """Resolve one open ``pr`` gate against its PR's merge state.
 
@@ -214,6 +229,20 @@ async def reconcile_pr_gate(
         # Already resolved THIS pr_url (a closed-unmerged / gone gate left open).
         # A merged gate is completed → out of the open set → never re-swept, so
         # it needs no marker; this guard only fires for the left-open states.
+        # PRD S7 (review #369 F2): a gate closed before the state existed is
+        # backfilled here — no GitHub call needed, the marker says it all.
+        if (
+            gate.metadata.get(STATE_URL_KEY) != spec.pr_url
+            or gate.metadata.get(STATE_KEY) != "needs_human"
+        ):
+            await write_marker(
+                ctx,
+                task_id=gate.id,
+                marker=closed_state_marker(
+                    spec.pr_url, str(gate.metadata.get(MERGE_STATE_KEY))
+                ),
+                subsystem="pr-gate",
+            )
         return None
 
     story_id = await waiter_of(ctx.lithos, gate.id)
@@ -285,6 +314,7 @@ async def reconcile_pr_gate(
         # must be held BEFORE remediation observes the head, or the merge
         # commit reads as a human push and resets the S5b budget
         await conflict_resolve.recover_debt(gate, spec, story_id, ctx)
+    said = Dispositions()
     if ingest_reviews:
         budget = None
         note = None
@@ -323,11 +353,13 @@ async def reconcile_pr_gate(
                 )
             if label is not None:
                 ctx.logger.info("external-remediation: %s for %s", label, spec.pr_url)
+            said = replace(said, remediation_exhausted=note is not None)
     if merge_gate is not None:
         held = remediation is not None and remediation.busy_on(spec.pr_url)
         verdict = await merge_gate.consider(gate, spec, story_id, pr, ctx, hold=held)
         if verdict != "unchanged":
             ctx.logger.info("merge-gate: %s for %s", verdict, spec.pr_url)
+        said = replace(said, regate=verdict)
     if conflict_resolve is not None:
         # PRD S5 (watcher half): resolve a conflict the merge-gate NAMED —
         # its record is the trigger, so this always runs after it; held
@@ -340,6 +372,49 @@ async def reconcile_pr_gate(
         )
         if label not in ("unchanged", "no_conflict"):
             ctx.logger.info("conflict-resolve: %s for %s", label, spec.pr_url)
+        said = replace(said, conflict=label)
+
+    # PRD S7: the one writer of the gate's reconciliation state, after every
+    # dispatcher has run — derived from the gate as it is NOW.
+    async def write_state(regate: str | None) -> None:
+        # busy is read at WRITE time: a probe that found a moved fingerprint
+        # starts its run as it settles
+        await record_state(
+            gate,
+            pr,
+            spec.pr_url,
+            ctx,
+            busy=Busy(
+                remediation=remediation is not None
+                and remediation.busy_on(spec.pr_url),
+                merge_gate=merge_gate is not None and merge_gate.busy_on(spec.pr_url),
+                conflict_resolve=conflict_resolve is not None
+                and conflict_resolve.busy_on(spec.pr_url)
+                and not conflict_resolve.debt_on(spec.pr_url),
+                conflict_debt=conflict_resolve is not None
+                and conflict_resolve.debt_on(spec.pr_url),
+            ),
+            dispositions=replace(said, regate=regate),
+        )
+
+    if merge_gate is None or said.regate != "probing":
+        await write_state(said.regate)
+        return "still_open"
+    # `probing` is the dispatcher's promise, not its answer (PR #369 round
+    # 3): the probe it just scheduled may still confirm the recorded verdict,
+    # fail, or find a moved fingerprint and start a red run. The state is
+    # written from what the probe FOUND — after every gate's probe is out
+    # when the sweep collects the settles (review #362 F5: the sweep never
+    # serialises on a subprocess per gate), inline otherwise.
+    dispatcher = merge_gate
+
+    async def settle() -> None:
+        await write_state(await dispatcher.settle_probe(gate.id))
+
+    if settle_later is None:
+        await settle()
+    else:
+        settle_later.append(settle)
     return "still_open"
 
 
@@ -508,7 +583,11 @@ async def _gate_closed(
     on the GATE stops the dead PR being re-polled and re-reported every sweep.
     """
     reason = "no longer exists (404)" if marker == "gone" else "was closed unmerged"
-    gate_marker = {MERGE_STATE_KEY: marker, MERGE_STATE_URL_KEY: pr_url}
+    gate_marker = {
+        MERGE_STATE_KEY: marker,
+        MERGE_STATE_URL_KEY: pr_url,
+        **closed_state_marker(pr_url, marker),  # PRD S7: one write, never apart
+    }
     if story_id is None:
         # Orphan gate (no waiter): nothing to post the finding on. Just mark it.
         await write_marker(

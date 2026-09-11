@@ -42,11 +42,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
-| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 2 | 1 |
+| `lithos_loom.subscriptions.merge_gate_command` | S | 1 | 6 |
+| `lithos_loom.subscriptions.merge_gate_dispatch` | L | 1 | 0 |
 | `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
+| `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
 | `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 8 |
@@ -154,7 +156,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `post_finding`
 - def `post_friction` — The record FIRST (strict — it is the once-per-pair bound), then the breadcrumb; a breadcrumb that cannot post never erases the record.
 - def `paths_of`
-- def `story_escalated` — Does an OPEN loom human gate already wait on the story? The record on the gate is the once-per-key guard; this is the belt for a record that failed to land after the gate was raised (the story still names it), so a paid run is never repeated and a second gate never raised.
+- def `story_escalation` — Does an OPEN loom human gate already wait on the story? ``escalated`` when one does, ``clear`` when none does, ``unknown`` when Lithos could not say (PR #369 review round 2: "cannot read" is kept distinct from a confirmed gate — the state must not claim a decision that was never raised, and a paid run must not start on an unknown either).
 - def `escalate` — The residue is a human's: raise the loom ``human`` gate on the story, once per sha pair (the record carries the gate id).
 
 ### `lithos_loom.subscriptions.conflict_resolve_record`
@@ -198,9 +200,16 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - class `IngestResult` — What one ingestion pass posted, for the remediation dispatcher (slice C).
 - def `ingest_external_reviews` — Ingest new review activity on one still-open gate's PR. Never raises.
 
-### `lithos_loom.subscriptions.merge_gate_dispatch`
-- def `spawn_merge_gate` — Default spawn: the merge-gate CLI, capped by whichever timeout the argv shape calls for (:func:`_subprocess.spawn_command`).
+### `lithos_loom.subscriptions.merge_gate_command`
 - class `MergeGateSettings` — Host-side knobs the watcher child threads in from its config.
+- def `spawn_merge_gate` — Default spawn: the merge-gate CLI, capped by whichever timeout the argv shape calls for (:func:`_subprocess.spawn_command`).
+- def `build_command`
+- def `json_path_for`
+- def `load_json`
+- def `output_tail`
+- def `probe_settings` — ``(label, fingerprint)``: the story's current settings fingerprint, ``""`` when the config is unresolvable (exit 4 — that IS a state the key compares), ``None`` when the probe itself failed.
+
+### `lithos_loom.subscriptions.merge_gate_dispatch`
 - class `MergeGateDispatch` — Owns the per-project single-flight dispatch of ``develop merge-gate``.
 
 ### `lithos_loom.subscriptions.merge_gate_outcome`
@@ -226,6 +235,14 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.ready_recheck`
 - def `delay_for` — Seconds to wait before the next re-check after *attempts* inconclusive ones: exponential from the base, capped.
 - class `ReadyRechecker` — Per-route re-check scheduler (see the module docstring).
+
+### `lithos_loom.subscriptions.reconciliation_state`
+- class `Busy` — What this process has in flight on the PR right now.
+- class `Dispositions` — What each dispatcher SAID this sweep (its ``consider`` label) — the signal that tells "not required" from "required but not evaluated" (review #369 F1), and an escalation from a stale record (F3).
+- class `Derived`
+- def `derive_state` — The PR's state from the gate's markers + the fetched PR + what runs + what the dispatchers said (see the module doc for the precedence). Pure; never raises on a malformed marker — a marker it cannot read is a marker that is absent. The detail is truncated here, so what is compared is what is stored.
+- def `closed_state_marker` — The state keys for a closed / deleted PR, folded into the merge marker's own write so the two never disagree.
+- def `record_state` — Derive the still-open gate's state from the gate AS IT IS NOW and write it when it moved. Returns the new state on a transition, ``None`` otherwise (unchanged, a detail-only move, or a failed write — the next sweep re-derives). Never raises.
 
 ### `lithos_loom.subscriptions.remediation_budget`
 - class `RemediationNotifier`

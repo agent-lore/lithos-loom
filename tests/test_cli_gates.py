@@ -366,3 +366,31 @@ def test_gates_lists_a_loom_human_gate_with_its_reason(
     assert "round 5: NOT approved (max_rounds)" in result.output
     assert HEALTH_OK in result.output
     assert fake.mutating_calls == []
+
+
+# ── reconciliation state column (PRD S7) ─────────────────────────────────
+
+
+def test_classify_pr_gate_carries_the_reconciliation_state() -> None:
+    meta = dict(_GATE_META)
+    meta["reconciliation_state"] = "behind"
+    row = classify_gate(_gate("gate-1", metadata=meta), "story-1", _story("story-1"))
+    assert row.state == "behind"
+
+
+def test_classify_pr_gate_without_a_state_has_none() -> None:
+    row = classify_gate(_gate("gate-1"), "story-1", _story("story-1"))
+    assert row.state is None
+
+
+def test_render_shows_a_state_column_for_pr_gates() -> None:
+    meta = dict(_GATE_META)
+    meta["reconciliation_state"] = "gate_failed"
+    rows = [
+        classify_gate(_gate("gate-1", metadata=meta), "story-1", _story("story-1")),
+        classify_gate(_human_gate("gate-2"), "story-2", _story("story-2")),
+    ]
+    lines = render_report(rows)
+    assert "STATE" in lines[0]
+    assert "gate_failed" in lines[1]
+    assert "—" in lines[2]  # a human gate has no reconciliation state

@@ -637,3 +637,116 @@ async def test_reconcile_pass_threads_remediation_to_the_gate_branch() -> None:
     )
 
     assert observed == ["e" * 40]
+
+
+async def test_reconcile_pass_settles_probing_gates_after_every_probe_launched() -> (
+    None
+):
+    """Review #369 round 3: a gate whose re-gate is `probing` gets its state
+    written from the probe's answer, after the loop — every probe is out
+    before the sweep waits on any of them (review #362 F5)."""
+    import logging
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.github_client import PullRequest
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.subscriptions import SubscriptionContext
+    from lithos_loom.subscriptions.merge_gate_record import MergeGateRecord
+
+    def _gate(n: int) -> Task:
+        url = f"https://github.com/o/r/pull/{n}"
+        # a prior green the probe is out re-verifying
+        green = MergeGateRecord(
+            pr_url=url,
+            head_sha="e" * 40,
+            base_sha="b" * 40,
+            status="green",
+            verdict="GREEN",
+        )
+        return Task(
+            id=f"gate-{n}",
+            title=f"Awaiting merge: US{n}",
+            status="open",
+            tags=(),
+            metadata={
+                "gate_type": "pr",
+                "repo": "o/r",
+                "pr_number": n,
+                "pr_url": url,
+                "merge_gate": green.as_marker(),
+            },
+            claims=(),
+            task_type="gate",
+        )
+
+    gates = [_gate(1), _gate(2)]
+    lithos = AsyncMock()
+    lithos.task_list = AsyncMock(return_value=gates)
+    lithos.task_edge_list = AsyncMock(return_value=[])
+    lithos.task_get = AsyncMock(
+        side_effect=lambda task_id: next(g for g in gates if g.id == task_id)
+    )
+    github = AsyncMock()
+    github.get_pull_request = AsyncMock(
+        side_effect=lambda repo, number: PullRequest(
+            repo="o/r",
+            number=number,
+            state="open",
+            merged=False,
+            merged_at=None,
+            merge_commit_sha=None,
+            head_sha="e" * 40,
+            base_ref="main",
+            base_sha="b" * 40,
+            mergeable=True,
+            mergeable_state="clean",
+        )
+    )
+    github.get_branch_tip = AsyncMock(return_value="b" * 40)
+    ctx = SubscriptionContext(
+        lithos=lithos, logger=logging.getLogger("test-gate"), agent_id="a"
+    )
+    order: list[str] = []
+
+    import asyncio
+
+    gate_2_settled = asyncio.Event()
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            order.append(f"consider {gate.id}")
+            return "probing"
+
+        async def settle_probe(self, gate_id: str) -> str:
+            order.append(f"settle {gate_id}")
+            if gate_id == "gate-1":
+                # a slow probe on the first gate must not hold the second's
+                # answer: the settles are awaited concurrently
+                await asyncio.wait_for(gate_2_settled.wait(), 2)
+            else:
+                gate_2_settled.set()
+            return "unchanged"
+
+    await _run_reconcile_pass(
+        lithos=lithos,
+        push_handler=AsyncMock(),
+        ctx=ctx,
+        resolved_window=None,
+        github=github,
+        pr_merge_enabled=True,
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+    assert order == [
+        "consider gate-1",
+        "consider gate-2",
+        "settle gate-1",
+        "settle gate-2",
+    ]
+    written = [
+        c.kwargs.get("metadata", {}).get("reconciliation_state")
+        for c in lithos.task_update.call_args_list
+    ]
+    assert written.count("ready_to_merge") == 2

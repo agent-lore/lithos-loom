@@ -39,6 +39,7 @@ from lithos_loom.sources.lithos_event_stream import LithosEventStream
 from lithos_loom.sources.lithos_note_stream import LithosNoteStream
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._develop_pr_merge import (
+    StateSettle,
     is_pr_gate,
     reconcile_pr_gate,
 )
@@ -164,6 +165,21 @@ async def _run_reconcile_pass(
         "error": 0,
     }
 
+    # PRD S7 / PR #369 round 3: a gate whose re-gate is out probing gets its
+    # state written from the probe's ANSWER, after the loop — every probe is
+    # launched before the sweep waits on any of them (review #362 F5).
+    settles: list[StateSettle] = []
+
+    async def _settle_one(settle: StateSettle) -> None:
+        try:
+            await settle()
+        except Exception as exc:  # defensive — the state writer catches its own
+            logger.warning(
+                "[Friction] github-watcher: reconciliation-state settle failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
     async def _pr_gate_one(gate: Any) -> None:
         """Resolve one open ``pr`` gate (Epic H). Same defensive wrap."""
         try:
@@ -175,6 +191,7 @@ async def _run_reconcile_pass(
                 remediation=remediation,
                 merge_gate=merge_gate,
                 conflict_resolve=conflict_resolve,
+                settle_later=settles,
             )
         except Exception as exc:  # defensive — the reconcile catches its own
             logger.warning(
@@ -194,6 +211,9 @@ async def _run_reconcile_pass(
             await _dispatch_one(task, "lithos.task.updated")
         elif pr_merge_enabled and is_pr_gate(task):
             await _pr_gate_one(task)
+    # concurrently: each settle waits on its own probe (up to
+    # PROBE_SETTLE_SECONDS), so the sweep pays the slowest, not the sum
+    await asyncio.gather(*(_settle_one(settle) for settle in settles))
 
     gate_summary = (
         f"{gate_counts['merged']} resolved / {gate_counts['closed_unmerged']} "

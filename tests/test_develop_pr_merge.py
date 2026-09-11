@@ -1150,6 +1150,9 @@ async def test_still_open_branch_considers_the_merge_gate_after_remediation() ->
     seen: list[dict[str, Any]] = []
 
     class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
         async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
             seen.append({"story": story_id, "head": pr.head_sha, "hold": hold})
             return "dispatched"
@@ -1227,6 +1230,9 @@ async def test_still_open_branch_keys_the_base_move_on_the_live_tip() -> None:
     seen: list[str] = []
 
     class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
         async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
             seen.append(pr.base_sha)
             return "dispatched"
@@ -1312,6 +1318,12 @@ async def test_still_open_branch_considers_conflict_resolution_last() -> None:
             return pr_url == _PR_URL
 
     class _Resolver:
+        def debt_on(self, pr_url: str) -> bool:
+            return False
+
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
         async def recover_debt(self, gate, spec, story_id, ctx):
             return None
 
@@ -1362,6 +1374,9 @@ async def test_still_open_branch_recovers_a_debt_before_observing_the_head() -> 
     order: list[str] = []
 
     class _Resolver:
+        def debt_on(self, pr_url: str) -> bool:
+            return False
+
         async def recover_debt(self, gate, spec, story_id, ctx):
             order.append("recover")
 
@@ -1393,3 +1408,264 @@ async def test_still_open_branch_recovers_a_debt_before_observing_the_head() -> 
     )
     assert outcome == "still_open"
     assert order[:2] == ["recover", "observe"] and order[-1] == "consider"
+
+
+# ── reconciliation state (PRD S7) ────────────────────────────────────────
+
+
+async def test_still_open_sweep_records_the_reconciliation_state() -> None:
+    from lithos_loom.subscriptions.reconciliation_state import (
+        STATE_KEY,
+        STATE_URL_KEY,
+    )
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(_open_pr())
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome == "still_open"
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] in ("ready_to_merge", "awaiting_review")
+    assert stored.metadata[STATE_URL_KEY] == _PR_URL
+
+
+async def test_closed_pr_records_needs_human_in_the_same_marker_write() -> None:
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(_pr(state="closed", merged=False))
+    writes_before = len(client.calls_to("task_update"))
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome == "closed_unmerged"
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] == "needs_human"
+    assert len(client.calls_to("task_update")) == writes_before + 1
+
+
+async def test_an_unreadable_base_tip_never_records_ready_to_merge() -> None:
+    """Review #369 F1: the re-gate cannot run without the live base tip,
+    so a clean, mergeable PR is NOT ready — it is unevaluated."""
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            return "unknown_shas"
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(_open_pr())
+    github.get_branch_tip.side_effect = GitHubError("boom")
+
+    await reconcile_pr_gate(
+        gate,
+        github,
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] == "awaiting_review"
+
+
+async def test_a_re_gate_deferred_behind_another_pr_records_reconciling() -> None:
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            return "deferred_busy"
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+
+    await reconcile_pr_gate(
+        gate,
+        _github(_open_pr()),
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] == "reconciling"
+
+
+async def test_a_gate_closed_before_s7_is_backfilled_with_needs_human() -> None:
+    """Review #369 F2: the terminal guard returns before any fetch; a gate
+    marked closed before this shipped must still get its state — with no
+    GitHub call."""
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY, STATE_URL_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
+    )
+    gate = await _get(client, gate.id)
+    github = _github(None)
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome is None
+    github.get_pull_request.assert_not_awaited()
+    stored = await client.task_get(task_id=gate.id)
+    assert stored is not None
+    assert stored.metadata[STATE_KEY] == "needs_human"
+    assert stored.metadata[STATE_URL_KEY] == _PR_URL
+    # and once backfilled, the guard is silent again
+    writes = len(client.calls_to("task_update"))
+    await reconcile_pr_gate(stored, github, _ctx(client))
+    assert len(client.calls_to("task_update")) == writes
+
+
+# ── a probing re-gate: the state written is the probe's ANSWER (#369 r3) ──
+
+
+def _landable_pr() -> PullRequest:
+    from dataclasses import replace
+
+    return replace(
+        _open_pr(),
+        base_ref="main",
+        base_sha="b" * 40,
+        mergeable=True,
+        mergeable_state="clean",
+    )
+
+
+async def _green_gate(client: FakeLithosClient, gate: Any) -> Any:
+    from lithos_loom.subscriptions.merge_gate_record import MergeGateRecord
+
+    record = MergeGateRecord(
+        pr_url=_PR_URL,
+        head_sha="e" * 40,
+        base_sha="b" * 40,
+        status="green",
+        verdict="GREEN",
+    )
+    await client.task_update(
+        task_id=gate.id, metadata={"merge_gate": record.as_marker()}
+    )
+    return await _get(client, gate.id)
+
+
+class _ProbingMergeGate:
+    """`consider` schedules a probe (`probing`); `settle_probe` is what it
+    found. `busy` is read at WRITE time — a probe that started a run flips it."""
+
+    def __init__(self, answer: str, *, busy_after: bool = False) -> None:
+        self.answer = answer
+        self.busy_after = busy_after
+        self.calls: list[str] = []
+        self._busy = False
+
+    def busy_on(self, pr_url: str) -> bool:
+        return self._busy
+
+    async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+        self.calls.append("consider")
+        return "probing"
+
+    async def settle_probe(self, gate_id: str) -> str:
+        self.calls.append("settle")
+        self._busy = self.busy_after
+        return self.answer
+
+
+@pytest.mark.parametrize(
+    ("answer", "busy_after", "expected"),
+    [
+        ("unchanged", False, "ready_to_merge"),
+        ("probing", False, "awaiting_review"),  # the probe never answered
+        ("probe_failed", False, "awaiting_review"),
+        ("dispatched", True, "reconciling"),  # the fingerprint moved; a run started
+    ],
+)
+async def test_a_probing_re_gate_records_the_probe_s_answer_not_its_promise(
+    answer: str, busy_after: bool, expected: str
+) -> None:
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    gate = await _green_gate(client, gate)
+    dispatcher = _ProbingMergeGate(answer, busy_after=busy_after)
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(_landable_pr()),
+        _ctx(client),
+        merge_gate=dispatcher,  # type: ignore[arg-type]
+    )
+
+    assert outcome == "still_open"
+    assert dispatcher.calls == ["consider", "settle"]
+    stored = await _get(client, gate.id)
+    assert stored.metadata[STATE_KEY] == expected
+
+
+async def test_a_probing_re_gate_can_defer_its_state_write_to_the_sweep() -> None:
+    """The sweep collects the settles and awaits them after every gate has
+    launched its probe (review #362 F5: probes run concurrently, the sweep
+    never serialises on a subprocess per gate). Nothing is written before."""
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    gate = await _green_gate(client, gate)
+    dispatcher = _ProbingMergeGate("unchanged")
+    settles: list[Any] = []
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        _github(_landable_pr()),
+        _ctx(client),
+        merge_gate=dispatcher,  # type: ignore[arg-type]
+        settle_later=settles,
+    )
+
+    assert outcome == "still_open"
+    assert dispatcher.calls == ["consider"]
+    assert STATE_KEY not in (await _get(client, gate.id)).metadata
+    assert len(settles) == 1
+    await settles[0]()
+    assert dispatcher.calls == ["consider", "settle"]
+    assert (await _get(client, gate.id)).metadata[STATE_KEY] == "ready_to_merge"
+
+
+async def test_a_settled_re_gate_never_defers_its_state_write() -> None:
+    from lithos_loom.subscriptions.reconciliation_state import STATE_KEY
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            return "unchanged"
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    settles: list[Any] = []
+    await reconcile_pr_gate(
+        gate,
+        _github(_open_pr()),
+        _ctx(client),
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+        settle_later=settles,
+    )
+    assert settles == []
+    assert STATE_KEY in (await _get(client, gate.id)).metadata

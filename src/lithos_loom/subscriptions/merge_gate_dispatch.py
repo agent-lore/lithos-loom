@@ -38,16 +38,25 @@ What this module owns, all sweep-side (ADR 0011 decision 3 — single writer):
 - **The settings probe never blocks the sweep** (review F5): it runs as a
   background task per gate, and only a changed fingerprint starts a run
   (under the project's slot, or on a later sweep if that slot is busy).
+  ``consider()`` answers ``probing`` the moment the probe is scheduled — a
+  promise, not a comparison — so the sweep's state writer asks
+  :meth:`MergeGateDispatch.settle_probe` for the probe's settled answer
+  (``unchanged`` / ``dispatched`` / ``deferred_*`` / ``probe_failed`` /
+  ``probe_crashed`` / ``superseded``, or ``probing`` when it has not answered
+  within :data:`PROBE_SETTLE_SECONDS`) once every gate's probe is out (PR
+  #369 round 3): a recorded green is confirmed by a fingerprint that
+  matched, never by a probe that merely exists.
+
+The subprocess plumbing (argv, ``--json`` paths, the default spawn and its
+timeouts, the probe itself) lives in :mod:`.merge_gate_command`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import sys
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +72,17 @@ from lithos_loom.subscriptions._project_settings import (
     read_project_flag,
     resolve_project_repo,
 )
-from lithos_loom.subscriptions._subprocess import spawn_command
+from lithos_loom.subscriptions.merge_gate_command import (
+    PROBE_TIMEOUT_SECONDS,
+    MergeGateSettings,
+    Spawn,
+    build_command,
+    json_path_for,
+    load_json,
+    output_tail,
+    probe_settings,
+    spawn_merge_gate,
+)
 from lithos_loom.subscriptions.merge_gate_outcome import (
     post_checkout_unresolved,
     post_config_unresolved,
@@ -103,10 +122,10 @@ __all__ = [
 # Project-context metadata key: per-project dial for the base-move re-gate.
 MERGE_GATE_SETTING = "develop_merge_gate"
 
-# Wall-clock cap on one run (a full check-set in a container) and on the
-# settings probe (config load + two Lithos reads — seconds, not minutes).
-RUN_TIMEOUT_SECONDS = 2 * 3600
-PROBE_TIMEOUT_SECONDS = 120
+# How long the sweep's state writer waits for a probe's answer: the probe's
+# own cap plus its record re-read — a probe that outlives this is reported
+# as `probing` (unconfirmed) and keeps running.
+PROBE_SETTLE_SECONDS = PROBE_TIMEOUT_SECONDS + 30
 
 # Record statuses retried on the SAME key, up to MAX_ATTEMPTS_PER_KEY (see
 # merge_gate_record): the run produced no verdict to stand on.
@@ -119,9 +138,6 @@ _REBOOT_REARMS: frozenset[str] = frozenset({"crashed", "push_failed"})
 # Refusals about the mapped checkout, settled on (repo_path, origin_seen).
 _CHECKOUT_REFUSALS: frozenset[str] = frozenset({"repo_mismatch", "checkout_unresolved"})
 
-# The findings quote at most this much subprocess output.
-_OUTPUT_TAIL_CHARS = 600
-
 # Record statuses whose outcome depends on the gate settings: an unchanged
 # sha pair re-gates when the probed fingerprint differs from the recorded
 # one. Everything else (conflict, fork, closed, no project, a crash or a
@@ -130,32 +146,9 @@ _SETTINGS_DEPENDENT: frozenset[str] = frozenset(
     {"green", "red", "errored", "no_checks", "config_unresolved", "push_failed"}
 )
 
-Spawn = Callable[[list[str]], Awaitable[tuple[int, str]]]
 # Whether a remediation run is in flight on a PR url — re-checked the moment
 # a background probe would start a run, not only when it was scheduled.
 Hold = Callable[[str], bool]
-
-
-async def spawn_merge_gate(cmd: list[str]) -> tuple[int, str]:
-    """Default spawn: the merge-gate CLI, capped by whichever timeout the
-    argv shape calls for (:func:`_subprocess.spawn_command`)."""
-    if "--resolve-only" in cmd:
-        return await spawn_command(
-            cmd, timeout=PROBE_TIMEOUT_SECONDS, label="merge-gate settings probe"
-        )
-    return await spawn_command(cmd, timeout=RUN_TIMEOUT_SECONDS, label="merge-gate run")
-
-
-@dataclass(frozen=True)
-class MergeGateSettings:
-    """Host-side knobs the watcher child threads in from its config."""
-
-    enabled: bool = True
-    projects: Mapping[str, Path] = field(default_factory=dict)
-    work_dir: Path = Path(".")
-    # Forwarded to the subprocess as `--config` so it loads the same host
-    # config this child did; None lets it fall back to env/CWD discovery.
-    config_path: Path | None = None
 
 
 class MergeGateDispatch:
@@ -181,7 +174,9 @@ class MergeGateDispatch:
         self._hold = hold
         self._tasks: dict[str, asyncio.Task[None]] = {}  # project slug → run
         self._in_flight: dict[str, str] = {}  # project slug → pr url
-        self._probes: dict[str, asyncio.Task[None]] = {}  # gate id → probe
+        # gate id → probe; a probe's result is its settled label (see
+        # `settle_probe`)
+        self._probes: dict[str, asyncio.Task[str]] = {}
 
     # ── in-flight state ────────────────────────────────────────────────
 
@@ -201,10 +196,31 @@ class MergeGateDispatch:
         """In-flight settings probes (finished ones are pruned)."""
         return sum(1 for t in self._probes.values() if not t.done())
 
-    def _live(self) -> list[asyncio.Task[None]]:
+    def _live(self) -> list[asyncio.Task[Any]]:
         return [
             t for t in (*self._probes.values(), *self._tasks.values()) if not t.done()
         ]
+
+    async def settle_probe(
+        self, gate_id: str, *, timeout: float = PROBE_SETTLE_SECONDS
+    ) -> str:
+        """The settled answer of the probe ``consider()`` reported as
+        ``probing`` for *gate_id* — what the state writer derives from
+        (PR #369 round 3): ``unchanged`` (the fingerprint matched; the ONE
+        answer that confirms a recorded verdict), ``dispatched`` (it moved;
+        a run is now in flight), ``deferred_busy`` / ``deferred_remediation``
+        (it moved; the run waits for a later sweep), ``probe_failed`` /
+        ``probe_crashed`` (nothing compared), ``superseded`` (the record moved
+        while probed; the next sweep decides afresh) — or ``probing`` when no
+        probe is pending or it has not answered within *timeout*. Waiting
+        never cancels the probe."""
+        task = self._probes.get(gate_id)
+        if task is None:
+            return "probing"
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
+        except TimeoutError:
+            return "probing"
 
     async def drain(self) -> None:
         """Await every in-flight probe and run (tests; the sweep never
@@ -505,17 +521,20 @@ class MergeGateDispatch:
         prior: MergeGateRecord,
         budget: RemediationBudget,
         ctx: SubscriptionContext,
-    ) -> None:
+    ) -> str:
         """The background probe: a changed fingerprint starts a run under
         the project's slot; a busy slot leaves it for a later sweep (which
-        re-probes — cheap, and no state to get stale). Never raises."""
+        re-probes — cheap, and no state to get stale). Never raises; its
+        result is the settled label `settle_probe` hands the state writer."""
         try:
-            label, fingerprint = await self._probe(spec, repo, story_id, gate_id)
+            label, fingerprint = await probe_settings(
+                self._spawn, self._settings, spec, repo, story_id, gate_id
+            )
         except Exception:  # noqa: BLE001 — a probe must never take the sweep down
             ctx.logger.exception(
                 "merge-gate: settings probe for %s raised", spec.pr_url
             )
-            return
+            return "probe_crashed"
         if fingerprint is None:
             ctx.logger.warning(
                 "[Friction] merge-gate: settings probe for %s failed (%s); "
@@ -523,9 +542,9 @@ class MergeGateDispatch:
                 spec.pr_url,
                 label,
             )
-            return
+            return "probe_failed"
         if fingerprint == prior.settings_fingerprint:
-            return
+            return "unchanged"
         ctx.logger.info(
             "merge-gate: settings for %s changed (%s → %s); re-gating",
             spec.pr_url,
@@ -541,7 +560,7 @@ class MergeGateDispatch:
                 "were probed; re-gate deferred to a later sweep",
                 spec.pr_url,
             )
-            return
+            return "deferred_remediation"
         if self.busy_for(slug):
             ctx.logger.info(
                 "merge-gate: a run is in flight for project %r; %s re-gates on a "
@@ -549,7 +568,7 @@ class MergeGateDispatch:
                 slug,
                 spec.pr_url,
             )
-            return
+            return "deferred_busy"
         # The probe captured the key when it was scheduled; a newer run may
         # have written a newer record meanwhile (re-review 2 F3). Act only on
         # the record we probed for.
@@ -568,86 +587,9 @@ class MergeGateDispatch:
                 "probed; nothing started (the next sweep decides afresh)",
                 spec.pr_url,
             )
-            return
+            return "superseded"
         self._start_run(gate_id, story_id, spec, slug, repo, head, base, 1, budget, ctx)
-
-    # ── subprocess plumbing ────────────────────────────────────────────
-
-    def command(
-        self,
-        spec: PrGateSpec,
-        repo: Path,
-        json_path: Path,
-        story_id: str,
-        *,
-        resolve_only: bool = False,
-    ) -> list[str]:
-        cmd = [
-            sys.executable,
-            "-m",
-            "lithos_loom",
-            "develop",
-            "merge-gate",
-            str(spec.pr_number),
-            # The story: the run resolves the project's + task's develop_*
-            # settings (profile, check-set, image, test command, parity) —
-            # the CURRENT config defending the base — strictly.
-            "--story",
-            story_id,
-            "--repo",
-            str(repo),
-            # The checkout is pinned to the gate's repo (PR #362 review F2):
-            # a PR number resolves against the checkout's origin, so a stale
-            # [projects.<slug>].repo would otherwise trial-merge AND push
-            # owner/other#N.
-            "--expect-repo",
-            spec.repo,
-            "--json",
-            str(json_path),
-        ]
-        if resolve_only:
-            cmd.append("--resolve-only")
-        if self._settings.config_path is not None:
-            cmd += ["--config", str(self._settings.config_path)]
-        return cmd
-
-    def _json_path(self, gate_id: str, *, probe: bool) -> Path:
-        kind = "probe" if probe else "run"
-        path = (
-            self._settings.work_dir
-            / "github-watcher"
-            / f"merge-gate-{gate_id}-{kind}.json"
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.unlink(missing_ok=True)
-        return path
-
-    @staticmethod
-    def _load(path: Path) -> dict[str, Any] | None:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return data if isinstance(data, dict) else None
-
-    async def _probe(
-        self, spec: PrGateSpec, repo: Path, story_id: str, gate_id: str
-    ) -> tuple[str, str | None]:
-        """``(label, fingerprint)``: the story's current settings fingerprint,
-        ``""`` when the config is unresolvable (exit 4 — that IS a state the
-        key compares), ``None`` when the probe itself failed."""
-        path = self._json_path(gate_id, probe=True)
-        rc, output = await self._spawn(
-            self.command(spec, repo, path, story_id, resolve_only=True)
-        )
-        if rc == 4:
-            return "config_unresolved", ""
-        data = self._load(path)
-        fingerprint = None if data is None else data.get("settings_fingerprint")
-        if rc != 0 or not isinstance(fingerprint, str):
-            tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
-            return f"exit {rc}: {tail}", None
-        return "resolved", fingerprint
+        return "dispatched"
 
     # ── the run itself ─────────────────────────────────────────────────
 
@@ -693,9 +635,11 @@ class MergeGateDispatch:
         budget: RemediationBudget,
         ctx: SubscriptionContext,
     ) -> None:
-        path = self._json_path(gate_id, probe=False)
-        rc, output = await self._spawn(self.command(spec, repo, path, story_id))
-        data = self._load(path)
+        path = json_path_for(self._settings, gate_id, probe=False)
+        rc, output = await self._spawn(
+            build_command(self._settings, spec, repo, path, story_id)
+        )
+        data = load_json(path)
         # the settle key for a repo mismatch: the sweep's own read, so a CLI
         # refusal re-arms only when the mapping or the remote url moves
         origin_seen = ((await origin_read(repo)).repo or "").lower()
@@ -708,7 +652,7 @@ class MergeGateDispatch:
             origin_seen=origin_seen,
             boot_id=self._boot_id,
         )
-        tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
+        tail = output_tail(output)
         if data is None and rc == 4:
             # config_unresolved: the CLI exits before any run and writes no
             # record — the exit code IS the record (PRD S3: skipped loudly,
