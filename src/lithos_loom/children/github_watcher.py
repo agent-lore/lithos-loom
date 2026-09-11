@@ -40,7 +40,9 @@ from lithos_loom.sources.lithos_note_stream import LithosNoteStream
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._develop_pr_merge import (
     StateSettle,
+    is_loom_human_gate,
     is_pr_gate,
+    reconcile_human_pr_gate,
     reconcile_pr_gate,
 )
 from lithos_loom.subscriptions._github_issue_push import (
@@ -67,6 +69,8 @@ from lithos_loom.subscriptions.merge_gate_dispatch import (
     MergeGateDispatch,
     MergeGateSettings,
 )
+from lithos_loom.subscriptions.pr_gate_stranding import complete_if_waiter_resolved
+from lithos_loom.subscriptions.remediation_budget import RemediationNotifier
 from lithos_loom.subscriptions.retry import run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -99,6 +103,7 @@ async def _run_reconcile_pass(
     remediation: ExternalRemediation | None = None,
     merge_gate: MergeGateDispatch | None = None,
     conflict_resolve: ConflictResolveDispatch | None = None,
+    notifier: RemediationNotifier | None = None,
 ) -> None:
     """Single pass of the periodic Lithos→GH reconciliation sweep.
 
@@ -116,8 +121,15 @@ async def _run_reconcile_pass(
       previously meant "no time bound" and the sweep walked every
       terminal task ever, growing unboundedly with each cycle).
 
+    - **Loom's own `human` gates** (always): one whose waiter is already
+      terminal is completed (never nudged — 04c2448b hygiene); one raised
+      for a closed / deleted PR polls that PR (when ``pr_merge_enabled``)
+      so a reopen-and-merge resolves the story it holds.
+
     The push handler is idempotent (re-fetches GH before each PATCH)
     so the sweep is a no-op when everything is already in sync.
+    *notifier* is the push sinks for the human gate a stranded ``pr`` gate
+    converts into.
     """
     handler = cast("Callable[[Event, SubscriptionContext], Any]", push_handler)
     now = datetime.now(UTC)
@@ -180,6 +192,28 @@ async def _run_reconcile_pass(
                 exc,
             )
 
+    # 04c2448b: loom's own human gates — waiter-resolved hygiene and the
+    # stranding gates' reopen poll.
+    human_counts = {"waiter_resolved": 0, "reopened_merged": 0}
+
+    async def _human_gate_one(gate: Any) -> None:
+        try:
+            label = await complete_if_waiter_resolved(gate, ctx)
+            if label == "completed":
+                human_counts["waiter_resolved"] += 1
+                return
+            if label != "open" or not pr_merge_enabled:
+                return
+            if await reconcile_human_pr_gate(gate, github, ctx) == "merged":
+                human_counts["reopened_merged"] += 1
+        except Exception as exc:  # defensive — both helpers catch their own
+            logger.warning(
+                "[Friction] github-watcher: human gate %s sweep failed: %s: %s",
+                gate.id,
+                type(exc).__name__,
+                exc,
+            )
+
     async def _pr_gate_one(gate: Any) -> None:
         """Resolve one open ``pr`` gate (Epic H). Same defensive wrap."""
         try:
@@ -192,6 +226,7 @@ async def _run_reconcile_pass(
                 merge_gate=merge_gate,
                 conflict_resolve=conflict_resolve,
                 settle_later=settles,
+                notifier=notifier,
             )
         except Exception as exc:  # defensive — the reconcile catches its own
             logger.warning(
@@ -211,6 +246,8 @@ async def _run_reconcile_pass(
             await _dispatch_one(task, "lithos.task.updated")
         elif pr_merge_enabled and is_pr_gate(task):
             await _pr_gate_one(task)
+        elif is_loom_human_gate(task):
+            await _human_gate_one(task)
     # concurrently: each settle waits on its own probe (up to
     # PROBE_SETTLE_SECONDS), so the sweep pays the slowest, not the sum
     await asyncio.gather(*(_settle_one(settle) for settle in settles))
@@ -219,7 +256,9 @@ async def _run_reconcile_pass(
         f"{gate_counts['merged']} resolved / {gate_counts['closed_unmerged']} "
         f"closed-unmerged / {gate_counts['still_open']} awaiting-merge / "
         f"{gate_counts['gone']} deleted / {gate_counts['unparseable']} unparseable "
-        f"/ {gate_counts['error']} error"
+        f"/ {gate_counts['error']} error; human-gates: "
+        f"{human_counts['waiter_resolved']} waiter-resolved / "
+        f"{human_counts['reopened_merged']} reopened-merged"
     )
 
     if resolved_window is None:
@@ -546,6 +585,7 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                             remediation=remediation,
                             merge_gate=merge_gate,
                             conflict_resolve=conflict_resolve,
+                            notifier=notifier,
                         )
                     except Exception:
                         logger.exception(

@@ -23,7 +23,7 @@ from typing import Any
 from lithos_loom.errors import LithosClientError
 from lithos_loom.subscriptions import SubscriptionContext
 
-__all__ = ["post_finding_then_mark", "write_marker"]
+__all__ = ["complete_swallowing", "post_finding_then_mark", "write_marker"]
 
 
 async def write_marker(
@@ -106,3 +106,29 @@ async def post_finding_then_mark(
         subsystem=subsystem,
     )
     return posted and marked
+
+
+async def complete_swallowing(
+    ctx: SubscriptionContext, *, task_id: Any, subject: str, subsystem: str
+) -> bool:
+    """``task_complete`` swallowing ``task_not_found`` (already terminal).
+
+    Returns ``True`` when the task is now terminal (completed here or already
+    was), ``False`` on a transient error the caller should retry next cycle.
+    The completion's ``unblocked`` answer is deliberately dropped: callers that
+    must act on it (the pr-gate resolver's story completion) have their own
+    variant. Never raises.
+    """
+    try:
+        await ctx.lithos.task_complete(task_id=task_id)
+    except LithosClientError as exc:
+        if exc.code == "task_not_found":
+            return True  # already terminal — fine
+        ctx.logger.warning(
+            "[Friction] %s: completing %s failed (%s); will retry next sweep",
+            subsystem,
+            subject,
+            exc,
+        )
+        return False
+    return True

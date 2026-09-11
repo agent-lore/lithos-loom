@@ -29,7 +29,9 @@ wiring the resolvers depend on:
 * ``waiter-gone`` — the ``waits_on_gate`` edge points at a task that no longer
   exists.
 * ``waiter-resolved`` — the waiter is already completed/cancelled while the
-  gate is still open (the resolve never landed the gate side).
+  gate is still open (the resolve never landed the gate side). For a loom
+  ``human`` gate this is transient: the github-watcher's reconcile sweep
+  completes it on its next pass (04c2448b hygiene).
 
 The classification mirrors the branches
 :func:`~lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` reasons

@@ -264,6 +264,9 @@ async def raise_needs_human(
         summary=escalation.summary,
         run_id=run_id,
         brief=escalation.brief,
+        # the brief's "what to do" follows the caller: a decision gate must
+        # not tell the operator that ticking it re-dispatches
+        actions=None if actions == REDISPATCH_ACTIONS else actions,
     )
     if gate_id is None:
         return None, gate_problem

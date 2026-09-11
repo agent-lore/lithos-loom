@@ -140,4 +140,37 @@ async def test_task_not_found_on_mark_is_swallowed() -> None:
 def test_findings_helpers_are_exported() -> None:
     from lithos_loom.subscriptions import _findings
 
-    assert set(_findings.__all__) == {"post_finding_then_mark", "write_marker"}
+    assert set(_findings.__all__) == {
+        "complete_swallowing",
+        "post_finding_then_mark",
+        "write_marker",
+    }
+
+
+async def test_complete_swallowing_treats_already_terminal_as_done() -> None:
+    """``task_not_found`` on a completion means the task is already terminal
+    (a race with another completer) — that is success; any other error is a
+    transient the caller retries next cycle."""
+    import logging
+
+    from lithos_loom.errors import LithosClientError
+    from lithos_loom.subscriptions import SubscriptionContext
+    from lithos_loom.subscriptions._findings import complete_swallowing
+    from tests.support import FakeLithosClient
+
+    client = FakeLithosClient(agent_id="a")
+    ctx = SubscriptionContext(
+        lithos=client, logger=logging.getLogger("t"), agent_id="a"
+    )
+    task = await client.task_create(title="t")
+
+    assert await complete_swallowing(ctx, task_id=task, subject="t", subsystem="x")
+    # already completed → task_not_found → still True
+    assert await complete_swallowing(ctx, task_id=task, subject="t", subsystem="x")
+
+    async def _boom(**kwargs: object) -> object:
+        raise LithosClientError("internal", "boom")
+
+    client.task_complete = _boom  # type: ignore[method-assign]
+    other = await client.task_create(title="u")
+    assert not await complete_swallowing(ctx, task_id=other, subject="u", subsystem="x")

@@ -388,12 +388,17 @@ def human_gate_brief(
     summary: str,
     run_id: str | None,
     brief: Mapping[str, Any] | None,
+    actions: str | None = None,
 ) -> str:
     """The gate's description: the decision brief an operator reads before
     acting, so the investigation is not redone by hand.
 
     Mirrors what the August rescues each needed — run id, rounds, cost, branch,
-    what was blocking — and states the two actions and their consequences.
+    what was blocking — and states the actions and their consequences: the
+    runner's pair (complete → re-dispatch, cancel the story → abandon) by
+    default, or the caller's own *actions* when the gate is a decision rather
+    than a re-dispatch (a stranded delivery, an exhausted remediation). The
+    warning against cancelling the gate itself stands either way.
     """
     b = dict(brief or {})
     lines = [
@@ -433,18 +438,28 @@ def human_gate_brief(
             "conversation_log",
         }:
             lines.append(f"**{key}:** {value}")
-    lines += [
-        "",
-        "**What to do:**",
-        (
-            "- Complete this gate → loom re-dispatches the story. Edit the story's "
-            "description / acceptance criteria first if the brief needs sharpening."
-        ),
-        (
-            "- Cancel the *story* (not this gate) → abandon it. Cancelling the gate "
-            "instead strands the story: a cancelled gate can never be satisfied."
-        ),
-    ]
+    lines += ["", "**What to do:**"]
+    if actions is None:
+        lines += [
+            (
+                "- Complete this gate → loom re-dispatches the story. Edit the "
+                "story's description / acceptance criteria first if the brief "
+                "needs sharpening."
+            ),
+            (
+                "- Cancel the *story* (not this gate) → abandon it. Cancelling the "
+                "gate instead strands the story: a cancelled gate can never be "
+                "satisfied."
+            ),
+        ]
+    else:
+        lines += [
+            f"- {actions}.",
+            (
+                "- Never cancel this gate. Cancelling the gate (rather than the "
+                "story) strands the story: a cancelled gate can never be satisfied."
+            ),
+        ]
     return "\n".join(lines)
 
 
@@ -461,9 +476,11 @@ async def create_human_gate(
     run_id: str | None = None,
     brief: Mapping[str, Any] | None = None,
     description: str | None = None,
+    actions: str | None = None,
 ) -> str:
     """Raise a loom ``human`` gate on *story_id* and link it (the escalation
-    primitive).
+    primitive). *actions* is the caller's own "what to do" for the brief
+    (see :func:`human_gate_brief`); the runner's pair when ``None``.
 
     Returns the new gate's id. Raises ``ValueError`` when *reason* is outside
     :data:`ESCALATION_REASONS`. Metadata keys are flat and named so the list
@@ -509,6 +526,7 @@ async def create_human_gate(
             summary=summary_line,
             run_id=run_id,
             brief=brief,
+            actions=actions,
         ),
     )
 
@@ -525,6 +543,7 @@ async def create_human_gate_best_effort(
     summary: str,
     run_id: str | None = None,
     brief: Mapping[str, Any] | None = None,
+    actions: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Raise a loom ``human`` gate, degrading instead of raising.
 
@@ -546,6 +565,7 @@ async def create_human_gate_best_effort(
             summary=summary,
             run_id=run_id,
             brief=brief,
+            actions=actions,
         )
     except (ValueError, OSError, LithosClientError) as exc:
         logger.exception("creating needs-human gate for story %s failed", story_id)
