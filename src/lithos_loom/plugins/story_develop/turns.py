@@ -25,7 +25,8 @@ __all__ = ["TurnAttempt", "TurnResult", "run_turn"]
 
 @dataclass(frozen=True)
 class TurnAttempt:
-    """The outcome of :func:`~.agent_session.turn_with_reactions` — the last turn plus how the
+    """The outcome of :func:`~.agent_session.turn_with_reactions` — the last
+    turn plus how the
     reactions ended.
 
     ``interrupted``: usage-limited with the pause budget spent (the caller

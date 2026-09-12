@@ -57,7 +57,7 @@
         "max_function": "lithos_loom.notifications.build_notifier"
       },
       "Plugins": {
-        "functions_over_10": 36,
+        "functions_over_10": 39,
         "max_complexity": 97,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
@@ -102,7 +102,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 125,
+    "functions_over_10": 128,
     "top_functions": [
       {
         "complexity": 97,
@@ -117,12 +117,12 @@
         "qualname": "lithos_loom.cli.converge.converge_command"
       },
       {
-        "complexity": 49,
-        "qualname": "lithos_loom.cli.project.import_project"
+        "complexity": 50,
+        "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
         "complexity": 49,
-        "qualname": "lithos_loom.plugins.story_develop.develop.develop"
+        "qualname": "lithos_loom.cli.project.import_project"
       },
       {
         "complexity": 44,
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.main._print_dry_run_report"
       }
     ],
-    "total_functions": 1462
+    "total_functions": 1467
   },
   "domain": {
     "associations": 2,
@@ -268,6 +268,7 @@
     "module_cycles": [
       [
         "lithos_loom.plugins.story_develop.agent_session",
+        "lithos_loom.plugins.story_develop.coder_salvage",
         "lithos_loom.plugins.story_develop.panel",
         "lithos_loom.plugins.story_develop.rounds"
       ]
@@ -319,6 +320,7 @@
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._run_containers (x2)",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._task_title (x2)",
       "tests/test_review_resolve.py -> lithos_loom.plugins.story_develop.review_resolve._gh_pr_view (x2)",
+      "tests/test_story_develop_engines.py -> lithos_loom.plugins.story_develop.engines._UNPARSED_STDOUT_KEEP (x2)",
       "tests/test_story_develop_idempotency.py -> lithos_loom.plugins.story_develop.idempotency._record_path (x2)",
       "tests/test_awaiting_review.py -> lithos_loom.subscriptions._awaiting_review",
       "tests/test_child_boot.py -> lithos_loom.children._boot",
@@ -333,10 +335,9 @@
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._merge_tags",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._project_tags",
       "tests/test_cli_project_create.py -> lithos_loom.cli.project._slugify",
-      "tests/test_cli_project_create.py -> lithos_loom.cli.project._title_from_stem",
-      "tests/test_doctor.py -> lithos_loom.doctor._check_lithos_subdir_creatable"
+      "tests/test_cli_project_create.py -> lithos_loom.cli.project._title_from_stem"
     ],
-    "tests_private_imports": 90
+    "tests_private_imports": 92
   },
   "size": {
     "components": {
@@ -365,10 +366,10 @@
         "functions": 128,
         "largest_module": "lithos_loom.cli.project",
         "largest_module_lines": 1705,
-        "lines": 6069,
+        "lines": 6070,
         "modules": 13,
         "public_symbols": 65,
-        "sloc": 5095
+        "sloc": 5096
       },
       "Config": {
         "classes": 11,
@@ -451,14 +452,14 @@
         "sloc": 224
       },
       "Plugins": {
-        "classes": 70,
-        "functions": 412,
+        "classes": 73,
+        "functions": 417,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1103,
-        "lines": 16173,
-        "modules": 48,
-        "public_symbols": 268,
-        "sloc": 12961
+        "lines": 16618,
+        "modules": 49,
+        "public_symbols": 277,
+        "sloc": 13348
       },
       "ProjectContext": {
         "classes": 0,
@@ -551,13 +552,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 56281,
-    "total_modules": 165,
-    "total_sloc": 45434
+    "total_lines": 56727,
+    "total_modules": 166,
+    "total_sloc": 45822
   },
   "tests": {
-    "ratio": 1.58,
-    "src_lines": 56281,
-    "test_lines": 89169
+    "ratio": 1.59,
+    "src_lines": 56727,
+    "test_lines": 89964
   }
 }

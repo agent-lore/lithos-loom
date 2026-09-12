@@ -94,14 +94,13 @@ class PauseBudget:
     def __init__(self, seconds: float) -> None:
         self.remaining = seconds
 
-_INFRA_CONTINUATION_PROMPT = (
+
+INFRA_CONTINUATION_PROMPT = (
     "Your previous turn was cut short by an infrastructure failure (the agent "
     "process died before it could finish; nothing you did was lost). Continue "
     "the task from where you left off. If you had already finished, just write "
     "the handoff file as previously instructed."
 )
-
-
 
 
 # When a usage-limited run checkpoints WITHOUT a parseable reset hint, suggest
@@ -216,9 +215,13 @@ def turn_with_reactions(
                 summary = limits.failure_summary(turn)
                 n = used + 1
                 escalation = (
-                    f"{agent} {cls.value} persisted after {n} attempt"
-                    f"{'s' if n != 1 else ''}: {summary} — {reaction.host_action}"
-                ) if reaction.escalate else None
+                    (
+                        f"{agent} {cls.value} persisted after {n} attempt"
+                        f"{'s' if n != 1 else ''}: {summary} — {reaction.host_action}"
+                    )
+                    if reaction.escalate
+                    else None
+                )
                 logger.warning(
                     "story-develop %s: %s %s after %d attempt(s): %s",
                     config.run_id,
@@ -241,7 +244,7 @@ def turn_with_reactions(
                 reaction.retries + 1,
             )
             services.sleep(wait)
-            continuation = _INFRA_CONTINUATION_PROMPT
+            continuation = INFRA_CONTINUATION_PROMPT
         else:
             return TurnAttempt(turn, False, total_cost)
         # Resume the SAME session when its transcript survived the interruption

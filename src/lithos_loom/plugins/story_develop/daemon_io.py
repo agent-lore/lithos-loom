@@ -797,6 +797,16 @@ def build_result_payload(
             "message": result.message,
             "retriable": True,
         }
+    elif result.status == "infra_failed":
+        # Slice B: a retry-class failure (auth / transport / spawn) persisted
+        # through its backoff retries. The host, not the story, is what needs
+        # fixing — retriable once it is; the escalation block says how.
+        status, exit_code = "failed", EXIT_FAILED
+        error = {
+            "category": "environment",
+            "message": result.message,
+            "retriable": True,
+        }
     else:
         status, exit_code = "failed", EXIT_FAILED
         error = {"category": "agent", "message": result.message}

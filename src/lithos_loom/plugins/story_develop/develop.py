@@ -96,6 +96,7 @@ class DevelopResult:
 
     # "approved" | "max_rounds" | "failed" | "interrupted"
     # | "stalled" | "disputed" | "cost_exceeded"  (T7 guards)
+    # | "infra_failed"  (slice B: an auth / transport / spawn failure persisted)
     status: str
     run_id: str
     worktree: Path
@@ -277,7 +278,7 @@ def _record_coder_disputes(
 # for a max_rounds run. ``state.json`` records the reason only for these, so the
 # offline ``attach`` summary (#188) never shows a stale reason for max_rounds.
 _REASON_BEARING_STATUSES = frozenset(
-    {"failed", "interrupted", "stalled", "disputed", "cost_exceeded"}
+    {"failed", "interrupted", "stalled", "disputed", "cost_exceeded", "infra_failed"}
 )
 
 
@@ -594,6 +595,11 @@ def develop(
             f"STOPPED ({status}): {failure_reason}; "
             f"last reviews: {_reviews_part(final_reviews)}{gate_part}; "
             f"{len(commits)} commit(s) on {branch}; cost ${total:.4f}"
+        )
+    elif status == "infra_failed":
+        message = (
+            f"INFRA FAILURE: {failure_reason}; {len(commits)} commit(s) on {branch}; "
+            f"sessions + handoffs preserved in {config.run_dir}; cost ${total:.4f}"
         )
     else:  # failed
         message = f"{failure_reason}{gate_part}; {len(commits)} commit(s) on {branch}"

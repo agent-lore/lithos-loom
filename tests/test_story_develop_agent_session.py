@@ -15,21 +15,21 @@ from typing import cast
 import pytest
 
 from lithos_loom.plugins.story_develop import agent_session, engines
-from lithos_loom.plugins.story_develop.agent_session import TurnAttempt
-from lithos_loom.plugins.story_develop.agent_session import (
-    _INFRA_CONTINUATION_PROMPT as INFRA_CONTINUATION,
-)
 from lithos_loom.plugins.story_develop.agent_session import (
     _CONTINUATION_PROMPT as CONTINUATION,
 )
 from lithos_loom.plugins.story_develop.agent_session import (
+    INFRA_CONTINUATION_PROMPT as INFRA_CONTINUATION,
+)
+from lithos_loom.plugins.story_develop.agent_session import (
     PauseBudget,
+    TurnAttempt,
     turn_with_reactions,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
+from lithos_loom.plugins.story_develop.limits import FailureClass
 from lithos_loom.plugins.story_develop.rounds import Services
 from lithos_loom.plugins.story_develop.turns import TurnResult
-from lithos_loom.plugins.story_develop.limits import FailureClass
 
 # A wording classify_failure maps to USAGE_LIMITED, with no parseable reset epoch
 # so pause_plan stays poll-based (predictable, budget-capped).
@@ -126,9 +126,7 @@ def _run(
 
 def test_succeeds_on_first_turn(tmp_path: Path) -> None:
     services, calls, sleeps = _services([_turn(succeeded=True, cost=0.1)])
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.turn.succeeded and att.interrupted is False
     assert att.cost == pytest.approx(0.1)
     assert len(calls) == 1 and sleeps == []
@@ -140,9 +138,7 @@ def test_non_limit_failure_returns_without_pausing(tmp_path: Path) -> None:
     services, calls, sleeps = _services(
         [_turn(succeeded=False, result_text="boom", cost=0.2)]
     )
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.interrupted is False and att.turn.succeeded is False
     assert att.cost == pytest.approx(0.2)
     assert len(calls) == 1 and sleeps == []
@@ -216,9 +212,7 @@ def test_budget_exhausted_checkpoints_as_interrupted(tmp_path: Path) -> None:
     services, calls, sleeps = _services(
         [_turn(succeeded=False, result_text=LIMIT, cost=0.1)]
     )
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(0)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(0))
     assert att.interrupted is True
     assert att.cost == pytest.approx(0.1)
     assert len(calls) == 1 and sleeps == []
@@ -252,16 +246,15 @@ def test_auth_failure_retries_once_after_backoff_resuming_the_session(
             _turn(succeeded=True, cost=0.3),
         ]
     )
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.turn.succeeded and att.escalation is None
     assert att.cost == pytest.approx(0.3)
     assert sleeps == [20.0]
     assert len(calls) == 2
     assert calls[1]["resume"] is True
     assert calls[1]["prompt"] == INFRA_CONTINUATION
-    assert "infrastructure" in INFRA_CONTINUATION and "usage limit" not in INFRA_CONTINUATION
+    assert "infrastructure" in INFRA_CONTINUATION
+    assert "usage limit" not in INFRA_CONTINUATION
 
 
 def test_auth_failure_twice_escalates_with_the_host_action(tmp_path: Path) -> None:
@@ -290,9 +283,7 @@ def test_transient_infra_retries_twice_with_backoff_then_escalates(
     services, calls, sleeps = _services(
         [_turn(succeeded=False, result_text=DISCONNECT) for _ in range(3)]
     )
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert sleeps == [30.0, 120.0] and len(calls) == 3
     assert att.escalation is not None and "transient_infra" in att.escalation
     assert "3 attempts" in att.escalation
@@ -305,9 +296,7 @@ def test_transient_infra_recovers_on_the_second_attempt(tmp_path: Path) -> None:
             _turn(succeeded=True, session_id="s"),
         ]
     )
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.turn.succeeded and att.escalation is None
     assert sleeps == [30.0] and len(calls) == 2
 
@@ -334,9 +323,7 @@ def test_killed_process_retries_once(tmp_path: Path) -> None:
         stderr="",
     )
     services, calls, sleeps = _services([killed, _turn(succeeded=True)])
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.turn.succeeded and sleeps == [10.0] and len(calls) == 2
 
 
@@ -344,9 +331,7 @@ def test_plain_agent_error_never_retries_or_escalates(tmp_path: Path) -> None:
     services, calls, sleeps = _services(
         [_turn(succeeded=False, result_text="AssertionError: nope", cost=0.2)]
     )
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.escalation is None and att.interrupted is False
     assert len(calls) == 1 and sleeps == []
 
@@ -364,9 +349,7 @@ def test_retry_counts_are_per_class_and_every_attempt_is_recorded(
             _turn(succeeded=True),
         ]
     )
-    att = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.turn.succeeded and att.escalation is None
     assert sleeps == [30.0, 20.0]
     assert recorded_fixtures == [("coder", 1), ("coder", 1)]

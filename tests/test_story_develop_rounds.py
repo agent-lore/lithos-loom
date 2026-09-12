@@ -613,3 +613,191 @@ def test_round1_coder_prompt_uses_the_entry_template_and_extra_slots(
 
     assert "CONFLICT-BRIEF-MARKER" in prompt
     assert "merge" in prompt.lower() and "conflict" in prompt.lower()
+
+
+# --- slice B: infra escalation exits + coder-side salvage -------------------
+
+
+def _coder_ctx(tmp_path: Path, wt: Path):
+    ctx, _ = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = wt
+    ctx.final_reviews = [_failed_outcome()]
+    return ctx
+
+
+def _dead_turn(text: str) -> _engines.TurnResult:
+    return _engines.TurnResult(
+        exit_code=1,
+        succeeded=False,
+        completed=False,
+        session_id="s",
+        result_text=text,
+        cost_usd=0.0,
+        raw={"is_error": True},
+        stderr="",
+    )
+
+
+_AUTH = "Failed to authenticate: OAuth session expired and could not be refreshed"
+_ESCALATION = (
+    f"coder auth_failed persisted after 2 attempts: {_AUTH} — re-auth, then "
+    "complete the gate"
+)
+
+
+def test_panel_phase_infra_failure_ends_the_run_infra_failed(tmp_path: Path) -> None:
+    ctx, _ = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+
+    def escalating_panel(cfg, reviewers, **kw):
+        return PanelRoundResult(
+            round_reviews=[],
+            cost=0.0,
+            interrupted=False,
+            resume_after=None,
+            invalid_reviewer=None,
+            infra_failure=(
+                "reviewer [correctness] auth_failed persisted after 2 attempts"
+            ),
+        )
+
+    ctx.run_panel_round = escalating_panel
+    exit_ = rounds_mod.panel_phase(ctx, 3)
+    assert exit_ is not None and exit_.status == "infra_failed"
+    assert exit_.failure_reason.startswith(
+        "round 3: reviewer [correctness] auth_failed"
+    )
+
+
+def test_coder_phase_escalation_ends_the_run_infra_failed(tmp_path: Path) -> None:
+    ctx = _coder_ctx(tmp_path, tmp_path / "wt")
+    ctx.wt.mkdir()
+    ctx.turn_with_reactions = lambda *a, **kw: TurnAttempt(
+        _dead_turn(_AUTH), False, 0.02, _ESCALATION
+    )
+
+    exit_ = rounds_mod.coder_phase(ctx, 2)
+
+    assert exit_ is not None and exit_.status == "infra_failed"
+    assert exit_.failure_reason == f"round 2: {_ESCALATION}"
+    assert ctx.coder_cost == pytest.approx(0.02)
+
+
+def test_coder_phase_salvages_the_handoff_the_dying_attempt_wrote(
+    tmp_path: Path,
+) -> None:
+    # The coder finished (wrote its handoff) and THEN the engine died on infra:
+    # the work product is authoritative, as for reviewers (#298) — the round
+    # proceeds to commit instead of ending infra_failed.
+    ctx = _coder_ctx(tmp_path, tmp_path / "wt")
+    ctx.wt.mkdir()
+    ctx.config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    def dying_turn(*a, **kw):
+        (ctx.config.handoff_dir / "round_02_coder_done.md").write_text("done")
+        return TurnAttempt(_dead_turn(_AUTH), False, 0.02, _ESCALATION)
+
+    ctx.turn_with_reactions = dying_turn
+    assert rounds_mod.coder_phase(ctx, 2) is None
+
+
+def test_coder_phase_does_not_salvage_a_preexisting_handoff(tmp_path: Path) -> None:
+    ctx = _coder_ctx(tmp_path, tmp_path / "wt")
+    ctx.wt.mkdir()
+    ctx.config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (ctx.config.handoff_dir / "round_02_coder_done.md").write_text("stale")
+    ctx.turn_with_reactions = lambda *a, **kw: TurnAttempt(
+        _dead_turn(_AUTH), False, 0.0, _ESCALATION
+    )
+
+    exit_ = rounds_mod.coder_phase(ctx, 2)
+    assert exit_ is not None and exit_.status == "infra_failed"
+
+
+def test_coder_phase_does_not_salvage_on_a_plain_agent_error(tmp_path: Path) -> None:
+    # A crashed coder that still wrote a handoff is the existing failure path:
+    # only an INFRA death (a retry class) qualifies for salvage.
+    ctx = _coder_ctx(tmp_path, tmp_path / "wt")
+    ctx.wt.mkdir()
+    ctx.config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    def crashing_turn(*a, **kw):
+        (ctx.config.handoff_dir / "round_02_coder_done.md").write_text("done")
+        return TurnAttempt(_dead_turn("AssertionError: nope"), False, 0.0)
+
+    ctx.turn_with_reactions = crashing_turn
+    exit_ = rounds_mod.coder_phase(ctx, 2)
+    assert exit_ is not None and exit_.status == "failed"
+    assert "coder turn failed" in exit_.failure_reason
+
+
+def test_handoff_nudge_runs_through_the_reaction_wrapper(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    # #114 nudge, slice B: the re-prompt is a turn like any other, so an infra
+    # death during it gets the same retry/escalate treatment — it must go
+    # through turn_with_reactions, never straight to services.run_turn.
+    ctx = _coder_ctx(tmp_path, tmp_git_repo)
+    ctx.coder_handoff_nudge = lambda r: f"you never wrote your handoff for round {r}"
+    (tmp_git_repo / "work.txt").write_text("uncommitted work")
+    prompts: list[str] = []
+
+    def turn(*a, **kw):
+        prompts.append(kw["prompt"])
+        ok = _engines.TurnResult(
+            exit_code=0,
+            succeeded=True,
+            completed=True,
+            session_id="s",
+            result_text="",
+            cost_usd=0.01,
+            raw={},
+            stderr="",
+        )
+        if len(prompts) == 2:
+            assert kw["resume"] is True
+            (ctx.config.handoff_dir / "round_02_coder_done.md").write_text("done")
+        return TurnAttempt(ok, False, 0.01)
+
+    ctx.turn_with_reactions = turn
+    ctx.services = rounds_mod.Services(
+        run_turn=lambda **kw: (_ for _ in ()).throw(AssertionError("bypassed")),
+        sleep=lambda s: None,
+        start_container=lambda cmd: "cid",
+        stop_container=lambda cid: None,
+        run_check_set=lambda *a, **k: None,
+    )
+    ctx.config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    assert rounds_mod.coder_phase(ctx, 2) is None
+    assert len(prompts) == 2 and "never wrote your handoff" in prompts[1]
+    assert ctx.coder_cost == pytest.approx(0.02)
+
+
+def test_nudge_escalation_ends_the_run_infra_failed(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    ctx = _coder_ctx(tmp_path, tmp_git_repo)
+    (tmp_git_repo / "work.txt").write_text("uncommitted work")
+    ctx.config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    n = {"calls": 0}
+
+    def turn(*a, **kw):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            ok = _engines.TurnResult(
+                exit_code=0,
+                succeeded=True,
+                completed=True,
+                session_id="s",
+                result_text="",
+                cost_usd=0.0,
+                raw={},
+                stderr="",
+            )
+            return TurnAttempt(ok, False, 0.0)
+        return TurnAttempt(_dead_turn(_AUTH), False, 0.0, _ESCALATION)
+
+    ctx.turn_with_reactions = turn
+    exit_ = rounds_mod.coder_phase(ctx, 2)
+    assert exit_ is not None and exit_.status == "infra_failed"
+    assert n["calls"] == 2

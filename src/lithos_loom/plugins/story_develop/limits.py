@@ -91,7 +91,10 @@ _EPOCH_RE = re.compile(r"limit reached\|(\d{9,12})")
 # key. Retried once (see the module docstring), then escalated.
 _AUTH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"failed to authenticate", re.IGNORECASE),
-    re.compile(r"oauth (?:session|token|access token).{0,40}(?:expired|revoked)", re.IGNORECASE),
+    re.compile(
+        r"oauth (?:session|token|access token).{0,40}(?:expired|revoked)",
+        re.IGNORECASE,
+    ),
     re.compile(r"authentication[_ ](?:failed|error)", re.IGNORECASE),
     re.compile(r"api[_ ]error(?:[_ ]status)?\W{0,4}401\b", re.IGNORECASE),
     re.compile(r"\b401\b.{0,40}\b(?:unauthori[sz]ed|oauth|authenticat)", re.IGNORECASE),
@@ -104,9 +107,15 @@ _TRANSIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"stream disconnected", re.IGNORECASE),
     re.compile(r"idle timeout waiting for websocket", re.IGNORECASE),
     re.compile(r"\breconnecting\b", re.IGNORECASE),
-    re.compile(r"\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|EHOSTUNREACH)\b"),
+    re.compile(
+        r"\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|EHOSTUNREACH)\b"
+    ),
     re.compile(r"api[_ ]error(?:[_ ]status)?\W{0,4}(?:5\d\d|429)\b", re.IGNORECASE),
-    re.compile(r"\b(?:overloaded|internal server error|service unavailable|bad gateway|gateway time-?out)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:overloaded|internal server error|service unavailable|bad gateway"
+        r"|gateway time-?out)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\brate.?limit(?:ed|_error)?\b", re.IGNORECASE),
     re.compile(r"\b(?:5\d\d|429)\b.{0,20}\b(?:error|retry)", re.IGNORECASE),
 )

@@ -22,9 +22,9 @@ from lithos_loom.plugins.story_develop.limits import (
     record_failure_fixture,
     reset_hint,
 )
+from lithos_loom.plugins.story_develop.turns import TurnResult
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_failures"
-from lithos_loom.plugins.story_develop.turns import TurnResult
 
 
 def _failed(
@@ -194,7 +194,7 @@ def test_raw_stdout_shape_is_retained_not_dropped() -> None:
         "API Error: 401 OAuth access token has been revoked",
         "authentication_failed: please run /login",
         "Invalid API key · Fix external API key",
-        "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}",
+        'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
     ],
 )
 def test_auth_wordings(text: str) -> None:
@@ -206,7 +206,7 @@ def test_auth_wordings(text: str) -> None:
     [
         "API Error: 500 internal server error",
         "rate limited, retrying",  # a 429 is transient, not a usage limit
-        "API Error: 429 {\"error\":{\"type\":\"rate_limit_error\"}}",
+        'API Error: 429 {"error":{"type":"rate_limit_error"}}',
         "Error: stream disconnected before completion",
         "idle timeout waiting for websocket message",
         "fetch failed: read ECONNRESET",

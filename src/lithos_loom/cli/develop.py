@@ -435,6 +435,7 @@ _OUTCOME_PHRASES = {
     "stalled": "stopped (stalled)",
     "disputed": "stopped (dispute needs human arbitration)",
     "cost_exceeded": "stopped (cost ceiling reached)",
+    "infra_failed": "stopped (infrastructure failure persisted; needs a human)",
 }
 
 
