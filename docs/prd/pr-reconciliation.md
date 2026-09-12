@@ -836,8 +836,9 @@ Three case shapes, all buildable from material already on hand:
   evidence; a known-true one must pass; an ambiguous one must proceed. The
   over-suppression failure mode is the one to watch, per RH-1's lens34 result.
   *Shipped 2026-09-12* as `lithos-loom eval triage` + `evals/triage/cases/`
-  (README there): a case is one sha + a batch, scored on known-false reject
-  rate (citation into declared refutation files) and must-proceed
+  (README there): a case is one tree + a batch fed through the production
+  intake, scored on known-false reject rate (a citation inside the declared
+  refutation lines) and must-proceed
   over-suppression (a gate at 0 by default). Seed batch =
   `lens43-known-good-batch` (four real must-proceed findings from the
   composed-tree run, two synthetic known-false). First run pending.
