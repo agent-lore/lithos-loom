@@ -19,13 +19,25 @@ the expensive error. The known-false half is synthetic because the run
 produced no false claim: both are closed questions ("the code does X") the
 tree answers in one line, declared as such.
 
-WHAT A CORRECT REJECTION CITES: f-005 → task_filtering.py:186-193 (the
-helper's own return expression, which counts `filters.agent`); f-006 →
-frontier.py:570-574 (the first statement of `_is_nothing_to_show`, which
-returns False on `errors`). The eval scores a rejection only if its evidence
-cites INTO that range — the claim's own anchor (the `def` line the finding
-points at) is outside it, so echoing the anchor back with "REJECT" scores
-nothing. The parser's "any resolving file:line" is not enough here.
+WHAT A CORRECT REJECTION CITES: f-005 → task_filtering.py:178-193 (the
+helper's docstring naming `project` as narrowing "like tag/agent", through
+its return expression, which counts `filters.agent`); f-006 →
+frontier.py:553 (the `errors` parameter), :556-563 (the docstring: "no
+recorded error") or :570-574 (the first statement, which returns False on
+`errors`). The prose refutations count too — an agent that reads the
+docstring first and cites it is right. The eval scores a rejection only if
+its evidence cites INTO one of those ranges — the claim's own anchor (the
+`def` line the finding points at) is outside every one, so echoing the
+anchor back with "REJECT" scores nothing. The parser's "any resolving
+file:line" is not enough here.
+
+AUTHOR IS NEUTRAL BY DESIGN: every finding carries the same author label.
+The [author] prefix reaches the prompt, so an author that correlated with
+the expected verdict (the panel's name on the true ones, "synthetic" on the
+false ones) would let a label-following agent score a perfect PASS without
+reading code. The true/synthetic distinction lives only in `provenance`,
+which never reaches the prompt; the preflight refuses a batch whose author
+set partitions the verdicts.
 
 DECISION RULE, STATED BEFORE THE FIRST PAID RUN: the prior for both rates is
 undefined (the step has never been measured). K=5 gives 10 known-false and
@@ -52,7 +64,7 @@ acceptance_criteria_file = "ac.md"
 
 [[finding]]
 id = "f-001"
-author = "loom-panel"
+author = "correctness"
 path = "src/lithos_lens/frontier.py"
 line = 247
 expected = "proceed"
@@ -64,7 +76,7 @@ The new no-tasks signal can be emitted from a combination of reads that is inter
 
 [[finding]]
 id = "f-002"
-author = "loom-panel"
+author = "correctness"
 path = "src/lithos_lens/frontier.py"
 line = 221
 expected = "proceed"
@@ -77,7 +89,7 @@ The claimed pre-0.4 flat open/completed/cancelled fallback still loads both term
 
 [[finding]]
 id = "f-003"
-author = "loom-panel"
+author = "correctness"
 path = "src/lithos_lens/frontier.py"
 line = 507
 expected = "proceed"
@@ -92,7 +104,7 @@ The requested "no tasks at all" branch is never established. `_is_nothing_to_sho
 
 [[finding]]
 id = "f-004"
-author = "loom-panel"
+author = "correctness"
 path = "src/lithos_lens/tasks.py"
 line = 347
 expected = "proceed"
@@ -109,27 +121,33 @@ The acceptance criterion's all-clear state is specifically the state where the o
 
 [[finding]]
 id = "f-005"
-author = "eval-synthetic"
+author = "correctness"
 path = "src/lithos_lens/task_filtering.py"
 line = 173
 expected = "reject"
-refutation = ["src/lithos_lens/task_filtering.py:186-193"]
+refutation = ["src/lithos_lens/task_filtering.py:178-193"]
 provenance = "synthetic"
 body = """
 `filters_narrow_the_board` ignores the agent filter: only `tags` and a non-default status set count as narrowing, so a shared `?agent=<name>` board — the section partition and the terminal reads filtered down to one agent's rows — still lets the "All systems healthy" stripe make its system-wide claim over rows the operator cannot see. `filters.agent` must count as narrowing exactly like `tags`.
 """
-# refutation: the helper's return expression (lines 188-193) includes `bool(filters.agent)`
+# refutation: the docstring (180-182) names project as narrowing like tag/agent;
+# the return expression (188-193) includes `bool(filters.agent)`
 
 [[finding]]
 id = "f-006"
-author = "eval-synthetic"
+author = "correctness"
 path = "src/lithos_lens/frontier.py"
 line = 549
 expected = "reject"
-refutation = ["src/lithos_lens/frontier.py:570-574"]
+refutation = [
+  "src/lithos_lens/frontier.py:553",
+  "src/lithos_lens/frontier.py:556-563",
+  "src/lithos_lens/frontier.py:570-574",
+]
 provenance = "synthetic"
 body = """
 `_is_nothing_to_show` never consults `errors`: when every read fails (an outage empties the open snapshot and both terminal windows alike) it returns True, so the dashboard renders the "No tasks in this window" panel — an affirmative empty-corpus claim — instead of the read-failure banner. The predicate must return False whenever the load recorded an error.
 """
-# refutation: the predicate's first statement (line 572) is `if errors or
-# open_snapshot or filters_narrowed: return False`
+# refutation: `errors` is a parameter (553), the docstring says "no recorded
+# error" (559), and the first statement (572) is `if errors or open_snapshot
+# or filters_narrowed: return False`

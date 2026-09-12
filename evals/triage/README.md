@@ -143,6 +143,14 @@ conventions:
   (`provenance = "panel"`). Do not paraphrase either.
 - **State the decision rule first** (RH-5): the opportunities per run, what
   reading changes S5a's posture, and what is not decisive at K=5.
+- **The author must not leak the verdict.** The `[author]` prefix reaches the
+  prompt; if one author sat only on the known-false side, a label-following
+  agent would pass without reading code. One author for the batch is simplest;
+  the preflight refuses an author set that partitions `expected`.
+- **A patch-form case owns its patch.** `head_patch` must be a file in the case
+  dir (no `../`): a case is self-contained even when the same patch also lives
+  in the review corpus. If the two are ever regenerated, the preflight's
+  tree pin against the original commit is what catches divergence.
 
 ## Seed corpus (2026-09-11)
 

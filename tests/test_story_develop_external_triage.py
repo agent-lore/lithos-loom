@@ -67,9 +67,25 @@ def test_cited_locations_normalises_container_and_relative_spellings() -> None:
     assert cited_locations(ev) == [("src/x.py", 12), ("docs/R.md", 3), ("HTTP", 404)]
 
 
-def test_a_later_line_for_the_same_id_wins_in_both_parse_and_classify() -> None:
-    text = "- f-001: REJECT — src/x.py:1 a\n- f-001: PROCEED\n"
-    assert parse_triage_verdicts(text, ["f-001"]).rejections == {}
+def test_a_cited_reject_is_sticky_across_contradictory_lines() -> None:
+    # The parse has always ACCUMULATED evidenced rejections; a contradictory
+    # verdict file keeps the evidenced verdict, and classify agrees with parse.
+    for text in (
+        "- f-001: REJECT — src/x.py:1 a\n- f-001: PROCEED\n",
+        "- f-001: REJECT — src/x.py:1 a\n- f-001: REJECT — no evidence\n",
+        "- f-001: PROCEED\n- f-001: REJECT — src/x.py:1 a\n",
+    ):
+        assert parse_triage_verdicts(text, ["f-001"]).rejections == {
+            "f-001": "src/x.py:1 a"
+        }, text
+        assert classify_verdict_lines(text, ["f-001"]) == {"f-001": LINE_REJECT}, text
+    # A later cited REJECT refreshes the evidence the parse returns.
+    text = "- f-001: REJECT — src/x.py:1 a\n- f-001: REJECT — src/x.py:2 b\n"
+    assert parse_triage_verdicts(text, ["f-001"]).rejections == {
+        "f-001": "src/x.py:2 b"
+    }
+    # Without an evidenced rejection, the later line wins.
+    text = "- f-001: REJECT — no evidence\n- f-001: PROCEED\n"
     assert classify_verdict_lines(text, ["f-001"]) == {"f-001": LINE_PROCEED}
 
 

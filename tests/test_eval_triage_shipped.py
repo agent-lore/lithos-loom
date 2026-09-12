@@ -73,6 +73,26 @@ def test_shipped_triage_case_resolves(
     # Gate-enforced: an eval that measures rejection alone trains the wrong
     # reflex, so every batch guards over-suppression with a must-proceed.
     assert case.known_true, f"{case.id}: no must-proceed finding"
+    # The [author] prefix reaches the prompt: if the author set separated the
+    # known-false from the must-proceed, a label-following agent would score a
+    # perfect PASS without reading code. Every author must sit on both sides
+    # (or there is only one).
+    by_author: dict[str, set[str]] = {}
+    for f in case.findings:
+        by_author.setdefault(f.author, set()).add(f.expected)
+    all_expected = {f.expected for f in case.findings}
+    if len(by_author) > 1:
+        for author, seen in by_author.items():
+            assert seen == all_expected, (
+                f"{case.id}: author {author!r} leaks the verdict"
+            )
+    # A refutation must never be satisfiable by echoing the claim's own anchor.
+    for f in case.known_false:
+        if f.path and f.line:
+            for r in f.refutation:
+                assert not r.covers(f.path, f.line), (
+                    f"{case.id}/{f.finding_id}: refutation {r.spec} covers the anchor"
+                )
     repo, sha, cleanup = _built(case, monkeypatch)
     try:
         tracked = frozenset(_git(repo, "ls-tree", "-r", "--name-only", sha).split())
@@ -110,22 +130,31 @@ def test_lens43_batch_rebuilds_the_pre_squash_tip_and_its_refutations_hold(
                 repo, "rev-parse", f"{_LENS43_TIP}^{{tree}}"
             )
         by_id = {f.finding_id: f for f in case.findings}
-        # f-005: the range holds the return expression that counts the agent.
-        r5 = by_id["f-005"].refutation[0]
-        lines = _git(repo, "show", f"{sha}:{r5.path}").splitlines()
-        assert r5.start is not None and r5.end is not None
-        assert any("bool(filters.agent)" in ln for ln in lines[r5.start - 1 : r5.end])
-        # ...and the claim's own anchor (the def line) is outside it.
-        assert not r5.covers(r5.path, by_id["f-005"].line or 0)
-        # f-006: the range holds the errors guard.
-        r6 = by_id["f-006"].refutation[0]
-        lines = _git(repo, "show", f"{sha}:{r6.path}").splitlines()
-        assert r6.start is not None and r6.end is not None
+
+        def covered(fid: str) -> list[str]:
+            out: list[str] = []
+            for r in by_id[fid].refutation:
+                lines = _git(repo, "show", f"{sha}:{r.path}").splitlines()
+                assert r.start is not None
+                end = r.end if r.end is not None else r.start
+                out += lines[r.start - 1 : end]
+            return out
+
+        # f-005: the ranges hold both refutations — the docstring naming
+        # project as narrowing like tag/agent, and the return expression
+        # counting the agent.
+        text5 = covered("f-005")
+        assert any("``project`` narrows like tag/agent" in ln for ln in text5)
+        assert any("bool(filters.agent)" in ln for ln in text5)
+        # f-006: the parameter, the docstring, and the errors guard.
+        text6 = covered("f-006")
+        assert any("errors: list[str]" in ln for ln in text6)
+        assert any("no recorded" in ln for ln in text6)
         assert any(
-            "if errors or open_snapshot or filters_narrowed" in ln
-            for ln in lines[r6.start - 1 : r6.end]
+            "if errors or open_snapshot or filters_narrowed" in ln for ln in text6
         )
-        assert not r6.covers(r6.path, by_id["f-006"].line or 0)
+        # One neutral author across the batch (see the description).
+        assert {f.author for f in case.findings} == {"correctness"}
         # The two judgements are declared as such; the two true ones are not.
         assert [f.ambiguous for f in case.findings] == [
             False,

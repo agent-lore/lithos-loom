@@ -105,10 +105,12 @@ def materialise_tree(case: TriageCase) -> tuple[str, Callable[[], None]]:
         return case.sha, lambda: None
     assert case.head_patch is not None and case.case_dir is not None
     repo = Path(case.repo).resolve()
+    # Absolute: `git apply` runs with cwd=build-worktree, so a case_dir relative
+    # to the launch cwd (the shipped cases pass `evals/triage/cases/<id>`) would
+    # not be found from there — the same trap review/patch.py names.
+    patch_path = (case.case_dir / case.head_patch).resolve()
     parent = Path(tempfile.mkdtemp(prefix="loom-eval-triage-patch-"))
-    sha, wt = materialise_patched_head(
-        repo, case.base, case.case_dir / case.head_patch, parent=parent
-    )
+    sha, wt = materialise_patched_head(repo, case.base, patch_path, parent=parent)
 
     def cleanup() -> None:
         try:

@@ -285,3 +285,54 @@ def test_errored_samples_are_marked_on_the_row(
     assert result.exit_code == 0, result.output
     assert "PASS +1err" in result.output
     assert "1/1" in result.output  # one valid sample → one known-false opportunity
+
+
+def test_patch_form_case_runs_from_a_relative_cases_dir(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The shipped default is the RELATIVE `evals/triage/cases`; `git apply` runs
+    # with cwd=build-worktree, so an unresolved case dir dies there (the trap
+    # review/patch.py names). Built argv, real parser, real materialisation.
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(tmp_git_repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    (tmp_git_repo / "f.txt").write_text("one\n")
+    git("add", "f.txt")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (tmp_git_repo / "f.txt").write_text("two\n")
+    patch_text = git("diff")
+    git("checkout", "--", "f.txt")
+
+    case_dir = tmp_path / "cases" / "pf"
+    case_dir.mkdir(parents=True)
+    (case_dir / "seed.patch").write_text(patch_text + "\n")
+    (case_dir / "ac.md").write_text("ac")
+    (case_dir / "case.toml").write_text(
+        _CASE.replace('id = "t1"', 'id = "pf"').replace(
+            f'sha = "{_SHA}"',
+            f'repo = "{tmp_git_repo}"\nbase = "{base}"\nhead_patch = "seed.patch"',
+        )
+    )
+    seen = _install(
+        monkeypatch,
+        TriageVerdicts(proceed=("f-001",), rejections={"f-002": "src/a.py:3 x"}),
+    )
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "t")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@t")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@t")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(eval_app, ["triage", "--cases-dir", "cases", "-k", "1"])
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
+    assert seen[0]["sha"] != base and len(seen[0]["sha"]) == 40
+    assert git("show", f"{seen[0]['sha']}:f.txt") == "two"

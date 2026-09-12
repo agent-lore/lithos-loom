@@ -86,7 +86,7 @@ def triage(
 
     Each sample is ONE read-only triage turn over a case's whole batch, the
     production shape. Two rates per case: **reject** — known-false findings
-    rejected with a citation into their declared refutation files — and
+    rejected with a citation into their declared refutation (files + line ranges) — and
     **over-supp** — must-proceed findings (known-true or ambiguous) that were
     rejected, the expensive direction. A case passes at the bar on the first
     with the second at or under ``--max-over-suppression``. A FAIL is the
@@ -116,6 +116,9 @@ def triage(
     resolved_model = (model.strip() if model else "") or default_models.get(tool)
     try:
         effort = parse_effort(effort, where="eval triage --effort")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
         require_agent_models(
             panel=(),
             coder=tool,

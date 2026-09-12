@@ -187,7 +187,9 @@ def classify_verdict_lines(
 
     The same scan :func:`parse_triage_verdicts` decides on — one home for the
     rule — exposed so an instrument can distinguish the three ways a finding
-    PROCEEDS. A later line for the same id wins, as it does for the parse.
+    PROCEEDS. A cited REJECT is sticky: once an id has one, a later PROCEED or
+    uncited REJECT for the same id does not undo it (the parse has always
+    accumulated rejections; a contradictory file keeps the evidenced verdict).
     """
     kinds, _ = _scan_verdict_lines(text, finding_ids, repo_files=repo_files)
     return kinds
@@ -207,15 +209,17 @@ def _scan_verdict_lines(
         cited = bool(evidence) and _CITATION_RE.search(evidence) is not None
         if cited and repo_files is not None:
             cited = _resolves_in_repo(evidence, repo_files)
-        if match.group("verdict").upper() != "REJECT":
-            kinds[fid] = LINE_PROCEED
-            evidence_by_id.pop(fid, None)
-        elif cited:
+        if match.group("verdict").upper() == "REJECT" and cited:
             kinds[fid] = LINE_REJECT
-            evidence_by_id[fid] = evidence
-        else:
+            evidence_by_id[fid] = (
+                evidence  # a later cited REJECT refreshes the evidence
+            )
+        elif kinds[fid] == LINE_REJECT:
+            continue  # sticky: an evidenced rejection is not undone by a later line
+        elif match.group("verdict").upper() == "REJECT":
             kinds[fid] = LINE_REJECT_UNCITED
-            evidence_by_id.pop(fid, None)
+        else:
+            kinds[fid] = LINE_PROCEED
     return kinds, evidence_by_id
 
 
