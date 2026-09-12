@@ -1,0 +1,153 @@
+[case]
+id = "lens43-known-good-batch"
+description = """
+PRD pr-reconciliation S8, triage shape — the first fixture. The batch is what
+loom's own correctness panel filed on the KNOWN-GOOD head of
+`lens43-composed-projects` (the operator's merged resolution of lens #43,
+pre-squash tip 41a43c8) in the 2026-09-11 run, verbatim, validated by hand
+against lens main afterwards (loom PR #373 comment) — plus two synthetic
+known-false claims written to have an exact refutation in the same tree.
+
+WHY THIS SHAPE: production triage sees a mixed batch, and the lens34 result
+(RH-1) says the failure to watch is OVER-SUPPRESSION — a triage tuned to
+reject the false claims starts rejecting the true ones. So the real
+material here is all must-proceed: two true defects (one now lens #82; one
+true at this sha and removed with its feature in lens #48), and two design
+judgements (a deferral the code documents; a wording the code reasons
+about). Every one of them MUST proceed — a rejection of any of the four is
+the expensive error. The known-false half is synthetic because the run
+produced no false claim: both are closed questions ("the code does X") the
+tree answers in one line, declared as such.
+
+WHAT A CORRECT REJECTION CITES: f-005 → task_filtering.py:178-193 (the
+helper's docstring naming `project` as narrowing "like tag/agent", through
+its return expression, which counts `filters.agent`); f-006 →
+frontier.py:553 (the `errors` parameter), :556-563 (the docstring: "no
+recorded error") or :570-574 (the first statement, which returns False on
+`errors`). The prose refutations count too — an agent that reads the
+docstring first and cites it is right. The eval scores a rejection only if
+its evidence cites INTO one of those ranges — the claim's own anchor (the
+`def` line the finding points at) is outside every one, so echoing the
+anchor back with "REJECT" scores nothing. The parser's "any resolving
+file:line" is not enough here.
+
+AUTHOR IS NEUTRAL BY DESIGN: every finding carries the same author label.
+The [author] prefix reaches the prompt, so an author that correlated with
+the expected verdict (the panel's name on the true ones, "synthetic" on the
+false ones) would let a label-following agent score a perfect PASS without
+reading code. The true/synthetic distinction lives only in `provenance`,
+which never reaches the prompt; the preflight refuses a batch whose author
+set partitions the verdicts.
+
+DECISION RULE, STATED BEFORE THE FIRST PAID RUN: the prior for both rates is
+undefined (the step has never been measured). K=5 gives 10 known-false and
+20 must-proceed opportunities — clustered (two per turn, the same six claims
+re-asked), so read the printed intervals as a lower bound on uncertainty and
+weigh `samples_with_suppression` (how many of the 5 turns rejected anything
+true) beside the rate. Over-suppression at 0/20 is the pass; 1/20 fails the
+gate too, and reads as "look at which finding, and at the verdict text" —
+attributable now that the sample records the raw verdict file and whether
+the rejected one was known-true or ambiguous; ≥2/20 means the prompt's
+default-to-act is not holding on real material and S5a narrows (triage
+reports, the coder still acts) until it does. Reject rate ≥8/10 means the
+step can do its job on closed questions; ≤2/10 means it cannot — and the
+line classes say whether it PROCEEDed, wrote an uncited REJECT the evidence
+rule discarded, or gave no verdict at all. A mid-band reading on either is
+not decisive at K=5.
+"""
+repo = "../lithos-lens"
+base = "61993963b10071525c4965abc1d083f444e919b3"           # lens main at #42 (the #43 story's own base)
+head_patch = "known-good.patch"   # git diff 6199396..41a43c8 — the pre-squash tip, on no branch
+acceptance_criteria_file = "ac.md"
+
+# ── must proceed: real findings from the 2026-09-11 known-good arm ──────────
+
+[[finding]]
+id = "f-001"
+author = "correctness"
+path = "src/lithos_lens/frontier.py"
+line = 247
+expected = "proceed"
+provenance = "panel"
+body = """
+The new no-tasks signal can be emitted from a combination of reads that is internally known not to be empty. For example, let the completed/cancelled reads return empty, then let `task_ready` return open task T, then complete T before the master open read returns empty. `_is_nothing_to_show` examines only the empty master and terminal results, ignores the non-empty ready/blocked results, and the skew retry is not triggered because there is no master row to overlap or classify. The page therefore asserts that Lithos has no open tasks and nothing recently resolved even though this same gather returned T and T now exists as completed. This violates the no-tasks acceptance branch under an ordinary task transition. Treat any frontier-only row as skew/non-empty and reconcile before emitting the empty-state signal (or obtain a snapshot-consistent emptiness verdict).
+"""
+# known-true: lens issue #82 (valid on lens main, 2026-09-11)
+
+[[finding]]
+id = "f-002"
+author = "correctness"
+path = "src/lithos_lens/frontier.py"
+line = 221
+expected = "proceed"
+provenance = "panel"
+body = """
+The claimed pre-0.4 flat open/completed/cancelled fallback still loads both terminal groups with `resolved_since`. The repository's own version contract identifies `resolved_since` filtering as a Lithos 0.4 addition, while the fallback target's legacy `lithos_task_list` accepted the older `since` filter. On an actual pre-0.4 FastMCP server, both terminal calls reject the unknown `resolved_since` argument; detection can still set `graph_available=False`, but `_rows_for` receives two exceptions and the fallback loses all completed/cancelled rows. (A sufficiently old server may likewise reject the always-sent `with_claims` argument, emptying the open side too.) `NoFrontierClient` does not expose this because it subclasses the modern fake and only removes the frontier methods. Once absence is confirmed—and on cached fallback renders—use a legacy-compatible task-list request shape and test against a fake that rejects 0.4-only task-list parameters.
+"""
+# known-true AT THIS SHA (contract-grounded: the requirements changelog names
+# resolved_since as 0.4-only); the whole fallback was withdrawn in lens #48
+
+[[finding]]
+id = "f-003"
+author = "correctness"
+path = "src/lithos_lens/frontier.py"
+line = 507
+expected = "proceed"
+ambiguous = true
+provenance = "panel"
+body = """
+The requested "no tasks at all" branch is never established. `_is_nothing_to_show` only knows that the unwindowed open response is empty and that the two `resolved_since`-windowed terminal responses are empty. A corpus containing one completed task resolved before `filters.since` therefore produces exactly the same `nothing_to_show=True` result as an actually empty Lithos. The template correspondingly renders "No tasks in this window," not the PRD's dedicated "No tasks yet" state/help path. The future-`since` test even locks in this conflation; the empty-corpus test supplies an actually empty fake but only asserts the weaker window message, so no test distinguishes the required state from the concrete old-terminal-task counterexample. Add an authoritative all-task existence check (possibly only after the windowed reads are empty) and reserve the no-task branch for a genuinely empty corpus.
+"""
+# ambiguous: a design decision the code reasons about in the helper's own
+# docstring — a judgement about the AC, not a fact the tree refutes. Must
+# proceed under default-to-act.
+
+[[finding]]
+id = "f-004"
+author = "correctness"
+path = "src/lithos_lens/tasks.py"
+line = 347
+expected = "proceed"
+ambiguous = true
+provenance = "panel"
+body = """
+The acceptance criterion's all-clear state is specifically the state where the open sections are empty, but `DashboardData.healthy` never checks whether any open section has rows. It is true for a board containing a ready open task (and the added rendering test uses the populated default fake), so "All systems healthy" is a generic read-integrity signal rather than the requested all-clear branch. With no open rows and one completed row, the page merely shows that same generic stripe plus three "No ... tasks match these filters" placeholders; there is no distinct "All clear — no open tasks" rendering. With only terminal work older than `since`, the window-empty branch suppresses the stripe altogether. Add a dedicated open-empty predicate/render (independent of any populated-board healthy stripe that remains desirable) and a terminal-only test that proves this branch is distinct from both a populated healthy board and an empty corpus.
+"""
+# ambiguous: the head's own `healthy` docstring defers the attention-list
+# gating to T1-S3 (shipped as lens #47 the next day). A deferral is a scope
+# disposition, not a refutation — must proceed.
+
+# ── must reject: synthetic closed questions with an exact refutation ───────
+
+[[finding]]
+id = "f-005"
+author = "correctness"
+path = "src/lithos_lens/task_filtering.py"
+line = 173
+expected = "reject"
+refutation = ["src/lithos_lens/task_filtering.py:178-193"]
+provenance = "synthetic"
+body = """
+`filters_narrow_the_board` ignores the agent filter: only `tags` and a non-default status set count as narrowing, so a shared `?agent=<name>` board — the section partition and the terminal reads filtered down to one agent's rows — still lets the "All systems healthy" stripe make its system-wide claim over rows the operator cannot see. `filters.agent` must count as narrowing exactly like `tags`.
+"""
+# refutation: the docstring (180-182) names project as narrowing like tag/agent;
+# the return expression (188-193) includes `bool(filters.agent)`
+
+[[finding]]
+id = "f-006"
+author = "correctness"
+path = "src/lithos_lens/frontier.py"
+line = 549
+expected = "reject"
+refutation = [
+  "src/lithos_lens/frontier.py:553",
+  "src/lithos_lens/frontier.py:556-563",
+  "src/lithos_lens/frontier.py:570-574",
+]
+provenance = "synthetic"
+body = """
+`_is_nothing_to_show` never consults `errors`: when every read fails (an outage empties the open snapshot and both terminal windows alike) it returns True, so the dashboard renders the "No tasks in this window" panel — an affirmative empty-corpus claim — instead of the read-failure banner. The predicate must return False whenever the load recorded an error.
+"""
+# refutation: `errors` is a parameter (553), the docstring says "no recorded
+# error" (559), and the first statement (572) is `if errors or open_snapshot
+# or filters_narrowed: return False`

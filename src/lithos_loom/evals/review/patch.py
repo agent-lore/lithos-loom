@@ -22,7 +22,7 @@ from ...runner import git, worktree
 from .case import Case
 
 
-def _materialise_patched_head(
+def materialise_patched_head(
     repo: Path, base_sha: str, patch_path: Path, *, parent: Path
 ) -> tuple[str, Path]:
     """Build ``base + patch`` as an ephemeral commit.
@@ -168,14 +168,14 @@ def materialise_patch_heads(case: Case) -> tuple[Case, Callable[[], None]]:
     try:
         replacements: dict[str, str] = {}
         if case.head_patch:
-            head_sha, wt = _materialise_patched_head(
+            head_sha, wt = materialise_patched_head(
                 repo, case.base, case_dir / case.head_patch, parent=parent
             )
             built.append(wt)
             replacements["head"] = head_sha
         if case.known_good_head_patch:
             kg_base = case.known_good_base or case.base
-            kg_sha, wt = _materialise_patched_head(
+            kg_sha, wt = materialise_patched_head(
                 repo, kg_base, case_dir / case.known_good_head_patch, parent=parent
             )
             built.append(wt)

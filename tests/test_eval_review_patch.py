@@ -304,26 +304,26 @@ def test_materialise_patch_heads_works_with_a_relative_case_dir(
         cleanup()
 
 
-def test_materialise_patched_head_raises_when_patch_nets_no_change(
+def testmaterialise_patched_head_raises_when_patch_nets_no_change(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # a patch that applies but changes nothing must NOT silently make head == base.
     base = git.base_sha(tmp_git_repo)
     monkeypatch.setattr(patch.git, "apply_patch", lambda wt, p: None)  # apply nothing
     with pytest.raises(ValueError, match="no change"):
-        patch._materialise_patched_head(
+        patch.materialise_patched_head(
             tmp_git_repo, base, tmp_path / "x.patch", parent=tmp_path / "p"
         )
 
 
-def test_materialise_patched_head_raises_on_unapplyable_patch(
+def testmaterialise_patched_head_raises_on_unapplyable_patch(
     tmp_git_repo: Path, tmp_path: Path
 ) -> None:
     base = git.base_sha(tmp_git_repo)
     bad = tmp_path / "bad.patch"
     bad.write_text("--- a/nope.txt\n+++ b/nope.txt\n@@ -1 +1 @@\n-x\n+y\n")
     with pytest.raises(RuntimeError):
-        patch._materialise_patched_head(tmp_git_repo, base, bad, parent=tmp_path / "p")
+        patch.materialise_patched_head(tmp_git_repo, base, bad, parent=tmp_path / "p")
 
 
 # ── shipped cases: patches must MATERIALISE, not just load (#292 finding 3) ──

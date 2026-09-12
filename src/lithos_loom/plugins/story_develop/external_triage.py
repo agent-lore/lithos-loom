@@ -42,9 +42,20 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "TRIAGE_HANDOFF_NAME",
     "TriageVerdicts",
+    "cited_locations",
+    "classify_verdict_lines",
     "parse_triage_verdicts",
     "triage_external_findings",
 ]
+
+# Per-finding verdict-line classes (``classify_verdict_lines``). Only
+# ``LINE_REJECT`` drops a finding; the other three all PROCEED — they are kept
+# apart so an instrument can tell a held default-to-act from a rejection the
+# evidence rule silently rescued (PRD S8 triage eval).
+LINE_PROCEED = "proceed"
+LINE_REJECT = "reject"  # explicit REJECT with cited, resolving evidence
+LINE_REJECT_UNCITED = "reject-uncited"  # REJECT lacking usable evidence → proceeds
+LINE_MISSING = "missing"  # no verdict line for the id → proceeds
 
 # The verdict file the triage agent writes into the handoff mount.
 TRIAGE_HANDOFF_NAME = "round_00_triage.md"
@@ -103,17 +114,25 @@ def _tracked_files(wt: Path) -> frozenset[str]:
     return frozenset(p for p in out.stdout.split("\0") if p)
 
 
-def _resolves_in_repo(evidence: str, repo_files: frozenset[str]) -> bool:
-    """True when any cited ``file:line`` path names a tracked file.
+def cited_locations(evidence: str) -> list[tuple[str, int]]:
+    """Every ``file:line`` citation in *evidence* as ``(repo-relative path, line)``.
 
     The triage agent reads the tree at ``/workspace``, so container-rooted
-    and ``./``-relative spellings normalise to the repo-relative path.
+    and ``./``-relative spellings normalise to the repo-relative path. One
+    home for the citation shape: the referent check below and the S8 eval's
+    "cites the right lines" check both read it.
     """
+    out: list[tuple[str, int]] = []
     for match in _CITATION_RE.finditer(evidence):
         path = match.group("path").removeprefix("./").lstrip("/")
-        if path.removeprefix("workspace/") in repo_files:
-            return True
-    return False
+        line = int(match.group(0).rsplit(":", 1)[1])
+        out.append((path.removeprefix("workspace/"), line))
+    return out
+
+
+def _resolves_in_repo(evidence: str, repo_files: frozenset[str]) -> bool:
+    """True when any cited ``file:line`` path names a tracked file."""
+    return any(path in repo_files for path, _ in cited_locations(evidence))
 
 
 @dataclass(frozen=True)
@@ -124,6 +143,11 @@ class TriageVerdicts:
     rejections: dict[str, str] = field(default_factory=dict)
     cost_usd: float = 0.0
     note: str = ""  # non-empty when triage degraded and defaulted to act
+    # Diagnostics, never consulted by the remediation path: what the verdict
+    # file said per id (``LINE_*``), and the file itself — so an eval can tell
+    # a deliberate PROCEED from a discarded uncited REJECT or a missing line.
+    line_kinds: dict[str, str] = field(default_factory=dict)
+    verdict_text: str = ""
 
 
 def parse_triage_verdicts(
@@ -143,8 +167,40 @@ def parse_triage_verdicts(
     proceeds. Ids the output invents are ignored. ``repo_files=None`` is the
     pure/unit-test mode: shape-only, no filesystem coupling.
     """
+    kinds, evidence = _scan_verdict_lines(text, finding_ids, repo_files=repo_files)
+    rejections = {
+        fid: evidence[fid] for fid in finding_ids if kinds[fid] == LINE_REJECT
+    }
+    proceed = tuple(fid for fid in finding_ids if fid not in rejections)
+    return TriageVerdicts(
+        proceed=proceed, rejections=rejections, line_kinds=kinds, verdict_text=text
+    )
+
+
+def classify_verdict_lines(
+    text: str,
+    finding_ids: list[str],
+    *,
+    repo_files: frozenset[str] | None = None,
+) -> dict[str, str]:
+    """Per-id class of the verdict line the file carries (``LINE_*``).
+
+    The same scan :func:`parse_triage_verdicts` decides on — one home for the
+    rule — exposed so an instrument can distinguish the three ways a finding
+    PROCEEDS. A cited REJECT is sticky: once an id has one, a later PROCEED or
+    uncited REJECT for the same id does not undo it (the parse has always
+    accumulated rejections; a contradictory file keeps the evidenced verdict).
+    """
+    kinds, _ = _scan_verdict_lines(text, finding_ids, repo_files=repo_files)
+    return kinds
+
+
+def _scan_verdict_lines(
+    text: str, finding_ids: list[str], *, repo_files: frozenset[str] | None
+) -> tuple[dict[str, str], dict[str, str]]:
     known = set(finding_ids)
-    rejections: dict[str, str] = {}
+    kinds: dict[str, str] = dict.fromkeys(finding_ids, LINE_MISSING)
+    evidence_by_id: dict[str, str] = {}
     for match in _VERDICT_RE.finditer(text):
         fid = match.group("fid")
         if fid not in known:
@@ -154,9 +210,17 @@ def parse_triage_verdicts(
         if cited and repo_files is not None:
             cited = _resolves_in_repo(evidence, repo_files)
         if match.group("verdict").upper() == "REJECT" and cited:
-            rejections[fid] = evidence
-    proceed = tuple(fid for fid in finding_ids if fid not in rejections)
-    return TriageVerdicts(proceed=proceed, rejections=rejections)
+            kinds[fid] = LINE_REJECT
+            evidence_by_id[fid] = (
+                evidence  # a later cited REJECT refreshes the evidence
+            )
+        elif kinds[fid] == LINE_REJECT:
+            continue  # sticky: an evidenced rejection is not undone by a later line
+        elif match.group("verdict").upper() == "REJECT":
+            kinds[fid] = LINE_REJECT_UNCITED
+        else:
+            kinds[fid] = LINE_PROCEED
+    return kinds, evidence_by_id
 
 
 def triage_external_findings(
@@ -252,4 +316,6 @@ def triage_external_findings(
         proceed=verdicts.proceed,
         rejections=verdicts.rejections,
         cost_usd=cost,
+        line_kinds=verdicts.line_kinds,
+        verdict_text=verdicts.verdict_text,
     )

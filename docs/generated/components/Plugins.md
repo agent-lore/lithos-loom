@@ -32,7 +32,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 8 |
-| `lithos_loom.plugins.story_develop.external_triage` | S | 1 | 2 |
+| `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
@@ -205,8 +205,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `pr_number_from_spec` — PR number from a converge change spec (``142`` / ``#142`` / a PR URL).
 
 ### `lithos_loom.plugins.story_develop.external_triage`
+- def `cited_locations` — Every ``file:line`` citation in *evidence* as ``(repo-relative path, line)``.
 - class `TriageVerdicts` — Parsed per-finding verdicts (also the container step's result shape).
 - def `parse_triage_verdicts` — Parse the verdict file, applying default-to-act per finding.
+- def `classify_verdict_lines` — Per-id class of the verdict line the file carries (``LINE_*``).
 - def `triage_external_findings` — Run the one-turn read-only triage pass over *outcome*'s findings.
 
 ### `lithos_loom.plugins.story_develop.findings`

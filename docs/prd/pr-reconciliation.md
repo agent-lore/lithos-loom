@@ -835,6 +835,13 @@ Three case shapes, all buildable from material already on hand:
 - **Triage.** A known-false external finding must be rejected with cited
   evidence; a known-true one must pass; an ambiguous one must proceed. The
   over-suppression failure mode is the one to watch, per RH-1's lens34 result.
+  *Shipped 2026-09-12* as `lithos-loom eval triage` + `evals/triage/cases/`
+  (README there): a case is one tree + a batch fed through the production
+  intake, scored on known-false reject rate (a citation inside the declared
+  refutation lines) and must-proceed
+  over-suppression (a gate at 0 by default). Seed batch =
+  `lens43-known-good-batch` (four real must-proceed findings from the
+  composed-tree run, two synthetic known-false). First run pending.
 - **Composed-tree review.** Whether the panel can find a defect that exists
   only in the *combination* of two individually-correct branches — the
   `filters_narrow_the_board` class. If it cannot, S5 narrows to check-set-only

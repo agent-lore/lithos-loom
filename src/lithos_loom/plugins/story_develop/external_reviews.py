@@ -55,6 +55,8 @@ __all__ = [
     "ExternalOutcome",
     "GitHubError",  # re-export: the CLI seam catches it without a GitHub-tier import
     "ReplyMode",  # re-export: the CLI epilogue routes on it (no GitHub-tier import)
+    "ReviewStream",  # re-export: the S8 triage eval builds findings through this seam
+    "adapter_for",  # re-export: same seam — the stream's reply capability
     "issue_comment_reply_body",  # re-export: same reason, for the reply epilogue
     "ack_instruction",
     "external_intake_reviews",
