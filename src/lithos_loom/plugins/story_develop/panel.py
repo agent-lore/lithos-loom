@@ -119,6 +119,7 @@ class PanelRoundResult:
     # reviewer, the class, the attempts, the failure and the host action. The
     # run ends ``infra_failed`` on it; ``None`` otherwise.
     infra_failure: str | None = None
+    infra_host_action: str = ""
 
 
 # --- prompt / rendering helpers --------------------------------------------
@@ -373,16 +374,18 @@ def _run_reviewer_with_reaction(
     reseed_prompt_override: str | None = None,
     skip_lifecycle_validation: bool = False,
     review_context: str = "",
-) -> tuple[ReviewOutcome, float, bool, datetime | None, str | None]:
+) -> tuple[ReviewOutcome, float, bool, datetime | None, tuple[str, str] | None]:
     """One reviewer's round, with the failure reactions wrapped around it.
 
     Switch first (replace ONLY this reviewer's container, reseed a fresh
     session from the handoff history), pause last (shared budget). Returns
-    ``(outcome, cost, interrupted, resume_after, infra_failure)`` —
+    ``(outcome, cost, interrupted, resume_after, escalation)`` —
     *resume_after* is set only when *interrupted* is True (T10 daemon
-    re-dispatch surface); *infra_failure* (slice B) when a retry-class failure
-    (auth / transport / spawn) persisted through its backoff retries and the
-    reaction table says escalate — the run ends ``infra_failed``. Salvage
+    re-dispatch surface); *escalation* (slice B) is ``(line, host_action)``
+    when a retry-class failure (auth / transport / spawn) persisted through
+    its backoff retries and the reaction table says escalate — the run ends
+    ``infra_failed``. Retry counts are per class AND per tool: a usage-limit
+    tool switch clears them (a new engine is a new failure domain). Salvage
     (#298, inside ``_review_turn``) runs first, then classification, then the
     reaction: a failed turn whose own handoff is valid never reaches a retry.
     Turns + the sleeps run through *services*; the tool-switch container
@@ -438,9 +441,9 @@ def _run_reviewer_with_reaction(
                 )
                 escalation = (
                     f"reviewer [{name}] {cls.value} persisted after {n} attempt"
-                    f"{'s' if n != 1 else ''}: {summary} — {reaction.host_action}"
+                    f"{'s' if n != 1 else ''}: {summary}"
                 )
-                return review, cost, False, None, escalation
+                return review, cost, False, None, (escalation, reaction.host_action)
             wait = reaction.backoff_seconds[used]
             attempts[cls] = used + 1
             logger.warning(
@@ -506,6 +509,7 @@ def _run_reviewer_with_reaction(
             containers.stop_container(rstate.container)
             rstate.engine_now = engines.get_engine(nxt)
             rstate.session = str(uuid.uuid4())
+            attempts.clear()  # a new engine is a new failure domain
             # Rebuild the run command for the NEW tool — its env var
             # (CODEX_HOME vs CLAUDE_CONFIG_DIR), auth file, and mount differ, so
             # the original (claude) run_cmd would mis-configure a codex
@@ -660,6 +664,7 @@ def run_panel_round(
     resume_after: datetime | None = None
     invalid_reviewer: str | None = None
     infra_failure: str | None = None
+    infra_host_action = ""
     for rstate in reviewers:
         name = rstate.spec.name
         review_prompt, review_resume, review_file_override = round_prompt(
@@ -720,11 +725,12 @@ def run_panel_round(
             interrupted = True
             resume_after = rev_resume_after
             break
-        if rev_infra is not None:
-            infra_failure = rev_infra
-            break
         if review.status == "invalid":
-            invalid_reviewer = name
+            invalid_reviewer = name  # additive: an escalation is ALSO invalid
+        if rev_infra is not None:
+            infra_failure, infra_host_action = rev_infra
+            break
+        if invalid_reviewer is not None:
             break
 
     return PanelRoundResult(
@@ -734,4 +740,5 @@ def run_panel_round(
         resume_after=resume_after,
         invalid_reviewer=invalid_reviewer,
         infra_failure=infra_failure,
+        infra_host_action=infra_host_action,
     )

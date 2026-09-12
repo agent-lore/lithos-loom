@@ -2261,6 +2261,8 @@ def test_persistent_auth_failure_ends_infra_failed(
     assert result.failure_reason.startswith(
         "round 1: coder auth_failed persisted after 2 attempts"
     )
-    assert "complete the gate" in result.failure_reason
+    assert "complete the gate" not in result.failure_reason
+    assert "complete the gate" in result.host_action
     assert result.message.startswith("INFRA FAILURE: ")
+    assert result.host_action in result.message
     assert "sessions + handoffs preserved" in result.message

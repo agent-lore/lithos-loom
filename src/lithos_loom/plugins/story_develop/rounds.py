@@ -119,6 +119,10 @@ class CycleExit:
     status: str
     failure_reason: str
     resume_after: datetime | None
+    # ``infra_failed`` only: what to fix on the host before completing the
+    # gate — carried beside the reason so the gate's capped summary never
+    # truncates it (slice B)
+    host_action: str = ""
 
 
 @dataclass
@@ -334,11 +338,11 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         engine=ctx.coder_engine,
     )
     ctx.coder_cost += attempt.cost
-    # Codex mints its session handle (thread_id) on turn 1; reuse the returned
-    # handle for resumes + persist it (no-op for claude, which echoes the
+    # Codex mints its session handle (thread_id) on turn 1; the wrapper's
+    # rebound handle (not the last turn's, which a fresh retry may leave empty)
+    # is what resumes + state.json persist (no-op for claude, which echoes the
     # supplied uuid). Drives daemon-resume + PR delivery.
-    if attempt.turn.session_id:
-        ctx.coder_session = attempt.turn.session_id
+    ctx.coder_session = attempt.session_id or ctx.coder_session
     # Salvage nudge (#114): a clean turn that left work but no handoff is
     # re-prompted once; the nudge's OWN outcome then judges the round.
     if (
@@ -347,6 +351,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         and not done_path.is_file()
         and git.has_uncommitted_changes(ctx.wt)
     ):
+        pre_turn = handoff.file_fingerprint(done_path)  # re-snapshot per attempt
         attempt = coder_salvage.nudge_for_handoff(ctx, round_no)
     if attempt.interrupted:
         return CycleExit(
@@ -361,7 +366,10 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         return None
     status, reason = outcome
     return CycleExit(
-        status=status, failure_reason=f"round {round_no}: {reason}", resume_after=None
+        status=status,
+        failure_reason=f"round {round_no}: {reason}",
+        resume_after=None,
+        host_action=attempt.host_action if status == "infra_failed" else "",
     )
 
 
@@ -518,6 +526,7 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
             status="infra_failed",
             failure_reason=f"round {round_no}: {panel.infra_failure}",
             resume_after=None,
+            host_action=panel.infra_host_action,
         )
     if panel.invalid_reviewer is not None:
         return CycleExit(
@@ -665,6 +674,16 @@ def _artifact_review_pass(
                 "artifact-review pass; pause budget exhausted"
             ),
             resume_after=panel.resume_after,
+        )
+    if panel.infra_failure is not None:
+        return CycleExit(
+            status="infra_failed",
+            failure_reason=(
+                f"round {round_no}: {panel.infra_failure} during the "
+                "artifact-review pass"
+            ),
+            resume_after=None,
+            host_action=panel.infra_host_action,
         )
     if panel.invalid_reviewer is not None:
         return CycleExit(

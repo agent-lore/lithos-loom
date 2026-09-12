@@ -40,6 +40,13 @@ class TurnAttempt:
     interrupted: bool
     cost: float
     escalation: str | None = None
+    # the reaction's host action (what to fix before completing the gate),
+    # carried separately so the gate's capped summary never truncates it
+    host_action: str = ""
+    # the session handle after every attempt's rebind — codex mints its
+    # thread_id on turn 1 and a fresh retry that dies before `thread.started`
+    # returns "", so the LAST turn's handle is not the run's handle
+    session_id: str = ""
 
 
 def run_turn(

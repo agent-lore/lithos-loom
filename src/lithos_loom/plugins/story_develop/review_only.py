@@ -57,15 +57,23 @@ _REVIEW_ONLY_CODER_SUMMARY = (
 def panel_incomplete(panel: PanelRoundResult | None) -> bool:
     """Whether the panel produced no usable review this pass.
 
-    True when it never ran (``None``), was **interrupted** (usage limit), or hit
-    an **invalid reviewer**. review-only folds this into a blocking report;
+    True when it never ran (``None``), was **interrupted** (usage limit), hit
+    an **invalid reviewer**, or a reviewer's infra reaction was exhausted
+    (``infra_failure``, slice B — also an invalid outcome, listed separately so
+    a consumer that forgets the new field still sees the old one). review-only
+    folds this into a blocking report;
     converge treats it as a hard **failure** — there is no trustworthy review to
     seed the fix loop from, so fixing against a partial/absent panel would be
     worse than stopping. (Note ``review_head`` *raises* on an exception rather
     than returning ``panel=None``, so in practice this catches the
     interrupted / invalid cases; ``None`` is the defensive floor.)
     """
-    return panel is None or panel.interrupted or panel.invalid_reviewer is not None
+    return (
+        panel is None
+        or panel.interrupted
+        or panel.invalid_reviewer is not None
+        or panel.infra_failure is not None
+    )
 
 
 def intake_blocks(

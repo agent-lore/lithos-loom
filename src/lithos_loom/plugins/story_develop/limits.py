@@ -1,9 +1,12 @@
 """Failure classification + reaction policy (PRD decisions #4/#5; slice B, 5dbeb0c8).
 
-Classification is **pattern-table driven** over the WHOLE failed turn — result
-text, stderr and the retained structured payload (``raw``: claude's JSON
-result, codex's ``failure_events``, or unparseable stdout kept verbatim) —
-never pane scraping (ADR 0002). One classifier serves every turn site (coder,
+Classification is **pattern-table driven** over the channels where the
+*transport* speaks — stderr, the claude CLI's error result (its ``result`` is
+the error text only when the payload flags ``is_error``), a claude API error's
+``api_error_status``, codex's ``failure_events``, and unparseable stdout kept
+verbatim — never the agent's own prose (a reviewer that writes "returns 401
+Unauthorized" in a finding is not an auth failure) and never pane scraping
+(ADR 0002). One classifier serves every turn site (coder,
 reviewer, the handoff nudge); the per-class *reaction* is data
 (:func:`reaction_for`) that those sites apply. The safe default is deliberate:
 an UNRECOGNISED failure is a generic ``agent_error``, NOT ``usage_limited`` and
@@ -76,6 +79,13 @@ _OOM_EXIT = 137  # SIGKILL (docker OOM-kill / a reaped container)
 _USAGE_LIMIT_PATTERNS: tuple[re.Pattern[str], ...] = (
     # API-style sentinel: "Claude AI usage limit reached|1717777777"
     re.compile(r"usage limit reached", re.IGNORECASE),
+    # A "rate limit" that names a reset window is a usage limit, not a 429 to
+    # retry into: "reached your rate limit … Try again in 4 hours".
+    re.compile(
+        r"rate limit.{0,80}(?:try again in|resets?\b|reached)|"
+        r"reached your rate limit",
+        re.IGNORECASE,
+    ),
     re.compile(r"hit your usage limit", re.IGNORECASE),
     # CLI-style wording: "5-hour limit reached ∙ resets 3am"
     re.compile(r"\b(?:\d+-hour|weekly|session)\s+limit reached", re.IGNORECASE),
@@ -117,11 +127,12 @@ _TRANSIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     re.compile(r"\brate.?limit(?:ed|_error)?\b", re.IGNORECASE),
-    re.compile(r"\b(?:5\d\d|429)\b.{0,20}\b(?:error|retry)", re.IGNORECASE),
 )
 
-# The process was killed or its container is gone. One retry re-execs into
-# the (possibly restarted) container; a second death escalates.
+# The process was killed or its container is gone. A killed process (exit
+# 137) may well succeed on a re-exec into the still-running container; a dead
+# container fails the retry too and escalates with the docker host action —
+# nothing here restarts containers.
 _OOM_OR_SPAWN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"container .{0,80}is not running", re.IGNORECASE),
     re.compile(r"no such container", re.IGNORECASE),
@@ -131,15 +142,49 @@ _OOM_OR_SPAWN_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def _failure_text(turn: TurnResult) -> str:
-    """The searchable text of a failed turn: result text + stderr + ``raw``.
+    """The usage-limit channels: result text + stderr + codex failure events.
 
-    ``raw`` matters: codex retains its failure events there (never in
-    ``result_text``, #103), the claude parser keeps unparseable stdout there
-    (the #405 shape printed the 401 as a bare line before the JSON), and a
-    claude API error carries ``api_error_status`` there.
+    Unchanged from T5 for claude (its limit message is the ``result``); codex
+    retains its limit event in ``raw["failure_events"]`` (#103), never in
+    ``result_text``.
     """
-    raw = json.dumps(turn.raw, default=str) if turn.raw else ""
-    return f"{turn.result_text}\n{turn.stderr}\n{raw}"
+    events = _failure_events_text(turn)
+    return f"{turn.result_text}\n{turn.stderr}\n{events}"
+
+
+def _failure_events_text(turn: TurnResult) -> str:
+    raw = turn.raw or {}
+    events = raw.get("failure_events") or ()
+    return "\n".join(json.dumps(ev, default=str) for ev in events)
+
+
+def _transport_text(turn: TurnResult) -> str:
+    """The infra channels — where the transport, not the agent, speaks.
+
+    stderr; the claude ``result`` ONLY when the payload flags ``is_error`` (then
+    it is the CLI's error text, not the agent's message — a completed turn's
+    prose that mentions "401" or "rate limit" must never classify as infra);
+    codex failure events; unparseable stdout the parser retained (the #405
+    shape); and a claude API error's numeric ``api_error_status``.
+    """
+    raw = turn.raw or {}
+    parts = [turn.stderr]
+    if raw.get("is_error"):
+        parts.append(turn.result_text)
+    parts.append(_failure_events_text(turn))
+    unparsed = raw.get("unparsed_stdout")
+    if unparsed:
+        parts.append(str(unparsed))
+    status = raw.get("api_error_status")
+    if status:
+        parts.append(f"api_error_status: {status}")
+    return "\n".join(parts)
+
+
+def _api_error_status(turn: TurnResult) -> int | None:
+    raw = turn.raw or {}
+    status = raw.get("api_error_status")
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
 def classify_failure(turn: TurnResult) -> FailureClass:
@@ -148,9 +193,12 @@ def classify_failure(turn: TurnResult) -> FailureClass:
     Precedence: a timeout or an OOM-kill exit is decided by the exit code
     alone (whatever the process printed is stale); then usage limit (a limit
     message can mention rate limiting — it must pause, never retry into the
-    same wall); then auth (a 401 inside a disconnect wording is the auth
-    problem); then transient transport; then spawn/memory wordings. Unknown
-    failures default to ``agent_error`` — never mis-pause, never mis-retry.
+    same wall); then a structured API status (401 → auth, 5xx / 429 →
+    transient); then auth wording (a 401 inside a disconnect wording is the
+    auth problem); then transient transport; then spawn/memory wordings — the
+    infra wordings read the transport channels only (:func:`_transport_text`).
+    Unknown failures default to ``agent_error`` — never mis-pause, never
+    mis-retry.
     """
     if turn.succeeded:
         raise ValueError("classify_failure() called on a successful turn")
@@ -158,9 +206,14 @@ def classify_failure(turn: TurnResult) -> FailureClass:
         return FailureClass.TIMEOUT
     if turn.exit_code == _OOM_EXIT:
         return FailureClass.OOM_OR_SPAWN
-    text = _failure_text(turn)
-    if any(p.search(text) for p in _USAGE_LIMIT_PATTERNS):
+    if any(p.search(_failure_text(turn)) for p in _USAGE_LIMIT_PATTERNS):
         return FailureClass.USAGE_LIMITED
+    status = _api_error_status(turn)
+    if status == 401:
+        return FailureClass.AUTH_FAILED
+    if status == 429 or (status is not None and 500 <= status <= 599):
+        return FailureClass.TRANSIENT_INFRA
+    text = _transport_text(turn)
     if any(p.search(text) for p in _AUTH_PATTERNS):
         return FailureClass.AUTH_FAILED
     if any(p.search(text) for p in _TRANSIENT_PATTERNS):
@@ -170,16 +223,21 @@ def classify_failure(turn: TurnResult) -> FailureClass:
     return FailureClass.AGENT_ERROR
 
 
-_SUMMARY_MAX = 200
+# leaves room for the "round N: <agent> <class> persisted after K attempts: "
+# prefix under the needs-human gate's 200-char summary cap
+_SUMMARY_MAX = 120
 
 
 def failure_summary(turn: TurnResult) -> str:
     """One short line naming why the turn failed, for logs / exits / the gate.
 
-    The first non-blank line of the result text, else of stderr, else of a
-    codex failure event's message, else ``exit <code>``.
+    The first non-blank line of the CLI's error result (claude, ``is_error``),
+    else of stderr, else of a codex failure event's message, else of retained
+    unparseable stdout, else ``exit <code>``. Capped so the composed reason
+    line stays under the needs-human gate's summary cap.
     """
-    candidates = [turn.result_text, turn.stderr]
+    raw = turn.raw or {}
+    candidates = [turn.result_text if raw.get("is_error") else "", turn.stderr]
     if turn.raw:
         for ev in turn.raw.get("failure_events") or ():
             if isinstance(ev, dict):

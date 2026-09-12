@@ -639,10 +639,8 @@ def _dead_turn(text: str) -> _engines.TurnResult:
 
 
 _AUTH = "Failed to authenticate: OAuth session expired and could not be refreshed"
-_ESCALATION = (
-    f"coder auth_failed persisted after 2 attempts: {_AUTH} — re-auth, then "
-    "complete the gate"
-)
+_ESCALATION = f"coder auth_failed persisted after 2 attempts: {_AUTH}"
+_HOST_ACTION = "re-authenticate the agent CLI on the host, then complete the gate"
 
 
 def test_panel_phase_infra_failure_ends_the_run_infra_failed(tmp_path: Path) -> None:
@@ -654,31 +652,62 @@ def test_panel_phase_infra_failure_ends_the_run_infra_failed(tmp_path: Path) -> 
             cost=0.0,
             interrupted=False,
             resume_after=None,
-            invalid_reviewer=None,
+            invalid_reviewer="correctness",  # additive with the escalation
             infra_failure=(
                 "reviewer [correctness] auth_failed persisted after 2 attempts"
             ),
+            infra_host_action=_HOST_ACTION,
         )
 
     ctx.run_panel_round = escalating_panel
     exit_ = rounds_mod.panel_phase(ctx, 3)
-    assert exit_ is not None and exit_.status == "infra_failed"
+    assert exit_ is not None and exit_.status == "infra_failed"  # outranks failed
     assert exit_.failure_reason.startswith(
         "round 3: reviewer [correctness] auth_failed"
     )
+    assert exit_.host_action == _HOST_ACTION
+
+
+def test_artifact_pass_infra_failure_ends_the_run_infra_failed(tmp_path: Path) -> None:
+    # The pass's consumer must not treat an escalating reviewer as "proceed":
+    # on main the same turn ended the run `failed`; now it ends `infra_failed`.
+    ctx, panel_calls = _artifact_ctx(tmp_path, collects=True, panel_passes=True)
+
+    def escalating_panel(cfg, reviewers, **kw):
+        panel_calls.append(kw)
+        return PanelRoundResult(
+            round_reviews=[_failed_outcome()],
+            cost=0.0,
+            interrupted=False,
+            resume_after=None,
+            invalid_reviewer="correctness",
+            infra_failure=(
+                "reviewer [correctness] transient_infra persisted after 3 attempts"
+            ),
+            infra_host_action=_HOST_ACTION,
+        )
+
+    ctx.run_panel_round = escalating_panel
+    exit_ = rounds_mod.approval_phase(ctx, 1)
+
+    assert [c.get("artifact_pass") for c in panel_calls] == [True]
+    assert exit_ is not None and exit_.status == "infra_failed"
+    assert "during the artifact-review pass" in exit_.failure_reason
+    assert exit_.host_action == _HOST_ACTION
 
 
 def test_coder_phase_escalation_ends_the_run_infra_failed(tmp_path: Path) -> None:
     ctx = _coder_ctx(tmp_path, tmp_path / "wt")
     ctx.wt.mkdir()
     ctx.turn_with_reactions = lambda *a, **kw: TurnAttempt(
-        _dead_turn(_AUTH), False, 0.02, _ESCALATION
+        _dead_turn(_AUTH), False, 0.02, _ESCALATION, host_action=_HOST_ACTION
     )
 
     exit_ = rounds_mod.coder_phase(ctx, 2)
 
     assert exit_ is not None and exit_.status == "infra_failed"
     assert exit_.failure_reason == f"round 2: {_ESCALATION}"
+    assert exit_.host_action == _HOST_ACTION
     assert ctx.coder_cost == pytest.approx(0.02)
 
 
@@ -795,9 +824,36 @@ def test_nudge_escalation_ends_the_run_infra_failed(
                 stderr="",
             )
             return TurnAttempt(ok, False, 0.0)
-        return TurnAttempt(_dead_turn(_AUTH), False, 0.0, _ESCALATION)
+        return TurnAttempt(
+            _dead_turn(_AUTH), False, 0.0, _ESCALATION, host_action=_HOST_ACTION
+        )
 
     ctx.turn_with_reactions = turn
     exit_ = rounds_mod.coder_phase(ctx, 2)
     assert exit_ is not None and exit_.status == "infra_failed"
+    assert exit_.host_action == _HOST_ACTION
     assert n["calls"] == 2
+
+
+def test_coder_phase_persists_the_wrappers_rebound_session(tmp_path: Path) -> None:
+    ctx = _coder_ctx(tmp_path, tmp_path / "wt")
+    ctx.wt.mkdir()
+    ctx.config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    def turn(*a, **kw):
+        (ctx.config.handoff_dir / "round_02_coder_done.md").write_text("done")
+        ok = _engines.TurnResult(
+            exit_code=0,
+            succeeded=True,
+            completed=True,
+            session_id="",  # a codex resume may not re-announce the thread
+            result_text="",
+            cost_usd=0.0,
+            raw={},
+            stderr="",
+        )
+        return TurnAttempt(ok, False, 0.0, session_id="thread-minted")
+
+    ctx.turn_with_reactions = turn
+    assert rounds_mod.coder_phase(ctx, 2) is None
+    assert ctx.coder_session == "thread-minted"

@@ -757,7 +757,7 @@ def test_failed_turn_without_valid_handoff_stays_invalid(tmp_path: Path) -> None
     # Slice B: the garbage is never salvaged into a verdict; the infra death
     # then takes its one retry and escalates (the invalid outcome stands).
     assert result.round_reviews[0].status == "invalid"
-    assert result.invalid_reviewer is None
+    assert result.invalid_reviewer == "correctness"
     assert result.infra_failure is not None
 
 
@@ -806,10 +806,11 @@ def test_stale_handoff_from_usage_limited_attempt_is_not_salvaged_by_fallback(
     )
 
     # Slice B: the fallback's infra death is not salvaged — and, being an auth
-    # failure, it is retried once (call 3) before the reviewer escalates.
+    # failure, it is retried once (call 3) before the reviewer escalates. The
+    # invalid outcome still stands (additive), the escalation rides beside it.
     assert calls["n"] == 3
     assert result.round_reviews[0].status == "invalid"
-    assert result.invalid_reviewer is None
+    assert result.invalid_reviewer == "correctness"
     assert result.infra_failure is not None and "correctness" in result.infra_failure
 
 
@@ -841,7 +842,7 @@ def test_stale_handoff_is_not_salvaged_by_pause_retry(tmp_path: Path) -> None:
     # Slice B: not salvaged, retried once on the auth class, then escalated.
     assert calls["n"] == 3
     assert result.round_reviews[0].status == "invalid"
-    assert result.invalid_reviewer is None
+    assert result.invalid_reviewer == "correctness"
     assert result.infra_failure is not None and "auth_failed" in result.infra_failure
 
 
@@ -865,9 +866,9 @@ def test_preexisting_handoff_untouched_by_failed_attempt_is_not_salvaged(
     result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
 
     # Slice B: the stale file is never salvaged; the auth death retries once
-    # and then escalates instead of ending the run as an invalid handoff.
+    # and then escalates — on top of, not instead of, the invalid outcome.
     assert result.round_reviews[0].status == "invalid"
-    assert result.invalid_reviewer is None
+    assert result.invalid_reviewer == "correctness"
     assert result.infra_failure is not None
 
 
@@ -1257,11 +1258,13 @@ def test_reviewer_auth_death_retries_once_then_escalates(tmp_path: Path) -> None
     )
 
     assert sleeps == [20.0] and len(calls) == 2
-    assert result.interrupted is False and result.invalid_reviewer is None
+    assert result.interrupted is False
+    assert result.invalid_reviewer == "correctness"  # additive, never masked
     assert result.infra_failure is not None
     assert "reviewer [correctness]" in result.infra_failure
     assert "auth_failed" in result.infra_failure
-    assert "complete the gate" in result.infra_failure
+    assert "complete the gate" not in result.infra_failure
+    assert "complete the gate" in result.infra_host_action
     assert result.round_reviews[0].status == "invalid"
     # the pause budget was never touched: infra backoff is not a pause
     assert len(list(config.failures_dir.glob("round_01_review-correctness*.json"))) == 2
@@ -1337,3 +1340,94 @@ def test_panel_stops_at_the_first_escalating_reviewer(tmp_path: Path) -> None:
     assert set(containers_seen) == {"cid-correctness"}  # security never ran
     assert result.infra_failure is not None and "correctness" in result.infra_failure
     assert len(result.round_reviews) == 1
+
+
+def test_tool_switch_resets_the_infra_retry_counters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two transient hits on claude, a usage limit, a switch to codex — the
+    new engine's FIRST disconnect must get its own retry, not inherit the
+    exhausted counter and escalate as "persisted after 3 attempts"."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    rstate = _ReviewerState(
+        ReviewerSpec(name="correctness", fallback_chain=("codex",)),
+        "cid-correctness",
+        [],
+        tmp_path,
+    )
+    monkeypatch.setattr(panel_mod.containers, "stop_container", lambda c: None)
+    monkeypatch.setattr(panel_mod.containers, "start_container", lambda cmd: "cid2")
+    monkeypatch.setattr(panel_mod, "build_run_cmd", lambda *a, **k: ("cid2", ["cmd"]))
+    script = [
+        _turn_failing_with("Error: stream disconnected before completion"),
+        _turn_failing_with("Error: stream disconnected before completion"),
+        _limited_turn(),  # claude's 3rd attempt: usage-limited -> switch
+        _turn_failing_with("Error: stream disconnected before completion"),  # codex #1
+        None,  # codex #2: succeeds with a handoff
+    ]
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    def run_turn(**kw):
+        step = script[calls["n"]]
+        calls["n"] += 1
+        if step is None:
+            (
+                config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+            ).write_text(_ART_LGTM)
+            return _ok_turn(kw["session_id"])
+        return step
+
+    result = _round(config, [rstate], _recording_services(run_turn, sleeps))
+
+    assert calls["n"] == 5
+    assert sleeps == [30.0, 120.0, 30.0]  # codex's disconnect got a fresh retry
+    assert result.infra_failure is None and result.interrupted is False
+    assert result.round_reviews[0].status == "LGTM"
+
+
+def test_infra_retry_then_usage_limit_takes_the_pause_path(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    script = [
+        _turn_failing_with("Error: stream disconnected before completion"),
+        _limited_turn(),
+        None,
+    ]
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    def run_turn(**kw):
+        step = script[calls["n"]]
+        calls["n"] += 1
+        if step is None:
+            (
+                config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+            ).write_text(_ART_LGTM)
+            return _ok_turn(kw["session_id"])
+        return step
+
+    budget = panel_mod.PauseBudget(24 * 3600)
+    result = panel_mod.run_panel_round(
+        config,
+        [_reviewer("correctness", tmp_path)],
+        wt=config.repo,
+        base=panel_mod.git.RangeBase("0" * 40),
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=budget,
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_recording_services(run_turn, sleeps),
+    )
+
+    assert calls["n"] == 3
+    assert sleeps[0] == 30.0 and len(sleeps) == 2
+    assert budget.remaining == pytest.approx(24 * 3600 - sleeps[1])  # only the pause
+    assert result.round_reviews[0].status == "LGTM"

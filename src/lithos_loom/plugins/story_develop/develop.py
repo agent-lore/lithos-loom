@@ -133,6 +133,10 @@ class DevelopResult:
     # final round's outcomes (a deferral round earlier than the seal would
     # otherwise vanish from the record).
     deferred_findings: tuple[DeferredFinding, ...] = ()
+    # ``infra_failed`` only (slice B): what to fix on the host before completing
+    # the needs-human gate — structured, so the gate's capped summary can never
+    # truncate it away
+    host_action: str = ""
     # the bare CycleExit reason for a reason-bearing stop (failed / interrupted
     # / stalled / disputed / cost_exceeded), without the gate / commit / cost
     # tail `message` appends — what the needs-human escalation (b91177d2)
@@ -527,6 +531,7 @@ def develop(
     status = exit_state.status
     failure_reason = exit_state.failure_reason
     resume_after = exit_state.resume_after
+    host_action = exit_state.host_action if status == "infra_failed" else ""
     coder_cost = ctx.coder_cost
     review_cost = ctx.review_cost
     gate = ctx.gate
@@ -598,8 +603,9 @@ def develop(
         )
     elif status == "infra_failed":
         message = (
-            f"INFRA FAILURE: {failure_reason}; {len(commits)} commit(s) on {branch}; "
-            f"sessions + handoffs preserved in {config.run_dir}; cost ${total:.4f}"
+            f"INFRA FAILURE: {failure_reason} — {host_action}; "
+            f"{len(commits)} commit(s) on {branch}; sessions + handoffs preserved "
+            f"in {config.run_dir}; cost ${total:.4f}"
         )
     else:  # failed
         message = f"{failure_reason}{gate_part}; {len(commits)} commit(s) on {branch}"
@@ -669,4 +675,5 @@ def develop(
         resume_after=resume_after,
         deferred_findings=collect_deferred(r.ledger for r in reviewers),
         failure_reason=failure_reason if status in _REASON_BEARING_STATUSES else "",
+        host_action=host_action,
     )

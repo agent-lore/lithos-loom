@@ -746,6 +746,8 @@ def escalation_block(
         brief["test_gate_verdict"] = result.test_gate.verdict
     if result.conversation_log is not None:
         brief["conversation_log"] = str(result.conversation_log)
+    if result.host_action:
+        brief["host_action"] = result.host_action  # slice B: never truncated
     return {"reason": reason, "summary": summary, "brief": brief}
 
 

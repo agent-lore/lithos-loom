@@ -28,8 +28,16 @@ FIXTURES = Path(__file__).parent / "fixtures" / "agent_failures"
 
 
 def _failed(
-    *, result_text: str = "", stderr: str = "", exit_code: int = 1
+    *,
+    result_text: str = "",
+    stderr: str = "",
+    exit_code: int = 1,
+    raw: dict | None | str = "cli-error",
 ) -> TurnResult:
+    # The default raw is the claude CLI's failed-turn shape: `is_error` set, so
+    # `result_text` is the CLI's error text (an infra channel). Pass
+    # `raw={"is_error": False}` or `raw=None` to model a turn whose result text
+    # is the AGENT's prose.
     return TurnResult(
         exit_code=exit_code,
         succeeded=False,
@@ -37,7 +45,7 @@ def _failed(
         session_id="",
         result_text=result_text,
         cost_usd=0.0,
-        raw=None,
+        raw={"is_error": True} if raw == "cli-error" else raw,  # type: ignore[arg-type]
         stderr=stderr,
     )
 
@@ -76,6 +84,7 @@ def test_classifies_limit_in_stderr() -> None:
         "fatal: not a git repository",
         "context window limit reached",  # context limit != usage limit
         "AssertionError: expected 3 findings, got 2",
+        "API Error: 400 invalid_request_error",  # a 4xx that is not auth/limit
     ],
 )
 def test_unrecognised_failures_are_agent_errors(text: str) -> None:
@@ -314,9 +323,16 @@ def test_every_escalating_class_names_a_host_action() -> None:
 # --- failure summary ----------------------------------------------------------
 
 
-def test_failure_summary_prefers_result_text_first_line() -> None:
+def test_failure_summary_prefers_the_cli_error_text_first_line() -> None:
     turn = _failed(result_text="first line\nsecond line", stderr="ignored")
     assert failure_summary(turn) == "first line"
+
+
+def test_failure_summary_skips_agent_prose_when_the_payload_is_not_an_error() -> None:
+    turn = _failed(
+        result_text="I added the feature.", stderr="boom", raw={"is_error": False}
+    )
+    assert failure_summary(turn) == "boom"
 
 
 def test_failure_summary_falls_back_to_stderr_then_raw_then_exit() -> None:
@@ -327,9 +343,73 @@ def test_failure_summary_falls_back_to_stderr_then_raw_then_exit() -> None:
 
 
 def test_failure_summary_is_one_short_line() -> None:
+    # Capped so "round N: <agent> <class> persisted after K attempts: " + the
+    # summary stays under the needs-human gate's 200-char summary cap.
     turn = _failed(result_text="x" * 1000)
     out = failure_summary(turn)
-    assert "\n" not in out and len(out) <= 200
+    assert "\n" not in out and len(out) <= 120
+
+
+# --- the classifier never reads the agent's own prose ------------------------
+
+_AGENT_PROSE = [
+    "Added rate limit handling to the GitHub client and retried on 429.",
+    "The endpoint returns 401 Unauthorized when the OAuth token is missing.",
+    "Finding: the client does not handle a 503 Service Unavailable from the provider.",
+    "Reviewed the reconnecting logic in the SSE source.",
+    "Blocking: authentication_failed is swallowed by the bare except at client.py:88",
+    "I could not finish: the suite printed 'API Error: 500 internal server error'.",
+    "OAuth session expired is the message our own login page shows.",
+]
+
+
+@pytest.mark.parametrize("text", _AGENT_PROSE)
+def test_agent_prose_in_a_completed_payload_is_never_infra(text: str) -> None:
+    # A claude turn that completed (is_error false) but failed for another
+    # reason — no resumable handle, a non-zero exit — carries the agent's
+    # final message in result_text. It must never be retried or escalated.
+    turn = _failed(result_text=text, raw={"is_error": False})
+    assert classify_failure(turn) == AGENT_ERROR
+    turn = _failed(result_text=text, raw=None)
+    assert classify_failure(turn) == AGENT_ERROR
+
+
+def test_reaction_never_retries_agent_prose() -> None:
+    turn = _failed(result_text=_AGENT_PROSE[0], raw={"is_error": False})
+    assert reaction_for(classify_failure(turn)).kind == "fail"
+
+
+def test_stderr_is_always_an_infra_channel() -> None:
+    turn = _failed(stderr="Error: stream disconnected before completion", raw=None)
+    assert classify_failure(turn) == FailureClass.TRANSIENT_INFRA
+
+
+# --- structured API status beats wording -------------------------------------
+
+
+def test_api_error_status_401_is_auth_without_any_wording() -> None:
+    turn = _failed(result_text="", raw={"is_error": True, "api_error_status": 401})
+    assert classify_failure(turn) == FailureClass.AUTH_FAILED
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 529])
+def test_api_error_status_5xx_or_429_is_transient(status: int) -> None:
+    turn = _failed(result_text="", raw={"is_error": True, "api_error_status": status})
+    assert classify_failure(turn) == FailureClass.TRANSIENT_INFRA
+
+
+def test_api_error_status_400_is_not_infra() -> None:
+    turn = _failed(result_text="", raw={"is_error": True, "api_error_status": 400})
+    assert classify_failure(turn) == AGENT_ERROR
+
+
+def test_rate_limit_with_a_reset_window_is_a_usage_limit_not_a_retry() -> None:
+    # Retrying with 30 s / 120 s backoff into a 4-hour wall would burn two
+    # turns and then raise a gate with a NETWORK host action.
+    text = "You have reached your rate limit for this model. Try again in 4 hours."
+    assert classify_failure(_failed(result_text=text)) == USAGE_LIMITED
+    text = "rate limit exceeded; resets at 3am"
+    assert classify_failure(_failed(result_text=text)) == USAGE_LIMITED
 
 
 # --- reset hint --------------------------------------------------------------

@@ -45,7 +45,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | GitHub | 4 | 1723 | 1336 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 1 |
 | LithosClient | 2 | 2268 | 1904 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 270 | 224 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
-| Plugins | 49 | 16618 | 13348 | 2 | 5 | 0.71 | 97 (`lithos_loom.plugins.story_develop.__main__.main`) | 39 |
+| Plugins | 49 | 16744 | 13446 | 2 | 5 | 0.71 | 98 (`lithos_loom.plugins.story_develop.__main__.main`) | 39 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 5 | 891 | 703 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **166**, lines: **56727**, SLOC: **45822**
+- Modules: **166**, lines: **56853**, SLOC: **45920**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -69,16 +69,16 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1467**, cyclomatic > 10: **128**
+- Functions: **1470**, cyclomatic > 10: **128**
 
 Top 10 most complex functions:
 
 | Complexity | Function |
 |---:|---|
-| 97 | `lithos_loom.plugins.story_develop.__main__.main` |
+| 98 | `lithos_loom.plugins.story_develop.__main__.main` |
 | 58 | `lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider` |
 | 53 | `lithos_loom.cli.converge.converge_command` |
-| 50 | `lithos_loom.plugins.story_develop.develop.develop` |
+| 51 | `lithos_loom.plugins.story_develop.develop.develop` |
 | 49 | `lithos_loom.cli.project.import_project` |
 | 44 | `lithos_loom.children.obsidian_sync._amain` |
 | 43 | `lithos_loom.subscriptions.reconciliation_state._derive` |
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.59** (89964 test lines / 56727 source lines)
+- Test-to-source line ratio: **1.59** (90284 test lines / 56853 source lines)

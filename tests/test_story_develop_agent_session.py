@@ -27,7 +27,6 @@ from lithos_loom.plugins.story_develop.agent_session import (
     turn_with_reactions,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
-from lithos_loom.plugins.story_develop.limits import FailureClass
 from lithos_loom.plugins.story_develop.rounds import Services
 from lithos_loom.plugins.story_develop.turns import TurnResult
 
@@ -39,6 +38,8 @@ LIMIT = "You've hit your usage limit. Upgrade to continue."
 def _turn(
     *, succeeded: bool, session_id: str = "", cost: float = 0.0, result_text: str = ""
 ) -> TurnResult:
+    # A failed turn carries the claude CLI's `is_error` payload, so its
+    # result_text is the CLI's error text (an infra channel), as in production.
     return TurnResult(
         exit_code=0 if succeeded else 1,
         succeeded=succeeded,
@@ -46,7 +47,7 @@ def _turn(
         session_id=session_id,
         result_text=result_text,
         cost_usd=cost,
-        raw=None,
+        raw={"is_error": not succeeded},
         stderr="",
     )
 
@@ -269,9 +270,13 @@ def test_auth_failure_twice_escalates_with_the_host_action(tmp_path: Path) -> No
     assert att.turn.succeeded is False and att.interrupted is False
     assert att.escalation is not None
     assert "coder" in att.escalation and "auth_failed" in att.escalation
-    assert "2 attempt" in att.escalation
+    assert "2 attempts" in att.escalation
     assert "OAuth session expired" in att.escalation
-    assert "complete the gate" in att.escalation
+    # the host action rides beside the line, never inside it — the gate caps
+    # the summary at 200 chars and must not truncate the action away
+    assert "complete the gate" not in att.escalation
+    assert "complete the gate" in att.host_action
+    assert len(f"round 9: {att.escalation}") <= 200
     assert sleeps == [20.0] and len(calls) == 2  # no third attempt
     assert budget.remaining == 600  # infra backoff never spends the pause budget
     assert att.cost == pytest.approx(0.02)
@@ -353,7 +358,7 @@ def test_retry_counts_are_per_class_and_every_attempt_is_recorded(
     assert att.turn.succeeded and att.escalation is None
     assert sleeps == [30.0, 20.0]
     assert recorded_fixtures == [("coder", 1), ("coder", 1)]
-    assert FailureClass.TRANSIENT_INFRA != FailureClass.AUTH_FAILED
+    assert att.host_action == ""
 
 
 def test_usage_limit_after_an_infra_retry_still_pauses(tmp_path: Path) -> None:
@@ -371,3 +376,38 @@ def test_usage_limit_after_an_infra_retry_still_pauses(tmp_path: Path) -> None:
     assert att.turn.succeeded and att.interrupted is False
     assert sleeps[0] == 30.0 and len(sleeps) == 2
     assert budget.remaining == pytest.approx(600 - sleeps[1])
+
+
+def test_attempt_carries_the_rebound_session_not_the_last_turns(tmp_path: Path) -> None:
+    # Codex mints its thread_id on turn 1; a FRESH retry (no transcript) that
+    # dies before `thread.started` returns "". The run's handle is the minted
+    # one, which only the wrapper saw — it must come back on the attempt.
+    services, calls, sleeps = _services(
+        [
+            _turn(succeeded=False, session_id="thread-minted", result_text=DISCONNECT),
+            _turn(succeeded=False, session_id="", result_text=DISCONNECT),
+            _turn(succeeded=False, session_id="", result_text=DISCONNECT),
+        ]
+    )
+    att = _run(
+        _config(tmp_path),
+        services,
+        _FakeEngine(False),
+        budget=PauseBudget(600),
+        session_id="pre-mint-uuid",
+    )
+    assert att.escalation is not None
+    assert att.session_id == "thread-minted"
+    assert att.turn.session_id == ""  # the last turn alone would lose it
+
+
+def test_successful_attempt_reports_its_session(tmp_path: Path) -> None:
+    services, _, _ = _services([_turn(succeeded=True, session_id="thread-minted")])
+    att = _run(
+        _config(tmp_path),
+        services,
+        _FakeEngine(True),
+        budget=PauseBudget(600),
+        session_id="pre-mint-uuid",
+    )
+    assert att.session_id == "thread-minted"

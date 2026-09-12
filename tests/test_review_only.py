@@ -307,3 +307,20 @@ def test_panel_incomplete_flags_absent_interrupted_and_invalid() -> None:
     assert review_only.panel_incomplete(_panel(interrupted=True)) is True
     assert review_only.panel_incomplete(_panel(invalid="correctness")) is True
     assert review_only.panel_incomplete(_panel()) is False  # complete, usable
+
+
+def test_panel_incomplete_on_an_infra_escalation() -> None:
+    # Slice B: an escalating reviewer is no usable review — converge must not
+    # seed its fix loop from it, review-only must report it as blocking.
+    from lithos_loom.plugins.story_develop.panel import PanelRoundResult
+    from lithos_loom.plugins.story_develop.review_only import panel_incomplete
+
+    panel = PanelRoundResult(
+        round_reviews=[],
+        cost=0.0,
+        interrupted=False,
+        resume_after=None,
+        invalid_reviewer=None,  # even if a consumer forgot the additive flag
+        infra_failure="reviewer [correctness] auth_failed persisted after 2 attempts",
+    )
+    assert panel_incomplete(panel) is True

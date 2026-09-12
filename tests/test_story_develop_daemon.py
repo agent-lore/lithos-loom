@@ -1253,10 +1253,11 @@ def test_build_result_payload_infra_failed_is_environment_and_retriable(
     # line (with its host action) as the summary.
     reason = (
         "round 2: coder auth_failed persisted after 2 attempts: Failed to "
-        "authenticate — re-authenticate the agent CLI, then complete the gate"
+        "authenticate: OAuth session expired and could not be refreshed"
     )
+    action = "re-authenticate the agent CLI on the host, then complete the gate"
     payload, exit_code = build_result_payload(
-        _result("infra_failed", tmp_path, failure_reason=reason),
+        _result("infra_failed", tmp_path, failure_reason=reason, host_action=action),
         task_id="t-1",
         started_at=_NOW,
         finished_at=_NOW,
@@ -1268,6 +1269,9 @@ def test_build_result_payload_infra_failed_is_environment_and_retriable(
     assert payload["error"]["retriable"] is True
     assert payload["escalation"]["reason"] == "infra"
     assert payload["escalation"]["summary"] == reason
+    # the host action is structured, so the gate's summary cap can't eat it
+    assert payload["escalation"]["brief"]["host_action"] == action
+    assert len(reason) <= 200
     validate_result_schema(payload)
 
 

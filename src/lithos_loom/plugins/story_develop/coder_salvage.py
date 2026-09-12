@@ -54,8 +54,7 @@ def nudge_for_handoff(ctx: RoundContext, round_no: int) -> TurnAttempt:
         engine=ctx.coder_engine,
     )
     ctx.coder_cost += attempt.cost
-    if attempt.turn.session_id:
-        ctx.coder_session = attempt.turn.session_id
+    ctx.coder_session = attempt.session_id or ctx.coder_session
     return attempt
 
 

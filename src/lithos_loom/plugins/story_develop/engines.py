@@ -404,6 +404,7 @@ class CodexEngine(_BaseEngine):
         saw_completed = False
         failure_events: list[dict] = []
 
+        unparsed: list[str] = []
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
@@ -411,6 +412,7 @@ class CodexEngine(_BaseEngine):
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                unparsed.append(line)  # retained for the failure classifier
                 continue
             if not isinstance(event, dict):
                 continue
@@ -443,6 +445,11 @@ class CodexEngine(_BaseEngine):
             raw_parts["usage"] = usage
         if failure_events:
             raw_parts["failure_events"] = failure_events
+        if unparsed and not completed:
+            # Same contract as the claude parser (slice B): a bare error line
+            # the CLI printed outside the event stream stays visible to the
+            # classifier, bounded, and never counts as a result.
+            raw_parts["unparsed_stdout"] = "\n".join(unparsed)[-_UNPARSED_STDOUT_KEEP:]
         raw = raw_parts or None
 
         return TurnResult(

@@ -177,7 +177,7 @@ def turn_with_reactions(
         if turn.session_id:
             session_id = turn.session_id
         if turn.succeeded:
-            return TurnAttempt(turn, False, total_cost)
+            return TurnAttempt(turn, False, total_cost, session_id=session_id)
         limits.record_failure_fixture(
             config.failures_dir, agent=agent, round_no=round_no, turn=turn
         )
@@ -196,7 +196,7 @@ def turn_with_reactions(
                     config.run_id,
                     agent,
                 )
-                return TurnAttempt(turn, True, total_cost)
+                return TurnAttempt(turn, True, total_cost, session_id=session_id)
             logger.info(
                 "story-develop %s: %s usage-limited; pausing %.0fs (%s; %.0f min "
                 "of pause budget left)",
@@ -217,7 +217,7 @@ def turn_with_reactions(
                 escalation = (
                     (
                         f"{agent} {cls.value} persisted after {n} attempt"
-                        f"{'s' if n != 1 else ''}: {summary} — {reaction.host_action}"
+                        f"{'s' if n != 1 else ''}: {summary}"
                     )
                     if reaction.escalate
                     else None
@@ -230,7 +230,14 @@ def turn_with_reactions(
                     used + 1,
                     summary,
                 )
-                return TurnAttempt(turn, False, total_cost, escalation)
+                return TurnAttempt(
+                    turn,
+                    False,
+                    total_cost,
+                    escalation,
+                    host_action=reaction.host_action if escalation else "",
+                    session_id=session_id,
+                )
             wait = reaction.backoff_seconds[used]
             attempts[cls] = used + 1
             logger.warning(
@@ -246,7 +253,7 @@ def turn_with_reactions(
             services.sleep(wait)
             continuation = INFRA_CONTINUATION_PROMPT
         else:
-            return TurnAttempt(turn, False, total_cost)
+            return TurnAttempt(turn, False, total_cost, session_id=session_id)
         # Resume the SAME session when its transcript survived the interruption
         # (the in-session context is the thing we are protecting); otherwise
         # re-issue the original prompt fresh.

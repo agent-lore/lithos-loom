@@ -544,3 +544,30 @@ def test_claude_parse_retained_stdout_is_bounded() -> None:
     turn = ClaudeEngine().parse_turn(big, exit_code=1, stderr="")
     assert turn.raw is not None
     assert len(turn.raw["unparsed_stdout"]) == engines_mod._UNPARSED_STDOUT_KEEP
+
+
+def test_codex_parse_retains_bare_error_lines_outside_the_event_stream() -> None:
+    # A codex CLI that prints its auth failure as a bare line (no JSON event)
+    # used to leave the classifier nothing to read.
+    from lithos_loom.plugins.story_develop.engines import CodexEngine
+
+    stdout = "Failed to authenticate: token expired\n"
+    turn = CodexEngine().parse_turn(stdout, exit_code=1, stderr="")
+    assert turn.succeeded is False and turn.completed is False
+    assert turn.raw == {"unparsed_stdout": "Failed to authenticate: token expired"}
+
+
+def test_codex_parse_does_not_retain_noise_from_a_completed_turn() -> None:
+    import json as _json
+
+    from lithos_loom.plugins.story_develop.engines import CodexEngine
+
+    stream = "\n".join(
+        [
+            "warming up…",
+            _json.dumps({"type": "thread.started", "thread_id": "t1"}),
+            _json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1}}),
+        ]
+    )
+    turn = CodexEngine().parse_turn(stream, exit_code=0, stderr="")
+    assert turn.succeeded and turn.raw == {"usage": {"input_tokens": 1}}
