@@ -6,12 +6,14 @@ Moved out of ``develop.py`` behind their public names:
   container, with all per-tool provisioning read off the :class:`Engine`
   (ARCH-2.E3);
 * :class:`PauseBudget` — the run's shared usage-limit pause budget;
-* :func:`turn_with_limit_pauses` — run a turn, pausing-and-retrying through
-  provider usage limits (T5); the subtle rebind / budget / resume-vs-fresh
-  reaction. It calls its side-effecting seams (``run_turn`` / ``sleep``) through
-  the injected :class:`~.rounds.Services`, and the per-tool transcript layout it
-  consults to decide resume-vs-fresh lives on the :class:`Engine`
-  (``engine.session_transcript_exists``), not here;
+* :func:`turn_with_reactions` — run a turn and apply the failure-class
+  reaction table (:mod:`limits`, slice B): pause-and-retry through provider
+  usage limits (T5), retry-with-backoff through transient infrastructure
+  failures, escalate when a retry class is exhausted; the subtle rebind /
+  budget / resume-vs-fresh reaction. It calls its side-effecting seams
+  (``run_turn`` / ``sleep``) through the injected :class:`~.rounds.Services`,
+  and the per-tool transcript layout it consults to decide resume-vs-fresh
+  lives on the :class:`Engine` (``engine.session_transcript_exists``), not here;
 * :func:`resume_after_from` — when an interrupted run should be retried (T10).
 
 ``develop.py`` keeps ``_`` -prefixed aliases (deleted in S8) so its own call
@@ -29,7 +31,7 @@ from ...runner import worktree
 from . import containers, engines, limits
 from .config import DevelopConfig
 from .rounds import Services
-from .turns import TurnResult
+from .turns import TurnAttempt, TurnResult
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,15 @@ class PauseBudget:
     def __init__(self, seconds: float) -> None:
         self.remaining = seconds
 
+_INFRA_CONTINUATION_PROMPT = (
+    "Your previous turn was cut short by an infrastructure failure (the agent "
+    "process died before it could finish; nothing you did was lost). Continue "
+    "the task from where you left off. If you had already finished, just write "
+    "the handoff file as previously instructed."
+)
+
+
+
 
 # When a usage-limited run checkpoints WITHOUT a parseable reset hint, suggest
 # retrying after this long. Provider windows are typically 1-5h; an hourly
@@ -111,7 +122,7 @@ def resume_after_from(turn: TurnResult | None) -> datetime:
     return hint or (datetime.now(UTC) + timedelta(minutes=_RESUME_FALLBACK_MINUTES))
 
 
-def turn_with_limit_pauses(
+def turn_with_reactions(
     config: DevelopConfig,
     budget: PauseBudget,
     *,
@@ -125,22 +136,28 @@ def turn_with_limit_pauses(
     round_no: int,
     timeout: int,
     engine: engines.Engine,
-) -> tuple[TurnResult, bool, float]:
-    """Run a turn, pausing-and-retrying through provider usage limits.
+) -> TurnAttempt:
+    """Run a turn, applying the failure-class reaction table until it settles.
 
-    Returns ``(turn, interrupted, total_cost)``: *interrupted* is True when
-    the turn was usage-limited and the pause budget ran out — the caller
-    checkpoints rather than treating it as an agent failure. Non-limit
-    failures return immediately (the existing failure paths own those).
-    *total_cost* sums every attempt, not just the last. Every failed turn is
-    recorded as a classification fixture (G4 capture harness).
+    A ``usage_limited`` turn pauses within the shared budget and retries (T5);
+    ``interrupted`` is set when the budget runs out — the caller checkpoints
+    rather than treating it as an agent failure. A ``retry`` class (auth,
+    transient infra, a killed process) sleeps its per-attempt backoff — which
+    never spends the pause budget — and retries, resuming the session when its
+    transcript survived; when its retries are exhausted the attempt carries an
+    ``escalation`` line and the caller ends the run ``infra_failed``. Every
+    other failure returns at once (the existing failure paths own those). Retry
+    counts are kept per class, so a disconnect followed by an auth failure
+    spends each class's own budget. Every failed turn is recorded as a
+    classification fixture (G4 capture harness).
 
-    The turn and the pause sleep run through *services* (ARCH-1.S4) so the loop
-    is testable with fakes; the resume-vs-fresh transcript check runs through
+    The turn and the sleeps run through *services* (ARCH-1.S4) so the loop is
+    testable with fakes; the resume-vs-fresh transcript check runs through
     *engine* (per-tool layout lives on the Engine, ARCH-2.E1/E2).
     """
     attempt_prompt, attempt_resume = prompt, resume
     total_cost = 0.0
+    attempts: dict[limits.FailureClass, int] = {}
     while True:
         turn = services.run_turn(
             container=container,
@@ -154,48 +171,83 @@ def turn_with_limit_pauses(
         )
         total_cost += turn.cost_usd
         # Codex mints its handle (thread_id) on turn 1; rebind so a retry after
-        # a usage-limit pause resumes the SAME session (and the transcript
-        # check below globs the right id) rather than the stale pre-mint uuid.
-        # No-op for claude (echoes the supplied uuid); dormant for codex until
-        # codex usage-limits are classified (G4), but kept correct — mirrors
-        # the reviewer path's `cur_session` rebind in `_review_turn`.
+        # a pause / backoff resumes the SAME session (and the transcript check
+        # below globs the right id) rather than the stale pre-mint uuid. No-op
+        # for claude (echoes the supplied uuid) — mirrors the reviewer path's
+        # `cur_session` rebind in `_review_turn`.
         if turn.session_id:
             session_id = turn.session_id
         if turn.succeeded:
-            return turn, False, total_cost
+            return TurnAttempt(turn, False, total_cost)
         limits.record_failure_fixture(
             config.failures_dir, agent=agent, round_no=round_no, turn=turn
         )
-        if limits.classify_failure(turn) != limits.USAGE_LIMITED:
-            return turn, False, total_cost
-        plan = limits.pause_plan(
-            turn,
-            poll_seconds=config.pause_poll_minutes * 60,
-            remaining_seconds=budget.remaining,
-        )
-        if plan is None:
-            logger.warning(
-                "story-develop %s: %s usage-limited and the pause budget is "
-                "exhausted — checkpointing",
+        cls = limits.classify_failure(turn)
+        reaction = limits.reaction_for(cls)
+        if reaction.kind == "pause":
+            plan = limits.pause_plan(
+                turn,
+                poll_seconds=config.pause_poll_minutes * 60,
+                remaining_seconds=budget.remaining,
+            )
+            if plan is None:
+                logger.warning(
+                    "story-develop %s: %s usage-limited and the pause budget is "
+                    "exhausted — checkpointing",
+                    config.run_id,
+                    agent,
+                )
+                return TurnAttempt(turn, True, total_cost)
+            logger.info(
+                "story-develop %s: %s usage-limited; pausing %.0fs (%s; %.0f min "
+                "of pause budget left)",
                 config.run_id,
                 agent,
+                plan.wait_seconds,
+                plan.reason,
+                budget.remaining / 60,
             )
-            return turn, True, total_cost
-        logger.info(
-            "story-develop %s: %s usage-limited; pausing %.0fs (%s; %.0f min "
-            "of pause budget left)",
-            config.run_id,
-            agent,
-            plan.wait_seconds,
-            plan.reason,
-            budget.remaining / 60,
-        )
-        services.sleep(plan.wait_seconds)
-        budget.remaining -= plan.wait_seconds
+            services.sleep(plan.wait_seconds)
+            budget.remaining -= plan.wait_seconds
+            continuation = _CONTINUATION_PROMPT
+        elif reaction.kind == "retry":
+            used = attempts.get(cls, 0)
+            if used >= reaction.retries:
+                summary = limits.failure_summary(turn)
+                n = used + 1
+                escalation = (
+                    f"{agent} {cls.value} persisted after {n} attempt"
+                    f"{'s' if n != 1 else ''}: {summary} — {reaction.host_action}"
+                ) if reaction.escalate else None
+                logger.warning(
+                    "story-develop %s: %s %s after %d attempt(s): %s",
+                    config.run_id,
+                    agent,
+                    cls.value,
+                    used + 1,
+                    summary,
+                )
+                return TurnAttempt(turn, False, total_cost, escalation)
+            wait = reaction.backoff_seconds[used]
+            attempts[cls] = used + 1
+            logger.warning(
+                "story-develop %s: %s %s (%s); retrying in %.0fs (attempt %d of %d)",
+                config.run_id,
+                agent,
+                cls.value,
+                limits.failure_summary(turn),
+                wait,
+                used + 2,
+                reaction.retries + 1,
+            )
+            services.sleep(wait)
+            continuation = _INFRA_CONTINUATION_PROMPT
+        else:
+            return TurnAttempt(turn, False, total_cost)
         # Resume the SAME session when its transcript survived the interruption
         # (the in-session context is the thing we are protecting); otherwise
         # re-issue the original prompt fresh.
-        if engine.session_transcript_exists(config_dir, session_id):
-            attempt_prompt, attempt_resume = _CONTINUATION_PROMPT, True
+        if reaction.resume and engine.session_transcript_exists(config_dir, session_id):
+            attempt_prompt, attempt_resume = continuation, True
         else:
             attempt_prompt, attempt_resume = prompt, resume

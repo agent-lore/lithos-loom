@@ -15,7 +15,7 @@ it builds a ``Services`` from its own module globals so the existing
 effect until S8 re-points the tests (see the compat note in :mod:`develop`).
 
 S4 introduced the seam and threaded it through
-:func:`agent_session.turn_with_limit_pauses`; S6 grew this module into the
+:func:`agent_session.turn_with_reactions`; S6 grew this module into the
 round/phase pipeline. :class:`RoundContext` is the explicit successor of
 ``develop()``'s locals bag; each phase function ``(ctx, round_no) -> CycleExit |
 None`` maps 1:1 onto a phase of a develop round and returns a :class:`CycleExit`
@@ -26,7 +26,7 @@ validation → setup → ``for round: run_round`` → epilogue.
 To keep the pipeline a leaf that imports neither ``panel`` (which imports
 ``Services`` from here) nor ``agent_session`` (ditto) nor ``develop`` — no import
 cycle — the boundary collaborators (``run_panel_round``,
-``turn_with_limit_pauses``, ``resume_after_from`` and the coder-side prompt
+``turn_with_reactions``, ``resume_after_from`` and the coder-side prompt
 helpers) are **injected** onto :class:`RoundContext` by ``develop()`` from its own
 module globals. That also keeps the ``develop_mod``-level ``monkeypatch`` targets
 (``run_panel_round`` / ``_run_check_set`` via :class:`Services` / ``run_turn`` /
@@ -60,7 +60,7 @@ from .gate_findings import GateLedger
 from .handoff import max_severity, render_prompt
 from .sandbox_facts import for_prompt as _sandbox_section
 from .test_gate import GateResult
-from .turns import TurnResult
+from .turns import TurnAttempt, TurnResult
 
 if TYPE_CHECKING:
     from .agent_session import PauseBudget
@@ -75,7 +75,7 @@ class Services:
     loop is testable with fakes (ARCH-1.S4).
 
     ``run_turn`` and ``sleep`` are consumed by
-    :func:`agent_session.turn_with_limit_pauses` today; ``start_container`` /
+    :func:`agent_session.turn_with_reactions` today; ``start_container`` /
     ``stop_container`` / ``run_check_set`` are wired now for the S6 phase
     pipeline.
     """
@@ -150,7 +150,7 @@ class RoundContext:
     budget: PauseBudget
     coder_session: str
     # --- injected boundary collaborators (from develop's own module globals) ---
-    turn_with_limit_pauses: Callable[..., tuple[TurnResult, bool, float]]
+    turn_with_reactions: Callable[..., TurnAttempt]
     run_panel_round: Callable[..., PanelRoundResult]
     resume_after_from: Callable[[TurnResult | None], datetime]
     render_panel_findings: Callable[[list[ReviewOutcome]], str]
@@ -314,7 +314,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         )
         coder_resume = True
 
-    coder_turn, coder_interrupted, attempt_cost = ctx.turn_with_limit_pauses(
+    attempt = ctx.turn_with_reactions(
         config,
         ctx.budget,
         services=ctx.services,
@@ -328,19 +328,26 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         timeout=ctx.coder_timeout,
         engine=ctx.coder_engine,
     )
-    ctx.coder_cost += attempt_cost
+    coder_turn = attempt.turn
+    ctx.coder_cost += attempt.cost
     # Codex mints its session handle (thread_id) on turn 1; reuse the returned
     # handle for resumes + persist it (no-op for claude, which echoes the
     # supplied uuid). Drives daemon-resume + PR delivery.
     if coder_turn.session_id:
         ctx.coder_session = coder_turn.session_id
-    if coder_interrupted:
+    if attempt.interrupted:
         return CycleExit(
             status="interrupted",
             failure_reason=(
                 f"round {round_no}: coder usage-limited; pause budget exhausted"
             ),
             resume_after=ctx.resume_after_from(coder_turn),
+        )
+    if attempt.escalation is not None:
+        return CycleExit(
+            status="infra_failed",
+            failure_reason=f"round {round_no}: {attempt.escalation}",
+            resume_after=None,
         )
     done_present = (config.handoff_dir / handoff.coder_handoff_name(round_no)).is_file()
     # The turn whose success gates the handoff for this round. The salvage nudge

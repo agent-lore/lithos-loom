@@ -15,11 +15,30 @@ ARCH-2.E5 (their last caller, the eval judge, migrated to
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 
 from . import containers
 from .engines import _TIMEOUT_EXIT, Engine, TurnResult
 
-__all__ = ["TurnResult", "run_turn"]
+__all__ = ["TurnAttempt", "TurnResult", "run_turn"]
+
+
+@dataclass(frozen=True)
+class TurnAttempt:
+    """The outcome of :func:`~.agent_session.turn_with_reactions` — the last turn plus how the
+    reactions ended.
+
+    ``interrupted``: usage-limited with the pause budget spent (the caller
+    checkpoints, T10). ``escalation``: a retry class was exhausted and its
+    reaction says escalate — one line naming the agent, the class, the attempt
+    count, the failure and the host action; the caller ends the run
+    ``infra_failed``. ``cost`` sums every attempt.
+    """
+
+    turn: TurnResult
+    interrupted: bool
+    cost: float
+    escalation: str | None = None
 
 
 def run_turn(

@@ -199,7 +199,7 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
 # develop-local Services seam (_develop_services / _sleep) are gone. develop()
 # now builds :meth:`Services.live` directly and calls the public names —
 # check_runner.build_check_set / .load_gate_ledger, agent_session's build_run_cmd
-# / PauseBudget / turn_with_limit_pauses / resume_after_from, panel's ReviewerState
+# / PauseBudget / turn_with_reactions / resume_after_from, panel's ReviewerState
 # / run_panel_round — so tests patch the real module homes (turns.run_turn,
 # time.sleep, check_runner.run_check_set / .build_check_set) rather than develop's
 # aliases. review_only + pr_delivery likewise import from those homes.
@@ -476,7 +476,7 @@ def develop(
         gate_ledger=gate_ledger,
         budget=budget,
         coder_session=coder_session,
-        turn_with_limit_pauses=agent_session.turn_with_limit_pauses,
+        turn_with_reactions=agent_session.turn_with_reactions,
         run_panel_round=run_panel_round,
         resume_after_from=agent_session.resume_after_from,
         render_panel_findings=_render_panel_findings,

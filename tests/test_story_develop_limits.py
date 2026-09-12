@@ -8,16 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from lithos_loom.plugins.story_develop.engines import CodexEngine
+from lithos_loom.plugins.story_develop.engines import ClaudeEngine, CodexEngine
 from lithos_loom.plugins.story_develop.limits import (
     AGENT_ERROR,
     USAGE_LIMITED,
+    FailureClass,
+    Reaction,
     classify_failure,
+    failure_summary,
     next_fallback_tool,
     pause_plan,
+    reaction_for,
     record_failure_fixture,
     reset_hint,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures" / "agent_failures"
 from lithos_loom.plugins.story_develop.turns import TurnResult
 
 
@@ -68,9 +74,8 @@ def test_classifies_limit_in_stderr() -> None:
         "",  # nothing at all
         "TypeError: cannot read properties of undefined",
         "fatal: not a git repository",
-        "API Error: 500 internal server error",
-        "rate limited, retrying",  # transient 429s are NOT a usage limit
         "context window limit reached",  # context limit != usage limit
+        "AssertionError: expected 3 findings, got 2",
     ],
 )
 def test_unrecognised_failures_are_agent_errors(text: str) -> None:
@@ -78,46 +83,28 @@ def test_unrecognised_failures_are_agent_errors(text: str) -> None:
     assert classify_failure(_failed(result_text=text)) == AGENT_ERROR
 
 
-def test_timeout_is_agent_error_even_with_limit_text() -> None:
+def test_timeout_is_its_own_class_even_with_limit_text() -> None:
+    # Silence is not a limit signal (T5) — and not an infra retry either: the
+    # turn ran to the wall, so its reaction stays the plain failure path.
     turn = _failed(result_text="usage limit reached", exit_code=124)
-    assert classify_failure(turn) == AGENT_ERROR
+    assert classify_failure(turn) == FailureClass.TIMEOUT
+    assert reaction_for(FailureClass.TIMEOUT).kind == "fail"
 
 
-def test_codex_raw_limit_events_are_not_yet_classified() -> None:
-    """The G4 boundary (#103): a real codex usage-limit is captured but not classified.
+def test_codex_raw_limit_events_are_classified_from_raw() -> None:
+    """G4 lands (#103): a real codex usage-limit is recognised from ``raw``.
 
     A real codex limit arrives as a JSONL ``turn.failed`` event, NOT an
-    ``agent_message`` — so :meth:`CodexEngine.parse_turn` stores it verbatim in
-    ``raw["failure_events"]`` and leaves ``result_text`` empty. Because
-    :func:`classify_failure` searches only ``result_text`` + ``stderr`` (never
-    ``raw``), the limit is NOT yet recognised as ``USAGE_LIMITED`` — it stays
-    ``AGENT_ERROR``, so a *real* codex limit does not yet reach the pause/resume
-    path. ARCH-2.E2 makes the resume mechanics correct (pinned by the coder test
-    with a *synthetic already-classified* failure); promoting the captured raw
-    wording into classification is the dormant G4 work. When G4 lands, flip this
-    assertion to ``USAGE_LIMITED``.
+    ``agent_message`` — :meth:`CodexEngine.parse_turn` stores it verbatim in
+    ``raw["failure_events"]`` and leaves ``result_text`` empty. The classifier
+    now searches the whole turn (result text + stderr + ``raw``), so the limit
+    reaches the pause/switch path instead of failing the run as ``agent_error``.
     """
-    stream = "\n".join(
-        json.dumps(e)
-        for e in (
-            {"type": "thread.started", "thread_id": "t1"},
-            {
-                "type": "turn.failed",
-                "error": {
-                    "message": "You've hit your usage limit.",
-                    "type": "usage_limit",
-                },
-            },
-        )
-    )
-    turn = CodexEngine().parse_turn(stream, exit_code=1, stderr="")
+    turn = _fixture_turn("codex_usage_limit.json")
     assert turn.succeeded is False
-    # the limit wording is captured verbatim in raw, NOT in result_text / stderr …
     assert turn.result_text == "" and turn.stderr == ""
     assert turn.raw is not None and "failure_events" in turn.raw
-    assert "usage limit" in json.dumps(turn.raw["failure_events"])
-    # … so the current classifier (result_text + stderr only) does not see it.
-    assert classify_failure(turn) == AGENT_ERROR
+    assert classify_failure(turn) == USAGE_LIMITED
 
 
 def test_classify_rejects_successful_turn() -> None:
@@ -133,6 +120,216 @@ def test_classify_rejects_successful_turn() -> None:
     )
     with pytest.raises(ValueError):
         classify_failure(ok)
+
+
+# --- slice B: one classifier over the whole turn (5dbeb0c8) ------------------
+
+
+def _fixture_turn(name: str) -> TurnResult:
+    """Build the TurnResult a fixture describes.
+
+    A fixture either carries the parsed fields (``result_text`` / ``stderr`` /
+    ``raw`` — a captured ``failures/round_NN_<agent>.json`` record) or the raw
+    ``stdout`` of the turn, which is fed through the named engine's parser —
+    so the parser's retention of unparseable output is part of what the
+    fixture pins.
+    """
+    data = json.loads((FIXTURES / name).read_text())
+    engine = ClaudeEngine() if data["engine"] == "claude" else CodexEngine()
+    if "stdout" in data:
+        return engine.parse_turn(
+            data["stdout"], exit_code=data["exit_code"], stderr=data["stderr"]
+        )
+    return TurnResult(
+        exit_code=data["exit_code"],
+        succeeded=False,
+        completed=False,
+        session_id="",
+        result_text=data["result_text"],
+        cost_usd=0.0,
+        raw=data["raw"],
+        stderr=data["stderr"],
+    )
+
+
+# Every fixture on disk must be listed here: an unlisted capture is a class
+# nobody decided on. (The completeness assertion below enforces it.)
+EXPECTED_CLASS = {
+    "claude_oauth_expired_parsed.json": FailureClass.AUTH_FAILED,
+    "claude_oauth_expired_raw_stdout.json": FailureClass.AUTH_FAILED,
+    "claude_401_token_revoked.json": FailureClass.AUTH_FAILED,
+    "claude_stream_disconnect.json": FailureClass.TRANSIENT_INFRA,
+    "claude_api_overloaded_529.json": FailureClass.TRANSIENT_INFRA,
+    "codex_stream_disconnect.json": FailureClass.TRANSIENT_INFRA,
+    "codex_usage_limit.json": FailureClass.USAGE_LIMITED,
+    "docker_exec_killed_137.json": FailureClass.OOM_OR_SPAWN,
+    "docker_container_not_running.json": FailureClass.OOM_OR_SPAWN,
+}
+
+
+def test_every_fixture_has_a_decided_class() -> None:
+    on_disk = {p.name for p in FIXTURES.glob("*.json")}
+    assert on_disk == set(EXPECTED_CLASS)
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED_CLASS))
+def test_fixture_classifies(name: str) -> None:
+    turn = _fixture_turn(name)
+    assert turn.succeeded is False
+    assert classify_failure(turn) == EXPECTED_CLASS[name]
+
+
+def test_raw_stdout_shape_is_retained_not_dropped() -> None:
+    # The #405 shape: unparseable stdout used to become raw=None / result_text=""
+    # and the 401 was invisible. The parser now keeps it for the classifier.
+    turn = _fixture_turn("claude_oauth_expired_raw_stdout.json")
+    assert turn.completed is False and turn.raw is not None
+    assert "OAuth session expired" in json.dumps(turn.raw)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "API Error: 401 OAuth access token has been revoked",
+        "authentication_failed: please run /login",
+        "Invalid API key · Fix external API key",
+        "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}",
+    ],
+)
+def test_auth_wordings(text: str) -> None:
+    assert classify_failure(_failed(result_text=text)) == FailureClass.AUTH_FAILED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "API Error: 500 internal server error",
+        "rate limited, retrying",  # a 429 is transient, not a usage limit
+        "API Error: 429 {\"error\":{\"type\":\"rate_limit_error\"}}",
+        "Error: stream disconnected before completion",
+        "idle timeout waiting for websocket message",
+        "fetch failed: read ECONNRESET",
+        "connect ETIMEDOUT 104.18.0.1:443",
+        "getaddrinfo EAI_AGAIN api.anthropic.com",
+        "API Error: 503 Service Unavailable",
+        "API Error: 529 overloaded_error",
+    ],
+)
+def test_transient_wordings(text: str) -> None:
+    assert classify_failure(_failed(result_text=text)) == FailureClass.TRANSIENT_INFRA
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Error response from daemon: container x is not running",
+        "Error response from daemon: No such container: x",
+        "OCI runtime exec failed: exec failed: unable to start container process",
+        "fatal error: out of memory",
+    ],
+)
+def test_spawn_and_memory_wordings(stderr: str) -> None:
+    assert classify_failure(_failed(stderr=stderr)) == FailureClass.OOM_OR_SPAWN
+
+
+def test_exit_137_is_oom_whatever_the_text_says() -> None:
+    # The process was killed; whatever it printed before is stale.
+    turn = _failed(result_text="usage limit reached", exit_code=137)
+    assert classify_failure(turn) == FailureClass.OOM_OR_SPAWN
+
+
+def test_usage_limit_outranks_transient_wording() -> None:
+    # "rate limit" style text inside a real limit message must still pause,
+    # never retry-with-backoff into the same wall.
+    text = "You've hit your usage limit (rate limited). Upgrade to continue."
+    assert classify_failure(_failed(result_text=text)) == USAGE_LIMITED
+
+
+def test_auth_outranks_transient_wording() -> None:
+    text = "stream disconnected: API Error: 401 OAuth access token has been revoked"
+    assert classify_failure(_failed(result_text=text)) == FailureClass.AUTH_FAILED
+
+
+def test_classes_are_strings_for_the_fixture_record() -> None:
+    # record_failure_fixture json-dumps the class; the on-disk word is the enum
+    # value, and the legacy constants are the same members (callers comparing
+    # `classify_failure(t) != USAGE_LIMITED` keep working).
+    assert FailureClass.AGENT_ERROR == "agent_error" == AGENT_ERROR
+    assert FailureClass.USAGE_LIMITED == "usage_limited" == USAGE_LIMITED
+    assert json.dumps(FailureClass.AUTH_FAILED) == '"auth_failed"'
+
+
+# --- reaction table -----------------------------------------------------------
+
+
+def test_reaction_table_is_total() -> None:
+    for cls in FailureClass:
+        assert isinstance(reaction_for(cls), Reaction)
+
+
+def test_auth_failure_retries_once_then_escalates() -> None:
+    # 2026-09-12: the host token was valid minutes after the container's
+    # refresh failed and the next run proceeded — a plausible rotation race
+    # on the shared credentials file. So: one re-read + retry, escalate on the
+    # second hit (a genuinely revoked login fails identically until a human
+    # re-authenticates).
+    r = reaction_for(FailureClass.AUTH_FAILED)
+    assert r.kind == "retry" and r.retries == 1 and r.escalate is True
+    assert r.backoff_seconds == (20.0,) and r.resume is True
+
+
+def test_transient_infra_retries_twice_with_backoff_then_escalates() -> None:
+    r = reaction_for(FailureClass.TRANSIENT_INFRA)
+    assert r.kind == "retry" and r.retries == 2 and r.escalate is True
+    assert r.backoff_seconds == (30.0, 120.0) and r.resume is True
+
+
+def test_oom_or_spawn_retries_once_then_escalates() -> None:
+    r = reaction_for(FailureClass.OOM_OR_SPAWN)
+    assert r.kind == "retry" and r.retries == 1 and r.escalate is True
+    assert len(r.backoff_seconds) == 1
+
+
+def test_usage_limit_pauses_and_plain_failures_fail() -> None:
+    assert reaction_for(FailureClass.USAGE_LIMITED).kind == "pause"
+    assert reaction_for(FailureClass.AGENT_ERROR).kind == "fail"
+    assert reaction_for(FailureClass.TIMEOUT).kind == "fail"
+
+
+def test_retry_reactions_have_one_backoff_per_retry() -> None:
+    for cls in FailureClass:
+        r = reaction_for(cls)
+        if r.kind == "retry":
+            assert len(r.backoff_seconds) == r.retries
+
+
+def test_every_escalating_class_names_a_host_action() -> None:
+    for cls in FailureClass:
+        r = reaction_for(cls)
+        if r.escalate:
+            assert r.host_action and "complete the gate" in r.host_action
+
+
+# --- failure summary ----------------------------------------------------------
+
+
+def test_failure_summary_prefers_result_text_first_line() -> None:
+    turn = _failed(result_text="first line\nsecond line", stderr="ignored")
+    assert failure_summary(turn) == "first line"
+
+
+def test_failure_summary_falls_back_to_stderr_then_raw_then_exit() -> None:
+    assert failure_summary(_failed(stderr="  boom  \n")) == "boom"
+    turn = _fixture_turn("codex_stream_disconnect.json")
+    assert "ECONNRESET" in failure_summary(turn)
+    assert failure_summary(_failed(exit_code=137)) == "exit 137"
+
+
+def test_failure_summary_is_one_short_line() -> None:
+    turn = _failed(result_text="x" * 1000)
+    out = failure_summary(turn)
+    assert "\n" not in out and len(out) <= 200
 
 
 # --- reset hint --------------------------------------------------------------

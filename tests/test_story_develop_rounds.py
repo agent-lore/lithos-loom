@@ -19,7 +19,7 @@ import pytest
 from lithos_loom.plugins.story_develop import check_artifacts
 from lithos_loom.plugins.story_develop import engines as _engines
 from lithos_loom.plugins.story_develop import rounds as rounds_mod
-from lithos_loom.plugins.story_develop.agent_session import PauseBudget
+from lithos_loom.plugins.story_develop.agent_session import PauseBudget, TurnAttempt
 from lithos_loom.plugins.story_develop.check_set import (
     Check,
     CheckResult,
@@ -200,7 +200,7 @@ def _artifact_ctx(tmp_path: Path, *, collects: bool, panel_passes: bool) -> tupl
         gate_ledger=GateLedger(),
         budget=PauseBudget(0),
         coder_session="s",
-        turn_with_limit_pauses=lambda **kw: None,  # type: ignore[arg-type]
+        turn_with_reactions=lambda **kw: None,  # type: ignore[arg-type]
         run_panel_round=fake_run_panel_round,
         resume_after_from=lambda t: None,  # type: ignore[arg-type]
         render_panel_findings=lambda r: "",
@@ -544,9 +544,9 @@ def test_capture_notice_reaches_next_coder_prompt(tmp_path: Path) -> None:
             raw=None,
             stderr="",
         )
-        return turn, False, 0.0
+        return TurnAttempt(turn, False, 0.0)
 
-    ctx.turn_with_limit_pauses = recording_turn
+    ctx.turn_with_reactions = recording_turn
     ctx.final_reviews = [_failed_outcome()]
     (ctx.wt).mkdir(parents=True, exist_ok=True)
 

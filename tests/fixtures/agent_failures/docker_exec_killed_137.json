@@ -1,0 +1,8 @@
+{
+  "_provenance": "synthetic \u2014 `docker exec` of an agent turn whose process was OOM-killed (exit 137, nothing on either stream)",
+  "engine": "claude",
+  "exit_code": 137,
+  "result_text": "",
+  "stderr": "",
+  "raw": null
+}

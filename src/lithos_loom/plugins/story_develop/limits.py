@@ -1,9 +1,28 @@
-"""Usage-limit classification + role-aware reaction policy (PRD decisions #4/#5).
+"""Failure classification + reaction policy (PRD decisions #4/#5; slice B, 5dbeb0c8).
 
-Classification is **pattern-table driven** over a failed turn's structured
-output (result text + stderr — never pane scraping, ADR 0002). The safe
-default is deliberate: an UNRECOGNISED failure is a generic ``agent_error``,
-NOT ``usage_limited`` — the system must never mis-pause on an ordinary crash.
+Classification is **pattern-table driven** over the WHOLE failed turn — result
+text, stderr and the retained structured payload (``raw``: claude's JSON
+result, codex's ``failure_events``, or unparseable stdout kept verbatim) —
+never pane scraping (ADR 0002). One classifier serves every turn site (coder,
+reviewer, the handoff nudge); the per-class *reaction* is data
+(:func:`reaction_for`) that those sites apply. The safe default is deliberate:
+an UNRECOGNISED failure is a generic ``agent_error``, NOT ``usage_limited`` and
+NOT infra — the system must never mis-pause or mis-retry an ordinary crash.
+
+Classes (:class:`FailureClass`) and their reactions:
+
+* ``usage_limited`` → pause / tool-switch (T5, unchanged);
+* ``auth_failed`` → ONE retry after a short backoff, then escalate. The
+  2026-09-12 lens#82 loss: the container's token refresh failed while the
+  host's credentials were valid minutes later (a rotation race on the shared,
+  RW-mounted credentials file is the working hypothesis), so a re-read is worth
+  one attempt — but a genuinely revoked login fails identically until a human
+  re-authenticates, so the second hit escalates;
+* ``transient_infra`` → up to two retries with backoff (stream disconnects,
+  5xx / 429 / overloaded, socket errors), then escalate;
+* ``oom_or_spawn`` → one retry (a killed process or a dead container), then
+  escalate;
+* ``timeout`` / ``agent_error`` → the plain failure path, as before.
 
 Because real limit events are rare and their wording shifts between CLI
 versions, every failed turn is also captured as a **fixture** under the run's
@@ -26,12 +45,29 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from .turns import TurnResult
 
-USAGE_LIMITED = "usage_limited"
-AGENT_ERROR = "agent_error"
+
+class FailureClass(StrEnum):
+    """Why a turn failed — the one vocabulary every turn site reacts to."""
+
+    USAGE_LIMITED = "usage_limited"
+    AUTH_FAILED = "auth_failed"
+    TRANSIENT_INFRA = "transient_infra"
+    OOM_OR_SPAWN = "oom_or_spawn"
+    TIMEOUT = "timeout"
+    AGENT_ERROR = "agent_error"
+
+
+# Legacy names — the same members, so `classify_failure(t) != USAGE_LIMITED`
+# and the recorded fixtures' wording are unchanged.
+USAGE_LIMITED = FailureClass.USAGE_LIMITED
+AGENT_ERROR = FailureClass.AGENT_ERROR
+
+_OOM_EXIT = 137  # SIGKILL (docker OOM-kill / a reaped container)
 
 # Patterns that positively identify a provider usage limit. Matched against
 # the failed turn's result text AND stderr, case-insensitively. Keep this
@@ -50,26 +86,168 @@ _USAGE_LIMIT_PATTERNS: tuple[re.Pattern[str], ...] = (
 # "...|1717777777" — epoch seconds appended after a pipe (API sentinel style).
 _EPOCH_RE = re.compile(r"limit reached\|(\d{9,12})")
 
+# Authentication failures: the claude CLI's OAuth wordings (session expired /
+# token revoked / authentication_failed / a 401 API error) and an invalid API
+# key. Retried once (see the module docstring), then escalated.
+_AUTH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"failed to authenticate", re.IGNORECASE),
+    re.compile(r"oauth (?:session|token|access token).{0,40}(?:expired|revoked)", re.IGNORECASE),
+    re.compile(r"authentication[_ ](?:failed|error)", re.IGNORECASE),
+    re.compile(r"api[_ ]error(?:[_ ]status)?\W{0,4}401\b", re.IGNORECASE),
+    re.compile(r"\b401\b.{0,40}\b(?:unauthori[sz]ed|oauth|authenticat)", re.IGNORECASE),
+    re.compile(r"invalid (?:api key|authentication)", re.IGNORECASE),
+)
+
+# Transient infrastructure: the transport died or the provider is busy. Worth
+# a backoff-and-retry; NOT worth a pause budget (no reset window to wait for).
+_TRANSIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"stream disconnected", re.IGNORECASE),
+    re.compile(r"idle timeout waiting for websocket", re.IGNORECASE),
+    re.compile(r"\breconnecting\b", re.IGNORECASE),
+    re.compile(r"\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|EHOSTUNREACH)\b"),
+    re.compile(r"api[_ ]error(?:[_ ]status)?\W{0,4}(?:5\d\d|429)\b", re.IGNORECASE),
+    re.compile(r"\b(?:overloaded|internal server error|service unavailable|bad gateway|gateway time-?out)\b", re.IGNORECASE),
+    re.compile(r"\brate.?limit(?:ed|_error)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:5\d\d|429)\b.{0,20}\b(?:error|retry)", re.IGNORECASE),
+)
+
+# The process was killed or its container is gone. One retry re-execs into
+# the (possibly restarted) container; a second death escalates.
+_OOM_OR_SPAWN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"container .{0,80}is not running", re.IGNORECASE),
+    re.compile(r"no such container", re.IGNORECASE),
+    re.compile(r"OCI runtime exec failed", re.IGNORECASE),
+    re.compile(r"\bout of memory\b|cannot allocate memory", re.IGNORECASE),
+)
+
 
 def _failure_text(turn: TurnResult) -> str:
-    """The searchable text of a failed turn (result text + stderr)."""
-    return f"{turn.result_text}\n{turn.stderr}"
+    """The searchable text of a failed turn: result text + stderr + ``raw``.
+
+    ``raw`` matters: codex retains its failure events there (never in
+    ``result_text``, #103), the claude parser keeps unparseable stdout there
+    (the #405 shape printed the 401 as a bare line before the JSON), and a
+    claude API error carries ``api_error_status`` there.
+    """
+    raw = json.dumps(turn.raw, default=str) if turn.raw else ""
+    return f"{turn.result_text}\n{turn.stderr}\n{raw}"
 
 
-def classify_failure(turn: TurnResult) -> str:
-    """Classify a FAILED turn as ``usage_limited`` or ``agent_error``.
+def classify_failure(turn: TurnResult) -> FailureClass:
+    """Classify a FAILED turn (see :class:`FailureClass`).
 
-    Timeouts are agent errors (the limit signal is an explicit message, not
-    silence). Unknown failures default to ``agent_error`` — never mis-pause.
+    Precedence: a timeout or an OOM-kill exit is decided by the exit code
+    alone (whatever the process printed is stale); then usage limit (a limit
+    message can mention rate limiting — it must pause, never retry into the
+    same wall); then auth (a 401 inside a disconnect wording is the auth
+    problem); then transient transport; then spawn/memory wordings. Unknown
+    failures default to ``agent_error`` — never mis-pause, never mis-retry.
     """
     if turn.succeeded:
         raise ValueError("classify_failure() called on a successful turn")
     if turn.timed_out:
-        return AGENT_ERROR
+        return FailureClass.TIMEOUT
+    if turn.exit_code == _OOM_EXIT:
+        return FailureClass.OOM_OR_SPAWN
     text = _failure_text(turn)
     if any(p.search(text) for p in _USAGE_LIMIT_PATTERNS):
-        return USAGE_LIMITED
-    return AGENT_ERROR
+        return FailureClass.USAGE_LIMITED
+    if any(p.search(text) for p in _AUTH_PATTERNS):
+        return FailureClass.AUTH_FAILED
+    if any(p.search(text) for p in _TRANSIENT_PATTERNS):
+        return FailureClass.TRANSIENT_INFRA
+    if any(p.search(text) for p in _OOM_OR_SPAWN_PATTERNS):
+        return FailureClass.OOM_OR_SPAWN
+    return FailureClass.AGENT_ERROR
+
+
+_SUMMARY_MAX = 200
+
+
+def failure_summary(turn: TurnResult) -> str:
+    """One short line naming why the turn failed, for logs / exits / the gate.
+
+    The first non-blank line of the result text, else of stderr, else of a
+    codex failure event's message, else ``exit <code>``.
+    """
+    candidates = [turn.result_text, turn.stderr]
+    if turn.raw:
+        for ev in turn.raw.get("failure_events") or ():
+            if isinstance(ev, dict):
+                msg = ev.get("message") or (ev.get("error") or {}).get("message")
+                if msg:
+                    candidates.append(str(msg))
+        unparsed = turn.raw.get("unparsed_stdout")
+        if unparsed:
+            candidates.append(str(unparsed))
+    for text in candidates:
+        for line in str(text).splitlines():
+            line = line.strip()
+            if line:
+                return line[:_SUMMARY_MAX]
+    return f"exit {turn.exit_code}"
+
+
+@dataclass(frozen=True)
+class Reaction:
+    """What a turn site does with a failed turn of one class.
+
+    ``kind``: ``"pause"`` (the T5 usage-limit path owns it), ``"retry"`` (sleep
+    ``backoff_seconds[attempt]`` and re-run, resuming the session when its
+    transcript survived and ``resume`` is set), ``"fail"`` (the plain failure
+    path). When a retry class is exhausted and ``escalate`` is set, the run ends
+    ``infra_failed`` — a needs-human stop whose brief carries ``host_action``.
+    """
+
+    kind: str
+    retries: int = 0
+    backoff_seconds: tuple[float, ...] = ()
+    resume: bool = True
+    escalate: bool = False
+    host_action: str = ""
+
+
+_COMPLETE_GATE = "then complete the gate to re-dispatch"
+
+_REACTIONS: dict[FailureClass, Reaction] = {
+    FailureClass.USAGE_LIMITED: Reaction(kind="pause"),
+    FailureClass.AUTH_FAILED: Reaction(
+        kind="retry",
+        retries=1,
+        backoff_seconds=(20.0,),
+        escalate=True,
+        host_action=(
+            "re-authenticate the agent CLI on the host (`claude` / `codex` login) "
+            f"and check the mounted credentials file, {_COMPLETE_GATE}"
+        ),
+    ),
+    FailureClass.TRANSIENT_INFRA: Reaction(
+        kind="retry",
+        retries=2,
+        backoff_seconds=(30.0, 120.0),
+        escalate=True,
+        host_action=(
+            f"check the host's network and the provider's status page, {_COMPLETE_GATE}"
+        ),
+    ),
+    FailureClass.OOM_OR_SPAWN: Reaction(
+        kind="retry",
+        retries=1,
+        backoff_seconds=(10.0,),
+        escalate=True,
+        host_action=(
+            "check docker (`docker ps -a`, memory limits, a daemon restart that "
+            f"orphaned the run's containers), {_COMPLETE_GATE}"
+        ),
+    ),
+    FailureClass.TIMEOUT: Reaction(kind="fail"),
+    FailureClass.AGENT_ERROR: Reaction(kind="fail"),
+}
+
+
+def reaction_for(cls: FailureClass) -> Reaction:
+    """The reaction table entry for *cls* (total over :class:`FailureClass`)."""
+    return _REACTIONS[cls]
 
 
 def reset_hint(turn: TurnResult, *, now: datetime | None = None) -> datetime | None:

@@ -1,0 +1,8 @@
+{
+  "_provenance": "synthetic \u2014 `docker exec` against a container that died between turns (the #323 restart-orphan shape)",
+  "engine": "claude",
+  "exit_code": 1,
+  "result_text": "",
+  "stderr": "Error response from daemon: container loom-develop-5f2e80a6-coder is not running\n",
+  "raw": null
+}
