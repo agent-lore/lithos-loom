@@ -54,6 +54,26 @@ step can do its job on closed questions; ≤2/10 means it cannot — and the
 line classes say whether it PROCEEDed, wrote an uncited REJECT the evidence
 rule discarded, or gave no verdict at all. A mid-band reading on either is
 not decisive at K=5.
+
+FIRST READING (2026-09-12, report ~/lithos-loom-eval-reports/
+triage-first-2026-09-12; triage = claude/claude-opus-5, the production
+intake + prompt): known-false rejected 10/10 (95% CI 72–100%),
+over-suppression 0/20 (95% CI 0–16%), samples_with_suppression 0/5, no
+errored turn, $3.44 for the five turns. AUDITED per verdict file: every
+turn wrote a plain PROCEED for all four must-proceed claims — the two true
+defects AND the two ambiguous design judgements — and a cited REJECT for
+both known-false ones, the citation landing inside a declared range every
+time (f-005 → task_filtering.py:190, the return expression's
+`bool(filters.agent)`; f-006 → frontier.py:572, the first statement's
+`if errors or ... return False`), never the anchor echoed back; three
+turns went further and traced the `errors` list back through the callers.
+No uncited REJECT, no missing verdict. Under the decision rule this is
+"the step can do its job on closed questions, and default-to-act holds on
+real material" — S5a stays reject-with-citation, the coder acts on what
+proceeds. Single arm at K=5 on one batch: a floor reading, not a rate; the
+next batch to add is one whose false claim is NOT a one-line closed
+question (a plausible cross-file misreading), where over-suppression has
+somewhere to come from.
 """
 repo = "../lithos-lens"
 base = "61993963b10071525c4965abc1d083f444e919b3"           # lens main at #42 (the #43 story's own base)
