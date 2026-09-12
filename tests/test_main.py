@@ -654,3 +654,5 @@ def test_eval_group_is_mounted_with_its_commands() -> None:
     result = runner.invoke(app, ["eval", "--help"])
     assert result.exit_code == 0
     assert "review" in result.output
+    assert "rescore" in result.output
+    assert "triage" in result.output

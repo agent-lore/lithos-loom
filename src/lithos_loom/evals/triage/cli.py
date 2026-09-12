@@ -14,16 +14,20 @@ from pathlib import Path
 import typer
 
 from ...plugins.story_develop import engines
+from ...plugins.story_develop.config import parse_effort
 from ...plugins.story_develop.daemon_io import load_tool_default_models
 from ...plugins.story_develop.model_policy import require_agent_models
 from ..review.app import discover_cases, eval_app, require_rate
-from ..review.report import ci_band
+from ..review.report import ci_band, err_suffix
 from ..review.stats import wilson_interval
 from .case import TriageCase, load_triage_case
 from .harness import (
     DEFAULT_BAR,
     DEFAULT_K,
+    DEFAULT_TIMEOUT,
     TriageCaseResult,
+    TriageSink,
+    expected_fingerprint,
     live_triage,
     run_triage_case,
 )
@@ -55,10 +59,17 @@ def triage(
         None,
         "--model",
         help="Explicit model for the triage agent (default: the loom config's "
-        "[story_develop.default_models] entry for --tool; required either way).",
+        "\\[story_develop.default_models] entry for --tool; required either way).",
     ),
     effort: str | None = typer.Option(
-        None, "--effort", help="Effort lever, if the engine has one."
+        None,
+        "--effort",
+        help="Effort lever (low|medium|high|xhigh|max), if the engine has one.",
+    ),
+    timeout: int = typer.Option(
+        DEFAULT_TIMEOUT,
+        "--timeout",
+        help="Seconds per triage turn (default: converge's reviewer timeout).",
     ),
     report_dir: Path | None = typer.Option(
         None,
@@ -84,6 +95,10 @@ def triage(
     """
     require_rate("--bar", bar)
     require_rate("--max-over-suppression", max_over_suppression)
+    if timeout < 1:
+        raise typer.BadParameter(
+            f"--timeout must be a positive number of seconds (got {timeout})"
+        )
     case_dirs = discover_cases(cases_dir, case)
 
     # Fail closed before any paid turn (#304): the triage agent's model must be
@@ -96,8 +111,11 @@ def triage(
     default_models, frictions = load_tool_default_models()
     for friction in frictions:
         typer.echo(f"[Friction] {friction}", err=True)
-    resolved_model = model or default_models.get(tool)
+    # A blank --model is "not given", never "the empty model" (an implicit
+    # fallback would be exactly the silent no-op #304 forbids).
+    resolved_model = (model.strip() if model else "") or default_models.get(tool)
     try:
+        effort = parse_effort(effort, where="eval triage --effort")
         require_agent_models(
             panel=(),
             coder=tool,
@@ -110,7 +128,12 @@ def triage(
     assert resolved_model is not None  # require_agent_models raised otherwise
 
     loaded = [load_triage_case(d) for d in case_dirs]
-    triage_info = {"tool": tool, "model": resolved_model, "effort": effort}
+    triage_info = {
+        "tool": tool,
+        "model": resolved_model,
+        "effort": effort,
+        "timeout": timeout,
+    }
     results: list[TriageCaseResult] = []
     for tc in loaded:
         typer.echo(
@@ -124,11 +147,13 @@ def triage(
             k=k,
             bar=bar,
             max_over_suppression=max_over_suppression,
-            triage_fn=lambda c: live_triage(
+            triage_fn=lambda c, sha: live_triage(
                 c,
+                sha,
                 tool=tool,
                 model=resolved_model,
                 effort=effort,
+                timeout=timeout,
                 default_models=dict(default_models),
             ),
             sink=_make_sink(report_dir) if report_dir is not None else None,
@@ -155,7 +180,7 @@ def triage(
         raise typer.Exit(1)
 
 
-def _make_sink(report_dir: Path):
+def _make_sink(report_dir: Path) -> TriageSink:
     def sink(case_id: str, i: int, payload: dict) -> None:
         out = report_dir / case_id
         out.mkdir(parents=True, exist_ok=True)
@@ -180,7 +205,10 @@ def _write_summary(
     payload = {
         "case": case.id,
         "repo": case.repo,
-        "sha": case.sha,
+        "tree": case.tree_label,
+        # Pins what the SCORER consumed (cf. eval review, #307): a reworded
+        # claim, a widened refutation or a flipped expectation changes it.
+        "expected_fingerprint": expected_fingerprint(case),
         "bar": bar,
         "max_over_suppression": max_over_suppression,
         "triage": triage_info,
@@ -194,6 +222,7 @@ def _write_summary(
         "over_suppression_ci": list(r.over_suppression_ci),
         "suppressed_known_true": r.suppressed_known_true,
         "known_true_opportunities": r.known_true_opportunities,
+        "samples_with_suppression": r.samples_with_suppression,
         "passed": r.passed,
         "errored_per_sample": list(r.errored_per_sample),
         "rejected_known_false_per_sample": list(r.rejected_known_false_per_sample),
@@ -202,6 +231,7 @@ def _write_summary(
         "notes_per_sample": list(r.notes_per_sample),
         "per_finding_correct": r.per_finding_correct,
         "per_finding_expected": r.per_finding_expected,
+        "per_finding_ambiguous": r.per_finding_ambiguous,
     }
     (out / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -222,10 +252,7 @@ def print_triage_table(results: Sequence[TriageCaseResult]) -> None:
     tot_rej = tot_kf = tot_sup = tot_kt = 0
     for r in results:
         cost = sum(r.cost_usd_per_sample)
-        errs = sum(r.errored_per_sample)
-        mark = "PASS" if r.passed else "FAIL"
-        if errs:
-            mark += f" +{errs}err"
+        mark = ("PASS" if r.passed else "FAIL") + err_suffix(sum(r.errored_per_sample))
         rej = _rate_cell(
             r.rejected_known_false, r.known_false_opportunities, r.reject_rate_ci
         )

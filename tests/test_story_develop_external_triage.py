@@ -19,6 +19,12 @@ import pytest
 from lithos_loom.plugins.story_develop import external_triage as triage_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.external_triage import (
+    LINE_MISSING,
+    LINE_PROCEED,
+    LINE_REJECT,
+    LINE_REJECT_UNCITED,
+    cited_locations,
+    classify_verdict_lines,
     parse_triage_verdicts,
     triage_external_findings,
 )
@@ -27,6 +33,44 @@ from lithos_loom.plugins.story_develop.panel import ReviewOutcome
 from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
 
 # ── the verdict parser (pure) ──────────────────────────────────────────
+
+
+def test_classify_verdict_lines_names_the_three_ways_a_finding_proceeds() -> None:
+    # Only LINE_REJECT drops a finding; the other three all proceed but an
+    # instrument must be able to tell them apart (PRD S8 triage eval).
+    text = (
+        "- f-001: PROCEED\n"
+        "- f-002: REJECT — src/x.py:12 refutes it\n"
+        "- f-003: REJECT — seems unlikely\n"
+    )
+    ids = ["f-001", "f-002", "f-003", "f-004"]
+    assert classify_verdict_lines(text, ids) == {
+        "f-001": LINE_PROCEED,
+        "f-002": LINE_REJECT,
+        "f-003": LINE_REJECT_UNCITED,
+        "f-004": LINE_MISSING,
+    }
+    # The referent check demotes a cited-but-unresolving reject the same way.
+    kinds = classify_verdict_lines(text, ids, repo_files=frozenset({"src/other.py"}))
+    assert kinds["f-002"] == LINE_REJECT_UNCITED
+    # parse and classify are one scan: the verdicts carry the same classes.
+    parsed = parse_triage_verdicts(text, ids)
+    assert parsed.line_kinds == classify_verdict_lines(text, ids)
+    assert parsed.verdict_text == text
+    assert parsed.rejections == {"f-002": "src/x.py:12 refutes it"}
+
+
+def test_cited_locations_normalises_container_and_relative_spellings() -> None:
+    # The SHAPE scan is deliberately loose (a protocol code is citation-shaped);
+    # the referent check against the tracked files is what excludes it.
+    ev = "/workspace/src/x.py:12 and ./docs/R.md:3 but not HTTP:404 nor 12:30"
+    assert cited_locations(ev) == [("src/x.py", 12), ("docs/R.md", 3), ("HTTP", 404)]
+
+
+def test_a_later_line_for_the_same_id_wins_in_both_parse_and_classify() -> None:
+    text = "- f-001: REJECT — src/x.py:1 a\n- f-001: PROCEED\n"
+    assert parse_triage_verdicts(text, ["f-001"]).rejections == {}
+    assert classify_verdict_lines(text, ["f-001"]) == {"f-001": LINE_PROCEED}
 
 
 def test_parser_reads_proceed_and_evidenced_reject() -> None:
@@ -187,6 +231,10 @@ def test_triage_runs_read_only_and_returns_verdicts(
     assert "src/x.py:12" in result.rejections["f-002"]
     assert result.cost_usd == 0.05
     assert result.note == ""
+    # Diagnostics ride along for the S8 instrument; the step's decisions
+    # (proceed / rejections) are unchanged by them.
+    assert result.line_kinds == {"f-001": LINE_PROCEED, "f-002": LINE_REJECT}
+    assert result.verdict_text.startswith("- f-001: PROCEED")
     assert "claim one" in captured["prompt"]
     assert captured["stopped"] == "triage-container"
     assert captured["removed"] == captured["wt"]

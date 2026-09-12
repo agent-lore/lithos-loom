@@ -659,7 +659,8 @@ Classify each validated external finding into one of four buckets:
    `expected = "reject"` in a triage case under `evals/triage/cases/`
    ([README](../triage/README.md)) carrying (a) the finding body as the
    external reviewer wrote it, (b) the repo/sha it was written against, and
-   (c) the `refutation_files` a correct rejection must cite. That corpus is
+   (c) the `refutation` (files + line ranges) a correct rejection must cite.
+   That corpus is
    the PRD S8 triage measurement (`lithos-loom eval triage`: known-false
    rejected / known-true proceeds / ambiguous proceeds); a known-good-arm
    finding of THIS harness that validated as real is minted there too, as a

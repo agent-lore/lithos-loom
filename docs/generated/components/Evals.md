@@ -22,14 +22,14 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.judge` | S | 1 | 1 |
 | `lithos_loom.evals.review.match` | M | 3 | 9 |
 | `lithos_loom.evals.review.overrides` | S | 0 | 2 |
-| `lithos_loom.evals.review.patch` | S | 0 | 1 |
+| `lithos_loom.evals.review.patch` | S | 0 | 2 |
 | `lithos_loom.evals.review.report` | S | 0 | 12 |
 | `lithos_loom.evals.review.rescore` | M | 5 | 6 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
 | `lithos_loom.evals.triage` | XS | 0 | 0 |
-| `lithos_loom.evals.triage.case` | S | 2 | 1 |
+| `lithos_loom.evals.triage.case` | M | 3 | 1 |
 | `lithos_loom.evals.triage.cli` | S | 0 | 2 |
-| `lithos_loom.evals.triage.harness` | S | 2 | 4 |
+| `lithos_loom.evals.triage.harness` | M | 2 | 7 |
 
 ## Public API
 
@@ -85,6 +85,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `resolve_panel` — The effective ``(profile, panel)`` for *case* under the run's overrides.
 
 ### `lithos_loom.evals.review.patch`
+- def `materialise_patched_head` — Build ``base + patch`` as an ephemeral commit.
 - def `materialise_patch_heads` — Resolve a case's patch-defined head(s) to ephemeral-commit shas (#193).
 
 ### `lithos_loom.evals.review.report`
@@ -118,6 +119,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `wilson_interval` — 95% Wilson score interval ``(lo, hi)`` in ``[0, 1]`` for ``successes`` / ``n``.
 
 ### `lithos_loom.evals.triage.case`
+- class `Refutation` — A file (optionally a line range) a correct rejection must cite.
 - class `TriageFinding` — One claim in the batch + the verdict a correct triage gives it.
 - class `TriageCase`
 - def `load_triage_case` — Load and validate ``case.toml`` + the AC file in *case_dir*.
@@ -127,12 +129,15 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `print_triage_table`
 
 ### `lithos_loom.evals.triage.harness`
+- def `expected_fingerprint` — A stable hash of what the scorer consumes (cf. ``eval review``, #307).
+- def `materialise_tree` — ``(sha, cleanup)`` — identity for the sha form; ``base + head_patch`` as an ephemeral commit otherwise (the build worktree keeps it reachable until ``cleanup``). Call once per case so K samples share the tree.
 - class `SampleScore`
 - def `score_sample` — Score one batch verdict against the case's expected verdicts.
-- class `TriageCaseResult`
+- class `TriageCaseResult` — Aggregated metrics for one case over K turns.
 - def `aggregate_triage` — Turn per-sample scores into a :class:`TriageCaseResult`.
-- def `run_triage_case` — Triage the batch *k* times and aggregate.
-- def `live_triage` — Run the production triage step once over the case's batch.
+- def `run_triage_case` — Materialise the tree once, triage the batch *k* times, aggregate.
+- def `external_findings_for` — The batch as production would carry it into the intake.
+- def `live_triage` — Run the production triage step once over the case's batch at *sha*.
 
 ## Dependencies
 
