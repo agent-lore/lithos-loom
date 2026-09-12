@@ -1,6 +1,6 @@
 """Direct, Services-injected tests for the usage-limit pause loop (ARCH-1.S4).
 
-``turn_with_limit_pauses`` used to be reachable only through a full ``develop()``
+``turn_with_reactions`` used to be reachable only through a full ``develop()``
 run; the :class:`Services` seam lets us drive its subtle rebind / budget /
 resume-vs-fresh reaction directly with fakes. Real ``limits`` classification +
 ``pause_plan`` are exercised (only ``record_failure_fixture`` is stubbed to keep
@@ -19,8 +19,12 @@ from lithos_loom.plugins.story_develop.agent_session import (
     _CONTINUATION_PROMPT as CONTINUATION,
 )
 from lithos_loom.plugins.story_develop.agent_session import (
+    INFRA_CONTINUATION_PROMPT as INFRA_CONTINUATION,
+)
+from lithos_loom.plugins.story_develop.agent_session import (
     PauseBudget,
-    turn_with_limit_pauses,
+    TurnAttempt,
+    turn_with_reactions,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.rounds import Services
@@ -34,6 +38,8 @@ LIMIT = "You've hit your usage limit. Upgrade to continue."
 def _turn(
     *, succeeded: bool, session_id: str = "", cost: float = 0.0, result_text: str = ""
 ) -> TurnResult:
+    # A failed turn carries the claude CLI's `is_error` payload, so its
+    # result_text is the CLI's error text (an infra channel), as in production.
     return TurnResult(
         exit_code=0 if succeeded else 1,
         succeeded=succeeded,
@@ -41,7 +47,7 @@ def _turn(
         session_id=session_id,
         result_text=result_text,
         cost_usd=cost,
-        raw=None,
+        raw={"is_error": not succeeded},
         stderr="",
     )
 
@@ -102,8 +108,8 @@ def _run(
     *,
     budget: PauseBudget,
     session_id: str = "sess-1",
-) -> tuple[TurnResult, bool, float]:
-    return turn_with_limit_pauses(
+) -> TurnAttempt:
+    return turn_with_reactions(
         config,
         budget,
         services=services,
@@ -121,11 +127,9 @@ def _run(
 
 def test_succeeds_on_first_turn(tmp_path: Path) -> None:
     services, calls, sleeps = _services([_turn(succeeded=True, cost=0.1)])
-    turn, interrupted, cost = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
-    assert turn.succeeded and interrupted is False
-    assert cost == pytest.approx(0.1)
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.turn.succeeded and att.interrupted is False
+    assert att.cost == pytest.approx(0.1)
     assert len(calls) == 1 and sleeps == []
 
 
@@ -135,11 +139,9 @@ def test_non_limit_failure_returns_without_pausing(tmp_path: Path) -> None:
     services, calls, sleeps = _services(
         [_turn(succeeded=False, result_text="boom", cost=0.2)]
     )
-    turn, interrupted, cost = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600)
-    )
-    assert interrupted is False and turn.succeeded is False
-    assert cost == pytest.approx(0.2)
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.interrupted is False and att.turn.succeeded is False
+    assert att.cost == pytest.approx(0.2)
     assert len(calls) == 1 and sleeps == []
 
 
@@ -151,11 +153,11 @@ def test_transcript_survived_retry_resumes_with_continuation(tmp_path: Path) -> 
         ]
     )
     budget = PauseBudget(600)
-    turn, interrupted, cost = _run(
+    att = _run(
         _config(tmp_path), services, _FakeEngine(transcript_exists=True), budget=budget
     )
-    assert interrupted is False
-    assert cost == pytest.approx(0.3)  # both attempts summed
+    assert att.interrupted is False
+    assert att.cost == pytest.approx(0.3)  # both attempts summed
     assert len(calls) == 2
     # the retry resumed the SAME session with the continuation prompt
     assert calls[1]["prompt"] == CONTINUATION
@@ -172,13 +174,13 @@ def test_transcript_gone_reissues_original_prompt_fresh(tmp_path: Path) -> None:
             _turn(succeeded=True, cost=0.1),
         ]
     )
-    turn, interrupted, cost = _run(
+    att = _run(
         _config(tmp_path),
         services,
         _FakeEngine(transcript_exists=False),
         budget=PauseBudget(600),
     )
-    assert interrupted is False and len(calls) == 2
+    assert att.interrupted is False and len(calls) == 2
     # no surviving transcript -> re-issue the ORIGINAL prompt, fresh (not resume)
     assert calls[1]["prompt"] == "do it"
     assert calls[1]["resume"] is False
@@ -211,11 +213,9 @@ def test_budget_exhausted_checkpoints_as_interrupted(tmp_path: Path) -> None:
     services, calls, sleeps = _services(
         [_turn(succeeded=False, result_text=LIMIT, cost=0.1)]
     )
-    turn, interrupted, cost = _run(
-        _config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(0)
-    )
-    assert interrupted is True
-    assert cost == pytest.approx(0.1)
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(0))
+    assert att.interrupted is True
+    assert att.cost == pytest.approx(0.1)
     assert len(calls) == 1 and sleeps == []
 
 
@@ -230,3 +230,184 @@ def test_every_failed_turn_is_recorded_as_a_fixture(
     )
     _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert recorded_fixtures == [("coder", 1)]  # exactly the one failed attempt
+
+
+# --- slice B: infra reactions (retry with backoff, then escalate) ------------
+
+AUTH = "Failed to authenticate: OAuth session expired and could not be refreshed"
+DISCONNECT = "Error: stream disconnected before completion"
+
+
+def test_auth_failure_retries_once_after_backoff_resuming_the_session(
+    tmp_path: Path,
+) -> None:
+    services, calls, sleeps = _services(
+        [
+            _turn(succeeded=False, result_text=AUTH, cost=0.0),
+            _turn(succeeded=True, cost=0.3),
+        ]
+    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.turn.succeeded and att.escalation is None
+    assert att.cost == pytest.approx(0.3)
+    assert sleeps == [20.0]
+    assert len(calls) == 2
+    assert calls[1]["resume"] is True
+    assert calls[1]["prompt"] == INFRA_CONTINUATION
+    assert "infrastructure" in INFRA_CONTINUATION
+    assert "usage limit" not in INFRA_CONTINUATION
+
+
+def test_auth_failure_twice_escalates_with_the_host_action(tmp_path: Path) -> None:
+    services, calls, sleeps = _services(
+        [
+            _turn(succeeded=False, result_text=AUTH, cost=0.01),
+            _turn(succeeded=False, result_text=AUTH, cost=0.01),
+        ]
+    )
+    budget = PauseBudget(600)
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=budget)
+    assert att.turn.succeeded is False and att.interrupted is False
+    assert att.escalation is not None
+    assert "coder" in att.escalation and "auth_failed" in att.escalation
+    assert "2 attempts" in att.escalation
+    assert "OAuth session expired" in att.escalation
+    # the host action rides beside the line, never inside it — the gate caps
+    # the summary at 200 chars and must not truncate the action away
+    assert "complete the gate" not in att.escalation
+    assert "complete the gate" in att.host_action
+    assert len(f"round 9: {att.escalation}") <= 200
+    assert sleeps == [20.0] and len(calls) == 2  # no third attempt
+    assert budget.remaining == 600  # infra backoff never spends the pause budget
+    assert att.cost == pytest.approx(0.02)
+
+
+def test_transient_infra_retries_twice_with_backoff_then_escalates(
+    tmp_path: Path,
+) -> None:
+    services, calls, sleeps = _services(
+        [_turn(succeeded=False, result_text=DISCONNECT) for _ in range(3)]
+    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert sleeps == [30.0, 120.0] and len(calls) == 3
+    assert att.escalation is not None and "transient_infra" in att.escalation
+    assert "3 attempts" in att.escalation
+
+
+def test_transient_infra_recovers_on_the_second_attempt(tmp_path: Path) -> None:
+    services, calls, sleeps = _services(
+        [
+            _turn(succeeded=False, result_text=DISCONNECT),
+            _turn(succeeded=True, session_id="s"),
+        ]
+    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.turn.succeeded and att.escalation is None
+    assert sleeps == [30.0] and len(calls) == 2
+
+
+def test_infra_retry_reissues_the_original_prompt_when_the_transcript_is_gone(
+    tmp_path: Path,
+) -> None:
+    services, calls, sleeps = _services(
+        [_turn(succeeded=False, result_text=DISCONNECT), _turn(succeeded=True)]
+    )
+    _run(_config(tmp_path), services, _FakeEngine(False), budget=PauseBudget(600))
+    assert calls[1]["prompt"] == "do it" and calls[1]["resume"] is False
+
+
+def test_killed_process_retries_once(tmp_path: Path) -> None:
+    killed = TurnResult(
+        exit_code=137,
+        succeeded=False,
+        completed=False,
+        session_id="",
+        result_text="",
+        cost_usd=0.0,
+        raw=None,
+        stderr="",
+    )
+    services, calls, sleeps = _services([killed, _turn(succeeded=True)])
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.turn.succeeded and sleeps == [10.0] and len(calls) == 2
+
+
+def test_plain_agent_error_never_retries_or_escalates(tmp_path: Path) -> None:
+    services, calls, sleeps = _services(
+        [_turn(succeeded=False, result_text="AssertionError: nope", cost=0.2)]
+    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.escalation is None and att.interrupted is False
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_retry_counts_are_per_class_and_every_attempt_is_recorded(
+    tmp_path: Path, recorded_fixtures: list[tuple[str, int]]
+) -> None:
+    # A disconnect (retry #1 of 2) followed by an auth failure (retry #1 of 1)
+    # then success: each class spends its own budget, every failed attempt
+    # lands as a fixture, and the classification of each is what was seen.
+    services, calls, sleeps = _services(
+        [
+            _turn(succeeded=False, result_text=DISCONNECT),
+            _turn(succeeded=False, result_text=AUTH),
+            _turn(succeeded=True),
+        ]
+    )
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.turn.succeeded and att.escalation is None
+    assert sleeps == [30.0, 20.0]
+    assert recorded_fixtures == [("coder", 1), ("coder", 1)]
+    assert att.host_action == ""
+
+
+def test_usage_limit_after_an_infra_retry_still_pauses(tmp_path: Path) -> None:
+    # The two reactions compose: an infra retry that then hits a usage limit
+    # takes the T5 pause path, and the pause is what the budget pays for.
+    services, calls, sleeps = _services(
+        [
+            _turn(succeeded=False, result_text=DISCONNECT),
+            _turn(succeeded=False, result_text=LIMIT),
+            _turn(succeeded=True),
+        ]
+    )
+    budget = PauseBudget(600)
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=budget)
+    assert att.turn.succeeded and att.interrupted is False
+    assert sleeps[0] == 30.0 and len(sleeps) == 2
+    assert budget.remaining == pytest.approx(600 - sleeps[1])
+
+
+def test_attempt_carries_the_rebound_session_not_the_last_turns(tmp_path: Path) -> None:
+    # Codex mints its thread_id on turn 1; a FRESH retry (no transcript) that
+    # dies before `thread.started` returns "". The run's handle is the minted
+    # one, which only the wrapper saw — it must come back on the attempt.
+    services, calls, sleeps = _services(
+        [
+            _turn(succeeded=False, session_id="thread-minted", result_text=DISCONNECT),
+            _turn(succeeded=False, session_id="", result_text=DISCONNECT),
+            _turn(succeeded=False, session_id="", result_text=DISCONNECT),
+        ]
+    )
+    att = _run(
+        _config(tmp_path),
+        services,
+        _FakeEngine(False),
+        budget=PauseBudget(600),
+        session_id="pre-mint-uuid",
+    )
+    assert att.escalation is not None
+    assert att.session_id == "thread-minted"
+    assert att.turn.session_id == ""  # the last turn alone would lose it
+
+
+def test_successful_attempt_reports_its_session(tmp_path: Path) -> None:
+    services, _, _ = _services([_turn(succeeded=True, session_id="thread-minted")])
+    att = _run(
+        _config(tmp_path),
+        services,
+        _FakeEngine(True),
+        budget=PauseBudget(600),
+        session_id="pre-mint-uuid",
+    )
+    assert att.session_id == "thread-minted"

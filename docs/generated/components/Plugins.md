@@ -24,6 +24,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
+| `lithos_loom.plugins.story_develop.coder_salvage` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
@@ -37,14 +38,14 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 12 |
+| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
-| `lithos_loom.plugins.story_develop.limits` | S | 1 | 5 |
+| `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.loop_entry` | XS | 1 | 0 |
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
-| `lithos_loom.plugins.story_develop.panel` | M | 3 | 2 |
+| `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.pr_delivery` | M | 3 | 15 |
@@ -58,7 +59,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
-| `lithos_loom.plugins.story_develop.turns` | XS | 0 | 1 |
+| `lithos_loom.plugins.story_develop.turns` | XS | 1 | 1 |
 
 ## Public API
 
@@ -75,7 +76,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `build_run_cmd` — Build (container_name, docker-run-argv) for an agent container.
 - class `PauseBudget` — The run's shared usage-limit pause budget, in seconds.
 - def `resume_after_from` — When an interrupted run should be retried (PRD decision #5, T10).
-- def `turn_with_limit_pauses` — Run a turn, pausing-and-retrying through provider usage limits.
+- def `turn_with_reactions` — Run a turn, applying the failure-class reaction table until it settles.
 
 ### `lithos_loom.plugins.story_develop.autoformat`
 - def `build_format_command` — Build the one-shot ``docker run`` argv for one formatter run.
@@ -115,6 +116,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `CheckSetResult` — The aggregate outcome of running an ordered check-set for one round.
 - def `classify_execution` — Map a raw container outcome onto the ``execution_outcome`` axis.
 - def `render_check_summary` — Render the round's check-set for prompt injection (ADR §6).
+
+### `lithos_loom.plugins.story_develop.coder_salvage`
+- def `nudge_for_handoff` — Re-prompt the coder once to write the missing handoff (#114).
+- def `written_by_dying_attempt` — True when a FAILED infra-class turn wrote (or rewrote) the handoff itself.
+- def `verdict` — ``None`` to proceed with the round, else ``(status, reason)`` for the exit.
 
 ### `lithos_loom.plugins.story_develop.config`
 - def `is_valid_reviewer_name` — True if *name* is a safe slug for container / path / filename use.
@@ -247,6 +253,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `conversation_log` — Assemble an ordered, human-readable log of every round's handoffs.
 - def `seed_handoff_dir` — Create *handoff_dir* and write ``FORMAT.md`` into it.
 - def `parse_review_handoff` — Parse + validate a reviewer handoff. Raises :class:`HandoffError`.
+- def `file_fingerprint` — Content identity of a handoff file (``None`` = absent / unreadable).
 
 ### `lithos_loom.plugins.story_develop.idempotency`
 - def `store_dir` — Resolve the host-persistent idempotency store directory.
@@ -255,7 +262,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `record_completion` — Persist *payload* as the completed-run record for *key* (atomic write).
 
 ### `lithos_loom.plugins.story_develop.limits`
-- def `classify_failure` — Classify a FAILED turn as ``usage_limited`` or ``agent_error``.
+- class `FailureClass` — Why a turn failed — the one vocabulary every turn site reacts to.
+- def `classify_failure` — Classify a FAILED turn (see :class:`FailureClass`).
+- def `failure_summary` — One short line naming why the turn failed, for logs / exits / the gate.
+- class `Reaction` — What a turn site does with a failed turn of one class.
+- def `reaction_for` — The reaction table entry for *cls* (total over :class:`FailureClass`).
 - def `reset_hint` — Best-effort parse of WHEN the limit resets, or ``None`` if unknown.
 - class `PausePlan` — How long to wait before retrying a usage-limited turn.
 - def `pause_plan` — Compute the next wait, or ``None`` when the pause budget is exhausted.
@@ -358,7 +369,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `CycleExit` — A terminal outcome of the develop loop.
 - class `RoundContext` — The explicit successor of ``develop()``'s locals bag (ARCH-1.S6).
 - def `round1_coder_prompt` — The cold-start coder prompt: story-develop's ``coder_init.md``, or — on a converge entry (``intake_reviews`` set) — the entry's template seeded from the intake review + the PR's own commit log so the coder reconstructs intent before changing anything (ADR 0003 §9 Shape 1); a conflict resolution (PRD S5) swaps the template and adds its brief as extra slots.
-- def `coder_phase` — Build the coder prompt, run its (limit-paused) turn, salvage a missing handoff once (#114), and gate the round on a clean turn + a written handoff.
+- def `coder_phase` — Build the coder prompt, run its turn through the reaction wrapper, nudge a missing handoff once (#114), and gate the round on a clean turn + a written handoff — or on a handoff the dying turn itself wrote (:mod:`coder_salvage`, slice B).
 - def `dispute_phase` — T7: record the coder's dispute marks from its handoff (round >= 2).
 - def `commit_round` — Commit a round's work as one commit, excluding the handoff dir.
 - def `commit_phase` — Commit the round's work (excluding the handoff dir) and auto-format it in place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
@@ -414,6 +425,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `run_gate_container` — Run the gate container and capture its outcome; never raises on red.
 
 ### `lithos_loom.plugins.story_develop.turns`
+- class `TurnAttempt` — The outcome of :func:`~.agent_session.turn_with_reactions` — the last turn plus how the reactions ended.
 - def `run_turn` — Execute one agent turn in *container* via *engine* and return its result.
 
 ## Dependencies

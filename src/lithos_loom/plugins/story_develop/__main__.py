@@ -1091,6 +1091,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif result.status == "cost_exceeded":
         print("\n  Stopped at the --max-cost-usd ceiling.")
+    elif result.status == "infra_failed":
+        print(
+            "\n  Infrastructure failure persisted through its retries — the host, "
+            f"not the story, needs fixing:\n  {result.host_action}"
+        )
     # #194 parity: an approved dialogue whose PR delivery FAILED is not a clean
     # success (no PR) — exit non-zero, matching daemon mode's delivery_error →
     # failed/EXIT_FAILED mapping. Sibling of the skipped completion above.

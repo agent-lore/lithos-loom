@@ -186,6 +186,8 @@ def _install_fakes(
             if coder_results is not None:
                 idx = len(state["coder_calls"]) - 1
                 action = coder_results[min(idx, len(coder_results) - 1)]
+                if action == "auth":
+                    return _auth_failed_turn(session_id)
                 if action == "limit":
                     # codex mints a fresh thread_id on the limited turn; claude
                     # echoes the supplied uuid. The retry resumes by THAT handle,
@@ -290,6 +292,22 @@ def config(tmp_git_repo: Path, tmp_path: Path) -> DevelopConfig:
         description="Add a greeting file",
         work_dir=tmp_path / "work",
         claude_config_dir=cfg_dir,
+    )
+
+
+def _auth_failed_turn(session_id: str) -> TurnResult:
+    # The 2026-09-12 lens#82 shape: the container's OAuth refresh failed.
+    return TurnResult(
+        exit_code=1,
+        succeeded=False,
+        completed=False,
+        session_id=session_id,
+        result_text=(
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        ),
+        cost_usd=0.0,
+        raw={"is_error": True, "terminal_reason": "api_error"},
+        stderr="",
     )
 
 
@@ -2208,3 +2226,43 @@ def test_out_of_scope_deferral_approves_and_records(
     assert d.rationale == "needs work"
     assert "pre-existing on the base" in d.deferral_reason
     assert d.files == ("greeting.txt:1",)
+
+
+# --- slice B: infra reactions end to end ------------------------------------
+
+
+def test_transient_auth_failure_is_retried_and_the_run_delivers(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """The 2026-09-12 loss, replayed: one auth death, a 20 s backoff, the
+    resumed turn finishes, review approves — no human involved."""
+    state = _install_fakes(
+        monkeypatch, config, coder_results=["auth", "ok"], reviews=[{"text": _LGTM}]
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    assert state["sleeps"] == [20.0]
+    assert state["coder_calls"] == [(1, False), (1, False)]  # no transcript -> fresh
+    assert _commit_count_since_base(result) == 1
+
+
+def test_persistent_auth_failure_ends_infra_failed(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    state = _install_fakes(monkeypatch, config, coder_results=["auth"])
+    result = develop_mod.develop(config)
+
+    assert result.status == "infra_failed"
+    assert result.approved is False
+    assert state["sleeps"] == [20.0]
+    assert state["coder_calls"] == [(1, False), (1, False)]
+    assert state["review_calls"] == []
+    assert result.failure_reason.startswith(
+        "round 1: coder auth_failed persisted after 2 attempts"
+    )
+    assert "complete the gate" not in result.failure_reason
+    assert "complete the gate" in result.host_action
+    assert result.message.startswith("INFRA FAILURE: ")
+    assert result.host_action in result.message
+    assert "sessions + handoffs preserved" in result.message

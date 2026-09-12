@@ -96,6 +96,7 @@ class DevelopResult:
 
     # "approved" | "max_rounds" | "failed" | "interrupted"
     # | "stalled" | "disputed" | "cost_exceeded"  (T7 guards)
+    # | "infra_failed"  (slice B: an auth / transport / spawn failure persisted)
     status: str
     run_id: str
     worktree: Path
@@ -132,6 +133,10 @@ class DevelopResult:
     # final round's outcomes (a deferral round earlier than the seal would
     # otherwise vanish from the record).
     deferred_findings: tuple[DeferredFinding, ...] = ()
+    # ``infra_failed`` only (slice B): what to fix on the host before completing
+    # the needs-human gate — structured, so the gate's capped summary can never
+    # truncate it away
+    host_action: str = ""
     # the bare CycleExit reason for a reason-bearing stop (failed / interrupted
     # / stalled / disputed / cost_exceeded), without the gate / commit / cost
     # tail `message` appends — what the needs-human escalation (b91177d2)
@@ -199,7 +204,7 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
 # develop-local Services seam (_develop_services / _sleep) are gone. develop()
 # now builds :meth:`Services.live` directly and calls the public names —
 # check_runner.build_check_set / .load_gate_ledger, agent_session's build_run_cmd
-# / PauseBudget / turn_with_limit_pauses / resume_after_from, panel's ReviewerState
+# / PauseBudget / turn_with_reactions / resume_after_from, panel's ReviewerState
 # / run_panel_round — so tests patch the real module homes (turns.run_turn,
 # time.sleep, check_runner.run_check_set / .build_check_set) rather than develop's
 # aliases. review_only + pr_delivery likewise import from those homes.
@@ -277,7 +282,7 @@ def _record_coder_disputes(
 # for a max_rounds run. ``state.json`` records the reason only for these, so the
 # offline ``attach`` summary (#188) never shows a stale reason for max_rounds.
 _REASON_BEARING_STATUSES = frozenset(
-    {"failed", "interrupted", "stalled", "disputed", "cost_exceeded"}
+    {"failed", "interrupted", "stalled", "disputed", "cost_exceeded", "infra_failed"}
 )
 
 
@@ -476,7 +481,7 @@ def develop(
         gate_ledger=gate_ledger,
         budget=budget,
         coder_session=coder_session,
-        turn_with_limit_pauses=agent_session.turn_with_limit_pauses,
+        turn_with_reactions=agent_session.turn_with_reactions,
         run_panel_round=run_panel_round,
         resume_after_from=agent_session.resume_after_from,
         render_panel_findings=_render_panel_findings,
@@ -526,6 +531,7 @@ def develop(
     status = exit_state.status
     failure_reason = exit_state.failure_reason
     resume_after = exit_state.resume_after
+    host_action = exit_state.host_action if status == "infra_failed" else ""
     coder_cost = ctx.coder_cost
     review_cost = ctx.review_cost
     gate = ctx.gate
@@ -595,6 +601,12 @@ def develop(
             f"last reviews: {_reviews_part(final_reviews)}{gate_part}; "
             f"{len(commits)} commit(s) on {branch}; cost ${total:.4f}"
         )
+    elif status == "infra_failed":
+        message = (
+            f"INFRA FAILURE: {failure_reason} — {host_action}; "
+            f"{len(commits)} commit(s) on {branch}; sessions + handoffs preserved "
+            f"in {config.run_dir}; cost ${total:.4f}"
+        )
     else:  # failed
         message = f"{failure_reason}{gate_part}; {len(commits)} commit(s) on {branch}"
 
@@ -663,4 +675,5 @@ def develop(
         resume_after=resume_after,
         deferred_findings=collect_deferred(r.ledger for r in reviewers),
         failure_reason=failure_reason if status in _REASON_BEARING_STATUSES else "",
+        host_action=host_action,
     )

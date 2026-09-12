@@ -33,6 +33,7 @@ from typing import Protocol
 from .config import WORKSPACE_MOUNT, DevelopConfig
 
 _TIMEOUT_EXIT = 124  # conventional timeout exit; we set it ourselves on timeout
+_UNPARSED_STDOUT_KEEP = 8000  # tail of unparseable stdout retained in raw (slice B)
 
 
 @dataclass(frozen=True)
@@ -246,25 +247,33 @@ class ClaudeEngine(_BaseEngine):
         ``is_error``, ``result``, ``session_id`` and ``total_cost_usd``. A
         non-zero exit *or* ``is_error: true`` *or* unparseable output is a failure.
         """
-        raw: dict | None = None
+        payload: dict | None = None
         try:
             parsed = json.loads(stdout) if stdout.strip() else None
             if isinstance(parsed, dict):
-                raw = parsed
+                payload = parsed
         except json.JSONDecodeError:
-            raw = None
+            payload = None
+        # Unparseable-but-present stdout is retained (bounded) so the failure
+        # classifier can still read it — the #405 shape printed the auth
+        # failure as a bare text line BEFORE the JSON result, and dropping it
+        # made the 401 invisible (slice B). It is never mistaken for a result:
+        # `completed` keys on the parsed payload, not on `raw`.
+        raw: dict | None = payload
+        if payload is None and stdout.strip():
+            raw = {"unparsed_stdout": stdout[-_UNPARSED_STDOUT_KEEP:]}
 
-        is_error = bool(raw.get("is_error")) if raw else True
+        is_error = bool(payload.get("is_error")) if payload else True
         # ``or ""`` normalises an explicit JSON ``null`` to "" (not "None").
-        parsed_session = str(raw.get("session_id") or "") if raw else ""
-        result_text = str(raw.get("result") or "") if raw else ""
-        cost_usd = float(raw.get("total_cost_usd") or 0.0) if raw else 0.0
+        parsed_session = str(payload.get("session_id") or "") if payload else ""
+        result_text = str(payload.get("result") or "") if payload else ""
+        cost_usd = float(payload.get("total_cost_usd") or 0.0) if payload else 0.0
         # `completed` is the turn's own outcome; `succeeded` additionally demands
         # a resumable handle, since later resume turns (T3) need one. Splitting
         # them lets a one-shot caller (the eval judge, #307) tell a genuinely
         # failed turn — whose partial text must never be trusted — from a good
         # answer that merely cannot be resumed.
-        completed = exit_code == 0 and raw is not None and not is_error
+        completed = exit_code == 0 and payload is not None and not is_error
         succeeded = completed and bool(parsed_session)
 
         return TurnResult(
@@ -395,6 +404,7 @@ class CodexEngine(_BaseEngine):
         saw_completed = False
         failure_events: list[dict] = []
 
+        unparsed: list[str] = []
         for line in stdout.splitlines():
             line = line.strip()
             if not line:
@@ -402,6 +412,7 @@ class CodexEngine(_BaseEngine):
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                unparsed.append(line)  # retained for the failure classifier
                 continue
             if not isinstance(event, dict):
                 continue
@@ -434,6 +445,11 @@ class CodexEngine(_BaseEngine):
             raw_parts["usage"] = usage
         if failure_events:
             raw_parts["failure_events"] = failure_events
+        if unparsed and not completed:
+            # Same contract as the claude parser (slice B): a bare error line
+            # the CLI printed outside the event stream stays visible to the
+            # classifier, bounded, and never counts as a result.
+            raw_parts["unparsed_stdout"] = "\n".join(unparsed)[-_UNPARSED_STDOUT_KEEP:]
         raw = raw_parts or None
 
         return TurnResult(

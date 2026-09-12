@@ -109,8 +109,8 @@ class ConvergeResult:
     * ``converged`` — the loop approved; the fixed branch was pushed (unless
       ``no_push``).
     * ``not_converged`` — the loop stopped without approval (``max_rounds`` /
-      ``disputed`` / ``stalled`` / ``cost_exceeded``); the fixes are left in the
-      local worktree, nothing pushed.
+      ``disputed`` / ``stalled`` / ``cost_exceeded`` / ``infra_failed``); the fixes
+      are left in the local worktree, nothing pushed.
     * ``fork_unsupported`` — the PR head is on a fork loom cannot push to.
     * ``merged`` — the PR has already landed; there is nothing to converge and
       any fix commit would be unlandable on it.

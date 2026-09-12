@@ -24,7 +24,6 @@ the tests patch on the ``containers`` module).
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 from collections.abc import Callable, Sequence
@@ -36,6 +35,7 @@ from ...runner import git
 from . import check_artifacts, containers, engines, handoff, limits
 from .agent_session import (
     _CONTINUATION_PROMPT,
+    INFRA_CONTINUATION_PROMPT,
     PauseBudget,
     build_run_cmd,
     resume_after_from,
@@ -114,6 +114,12 @@ class PanelRoundResult:
     interrupted: bool
     resume_after: datetime | None
     invalid_reviewer: str | None
+    # Slice B: a reviewer's infra reaction was exhausted (auth / transport /
+    # spawn failure persisted through its retries) — one line naming the
+    # reviewer, the class, the attempts, the failure and the host action. The
+    # run ends ``infra_failed`` on it; ``None`` otherwise.
+    infra_failure: str | None = None
+    infra_host_action: str = ""
 
 
 # --- prompt / rendering helpers --------------------------------------------
@@ -127,19 +133,6 @@ def _read_review(path: Path) -> tuple[ReviewHandoff | None, str | None]:
         return handoff.parse_review_handoff(path.read_text(encoding="utf-8")), None
     except HandoffError as exc:
         return None, str(exc)
-
-
-def _handoff_fingerprint(path: Path) -> str | None:
-    """Content identity of the round handoff (``None`` = absent/unreadable).
-
-    Salvage provenance (#298 / PR #299 review): a failed attempt may only
-    salvage an artifact it *itself* created or rewrote, so each attempt
-    snapshots the file before running and compares after.
-    """
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
 
 
 def _prior_review_text(config: DevelopConfig, round_no: int, reviewer: str) -> str:
@@ -220,7 +213,7 @@ def _review_turn(
     # attempt created or rewrote — a valid file left by an earlier attempt
     # (usage-limited switch, pause retry, a prior dispatch resuming into the
     # same round) is not this attempt's work.
-    pre_attempt = _handoff_fingerprint(review_path)
+    pre_attempt = handoff.file_fingerprint(review_path)
 
     turn = services.run_turn(
         container=container,
@@ -255,7 +248,7 @@ def _review_turn(
             )
             # Re-snapshot: the correction retry is now the attempt whose
             # rewrite (and only its rewrite) is salvage-eligible.
-            pre_attempt = _handoff_fingerprint(review_path)
+            pre_attempt = handoff.file_fingerprint(review_path)
             retry = services.run_turn(
                 container=container,
                 prompt=correction,
@@ -293,7 +286,7 @@ def _review_turn(
         # hit the same limit next round. The fingerprint guard scopes salvage
         # to the failed attempt's OWN write — never a stale file from an
         # earlier attempt or dispatch.
-        if _handoff_fingerprint(review_path) != pre_attempt:
+        if handoff.file_fingerprint(review_path) != pre_attempt:
             parsed, salvage_err = _read_checked()
             if parsed is not None:
                 logger.warning(
@@ -381,15 +374,22 @@ def _run_reviewer_with_reaction(
     reseed_prompt_override: str | None = None,
     skip_lifecycle_validation: bool = False,
     review_context: str = "",
-) -> tuple[ReviewOutcome, float, bool, datetime | None]:
-    """One reviewer's round, with the T5 usage-limit reaction wrapped around it.
+) -> tuple[ReviewOutcome, float, bool, datetime | None, tuple[str, str] | None]:
+    """One reviewer's round, with the failure reactions wrapped around it.
 
     Switch first (replace ONLY this reviewer's container, reseed a fresh
     session from the handoff history), pause last (shared budget). Returns
-    ``(outcome, cost, interrupted, resume_after)`` — *resume_after* is set
-    only when *interrupted* is True (T10 daemon re-dispatch surface). Turns +
-    the pause sleep run through *services*; the tool-switch container replace
-    calls ``containers.*`` directly (ARCH-1.S5).
+    ``(outcome, cost, interrupted, resume_after, escalation)`` —
+    *resume_after* is set only when *interrupted* is True (T10 daemon
+    re-dispatch surface); *escalation* (slice B) is ``(line, host_action)``
+    when a retry-class failure (auth / transport / spawn) persisted through
+    its backoff retries and the reaction table says escalate — the run ends
+    ``infra_failed``. Retry counts are per class AND per tool: a usage-limit
+    tool switch clears them (a new engine is a new failure domain). Salvage
+    (#298, inside ``_review_turn``) runs first, then classification, then the
+    reaction: a failed turn whose own handoff is valid never reaches a retry.
+    Turns + the sleeps run through *services*; the tool-switch container
+    replace calls ``containers.*`` directly (ARCH-1.S5).
     """
     name = rstate.spec.name
     validate = reviewer_validator(
@@ -419,11 +419,74 @@ def _run_reviewer_with_reaction(
         review_file=review_file,
     )
     cost = review.cost_usd
+    attempts: dict[limits.FailureClass, int] = {}
 
-    while (
-        rev_failed is not None
-        and limits.classify_failure(rev_failed) == limits.USAGE_LIMITED
-    ):
+    while rev_failed is not None:
+        cls = limits.classify_failure(rev_failed)
+        reaction = limits.reaction_for(cls)
+        if reaction.kind == "retry":
+            used = attempts.get(cls, 0)
+            if used >= reaction.retries:
+                if not reaction.escalate:
+                    break
+                n = used + 1
+                summary = limits.failure_summary(rev_failed)
+                logger.warning(
+                    "story-develop %s: reviewer [%s] %s after %d attempt(s): %s",
+                    config.run_id,
+                    name,
+                    cls.value,
+                    n,
+                    summary,
+                )
+                escalation = (
+                    f"reviewer [{name}] {cls.value} persisted after {n} attempt"
+                    f"{'s' if n != 1 else ''}: {summary}"
+                )
+                return review, cost, False, None, (escalation, reaction.host_action)
+            wait = reaction.backoff_seconds[used]
+            attempts[cls] = used + 1
+            logger.warning(
+                "story-develop %s: reviewer [%s] %s (%s); retrying in %.0fs "
+                "(attempt %d of %d)",
+                config.run_id,
+                name,
+                cls.value,
+                limits.failure_summary(rev_failed),
+                wait,
+                used + 2,
+                reaction.retries + 1,
+            )
+            services.sleep(wait)
+            if reaction.resume and rstate.engine_now.session_transcript_exists(
+                config.reviewer_config_dir(name), rstate.session
+            ):
+                retry_prompt, retry_resume = INFRA_CONTINUATION_PROMPT, True
+            else:
+                retry_prompt, retry_resume = prompt, resume
+            review, rev_failed, rstate.session = _review_turn(
+                config,
+                services=services,
+                reviewer=name,
+                block_threshold=rstate.spec.block_threshold,
+                container=rstate.container,
+                session_id=rstate.session,
+                round_no=round_no,
+                resume=retry_resume,
+                prompt=retry_prompt,
+                timeout=timeout,
+                engine=rstate.engine_now,
+                model=active_model(
+                    rstate.spec, rstate.engine_now.name, config.default_models
+                ),
+                effort=rstate.spec.effort,
+                validate=validate,
+                review_file=review_file,
+            )
+            cost += review.cost_usd
+            continue
+        if reaction.kind != "pause":
+            break  # a plain failure: the invalid-handoff path owns it
         nxt = limits.next_fallback_tool(rstate.chain, rstate.engine_now.name)
         while nxt is not None and not engines.is_supported(nxt):
             logger.warning(
@@ -446,6 +509,7 @@ def _run_reviewer_with_reaction(
             containers.stop_container(rstate.container)
             rstate.engine_now = engines.get_engine(nxt)
             rstate.session = str(uuid.uuid4())
+            attempts.clear()  # a new engine is a new failure domain
             # Rebuild the run command for the NEW tool — its env var
             # (CODEX_HOME vs CLAUDE_CONFIG_DIR), auth file, and mount differ, so
             # the original (claude) run_cmd would mis-configure a codex
@@ -510,7 +574,7 @@ def _run_reviewer_with_reaction(
             remaining_seconds=budget.remaining,
         )
         if plan is None:
-            return review, cost, True, resume_after_from(rev_failed)
+            return review, cost, True, resume_after_from(rev_failed), None
         logger.info(
             "story-develop %s: reviewer [%s] usage-limited; pausing %.0fs "
             "(%s; %.0f min of pause budget left)",
@@ -547,7 +611,7 @@ def _run_reviewer_with_reaction(
         )
         cost += review.cost_usd
 
-    return review, cost, False, None
+    return review, cost, False, None, None
 
 
 # --- orchestration ----------------------------------------------------------
@@ -599,6 +663,8 @@ def run_panel_round(
     interrupted = False
     resume_after: datetime | None = None
     invalid_reviewer: str | None = None
+    infra_failure: str | None = None
+    infra_host_action = ""
     for rstate in reviewers:
         name = rstate.spec.name
         review_prompt, review_resume, review_file_override = round_prompt(
@@ -615,7 +681,7 @@ def run_panel_round(
             review_context=review_context,
         )
 
-        review, rev_cost, rev_interrupted, rev_resume_after = (
+        review, rev_cost, rev_interrupted, rev_resume_after, rev_infra = (
             _run_reviewer_with_reaction(
                 config,
                 budget,
@@ -660,7 +726,11 @@ def run_panel_round(
             resume_after = rev_resume_after
             break
         if review.status == "invalid":
-            invalid_reviewer = name
+            invalid_reviewer = name  # additive: an escalation is ALSO invalid
+        if rev_infra is not None:
+            infra_failure, infra_host_action = rev_infra
+            break
+        if invalid_reviewer is not None:
             break
 
     return PanelRoundResult(
@@ -669,4 +739,6 @@ def run_panel_round(
         interrupted=interrupted,
         resume_after=resume_after,
         invalid_reviewer=invalid_reviewer,
+        infra_failure=infra_failure,
+        infra_host_action=infra_host_action,
     )
