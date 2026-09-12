@@ -21,7 +21,7 @@ lower a budget after improving the code to lock in the gain.
 
 ## Import graph
 
-- Cross-component edges: **68** (308 module-level)
+- Cross-component edges: **68** (317 module-level)
 - Component cycles: Render ↔ Subscriptions
 - Module cycles: lithos_loom.plugins.story_develop.agent_session ↔ lithos_loom.plugins.story_develop.panel ↔ lithos_loom.plugins.story_develop.rounds
 - Tier-skipping edges (Entrypoints → Foundation): 11 (Children -> Bus, Children -> Config, Children -> GitHub, Children -> LithosClient, Children -> Notifications, Children -> State, Entrypoint -> Bus, Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> LithosClient, Entrypoint -> Supervisor)
@@ -39,9 +39,9 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Cli | 13 | 6069 | 5095 | 2 | 8 | 0.80 | 53 (`lithos_loom.cli.converge.converge_command`) | 20 |
 | Config | 1 | 1239 | 1055 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
-| Entrypoint | 2 | 624 | 494 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
+| Entrypoint | 2 | 625 | 495 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
 | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
-| Evals | 15 | 3911 | 3168 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 12 |
+| Evals | 19 | 4644 | 3825 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 16 |
 | GitHub | 4 | 1723 | 1336 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 1 |
 | LithosClient | 2 | 2268 | 1904 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 270 | 224 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **161**, lines: **55226**, SLOC: **44500**
+- Modules: **165**, lines: **55960**, SLOC: **45158**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -69,7 +69,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1433**, cyclomatic > 10: **120**
+- Functions: **1450**, cyclomatic > 10: **124**
 
 Top 10 most complex functions:
 
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.59** (87687 test lines / 55226 source lines)
+- Test-to-source line ratio: **1.58** (88333 test lines / 55960 source lines)

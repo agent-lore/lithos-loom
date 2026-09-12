@@ -26,6 +26,10 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.report` | S | 0 | 12 |
 | `lithos_loom.evals.review.rescore` | M | 5 | 6 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
+| `lithos_loom.evals.triage` | XS | 0 | 0 |
+| `lithos_loom.evals.triage.case` | S | 2 | 1 |
+| `lithos_loom.evals.triage.cli` | S | 0 | 2 |
+| `lithos_loom.evals.triage.harness` | S | 2 | 4 |
 
 ## Public API
 
@@ -112,6 +116,23 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 
 ### `lithos_loom.evals.review.stats`
 - def `wilson_interval` — 95% Wilson score interval ``(lo, hi)`` in ``[0, 1]`` for ``successes`` / ``n``.
+
+### `lithos_loom.evals.triage.case`
+- class `TriageFinding` — One claim in the batch + the verdict a correct triage gives it.
+- class `TriageCase`
+- def `load_triage_case` — Load and validate ``case.toml`` + the AC file in *case_dir*.
+
+### `lithos_loom.evals.triage.cli`
+- def `triage` — Measure triage on batches of findings with known verdicts (PRD S8).
+- def `print_triage_table`
+
+### `lithos_loom.evals.triage.harness`
+- class `SampleScore`
+- def `score_sample` — Score one batch verdict against the case's expected verdicts.
+- class `TriageCaseResult`
+- def `aggregate_triage` — Turn per-sample scores into a :class:`TriageCaseResult`.
+- def `run_triage_case` — Triage the batch *k* times and aggregate.
+- def `live_triage` — Run the production triage step once over the case's batch.
 
 ## Dependencies
 

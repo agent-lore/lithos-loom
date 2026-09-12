@@ -69,6 +69,7 @@ app.add_typer(develop_app, name="develop")
 from lithos_loom.evals.review import cli as _eval_review_cli  # noqa: E402,F401
 from lithos_loom.evals.review import cli_rescore as _eval_rescore  # noqa: E402,F401
 from lithos_loom.evals.review.app import eval_app  # noqa: E402
+from lithos_loom.evals.triage import cli as _eval_triage_cli  # noqa: E402,F401
 
 app.add_typer(eval_app, name="eval")
 

@@ -655,13 +655,17 @@ Classify each validated external finding into one of four buckets:
    escape would punish correct review behaviour.
 4. **Invalid claim** — triage / the fix run showed it wrong. → An **S5a
    triage fixture**: a known-false external finding the triage step must
-   REJECT with cited `file:line` evidence. Format: a parametrized entry in
-   `tests/test_story_develop_external_triage.py` carrying (a) the finding
-   body as the external reviewer wrote it, (b) the repo/sha it was written
-   against, and (c) the refuting citation a correct triage should produce —
-   the hermetic half of the PRD S8 measurement (known-false rejected /
-   known-true proceeds). No seed fixtures yet: every external finding on the
-   S2 arc's own PRs validated as real.
+   REJECT with cited `file:line` evidence. Format: a `[[finding]]` with
+   `expected = "reject"` in a triage case under `evals/triage/cases/`
+   ([README](../triage/README.md)) carrying (a) the finding body as the
+   external reviewer wrote it, (b) the repo/sha it was written against, and
+   (c) the `refutation_files` a correct rejection must cite. That corpus is
+   the PRD S8 triage measurement (`lithos-loom eval triage`: known-false
+   rejected / known-true proceeds / ambiguous proceeds); a known-good-arm
+   finding of THIS harness that validated as real is minted there too, as a
+   must-proceed. The seed batch's real findings all validated as true or as
+   judgements — the S2 arc's own finding repeated — so its known-false half
+   is synthetic and says so.
 
 ### Minting rules (the RH-5 gates, applied)
 
