@@ -841,7 +841,14 @@ Three case shapes, all buildable from material already on hand:
   refutation lines) and must-proceed
   over-suppression (a gate at 0 by default). Seed batch =
   `lens43-known-good-batch` (four real must-proceed findings from the
-  composed-tree run, two synthetic known-false). First run pending.
+  composed-tree run, two synthetic known-false). **First reading
+  (2026-09-12): known-false rejected 10/10, over-suppression 0/20 — the two
+  ambiguous must-proceed claims included — every rejection cited inside its
+  declared refutation range, no uncited or missing verdict, $3.44 for K=5**
+  — the step does its job on closed questions and default-to-act holds on
+  real material; S5a stays reject-with-citation. A floor reading on one
+  batch: the next batch needs a false claim that is a plausible cross-file
+  misreading rather than a one-line closed question.
 - **Composed-tree review.** Whether the panel can find a defect that exists
   only in the *combination* of two individually-correct branches — the
   `filters_narrow_the_board` class. If it cannot, S5 narrows to check-set-only
