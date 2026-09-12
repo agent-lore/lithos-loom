@@ -840,6 +840,19 @@ Three case shapes, all buildable from material already on hand:
   `filters_narrow_the_board` class. If it cannot, S5 narrows to check-set-only
   auto-push for non-semantic conflicts, which is a narrowing rather than a
   redesign.
+  *Shipped 2026-09-11* as `evals/review/cases/lens43-composed-projects`:
+  base = lens main after the #44/#45 pair, known-good = the operator's own
+  resolution (the pre-squash tip, the squash merge's tree but for two
+  post-merge giveaway lines neutralised in both heads), defect head = that
+  tree with the `projects` term undone. Panel-only by construction — no
+  added line names the project filter and both heads pass lens's full
+  check-set. The prior is undefined (no panel has seen the composition);
+  the case's description states the K=5 decision rule and the audit rule
+  for a catch. **First reading (2026-09-11): 5/5 caught, 0/5 fp, gate green
+  on both heads, all five findings audited as tree-reading** — the panel
+  does compositional review on this class, so S5 keeps panel-approved
+  auto-push for semantic conflicts. Single arm at K=5: "rely on it", not a
+  rate.
 
 **Precondition on any A/B here, from RH-5:** state the minimum detectable effect
 before paying for an arm. These are near-0/near-saturated questions, which is
