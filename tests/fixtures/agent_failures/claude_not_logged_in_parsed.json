@@ -1,0 +1,37 @@
+{
+  "_provenance": "captured 2026-09-13 \u2014 `eval resolve` $0 smoke under a HOME whose .claude/.credentials.json carried an already-expired OAuth token (failures/round_01_coder.json of the run): the coder died in ~3 s with zero tokens and the classifier said agent_error (loom #382)",
+  "engine": "claude",
+  "exit_code": 1,
+  "result_text": "Not logged in \u00b7 Please run /login",
+  "stderr": "",
+  "raw": {
+    "is_error": true,
+    "duration_api_ms": 0,
+    "num_turns": 1,
+    "stop_reason": "stop_sequence",
+    "session_id": "e456b8ad-83cc-4348-b9f4-532e3154a080",
+    "total_cost_usd": 0,
+    "usage": {
+      "output_tokens_details": {
+        "thinking_tokens": 0
+      },
+      "input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 0,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "",
+      "iterations": [],
+      "speed": "standard"
+    },
+    "modelUsage": {}
+  }
+}
