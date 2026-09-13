@@ -58,13 +58,17 @@ def create(
 
 def current_base_ref(repo: Path, base_branch: str) -> str:
     """The commit-ish a fresh branch off *base_branch* starts at (see
-    :func:`create`): the SHA of ``refs/remotes/origin/<base_branch>`` — freshly
-    fetched (:func:`git.fetch_branch`), or as last fetched when the fetch
-    fails — when the repo has that ref, else *base_branch* itself. A sha,
-    not the ``origin/<base>`` name: a branch created at a remote-tracking
-    name gets upstream config written to ``.git/config`` under a
-    non-retrying lock, which concurrent cuts in one checkout trip over
-    (#390 review); a sha writes nothing."""
+    :func:`create`): when the repo has an ``origin`` remote, the SHA of
+    ``refs/remotes/origin/<base_branch>`` after :func:`git.fetch_branch` —
+    the explicit refspec CREATES the tracking ref, so a checkout that never
+    materialised it (narrowed then widened, pruned — PR #393 review) is
+    fetched too, never cut at the stale local branch; when the fetch fails,
+    the ref as last fetched if there is one, else the local branch (logged).
+    A repo with no ``origin`` (the test fixtures) keeps the local branch. A
+    sha, not the ``origin/<base>`` name: a branch created at a
+    remote-tracking name gets upstream config written to ``.git/config``
+    under a non-retrying lock, which concurrent cuts in one checkout trip
+    over; a sha writes nothing."""
     remote_ref = f"refs/remotes/origin/{base_branch}"
 
     def resolve() -> str | None:
@@ -76,18 +80,29 @@ def current_base_ref(repo: Path, base_branch: str) -> str:
         )
         return probe.stdout.strip() if probe.returncode == 0 else None
 
-    if resolve() is None:
+    has_origin = (
+        subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    )
+    if not has_origin:
         return base_branch
     problem = git.fetch_branch(repo, base_branch)
+    sha = resolve()
     if problem:
         logger.warning(
-            "worktree: fetch of origin/%s failed (%s); starting at the local "
-            "(last fetched) origin/%s",
+            "worktree: fetch of origin/%s failed (%s); starting at %s",
             base_branch,
             problem,
-            base_branch,
+            f"the last fetched origin/{base_branch}"
+            if sha
+            else f"the local {base_branch} (no fetched ref)",
         )
-    return resolve() or base_branch
+    return sha or base_branch
 
 
 def create_on_branch(

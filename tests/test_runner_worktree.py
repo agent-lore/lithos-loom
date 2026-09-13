@@ -163,6 +163,55 @@ def test_create_fetches_by_explicit_refspec_whatever_the_remote_config_says(
     assert _sha(clone, "origin/main") == moved
 
 
+def test_create_fetches_when_origin_exists_but_the_tracking_ref_does_not(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """PR #393 review (High): a checkout with an `origin` remote but no
+    materialised `origin/<base>` (narrowed then widened, a pruned tracking
+    ref) must still fetch — the explicit refspec CREATES the ref — not cut
+    at the stale local branch, which is the defect this PR exists to fix."""
+    clone = _clone_with_remote(tmp_path, tmp_git_repo)
+    stale_local = _sha(clone, "main")
+    subprocess.run(
+        ["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=clone, check=True
+    )
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", "refs/remotes/origin/main"],
+            cwd=clone,
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+    moved = _add_commit(tmp_git_repo, "landed.txt", "merged upstream\n")
+
+    wt = worktree.create(clone, "main", "task", parent=tmp_path / "w")
+
+    assert _sha(wt, "HEAD") == moved
+    assert _sha(clone, "origin/main") == moved  # the fetch created the ref
+    assert _sha(clone, "main") == stale_local
+
+
+def test_create_falls_back_to_the_local_branch_when_no_ref_and_the_fetch_fails(
+    tmp_git_repo: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # origin exists but is dead AND there is no tracking ref to fall back on:
+    # the local branch is all there is (logged)
+    clone = _clone_with_remote(tmp_path, tmp_git_repo)
+    subprocess.run(
+        ["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=clone, check=True
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(tmp_path / "gone")],
+        cwd=clone,
+        check=True,
+    )
+    with caplog.at_level("WARNING", logger="lithos_loom.runner.worktree"):
+        wt = worktree.create(clone, "main", "task", parent=tmp_path / "w")
+    assert _sha(wt, "HEAD") == _sha(clone, "main")
+    assert any("fetch" in r.message and "local" in r.message for r in caplog.records)
+
+
 def test_fetch_base_retries_once_when_a_concurrent_fetch_moved_the_ref(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,7 +265,9 @@ def test_create_falls_back_to_the_local_branch_when_the_fetch_fails(
     with caplog.at_level("WARNING", logger="lithos_loom.runner.worktree"):
         wt = worktree.create(clone, "main", "task", parent=tmp_path / "w")
     assert _sha(wt, "HEAD") == _sha(clone, "origin/main")
-    assert any("fetch" in r.message and "local" in r.message for r in caplog.records)
+    assert any(
+        "fetch" in r.message and "last fetched" in r.message for r in caplog.records
+    )
 
 
 def test_fetch_branch_kills_a_hung_transport_with_its_group(
