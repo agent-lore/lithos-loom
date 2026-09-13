@@ -9,6 +9,7 @@ round is scripted via the ``reviews`` list.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import subprocess
@@ -2310,6 +2311,28 @@ def test_resolve_mode_ends_infra_failed_when_the_regenerate_pass_cannot_run(
     assert "docker: no" in result.message
     assert result.host_action == "check docker on the host, then complete the gate"
     assert state["review_calls"] == []  # nothing was reviewed
+
+
+def test_external_ack_contract_rides_into_every_coder_round(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#387: the per-id acknowledgement is answered from the FINAL coder
+    handoff, so the contract must reach the round-2+ coder prompt too — not
+    only round 1's cold start."""
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}],
+    )
+    entry = dataclasses.replace(
+        _pr_entry(config, None), external_ack="## External findings (ack f-002)"
+    )
+
+    result = develop_mod.develop(config, entry=entry)
+
+    assert result.status == "approved" and result.rounds == 2
+    assert "ack f-002" in state["coder_prompts"][0]
+    assert "ack f-002" in state["coder_prompts"][1]
 
 
 def test_develop_without_entry_uses_fresh_worktree_off_base(

@@ -32,7 +32,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 8 |
+| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 10 |
 | `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -208,9 +208,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `external_intake_reviews` — Build the synthetic intake that seeds converge's coder, plus the ``finding_id → ExternalFinding`` map the reply epilogue threads back on.
 - class `ExternalOutcome` — What happened to one injected external finding, for the reply epilogue.
 - class `CoderAck` — One line of the coder's ``## External findings`` acknowledgement.
-- def `ack_instruction` — The prompt block that makes the coder's per-id acknowledgement a hard contract, appended to the external-mode round-1 coder prompt.
+- def `ack_instruction` — The prompt block that makes the coder's per-id acknowledgement a hard contract, appended to EVERY external-mode coder prompt (round 1's cold start and each fix round — #387: the threads are answered from the FINAL handoff, so a later round that undoes a fix must say so).
 - def `parse_coder_acks` — Parse the coder handoff's ``## External findings`` acknowledgements.
 - def `outcomes_after_loop` — Fold triage rejections + the coder's per-id claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
+- def `final_round_outcomes` — The converge epilogue's dispositions, read from the coder's FINAL handoff (#387: lens #84's round 1 said FIXED, round 3 reverted it, and the threads were answered from round 1) — the mandated ``## External findings`` acks plus any ``## Findings`` dispute block — and checked against the tree: a run whose final tree equals the PR head outside the generated paths undid its fix. The ack section is scoped to the injected ids by construction; the ``## Findings`` block is read in round 1 only (a later round's belongs to the panel). A final round without the section carries no earlier claim forward (the safe direction).
+- def `undecided_note` — The status-line suffix for a converged run that left an external finding ``reverted`` (#387) — the tree converged, the decision did not.
 - def `pr_number_from_spec` — PR number from a converge change spec (``142`` / ``#142`` / a PR URL).
 
 ### `lithos_loom.plugins.story_develop.external_triage`

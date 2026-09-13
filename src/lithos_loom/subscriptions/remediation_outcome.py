@@ -24,7 +24,10 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationBudget,
     RemediationNotifier,
 )
-from lithos_loom.subscriptions.remediation_escalation import escalate_if_exhausted
+from lithos_loom.subscriptions.remediation_escalation import (
+    escalate_disputed,
+    escalate_if_exhausted,
+)
 
 __all__ = [
     "REFUND_RETRY_DELAYS",
@@ -122,7 +125,10 @@ async def record_result(
     if data.get("pushed") and pushed_sha:
         # Loom's own push: recorded so the next sweep's head observation
         # attributes it (no human-push reset) and own-sha material skips.
-        updated = dataclasses.replace(
+        # Every later write on this budget (the escalations below) starts
+        # from THIS copy, or it would clobber the attribution and the next
+        # sweep would read loom's own push as a human's (opus round 1).
+        budget = dataclasses.replace(
             budget,
             last_loom_pushed_sha=pushed_sha,
             last_seen_head_sha=pushed_sha,
@@ -130,7 +136,7 @@ async def record_result(
         await write_marker(
             ctx,
             task_id=gate_id,
-            marker={REMEDIATION_KEY: updated.as_marker()},
+            marker={REMEDIATION_KEY: budget.as_marker()},
             subsystem="external-remediation",
         )
 
@@ -165,6 +171,38 @@ async def record_result(
         f", ${cost:.2f}" if isinstance(cost, int | float) else "",
     )
     await post_finding(ctx, story_id, "\n".join(lines))
+    # #387: a fix the loop made and then undid is a DECISION (the review vs
+    # the acceptance criteria), raised now whatever the budget says — before
+    # the exhaustion rule, which would otherwise wait for the last round.
+    reverted = next(
+        (
+            o
+            for o in data.get("external_outcomes") or []
+            if isinstance(o, dict) and o.get("disposition") == "reverted"
+        ),
+        None,
+    )
+    if reverted is not None:
+        problem = await escalate_disputed(
+            ctx,
+            gate_id=gate_id,
+            story_id=story_id,
+            spec=spec,
+            budget=budget,
+            notifier=notifier,
+            outcome=reverted,
+            pushed_sha=pushed_sha,
+        )
+        if problem is not None:
+            await post_finding(
+                ctx,
+                story_id,
+                f"[Friction] external-remediation: external finding "
+                f"{reverted.get('finding_id', '?')} on {spec.pr_url} was fixed "
+                f"then reverted, but no needs-human gate could be raised "
+                f"({problem}); the decision is outstanding",
+            )
+        return
     # The CLI's own verdict decides (PR #361 review F1): `triage_rejected`
     # is a success — nothing left for the operator. An older record without
     # the flag is judged by status alone.

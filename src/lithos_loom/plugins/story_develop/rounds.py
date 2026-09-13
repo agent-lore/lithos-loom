@@ -308,6 +308,7 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
             review_files=review_files,
             handoff_file=handoff.coder_handoff_name(round_no),
             sandbox_facts=_sandbox_section(config.image, for_coder=True),
+            external_ack=ctx.external_ack,  # every round (#387); "" off external
         )
         coder_resume = True
 

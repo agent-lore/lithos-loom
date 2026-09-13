@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | M | 1 | 27 |
+| `lithos_loom.runner.git` | M | 1 | 28 |
 | `lithos_loom.runner.worktree` | S | 0 | 6 |
 
 ## Public API
@@ -45,6 +45,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `apply_patch` — Apply the unified diff at *patch_path* to *worktree*'s working tree (#193).
 - def `log_between` — Return the branch's commit log from *base* to *head*, oldest first.
 - def `diff_stat` — Return ``git diff --stat base...HEAD`` — the branch's cumulative change.
+- def `tree_differs` — Whether the trees of *a* and *b* differ, ignoring paths under the *exclude* prefixes (repo-relative; ``:(exclude)`` pathspec magic, so literal-pathspec mode is deliberately NOT set). ``git diff --quiet``: exit 1 = differs, 0 = identical, anything else raises (#387's objective "did the run move the tree" read).
 - def `merge` — Merge *ref* into *worktree*'s HEAD; return the conflicting paths.
 - def `merge_no_commit` — Merge *ref* into HEAD **without committing**; return the conflicting paths.
 - def `unmerged_paths` — The paths still unmerged in the index, exactly as named on disk.

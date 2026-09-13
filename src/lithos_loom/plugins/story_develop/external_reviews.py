@@ -28,9 +28,11 @@ reviewer proposes, loom's gate disposes).
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from lithos_loom.github_client import GitHubClient, GitHubError
 from lithos_loom.github_models import issue_comment_reply_body, parse_github_ref
@@ -44,10 +46,13 @@ from lithos_loom.github_review_streams import (
     proven_handled,
 )
 
+from ...runner import git
 from . import handoff
 from .findings import FindingLedger
 from .github_access import github_call
 from .panel import ReviewOutcome
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CoderAck",
@@ -221,9 +226,12 @@ class ExternalOutcome:
     """What happened to one injected external finding, for the reply epilogue.
 
     ``disposition``: ``rejected`` (triage refuted it, ``detail`` = the cited
-    evidence), ``fixed`` / ``disputed`` (the coder's per-id acknowledgement,
-    ``detail`` = its one-line response), or ``unaddressed`` (no validated
-    claim — the loop stopped early, or the coder never acknowledged the id).
+    evidence), ``fixed`` / ``disputed`` / ``reverted`` (the coder's per-id
+    acknowledgement in its FINAL handoff, ``detail`` = its one-line response
+    — ``reverted`` is a fix a later round undid, #387: the reviewer and the
+    story's acceptance criteria disagree, an operator decision), or
+    ``unaddressed`` (no validated claim — the loop stopped early, the coder
+    never acknowledged the id in its final handoff, or the tree never moved).
     The epilogue only *asserts* a fix in a thread reply when the branch was
     actually pushed; dispositions here are claims.
     """
@@ -238,7 +246,7 @@ class ExternalOutcome:
 class CoderAck:
     """One line of the coder's ``## External findings`` acknowledgement."""
 
-    verdict: str  # "fixed" | "disputed"
+    verdict: str  # "fixed" | "disputed" | "reverted"
     detail: str = ""
 
 
@@ -256,7 +264,7 @@ _ACK_SECTION_RE = re.compile(
 # One ack per LINE (the same anchoring rule as the triage verdict regex — an
 # unanchored pattern would let one line's detail swallow the next).
 _ACK_RE = re.compile(
-    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>FIXED|DISPUTED)"
+    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>FIXED|DISPUTED|REVERTED)"
     r"[ \t]*(?:[—–:-]+[ \t]*(?P<detail>.*\S))?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -264,7 +272,9 @@ _ACK_RE = re.compile(
 
 def ack_instruction(finding_ids: Sequence[str]) -> str:
     """The prompt block that makes the coder's per-id acknowledgement a hard
-    contract, appended to the external-mode round-1 coder prompt.
+    contract, appended to EVERY external-mode coder prompt (round 1's cold
+    start and each fix round — #387: the threads are answered from the
+    FINAL handoff, so a later round that undoes a fix must say so).
 
     Every injected id is named explicitly so the coder cannot conform while
     silently dropping one — an omitted id parses to no ack and the finding
@@ -272,20 +282,24 @@ def ack_instruction(finding_ids: Sequence[str]) -> str:
     """
     ids = ", ".join(finding_ids)
     return f"""
-## External-finding acknowledgements (required)
+## External-finding acknowledgements (required, every round)
 
 The findings above come from EXTERNAL reviewers on the PR's own threads, and
-each thread is answered from your handoff. In addition to the normal format,
-your handoff MUST contain a `{ACK_SECTION.lstrip("# ")}` section (header
-exactly `{ACK_SECTION}`) with exactly one line per finding id — every one of:
-{ids} — stating what you did:
+each thread is answered from your LAST handoff. In addition to the normal
+format, EVERY handoff you write in this run MUST contain a
+`{ACK_SECTION.lstrip("# ")}` section (header exactly `{ACK_SECTION}`) with
+exactly one line per finding id — every one of: {ids} — stating the state of
+that finding AS OF THIS HANDOFF:
 
 - f-001: FIXED — <one line: what you changed, and where>
 - f-002: DISPUTED — <one line: why the finding is wrong>
+- f-003: REVERTED — <one line: why you undid a fix from an earlier round>
 
-Use FIXED only for a finding you actually resolved in the code this turn. An
-id you omit is treated as NOT addressed and its thread gets no answer — never
-omit one silently.
+Use FIXED only for a finding whose fix is in the tree NOW. A fix you undid
+this round (a reviewer holds it contradicts the acceptance criteria, say) is
+REVERTED, never FIXED — the operator decides between the two contracts, not
+you. An id you omit is treated as NOT addressed and its thread gets no answer
+— never omit one silently, and repeat the section in every round.
 """
 
 
@@ -320,19 +334,28 @@ def outcomes_after_loop(
     acks: dict[str, CoderAck],
     *,
     loop_approved: bool = False,
+    tree_changed: bool | None = None,
+    missing_ack_detail: str = "",
 ) -> tuple[ExternalOutcome, ...]:
     """Fold triage rejections + the coder's per-id claims into per-finding
     outcomes, in the injection order (``id_map`` preserves it).
 
     ``fixed`` requires BOTH halves of the evidence (PR #345 re-review 1): the
     coder's explicit ``FIXED`` acknowledgement for that id (*acks*, from the
-    mandated ``## External findings`` section — the loop's approval alone is
-    evidence the TREE passed, not evidence of each disposition, so a silent
-    partial fix must never earn a per-thread claim) AND ``loop_approved``
-    (the panel + gate accepted the tree the acknowledgement is about — an
-    acked fix in an unapproved loop was never validated). A dispute counts
-    from either channel: the shared ``## Findings`` block contract, or a
-    ``DISPUTED`` acknowledgement line. Everything else is ``unaddressed``.
+    mandated ``## External findings`` section of its FINAL handoff — the
+    loop's approval alone is evidence the TREE passed, not evidence of each
+    disposition, so a silent partial fix must never earn a per-thread claim)
+    AND ``loop_approved`` (the panel + gate accepted the tree the
+    acknowledgement is about — an acked fix in an unapproved loop was never
+    validated) AND, when known, a tree that MOVED (*tree_changed*, #387: an
+    approved run whose final tree equals the PR head outside the generated
+    paths undid its own fix — ``reverted``, whatever the handoff says). A
+    ``REVERTED`` acknowledgement is ``reverted``. A dispute counts from
+    either channel — the ``## Findings`` block only in round 1, see
+    :func:`final_round_outcomes`:
+    the shared ``## Findings`` block contract, or a ``DISPUTED``
+    acknowledgement line. Everything else is ``unaddressed`` —
+    *missing_ack_detail* is the reason recorded when there is no ack at all.
     """
     out: list[ExternalOutcome] = []
     for fid, ext in id_map.items():
@@ -351,12 +374,113 @@ def outcomes_after_loop(
             )
             out.append(ExternalOutcome(fid, ext, "disputed", detail=detail))
             continue
+        if ack is not None and ack.verdict == "reverted":
+            out.append(ExternalOutcome(fid, ext, "reverted", detail=ack.detail))
+            continue
         if ack is not None and ack.verdict == "fixed" and loop_approved:
+            if tree_changed is False:
+                # round 1 must commit, so an APPROVED loop that ends at the
+                # PR head undid what it did — the decision shape, whatever
+                # the coder wrote
+                out.append(
+                    ExternalOutcome(
+                        fid,
+                        ext,
+                        "reverted",
+                        detail=(
+                            "acknowledged FIXED, but the final tree is identical "
+                            "to the PR head outside the generated paths — the "
+                            "fix was undone"
+                        ),
+                    )
+                )
+                continue
             out.append(ExternalOutcome(fid, ext, "fixed", detail=ack.detail))
             continue
-        detail = ack.detail if ack is not None else ""
+        detail = ack.detail if ack is not None else missing_ack_detail
         out.append(ExternalOutcome(fid, ext, "unaddressed", detail=detail))
     return tuple(out)
+
+
+def final_round_outcomes(
+    *,
+    handoff_dir: Path,
+    run_id: str,
+    rounds: int,
+    loop_approved: bool,
+    worktree: Path,
+    head_sha: str,
+    generated_paths: Sequence[str],
+    id_map: dict[str, ExternalFinding],
+    rejections: dict[str, str],
+    surviving_ids: Sequence[str],
+) -> tuple[ExternalOutcome, ...]:
+    """The converge epilogue's dispositions, read from the coder's FINAL
+    handoff (#387: lens #84's round 1 said FIXED, round 3 reverted it, and
+    the threads were answered from round 1) — the mandated ``## External
+    findings`` acks plus any ``## Findings`` dispute block — and checked
+    against the tree: a run whose final tree equals the PR head outside the
+    generated paths undid its fix. The ack section is scoped to the injected
+    ids by construction; the ``## Findings`` block is read in round 1 only
+    (a later round's belongs to the panel). A final round without the
+    section carries no earlier claim forward (the safe direction).
+    """
+    coder_claims: dict[str, handoff.Finding] = {}
+    acks: dict[str, CoderAck] = {}
+    final_round = max(rounds, 1)
+    coder_path = handoff_dir / handoff.coder_handoff_name(final_round)
+    try:
+        text = coder_path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""  # loop died before that round's handoff → unaddressed
+    missing = ""
+    if text:
+        acks = parse_coder_acks(text, surviving_ids)
+        if not acks and final_round > 1:
+            missing = (
+                f"no acknowledgement in the round {final_round} coder handoff — "
+                "an earlier round's claim is not carried forward"
+            )
+            logger.warning("converge %s: %s", run_id, missing.split(" — ")[0])
+        if final_round == 1:
+            # Round 1's `## Findings` block can only name the injected ids.
+            # A later round's is the panel's dispute contract, whose ids
+            # are minted independently (a panel f-001 beside the external
+            # f-001) — never read as a claim about an external id.
+            try:
+                parsed = handoff.parse_review_handoff(text)
+                coder_claims = {f.finding_id: f for f in parsed.findings}
+            except ValueError:
+                pass  # unparseable handoff: acks (line-scoped) may still hold
+    try:
+        tree_changed: bool | None = git.tree_differs(
+            worktree, head_sha, "HEAD", exclude=generated_paths
+        )
+    except (RuntimeError, OSError) as exc:
+        # the claim then stands on the acknowledgement alone, as before
+        logger.warning("converge %s: could not read the final tree: %s", run_id, exc)
+        tree_changed = None
+    return outcomes_after_loop(
+        id_map,
+        rejections,
+        coder_claims,
+        acks,
+        loop_approved=loop_approved,
+        tree_changed=tree_changed,
+        missing_ack_detail=missing,
+    )
+
+
+def undecided_note(outcomes: Sequence[ExternalOutcome]) -> str:
+    """The status-line suffix for a converged run that left an external
+    finding ``reverted`` (#387) — the tree converged, the decision did not."""
+    undecided = [o.finding_id for o in outcomes if o.disposition == "reverted"]
+    if not undecided:
+        return ""
+    return (
+        f"; external {', '.join(undecided)} REVERTED — operator decision needed "
+        "(the review vs the story's acceptance criteria)"
+    )
 
 
 def pr_number_from_spec(change_spec: str) -> int | None:

@@ -33,17 +33,15 @@ The guard rails, all sweep-owned (ADR 0011 decision 3 — single writer):
 - **Trust** — only allowlisted bots / write-admin humans' material triggers a
   dispatch (converge re-applies the same line to what it feeds the coder).
 - **Per-project dial** — context-doc ``develop_external_review_converge``
-  (default **on**, ADR 0011 decision 6 — default-off would regress against
-  the inline round slice D retires).
+  (default **on**, ADR 0011 decision 6).
 
-Failure economics: a converge run that produced a JSON result spent agent
-time and keeps its budget round (``triage_rejected`` included); an exit-0
-run with no JSON found nothing live to ingest (suppression drift between the
-sweep's view and the CLI's re-fetch) and gives the round back; a non-zero
-exit with no JSON posts a ``[Friction]`` finding and keeps the round. The
-pre-run reservation is **strict** (PR #346 review F3): a budget write that
-did not demonstrably land never spawns — the bound only exists if the
-increment does.
+Failure economics: a run that produced a JSON result keeps its budget round
+(``triage_rejected`` included); an exit-0 run with no JSON found nothing
+live to ingest and gives the round back; a non-zero exit with no JSON posts
+``[Friction]`` and keeps the round. The pre-run reservation is **strict**
+(PR #346 review F3): a budget write that did not demonstrably land never
+spawns. A decision gate on the budget (#387) holds every dispatch while it
+is open — :func:`~.remediation_escalation.decision_pending`.
 """
 
 from __future__ import annotations
@@ -81,6 +79,7 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationSettings,
     read_budget,
 )
+from lithos_loom.subscriptions.remediation_escalation import decision_pending
 from lithos_loom.subscriptions.remediation_outcome import (
     escalate_or_report,
     post_checkout_unresolved_refusal,
@@ -160,8 +159,7 @@ class ExternalRemediation:
         self._task: asyncio.Task[None] | None = None
         self._in_flight_pr_url = ""
         # #377: PR urls whose last run this boot ended `infra_failed` — held
-        # from re-dispatch (an outage must not spend a round per sweep); a
-        # daemon restart is the operator's fix attempt and starts empty.
+        # from re-dispatch until the daemon restarts (the operator's fix attempt)
         self._infra_held: set[str] = set()
 
     @property
@@ -197,9 +195,8 @@ class ExternalRemediation:
             return budget
         # A moved head is a HUMAN push unless it matches loom's own recorded
         # push; an empty previous sighting is first-time initialization only
-        # (PR #346 review F2 — gating the reset on a non-empty
-        # last_loom_pushed_sha left a PR whose spending rounds never pushed
-        # permanently exhausted: a human push could then never reset it).
+        # (PR #346 review F2: gating the reset on a non-empty loom sha left a
+        # PR whose spending rounds never pushed permanently exhausted).
         if budget.last_seen_head_sha and head != budget.last_loom_pushed_sha:
             ctx.logger.info(
                 "external-remediation: head of %s moved to %s (not loom's %s) — "
@@ -252,18 +249,22 @@ class ExternalRemediation:
 
         The pending trigger this decision leans on is parked by INGESTION,
         atomically with the batch's high-water marks and only after the
-        provider found the batch dispatchable (PR #346 review F1 +
-        re-reviews 1/3 — the marks consume the batch, so its dispatch debt
-        must become durable in the same write; and dispatchability is
-        decided pre-park so an undispatchable batch neither parks nor
-        clears). consider() then shapes the trigger's fate: a busy slot
-        leaves it for :meth:`resume_pending`, a dispatch consumes it with
-        the reservation, and dispatch-time refusals that retrying cannot
-        fix (opt-out, unmapped project) clear it.
+        provider found the batch dispatchable (PR #346 review F1 + re-reviews
+        1/3: the marks consume the batch, so its dispatch debt must become
+        durable in the same write). consider() then shapes the trigger's
+        fate: a busy slot leaves it for :meth:`resume_pending`, a dispatch
+        consumes it with the reservation, and dispatch-time refusals that
+        retrying cannot fix (opt-out, unmapped project) clear it.
         """
         settings = self._settings
         if settings.budget <= 0:
             return "disabled"
+        # the gate before the count (PR #389 review): lifting it re-arms
+        budget, pending = await decision_pending(
+            ctx, gate_id=gate.id, spec=spec, budget=budget
+        )
+        if pending:
+            return "escalated"
         if budget.rounds_used >= settings.budget:
             return "exhausted"  # the note already rode out on the finding
         if story_id is None:
@@ -349,16 +350,14 @@ class ExternalRemediation:
     ) -> str | None:
         """Fire a parked pending trigger on a sweep with no new batch.
 
-        ``None`` when no trigger is parked for this PR url. The resumed
-        dispatch needs no dispatchability revalidation: a trigger only
-        exists for a batch the provider already found trusted and
-        non-own-sha at park time (re-review 3) — material predating any
-        later loom push stays non-own-sha by construction — and converge
-        re-applies the trust line to whatever it re-fetches, refunding the
-        round when nothing live remains. The trigger survives a busy slot
-        and an exhausted budget (a human push resets the budget and the
-        trigger then fires) and is consumed atomically with the budget
-        reservation on dispatch.
+        ``None`` when no trigger is parked for this PR url. No
+        dispatchability revalidation: a trigger only exists for a batch the
+        provider found trusted and non-own-sha at park time (re-review 3),
+        and converge re-applies the trust line to what it re-fetches,
+        refunding the round when nothing live remains. The trigger survives
+        a busy slot, an exhausted budget and an open decision gate (it fires
+        after the reset / the decision) and is consumed atomically with the
+        budget reservation on dispatch.
         """
         raw = gate.metadata.get(PENDING_KEY)
         if not isinstance(raw, dict) or raw.get("pr_url") != spec.pr_url:
@@ -367,6 +366,11 @@ class ExternalRemediation:
             return "disabled"
         if self.busy:
             return "deferred_busy"  # trigger stays parked
+        budget, pending = await decision_pending(
+            ctx, gate_id=gate.id, spec=spec, budget=budget
+        )
+        if pending:
+            return "escalated"  # trigger stays parked for after the decision
         if budget.rounds_used >= self._settings.budget:
             return "exhausted"  # trigger stays parked for after a reset
         if story_id is None:
@@ -442,8 +446,8 @@ class ExternalRemediation:
             return "deferred_merge_gate"
         # The cheap origin read (PR #362 re-review 2 F2): a checkout that is
         # not the gate's repo must not spend a round or consume the parked
-        # trigger — the debt stays parked and dispatches once the mapping is
-        # fixed. The CLI's --expect-repo remains the authoritative check.
+        # trigger (it dispatches once the mapping is fixed); --expect-repo
+        # on the CLI remains the authoritative check.
         read = await origin_read(repo)
         origin = read.repo
         seen = (origin or "").lower()

@@ -240,10 +240,13 @@ def _derive(
 
     budget = _record(meta, _REMEDIATION, pr_url)
     if _str(budget.get("needs_human_gate_id")):
+        why = (
+            "an external review disputes the story's acceptance criteria"
+            if _str(budget.get("needs_human_reason")) == "disputed"
+            else "external-remediation budget exhausted"
+        )
         return Derived(
-            "needs_human",
-            "external-remediation budget exhausted — decision gate "
-            f"{budget['needs_human_gate_id']}",
+            "needs_human", f"{why} — decision gate {budget['needs_human_gate_id']}"
         )
 
     # The round is reserved at dispatch, so the count reads exhausted while
