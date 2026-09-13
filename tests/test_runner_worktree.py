@@ -125,6 +125,71 @@ def test_create_starts_at_the_fetched_remote_base_not_the_stale_local_branch(
     assert _sha(wt, "HEAD") == moved  # the fetched origin/main, not local main
     assert _sha(clone, "main") == stale_local  # the operator's branch untouched
     assert _branch_of(wt).startswith("task-")
+    # started at the resolved sha, so no upstream-tracking config was written
+    # (opus round 1: `-b x origin/main` writes .git/config under a non-retrying
+    # lock — concurrent cuts in one checkout failed 24/40 times)
+    tracking = subprocess.run(
+        ["git", "config", "--get-regexp", f"branch\\.{_branch_of(wt)}\\."],
+        cwd=clone,
+        capture_output=True,
+        text=True,
+    )
+    assert tracking.returncode != 0 and tracking.stdout == ""
+
+
+def test_create_fetches_by_explicit_refspec_whatever_the_remote_config_says(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """opus round 1: a bare `git fetch origin main` updates the tracking ref
+    only when `remote.origin.fetch` maps it — a checkout narrowed to another
+    branch would report success and cut at the stale ref, the very defect
+    again. The explicit refspec updates it regardless."""
+    clone = _clone_with_remote(tmp_path, tmp_git_repo)
+    subprocess.run(
+        [
+            "git",
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/other:refs/remotes/origin/other",
+        ],
+        cwd=clone,
+        check=True,
+    )
+    moved = _add_commit(tmp_git_repo, "landed.txt", "merged upstream\n")
+
+    wt = worktree.create(clone, "main", "task", parent=tmp_path / "w")
+
+    assert _sha(wt, "HEAD") == moved
+    assert _sha(clone, "origin/main") == moved
+
+
+def test_fetch_base_retries_once_when_a_concurrent_fetch_moved_the_ref(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opus round 1: two fetches of a moved base race on the ref's CAS; the
+    loser exits 1 with `cannot lock ref … is at X but expected Y` although
+    both would write X. That is not a failure — retry once."""
+    from lithos_loom.runner import git
+
+    clone = _clone_with_remote(tmp_path, tmp_git_repo)
+    moved = _add_commit(tmp_git_repo, "landed.txt", "merged upstream\n")
+    real_run = git.run_group
+    calls: list[list[str]] = []
+
+    def racing_run(argv, **kw):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            return 1, (
+                "error: cannot lock ref 'refs/remotes/origin/main': is at "
+                f"{moved} but expected {'0' * 40}\n"
+            )
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(git, "run_group", racing_run)
+
+    assert git.fetch_branch(clone, "main") == ""
+    assert len(calls) == 2
+    assert _sha(clone, "origin/main") == moved
 
 
 def test_create_falls_back_to_the_local_branch_without_a_remote(
@@ -152,6 +217,47 @@ def test_create_falls_back_to_the_local_branch_when_the_fetch_fails(
         wt = worktree.create(clone, "main", "task", parent=tmp_path / "w")
     assert _sha(wt, "HEAD") == _sha(clone, "origin/main")
     assert any("fetch" in r.message and "local" in r.message for r in caplog.records)
+
+
+def test_fetch_branch_kills_a_hung_transport_with_its_group(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """opus round 1: killing `git fetch` alone leaves the ssh / https helper
+    running; the fetch runs in its own process group and the group is killed
+    on timeout, so a hung remote costs the timeout and nothing else."""
+    import os
+    import time
+
+    from lithos_loom.runner import git
+
+    clone = _clone_with_remote(tmp_path, tmp_git_repo)
+    # an ssh "transport" that hangs: git runs it through GIT_SSH_COMMAND
+    hang = tmp_path / "hang.sh"
+    hang.write_text(
+        "#!/bin/sh\necho $$ > " + str(tmp_path / "hang.pid") + "\nsleep 300\n"
+    )
+    hang.chmod(0o755)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "ssh://localhost/nowhere.git"],
+        cwd=clone,
+        check=True,
+    )
+    started = time.monotonic()
+    env_backup = os.environ.get("GIT_SSH_COMMAND")
+    os.environ["GIT_SSH_COMMAND"] = str(hang)
+    try:
+        problem = git.fetch_branch(clone, "main", timeout=1.0)
+    finally:
+        if env_backup is None:
+            del os.environ["GIT_SSH_COMMAND"]
+        else:
+            os.environ["GIT_SSH_COMMAND"] = env_backup
+    assert "timed out" in problem
+    assert time.monotonic() - started < 10
+    helper = int((tmp_path / "hang.pid").read_text())
+    time.sleep(0.2)
+    with pytest.raises(ProcessLookupError):
+        os.kill(helper, 0)  # the helper died with the group
 
 
 def test_create_at_checks_out_detached_at_ref(

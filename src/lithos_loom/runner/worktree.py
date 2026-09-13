@@ -18,13 +18,11 @@ import secrets
 import subprocess
 from pathlib import Path
 
+from . import git
+
 logger = logging.getLogger(__name__)
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-# A remote that does not answer must not hang a dispatch: the fetch is a
-# courtesy to the operator's checkout, not a dependency of the run.
-_FETCH_TIMEOUT_SECONDS = 60
 
 
 def _slug(name: str, *, max_length: int = 50) -> str:
@@ -60,42 +58,36 @@ def create(
 
 def current_base_ref(repo: Path, base_branch: str) -> str:
     """The commit-ish a fresh branch off *base_branch* starts at (see
-    :func:`create`): ``origin/<base_branch>`` — freshly fetched, or as last
-    fetched when the fetch fails — when the repo has it, else *base_branch*
-    itself."""
-    remote_ref = f"origin/{base_branch}"
-    probe = subprocess.run(
-        ["git", "rev-parse", "--verify", "-q", f"refs/remotes/{remote_ref}"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    )
-    if probe.returncode != 0:
-        return base_branch
-    try:
-        fetched = subprocess.run(
-            ["git", "fetch", "-q", "origin", base_branch],
+    :func:`create`): the SHA of ``refs/remotes/origin/<base_branch>`` — freshly
+    fetched (:func:`git.fetch_branch`), or as last fetched when the fetch
+    fails — when the repo has that ref, else *base_branch* itself. A sha,
+    not the ``origin/<base>`` name: a branch created at a remote-tracking
+    name gets upstream config written to ``.git/config`` under a
+    non-retrying lock, which concurrent cuts in one checkout trip over
+    (#390 review); a sha writes nothing."""
+    remote_ref = f"refs/remotes/origin/{base_branch}"
+
+    def resolve() -> str | None:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", remote_ref],
             cwd=repo,
             capture_output=True,
             text=True,
-            timeout=_FETCH_TIMEOUT_SECONDS,
         )
-    except subprocess.TimeoutExpired:
+        return probe.stdout.strip() if probe.returncode == 0 else None
+
+    if resolve() is None:
+        return base_branch
+    problem = git.fetch_branch(repo, base_branch)
+    if problem:
         logger.warning(
-            "worktree: fetch of %s timed out; starting at the local (last fetched) %s",
-            remote_ref,
-            remote_ref,
+            "worktree: fetch of origin/%s failed (%s); starting at the local "
+            "(last fetched) origin/%s",
+            base_branch,
+            problem,
+            base_branch,
         )
-        return remote_ref
-    if fetched.returncode != 0:
-        logger.warning(
-            "worktree: fetch of %s failed (%s); starting at the local (last "
-            "fetched) %s",
-            remote_ref,
-            fetched.stderr.strip().splitlines()[-1] if fetched.stderr.strip() else "?",
-            remote_ref,
-        )
-    return remote_ref
+    return resolve() or base_branch
 
 
 def create_on_branch(
