@@ -1,0 +1,3432 @@
+diff --git a/docs/SPECIFICATION.md b/docs/SPECIFICATION.md
+index 6fa8626..b57f694 100644
+--- a/docs/SPECIFICATION.md
++++ b/docs/SPECIFICATION.md
+@@ -63,7 +63,9 @@ The current application exposes these routes:
+ - `GET /health`
+   Returns Lens health information suitable for container or service checks.
+ - `GET /tasks`
+-  Renders the task dashboard and accepts filter query parameters.
++  Renders the task dashboard and accepts filter query parameters. With
++  `?selected=<task_id>` the side panel is rendered open beside the board
++  (§5.6.1).
+ - `GET /tasks/events`
+   Browser-facing Server-Sent Events endpoint for live task updates.
+ - `GET /tasks/{task_id}` (and `GET /tasks/id?task_id=<id>`)
+@@ -80,6 +82,10 @@ The current application exposes these routes:
+   every id Lens can be handed is a server-generated UUID).
+   `tasks.task_detail_path` is the one place that decides, shared by the board,
+   the graph page and the knowledge produced-by chip.
++- `GET /tasks/{task_id}?fragment=panel`
++  Renders the task's side-panel partial (§5.6.1) — the same reads as the detail
++  page through a template that extends no layout. This is what a dashboard row
++  click fetches.
+ - `GET /tasks/{task_id}/findings`
+   Renders the findings fragment used by the task detail page.
+ - `GET /tasks/{task_id}/blockers`
+@@ -331,16 +337,100 @@ two cannot disagree about why a task is where it is. It shows:
+   unsatisfiable one, or a cycle
+ - **the blocker chain**, expandable one level at a time to a bounded depth; a
+   level that would revisit the chain reports the cycle instead of walking it
++- **Blocks:** — the level-1 dependents (outgoing `blocks` / `waits_on_gate`)
++  with the live status each was read with, beneath the chain, so the text
++  baseline covers both directions of the same relationship. The two blocker
++  edge types read opposite ways round here: a *dependent* is never a reason
++  this task cannot run, so the "satisfied" and "unsatisfiable" verdicts — which
++  are claims about this task's own predecessors — are not applied to it
+ - **provenance** in both directions (`discovered_from`)
+ - **children**, for an epic
+ - **findings**, with links to any note a finding produced
+ - related note links where available
+ 
+ Every bounded list on the page states its own remainder through one shared
+-tail, so the page-size claim has a single definition.
++tail, so the page-size claim has a single definition. The dependents list is
++one of them: the outgoing edge count is agent-written like the incoming one.
+ 
+ Detail rendering is read-only in the current implementation.
+ 
++#### 5.6.1 Side panel
++
++The same reads back a **side panel**, so a relationship can be read without
++leaving the board. One implementation for two host pages (§5.5 of
++REQUIREMENTS), rendered from one template that extends no layout:
++
++- `GET /tasks?selected=<task_id>` renders the board with the panel already
++  open. That is the no-JS baseline — a shared link, a screen reader and a
++  browser with scripting off all land on the same thing — and `selected` is the
++  dashboard's *only* selection parameter. The graph page's is `focus` (§5.12);
++  neither page carries the other's.
++- `GET /tasks/{task_id}?fragment=panel` answers with the partial and nothing
++  else. A row click fetches it — from the URL the SERVER wrote onto the row, so
++  the id encoding and the board's preserved filters have one definition — swaps
++  it into the board and pushes `selected` onto the URL with `pushState`. The
++  push happens after the swap, so a failed fetch never leaves the address bar
++  claiming an open panel.
++- Closing (the Close link, or Escape) clears `selected` and nothing else: the
++  filters, the epic scope and the resolved-since window are rebuilt from the
++  live URL. `selected` is deliberately not a preserved filter, so no generated
++  link carries one selection into the next page. Back and forward re-apply the
++  URL's selection without a reload.
++- **The latest intent owns the panel.** Panels are fetched, so two can be in
++  flight at once and answer in either order. Every open and every close takes a
++  generation, and no response writes the panel or the URL unless its generation
++  is still current — checked at *both* suspension points, since the response
++  arriving and its body being read are separate moments. What the panel is MEANT
++  to show is tracked separately from what it is showing, and `popstate` compares
++  against the intent: a Forward back onto the selection already on screen still
++  supersedes an open running under it. A reconcile is validated against the URL
++  it actually fetched as well as its generation — a click in flight has not
++  pushed its URL yet, so a reconcile started in that window carries the previous
++  selection's panel under the next one's generation. The board fragment applies
++  either way: it does not depend on the selection.
++- **A panel that never arrives.** A rejected fetch, a non-OK response and a body
++  that fails to read are one outcome, and what it costs depends on who asked. A
++  click has pushed nothing yet, so the panel and the URL still agree and both
++  stay — only the intent is walked back to what is on screen, or the next
++  Forward onto the task that failed would match it and leave the previous task's
++  panel under its URL. Back and forward move the URL *before* the panel code
++  runs, so there the panel on screen already names a different task than the
++  address bar: it is cleared, along with the selection, because an empty panel
++  under a URL the operator can retry is a missing answer and the previous task's
++  panel is a wrong one.
++- **The browser never assembles a panel URL.** Rows carry one built by the
++  server, and the host carries the one built for the request's own selection —
++  which is what reopens a deep-linked task that has no row on this board. The
++  residual fallback uses the query-alias route, whose path and key the server
++  hands down, because that is the one form that addresses every id: a task
++  called `graph` fetched as `/tasks/graph` would return the graph PAGE.
++- **Every row on the board opens one**, the Gates section included: a gate is a
++  task, and "what is this gate holding up?" is the Blocks list the panel
++  already answers. The contract a row opts into is `data-task-id` plus the
++  server-built `data-panel-url` — not the `data-task-row` hook the live-event
++  handlers use to rewrite claim and status chrome in place, which a gate row
++  does not carry.
++- **Expand** leaves for the full page. Every other link inside the panel is an
++  ordinary link too; the click handler intercepts the row title and the row
++  itself, never a tag chip or a link within the panel. Nor a `<summary>`: the
++  gate row's waiter list is a `<details>` that expands with no JavaScript, and
++  its disclosure control keeps that behaviour.
++
++The panel states: the header (title, status, type badge with `gate_type`,
++project chip under the configured convention, creating agent), the parent
++breadcrumb, the blockers with live status (level 1, no per-level expander —
++the walk lives on the full page), **Blocks** (the level-1 dependents), the
++active claims, and the finding COUNT linked to the full timeline. The
++downstream-impact line (`frees N in this graph, M immediately`) needs a scope
++and is not computed here; its slot is present and empty.
++
++An unknown id renders the **not-found panel** at HTTP 200 on both routes —
++never a 500, and never at the cost of the board beside it — and a read that
++merely failed says so instead, because "this task does not exist" is Lithos's
++answer rather than a transport outcome. The open panel carries its own refresh
++fragment, so the reconcile that keeps the board live keeps the panel's blocker
++and dependent statuses live too without rebuilding it under the cursor.
++
+ ### 5.7 Knowledge Surface
+ 
+ K1 replaced the minimal note path with a browsable knowledge surface.
+@@ -697,6 +787,13 @@ queued is not one of its three outcomes, and is carried by the span field
+ attribute only: one Prometheus series per project is the cardinality failure
+ §8's rule exists to prevent.
+ 
++The side panel (§5.6.1) is counted by **`lens_tasks_panel_opens_total`**
++(`source` in `url` | `fragment`) — the SSR baseline and the click-fetched
++partial, which are the two things the request can actually distinguish. The
++PRD's finer row-vs-node split is the client's knowledge, not a fact on the
++request, and the task id is absent for the same cardinality reason as the
++graph's scope key.
++
+ ## 6. Current Lithos Dependencies
+ 
+ Lens currently assumes the availability of an existing Lithos deployment that
+diff --git a/docs/generated/components/TaskGraph.md b/docs/generated/components/TaskGraph.md
+index 275b093..1f34180 100644
+--- a/docs/generated/components/TaskGraph.md
++++ b/docs/generated/components/TaskGraph.md
+@@ -162,7 +162,7 @@ Task-graph transport records and normalizers (blocked-task rows + edges), plus t
+ 
+ ### `lithos_lens.task_links`
+ - class `TaskLinkClient` — The narrow client surface the neighbour reads need.
+-- class `LinkTarget` — One neighbour id to resolve, with the edge type that named it.
++- class `LinkTarget` — One neighbour id to resolve, with the edge type and DIRECTION that named it.
+ - class `LinkedTask` — One neighbour of a task, carrying the live status actually read for it.
+ - class `PageTail` — What a bounded page did NOT render, and how much of it there was.
+ - def `bounded_page` — Take the first :data:`LINK_PAGE_SIZE` items and COUNT the rest.
+diff --git a/docs/generated/components/Telemetry.md b/docs/generated/components/Telemetry.md
+index b08a374..fe6abf3 100644
+--- a/docs/generated/components/Telemetry.md
++++ b/docs/generated/components/Telemetry.md
+@@ -11,7 +11,7 @@ OpenTelemetry setup and the named metric-instrument catalogue: providers, export
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.metrics` | M | 0 | 18 |
++| `lithos_lens.metrics` | M | 0 | 19 |
+ | `lithos_lens.telemetry` | M | 0 | 6 |
+ 
+ ## Public API
+@@ -35,6 +35,7 @@ OpenTelemetry setup and the named metric-instrument catalogue: providers, export
+ - def `knowledge_resolves` — Counter of wiki-link resolutions by the arm that decided.
+ - def `tasks_graph_renders` — Counter of `/tasks/graph` renders by scope kind and terminal outcome.
+ - def `tasks_graph_cycle_reads` — Counter of the graph page's scoped `lithos_task_blocked` reads.
++- def `tasks_panel_opens` — Counter of side-panel renders by where the request came from (§5.5).
+ 
+ ### `lithos_lens.telemetry`
+ - def `setup_telemetry` — Install the tracer, meter and (when exporting) log providers.
+diff --git a/docs/generated/components/Web.md b/docs/generated/components/Web.md
+index de209ba..5c9dbc7 100644
+--- a/docs/generated/components/Web.md
++++ b/docs/generated/components/Web.md
+@@ -13,8 +13,8 @@ FastAPI application factory serving the server-rendered dashboard UI (Jinja2 tem
+ |---|---|---:|---:|
+ | `lithos_lens.graph_routes` | S | 0 | 1 |
+ | `lithos_lens.knowledge_routes` | S | 0 | 1 |
+-| `lithos_lens.request_filters` | M | 0 | 12 |
+-| `lithos_lens.web` | M | 0 | 1 |
++| `lithos_lens.request_filters` | M | 0 | 13 |
++| `lithos_lens.web` | L | 0 | 1 |
+ 
+ ## Public API
+ 
+@@ -30,6 +30,7 @@ FastAPI application factory serving the server-rendered dashboard UI (Jinja2 tem
+ - def `task_tag_url`
+ - def `task_tag_clear_url` — Link an active-filter chip to the same board WITHOUT that one tag.
+ - def `task_detail_url` — Link a task id as ONE path segment, with every reserved character encoded.
++- def `panel_fragment_url` — Link a row to the SIDE PANEL fragment for its task (§5.5, T2-A6).
+ - def `blocker_expand_url` — Link a blocker line's expander to the fragment for its OWN blockers (T1-S8).
+ - def `note_url` — Link a finding's document, id-encoded, carrying the task back-link.
+ - def `epic_scope_url` — Link an epic chip to the dashboard scoped to that epic — or unscoped.
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 73c16b3..d75cf21 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -328,6 +328,7 @@ classDiagram
+     +task_type str
+     +gate_type str
+     +unresolved bool
++    +downstream bool
+     +gate_elapsed bool
+   }
+   class NodeView {
+@@ -374,6 +375,7 @@ classDiagram
+     +children_state SectionState
+     +not_found bool
+     +errors tuple[str, ...]
++    +projects tuple[str, ...]
+   }
+   class TaskGraphScope {
+     +kind str
+@@ -468,6 +470,7 @@ classDiagram
+   TaskDetailData "1" --> "1" Breadcrumb : breadcrumb
+   TaskDetailData "1" --> "0..*" FindingView : findings
+   TaskDetailData "1" --> "1" LinkPage : blockers
++  TaskDetailData "1" --> "1" LinkPage : dependents
+   TaskDetailData "1" --> "1" LinkPage : discovered_from
+   TaskDetailData "1" --> "1" LinkPage : spawned
+   TaskDetailData "1" --> "1" PageTail : children_tail
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index a147913..d80aacb 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -105,10 +105,10 @@
+         "qualname": "lithos_lens.events._iter_sse_lines"
+       }
+     ],
+-    "total_functions": 577
++    "total_functions": 582
+   },
+   "domain": {
+-    "associations": 77,
++    "associations": 78,
+     "models": 69,
+     "models_without_docstrings": 16
+   },
+@@ -177,7 +177,7 @@
+       }
+     },
+     "cross_component_edges": 35,
+-    "cross_component_module_edges": 93,
++    "cross_component_module_edges": 94,
+     "longest_component_chain": 8,
+     "module_cycle_count": 0,
+     "module_cycles": [],
+@@ -293,52 +293,52 @@
+         "functions": 248,
+         "largest_module": "lithos_lens.graph_layout",
+         "largest_module_lines": 799,
+-        "lines": 7709,
++        "lines": 7767,
+         "modules": 18,
+         "public_symbols": 107,
+-        "sloc": 5912
++        "sloc": 5953
+       },
+       "Tasks": {
+         "classes": 13,
+         "functions": 37,
+         "largest_module": "lithos_lens.tasks",
+-        "largest_module_lines": 669,
+-        "lines": 1118,
++        "largest_module_lines": 679,
++        "lines": 1128,
+         "modules": 3,
+         "public_symbols": 42,
+-        "sloc": 814
++        "sloc": 817
+       },
+       "Telemetry": {
+         "classes": 0,
+-        "functions": 37,
++        "functions": 38,
+         "largest_module": "lithos_lens.telemetry",
+         "largest_module_lines": 548,
+-        "lines": 1069,
++        "lines": 1091,
+         "modules": 2,
+-        "public_symbols": 24,
+-        "sloc": 775
++        "public_symbols": 25,
++        "sloc": 793
+       },
+       "Web": {
+         "classes": 1,
+-        "functions": 42,
++        "functions": 46,
+         "largest_module": "lithos_lens.web",
+-        "largest_module_lines": 629,
+-        "lines": 1479,
++        "largest_module_lines": 720,
++        "lines": 1591,
+         "modules": 4,
+-        "public_symbols": 15,
+-        "sloc": 1150
++        "public_symbols": 16,
++        "sloc": 1236
+       }
+     },
+     "max_module": "lithos_lens.graph_layout",
+     "max_module_lines": 799,
+     "modules_over_800": [],
+-    "total_lines": 17396,
++    "total_lines": 17598,
+     "total_modules": 46,
+-    "total_sloc": 13352
++    "total_sloc": 13500
+   },
+   "tests": {
+-    "ratio": 1.67,
+-    "src_lines": 17396,
+-    "test_lines": 29044
++    "ratio": 1.74,
++    "src_lines": 17598,
++    "test_lines": 30548
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 1e50be5..0084a3e 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -21,7 +21,7 @@ lower a budget after improving the code to lock in the gain.
+ 
+ ## Import graph
+ 
+-- Cross-component edges: **35** (93 module-level)
++- Cross-component edges: **35** (94 module-level)
+ - Component cycles: none
+ - Module cycles: none
+ - Tier-skipping edges (Entrypoints → Foundation): 10 (Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> Logging, Entrypoint -> Telemetry, Web -> Config, Web -> Errors, Web -> Knowledge, Web -> TaskGraph, Web -> Tasks, Web -> Telemetry)
+@@ -42,20 +42,20 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | LithosClient | 5 | 2591 | 2078 | 2 | 6 | 0.75 | 20 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 4 |
+ | Logging | 1 | 169 | 122 | 2 | 1 | 0.33 | 7 (`lithos_lens.logging._json_safe`) | 0 |
+ | State | 1 | 80 | 59 | 1 | 4 | 0.80 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
+-| TaskGraph | 18 | 7709 | 5912 | 4 | 1 | 0.20 | 46 (`lithos_lens.frontier.load_dashboard`) | 17 |
+-| Tasks | 3 | 1118 | 814 | 5 | 0 | 0.00 | 23 (`lithos_lens.normalizers.normalize_task`) | 3 |
+-| Telemetry | 2 | 1069 | 775 | 4 | 2 | 0.33 | 10 (`lithos_lens.telemetry.setup_telemetry`) | 0 |
+-| Web | 4 | 1479 | 1150 | 1 | 9 | 0.90 | 14 (`lithos_lens.request_filters._parse_preserved_filters`) | 2 |
++| TaskGraph | 18 | 7767 | 5953 | 4 | 1 | 0.20 | 46 (`lithos_lens.frontier.load_dashboard`) | 17 |
++| Tasks | 3 | 1128 | 817 | 5 | 0 | 0.00 | 23 (`lithos_lens.normalizers.normalize_task`) | 3 |
++| Telemetry | 2 | 1091 | 793 | 4 | 2 | 0.33 | 10 (`lithos_lens.telemetry.setup_telemetry`) | 0 |
++| Web | 4 | 1591 | 1236 | 1 | 9 | 0.90 | 14 (`lithos_lens.request_filters._parse_preserved_filters`) | 2 |
+ 
+ ## Size
+ 
+-- Modules: **46**, lines: **17396**, SLOC: **13352**
++- Modules: **46**, lines: **17598**, SLOC: **13500**
+ - Largest module: `lithos_lens.graph_layout` (799 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **577**, cyclomatic > 10: **31**
++- Functions: **582**, cyclomatic > 10: **31**
+ 
+ Top 10 most complex functions:
+ 
+@@ -82,5 +82,5 @@ Private-name reaches across module seams. Both counts can be pinned as
+ 
+ ## Domain & tests
+ 
+-- Domain models: **69** (77 associations, 16 without docstrings)
+-- Test-to-source line ratio: **1.67** (29044 test lines / 17396 source lines)
++- Domain models: **69** (78 associations, 16 without docstrings)
++- Test-to-source line ratio: **1.74** (30548 test lines / 17598 source lines)
+diff --git a/e2e/tests/live-events.spec.ts b/e2e/tests/live-events.spec.ts
+index 7cfc240..a2db8d9 100644
+--- a/e2e/tests/live-events.spec.ts
++++ b/e2e/tests/live-events.spec.ts
+@@ -122,3 +122,50 @@ test("finding.posted reveals the finding chip on the task's row", async ({ page,
+   await expect(chip).toBeVisible();
+   await expect(chip).toHaveText("1 new finding");
+ });
++
++test("a task event refreshes the open side panel without losing the selection", async ({
++  page,
++  request,
++}) => {
++  // T2-A6: the panel states BLOCKER and DEPENDENT statuses, so it has to ride
++  // the same reconcile the board does — a panel left as a snapshot answers
++  // "what is blocking this?" with what WAS blocking it. It carries its own
++  // refresh fragment, so the swap is observable even against fixtures whose
++  // data never changes: mark the node that is on screen, and watch it go.
++  await page.goto("/tasks?project=lithos-loom&selected=loom-worker");
++  await expect(page.locator('[data-panel-task="loom-worker"]')).toBeVisible();
++  await expect(page.locator('[data-live-state="live"]')).toBeVisible();
++  await expect(
++    page.locator('[data-panel-dependents] [data-link-list="dependents"] li').first(),
++  ).toBeVisible();
++
++  await page.evaluate(() => {
++    document
++      .querySelector("[data-task-panel]")
++      ?.setAttribute("data-e2e-stale", "1");
++  });
++
++  const publish = await request.post("/tasks/events/publish", {
++    data: {
++      id: `evt-e2e-panel-${Date.now()}`,
++      type: "task.updated",
++      task_id: "loom-worker",
++      requires_refresh: true,
++    },
++  });
++  expect(publish.status()).toBe(202);
++
++  // The marked node is gone: the reconcile replaced the panel…
++  await expect(page.locator("[data-task-panel][data-e2e-stale]")).toHaveCount(0);
++  // …with a fresh one for the same task, relationship lines and all…
++  await expect(page.locator('[data-panel-task="loom-worker"]')).toBeVisible();
++  await expect(
++    page.locator('[data-panel-blockers] [data-link-list="blockers"] li').first(),
++  ).toBeVisible();
++  await expect(
++    page.locator('[data-panel-dependents] [data-link-list="dependents"] li').first(),
++  ).toBeVisible();
++  // …and neither the selection nor the board moved under it.
++  await expect(page).toHaveURL(/\?project=lithos-loom&selected=loom-worker$/);
++  await expect(page.locator(".task-board")).toBeVisible();
++});
+diff --git a/e2e/tests/screenshots.spec.ts b/e2e/tests/screenshots.spec.ts
+index 073e8f6..454c341 100644
+--- a/e2e/tests/screenshots.spec.ts
++++ b/e2e/tests/screenshots.spec.ts
+@@ -112,6 +112,33 @@ const PAGES: ReadonlyArray<{
+       ).toBeVisible();
+     },
+   },
++  {
++    // The side panel (T2-A6), server-rendered open by `?selected=` — the
++    // no-JS baseline, and the only artifact that shows the panel OVER the
++    // board. `loom-worker` sits mid-chain in the demo's loom cluster, so it
++    // is the one fixture carrying every section at once: a blocker above, two
++    // dependents below, and a parent epic.
++    slug: "dashboard-panel",
++    url: "/tasks?since=2026-08-01&selected=loom-worker",
++    ready: async (page) => {
++      await expect(page.locator(".task-board")).toBeVisible();
++      await expect(page.locator('[data-panel-task="loom-worker"]')).toBeVisible();
++      // Both directions of the relationship, which is the slice: the chain
++      // upstream and the "Blocks" list downstream.
++      await expect(
++        page.locator('[data-panel-blockers] [data-link-list="blockers"] li').first(),
++      ).toBeVisible();
++      await expect(
++        page
++          .locator('[data-panel-dependents] [data-link-list="dependents"] li')
++          .first(),
++      ).toBeVisible();
++      // The parent breadcrumb and the two buttons §5.5 promises.
++      await expect(page.locator("[data-panel-parent]")).toBeVisible();
++      await expect(page.locator("[data-panel-expand]")).toBeVisible();
++      await expect(page.locator("[data-panel-close]")).toBeVisible();
++    },
++  },
+   {
+     slug: "task-detail",
+     url: "/tasks/influx-ingest-cutover",
+diff --git a/e2e/tests/smoke.spec.ts b/e2e/tests/smoke.spec.ts
+index 10d4450..f8255ff 100644
+--- a/e2e/tests/smoke.spec.ts
++++ b/e2e/tests/smoke.spec.ts
+@@ -349,11 +349,29 @@ test("the optimistic skeleton is suppressed on a filtered board", async ({ page,
+   ).toHaveCount(0);
+ });
+ 
+-test("clicking a task opens its detail page", async ({ page }) => {
++test("clicking a task opens its panel, and Expand opens the full page", async ({
++  page,
++}) => {
+   await page.goto("/tasks?since=2026-08-01");
+ 
+   await page.getByRole("link", { name: "Cut over Influx ingest path" }).click();
+ 
++  // §5.5 (T2-A6): a row click opens the side panel and pushes `selected` onto
++  // the URL — the operator keeps their place in the list. The full page is
++  // what Expand is for, and this is the transition the PRD's problem statement
++  // is about ("every row click is a page navigation").
++  await expect(
++    page.locator('[data-panel-task="influx-ingest-cutover"]'),
++  ).toBeVisible();
++  await expect(page).toHaveURL(/selected=influx-ingest-cutover/);
++  await expect(page.locator(".task-board")).toBeVisible();
++  // The panel answers both directions of the relationship, not just upstream.
++  await expect(
++    page.locator('[data-panel-dependents] [data-link-target="influx-backfill"]'),
++  ).toBeVisible();
++
++  await page.locator("[data-panel-expand]").click();
++
+   await expect(page).toHaveURL(/\/tasks\/influx-ingest-cutover/);
+   await expect(
+     page.locator('[data-task-detail="influx-ingest-cutover"]'),
+@@ -364,6 +382,121 @@ test("clicking a task opens its detail page", async ({ page }) => {
+   await expect(page.getByText("worker-a").first()).toBeVisible();
+ });
+ 
++test("clicking a row away from its links opens the panel too", async ({ page }) => {
++  // §5.5's contract is "clicking a ROW opens a panel" — the title link is the
++  // obvious target, not the whole of it. This clicks the row's meta line,
++  // which carries badges and timestamps and no anchor at all.
++  await page.goto("/tasks?since=2026-08-01");
++  const row = page.locator('[data-task-row][data-task-id="influx-backfill"]');
++  await expect(row).toBeVisible();
++
++  await row.locator(".task-row-meta").click();
++
++  await expect(
++    page.locator('[data-panel-task="influx-backfill"]'),
++  ).toBeVisible();
++  await expect(page).toHaveURL(/selected=influx-backfill/);
++});
++
++test("clicking a gate row opens its panel, and the waiter list still opens", async ({
++  page,
++}) => {
++  // §5.5's "clicking a row opens a panel" covers the Gates section too: a gate
++  // is a task, and "what is this gate holding up?" is the Blocks list the
++  // panel already answers. Gate rows carry gate chrome rather than claim
++  // chrome, so they do not carry `data-task-row` — which is exactly how the
++  // section fell out of the shared click contract.
++  await page.goto("/tasks?since=2026-08-01");
++  const gate = page.locator(
++    '[data-gate-row][data-task-id="influx-read-swap-approval"]',
++  );
++  await expect(gate).toBeVisible();
++
++  // The waiter disclosure is a <details> that works with no JS, so the row
++  // handler must leave its <summary> alone. Toggled BEFORE the panel click:
++  // a handler that swallowed it would both fail to expand the list and open
++  // the panel early.
++  const waiters = gate.locator("[data-gate-waiters]");
++  await waiters.locator("summary").click();
++  await expect(waiters.locator(".gate-waiter-list")).toBeVisible();
++  await expect(page).not.toHaveURL(/selected=/);
++
++  await gate.locator(".task-title").click();
++
++  await expect(
++    page.locator('[data-panel-task="influx-read-swap-approval"]'),
++  ).toBeVisible();
++  await expect(page).toHaveURL(/selected=influx-read-swap-approval/);
++  // Still the board — a gate click used to be a full-page navigation.
++  await expect(page.locator(".task-board")).toBeVisible();
++});
++
++test("a panel fetch that fails leaves the board exactly as it was", async ({
++  page,
++}) => {
++  // The real failure path, in a real browser: the fragment request is aborted,
++  // so `fetch` REJECTS rather than answering. A click pushes its URL only on
++  // success, so nothing may move — and nothing may be left dangling either.
++  await page.goto("/tasks?since=2026-08-01");
++  const errors: string[] = [];
++  page.on("pageerror", (error) => errors.push(String(error)));
++  // Matched by predicate, not by glob: `fragment=panel` sits in the QUERY, and
++  // a `**/…` pattern only matches after a path separator.
++  const isPanelFragment = (url: URL) =>
++    url.searchParams.get("fragment") === "panel";
++  let aborted = 0;
++  await page.route(isPanelFragment, (route) => {
++    aborted += 1;
++    return route.abort();
++  });
++
++  // Armed BEFORE the click, and awaited after it: the failing REQUEST is what
++  // this test synchronises on. Every assertion below is also true in the
++  // instant after the click and before the request fails, so a wall-clock
++  // sleep would let the test pass on a run where the route never matched at
++  // all — and would inspect `errors` too early on a slow worker. Waiting on
++  // the event itself removes both.
++  const requestFailed = page.waitForEvent("requestfailed", (request) =>
++    isPanelFragment(new URL(request.url())),
++  );
++
++  await page.getByRole("link", { name: "Cut over Influx ingest path" }).click();
++  await requestFailed;
++  expect(aborted).toBe(1);
++  // The rejection reaches the page's own handlers in the microtask checkpoint
++  // that follows the failure, so one frame later it has either been caught or
++  // been reported. A double rAF is how the rest of this suite waits for the
++  // page to settle, and it costs a round trip, which is what orders the
++  // `pageerror` delivery below against this assertion.
++  await page.evaluate(
++    () =>
++      new Promise((resolve) =>
++        requestAnimationFrame(() => requestAnimationFrame(resolve)),
++      ),
++  );
++
++  await expect(page.locator("[data-task-panel]")).toHaveCount(0);
++  await expect(page).toHaveURL(/\/tasks\?since=2026-08-01$/);
++  await expect(page.locator(".task-board")).toBeVisible();
++  expect(errors).toEqual([]);
++});
++
++test("closing the side panel keeps the board's filters", async ({ page }) => {
++  // The no-JS baseline first: `?selected=` renders the panel open server-side.
++  await page.goto("/tasks?project=influx&selected=influx-backfill");
++  await expect(
++    page.locator('[data-panel-task="influx-backfill"]'),
++  ).toBeVisible();
++
++  await page.locator("[data-panel-close]").click();
++
++  // Closing clears the selection and NOTHING else: the project scope, and the
++  // board under it, are exactly where they were.
++  await expect(page.locator("[data-task-panel]")).toHaveCount(0);
++  await expect(page).toHaveURL(/\/tasks\?project=influx$/);
++  await expect(page.locator(".task-board")).toBeVisible();
++});
++
+ test("knowledge note renders server-side markdown", async ({ page }) => {
+   await page.goto("/note/note-influx-plan");
+ 
+diff --git a/src/lithos_lens/metrics.py b/src/lithos_lens/metrics.py
+index 9511902..32eb50c 100644
+--- a/src/lithos_lens/metrics.py
++++ b/src/lithos_lens/metrics.py
+@@ -519,3 +519,25 @@ def tasks_graph_cycle_reads() -> Any:
+             description="Scoped blocked reads behind the graph page's cycle signal.",
+         ),
+     )
++
++
++def tasks_panel_opens() -> Any:
++    """Counter of side-panel renders by where the request came from (§5.5).
++
++    Labels: ``source`` in ``url`` (the SSR baseline — `/tasks?selected=<id>`,
++    i.e. a deep link or a shared URL) | ``fragment`` (`?fragment=panel`, which
++    is what a row or node click fetches).
++
++    Those two are what the SERVER can actually tell apart, so they are what it
++    counts. The PRD's finer "row vs node" split is the client's knowledge, not
++    a fact on the request, and inventing a label the request does not carry
++    would make the series a guess. The task id is deliberately absent: one
++    series per task is the unbounded cardinality this module's rule forbids.
++    """
++    return _instrument(
++        "lens_tasks_panel_opens_total",
++        lambda meter: meter.create_counter(
++            "lens_tasks_panel_opens_total",
++            description="Task side-panel renders by request source.",
++        ),
++    )
+diff --git a/src/lithos_lens/request_filters.py b/src/lithos_lens/request_filters.py
+index 658f044..a9e2bc9 100644
+--- a/src/lithos_lens/request_filters.py
++++ b/src/lithos_lens/request_filters.py
+@@ -41,6 +41,8 @@ from fastapi import Request
+ from lithos_lens.tasks import (
+     ADD_TAG_FILTER_KEY,
+     MAX_FILTER_QUERY_BYTES,
++    PANEL_FRAGMENT_KEY,
++    PANEL_FRAGMENT_VALUE,
+     TAG_FILTER_KEY,
+     TAG_FILTER_KEYS,
+     honored_tags,
+@@ -274,6 +276,25 @@ def task_detail_url(request: Request, task_id: str) -> str:
+     return f"{path}{'&' if '?' in path else '?'}{urlencode(params)}"
+ 
+ 
++def panel_fragment_url(request: Request, task_id: str) -> str:
++    """Link a row to the SIDE PANEL fragment for its task (§5.5, T2-A6).
++
++    Emitted onto every row as ``data-panel-url`` so the click handler in
++    ``tasks.js`` fetches a URL the SERVER built. Two things fall out of that
++    which a URL assembled in the browser would get wrong: the id is addressed
++    through :func:`~lithos_lens.tasks.task_detail_path`, so a task called
++    ``graph`` reaches the alias route instead of the graph page; and the
++    board's preserved filters ride along through the same allowlist every other
++    generated tasks URL uses, so the panel's own Expand and Close links come
++    back carrying the scope the operator is browsing under rather than dropping
++    it the moment the panel opens.
++    """
++    params = _preserved_filter_params(request)
++    params.append((PANEL_FRAGMENT_KEY, PANEL_FRAGMENT_VALUE))
++    path = task_detail_path(task_id)
++    return f"{path}{'&' if '?' in path else '?'}{urlencode(params)}"
++
++
+ def blocker_expand_url(request: Request, task_id: str, chain: Sequence[str]) -> str:
+     """Link a blocker line's expander to the fragment for its OWN blockers (T1-S8).
+ 
+diff --git a/src/lithos_lens/static/lens.css b/src/lithos_lens/static/lens.css
+index 08e3099..265e4b5 100644
+--- a/src/lithos_lens/static/lens.css
++++ b/src/lithos_lens/static/lens.css
+@@ -1011,6 +1011,75 @@ button,
+   gap: 0.75rem;
+ }
+ 
++/* The side panel (§5.5, T2-A6) — ONE implementation for dashboard rows and, from
++   T2-A4, graph nodes. On the dashboard it OVERLAYS the right edge rather than
++   reflowing the board: the operator's place in the list is the thing the panel
++   exists to preserve, and a column that pushed the rows sideways would lose it
++   on every click. Fixed, so it stays put while the board scrolls under it, and
++   scrollable in itself so a long blocker list cannot run off the screen.
++
++   The width is clamped to the viewport, not just to 24rem: at 320px an overlay
++   wider than the page would make the document itself scroll sideways (the e2e
++   capture asserts it does not). The host is `:empty` whenever no task is
++   selected, which is what keeps a closed panel out of the layout entirely. */
++.task-panel-host:empty {
++  display: none;
++}
++
++.task-panel {
++  background: var(--panel);
++  border: 1px solid var(--line);
++  border-radius: 0.9rem;
++  box-shadow: 0 0.75rem 2rem rgba(30, 39, 35, 0.18);
++  display: grid;
++  gap: 1rem;
++  max-height: calc(100vh - 6rem);
++  overflow-y: auto;
++  padding: 1.25rem;
++  position: fixed;
++  right: 1rem;
++  top: 5rem;
++  width: min(24rem, calc(100vw - 2rem));
++  z-index: 5;
++}
++
++/* Same reason `.detail-panel > *` carries it: a grid item defaults to
++   min-width: auto, so one unbreakable token (an ISO expiry in a claim line)
++   would size the panel's column wider than the panel. */
++.task-panel > * {
++  min-width: 0;
++}
++
++.task-panel h2 {
++  font-size: 1.15rem;
++  margin: 0;
++}
++
++.task-panel h3 {
++  font-size: 0.95rem;
++  margin: 0 0 0.4rem;
++}
++
++.task-panel-header {
++  display: grid;
++  gap: 0.5rem;
++}
++
++.task-panel-actions {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 0.5rem;
++}
++
++/* Expand and Close sit side by side. The shared control rule above stretches
++   every button to `width: 100%` — right for the filter form it was written
++   for, wrong in a 24rem panel, where it turned two links into two stacked
++   bars taller than the header they belong to. */
++.task-panel-actions .button-secondary {
++  flex: 1 1 auto;
++  width: auto;
++}
++
+ /* Task-detail graph surfaces (T1-S7): the parent breadcrumb, the level-1
+    blocker chain / provenance link lists, and the children table. The link list
+    is the shared rendering for every bounded neighbour page (link_page.html),
+diff --git a/src/lithos_lens/static/tasks.js b/src/lithos_lens/static/tasks.js
+index 6db47b2..79ddb59 100644
+--- a/src/lithos_lens/static/tasks.js
++++ b/src/lithos_lens/static/tasks.js
+@@ -1,6 +1,11 @@
+ (function () {
+   const config = window.LithosLensTasks || {};
+   const eventsUrl = config.eventsUrl || "/tasks/events";
++  // The HOST page's one selection parameter (REQUIREMENTS §5.5): `selected` on
++  // the dashboard, `focus` on the graph page, which passes its own. The panel
++  // below is one implementation for both, so the parameter is configuration
++  // rather than a second copy of the panel code per page.
++  const selectionParam = config.selectionParam || "selected";
+   const autoRefreshIntervalMs = config.autoRefreshIntervalMs || 30000;
+   const seenEvents = new Set();
+   let eventSource = null;
+@@ -12,6 +17,27 @@
+   let gateRefreshTimer = null;
+   let gateCountdownTimer = null;
+   let lastGateRefreshAt = 0;
++  // Which task the open panel is showing, "" when it is closed. Seeded from
++  // the URL at load, because `?selected=` renders the panel server-side.
++  let selectedTaskId = "";
++  // Which task the panel is MEANT to be showing — set the moment an open
++  // starts, cleared the moment one closes. Between it and `selectedTaskId`
++  // sits an in-flight request, and that gap is where the URL and the panel can
++  // disagree: a Forward back onto the selection already on screen still has to
++  // supersede an open running under it, or that open's late response paints a
++  // panel the URL has moved away from.
++  let desiredTaskId = "";
++  // Every panel INTENT — an open, a close — takes the next generation, and no
++  // response may write the panel unless its generation is still the current
++  // one. Without it the panel is whichever request happened to answer LAST
++  // rather than whatever the operator asked for most recently: click row A
++  // then row B, let B answer first, and A's older response would overwrite B
++  // and push `selected=A` over it. The same counter supersedes an in-flight
++  // open when the panel is closed under it (Back past a selection), and stops
++  // a reconcile fetched for one selection from painting its panel over
++  // another. Cancelling the fetch would not do: the response is already on its
++  // way, and it is the WRITE that has to be ordered, not the read.
++  let panelGeneration = 0;
+   // setTimeout stores its delay in a signed 32-bit int: anything larger wraps
+   // and fires (near) immediately, so a gate more than ~24.8 days out must be
+   // reached by chaining sleeps rather than by one oversized timeout.
+@@ -108,7 +134,16 @@
+   }
+ 
+   async function runRefresh() {
+-    const response = await fetch(window.location.href, {
++    // Which selection this render is FOR. The reconcile fetches the live URL,
++    // so the panel it comes back with is the one THAT URL named — which is not
++    // always the selection the operator has by the time it answers. Both facts
++    // are captured: the URL, because a click already in flight when this left
++    // pushes a new one without touching the generation; and the generation,
++    // because a close-and-reopen can land back on the same URL with a fresher
++    // panel of its own.
++    const refreshUrl = window.location.href;
++    const panelGenerationAtFetch = panelGeneration;
++    const response = await fetch(refreshUrl, {
+       headers: { "X-Lithos-Lens-Refresh": "tasks" }
+     });
+     if (!response.ok) return;
+@@ -118,6 +153,18 @@
+     if (config.detailTaskId) {
+       replaceFragment(doc, "detail");
+     }
++    // The open panel carries live blocker and dependent statuses, and the
++    // reconcile already fetched this URL — which, after a row click, names the
++    // selection. Swapped separately from the board so the panel is not torn
++    // down and rebuilt under the cursor on every event, and only while the
++    // selection is still the one it was rendered for (the board fragment above
++    // does not depend on the selection, so it is applied either way).
++    if (
++      panelGeneration === panelGenerationAtFetch &&
++      selectionIn(refreshUrl) === selectionIn(window.location.href)
++    ) {
++      replaceFragment(doc, "panel");
++    }
+     setupDatePickers();
+     // The replaced fragment carries a fresh board (new gate rows, a new
+     // ready_at, or none), so the countdown text and the one-shot timer are
+@@ -169,6 +216,234 @@
+     return document.querySelector(`[data-task-row][data-task-id="${cssEscape(taskId)}"]`);
+   }
+ 
++  // ── The side panel (§5.5): fetch the fragment, push the selection ────────
++  //
++  // The panel is SERVER-rendered markup throughout — `?selected=<id>` renders
++  // it into the board, and a row click fetches the same partial from
++  // `/tasks/{id}?fragment=panel`. Nothing here builds panel HTML, so the no-JS
++  // baseline and the clicked panel cannot drift.
++
++  function panelHost() {
++    return document.querySelector("[data-panel-host]");
++  }
++
++  // The panel contract a row opts into, and the ONE selector both halves of
++  // the interaction use: the id the click selects plus the server-built URL
++  // its panel comes from. Every kind of board row carries the pair —
++  // tasks/row.html, tasks/gate_row.html (a gate is a task, and §5.5 puts a
++  // panel behind every row, not behind the workable ones only) and the
++  // skeleton `insertSkeletonRow` builds below. Deliberately NOT
++  // `[data-task-row]`: that attribute is the SSE handlers' hook for the rows
++  // they may rewrite in place, and a gate row's chrome is not theirs to touch.
++  // Requiring `data-task-id` as well keeps the panel HOST out of the match —
++  // it carries a `data-panel-url` of its own for the selection it rendered.
++  const PANEL_ROW = "[data-panel-url][data-task-id]";
++
++  function panelRowFor(taskId) {
++    return document.querySelector(
++      `[data-panel-url][data-task-id="${cssEscape(taskId)}"]`
++    );
++  }
++
++  // The query alias addresses EVERY id — the path form is what the ids that
++  // collide with a page under `/tasks/` cannot use — and its path and key come
++  // from the server rather than being spelled out here.
++  function aliasPanelUrl(taskId) {
++    const alias = new URLSearchParams();
++    alias.set(config.panelAliasKey || "task_id", taskId);
++    alias.set("fragment", "panel");
++    return `${config.panelAliasPath || "/tasks/id"}?${alias.toString()}`;
++  }
++
++  function panelUrlFor(taskId) {
++    // Both sources here are URLs the SERVER built, and that is the point: task
++    // ids are arbitrary strings, and the id that collides with a page under
++    // `/tasks/` (`graph`) must be addressed through the query alias or the
++    // fetch lands on the graph PAGE and that page gets swapped into the panel.
++    // `tasks.task_detail_path` owns that rule; the browser does not restate it.
++    //
++    // The row's `data-panel-url` also carries the board's preserved filters,
++    // so the panel comes back with Expand and Close links inside the scope the
++    // operator is browsing.
++    const row = panelRowFor(taskId);
++    if (row && row.dataset.panelUrl) return row.dataset.panelUrl;
++    // No row for it: a deep link to a task the board's filters exclude. The
++    // host keeps the URL the server built for the SELECTION it rendered, so
++    // Back and Forward can reopen exactly that task — the case where there has
++    // never been a row to read it off.
++    const host = panelHost();
++    if (host && host.dataset.panelSelected === taskId && host.dataset.panelUrl) {
++      return host.dataset.panelUrl;
++    }
++    // Last resort, for a task this tab has no server-built URL for (its row
++    // left the board on a reconcile): the query alias. The board's filters are
++    // lost, which costs the panel's own links their scope; opening the right
++    // task without them beats opening the wrong page with them.
++    return aliasPanelUrl(taskId);
++  }
++
++  // Which task a URL selects, "" for none. One reading, shared by the load-time
++  // seed, the popstate handler and the reconcile's staleness check — the three
++  // places that have to agree on what the address bar currently means.
++  function selectionIn(url) {
++    return new URL(url, window.location.href).searchParams.get(selectionParam) || "";
++  }
++
++  // This page's URL with the selection parameter set to `taskId`, or removed
++  // when it is empty. Built from the live URL rather than from a remembered
++  // query string, so closing the panel preserves every filter, the epic scope
++  // and the resolved-since window exactly as they arrived.
++  function selectionUrl(taskId) {
++    const url = new URL(window.location.href);
++    if (taskId) url.searchParams.set(selectionParam, taskId);
++    else url.searchParams.delete(selectionParam);
++    return url.pathname + url.search;
++  }
++
++  async function openPanel(taskId, options) {
++    const host = panelHost();
++    if (!host || !taskId) return;
++    const push = !options || options.push !== false;
++    // Claimed BEFORE the fetch: from here on, anything that changes the
++    // selection supersedes this request, whichever order the responses land in.
++    panelGeneration += 1;
++    desiredTaskId = taskId;
++    const generation = panelGeneration;
++    // `null` means "no panel to show", whatever went wrong — a transport
++    // failure, a non-OK answer, or a body that never finished reading. The
++    // three are one outcome here and share one recovery below; an EMPTY body
++    // is deliberately not one of them, so a legitimately empty 200 still
++    // renders as the empty panel it is.
++    let markup = null;
++    try {
++      const response = await fetch(panelUrlFor(taskId), {
++        headers: { "X-Lithos-Lens-Refresh": "panel" }
++      });
++      // Superseded while in flight — a newer click, a close, or a Back past
++      // this selection. Dropped in silence: the newer intent already owns the
++      // panel and the URL, and writing either here would undo it.
++      if (generation !== panelGeneration) return;
++      // The route answers an unknown id with the not-found PANEL at 200, so a
++      // non-OK response is a transport-level failure, not "no such task".
++      if (response.ok) markup = await response.text();
++    } catch (error) {
++      // Caught rather than propagated: nothing awaits this call (a click
++      // handler and a popstate handler start it), so a rejection could only
++      // become an unhandled one — and the recovery is the same either way.
++      markup = null;
++    }
++    // Checked again after the second await: reading the body is a suspension
++    // point of its own, and the gap between "headers arrived" and "body read"
++    // is long enough for another click to land in it.
++    if (generation !== panelGeneration) return;
++    if (markup === null) {
++      panelFetchFailed(push);
++      return;
++    }
++    host.innerHTML = markup;
++    // Same reason replaceFragment does it: these nodes were parsed out of a
++    // fetched document, and htmx only wires the ones it swapped itself.
++    if (window.htmx) window.htmx.process(host);
++    selectedTaskId = taskId;
++    // Pushed AFTER the swap, so a URL never claims a panel that failed to open.
++    if (push) window.history.pushState({ selected: taskId }, "", selectionUrl(taskId));
++  }
++
++  function panelFetchFailed(push) {
++    // No panel arrived, and what that COSTS depends on who asked — because the
++    // two callers differ on whether the URL has already moved.
++    if (push) {
++      // A click. Its URL is pushed only on success, so the address bar and the
++      // panel still agree and both stay. Only the INTENT has to be walked back
++      // to what is actually on screen: left claiming the task that failed, the
++      // next Forward onto that very selection would match the intent, return
++      // early, and leave the previous task's panel sitting under it.
++      desiredTaskId = selectedTaskId;
++      return;
++    }
++    // Back or forward. The browser moved the URL BEFORE this ran, so the panel
++    // on screen already names a different task than the address bar does —
++    // the one state the panel must never be left in. It is cleared rather than
++    // kept: an empty panel under a selection the operator can retry (reload,
++    // or navigate to it again) is a missing answer, while the previous task's
++    // panel under this URL is a wrong one. The selection is dropped with it,
++    // so navigating back here really does retry instead of matching a stale
++    // intent and doing nothing.
++    const host = panelHost();
++    if (host) host.innerHTML = "";
++    selectedTaskId = "";
++    desiredTaskId = "";
++  }
++
++  function closePanel(options) {
++    // Closing is an intent like any other, so it takes a generation too: an
++    // open still in flight under it must not reopen the panel afterwards.
++    panelGeneration += 1;
++    desiredTaskId = "";
++    const host = panelHost();
++    if (host) host.innerHTML = "";
++    selectedTaskId = "";
++    if (!options || options.push !== false) {
++      window.history.pushState({ selected: "" }, "", selectionUrl(""));
++    }
++  }
++
++  function handlePanelClick(event) {
++    // Modified and non-primary clicks keep their browser meaning: open in a
++    // new tab has to stay open in a new tab, on a row as much as on a link.
++    if (event.defaultPrevented) return;
++    if (event.button !== undefined && event.button !== 0) return;
++    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
++    const target = event.target;
++    if (!target || !target.closest) return;
++    if (target.closest("[data-panel-close]")) {
++      event.preventDefault();
++      closePanel();
++      return;
++    }
++    // Inside the panel, every link is an ordinary link — Expand navigates to
++    // the full page, and a blocker or parent opens that task's own page.
++    if (target.closest("[data-task-panel]")) return;
++    // A <summary> is the browser's own control for the <details> it opens, and
++    // a gate row carries one (the waiter list, which works with no JS at all).
++    // Swallowing that click would trade the disclosure for a panel open and
++    // the list could never be expanded again — the same reason the tag chips
++    // below keep their navigation.
++    if (target.closest("summary")) return;
++    const row = target.closest(PANEL_ROW);
++    if (!row) return;
++    const link = target.closest("a[href]");
++    // The title link IS the row click (§5.5: clicking a row opens the panel,
++    // Expand navigates). A tag chip is its own filter link and keeps it.
++    if (link && !link.classList.contains("task-title")) return;
++    event.preventDefault();
++    openPanel(row.dataset.taskId);
++  }
++
++  function handlePanelKeydown(event) {
++    // `desiredTaskId` as well as the visible one: Escape during an open is a
++    // cancel, and leaving that open to land afterwards would reopen a panel
++    // the operator has just dismissed.
++    if (event.key !== "Escape" || !(selectedTaskId || desiredTaskId)) return;
++    closePanel();
++  }
++
++  function handlePanelPopstate() {
++    // Back and forward walk the selection without a reload: the URL is the
++    // state, so whatever it names now is what the panel shows.
++    //
++    // Compared against the INTENT, not against what is on screen. Forward onto
++    // a selection still displayed — Back to A and straight Forward to B before
++    // A has answered — leaves the screen already correct but an open for A
++    // running under it, and a handler that returned early there would let A's
++    // response land beneath B's URL. Re-entering the transition supersedes it,
++    // which is the whole job here; the generation guard settles the rest.
++    const taskId = selectionIn(window.location.href);
++    if (taskId === desiredTaskId) return;
++    if (taskId) openPanel(taskId, { push: false });
++    else closePanel({ push: false });
++  }
++
+   function insertSkeletonRow(message) {
+     const taskId = message.task_id;
+     if (!taskId || rowFor(taskId)) return;
+@@ -203,6 +478,13 @@
+     row.dataset.taskRow = "";
+     row.dataset.taskId = taskId;
+     row.dataset.taskStatus = "open";
++    // The panel contract, on a row no template rendered. The alias URL is the
++    // only one the browser may build for an arbitrary id, and it is also the
++    // right one here: the guard above means no filter is active, so there is
++    // no board scope for this panel to carry (the same reasoning as the bare
++    // detail link below). The ~800ms reconcile replaces this row with the
++    // server's, and its `data-panel-url` with the server's too.
++    row.dataset.panelUrl = aliasPanelUrl(taskId);
+     row.innerHTML = `
+       <div><a class="task-title" href="/tasks/${encodeURIComponent(taskId)}">${escapeHtml(title)}</a><p>Loading full task details...</p></div>
+       <div class="task-row-meta"><span class="badge badge-open">open</span><span class="claim-chip claim-chip-unknown" data-claim-summary>claims unknown</span></div>
+@@ -489,5 +771,13 @@
+   setupDatePickers();
+   renderGateCountdowns();
+   scheduleGateRefresh();
++  // The server already rendered the panel for whatever `?selected=` named, so
++  // the client starts from the URL rather than from an empty selection — an
++  // Escape on a deep-linked panel has to close the panel that is on screen.
++  selectedTaskId = selectionIn(window.location.href);
++  desiredTaskId = selectedTaskId;
++  document.addEventListener("click", handlePanelClick);
++  document.addEventListener("keydown", handlePanelKeydown);
++  window.addEventListener("popstate", handlePanelPopstate);
+   connect();
+ })();
+diff --git a/src/lithos_lens/task_detail.py b/src/lithos_lens/task_detail.py
+index 41cc559..0dd34b3 100644
+--- a/src/lithos_lens/task_detail.py
++++ b/src/lithos_lens/task_detail.py
+@@ -43,6 +43,7 @@ import asyncio
+ from dataclasses import dataclass
+ from typing import Any, Protocol, cast
+ 
++from lithos_lens.task_filtering import task_projects
+ from lithos_lens.task_graph import EdgeRecord
+ from lithos_lens.task_links import (
+     BLOCKER_EDGE_TYPES,
+@@ -61,9 +62,12 @@ from lithos_lens.task_links import (
+     outgoing_targets,
+ )
+ from lithos_lens.tasks import (
++    DEFAULT_PROJECT_CONVENTION,
++    DEFAULT_PROJECT_TAG_KEY,
+     REOPENED_FINDING_PREFIX,
+     FindingRecord,
+     NoteRecord,
++    ProjectConvention,
+     SectionState,
+     TaskRecord,
+     TaskStatusRecord,
+@@ -134,6 +138,12 @@ class TaskDetailData:
+     # BOUNDED page of the edge set with a counted tail (``task_links``), never
+     # the whole set: the edge count is agent-controlled.
+     blockers: LinkPage = LinkPage()
++    # The downstream half of the same relationship: outgoing
++    # ``blocks``/``waits_on_gate``, level 1, with each dependent's live status
++    # (REQUIREMENTS §5.5.2's "Blocks" line). Bounded by the same page as the
++    # blockers above — the outgoing edge count is agent-written too, and a gate
++    # is exactly where a large one is expected.
++    dependents: LinkPage = LinkPage()
+     discovered_from: LinkPage = LinkPage()
+     spawned: LinkPage = LinkPage()
+     breadcrumb: Breadcrumb = Breadcrumb()
+@@ -152,6 +162,10 @@ class TaskDetailData:
+     children_state: SectionState = SectionState.OK
+     not_found: bool = False
+     errors: tuple[str, ...] = ()
++    #: Every project slug this task claims under the configured convention
++    #: (§5B.1), for the panel's project chip. Resolved here rather than in the
++    #: template so the convention has one reading.
++    projects: tuple[str, ...] = ()
+ 
+     @property
+     def gate_type(self) -> str:
+@@ -180,6 +194,9 @@ class TaskDetailData:
+ async def load_task_detail(
+     lithos: TaskDetailClient,
+     task_id: str,
++    *,
++    convention: ProjectConvention = DEFAULT_PROJECT_CONVENTION,
++    tag_key: str = DEFAULT_PROJECT_TAG_KEY,
+ ) -> TaskDetailData:
+     errors: list[str] = []
+     # §5.5's data contract: task_get + task_status + task_edge_list +
+@@ -267,7 +284,7 @@ async def load_task_detail(
+     else:
+         edges = tuple(cast(list[EdgeRecord], edges_result))
+ 
+-    blockers, discovered_from, spawned, breadcrumb = await _load_relations(
++    blockers, dependents, discovered_from, spawned, breadcrumb = await _load_relations(
+         lithos, task_id, edges, limiter=limiter
+     )
+ 
+@@ -276,6 +293,7 @@ async def load_task_detail(
+         task_status=task_status,
+         findings=finding_views,
+         blockers=blockers,
++        dependents=dependents,
+         discovered_from=discovered_from,
+         spawned=spawned,
+         breadcrumb=breadcrumb,
+@@ -286,6 +304,7 @@ async def load_task_detail(
+         relations_state=relations_state,
+         children_state=children_state,
+         errors=tuple(errors),
++        projects=task_projects(task, convention=convention, tag_key=tag_key),
+     )
+ 
+ 
+@@ -295,8 +314,8 @@ async def _load_relations(
+     edges: tuple[EdgeRecord, ...],
+     *,
+     limiter: asyncio.Semaphore,
+-) -> tuple[LinkPage, LinkPage, LinkPage, Breadcrumb]:
+-    """Turn one edge list into the page's three link pages and its breadcrumb.
++) -> tuple[LinkPage, LinkPage, LinkPage, LinkPage, Breadcrumb]:
++    """Turn one edge list into the page's four link pages and its breadcrumb.
+ 
+     The edge list is one round trip returning N rows, parsed locally in O(N);
+     resolving those rows' live statuses is N round trips on the shared MCP
+@@ -327,12 +346,21 @@ async def _load_relations(
+     and is not rendered. Closing it needs either a per-task ``task_blocked``
+     upstream or the T1-S8 multi-level walk, whichever lands first.
+     """
+-    blockers, discovered_from, spawned = await asyncio.gather(
++    blockers, dependents, discovered_from, spawned = await asyncio.gather(
+         load_link_page(
+             lithos,
+             incoming_targets(task_id, edges, BLOCKER_EDGE_TYPES),
+             limiter=limiter,
+         ),
++        # The same edge types read the other way round: what this task blocks
++        # (§5.5.2's "Blocks" line, and T2-A6's panel). One edge list already in
++        # hand, so this costs no extra round trip of its own — only the same
++        # bounded, shared-limiter status fan-out the blocker page makes.
++        load_link_page(
++            lithos,
++            outgoing_targets(task_id, edges, BLOCKER_EDGE_TYPES),
++            limiter=limiter,
++        ),
+         load_link_page(
+             lithos,
+             incoming_targets(task_id, edges, (PROVENANCE_EDGE_TYPE,)),
+@@ -345,7 +373,7 @@ async def _load_relations(
+         ),
+     )
+     breadcrumb = await load_parent_breadcrumb(lithos, task_id, edges)
+-    return blockers, discovered_from, spawned, breadcrumb
++    return blockers, dependents, discovered_from, spawned, breadcrumb
+ 
+ 
+ async def resolve_finding_notes(
+diff --git a/src/lithos_lens/task_links.py b/src/lithos_lens/task_links.py
+index e2fc8b3..4e7167a 100644
+--- a/src/lithos_lens/task_links.py
++++ b/src/lithos_lens/task_links.py
+@@ -132,10 +132,18 @@ class TaskLinkClient(Protocol):
+ 
+ 
+ class LinkTarget(NamedTuple):
+-    """One neighbour id to resolve, with the edge type that named it."""
++    """One neighbour id to resolve, with the edge type and DIRECTION that named it.
++
++    The direction is carried because the two blocker edge types mean opposite
++    things read the two ways: ``other -> task`` is a reason this task cannot
++    run, ``task -> other`` is something waiting on it. Selected from the
++    endpoint ids (:func:`incoming_targets` / :func:`outgoing_targets`), so it
++    never depends on the payload's server-computed ``direction`` label.
++    """
+ 
+     task_id: str
+     edge_type: str
++    downstream: bool = False
+ 
+ 
+ @dataclass(frozen=True)
+@@ -155,6 +163,9 @@ class LinkedTask:
+     task_type: str = ""
+     gate_type: str = ""
+     unresolved: bool = False
++    #: True when the edge points AWAY from the task this page belongs to — a
++    #: dependent, not a predecessor. See :attr:`blocking`.
++    downstream: bool = False
+     #: A TIMER gate whose ``ready_at`` has passed. Lithos resolves those on
+     #: their own without closing the task, so the gate stays ``open`` while it
+     #: no longer holds anything back — see :attr:`satisfied`.
+@@ -175,8 +186,17 @@ class LinkedTask:
+         follow-on is merely cancelled — nothing waits on it — so calling it
+         unsatisfiable would assert a dependency that does not exist, in the
+         page's loudest treatment, on a section that is purely historical.
++
++        DIRECTION is half the test, not an afterthought. The same two edge
++        types render the "Blocks" list (T2-A6) with the arrow the other way
++        round, and there the far task is a DEPENDENT: a completed one is not a
++        "satisfied" dependency of this task, and a cancelled one is emphatically
++        not "unsatisfiable — this task can never run", which is what those two
++        chips say. Nothing downstream is ever a reason this task cannot run, so
++        it is never blocking, and every verdict derived from this falls out
++        correctly instead of being re-decided per template.
+         """
+-        return self.edge_type in BLOCKER_EDGE_TYPES
++        return self.edge_type in BLOCKER_EDGE_TYPES and not self.downstream
+ 
+     @property
+     def satisfied(self) -> bool:
+@@ -388,7 +408,7 @@ def incoming_targets(
+     missing is the failure this page exists to prevent.
+     """
+     return tuple(
+-        LinkTarget(edge.from_task_id, edge.type)
++        LinkTarget(edge.from_task_id, edge.type, downstream=False)
+         for edge in edges
+         if edge.type in types and edge.to_task_id == task_id and edge.from_task_id
+     )
+@@ -399,9 +419,15 @@ def outgoing_targets(
+     edges: Sequence[EdgeRecord],
+     types: Sequence[str],
+ ) -> tuple[LinkTarget, ...]:
+-    """Neighbours on edges pointing AWAY from ``task_id`` (``task_id -> other``)."""
++    """Neighbours on edges pointing AWAY from ``task_id`` (``task_id -> other``).
++
++    Marked ``downstream``: on the blocker edge types these are the task's
++    DEPENDENTS, and :attr:`LinkedTask.blocking` — with the satisfied and
++    unsatisfiable verdicts hanging off it — reads the opposite way round from
++    them (see that property).
++    """
+     return tuple(
+-        LinkTarget(edge.to_task_id, edge.type)
++        LinkTarget(edge.to_task_id, edge.type, downstream=True)
+         for edge in edges
+         if edge.type in types and edge.from_task_id == task_id and edge.to_task_id
+     )
+@@ -545,12 +571,16 @@ def _timer_gate_elapsed(task: TaskRecord) -> bool:
+ def _linked_task(target: LinkTarget, result: Any) -> LinkedTask:
+     if isinstance(result, BaseException):
+         return LinkedTask(
+-            task_id=target.task_id, edge_type=target.edge_type, unresolved=True
++            task_id=target.task_id,
++            edge_type=target.edge_type,
++            downstream=target.downstream,
++            unresolved=True,
+         )
+     task = cast(TaskRecord, result)
+     return LinkedTask(
+         task_id=task.id or target.task_id,
+         edge_type=target.edge_type,
++        downstream=target.downstream,
+         title=task.title,
+         status=task.status,
+         task_type=task.task_type,
+diff --git a/src/lithos_lens/tasks.py b/src/lithos_lens/tasks.py
+index 6ffdb0a..d631998 100644
+--- a/src/lithos_lens/tasks.py
++++ b/src/lithos_lens/tasks.py
+@@ -142,6 +142,16 @@ RESERVED_TASK_PATH_SEGMENTS: frozenset[str] = frozenset({"graph", "events", "id"
+ TASK_DETAIL_ALIAS_PATH = "/tasks/id"
+ TASK_DETAIL_ALIAS_KEY = "task_id"
+ 
++#: §5.5's selection vocabulary. Each host page has exactly ONE selection
++#: parameter — the dashboard's is ``selected``, the graph page's is ``focus``
++#: (T2-A7) — and both open the SAME panel, fetched from the detail route as
++#: ``?fragment=panel``. Named here, with the rest of the task URL vocabulary,
++#: so the board, the fragment route and ``tasks.js`` cannot drift on the
++#: spelling of a parameter all three have to agree on.
++PANEL_SELECTION_KEY = "selected"
++PANEL_FRAGMENT_KEY = "fragment"
++PANEL_FRAGMENT_VALUE = "panel"
++
+ 
+ def task_detail_path(task_id: str) -> str:
+     """The URL that addresses ``task_id``'s detail page, unambiguously.
+diff --git a/src/lithos_lens/templates/tasks/dashboard.html b/src/lithos_lens/templates/tasks/dashboard.html
+index 80e380a..03974b1 100644
+--- a/src/lithos_lens/templates/tasks/dashboard.html
++++ b/src/lithos_lens/templates/tasks/dashboard.html
+@@ -506,6 +506,34 @@
+       </section>
+     </div>
+ 
++    {#
++      The side panel's host (§5.5, T2-A6). Server-rendered OPEN when the
++      request carries `?selected=<id>` — the no-JS baseline — and otherwise
++      empty, waiting for a row click to fetch `?fragment=panel` into it.
++
++      Deliberately OUTSIDE `data-refresh-fragment="dashboard-data"`: the board
++      is replaced wholesale on every reconcile, and a panel inside it would be
++      torn down and rebuilt under the operator's cursor. The panel carries its
++      own `data-refresh-fragment="panel"` instead, so the same refresh swaps
++      only the panel's own markup and its blocker/dependent statuses stay live.
++    #}
++    {# `data-panel-url` on the HOST, not only on the rows: a deep-linked task
++       need not be on this board at all (a filter excludes it, or it resolved
++       outside the window), and Back or Forward to it must still fetch the
++       panel through the id's canonical route. The rows cover every task the
++       operator can click; this covers the one the URL named.
++
++       `data-panel-selected`, not `data-panel-task`: this is the id the REQUEST
++       named, which an unknown task still has and the panel header (which names
++       the task actually resolved) does not. Two hooks for two facts. #}
++    <div class="task-panel-host" data-panel-host{% if selected_id %} data-panel-selected="{{ selected_id }}" data-panel-url="{{ panel_fragment_url(request, selected_id) }}"{% endif %}>
++      {% if panel %}
++        {% with detail = panel %}
++          {% include "tasks/panel.html" %}
++        {% endwith %}
++      {% endif %}
++    </div>
++
+   {% else %}
+     <section class="status-grid" aria-label="Service status">
+       <article>
+@@ -545,6 +573,16 @@
+            and an unrecognized value falling back to all statuses. A second
+            reading of that vocabulary would be a copy to drift. #}
+         boardAdmitsOpen: {{ ("open" in dashboard.filters.statuses) | tojson }},
++        {# The dashboard's ONE selection parameter (§5.5). The graph page has
++           its own (`focus`) and passes it here instead, so the panel code in
++           tasks.js is shared and neither page hard-codes the other's. #}
++        selectionParam: {{ panel_selection_key | tojson }},
++        {# The query-alias route, for the panel's last-resort fetch URL: the
++           one form that addresses every id, including the page words a path
++           segment would send somewhere else entirely. Passed down so the
++           spelling stays in tasks.py rather than being restated in JS. #}
++        panelAliasPath: {{ task_detail_alias_path | tojson }},
++        panelAliasKey: {{ task_detail_alias_key | tojson }},
+         eventsUrl: "/tasks/events"
+       };
+     </script>
+diff --git a/src/lithos_lens/templates/tasks/detail.html b/src/lithos_lens/templates/tasks/detail.html
+index c659ff9..191dc5b 100644
+--- a/src/lithos_lens/templates/tasks/detail.html
++++ b/src/lithos_lens/templates/tasks/detail.html
+@@ -121,6 +121,36 @@
+         </section>
+       {% endif %}
+ 
++      {% if detail.task.status == "open" or detail.dependents.total %}
++        <section data-dependents>
++          {# The downstream half of the same relationship (§5.5.2's Blocks
++             line, T2-A6): the level-1 dependents this task's completion would
++             free, with the live status each was read with. The blocker chain
++             above answers "why can't this run?"; this answers "what is waiting
++             on it?", and both come from the ONE edge list already in hand.
++
++             Rendered on the same terms as the chain — while the task is open,
++             or whenever the edges exist — so a finished task still shows what
++             it once held up rather than dropping the record. #}
++          {# "Blocks:" with the colon, verbatim: REQUIREMENTS §5.5.2 and the
++             PRD (D11) both name this the "Blocks:" line, and it LABELS the
++             list under it the way the provenance eyebrows do rather than
++             titling a section. #}
++          <h2>Blocks:</h2>
++          {% if detail.relations_state == "error" %}
++            <p class="warning-text">Dependents unavailable. Refresh this task to retry.</p>
++          {% elif detail.dependents.total %}
++            {# No `chain`: a walk DOWNstream is the graph page's job (T2), not
++               this page's per-level blocker expander. #}
++            {% with page = detail.dependents, page_noun = "dependents", page_label = "dependents" %}
++              {% include "tasks/link_page.html" %}
++            {% endwith %}
++          {% else %}
++            <p class="empty">Nothing depends on this task.</p>
++          {% endif %}
++        </section>
++      {% endif %}
++
+       {% if detail.has_provenance %}
+         <section data-provenance>
+           <h2>Provenance</h2>
+diff --git a/src/lithos_lens/templates/tasks/findings.html b/src/lithos_lens/templates/tasks/findings.html
+index f68a228..bc5dc1f 100644
+--- a/src/lithos_lens/templates/tasks/findings.html
++++ b/src/lithos_lens/templates/tasks/findings.html
+@@ -1,4 +1,6 @@
+-<section>
++{# `id="findings"`: the panel links a task's finding COUNT to the timeline
++   here, so the full page opens at it rather than at the top. #}
++<section id="findings">
+   <h2>Findings</h2>
+   {% if filter_query_rejected %}
+     {# Refused, not trimmed — see the dashboard's banner for why. #}
+diff --git a/src/lithos_lens/templates/tasks/gate_row.html b/src/lithos_lens/templates/tasks/gate_row.html
+index d871b0d..095f12f 100644
+--- a/src/lithos_lens/templates/tasks/gate_row.html
++++ b/src/lithos_lens/templates/tasks/gate_row.html
+@@ -10,8 +10,13 @@
+   class tokens or selector hooks. Timer gates render ``ready_at`` as an
+   absolute stamp — the no-JS baseline — which tasks.js rewrites into a live
+   countdown.
++
++  A gate is a task, so it takes part in the side panel exactly like the rows in
++  tasks/row.html do (§5.5, T2-A6): `data-task-id` plus the SERVER-built
++  `data-panel-url` is the whole contract tasks.js clicks on, and "what is this
++  gate holding up?" is the Blocks list the panel already answers.
+ #}
+-<article class="task-row gate-row" id="task-row-{{ gate.task.id }}" data-gate-row data-task-id="{{ gate.task.id }}" data-gate-type="{{ gate.type_slug }}" title="{{ gate.task.title }}">
++<article class="task-row gate-row" id="task-row-{{ gate.task.id }}" data-gate-row data-task-id="{{ gate.task.id }}" data-panel-url="{{ panel_fragment_url(request, gate.task.id) }}" data-gate-type="{{ gate.type_slug }}" title="{{ gate.task.title }}">
+   <div>
+     <a class="task-title" href="{{ task_detail_url(request, gate.task.id) }}">{{ gate.task.title }}</a>
+     {% if gate.task.description %}
+diff --git a/src/lithos_lens/templates/tasks/panel.html b/src/lithos_lens/templates/tasks/panel.html
+new file mode 100644
+index 0000000..6098cd4
+--- /dev/null
++++ b/src/lithos_lens/templates/tasks/panel.html
+@@ -0,0 +1,153 @@
++{#
++  THE side panel (§5.5, T2-A6) — ONE implementation for dashboard rows and, from
++  T2-A4, graph nodes.
++
++  Rendered three ways from this one file, which is what keeps the three honest
++  about each other:
++
++  - server-side into the dashboard, from `GET /tasks?selected=<id>` (the no-JS
++    baseline: a deep link or a shared URL opens the board with the panel up);
++  - as the whole response of `GET /tasks/{id}?fragment=panel`, which is what a
++    row click fetches before pushing `selected` onto the URL;
++  - and, on the auto-refresh, swapped in place through
++    `data-refresh-fragment="panel"` so the live statuses below stay live.
++
++  So it extends nothing and carries its own degraded states: an unknown id must
++  render the not-found PANEL (never HTTP 500), and a failed read must not be
++  reported as "this task does not exist".
++
++  Context: `detail` (a task_detail.TaskDetailData), plus the host page's
++  `offline` / `filter_query_rejected` flags. `panel_close_url` is optional — the
++  host page's own URL with its selection parameter cleared; the dashboard's
++  board URL is the default, and the graph page (T2-A7) passes its own.
++#}
++<aside class="task-panel" data-task-panel data-refresh-fragment="panel" aria-label="Task panel" tabindex="-1">
++  {% if filter_query_rejected %}
++    <p class="warning-text" data-panel-state="filters-rejected">The filters in this link are too large to apply.</p>
++  {% elif offline %}
++    <p class="warning-text" data-panel-state="offline">Lithos is offline or degraded. Task detail is unavailable.</p>
++  {% elif detail is none %}
++    <p class="warning-text" data-panel-state="unavailable">Could not load this task from Lithos.</p>
++  {% elif detail.not_found %}
++    {# Lithos's own answer (the `task_not_found` envelope), not a failed read. #}
++    <header class="task-panel-header">
++      <p class="eyebrow">Task not found</p>
++      <h2>Unknown task</h2>
++      <div class="task-panel-actions">
++        <a class="button-secondary" href="{{ panel_close_url or tasks_url(request) }}" data-panel-close>Close</a>
++      </div>
++    </header>
++    <p data-panel-state="not-found">Lithos has no task with this id.</p>
++  {% elif not detail.task %}
++    {# A read that failed, which is NOT the same as "this task does not exist". #}
++    <header class="task-panel-header">
++      <p class="eyebrow">Task panel</p>
++      <h2>Task unavailable</h2>
++      <div class="task-panel-actions">
++        <a class="button-secondary" href="{{ panel_close_url or tasks_url(request) }}" data-panel-close>Close</a>
++      </div>
++    </header>
++    <p class="warning-text" data-panel-state="error">{{ detail.errors | join(" ") or "Could not load this task from Lithos." }}</p>
++  {% else %}
++    <header class="task-panel-header" data-panel-task="{{ detail.task.id }}">
++      <p class="eyebrow">Task panel</p>
++      <h2>{{ detail.task.title }}</h2>
++      <div class="detail-meta">
++        <span class="badge badge-{{ detail.task.status }}">{{ detail.task.status }}</span>
++        <span class="badge badge-type" data-task-type="{{ detail.task.task_type }}">{{ detail.task.task_type }}</span>
++        {% if detail.gate_type %}<span class="badge badge-type" data-gate-type="{{ detail.gate_type }}">{{ detail.gate_type }} gate</span>{% endif %}
++        {# The project chip: read off `task_projects` under the configured
++           convention (§5B.1), so a task carrying both spellings shows both
++           rather than whichever this template happened to look at. #}
++        {% for slug in detail.projects %}
++          <span class="tag-chip tag-chip-project" data-panel-project="{{ slug }}">{{ slug }}</span>
++        {% endfor %}
++        {% if detail.task.created_by %}<span>Created by {{ detail.task.created_by }}</span>{% endif %}
++      </div>
++      <div class="task-panel-actions">
++        {# Expand LEAVES the board for the full page; close just clears the
++           host's selection parameter. Both are real links, so the panel works
++           with JavaScript off — tasks.js intercepts them, it does not invent
++           them. #}
++        <a class="button-secondary" href="{{ task_detail_url(request, detail.task.id) }}" data-panel-expand>Expand</a>
++        <a class="button-secondary" href="{{ panel_close_url or tasks_url(request) }}" data-panel-close>Close</a>
++      </div>
++    </header>
++
++    {% if detail.breadcrumb.ancestors or detail.breadcrumb.incomplete %}
++      <nav class="detail-breadcrumb" data-panel-parent aria-label="Parent tasks">
++        {% if detail.breadcrumb.incomplete %}<span data-breadcrumb-incomplete title="The chain above could not be walked to a root">&hellip;</span>{% endif %}
++        {% for parent in detail.breadcrumb.ancestors %}
++          <a href="{{ task_detail_url(request, parent.id) }}">{{ parent.title }}</a>
++        {% endfor %}
++        <span aria-current="page">{{ detail.task.title }}</span>
++      </nav>
++    {% endif %}
++
++    <section data-panel-blockers>
++      {# Same heading rule as the full page: "Blocked by" is a claim about the
++         present, and a set of finished predecessors does not support it. #}
++      <h3>{% if detail.blockers.still_blocking %}Blocked by{% else %}Dependencies{% endif %}</h3>
++      {% if detail.relations_state == "error" %}
++        <p class="warning-text">Blockers unavailable. Refresh to retry.</p>
++      {% elif detail.blockers.total %}
++        {# No `chain`, so no expanders: the panel is level 1 by decision (D9)
++           and the full page is where a walk belongs. #}
++        {% with page = detail.blockers, page_noun = "blockers", page_label = "blockers" %}
++          {% include "tasks/link_page.html" %}
++        {% endwith %}
++      {% else %}
++        <p class="empty">Nothing is blocking this task.</p>
++      {% endif %}
++    </section>
++
++    <section data-panel-dependents>
++      {# The downstream half of the relationship the chain shows upstream,
++         under the same "Blocks:" label the full page uses (§5.5.2). #}
++      <h3>Blocks:</h3>
++      {% if detail.relations_state == "error" %}
++        <p class="warning-text">Dependents unavailable. Refresh to retry.</p>
++      {% elif detail.dependents.total %}
++        {% with page = detail.dependents, page_noun = "dependents", page_label = "dependents" %}
++          {% include "tasks/link_page.html" %}
++        {% endwith %}
++      {% else %}
++        <p class="empty">Nothing depends on this task.</p>
++      {% endif %}
++    </section>
++
++    {#
++      Downstream impact (§5.5.1, D10) — "frees N in this graph, M immediately".
++      T2-A7 fills this slot: N is counted over a SCOPE's active projection and M
++      comes from that scope's coverage-set blocked reads, so neither figure
++      exists until the panel is handed a `scope=`. Deliberately empty rather
++      than absent, so the slot has one place to land and the dashboard (which
++      passes no scope) renders no number it cannot support.
++    #}
++    <div data-panel-impact-slot></div>
++
++    <section data-panel-claims>
++      <h3>Active claims</h3>
++      {% if detail.status_state == "error" %}
++        <p class="warning-text">Claims unavailable. Refresh to retry.</p>
++      {% elif detail.task_status and detail.task_status.claims %}
++        <div class="claim-list">
++          {% for claim in detail.task_status.claims %}
++            <span data-panel-claim="{{ claim.aspect }}">{{ claim.aspect }} / {{ claim.agent }} / expires {{ claim.expires_at }}</span>
++          {% endfor %}
++        </div>
++      {% else %}
++        <p class="empty">No active claims.</p>
++      {% endif %}
++    </section>
++
++    <p data-panel-findings>
++      {% if detail.findings_state == "error" %}
++        <span class="warning-text">Findings unavailable. Refresh to retry.</span>
++      {% else %}
++        {# A COUNT plus a link, not the timeline: the full page carries §5.6. #}
++        <a href="{{ task_detail_url(request, detail.task.id) }}#findings">{{ detail.findings | length }} finding{{ "" if (detail.findings | length) == 1 else "s" }}</a>
++      {% endif %}
++    </p>
++  {% endif %}
++</aside>
+diff --git a/src/lithos_lens/templates/tasks/row.html b/src/lithos_lens/templates/tasks/row.html
+index b7ad1a2..42fe48e 100644
+--- a/src/lithos_lens/templates/tasks/row.html
++++ b/src/lithos_lens/templates/tasks/row.html
+@@ -1,4 +1,9 @@
+-<article class="task-row" id="task-row-{{ row.task.id }}" data-task-row data-task-id="{{ row.task.id }}" data-task-status="{{ row.task.status }}" title="{{ row.task.title }}">
++{# `data-panel-url` is this row's side-panel fragment (§5.5, T2-A6), built
++   SERVER-side so the id encoding (a task called `graph` goes through the alias
++   route) and the board's preserved filters have one definition. tasks.js reads
++   it on a row click; with JavaScript off the title link below is the ordinary
++   navigation it has always been. #}
++<article class="task-row" id="task-row-{{ row.task.id }}" data-task-row data-task-id="{{ row.task.id }}" data-task-status="{{ row.task.status }}" data-panel-url="{{ panel_fragment_url(request, row.task.id) }}" title="{{ row.task.title }}">
+   <div>
+     <a class="task-title" href="{{ task_detail_url(request, row.task.id) }}">{{ row.task.title }}</a>
+     {% if row.task.description %}
+diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
+index 4c66c29..41d02e9 100644
+--- a/src/lithos_lens/web.py
++++ b/src/lithos_lens/web.py
+@@ -51,6 +51,7 @@ from lithos_lens.request_filters import (
+     filter_query_oversized,
+     knowledge_tag_url,
+     note_url,
++    panel_fragment_url,
+     tag_chip_class,
+     task_card_url,
+     task_detail_url,
+@@ -59,10 +60,13 @@ from lithos_lens.request_filters import (
+     tasks_url,
+ )
+ from lithos_lens.state import AppState
+-from lithos_lens.task_detail import load_task_detail
++from lithos_lens.task_detail import TaskDetailData, load_task_detail
+ from lithos_lens.tasks import (
+     MAX_FILTER_QUERY_BYTES,
+     MAX_FILTER_TAG_CHIPS,
++    PANEL_FRAGMENT_KEY,
++    PANEL_FRAGMENT_VALUE,
++    PANEL_SELECTION_KEY,
+     TASK_DETAIL_ALIAS_KEY,
+     TASK_DETAIL_ALIAS_PATH,
+     default_since,
+@@ -187,6 +191,16 @@ def create_app(
+     templates.env.globals["epic_scope_url"] = epic_scope_url
+     templates.env.globals["task_card_url"] = task_card_url
+     templates.env.globals["tag_chip_class"] = tag_chip_class
++    # The side panel's fetch URL, built server-side per row (§5.5): the id
++    # encoding and the preserved filters have one definition, in request_filters.
++    templates.env.globals["panel_fragment_url"] = panel_fragment_url
++    templates.env.globals["panel_selection_key"] = PANEL_SELECTION_KEY
++    # The one route that can address ANY id (`tasks.task_detail_path`). The
++    # board hands both halves to the browser so the panel's last-resort fetch
++    # URL is spelled by the server rather than guessed in JavaScript — a task
++    # called `graph` reached through the path form fetches the graph PAGE.
++    templates.env.globals["task_detail_alias_path"] = TASK_DETAIL_ALIAS_PATH
++    templates.env.globals["task_detail_alias_key"] = TASK_DETAIL_ALIAS_KEY
+     templates.env.globals["knowledge_tag_url"] = knowledge_tag_url
+     templates.env.globals["note_url"] = note_url
+     templates.env.globals["board_is_filtered"] = board_is_filtered
+@@ -354,15 +368,26 @@ def create_app(
+ 
+     @app.get("/tasks/{task_id}", response_class=HTMLResponse)
+     async def task_detail(request: Request, task_id: str) -> HTMLResponse:
++        """The task's full page — or, with ``?fragment=panel``, its side panel.
++
++        ONE route and one set of reads behind both (§5.5: "single template
++        path, two host pages"). The fragment is the same data rendered through
++        ``tasks/panel.html``, which extends no layout, so a row click on the
++        dashboard and a node click on the graph page (T2-A4) fetch the partial
++        and nothing else. Every degraded state — offline, an over-budget filter
++        query, and above all an unknown id — is answered in the panel's own
++        markup rather than as a status code the click handler would have to
++        interpret.
++        """
++        panel = request.query_params.get(PANEL_FRAGMENT_KEY) == PANEL_FRAGMENT_VALUE
++        template = "tasks/panel.html" if panel else "tasks/detail.html"
+         if filter_query_oversized(request):
+-            return await _reject_oversized_filters(
+-                request, templates, state, "tasks/detail.html"
+-            )
++            return await _reject_oversized_filters(request, templates, state, template)
+         snapshot = await state.refresh_health()
+         if snapshot.lithos != "ok":
+             return templates.TemplateResponse(
+                 request,
+-                "tasks/detail.html",
++                template,
+                 {
+                     "config": state.config,
+                     "health": snapshot,
+@@ -371,10 +396,12 @@ def create_app(
+                     "offline": True,
+                 },
+             )
+-        detail = await load_task_detail(state.lithos_client, task_id)
++        detail = await _load_detail(state, task_id)
++        if panel:
++            metrics.tasks_panel_opens().add(1, {"source": "fragment"})
+         return templates.TemplateResponse(
+             request,
+-            "tasks/detail.html",
++            template,
+             {
+                 "config": state.config,
+                 "health": snapshot,
+@@ -403,7 +430,7 @@ def create_app(
+                     "offline": True,
+                 },
+             )
+-        detail = await load_task_detail(state.lithos_client, task_id)
++        detail = await _load_detail(state, task_id)
+         return templates.TemplateResponse(
+             request,
+             "tasks/findings.html",
+@@ -518,6 +545,7 @@ async def _reject_oversized_filters(
+             "active_view": "tasks",
+             "dashboard": None,
+             "detail": None,
++            "panel": None,
+             "offline": False,
+             "filter_query_rejected": True,
+             "max_filter_query_bytes": MAX_FILTER_QUERY_BYTES,
+@@ -527,6 +555,50 @@ async def _reject_oversized_filters(
+     )
+ 
+ 
++async def _load_detail(state: AppState, task_id: str) -> TaskDetailData:
++    """One task's detail data, under the deployment's project convention.
++
++    The convention is config (§5B.1) and the panel's project chip is rendered
++    from it, so it is threaded in here — once — rather than re-read in a
++    template that would have to decide between `metadata.project` and the
++    `<tag_key>:<slug>` tag on its own.
++    """
++    tasks_config = state.config.tasks
++    return await load_task_detail(
++        state.lithos_client,
++        task_id,
++        convention=tasks_config.project_convention,
++        tag_key=tasks_config.project_tag_key,
++    )
++
++
++def _selected_id(request: Request) -> str:
++    """The task id this request asked to open a panel for, if any."""
++    return (request.query_params.get(PANEL_SELECTION_KEY) or "").strip()
++
++
++async def _selected_panel(request: Request, state: AppState) -> TaskDetailData | None:
++    """The side panel this request asked to open, if it asked (§5.5, T2-A6).
++
++    ``?selected=<id>`` is the DASHBOARD's single selection parameter, and this
++    is its no-JS baseline: a deep link or a shared URL renders the board with
++    the panel already open, because the same reads that back the fragment route
++    run here too. Deliberately NOT a preserved filter (`request_filters`) — it
++    names one open panel, not a slice of the board, so closing it clears the
++    parameter and leaves every filter in place, and no generated link carries a
++    selection into navigation it has nothing to do with.
++
++    An unknown id lands here as ``TaskDetailData.not_found`` and renders the
++    not-found PANEL beside a perfectly good board: a bad id in a shared URL
++    must not cost the operator the dashboard.
++    """
++    selected = _selected_id(request)
++    if not selected:
++        return None
++    metrics.tasks_panel_opens().add(1, {"source": "url"})
++    return await _load_detail(state, selected)
++
++
+ async def _render_tasks(
+     request: Request,
+     templates: Jinja2Templates,
+@@ -538,6 +610,7 @@ async def _render_tasks(
+         )
+     snapshot = await state.refresh_health()
+     dashboard = None
++    panel: TaskDetailData | None = None
+     if snapshot.lithos == "ok":
+         query_items = list(request.query_params.multi_items())
+         filters = parse_filters(
+@@ -571,19 +644,32 @@ async def _render_tasks(
+             },
+         )
+         tasks_config = state.config.tasks
+-        dashboard = await load_dashboard(
+-            state.lithos_client,
+-            filters=filters,
+-            frontier_limit=tasks_config.frontier_limit,
+-            attention=AttentionPolicy(
+-                gate_waiting_attention_hours=tasks_config.gate_waiting_attention_hours,
+-                claim_expiring_soon_minutes=tasks_config.claim_expiring_soon_minutes,
+-                stale_open_age_days=tasks_config.stale_open_age_days,
+-                unclaimed_ready_age_minutes=tasks_config.unclaimed_ready_age_minutes,
+-                dispatch_trigger_tag_prefixes=(
+-                    tasks_config.dispatch_trigger_tag_prefixes
++        # Concurrently: the board is a frontier fan-out and the panel is one
++        # task's reads, and neither needs the other's answer. Serialising them
++        # would add a whole panel render to the latency of every deep link that
++        # arrives with `?selected=`.
++        dashboard, panel = await asyncio.gather(
++            load_dashboard(
++                state.lithos_client,
++                filters=filters,
++                frontier_limit=tasks_config.frontier_limit,
++                attention=AttentionPolicy(
++                    gate_waiting_attention_hours=(
++                        tasks_config.gate_waiting_attention_hours
++                    ),
++                    claim_expiring_soon_minutes=(
++                        tasks_config.claim_expiring_soon_minutes
++                    ),
++                    stale_open_age_days=tasks_config.stale_open_age_days,
++                    unclaimed_ready_age_minutes=(
++                        tasks_config.unclaimed_ready_age_minutes
++                    ),
++                    dispatch_trigger_tag_prefixes=(
++                        tasks_config.dispatch_trigger_tag_prefixes
++                    ),
+                 ),
+             ),
++            _selected_panel(request, state),
+         )
+         logger.debug(
+             "tasks dashboard loaded",
+@@ -617,6 +703,11 @@ async def _render_tasks(
+             "health": snapshot,
+             "active_view": "tasks",
+             "dashboard": dashboard,
++            "panel": panel,
++            # The id AS REQUESTED, which is not always `panel.task.id`: an
++            # unknown id has no task at all, and the host still has to carry
++            # the URL that would reopen it.
++            "selected_id": _selected_id(request),
+             "max_tag_chips": MAX_FILTER_TAG_CHIPS,
+             "default_since": default_since(state.config.tasks.default_time_range_days),
+         },
+diff --git a/tests/test_task_panel.py b/tests/test_task_panel.py
+new file mode 100644
+index 0000000..b75fada
+--- /dev/null
++++ b/tests/test_task_panel.py
+@@ -0,0 +1,598 @@
++"""T2 slice A6 — the side panel, one implementation for rows and nodes.
++
++§5.5 puts a panel behind every row: clicking one opens the task's blockers,
++its dependents, its parent and its claims WITHOUT leaving the board, and
++`GET /tasks?selected=<id>` renders that panel server-side so a shared link (or
++a browser with JavaScript off) lands on the same thing. The graph page reuses
++this exact fragment from T2-A4 with `focus=` in place of `selected=`.
++
++What these pin is the server half of that contract:
++
++- `?selected=` renders the panel INTO the board, with the task's title, its
++  blockers carrying live status, and its level-1 dependents;
++- `?fragment=panel` answers with the partial and nothing else — no layout, no
++  nav, no findings timeline — because a click swaps the response straight into
++  the page;
++- an unknown id renders the not-found PANEL at 200, never HTTP 500, on either
++  route and beside a perfectly good board;
++- closing preserves the board: the close link carries `?project=` and drops
++  only the selection (the browser-side half of that is `test_tasks_js.py`);
++- and the full detail page grows the same downstream half of the relationship
++  under "Blocks" (§5.5.2's Blocks line).
++
++The fixture helpers come from ``tests.test_task_detail``: same fake, same
++edge-writing vocabulary, and the panel is the same reads that page already
++makes.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import replace
++from pathlib import Path
++
++from lithos_lens.task_links import LINK_PAGE_SIZE
++from tests.test_task_detail import _client, _link, _task
++from tests.test_tasks_mvp import TaskFakeLithosClient, _add_gate
++
++
++def _related_fixture() -> TaskFakeLithosClient:
++    """``open-unclaimed`` with a blocker above it and three dependents below.
++
++    Both directions of the SAME edge types, which is the point of the slice:
++    the chain answers "why can't this run?" and the Blocks line answers "what
++    is waiting on it?". One dependent is deliberately COMPLETED — the two
++    directions read opposite ways round, and a finished dependent is the case
++    where a verdict written for predecessors would be wrong on this list.
++    """
++    fake = TaskFakeLithosClient()
++    fake.tasks.extend(
++        [
++            _task("pred-open", title="Design schema"),
++            _task("dep-ship", title="Ship the harness"),
++            _task("dep-gate-waiter", title="Announce the harness"),
++            _task("dep-done", title="Land the migration", status="completed"),
++            _task("parent-epic", title="Ingest epic", task_type="epic"),
++        ]
++    )
++    _link(fake, "pred-open", "open-unclaimed", "blocks")
++    _link(fake, "open-unclaimed", "dep-ship", "blocks")
++    _link(fake, "open-unclaimed", "dep-gate-waiter", "waits_on_gate")
++    _link(fake, "open-unclaimed", "dep-done", "blocks")
++    _link(fake, "parent-epic", "open-unclaimed", "parent_child")
++    return fake
++
++
++# --- Acceptance: `GET /tasks?selected=<id>` renders the panel open ----------
++
++
++def test_selected_renders_the_panel_open_on_the_dashboard(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Headline acceptance: the no-JS baseline. One request, and the board
++    comes back with the panel already open on the named task — its title, its
++    blockers with the status Lithos reports for them NOW, and its level-1
++    dependents."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-unclaimed")
++
++    assert response.status_code == 200
++    text = response.text
++    # The board is still there: the panel is beside the list, not instead of it.
++    assert 'data-task-row data-task-id="open-claimed"' in text
++    assert "data-task-panel" in text
++    assert 'data-panel-task="open-unclaimed"' in text
++    assert "Unclaimed open task" in text
++    # Blockers, with live status.
++    blockers = text.split("data-panel-blockers", 1)[1].split("data-panel-dependents")[0]
++    assert 'data-link-target="pred-open"' in blockers
++    assert "Design schema" in blockers
++    assert 'class="badge badge-open">open</span>' in blockers
++    # Dependents — the downstream half, each with the status it was READ with.
++    dependents = text.split("data-panel-dependents", 1)[1].split("data-panel-claims")[0]
++    assert "Blocks:" in dependents
++    assert 'data-link-list="dependents"' in dependents
++    assert 'data-link-target="dep-ship"' in dependents
++    assert 'data-link-target="dep-gate-waiter"' in dependents
++    assert "Ship the harness" in dependents
++    ship = dependents.split('data-link-target="dep-ship"', 1)[1].split("</li>")[0]
++    assert 'class="badge badge-open">open</span>' in ship
++    done = dependents.split('data-link-target="dep-done"', 1)[1].split("</li>")[0]
++    assert 'class="badge badge-completed">completed</span>' in done
++    # The parent breadcrumb and the findings link complete §5.5.1's panel.
++    assert "data-panel-parent" in text
++    assert "Ingest epic" in text
++    findings = text.split("data-panel-findings", 1)[1].split("</p>")[0]
++    assert ">0 findings</a>" in findings
++    # D10's downstream-impact line is A7's, and its slot is named and empty —
++    # the dashboard passes no scope, so there is no number to stand behind.
++    assert "data-panel-impact-slot></div>" in text
++
++
++def test_the_panel_names_the_task_project_and_type(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The header is the identity §5.5.1 asks for: type badge, status and the
++    project chip read under the configured convention (§5B.1), not guessed at
++    in the template."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-unclaimed")
++
++    header = response.text.split("data-panel-task=", 1)[1].split("</header>")[0]
++    assert 'data-panel-project="influx"' in header
++    assert 'data-task-type="task"' in header
++    assert 'class="badge badge-open">open</span>' in header
++    # Expand leaves for the full page; close only clears the selection.
++    assert "data-panel-expand" in header
++    assert "data-panel-close" in header
++
++
++def test_a_selected_task_with_no_dependents_says_so(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The affirmative answer matters as much as the list — an empty Blocks
++    section would read as a rendering failure."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-unclaimed")
++
++    assert "Nothing depends on this task." in response.text
++
++
++# --- Acceptance: the fragment route returns the partial only ---------------
++
++
++def test_the_fragment_route_returns_the_panel_partial_only(
++    lithos_lens_config_env: Path,
++) -> None:
++    """What a row click swaps into the page. No layout, no nav, no board — and
++    none of the full page's sections either, because the panel is a summary
++    with an Expand button, not a second copy of `/tasks/{id}`."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks/open-unclaimed?fragment=panel")
++
++    assert response.status_code == 200
++    text = response.text
++    assert text.lstrip().startswith("<aside")
++    assert "<!doctype html>" not in text.lower()
++    assert "shell-header" not in text
++    assert "Search knowledge" not in text
++    assert "data-task-row" not in text
++    # The panel links the findings COUNT; the timeline itself stays on the page.
++    assert "findings-timeline" not in text
++    assert "children-table" not in text
++    # It is nonetheless the whole panel.
++    assert 'data-panel-task="open-unclaimed"' in text
++    assert 'data-link-target="dep-ship"' in text
++
++
++def test_the_rows_panel_url_is_the_fragment_route_with_the_board_filters(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The click handler fetches a URL the SERVER built, so the id encoding and
++    the preserved filters have one definition. A panel fetched without the
++    board's scope would come back with Expand and Close links that silently
++    drop it."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?project=influx")
++
++    row = response.text.split('data-task-id="open-unclaimed"', 1)[1]
++    panel_url = row.split('data-panel-url="', 1)[1].split('"')[0]
++    assert panel_url.replace("&amp;", "&") == (
++        "/tasks/open-unclaimed?project=influx&fragment=panel"
++    )
++
++
++def test_every_row_on_the_board_carries_the_panel_contract(
++    lithos_lens_config_env: Path,
++) -> None:
++    """§5.5 puts a panel behind EVERY row, so every row the board renders has
++    to carry the pair tasks.js opens one from: the id it selects and the
++    server-built URL its panel comes from.
++
++    Asserted over the rendered markup rather than per template, because the
++    board has more than one kind of row and they are easy to forget. The Gates
++    section was: its rows carry gate chrome instead of claim chrome, so they
++    do not carry `data-task-row`, and a click handler keyed off that attribute
++    left the whole section navigating away instead of opening a panel.
++    """
++    fake = _related_fixture()
++    _add_gate(fake, "gate-human", title="Approve the cutover")
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?since=2026-04-01")
++
++    rows = re.findall(r"<article class=\"task-row[^\"]*\"[^>]*>", response.text)
++    assert any("data-gate-row" in row for row in rows), (
++        "the fixture is meant to put a gate row on the board"
++    )
++    inert = [
++        row
++        for row in rows
++        if "data-task-id=" not in row or "data-panel-url=" not in row
++    ]
++    assert inert == [], f"rows with no panel to open: {inert}"
++
++
++# --- Acceptance: an unknown id is a panel, never a 500 ----------------------
++
++
++def test_an_unknown_id_renders_the_not_found_panel_on_the_fragment_route(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Lithos answers `task_not_found`, so the panel says so. A 500 here would
++    be an error page swapped into a working board."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks/no-such-task?fragment=panel")
++
++    assert response.status_code == 200
++    assert 'data-panel-state="not-found"' in response.text
++    assert "Lithos has no task with this id." in response.text
++
++
++def test_an_unknown_selected_id_does_not_cost_the_operator_the_board(
++    lithos_lens_config_env: Path,
++) -> None:
++    """A stale id in a shared URL is a bad PANEL, not a bad page."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=no-such-task")
++
++    assert response.status_code == 200
++    assert 'data-panel-state="not-found"' in response.text
++    assert 'data-task-row data-task-id="open-unclaimed"' in response.text
++
++
++def test_a_failed_read_is_not_reported_as_a_missing_task(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The other half of the same distinction: a read that failed must not
++    claim the task does not exist."""
++    fake = TaskFakeLithosClient(visible_failures=True)
++
++    async def failing_get(task_id: str):
++        raise RuntimeError("boom")
++
++    fake.task_get = failing_get  # type: ignore[method-assign]
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks/open-unclaimed?fragment=panel")
++
++    assert response.status_code == 200
++    assert 'data-panel-state="error"' in response.text
++    assert 'data-panel-state="not-found"' not in response.text
++
++
++# --- Acceptance: closing preserves the board's state -----------------------
++
++
++def test_closing_the_panel_keeps_the_boards_filters(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The no-JS half of "close preserves list state": the Close link is the
++    board this request asked for, minus the selection. `selected` is not a
++    preserved filter, so it falls out of every generated URL — including the
++    row links and the Expand button, which must not carry one selection into
++    the next page."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?project=influx&selected=open-unclaimed")
++
++    panel = response.text.split("data-task-panel", 1)[1]
++    close_url = (
++        panel.split("data-panel-close", 1)[0].rsplit('href="', 1)[1].split('"')[0]
++    )
++    assert close_url.replace("&amp;", "&") == "/tasks?project=influx"
++    expand_url = (
++        panel.split("data-panel-expand", 1)[0].rsplit('href="', 1)[1].split('"')[0]
++    )
++    assert expand_url.replace("&amp;", "&") == ("/tasks/open-unclaimed?project=influx")
++
++
++# --- Acceptance: the detail page's own "Blocks" line (§5.5.2) --------------
++
++
++def test_the_detail_page_lists_its_level_1_dependents_under_blocks(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The text baseline covers BOTH directions now: the blocker chain above,
++    and one line per dependent — with live status — beneath it."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks/open-unclaimed")
++
++    assert response.status_code == 200
++    section = response.text.split("data-dependents", 1)[1]
++    # The label §5.5.2 and the PRD both name, verbatim — colon included.
++    assert "Blocks:" in section
++    assert 'data-link-list="dependents"' in section
++    assert 'data-link-target="dep-ship"' in section
++    assert 'data-link-target="dep-gate-waiter"' in section
++    assert "Ship the harness" in section
++    # "one line per dependent WITH STATUS" — the status each was read with,
++    # and no predecessor verdict on a downstream line.
++    ship = section.split('data-link-target="dep-ship"', 1)[1].split("</li>")[0]
++    assert 'class="badge badge-open">open</span>' in ship
++    done = section.split('data-link-target="dep-done"', 1)[1].split("</li>")[0]
++    assert 'class="badge badge-completed">completed</span>' in done
++    assert "data-link-satisfied" not in done
++    # Level 1 only: the downstream walk is the graph page's job, so no line
++    # here offers the blocker chain's per-level expander.
++    dependents = section.split('data-link-list="dependents"', 1)[1].split("</ul>")[0]
++    assert "data-blocker-expand" not in dependents
++
++
++def test_the_dependents_page_is_bounded_like_every_other_neighbour_list(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The outgoing edge count is agent-written too — a gate is exactly where a
++    runaway one is expected — so the Blocks line renders one bounded page and
++    COUNTS the rest through the shared tail, rather than resolving every
++    dependent's status on every render."""
++    extra = 9
++    fake = TaskFakeLithosClient()
++    for index in range(LINK_PAGE_SIZE + extra):
++        dependent_id = f"dep-{index:03d}"
++        fake.tasks.append(_task(dependent_id, title=f"Dependent {index:03d}"))
++        _link(fake, "open-unclaimed", dependent_id, "blocks")
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks/open-unclaimed")
++
++    text = response.text
++    assert 'data-link-tail="dependents"' in text
++    assert f"{extra} more dependents not shown." in text
++    # One page of status reads for them, not one per edge.
++    assert fake.get_calls[1:] == [f"dep-{index:03d}" for index in range(LINK_PAGE_SIZE)]
++
++
++# --- §5.5.1's other required fields: claims, findings, the gate subtype -----
++
++
++def test_the_panel_renders_the_tasks_active_claims(
++    lithos_lens_config_env: Path,
++) -> None:
++    """§5.5.1's Active claims row, read from `lithos_task_status`. The claim
++    is the answer to "is anyone on this?", so the panel names the aspect, the
++    agent and the expiry rather than a count."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-claimed")
++
++    claims = response.text.split("data-panel-claims", 1)[1].split("</section>")[0]
++    assert 'data-panel-claim="implementation"' in claims
++    assert "implementation / worker-a / expires" in claims
++    assert "No active claims." not in claims
++
++
++def test_the_panel_links_its_finding_count_to_the_timeline(
++    lithos_lens_config_env: Path,
++) -> None:
++    """A COUNT plus a link, not the timeline (§5.5.1): the panel is a summary,
++    and the full page carries §5.6. The count is the findings actually read,
++    and the link opens the page AT them."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-claimed")
++
++    findings = response.text.split("data-panel-findings", 1)[1].split("</p>")[0]
++    # The fixture stages two findings on this task.
++    assert ">2 findings</a>" in findings
++    assert 'href="/tasks/open-claimed#findings"' in findings
++    # The timeline itself stays on the full page.
++    assert "findings-timeline" not in response.text.split("data-task-panel", 1)[1]
++
++
++def test_the_panel_names_a_gates_subtype(lithos_lens_config_env: Path) -> None:
++    """§5.5.1's type badge is "task / epic / gate + `gate_type`". A gate whose
++    kind is not named is a gate the operator cannot judge — a human gate waits
++    on a person, a timer gate on the clock."""
++    fake = TaskFakeLithosClient()
++    fake.tasks.append(
++        _task(
++            "gate-review",
++            title="Human review",
++            task_type="gate",
++            metadata={"gate_type": "human"},
++        )
++    )
++    _link(fake, "gate-review", "open-unclaimed", "waits_on_gate")
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=gate-review")
++
++    header = response.text.split("data-panel-task=", 1)[1].split("</header>")[0]
++    assert 'data-task-type="gate"' in header
++    assert 'data-gate-type="human">human gate' in header
++    # And its waiter is the Blocks list: what resolving this gate would free.
++    dependents = response.text.split("data-panel-dependents", 1)[1]
++    assert 'data-link-target="open-unclaimed"' in dependents
++
++
++# --- A dependent is not a blocker: the verdicts read one way round ----------
++
++
++def test_a_finished_dependent_is_not_labelled_as_a_satisfied_dependency(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The two blocker edge types render BOTH lists, and the verdicts written
++    for predecessors say the opposite thing downstream: "satisfied" means this
++    task's own dependency was met, and a completed DEPENDENT met nothing of the
++    sort. It carries its status and no verdict."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-unclaimed")
++
++    dependents = response.text.split("data-panel-dependents", 1)[1].split(
++        "data-panel-claims"
++    )[0]
++    done = dependents.split('data-link-target="dep-done"', 1)[1].split("</li>")[0]
++    assert 'class="badge badge-completed">completed</span>' in done
++    assert "data-link-satisfied" not in done
++    # The blocker list above is untouched by that rule — a completed
++    # PREDECESSOR is still marked satisfied there.
++    assert "Blocked by" in response.text
++
++
++def test_a_cancelled_dependent_is_not_called_unsatisfiable(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The loudest version of the same error: "unsatisfiable" says THIS task
++    can never run. A cancelled task waiting on it says nothing about whether it
++    can run — only that one of the things that wanted it went away."""
++    fake = TaskFakeLithosClient()
++    fake.tasks.append(_task("dep-cancelled", title="Dropped work", status="cancelled"))
++    _link(fake, "open-unclaimed", "dep-cancelled", "blocks")
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-unclaimed")
++
++    dependents = response.text.split("data-panel-dependents", 1)[1].split(
++        "data-panel-claims"
++    )[0]
++    assert 'class="badge badge-cancelled">cancelled</span>' in dependents
++    assert "data-link-unsatisfiable" not in dependents
++    # …and the section heading still reports the task as unblocked.
++    assert "Nothing is blocking this task." in response.text
++
++
++# --- Reserved and URL-reserved ids reach their own panel --------------------
++
++
++def test_a_page_word_id_is_addressed_through_the_alias_route(
++    lithos_lens_config_env: Path,
++) -> None:
++    """A task really can be called `graph` (ids are arbitrary strings), and
++    `/tasks/graph` is the graph PAGE. The row's panel URL therefore goes
++    through the query alias — and fetching it returns that task's panel, not a
++    page swapped into the panel host."""
++    fake = TaskFakeLithosClient()
++    fake.tasks.append(
++        replace(_task("graph", title="Draw the graph"), tags=("project:influx",))
++    )
++    _link(fake, "graph", "open-unclaimed", "blocks")
++
++    with _client(lithos_lens_config_env, fake) as client:
++        board = client.get("/tasks?project=influx")
++        row = board.text.split('data-task-id="graph"', 1)[1]
++        panel_url = row.split('data-panel-url="', 1)[1].split('"')[0]
++        panel = client.get(panel_url.replace("&amp;", "&"))
++
++    resolved = panel_url.replace("&amp;", "&")
++    assert resolved.startswith("/tasks/id?task_id=graph")
++    assert "fragment=panel" in resolved
++    # …and the board's scope rides along, like every other generated tasks URL.
++    assert "project=influx" in resolved
++    assert panel.status_code == 200
++    assert panel.text.lstrip().startswith("<aside")
++    assert 'data-panel-task="graph"' in panel.text
++    assert "Draw the graph" in panel.text
++    # The graph page would have come back with these; the panel must not.
++    assert "data-graph-picker" not in panel.text
++    assert "<!doctype html>" not in panel.text.lower()
++
++
++def test_a_url_reserved_id_is_encoded_into_one_path_segment(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Ids are arbitrary non-empty strings, so `?` and `#` in one would
++    truncate the path and address something else entirely. The server builds
++    the URL, so the encoding is the same decision every task link makes."""
++    fake = TaskFakeLithosClient()
++    fake.tasks.append(_task("od?d#id", title="Odd id task"))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        board = client.get("/tasks")
++        row = board.text.split('data-task-id="od?d#id"', 1)[1]
++        panel_url = row.split('data-panel-url="', 1)[1].split('"')[0]
++        panel = client.get(panel_url.replace("&amp;", "&"))
++
++    assert panel_url.startswith("/tasks/od%3Fd%23id?")
++    assert panel.status_code == 200
++    assert "Odd id task" in panel.text
++
++
++def test_the_panel_host_carries_the_selections_own_fetch_url(
++    lithos_lens_config_env: Path,
++) -> None:
++    """A deep-linked task need not have a row: a filter can exclude it, or it
++    resolved outside the window. Back and Forward still have to reopen it, so
++    the HOST carries the URL the server built for the selection — including for
++    an id no row could ever supply, and for one that does not exist at all."""
++    fake = TaskFakeLithosClient()
++    fake.tasks.append(_task("graph", title="Draw the graph"))
++
++    with _client(lithos_lens_config_env, fake) as client:
++        # `graph` carries no `project:influx` tag, so this board excludes it.
++        scoped = client.get("/tasks?project=influx&selected=graph")
++        unknown = client.get("/tasks?selected=no-such-task")
++
++    host = scoped.text.split("data-panel-host", 1)[1].split(">")[0]
++    assert 'data-panel-selected="graph"' in host
++    assert "/tasks/id?task_id=graph" in host.replace("&amp;", "&")
++    assert 'data-task-id="graph"' not in scoped.text
++    # Even an unknown id: the host's job is to be able to re-ask the question.
++    unknown_host = unknown.text.split("data-panel-host", 1)[1].split(">")[0]
++    assert 'data-panel-selected="no-such-task"' in unknown_host
++
++
++def test_the_panel_task_hook_names_exactly_one_element(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The host and the panel header carry DIFFERENT hooks on purpose, and this
++    is why: a board with the panel open is addressed by `[data-panel-task]` in
++    the browser suite, and two elements answering to it is a strict-mode
++    failure there and an ambiguous selector everywhere else. The host names the
++    id the REQUEST carried (an unknown task has one); the header names the task
++    that actually resolved."""
++    fake = _related_fixture()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?selected=open-unclaimed")
++
++    assert response.text.count("data-panel-task=") == 1
++    assert response.text.count("data-panel-selected=") == 1
++
++
++def test_the_close_link_keeps_every_part_of_the_boards_state(
++    lithos_lens_config_env: Path,
++) -> None:
++    """ "Close preserves list state" is the whole board, not one filter: the
++    epic scope the build criterion names, a repeated multi-select, a tag whose
++    value carries a colon, the agent and the resolved-since window all survive,
++    and only `selected` goes. The no-JS half of the browser test in
++    `test_tasks_js.py` — the link an operator without JavaScript clicks."""
++    from urllib.parse import parse_qsl, urlsplit
++
++    fake = _related_fixture()
++    query = (
++        "status=open&project=influx&project=loom&tag=area%3Adata&tag=ops"
++        "&agent=planner&epic=parent-epic&since=2026-08-01"
++    )
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get(f"/tasks?{query}&selected=open-unclaimed")
++
++    panel = response.text.split("data-task-panel", 1)[1]
++    close_url = (
++        panel.split("data-panel-close", 1)[0].rsplit('href="', 1)[1].split('"')[0]
++    )
++    closed = sorted(parse_qsl(urlsplit(close_url.replace("&amp;", "&")).query))
++    assert closed == sorted(parse_qsl(query))
+diff --git a/tests/test_tasks_js.py b/tests/test_tasks_js.py
+index ffd9af2..33a58c1 100644
+--- a/tests/test_tasks_js.py
++++ b/tests/test_tasks_js.py
+@@ -13,6 +13,13 @@ arms:
+ - a stamp already in the past on arrival (browser/Lens clock skew) must back
+   off to the poll interval instead of the sub-second floor.
+ 
++T2-A6 adds a second harness for the SIDE PANEL, which lives in the same file
++for the same reason: what it pins is browser behaviour with no server half —
++which URL a row click fetches, and above all that CLOSING the panel clears only
++the selection and leaves the board's filters (``?project=``) exactly as they
++were. A Python test can assert what the close LINK says; only this can assert
++what ``history.pushState`` is handed.
++
+ Node is the same runtime the ``e2e/`` Playwright suite needs; the tests skip
+ when it is absent rather than failing a pure-Python environment.
+ """
+@@ -58,6 +65,9 @@ const document = {
+   },
+   querySelectorAll() { return { length: 0, forEach() {} }; },
+   createElement() { return { dataset: {}, style: {}, appendChild() {} }; },
++  // The panel (T2-A6) binds its click/keydown handlers at load; this harness
++  // never fires one, but the IIFE must be able to install them.
++  addEventListener() {},
+ };
+ 
+ class EventSource {
+@@ -69,6 +79,7 @@ const sandbox = {
+   document,
+   EventSource,
+   console,
++  URL,
+   // Controlled clock: the harness asserts on exact delays, and advances time
+   // by a timer's own delay when it fires (so a chained sleep converges).
+   Date: new Proxy(Date, {
+@@ -86,6 +97,7 @@ sandbox.window = {
+   clearTimeout() {},
+   setInterval: () => 0,
+   clearInterval() {},
++  addEventListener() {},
+   location: { href: "http://lens.test/tasks" },
+ };
+ sandbox.window.window = sandbox.window;
+@@ -218,3 +230,897 @@ def test_a_second_gate_due_soon_is_not_delayed_to_the_poll_interval() -> None:
+     assert result["delays"][1] == 3_500, (
+         f"second gate was scheduled {result['delays'][1]}ms out, not 3500ms"
+     )
++
++
++# ── the side panel (T2-A6): row click, close, Escape, back/forward ──────────
++
++# A second stub DOM, and a deliberately CONTROLLED one: the panel's defects
++# live in the gaps between a request leaving and its response landing, so every
++# fetch here is deferred and settled by name. That is what lets a test stage an
++# out-of-order pair (click A, click B, answer A last) — the interleaving a
++# harness that drains each request before the next action can never produce.
++#
++# It models what the panel code actually touches: two rows with server-built
++# panel URLs, a host whose `innerHTML` setter maintains the panel node that
++# `replaceFragment` swaps, a history STACK with back/forward, an EventSource
++# that delivers events to the real handler, and a timer list the test fires to
++# run the reconcile. `DOMParser` parses the fake document as JSON keyed by
++# refresh-fragment name — the fragments are the contract, not the markup.
++PANEL_HARNESS = """
++const fs = require("fs");
++const vm = require("vm");
++
++const [sourcePath, initialHref, actionsRaw, selectionParam] = process.argv.slice(1);
++const actions = JSON.parse(actionsRaw);
++
++// Registered before anything runs, which also overrides Node's default of
++// crashing the process: an unhandled rejection is a RESULT this harness
++// reports, because "the panel never leaves a rejection dangling" is part of
++// what the failure paths promise.
++const unhandled = [];
++process.on("unhandledRejection", (reason) => { unhandled.push(String(reason)); });
++
++const entries = [initialHref];
++let cursor = 0;
++const pushed = [];
++const fetches = [];      // { url, settle } — settled by an explicit action
++const prevented = [];
++const listeners = {};    // document/window listeners, by type
++const sse = {};          // EventSource listeners, by type
++const timers = new Map();
++let timerId = 0;
++let board = "board:initial";
++
++function href() { return entries[cursor]; }
++function absolute(url) { return new URL(url, "http://lens.test").href; }
++
++// The host, with the `innerHTML` setter the panel code writes through. The
++// node it keeps is what `document.querySelector('[data-refresh-fragment=
++// "panel"]')` finds, so a reconcile can replace exactly what an open panel put
++// there — the live-status path this exists to exercise.
++const host = {
++  dataset: {},
++  panel: null,
++  _html: "",
++  get innerHTML() { return this._html; },
++  set innerHTML(value) {
++    this._html = value;
++    this.panel = value
++      ? { html: value, replaceWith(next) { host.innerHTML = next.html; } }
++      : null;
++  },
++};
++
++// What `dashboard.html` renders for a request that arrived with `?selected=`:
++// the panel already in the host, and the host carrying the URL the SERVER
++// built for that selection — the only source for a task with no row.
++const initialSelection =
++  new URL(initialHref).searchParams.get(selectionParam) || "";
++if (initialSelection) {
++  host.dataset.panelSelected = initialSelection;
++  host.dataset.panelUrl =
++    "/tasks/" + initialSelection + "?project=influx&fragment=panel";
++  host.innerHTML = "panel:" + initialSelection;
++}
++
++const rows = {
++  alpha: {
++    dataset: {
++      taskId: "alpha",
++      panelUrl: "/tasks/alpha?project=influx&fragment=panel",
++    },
++  },
++  beta: {
++    dataset: {
++      taskId: "beta",
++      panelUrl: "/tasks/beta?project=influx&fragment=panel",
++    },
++  },
++  // A task really can be called `graph`, and the server addresses it through
++  // the query alias because `/tasks/graph` is the graph PAGE.
++  graph: {
++    dataset: {
++      taskId: "graph",
++      panelUrl: "/tasks/id?task_id=graph&project=influx&fragment=panel",
++    },
++  },
++  // A row from the Gates section. It renders gate chrome instead of the
++  // claim/blocker chrome of an ordinary row, so it carries `data-gate-row`
++  // and NOT `data-task-row` — and the SAME panel contract, which is the whole
++  // point: one click handler for every row on the board (§5.5).
++  gate: {
++    gateRow: true,
++    dataset: {
++      taskId: "gate",
++      panelUrl: "/tasks/gate?project=influx&fragment=panel",
++    },
++  },
++};
++
++// The one selector tasks.js closest()s a click up to. Spelled once here for
++// the same reason it is spelled once there: a row that does not match it is a
++// row the panel cannot be opened from.
++const PANEL_ROW = "[data-panel-url][data-task-id]";
++
++const boardNode = { replaceWith(next) { board = next.html; } };
++const titleLink = { classList: { contains: (name) => name === "task-title" } };
++const tagLink = { classList: { contains: () => false } };
++
++function clickEvent(map, label) {
++  return {
++    button: 0,
++    defaultPrevented: false,
++    target: { closest: (selector) => map[selector] || null },
++    preventDefault() { prevented.push(label); },
++  };
++}
++
++const document = {
++  querySelector(selector) {
++    if (selector === "[data-panel-host]") return host;
++    if (selector === '[data-refresh-fragment="panel"]') return host.panel;
++    if (selector === '[data-refresh-fragment="dashboard-data"]') return boardNode;
++    // The PANEL contract — carried by every row on the board, gates included.
++    const selected =
++      /\\[data-panel-url\\]\\[data-task-id="([^"]+)"\\]/.exec(selector);
++    if (selected) return rows[selected[1]] || null;
++    // The SSE handlers' hook, which a gate row does not carry: its chrome is
++    // not the claim/status chrome those handlers rewrite.
++    const row = /\\[data-task-row\\]\\[data-task-id="([^"]+)"\\]/.exec(selector);
++    if (row) {
++      const found = rows[row[1]];
++      return found && !found.gateRow ? found : null;
++    }
++    return null;
++  },
++  querySelectorAll() { return { length: 0, forEach() {} }; },
++  createElement() { return { dataset: {}, style: {}, appendChild() {} }; },
++  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
++};
++
++class EventSource {
++  addEventListener(type, fn) { (sse[type] = sse[type] || []).push(fn); }
++  close() {}
++}
++
++// What the SERVER would answer for a URL. A panel fetch returns that task's
++// partial; the reconcile fetches the live board URL, so its document carries
++// the board plus the panel for whatever `selected=` that URL names — which is
++// exactly how a reconcile's panel can be one selection behind.
++function bodyFor(url) {
++  if (url.indexOf("fragment=panel") !== -1) {
++    const path = /\\/tasks\\/([^?]+)\\?/.exec(url);
++    const alias = /task_id=([^&]+)/.exec(url);
++    const id = decodeURIComponent(alias ? alias[1] : path ? path[1] : "");
++    return "panel:" + id;
++  }
++  const selected = new URL(url, "http://lens.test").searchParams.get(selectionParam);
++  const doc = { "dashboard-data": "board:fresh" };
++  if (selected) doc.panel = "panel:" + selected + ":fresh";
++  return JSON.stringify(doc);
++}
++
++const sandbox = {
++  document,
++  EventSource,
++  console,
++  URL,
++  URLSearchParams,
++  DOMParser: class {
++    parseFromString(text) {
++      let parsed = {};
++      try { parsed = JSON.parse(text); } catch (error) { parsed = {}; }
++      return {
++        querySelector(selector) {
++          const match = /data-refresh-fragment="([^"]+)"/.exec(selector);
++          if (!match || parsed[match[1]] === undefined) return null;
++          return { html: parsed[match[1]] };
++        },
++      };
++    }
++  },
++  // Headers and BODY are separate suspension points, and the panel code checks
++  // itself at both: `await fetch(...)` resolves when the response arrives,
++  // `await response.text()` when it has been read. A harness that answered them
++  // together could only ever exercise the first check.
++  //
++  // Each request can also FAIL in each of the three ways a real one can: a
++  // rejected fetch (no connection), a non-OK answer, and a body that never
++  // finishes reading. They are separate outcomes in the browser and separate
++  // actions here.
++  fetch: (url) => new Promise((resolveResponse, rejectResponse) => {
++    let resolveBody = () => {};
++    let rejectBody = () => {};
++    const body = new Promise((resolve, reject) => {
++      resolveBody = resolve;
++      rejectBody = reject;
++    });
++    // The HARNESS's own handler, so a body rejected for a request the code
++    // under test abandoned is not reported as ITS unhandled rejection. The
++    // awaiting code still sees the rejection; this only keeps the books
++    // honest about whose it is.
++    body.catch(() => {});
++    fetches.push({
++      url,
++      headers: () => resolveResponse({ ok: true, text: () => body }),
++      body: () => resolveBody(bodyFor(url)),
++      settle() { this.headers(); this.body(); },
++      fail: () => resolveResponse({ ok: false, text: () => body }),
++      reject: () => rejectResponse(new Error("network is down")),
++      rejectBody: () => rejectBody(new Error("connection reset mid-body")),
++    });
++  }),
++};
++sandbox.window = {
++  LithosLensTasks: {
++    eventsUrl: "/tasks/events",
++    // The HOST page's selection parameter — `selected` on the dashboard,
++    // `focus` on the graph page. Driven from the test, because "one panel
++    // implementation for rows and nodes" is exactly the promise a hard-coded
++    // key here would stop protecting.
++    selectionParam,
++    panelAliasPath: "/tasks/id",
++    panelAliasKey: "task_id",
++  },
++  setTimeout: (fn, delay) => { timerId += 1; timers.set(timerId, fn); return timerId; },
++  clearTimeout: (id) => { timers.delete(id); },
++  setInterval: () => 0,
++  clearInterval() {},
++  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
++  location: { get href() { return href(); } },
++  history: {
++    pushState(state, title, url) {
++      pushed.push(url);
++      entries.splice(cursor + 1);
++      entries.push(absolute(url));
++      cursor = entries.length - 1;
++    },
++  },
++};
++sandbox.window.window = sandbox.window;
++Object.assign(sandbox, { setTimeout: sandbox.window.setTimeout });
++
++vm.createContext(sandbox);
++vm.runInContext(fs.readFileSync(sourcePath, "utf8"), sandbox);
++
++function fire(type, event) {
++  (listeners[type] || []).forEach((listener) => listener(event));
++}
++
++let eventSeq = 0;
++
++const ACTIONS = {
++  escape: () => fire("keydown", { key: "Escape" }),
++  close: () => fire("click", clickEvent({ "[data-panel-close]": {} }, "close")),
++  expand: () => fire("click", clickEvent(
++    { "[data-task-panel]": {}, "a[href]": tagLink }, "expand",
++  )),
++  tag: () => fire("click", clickEvent(
++    { [PANEL_ROW]: rows.alpha, "a[href]": tagLink }, "tag",
++  )),
++  // The <summary> of a gate row's waiter list: the browser's own control for
++  // the <details> it opens, inside a row the panel handler claims.
++  waiters: () => fire("click", clickEvent(
++    { [PANEL_ROW]: rows.gate, summary: {} }, "waiters",
++  )),
++  back: () => { if (cursor > 0) cursor -= 1; fire("popstate", {}); },
++  forward: () => {
++    if (cursor < entries.length - 1) cursor += 1;
++    fire("popstate", {});
++  },
++  // One task event: the real handler debounces a reconcile behind a timer.
++  event: () => {
++    eventSeq += 1;
++    (sse["task.updated"] || []).forEach((listener) => listener({
++      lastEventId: "event-" + eventSeq,
++      data: JSON.stringify({
++        type: "task.updated", task_id: "alpha", requires_refresh: true,
++      }),
++    }));
++  },
++  // The board was replaced by a reconcile and this row is no longer on it —
++  // the one way a task in this tab's history can have no server-built URL left.
++  drop: () => {},
++  timers: () => {
++    const pending = Array.from(timers.entries());
++    timers.clear();
++    pending.forEach(([, fn]) => fn());
++  },
++};
++
++(async () => {
++  for (const action of actions) {
++    const [name, argument] = action.split(":");
++    if (name === "click") {
++      fire("click", clickEvent(
++        { [PANEL_ROW]: rows[argument], "a[href]": titleLink }, "row:" + argument,
++      ));
++    } else if (name === "click-body") {
++      // The row itself, away from any link — "clicking a ROW opens the panel"
++      // (§5.5), not only clicking its title.
++      fire("click", clickEvent(
++        { [PANEL_ROW]: rows[argument] }, "row-body:" + argument,
++      ));
++    } else if (name === "settle") {
++      fetches[Number(argument)].settle();
++    } else if (name === "headers") {
++      fetches[Number(argument)].headers();
++    } else if (name === "body") {
++      fetches[Number(argument)].body();
++    } else if (name === "fail") {
++      fetches[Number(argument)].fail();
++    } else if (name === "reject") {
++      fetches[Number(argument)].reject();
++    } else if (name === "reject-body") {
++      fetches[Number(argument)].rejectBody();
++    } else if (name === "drop") {
++      delete rows[argument];
++    } else {
++      ACTIONS[name]();
++    }
++    // Between actions only: each one is a discrete operator/browser event, and
++    // whatever it set in motion gets to make whatever progress it can before
++    // the next. Nothing here waits for a fetch — only an explicit `settle`
++    // answers one.
++    await new Promise((resolve) => setImmediate(resolve));
++  }
++  // One more turn, so a rejection left dangling by the last action is reported
++  // before the results are: Node raises `unhandledRejection` a tick after the
++  // rejection itself.
++  await new Promise((resolve) => setImmediate(resolve));
++  console.log(JSON.stringify({
++    pushed,
++    fetches: fetches.map((entry) => entry.url),
++    prevented,
++    href: href(),
++    panel: host.innerHTML,
++    board,
++    unhandled,
++  }));
++})();
++"""
++
++BOARD_HREF = "http://lens.test/tasks?project=influx"
++
++
++def _panel_run(
++    actions: list[str],
++    href: str = BOARD_HREF,
++    selection_param: str = "selected",
++) -> dict:
++    """Load tasks.js against a two-row board, then run ``actions`` in order.
++
++    Every fetch stays unanswered until an explicit action: ``settle:<n>``
++    answers one whole, ``headers:<n>`` and ``body:<n>`` answer its two halves
++    separately. So a test says exactly which response lands when, and where in
++    a response's own lifetime the next thing happens.
++
++    ``selection_param`` is the HOST page's one selection parameter — the
++    dashboard's ``selected``, the graph page's ``focus`` — because the panel is
++    one implementation for both and nothing in it may assume either spelling.
++    """
++    assert NODE is not None
++    result = subprocess.run(
++        [
++            NODE,
++            "-e",
++            PANEL_HARNESS,
++            "--",
++            str(TASKS_JS),
++            href,
++            json.dumps(actions),
++            selection_param,
++        ],
++        capture_output=True,
++        text=True,
++        check=True,
++    )
++    return json.loads(result.stdout)
++
++
++def test_clicking_a_row_fetches_its_panel_fragment_and_pushes_the_selection() -> None:
++    """§5.5: a row click opens the panel instead of navigating. It fetches the
++    URL the SERVER put on the row — so the id encoding and the board's filters
++    are the server's decision — and only then pushes `selected` onto the URL, so
++    a failed fetch can never leave the address bar claiming an open panel."""
++    result = _panel_run(["click:alpha", "settle:0"])
++
++    assert result["fetches"] == ["/tasks/alpha?project=influx&fragment=panel"]
++    assert result["pushed"] == ["/tasks?project=influx&selected=alpha"]
++    assert result["panel"] == "panel:alpha"
++    assert result["prevented"] == ["row:alpha"]
++
++
++def test_nothing_is_pushed_until_the_panel_has_actually_arrived() -> None:
++    """The push follows the swap. While the fetch is in flight the URL still
++    describes what is on screen."""
++    result = _panel_run(["click:alpha"])
++
++    assert result["pushed"] == []
++    assert result["panel"] == ""
++
++
++def test_closing_the_panel_keeps_the_boards_project_filter() -> None:
++    """THE acceptance criterion for the close path: closing clears the
++    selection and preserves list state. Rebuilt from the live URL rather than
++    from a remembered query string, so every filter — `project` here, but tags,
++    the epic scope and the since window alike — survives."""
++    result = _panel_run(["click:alpha", "settle:0", "close"])
++
++    assert result["pushed"][-1] == "/tasks?project=influx"
++    assert result["href"] == "http://lens.test/tasks?project=influx"
++    assert result["panel"] == ""
++
++
++def test_escape_closes_the_panel_the_same_way() -> None:
++    """Escape is the keyboard half of the close button, not a second path with
++    its own URL handling."""
++    result = _panel_run(["click:alpha", "settle:0", "escape"])
++
++    assert result["pushed"][-1] == "/tasks?project=influx"
++    assert result["panel"] == ""
++
++
++def test_escape_with_no_panel_open_pushes_nothing() -> None:
++    """An Escape on a board with no selection must not write a history entry —
++    it would make Back a no-op the operator has to press twice."""
++    result = _panel_run(["escape"])
++
++    assert result["pushed"] == []
++
++
++def test_a_tag_chip_inside_a_row_keeps_its_own_navigation() -> None:
++    """A row click is the TITLE link and the row itself. The tag chips inside
++    the row are filter links and must still filter, or the panel would swallow
++    the only way to scope the board from a row."""
++    result = _panel_run(["tag"])
++
++    assert result["fetches"] == []
++    assert result["pushed"] == []
++    assert result["prevented"] == []
++
++
++def test_links_inside_the_panel_navigate_normally() -> None:
++    """Expand is the whole point of the panel's link set: it LEAVES for the
++    full page. A handler that swallowed clicks inside the panel would strand
++    the operator in a summary."""
++    result = _panel_run(["expand"])
++
++    assert result["fetches"] == []
++    assert result["pushed"] == []
++    assert result["prevented"] == []
++
++
++# --- Ordering: the LATEST intent owns the panel, whatever answers last ------
++
++
++def test_a_late_response_never_overwrites_a_newer_selection() -> None:
++    """Two clicks in flight at once, answered in the wrong order. Panels are
++    fetched, so this is ordinary — and without a guard the panel becomes
++    whichever request happened to answer LAST: A's stale response would repaint
++    A and push `selected=A` over B, so the first click would win."""
++    result = _panel_run(["click:alpha", "click:beta", "settle:1", "settle:0"])
++
++    assert result["panel"] == "panel:beta"
++    assert result["pushed"] == ["/tasks?project=influx&selected=beta"]
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=beta"
++
++
++def test_a_response_that_lands_after_a_close_does_not_reopen_the_panel() -> None:
++    """The same defect with a stronger contradiction: the panel is closed, the
++    URL says nothing is selected, and a request issued before the close answers
++    afterwards. Reopening then leaves a panel the URL does not describe."""
++    result = _panel_run(["click:alpha", "close", "settle:0"])
++
++    assert result["panel"] == ""
++    assert result["pushed"] == ["/tasks?project=influx"]
++
++
++def test_back_past_an_in_flight_selection_leaves_the_url_it_landed_on() -> None:
++    """The reviewer's interleaving, end to end: from B, Back to A starts A's
++    fetch, and a second Back to the unselected board arrives before it lands.
++    The late A response must not reopen A under a URL that has moved on."""
++    result = _panel_run(
++        [
++            "click:alpha",
++            "settle:0",
++            "click:beta",
++            "settle:1",
++            "back",  # -> ?selected=alpha, starts a fetch
++            "back",  # -> the unselected board, closes the panel
++            "settle:2",  # …and only now does alpha answer
++        ]
++    )
++
++    assert result["panel"] == ""
++    assert result["href"] == "http://lens.test/tasks?project=influx"
++    # Neither Back pushed: back/forward walk history, they do not extend it.
++    assert result["pushed"] == [
++        "/tasks?project=influx&selected=alpha",
++        "/tasks?project=influx&selected=beta",
++    ]
++
++
++def test_forward_onto_the_visible_selection_still_supersedes_an_open() -> None:
++    """Back to A and straight Forward to B, before A has answered. B is still
++    what is on SCREEN, so a handler comparing against the screen has nothing to
++    do and returns — leaving A's open running under B's URL, and A's response
++    free to paint itself there. The comparison is against the INTENT for
++    exactly this schedule."""
++    result = _panel_run(
++        [
++            "click:alpha",
++            "settle:0",
++            "click:beta",
++            "settle:1",
++            "back",  # -> ?selected=alpha, starts alpha's fetch
++            "forward",  # -> ?selected=beta again, before it answers
++            "settle:2",  # …and only now does alpha answer
++        ]
++    )
++
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=beta"
++    assert result["panel"] == "panel:beta"
++
++
++def test_a_reconcile_started_before_a_click_pushed_does_not_paint_it() -> None:
++    """The reconcile fetches the LIVE URL, and a click already in flight has
++    not pushed its own yet — so a reconcile started in that window carries the
++    previous selection's panel while the generation it captured is the new
++    click's. Generation alone therefore cannot spot it; the URL it fetched can."""
++    result = _panel_run(
++        [
++            "click:beta",
++            "settle:0",
++            "click:alpha",  # in flight, so the URL still says beta
++            "event",
++            "timers",  # the reconcile leaves, fetching ?selected=beta
++            "settle:1",  # alpha lands and pushes ?selected=alpha
++            "settle:2",  # …then the reconcile answers, with beta's panel
++        ]
++    )
++
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=alpha"
++    assert result["panel"] == "panel:alpha"
++    # The board fragment is applied either way: it does not depend on the
++    # selection, and dropping it would leave the board stale for no reason.
++    assert result["board"] == "board:fresh"
++
++
++def test_a_body_that_arrives_after_a_newer_panel_is_rendered_is_dropped() -> None:
++    """The second suspension point, on its own. A's response ARRIVES, then B is
++    clicked and fully rendered, and only then is A's body read. Between those
++    two awaits the panel and the URL have both moved on, so the check after
++    `response.text()` is what stops A's markup landing on top of B."""
++    result = _panel_run(
++        ["click:alpha", "headers:0", "click:beta", "settle:1", "body:0"]
++    )
++
++    assert result["panel"] == "panel:beta"
++    assert result["pushed"] == ["/tasks?project=influx&selected=beta"]
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=beta"
++
++
++def test_back_to_an_earlier_selection_shows_that_task_without_a_push() -> None:
++    """Back and forward walk the exploration: a previous NON-EMPTY selection is
++    re-fetched and re-shown, and no history entry is written for the move."""
++    opened = ["click:alpha", "settle:0", "click:beta", "settle:1"]
++    result = _panel_run(opened + ["back", "settle:2"])
++
++    assert result["panel"] == "panel:alpha"
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=alpha"
++    assert result["pushed"] == [
++        "/tasks?project=influx&selected=alpha",
++        "/tasks?project=influx&selected=beta",
++    ]
++
++
++def test_forward_returns_to_the_later_selection() -> None:
++    """…and the same in the other direction, which is what makes the URL — not
++    a click — the state."""
++    result = _panel_run(
++        [
++            "click:alpha",
++            "settle:0",
++            "click:beta",
++            "settle:1",
++            "back",
++            "settle:2",
++            "forward",
++            "settle:3",
++        ]
++    )
++
++    assert result["panel"] == "panel:beta"
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=beta"
++    assert len(result["pushed"]) == 2
++
++
++# --- Live reconciliation: an open panel's statuses stay live ----------------
++
++
++def test_a_task_event_refreshes_the_open_panel_alongside_the_board() -> None:
++    """The panel states BLOCKER and DEPENDENT statuses, so a stale one is a
++    wrong answer, not merely an old one. A task event reconciles the board, and
++    the panel is swapped from the same response — while the selection and the
++    URL stay exactly where they were."""
++    result = _panel_run(["click:alpha", "settle:0", "event", "timers", "settle:1"])
++
++    # The reconcile fetched the live URL, which names the open selection.
++    assert (
++        result["fetches"][1] == "http://lens.test/tasks?project=influx&selected=alpha"
++    )
++    assert result["panel"] == "panel:alpha:fresh"
++    assert result["board"] == "board:fresh"
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=alpha"
++    # No history entry: a refresh is not a navigation.
++    assert result["pushed"] == ["/tasks?project=influx&selected=alpha"]
++
++
++def test_a_reconcile_fetched_for_one_selection_never_paints_another() -> None:
++    """The reconcile carries a panel for whatever was selected when it LEFT. If
++    the operator has opened another task since, that panel is one selection
++    behind and must not be applied — the board fragment still is, because it
++    does not depend on the selection."""
++    result = _panel_run(
++        [
++            "click:alpha",
++            "settle:0",
++            "event",
++            "timers",  # the reconcile leaves, carrying alpha's panel
++            "click:beta",
++            "settle:2",  # beta's panel arrives first
++            "settle:1",  # …then the reconcile answers, with alpha
++        ]
++    )
++
++    assert result["panel"] == "panel:beta"
++    assert result["board"] == "board:fresh"
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=beta"
++
++
++# --- The fallback URL: every id addressable, page words included ------------
++
++
++def test_a_selection_with_no_row_reopens_through_the_hosts_own_url() -> None:
++    """A deep-linked task need not have a row — a filter can exclude it, or it
++    resolved outside the window — so the host carries the URL the server built
++    for the selection it rendered. Closing and going Back reopens it through
++    that, with the board's filters intact."""
++    result = _panel_run(
++        ["close", "back", "settle:0"],
++        href="http://lens.test/tasks?project=influx&selected=ghost",
++    )
++
++    assert result["fetches"] == ["/tasks/ghost?project=influx&fragment=panel"]
++    assert result["panel"] == "panel:ghost"
++
++
++def test_a_page_word_id_is_never_refetched_through_a_browser_built_path() -> None:
++    """The last resort, reached when the row a selection came from has left the
++    board on a reconcile. A task id is an arbitrary string and `graph` is a
++    PAGE under /tasks/, so a path assembled in the browser would fetch the
++    graph page and swap it into the panel host. The alias route addresses every
++    id, and its spelling comes from the server rather than from here."""
++    result = _panel_run(
++        ["click:graph", "settle:0", "close", "drop:graph", "back", "settle:1"]
++    )
++
++    # First through the row's server-built URL, then — with the row gone —
++    # through the alias, never `/tasks/graph`.
++    assert result["fetches"] == [
++        "/tasks/id?task_id=graph&project=influx&fragment=panel",
++        "/tasks/id?task_id=graph&fragment=panel",
++    ]
++    assert result["panel"] == "panel:graph"
++    assert not any(url.startswith("/tasks/graph") for url in result["fetches"])
++
++
++# --- One panel, two hosts: the selection parameter is the host's ------------
++
++# What the graph page (T2-A4) will hand this code: its own selection parameter
++# and its own URL state around it. The panel is ONE implementation for rows and
++# nodes, so every transition below runs against `focus` here and `selected`
++# above, from the same source.
++GRAPH_HREF = (
++    "http://lens.test/tasks/graph"
++    "?project=lithos-loom&overlays=hierarchy&isolated=1&focus=alpha"
++)
++
++
++def test_a_node_click_pushes_the_hosts_own_selection_parameter() -> None:
++    """On the graph page the parameter is `focus`, and nothing may write
++    `selected` there: §5.5 gives each host exactly one selection parameter, and
++    two on one URL is two selections."""
++    result = _panel_run(["click:beta", "settle:0"], GRAPH_HREF, selection_param="focus")
++
++    assert result["pushed"] == [
++        "/tasks/graph?project=lithos-loom&overlays=hierarchy&isolated=1&focus=beta"
++    ]
++    assert "selected=" not in result["href"]
++
++
++def test_closing_on_the_graph_page_clears_focus_and_keeps_the_graph_state() -> None:
++    """Close clears the host's selection and nothing else — here that means the
++    scope, the overlays and the isolated toggle all survive, exactly as the
++    dashboard's filters do."""
++    result = _panel_run(
++        ["click:beta", "settle:0", "close"], GRAPH_HREF, selection_param="focus"
++    )
++
++    assert result["pushed"][-1] == (
++        "/tasks/graph?project=lithos-loom&overlays=hierarchy&isolated=1"
++    )
++    assert result["panel"] == ""
++
++
++def test_back_on_the_graph_page_restores_the_focus_in_the_url() -> None:
++    """…and back/forward read the same parameter they wrote."""
++    result = _panel_run(
++        ["close", "back", "settle:0"], GRAPH_HREF, selection_param="focus"
++    )
++
++    assert result["fetches"] == ["/tasks/alpha?project=influx&fragment=panel"]
++    assert result["panel"] == "panel:alpha"
++    assert result["href"] == GRAPH_HREF
++
++
++# --- The interaction contract: a ROW opens the panel, not just its title ----
++
++
++def test_clicking_the_row_away_from_any_link_opens_the_panel() -> None:
++    """§5.5 says "clicking a row opens a panel". The title link is the obvious
++    target, but it is not the contract: a click on the row's own body — its
++    meta line, its whitespace — opens the same panel, and a handler that only
++    caught the title would leave most of the row inert."""
++    result = _panel_run(["click-body:alpha", "settle:0"])
++
++    assert result["fetches"] == ["/tasks/alpha?project=influx&fragment=panel"]
++    assert result["pushed"] == ["/tasks?project=influx&selected=alpha"]
++    assert result["panel"] == "panel:alpha"
++    assert result["prevented"] == ["row-body:alpha"]
++
++
++def test_clicking_a_gate_row_opens_its_panel_like_any_other_row() -> None:
++    """A gate is a row on the board, so §5.5's "clicking a row opens a panel"
++    covers it. Gate rows carry gate chrome instead of claim chrome and so do
++    NOT carry `data-task-row`; keying the handler off that attribute left the
++    whole Gates section navigating away on a title click and inert everywhere
++    else. The panel contract is `data-panel-url` + `data-task-id`, which every
++    rendered row carries."""
++    result = _panel_run(["click:gate", "settle:0"])
++
++    assert result["fetches"] == ["/tasks/gate?project=influx&fragment=panel"]
++    assert result["pushed"] == ["/tasks?project=influx&selected=gate"]
++    assert result["panel"] == "panel:gate"
++    assert result["prevented"] == ["row:gate"]
++
++
++def test_a_gate_rows_waiter_list_still_opens_natively() -> None:
++    """The waiter count is a <details> so it expands with no JS at all. Its
++    <summary> is the browser's own control, and a row handler that swallowed
++    the click would trade the disclosure for a panel open — the list could
++    then never be expanded again."""
++    result = _panel_run(["waiters"])
++
++    assert result["fetches"] == []
++    assert result["pushed"] == []
++    assert result["prevented"] == []
++
++
++def test_escape_closes_a_server_rendered_panel_with_no_click_before_it() -> None:
++    """A deep link renders the panel server-side, so the browser never opened
++    it — the selection comes off the URL at load. Escape has to close THAT
++    panel too, which is what the load-time seed is for: without it the first
++    Escape on a shared link does nothing."""
++    result = _panel_run(
++        ["escape"], "http://lens.test/tasks?project=influx&selected=ghost"
++    )
++
++    assert result["panel"] == ""
++    assert result["pushed"] == ["/tasks?project=influx"]
++
++
++# --- Close preserves the WHOLE list state, not just one filter -------------
++
++COMPOSITE_HREF = (
++    "http://lens.test/tasks"
++    "?status=open&project=influx&project=loom&tag=area%3Adata&tag=ops"
++    "&agent=worker-a&epic=epic-1&since=2026-08-01&selected=alpha"
++)
++
++
++def test_closing_removes_only_the_selection_from_a_full_board_url() -> None:
++    """ "Close preserves list state" is the whole query, not the one filter the
++    headline example happens to use: the epic scope the build criterion names,
++    a repeated multi-select, a tag whose value carries a colon, and the
++    resolved-since window. Asserted as a multimap, so a rebuild that dropped a
++    duplicate or reordered the pairs fails even if it kept every key."""
++    from urllib.parse import parse_qsl, urlsplit
++
++    result = _panel_run(["close"], COMPOSITE_HREF)
++
++    expected = [
++        (key, value)
++        for key, value in parse_qsl(urlsplit(COMPOSITE_HREF).query)
++        if key != "selected"
++    ]
++    closed = parse_qsl(urlsplit(result["pushed"][-1]).query)
++    assert closed == expected
++    assert "selected" not in dict(closed)
++
++
++# --- A panel that never arrives: three failures, two navigation modes -------
++
++# Back and Forward move the URL BEFORE the panel code runs, so a failed fetch
++# there is not the same event as a failed click: the address bar already names
++# the new task while the previous one is still on screen. Each failure class is
++# exercised on that path, because they enter the code at three different points.
++OPEN_A_THEN_B = ["click:alpha", "settle:0", "click:beta", "settle:1"]
++
++
++def test_a_failed_response_on_back_never_leaves_the_previous_task_on_screen() -> None:
++    """The reviewer's schedule: A, then B, then Back to A — and A's fragment
++    answers non-200. The URL says A. Leaving B's panel under it is the one
++    state the panel must never be in, so it is cleared: a missing answer beats
++    a wrong one, and the URL stays intact for a reload to retry."""
++    result = _panel_run(OPEN_A_THEN_B + ["back", "fail:2"])
++
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=alpha"
++    assert result["panel"] == ""
++    assert result["unhandled"] == []
++
++
++def test_a_rejected_fetch_on_back_is_handled_the_same_way() -> None:
++    """A transport failure never reaches the `response.ok` test at all — it
++    rejects the fetch. Same outcome required, and nothing left dangling: with
++    no caller awaiting `openPanel`, an uncaught rejection is an unhandled one."""
++    result = _panel_run(OPEN_A_THEN_B + ["back", "reject:2"])
++
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=alpha"
++    assert result["panel"] == ""
++    assert result["unhandled"] == []
++
++
++def test_a_body_that_fails_to_read_on_back_is_handled_the_same_way() -> None:
++    """The third class, and the one that gets furthest in: the response
++    arrives, `ok` is true, and the connection dies while the body is read."""
++    result = _panel_run(OPEN_A_THEN_B + ["back", "headers:2", "reject-body:2"])
++
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=alpha"
++    assert result["panel"] == ""
++    assert result["unhandled"] == []
++
++
++def test_a_failed_click_leaves_the_panel_and_the_url_exactly_as_they_were() -> None:
++    """The other navigation mode. A click pushes only on success, so nothing
++    has moved: the panel on screen still describes the URL, and both stay."""
++    result = _panel_run(["click:alpha", "settle:0", "click:beta", "fail:1"])
++
++    assert result["panel"] == "panel:alpha"
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=alpha"
++    assert result["pushed"] == ["/tasks?project=influx&selected=alpha"]
++    assert result["unhandled"] == []
++
++
++def test_a_failed_click_does_not_leave_its_task_claimed_as_the_intent() -> None:
++    """What the failed click must NOT leave behind. The intent is compared
++    against on every history move, so a click that failed while claiming B
++    makes the next Forward ONTO B match it, return early, and leave A's panel
++    sitting under B's URL. The intent is walked back to what is on screen, so
++    that Forward re-fetches instead."""
++    result = _panel_run(
++        OPEN_A_THEN_B
++        + [
++            "back",  # -> ?selected=alpha
++            "settle:2",  # …shown; the forward entry (beta) is still in history
++            "click:beta",  # a click that fails, pushing nothing
++            "fail:3",
++            "forward",  # -> ?selected=beta, which the stale intent would match
++            "settle:4",
++        ]
++    )
++
++    assert result["href"] == "http://lens.test/tasks?project=influx&selected=beta"
++    assert result["panel"] == "panel:beta"
++    assert result["unhandled"] == []

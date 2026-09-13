@@ -1,0 +1,146 @@
+[case]
+id = "lens83-gate-row-panel-contract"
+description = """
+lens PR #83 escape (T2-A6, story-develop run 6b7f0fa7): the standard panel
+(correctness + test-quality, 5 rounds, $46.04, ZERO findings at any severity)
+approved and delivered head 68af5b4 — and the external reviewer's first pass
+on the delivered PR found one P1 in the Conversation tab
+(https://github.com/agent-lore/lithos-lens/pull/83#issuecomment-5651750662):
+gate rows bypass the side panel. The story wires "a row click" to the panel
+by having tasks/row.html emit `data-task-row` + a SERVER-built
+`data-panel-url`, and the new tasks.js click handler resolves the target via
+`target.closest("[data-task-row]")` / `rowFor()` — but the dashboard has a
+SECOND renderer of "row": tasks/gate_row.html (`class="task-row gate-row"`,
+"One open gate in the Gates section (§5.2.3)"), which the diff never touches
+and which carries only `data-gate-row` and no panel URL. So clicking a gate
+title still full-page-navigates, clicking the rest of a gate row does
+nothing, and `?selected=<gate-id>` never opens from the board — while the
+deep link to a gate panel is tested and works.
+
+Escape-review provenance (README §"Escape review"): the FIRST case minted by
+the standing process after the seed corpus (the conveyor worked: the
+`[ExternalReview]` finding, the thread reply and the fix commit were all
+durable). Bucket 1 — the panel reviewed this exact diff, the defect is in
+its RELATION to an untouched template in the same tree, and catching it
+needs only the tree plus reasoning: the AC says "A row click fetches …";
+REQUIREMENTS §5.5 (in the reviewed checkout) opens with "Clicking a row …
+opens a right-side panel" and the story's own title says "one implementation
+for rows and nodes"; the templates dir lists every renderer of a board row,
+and gate_row.html names itself one. BLIND-SPOT CLASS: sibling-surface
+completeness — a contract added to one renderer of a shared concept must
+reach every renderer of it (the row.html / gate_row.html pair here; the
+lens43-degraded-contract class is contract-grounding against a requirements
+doc, this one is contract-grounding against the tree's OTHER implementation
+of the same thing). Unlike lens43-composed-projects, nothing is composed:
+gate_row.html was on the base and the story simply never looked.
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout.
+FULL-FEATURE diff as the panel approved it (base = lens main 22fe6a1, the
+#81 squash merge = the story's own merge-base; defect patch = delivered r5
+head 68af5b4). The panel that escaped it was correctness + test-quality;
+the case runs correctness alone, like the other lens cases — the class is
+a correctness one.
+
+PAIRING: defect + its AUTHENTIC FIX (the lens22 shape). known-good.patch is
+`git diff 22fe6a1..0ab1eb7` — the first commit of loom's own remediation
+round 1 (`converge --from-github`, run a7aae006), a direct descendant of
+the defect head that adds exactly the fix: gate_row.html gains the
+server-built `data-panel-url`; tasks.js gets one `PANEL_ROW =
+"[data-panel-url][data-task-id]"` selector for both halves of the
+interaction (deliberately not `[data-task-row]`, the SSE handlers' hook)
+plus a `<summary>` bail-out so the gate row's waiter disclosure keeps
+working; a board-wide contract test, a JS click test and a Playwright flow
+on the human-gate fixture; the §5.6 spec paragraph; regenerated metrics.
+NOT the re-reviewed head 379b219: the remediation's round 2 also fixed
+three findings loom's own converge panel raised on 0ab1eb7 (below), and
+pairing against it would make those three a difference between the heads
+— the 289 shape — for no gain.
+
+RH-5 DECLARATION: one declared defect, the externally-caught escape. The
+head carries THREE MORE, present-but-undeclared and deliberately so: loom's
+converge panel found them on the fixed tree (round 1 of run a7aae006) and
+379b219 closed them — (1) `selectionUrl()` rebuilds the URL as `pathname +
+search`, so a board section anchor (`#task-group-<section>`, which
+`task_card_url` generates) is dropped on the first panel transition; (2)
+`openPanel()` pushes unconditionally, so reopening the already-selected
+task stacks a duplicate history entry and Back needs two presses; (3)
+panel.html only loops `detail.projects`, so a projectless task's header
+renders no project field at all. All three are in the diff and catchable
+from the tree, but they are present at BOTH heads (the authentic fix does
+not touch them — pinned by the preflight test), so they cannot be
+`[[expected]]` without turning every known-good catch into a false `fp`.
+They are SHARED findings: they land in `noise`, never in `fp` (README
+§"Noise"). A reviewer that files them is right, and does not score. (1)
+does bear on the AC's "close … preserves list state" — if a future re-seed
+pairs against 379b219 instead, declare it then.
+
+PANEL-ONLY BY CONSTRUCTION: no test at the defect head clicks a gate row
+or asserts the panel contract on one (the only gate-row reference in the
+tests is the smoke fixture's selector), and the external reviewer proved
+the gap with a temporary assertion it then removed. Both heads pass lens's
+own `make check`: 68af5b4 = the reviewer's validation on that head (ruff +
+pyright clean, 1,278 passed / 16 skipped); 0ab1eb7 = verified 2026-09-13
+while authoring (1,281 passed / 16 skipped, ruff + pyright clean). The first
+`eval review` run confirms gate-green on both heads before its numbers are
+read.
+
+MDE, STATED BEFORE ANY PAID ARM (README §"How many samples"): the prior is
+one live run at 0 findings over 5 rounds — but rounds are not samples (the
+same coder summary anchored every round; dogfood #239's shape), so the
+single-arm K=5 reading is a characterisation, not the A/B of the power
+table. Decision rule: ≥4/5 → the live miss was single-pass variance +
+coder-summary anchoring, not a blind spot — the lever is the per-criterion
+AC→evidence checklist (#208), not a lens; 0/5 → a genuine class; it is
+CLOSED (the renderers of a board row are enumerable from the templates
+dir), so an enumerate-the-rest lens is admissible under the RH-1 rule —
+control in-session first; 1–3/5 → not decisive at K=5: pay K≈20 or leave
+it as a regression floor only.
+"""
+ac_provenance = "replay"   # the real T2-A6 story body the panel reviewed against
+tier = "frontier"          # the first escape-review mint; unmeasured until its first K=5 run
+repo = "../lithos-lens"
+base = "22fe6a1757ce75c9ad7df856ca069851c9c2f837"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+# `file` is the FIX site (the template that lacks the contract). A reviewer
+# may anchor the same finding at the harm site instead — tasks.js, where the
+# click handler and `panelUrlFor()` resolve rows by `[data-task-row]` only —
+# the structured matcher misses that phrasing and the judge rescues it.
+file = "src/lithos_lens/templates/tasks/gate_row.html"
+keywords = [
+    "gate_row",
+    "gate row",
+    "gate rows",
+    "Gates section",
+    "data-panel-url",
+    "data-task-row",
+    "data-gate-row",
+]
+min_severity = "major"
+mechanism = """
+Gate rows are excluded from the side-panel interaction the story adds for
+"a row click". The diff makes tasks/row.html emit `data-task-row` plus a
+server-built `data-panel-url`, and the new tasks.js click handler only
+recognises an ancestor carrying `data-task-row` (`panelUrlFor()` likewise
+resolves through `rowFor()`), but the dashboard's Gates section renders its
+rows from tasks/gate_row.html — untouched by the diff — which carries only
+`data-gate-row` and no panel URL. Clicking a gate title therefore still
+full-page-navigates, clicking the rest of a gate row does nothing, and
+`?selected=<gate-id>` is never pushed from the board, contradicting the AC's
+"A row click fetches … and pushes `selected`" and REQUIREMENTS §5.5
+("Clicking a row … opens a right-side panel"). A finding that names gate
+rows (the Gates section / gate_row.html) as missing the panel contract or
+being unreachable by the click handler is a match, whichever file it is
+anchored at. NOT a match: the dropped section anchor (`selectionUrl()`
+returning pathname + search); a duplicate pushState entry when reopening the
+selected task; the missing "(no project)" header chip; the skeleton row's
+own panel URL; race/ordering findings in the popstate or fetch paths; any
+finding about the detail page or the fragment route.
+"""

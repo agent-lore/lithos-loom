@@ -929,3 +929,115 @@ def test_lens43_composed_fixture_pins_the_missing_projects_term(
             assert "projects" not in params
     finally:
         cleanup()
+
+
+# ---------------------------------------------------------------------------
+# lens83-gate-row-panel-contract (escape review, lens PR #83): the panel
+# contract reached one renderer of a board row and not the other.
+
+_LENS83_TASKS_JS = "src/lithos_lens/static/tasks.js"
+_LENS83_GATE_ROW = "src/lithos_lens/templates/tasks/gate_row.html"
+_LENS83_ROW = "src/lithos_lens/templates/tasks/row.html"
+_LENS83_PANEL = "src/lithos_lens/templates/tasks/panel.html"
+_LENS83_CONTRACT = 'data-panel-url="{{ panel_fragment_url(request, gate.task.id) }}"'
+_LENS83_SELECTOR = 'const PANEL_ROW = "[data-panel-url][data-task-id]";'
+_LENS83_FIX_FILES = [
+    "docs/SPECIFICATION.md",
+    "docs/generated/metrics.json",
+    "docs/generated/metrics.md",
+    "e2e/tests/smoke.spec.ts",
+    _LENS83_TASKS_JS,
+    _LENS83_GATE_ROW,
+    "tests/test_task_panel.py",
+    "tests/test_tasks_js.py",
+]
+# The delivered r5 head and the first remediation commit, when the checkout
+# has them: the rebuilt trees must be theirs exactly.
+_LENS83_DELIVERED = "68af5b47eb4c2e57b85a294788efea66e3ac3630"
+_LENS83_FIX = "0ab1eb758f1c1f2a99425db257faf096230c86dc"
+
+
+def test_lens83_fixture_pins_the_gate_row_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Escape review (README §"Escape review", bucket 1): the story wired "a
+    # row click" to the panel through tasks/row.html + a `[data-task-row]`
+    # click handler and never touched tasks/gate_row.html, the board's other
+    # row renderer — so gate rows carry no panel URL and the handler cannot
+    # reach them. The known-good is loom's own remediation commit 0ab1eb7
+    # (converge --from-github round 1), a descendant of the defect head
+    # carrying exactly the fix. Pinned as a pair: the contract is NEW in the
+    # diff (neither template has it on the base); the defect patch never
+    # touches gate_row.html; the fix puts the server-built URL on the gate
+    # row and switches the handler to the shared selector; the heads differ
+    # in nothing but the fix commit's files; both rebuilt trees are the real
+    # commits'; the three declared-as-residue defects are present at BOTH
+    # heads (shared → noise, never fp); and no test at the defect head clicks
+    # a gate row (panel-only by construction).
+    case = load_case(_SHIPPED_CASES_DIR / "lens83-gate-row-panel-contract")
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+
+    # The panel contract is the story's: on the base neither row template
+    # carries it, and the gate row already exists as a second renderer.
+    for path in (_LENS83_ROW, _LENS83_GATE_ROW):
+        assert "data-panel-url" not in _blob_at(repo, case.base, path)
+    assert "data-gate-row" in _blob_at(repo, case.base, _LENS83_GATE_ROW)
+    # ...and the defect patch adds it to row.html while never touching
+    # gate_row.html — the defect is the relation to an untouched file.
+    assert case.case_dir is not None
+    defect_patch = (case.case_dir / "feature-with-defect.patch").read_text()
+    assert f"diff --git a/{_LENS83_GATE_ROW}" not in defect_patch
+    assert f"diff --git a/{_LENS83_ROW}" in defect_patch
+
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    try:
+        good_head = resolved.known_good_head or ""
+        buggy_js = _blob_at(repo, resolved.head, _LENS83_TASKS_JS)
+        good_js = _blob_at(repo, good_head, _LENS83_TASKS_JS)
+        buggy_gate = _blob_at(repo, resolved.head, _LENS83_GATE_ROW)
+        good_gate = _blob_at(repo, good_head, _LENS83_GATE_ROW)
+        # The defect head: row.html has the contract, gate_row.html does not,
+        # and the handler resolves rows by the SSE hook alone.
+        assert "data-panel-url" in _blob_at(repo, resolved.head, _LENS83_ROW)
+        assert "data-panel-url" not in buggy_gate
+        assert 'target.closest("[data-task-row]")' in buggy_js
+        assert _LENS83_SELECTOR not in buggy_js
+        # The fix: the server-built URL on the gate row, one shared selector
+        # for both halves of the interaction, the <summary> bail-out.
+        assert _LENS83_CONTRACT in good_gate
+        assert _LENS83_SELECTOR in good_js
+        assert "target.closest(PANEL_ROW)" in good_js
+        assert 'target.closest("summary")' in good_js
+
+        # Minimal pair: the fix commit's files and nothing else.
+        changed = _git_out(repo, "diff", "--name-only", resolved.head, good_head)
+        assert sorted(changed.split()) == sorted(_LENS83_FIX_FILES)
+        # Tree pins against the real commits, where the checkout has them.
+        for real, rebuilt in (
+            (_LENS83_DELIVERED, resolved.head),
+            (_LENS83_FIX, good_head),
+        ):
+            if _commit_exists(repo, real):
+                assert _git_out(repo, "diff", "--name-only", real, rebuilt) == ""
+
+        # Residue declared in the description — present at BOTH heads, so a
+        # finding about it is shared noise and never a defect-scoped fp.
+        for sha in (resolved.head, good_head):
+            js = _blob_at(repo, sha, _LENS83_TASKS_JS)
+            assert "return url.pathname + url.search;" in js  # anchor dropped
+            assert "selectionIn(window.location.href) !== taskId" not in js  # dup push
+            assert "(no project)" not in _blob_at(repo, sha, _LENS83_PANEL)
+
+        # Panel-only: no test at the defect head clicks a gate row; the fix
+        # adds that coverage (it is how the reviewer proved the gap).
+        needle = "clicking_a_gate_row"
+        assert _tests_mentioning(repo, resolved.head, needle) == []
+        assert _tests_mentioning(repo, good_head, needle) != []
+    finally:
+        cleanup()
