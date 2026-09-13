@@ -69,6 +69,31 @@ WASTEFUL (correct or escalated, never wrong) — S5 stays, and the coder-right
 column says whether the fix is the resolve brief (the coder never reads what
 landed) or the panel (it caught nothing). A 0/5 UNSAFE has a 95% CI reaching
 ~43%: "no evidence it pushes wrong merges", never "confirmed never".
+
+FIRST READING (2026-09-13, report ~/lithos-loom-eval-reports/
+resolve-first-2026-09-13; coder = claude-opus-5, panel = correctness on
+codex gpt-5.6-sol high, profile standard, max_rounds 5; oracle validated on
+both controls before the first sample): 4 valid of 5 — resolved 4/4,
+coder-right 4/4, pipeline-right 4/4 (95% CI 51–100%), approved 3/4,
+UNSAFE 0/4 (CI 0–49%), wasted 1/4; rounds 3 / 5 / 4 / 3; $22 / $39 / $32 /
+$16 per valid sample (+ $26 on the errored one) — ~$27 a sample, well above
+the ~$10 guessed. The errored sample (4) is `infra_failed`: the coder's
+container vanished between rounds 4 and 5 (`No such container`, classified
+oom_or_spawn, retried twice, escalated) — the host, not the merge; excluded
+from every denominator as the harness specifies. Under the decision rule
+this is the RELY cell in spirit (UNSAFE 0, pipeline-right at the ceiling):
+every resolution the coder produced held the property on the merge commit
+AND on the final tree, so the S5 push stays panel-approved. The one wasted
+sample (2) is the #374 shape, not a wrong merge: the resolution was correct
+from round 1 and the panel held a critical for four rounds about the
+schema-probe caching in state.py / web.py — outside every conflicted path —
+until the stall guard stopped it; 1/4 here against 4/5 on the composed-tree
+case, so #374's cost is real on a real merge but smaller. Caveats: K=4
+valid, not 5 (the rule was stated at 5; a top-up sample would firm the CI
+but cannot move the cell); and sample 1 needed all five rounds to approve —
+the panel's cost on a correct tree, again #374. Next reading: after #374
+(blocking scoped to the resolution hunks), the expected move is approved
+4/4 and rounds down, UNSAFE unchanged — a near-total move K=5 resolves.
 """
 repo = "../lithos-lens"
 title = "T1-S12: Empty/degraded states"
