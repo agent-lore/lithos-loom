@@ -84,10 +84,14 @@ class PanelSource(Protocol):
     cases both qualify)."""
 
     @property
-    def personas(self) -> tuple[str, ...]: ...
+    def personas(self) -> tuple[str, ...]:
+        """The canonical persona names the case fields by default."""
+        raise NotImplementedError
 
     @property
-    def profile(self) -> str: ...
+    def profile(self) -> str:
+        """The profile whose check-set (and, unoverridden, panel) applies."""
+        raise NotImplementedError
 
 
 def resolve_panel(

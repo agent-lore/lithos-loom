@@ -73,9 +73,12 @@ has no valid sample, or the fixture cannot be measured at all (below).
 **Errored** samples — an `infra_failed` run (an auth / transport / spawn death
 the reaction table could not retry through), a loop that ended
 `interrupted` (a pause budget ran out), a reviewer whose final handoff was
-invalid (no verdict given), or the harness's own plumbing raising — are
-excluded from every denominator, like a crashed reviewer in `eval review`;
-`+Nerr` marks the row. **Gate-green** — the last round's `test` check
+invalid (no verdict given), a **probe that could not run** (a launch
+failure, a timeout — an execution error is never "the property fails": one
+such reading must not be the UNSAFE that changes S5's posture), or the
+harness's own plumbing raising — are excluded from every denominator, like
+a crashed reviewer in `eval review`; `+Nerr` marks the row. On a control,
+a probe that cannot run refuses the case instead. **Gate-green** — the last round's `test` check
 verdict — is recorded per sample (`sample-<i>.json`) and counted in
 `summary.json` but not rated: a red gate on a wrong merge is the path
 working.
@@ -170,7 +173,11 @@ commits, as the lens43 case does):
   it fails the oracle too).
 - **Probes run on the host under the project's toolchain** (`uv run` for a
   Python project builds the tree's own env from cache — seconds). They are
-  repo-controlled data run as an argv, never through a shell.
+  repo-controlled data run as an argv, never through a shell. Exit 0 =
+  holds, any other exit = the property fails; a probe that cannot be
+  launched or times out (`--probe-timeout`, its whole process group
+  killed) is an execution error, recorded as such — so a probe must FAIL
+  by exiting non-zero, never by hanging.
 - **State the decision rule first** (RH-5): what an UNSAFE reading changes
   about S5, what the right-rates say about *which half* of the path to fix
   (the resolve brief vs the panel), and what is not decisive at K=5.

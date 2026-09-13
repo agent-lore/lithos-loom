@@ -39,9 +39,9 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Cli | 13 | 6079 | 5102 | 2 | 8 | 0.80 | 54 (`lithos_loom.cli.converge.converge_command`) | 20 |
 | Config | 1 | 1239 | 1055 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
-| Entrypoint | 2 | 626 | 496 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
+| Entrypoint | 2 | 634 | 502 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
 | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
-| Evals | 23 | 6386 | 5351 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 21 |
+| Evals | 23 | 6414 | 5376 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 22 |
 | GitHub | 4 | 1723 | 1336 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 1 |
 | LithosClient | 2 | 2268 | 1904 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 270 | 224 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **170**, lines: **58544**, SLOC: **47390**
+- Modules: **170**, lines: **58580**, SLOC: **47421**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -69,7 +69,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1508**, cyclomatic > 10: **133**
+- Functions: **1508**, cyclomatic > 10: **134**
 
 Top 10 most complex functions:
 
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.58** (92242 test lines / 58544 source lines)
+- Test-to-source line ratio: **1.58** (92342 test lines / 58580 source lines)

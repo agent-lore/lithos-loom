@@ -50,12 +50,12 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - class `OracleError` — The case's probes do not discriminate its own controls.
 - class `FixtureError` — The case's merge is not one the S5 path can be measured on.
 - class `Trees` — The three materialised commits a case needs: the PR head to resolve, and the two oracle controls.
-- class `ProbeResult`
+- class `ProbeResult` — One probe's verdict on one tree. ``error`` set = the probe could not run (launch failure, timeout): an execution error, not a verdict — ``passed`` is False then, but no scorer may read it as "wrong".
 - class `ResolveOutcome` — What one S5 run produced — the harness's view of a :class:`~..converge.ConvergeResult`, plus the trees to probe.
 - def `expected_fingerprint` — A stable hash of what the SCORER consumes: the case id and its probes.
 - def `materialise_trees` — ``(trees, cleanup)`` — each tree is its sha, or ``anchor + patch`` as an ephemeral commit (the head on ``merge_base``, the controls on ``base``); the build worktrees keep the commits reachable until ``cleanup``. Called once per case so K samples share the trees.
 - class `SampleScore`
-- def `score_sample` — Score one S5 run: the panel's verdict beside the oracle's, on the round-1 merge commit and on the final tree. No probe runs on a run that produced no merge commit, nor on an errored one (an infra death, a pause budget that ran out, a reviewer that gave no valid verdict). An approval only counts when S5 could have pushed the tree.
+- def `score_sample` — Score one S5 run: the panel's verdict beside the oracle's, on the round-1 merge commit and on the final tree. No probe runs on a run that produced no merge commit, nor on an errored one (an infra death, a pause budget that ran out, a reviewer that gave no valid verdict). A probe that could not RUN (a launch failure, a timeout) is an execution error, never a verdict on the tree: the sample is errored, not wrong — one such reading must never be the UNSAFE that changes S5's posture. An approval only counts for a resolved run S5 could have pushed.
 - class `ResolveCaseResult` — Aggregated metrics for one case over K runs.
 - def `aggregate_resolve`
 - def `run_resolve_case` — Materialise the trees once, validate the oracle, run S5 *k* times, score each run against the oracle, aggregate.

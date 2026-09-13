@@ -121,6 +121,10 @@ class Trees:
 
 @dataclass(frozen=True)
 class ProbeResult:
+    """One probe's verdict on one tree. ``error`` set = the probe could not
+    run (launch failure, timeout): an execution error, not a verdict —
+    ``passed`` is False then, but no scorer may read it as "wrong"."""
+
     name: str
     passed: bool
     exit_code: int | None
@@ -315,32 +319,42 @@ def score_sample(
     """Score one S5 run: the panel's verdict beside the oracle's, on the
     round-1 merge commit and on the final tree. No probe runs on a run that
     produced no merge commit, nor on an errored one (an infra death, a pause
-    budget that ran out, a reviewer that gave no valid verdict). An approval
-    only counts when S5 could have pushed the tree."""
+    budget that ran out, a reviewer that gave no valid verdict). A probe that
+    could not RUN (a launch failure, a timeout) is an execution error, never
+    a verdict on the tree: the sample is errored, not wrong — one such
+    reading must never be the UNSAFE that changes S5's posture. An approval
+    only counts for a resolved run S5 could have pushed."""
     errored = (
         outcome.status in _ERRORED_STATUSES
         or outcome.develop_status == "interrupted"
         or outcome.panel_invalid
     )
-    resolved = bool(outcome.merge_sha) and not errored
+    has_merge = bool(outcome.merge_sha)
     first: tuple[ProbeResult, ...] = ()
     final: tuple[ProbeResult, ...] = ()
-    if resolved:
+    message = outcome.message
+    if has_merge and not errored:
         first = _probe_tree(case, outcome.merge_sha, probe_runner)
         final = (
             first
             if outcome.final_sha == outcome.merge_sha
             else _probe_tree(case, outcome.final_sha, probe_runner)
         )
+        broken = [r for r in (*first, *final) if r.error]
+        if broken:
+            errored = True
+            detail = "; ".join(f"{r.name}: {r.error}" for r in broken)
+            message += f" (probe execution failed — {detail})"
+    resolved = has_merge and not errored
     return SampleScore(
         status=outcome.status,
-        message=outcome.message,
+        message=message,
         errored=errored,
         resolved=resolved,
         gate_green=resolved and outcome.gate_green,
-        approved=outcome.status == "converged" and outcome.pushable,
-        correct_first=_held(first),
-        correct_final=_held(final),
+        approved=resolved and outcome.status == "converged" and outcome.pushable,
+        correct_first=resolved and _held(first),
+        correct_final=resolved and _held(final),
         rounds=outcome.rounds,
         cost_usd=outcome.cost_usd,
         conflict_paths=tuple(outcome.conflict_paths),
@@ -450,6 +464,16 @@ def _validate_oracle(
     case: ResolveCase, trees: Trees, probe_runner: ProbeRunner
 ) -> None:
     good = _probe_tree(case, trees.known_good, probe_runner)
+    bad = _probe_tree(case, trees.known_bad, probe_runner)
+    # an execution error on a control is not a verdict on the oracle: the
+    # case cannot be validated, so it is refused — named as what it is
+    for label, results in (("known-good", good), ("known-bad", bad)):
+        broken = [r for r in results if r.error]
+        if broken:
+            detail = "; ".join(f"{r.name}: {r.error}" for r in broken)
+            raise OracleError(
+                f"case {case.id}: probe(s) could not run on the {label} tree — {detail}"
+            )
     failed = [r.name for r in good if not r.passed]
     if failed:
         raise OracleError(
@@ -457,7 +481,6 @@ def _validate_oracle(
             f"{trees.known_good[:12]} — the oracle does not hold on the "
             "control it must hold on"
         )
-    bad = _probe_tree(case, trees.known_bad, probe_runner)
     if _held(bad):
         raise OracleError(
             f"case {case.id}: every probe passes on the known-bad tree "
@@ -565,8 +588,9 @@ def run_probe(
     The command is the case's (repo-controlled data, run as an argv — no
     shell), with ``{case_dir}`` / ``{worktree}`` rendered shell-quoted. A
     timeout (the probe's whole process group is killed) or an unlaunchable
-    command is a failed probe with ``error`` set, never an exception — the
-    sample records it and scores as not holding.
+    command is an EXECUTION error — ``error`` set, ``exit_code`` None, never
+    an exception — which the scorer turns into an errored sample (and the
+    oracle validation into a refusal), never into "the property fails".
     """
     assert case.case_dir is not None
     repo = Path(case.repo).resolve()

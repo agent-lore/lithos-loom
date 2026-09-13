@@ -168,18 +168,37 @@ def test_an_infra_death_is_errored_and_runs_no_probe(status: str) -> None:
     assert not (s.resolved or s.approved or s.correct_final)
 
 
-def test_a_probe_that_errors_counts_as_failed_and_is_recorded() -> None:
+def test_a_probe_that_could_not_run_is_an_errored_sample_not_an_unsafe_one() -> None:
+    # PR #383 review (High): a launch failure / timeout is an execution error,
+    # never "the property fails" — the one reading that must not become the
+    # UNSAFE that changes S5's posture
     def runner(case: ResolveCase, sha: str, probe: Probe) -> ProbeResult:
-        return ProbeResult(
-            name=probe.name, passed=False, exit_code=None, output="", error="boom"
-        )
+        if probe.name == "p2" and sha == _FINAL:
+            return ProbeResult(
+                name=probe.name, passed=False, exit_code=None, output="", error="boom"
+            )
+        return ProbeResult(name=probe.name, passed=True, exit_code=0, output="")
 
     s = score_sample(_case(), _outcome(), runner)
+    assert s.errored
+    assert not (s.approved or s.resolved or s.unsafe or s.wasted)
     assert not s.correct_first and not s.correct_final
-    assert s.unsafe  # approved, and the oracle did not hold
+    assert "probe execution failed" in s.message and "p2: boom" in s.message
     payload = s.payload()
-    assert payload["probe_results_final"]["p1"]["error"] == "boom"
-    assert payload["probe_results_final"]["p1"]["exit_code"] is None
+    assert payload["probe_results_final"]["p2"]["error"] == "boom"
+    assert payload["probe_results_final"]["p2"]["exit_code"] is None
+    assert payload["errored"] is True and payload["unsafe"] is False
+
+
+def test_a_converged_run_with_no_merge_commit_is_neither_approved_nor_unsafe() -> None:
+    # PR #383 review (Medium): approval is contingent on a resolution — a
+    # converged status with no detected merge scores nothing
+    probes = _Probes(_all_pass(_HEAD))
+    s = score_sample(
+        _case(), _outcome("converged", merge_sha="", final_sha=_HEAD), probes
+    )
+    assert not s.resolved and not s.approved and not s.unsafe
+    assert probes.calls == []
 
 
 def test_payload_is_json_shaped() -> None:
@@ -321,6 +340,35 @@ def test_the_oracle_is_validated_on_both_controls_before_any_sample() -> None:
         )
     assert run.calls == []
     assert cleanup == ["trees"]
+
+
+@pytest.mark.parametrize("broken_tree", [_GOOD, _BAD])
+def test_a_probe_that_cannot_run_on_a_control_refuses_the_case(
+    broken_tree: str,
+) -> None:
+    # an execution error on either control is not a discrimination — on the
+    # known-bad it would otherwise read as "at least one probe fails"
+    cleanup: list[str] = []
+    run = _Run([])
+
+    def runner(case: ResolveCase, sha: str, probe: Probe) -> ProbeResult:
+        if sha == broken_tree and probe.name == "p1":
+            return ProbeResult(
+                name=probe.name, passed=False, exit_code=None, output="", error="no uv"
+            )
+        return ProbeResult(name=probe.name, passed=sha == _GOOD, exit_code=0, output="")
+
+    with pytest.raises(OracleError, match="could not run") as info:
+        run_resolve_case(
+            _case(),
+            k=1,
+            bar=0.8,
+            resolve_fn=run,
+            probe_runner=runner,
+            materialise=lambda c: _trees(cleanup),
+        )
+    assert "p1: no uv" in str(info.value)
+    assert run.calls == [] and cleanup == ["trees"]
 
 
 def test_a_known_bad_that_passes_every_probe_is_refused() -> None:
@@ -705,3 +753,55 @@ def test_live_resolve_refuses_a_rewritten_history_as_a_resolution(
     finally:
         outcome.cleanup()
     assert _branches(repo) == {"main", "story"}
+
+
+# --- run_probe: real subprocesses, real failure shapes ------------------------
+
+
+def _probe_case(repo: Path, sha: str) -> ResolveCase:
+    return replace(
+        _case(),
+        repo=str(repo),
+        head=sha,
+        known_good=sha,
+        known_bad=sha,
+        case_dir=repo.parent,
+    )
+
+
+def test_run_probe_reports_a_timeout_as_an_execution_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from lithos_loom.evals.resolve.harness import run_probe
+
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "eval")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "eval@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "eval")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "eval@localhost")
+    repo, _mb, head, _base = _scratch_repo(tmp_path)
+    case = _probe_case(repo, head)
+    r = run_probe(case, head, Probe("slow", "sleep 30"), timeout=1)
+    assert not r.passed and r.exit_code is None
+    assert "timed out after 1s" in r.error
+    # the probe's worktree is gone again
+    assert _git(repo, "worktree", "list").count("\n") == 0
+
+
+def test_run_probe_reports_an_unlaunchable_command_as_an_execution_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from lithos_loom.evals.resolve.harness import run_probe
+
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "eval")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "eval@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "eval")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "eval@localhost")
+    repo, _mb, head, _base = _scratch_repo(tmp_path)
+    case = _probe_case(repo, head)
+    r = run_probe(case, head, Probe("missing", "/nonexistent/probe-binary --x"))
+    assert not r.passed and r.exit_code is None and r.error
+    # ...while a command that runs and FAILS is a verdict, not an error
+    verdict = run_probe(case, head, Probe("false", "false"))
+    assert not verdict.passed and verdict.exit_code == 1 and verdict.error == ""
+    holds = run_probe(case, head, Probe("true", "true"))
+    assert holds.passed and holds.exit_code == 0

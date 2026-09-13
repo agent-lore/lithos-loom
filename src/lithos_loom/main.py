@@ -72,6 +72,14 @@ from lithos_loom.evals.review import cli_rescore as _eval_rescore  # noqa: E402,
 from lithos_loom.evals.review.app import eval_app  # noqa: E402
 from lithos_loom.evals.triage import cli as _eval_triage_cli  # noqa: E402,F401
 
+# The command modules register on import; naming them here keeps the
+# registration greppable and stops linters reading the imports as dead.
+_EVAL_COMMAND_MODULES = (
+    _eval_review_cli,
+    _eval_rescore,
+    _eval_triage_cli,
+    _eval_resolve_cli,
+)
 app.add_typer(eval_app, name="eval")
 
 
