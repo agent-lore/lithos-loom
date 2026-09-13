@@ -194,7 +194,7 @@ def review(
             profile=eff_profile,
             default_models=dict(default_models),
         )
-        note = f" [profile={eff_profile}; panel={_panel_phrase(panel)}]"
+        note = f" [profile={eff_profile}; panel={panel_phrase(panel)}]"
         artifacts = _artifact_info(loaded)
         if artifacts is not None:
             # RH-3: the measured surface is the artifact-review pass, not the diff
@@ -333,8 +333,9 @@ def _artifact_info(case: Case) -> dict | None:
     return info
 
 
-def _panel_phrase(panel: tuple[ReviewerSpec, ...]) -> str:
-    """A compact one-line panel rendering for the per-case stderr note."""
+def panel_phrase(panel: tuple[ReviewerSpec, ...]) -> str:
+    """A compact one-line panel rendering for the per-case stderr note
+    (shared with ``eval resolve``)."""
 
     def one(s: ReviewerSpec) -> str:
         extras = [s.tool] + [v for v in (s.model, s.effort) if v]

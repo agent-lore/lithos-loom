@@ -66,6 +66,7 @@ app.add_typer(develop_app, name="develop")
 # On-demand eval harnesses (#183) — not part of `make check`; host-only.
 # Import the command modules for their registration side effects; the group
 # itself lives in `app` so several commands can share its pre-paid checks.
+from lithos_loom.evals.resolve import cli as _eval_resolve_cli  # noqa: E402,F401
 from lithos_loom.evals.review import cli as _eval_review_cli  # noqa: E402,F401
 from lithos_loom.evals.review import cli_rescore as _eval_rescore  # noqa: E402,F401
 from lithos_loom.evals.review.app import eval_app  # noqa: E402

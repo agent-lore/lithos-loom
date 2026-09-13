@@ -832,6 +832,17 @@ Three case shapes, all buildable from material already on hand:
   a plausible-looking merge that drops `projects` from
   `filters_narrow_the_board` is the obvious seeded defect, since that is the
   real one.
+  *Shipped 2026-09-13* as `lithos-loom eval resolve` + `evals/resolve/cases/`
+  (README there): a case is the real conflicting merge (merge-base, delivered
+  head, moved base tip) plus an **executable oracle** — probes validated on a
+  known-good tree (the operator's merge) and a known-bad one (that merge with
+  the `projects` term undone) before any paid sample. Each sample is one
+  `converge --resolve-conflicts` run, no push, scored on coder-right (the
+  round-1 merge commit), pipeline-right (the final tree), approved, and
+  **UNSAFE** (approved AND wrong — the merge S5 would have pushed; one fails
+  the case). Seed = `lens43-projects-merge`: ten text conflicts, the defect
+  outside every conflicted hunk. Unmeasured until its first K=5 run; the
+  decision rule is stated in the case.
 - **Triage.** A known-false external finding must be rejected with cited
   evidence; a known-true one must pass; an ambiguous one must proceed. The
   over-suppression failure mode is the one to watch, per RH-1's lens34 result.

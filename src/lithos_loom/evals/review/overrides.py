@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import Protocol
 
 from ...plugins.story_develop import engines
 from ...plugins.story_develop.config import ReviewerSpec, parse_effort, parse_model
 from ...plugins.story_develop.personas import canonical_personas
 from ...plugins.story_develop.profiles import get_profile
-from .case import Case
 
 # The per-reviewer axes a run may vary. Deliberately NOT block_threshold /
 # system_prompt / fallback_chain: those change what a persona IS, not which
@@ -78,8 +78,20 @@ def parse_reviewer_overrides(items: Sequence[str]) -> ReviewerOverrides:
     return overrides
 
 
+class PanelSource(Protocol):
+    """What :func:`resolve_panel` reads off a case: the panel it declares and
+    the profile its check-set comes from (``eval review`` and ``eval resolve``
+    cases both qualify)."""
+
+    @property
+    def personas(self) -> tuple[str, ...]: ...
+
+    @property
+    def profile(self) -> str: ...
+
+
 def resolve_panel(
-    case: Case,
+    case: PanelSource,
     *,
     profile: str | None = None,
     reviewers: Sequence[str] | None = None,
