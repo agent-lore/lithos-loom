@@ -580,9 +580,7 @@ def test_from_github_answers_a_reverted_fix_honestly(
             message="converged and pushed to feature",
         )
 
-    import lithos_loom.cli.converge as cli_mod
-
-    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    converge_cli.converge_pr, saved = fake_converge_pr, converge_cli.converge_pr
     try:
         result = runner.invoke(
             develop_app,
@@ -598,7 +596,7 @@ def test_from_github_answers_a_reverted_fix_honestly(
             catch_exceptions=False,
         )
     finally:
-        cli_mod.converge_pr = saved
+        converge_cli.converge_pr = saved
 
     assert result.exit_code != 0  # not a success: a decision is outstanding
     bodies = dict(github_stubs["replies"])

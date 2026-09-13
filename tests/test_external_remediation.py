@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import sys
@@ -829,6 +830,120 @@ async def test_resume_pending_holds_on_a_decision_gate_and_keeps_the_trigger(
     await rem._task
     marker = await _marker(client, gate.id)
     assert marker["needs_human_gate_id"] == "" and marker["needs_human_reason"] == ""
+
+
+async def test_completing_the_decision_gate_at_the_budget_limit_re_arms_and_dispatches(
+    tmp_path: Path,
+) -> None:
+    """PR #389 review (High): the motivating run was round 2/2 — with the
+    exhausted check first, completing the gate (the promised no-push
+    decision) could never release anything. The gate is checked FIRST, and
+    lifting it is the operator's consent to continue: the budget re-arms
+    (rounds reset, the push attribution kept) and the next batch — or the
+    parked trigger — dispatches. Both entry points, at the limit."""
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    decision = await client.task_create(
+        title="Needs human", task_type="gate", metadata={"gate_type": "human"}
+    )
+    await client.task_complete(task_id=decision, agent="dave")
+    budget = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=2,
+        last_loom_pushed_sha="8d" * 20,
+        last_seen_head_sha="8d" * 20,
+        needs_human_gate_id=decision,
+        needs_human_reason="disputed",
+    )
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: budget.as_marker()}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    spawn, calls = _spawner(
+        {"status": "converged", "succeeded": True, "pushed": False, "rounds": 1}
+    )
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+
+    label = await _consider(client, gate, story, rem, budget=budget)
+
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 1
+    marker = await _marker(client, gate.id)
+    assert marker["needs_human_gate_id"] == "" and marker["needs_human_reason"] == ""
+    assert marker["rounds_used"] == 1  # re-armed, then this dispatch's reservation
+    assert marker["last_loom_pushed_sha"] == "8d" * 20  # attribution survives
+
+    # ...and the parked-trigger path at the limit, same rule
+    client2 = FakeLithosClient()
+    story2, gate2 = await _gate_with_story(client2)
+    decision2 = await client2.task_create(
+        title="Needs human", task_type="gate", metadata={"gate_type": "human"}
+    )
+    await client2.task_complete(task_id=decision2, agent="dave")
+    await client2.task_update(
+        task_id=gate2.id, agent="a", metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate2 = await client2.task_get(task_id=gate2.id)
+    assert gate2 is not None
+    spawn2, calls2 = _spawner(None)
+    rem2 = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn2)
+    spec2 = parse_pr_gate(gate2)
+    assert spec2 is not None
+    budget2 = dataclasses.replace(budget, needs_human_gate_id=decision2)
+    label = await rem2.resume_pending(
+        gate2, spec2, story2, budget2, _github(), _ctx(client2)
+    )
+    assert label == "dispatched"
+    assert rem2._task is not None
+    await rem2._task
+    assert len(calls2) == 1
+
+
+async def test_an_open_decision_gate_at_the_limit_still_holds(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    decision = await client.task_create(
+        title="Needs human", task_type="gate", metadata={"gate_type": "human"}
+    )
+    budget = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=2, needs_human_gate_id=decision
+    )
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    assert await _consider(client, gate, story, rem, budget=budget) == "escalated"
+    assert calls == []
+
+
+async def test_completing_the_exhaustion_gate_re_arms_the_budget_too(
+    tmp_path: Path,
+) -> None:
+    """One rule for every loom remediation gate: it IS the budget's stop, and
+    the operator lifting it is consent to continue — an exhaustion gate
+    completed without a push re-arms exactly like a disputed one (the
+    actions say so)."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    decision = await client.task_create(
+        title="Needs human", task_type="gate", metadata={"gate_type": "human"}
+    )
+    await client.task_complete(task_id=decision, agent="dave")
+    budget = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=2,
+        needs_human_gate_id=decision,
+        needs_human_reason="remediation_exhausted",
+    )
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    assert await _consider(client, gate, story, rem, budget=budget) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 1
 
 
 async def test_consider_releases_the_hold_once_the_decision_gate_is_terminal(

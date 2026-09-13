@@ -159,8 +159,7 @@ class ExternalRemediation:
         self._task: asyncio.Task[None] | None = None
         self._in_flight_pr_url = ""
         # #377: PR urls whose last run this boot ended `infra_failed` — held
-        # from re-dispatch (an outage must not spend a round per sweep); a
-        # daemon restart is the operator's fix attempt and starts empty.
+        # from re-dispatch until the daemon restarts (the operator's fix attempt)
         self._infra_held: set[str] = set()
 
     @property
@@ -260,13 +259,14 @@ class ExternalRemediation:
         settings = self._settings
         if settings.budget <= 0:
             return "disabled"
-        if budget.rounds_used >= settings.budget:
-            return "exhausted"  # the note already rode out on the finding
+        # the gate before the count (PR #389 review): lifting it re-arms
         budget, pending = await decision_pending(
             ctx, gate_id=gate.id, spec=spec, budget=budget
         )
         if pending:
             return "escalated"
+        if budget.rounds_used >= settings.budget:
+            return "exhausted"  # the note already rode out on the finding
         if story_id is None:
             return "no_story"  # nowhere to record the outcome
 
@@ -366,13 +366,13 @@ class ExternalRemediation:
             return "disabled"
         if self.busy:
             return "deferred_busy"  # trigger stays parked
-        if budget.rounds_used >= self._settings.budget:
-            return "exhausted"  # trigger stays parked for after a reset
         budget, pending = await decision_pending(
             ctx, gate_id=gate.id, spec=spec, budget=budget
         )
         if pending:
             return "escalated"  # trigger stays parked for after the decision
+        if budget.rounds_used >= self._settings.budget:
+            return "exhausted"  # trigger stays parked for after a reset
         if story_id is None:
             return "no_story"
         ctx.logger.info(

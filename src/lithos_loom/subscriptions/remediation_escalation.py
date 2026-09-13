@@ -10,7 +10,8 @@ route-runner's failed exit (gate → record → push sinks → ``[NeedsHuman]``)
 The gate is a decision, not a re-dispatch — the story stays behind its
 ``pr`` gate either way — so its actions are remediation's own, and it is
 raised **once per budget**: the gate id is recorded on the budget marker,
-and a human push (which resets the budget) re-arms it.
+and a human push (which resets the budget) re-arms it — as does the
+operator completing the gate (:func:`decision_pending`, PR #389 review).
 """
 
 from __future__ import annotations
@@ -45,7 +46,8 @@ REMEDIATION_ACTIONS = (
     "the story stays behind its pr gate; push the fix branch by hand if the "
     "residual is acceptable, re-run `develop converge <pr> --from-github` with "
     "a higher --max-rounds, or address the finding directly — a human push to "
-    "the PR re-arms loom's budget; complete this gate once decided"
+    "the PR re-arms loom's budget, and so does completing this gate once "
+    "decided (loom then remediates the next review on a fresh budget)"
 )
 """What the operator can do about an exhausted remediation — none of it is a
 re-dispatch, so the runner's two actions would mislead here."""
@@ -55,8 +57,9 @@ DISPUTE_ACTIONS = (
     "the loop undid its own fix rather than choose — decide: amend the "
     "story's acceptance criteria and re-run `develop converge <pr> "
     "--from-github` (or re-apply the fix by hand), or answer the reviewer on "
-    "the thread and leave the code as it is; a human push to the PR re-arms "
-    "loom's budget; complete this gate once decided"
+    "the thread and leave the code as it is; completing this gate once decided "
+    "re-arms loom's budget (as a human push does) and remediation resumes on "
+    "the next review"
 )
 """What the operator can do about a reverted external fix (#387)."""
 
@@ -222,14 +225,17 @@ async def decision_pending(
     spec: PrGateSpec,
     budget: RemediationBudget,
 ) -> tuple[RemediationBudget, bool]:
-    """#387: a decision gate on this budget (a reverted fix, raised with
-    rounds to spare) holds every dispatch — ``consider`` and a parked
-    trigger alike — while it is OPEN. The operator's decision need not
-    involve a push ("answer the reviewer, leave the code"), so the gate
-    going terminal is the release: the marker on the ``pr`` gate *gate_id*
-    forgets it and the budget returned dispatches. An unreadable gate holds
-    (fail closed); a gate that no longer exists can never be completed, so
-    it releases.
+    """A loom remediation gate on this budget — a reverted fix (#387, raised
+    with rounds to spare) or an exhausted budget — holds every dispatch,
+    ``consider`` and a parked trigger alike, while it is OPEN. The gate IS
+    the budget's stop, and the operator's decision need not involve a push
+    ("answer the reviewer, leave the code"), so the gate going terminal is
+    the release AND the operator's consent to continue: the marker on the
+    ``pr`` gate *gate_id* forgets it and the budget re-arms (rounds reset,
+    loom's push attribution kept — the own-sha skip must still hold), as a
+    human push would (PR #389 review: the motivating run was the last
+    budgeted round). An unreadable gate holds (fail closed); a gate that no
+    longer exists can never be completed, so it releases.
     """
     decision_id = budget.needs_human_gate_id
     if not decision_id:
@@ -247,7 +253,7 @@ async def decision_pending(
     if decision is not None and getattr(decision, "status", "open") == "open":
         return budget, True
     released = dataclasses.replace(
-        budget, needs_human_gate_id="", needs_human_reason=""
+        budget, rounds_used=0, needs_human_gate_id="", needs_human_reason=""
     )
     ok = await write_marker(
         ctx,
