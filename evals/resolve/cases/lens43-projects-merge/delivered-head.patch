@@ -1,0 +1,2432 @@
+diff --git a/docs/REQUIREMENTS.md b/docs/REQUIREMENTS.md
+index b431764..bb02851 100644
+--- a/docs/REQUIREMENTS.md
++++ b/docs/REQUIREMENTS.md
+@@ -380,7 +380,7 @@ At process startup Lens performs the following steps in order:
+ 
+ ```python
+ lithos_agent_register(
+-    id=config.lithos.agent_id,     # "lithos-lens"
++    id=config.lithos.agent_id,  # "lithos-lens"
+     name="Lithos Lens",
+     type="web-ui",
+ )
+@@ -1210,7 +1210,7 @@ When `contradicts` edges exist, Lens exposes a resolution panel on the relevant
+ ```python
+ lithos_conflict_resolve(
+     edge_id=edge_id,
+-    resolution="superseded",   # accepted_dual | superseded | refuted | merged
++    resolution="superseded",  # accepted_dual | superseded | refuted | merged
+     resolver=operator_id,
+     winner_id=winning_note_id,  # required when resolution == "superseded"
+ )
+diff --git a/docs/architecture.toml b/docs/architecture.toml
+index 7340fc1..1917a53 100644
+--- a/docs/architecture.toml
++++ b/docs/architecture.toml
+@@ -43,7 +43,7 @@ Entrypoint   = ["lithos_lens.main", "lithos_lens.__main__"]
+ Web          = ["lithos_lens.web"]
+ State        = ["lithos_lens.state"]
+ Events       = ["lithos_lens.events"]
+-LithosClient = ["lithos_lens.lithos_client", "lithos_lens.fake_lithos", "lithos_lens.fake_dataset"]
++LithosClient = ["lithos_lens.lithos_client", "lithos_lens.lithos_tools", "lithos_lens.fake_lithos", "lithos_lens.fake_dataset"]
+ Config       = ["lithos_lens.config"]
+ Tasks        = ["lithos_lens.tasks"]
+ TaskGraph    = ["lithos_lens.task_graph", "lithos_lens.frontier"]
+@@ -72,8 +72,15 @@ Foundation  = ["Config", "Tasks", "TaskGraph", "Knowledge", "Logging", "Telemetr
+ cross_component_edges  = 27   # +1 fake-mode event hub (fake_lithos -> events); +1 Web -> TaskGraph (frontier dashboard assembly); +1 Web -> Events (fake-mode publish seam constructs LensEvent); direction: down
+ component_cycles       = 0    # no component-level cycles today; keep it that way
+ module_cycles          = 0    # no module-level cycles today; keep it that way
+-modules_over_800_lines = 0    # no god modules today; keep it that way
+-max_module_lines       = 800  # stop-loss at the god-module threshold; largest today is config (671)
++# Raised deliberately in T1-S12 (security review): task-graph feature detection
++# must read the server's tools/list rather than error text, and the probe
++# belongs on LithosClient — which was already one line under the old 800
++# ceiling. Round 4 moved the tools/list cursor walk into lithos_tools.py, which
++# is why this is 830 and not the 860 round 3 asked for; the rest of the MCP
++# transport (session worker, tool-call decoding) is the next slice to lift out.
++# Nothing else may cross 800 in the meantime.
++modules_over_800_lines = 1    # lithos_client (821); no other module may join it
++max_module_lines       = 830  # stop-loss just above today's largest, lithos_client (821)
+ cross_module_private_refs = 0  # no cross-module private reaches today; keep it that way
+ tests_private_imports     = 0  # tests use only the public surface; keep it that way
+ 
+diff --git a/docs/generated/components/LithosClient.md b/docs/generated/components/LithosClient.md
+index 2c2fca6..6a67b5e 100644
+--- a/docs/generated/components/LithosClient.md
++++ b/docs/generated/components/LithosClient.md
+@@ -14,6 +14,7 @@ Lithos server clients — the real MCP-over-SSE client (health, registration, to
+ | `lithos_lens.fake_dataset` | M | 1 | 1 |
+ | `lithos_lens.fake_lithos` | M | 2 | 1 |
+ | `lithos_lens.lithos_client` | L | 4 | 0 |
++| `lithos_lens.lithos_tools` | XS | 1 | 1 |
+ 
+ ## Public API
+ 
+@@ -32,6 +33,10 @@ Lithos server clients — the real MCP-over-SSE client (health, registration, to
+ - class `LithosToolError` — Raised when Lithos returns an error envelope from a tool call.
+ - class `LithosClient` — Best-effort Lithos client used by the web app.
+ 
++### `lithos_lens.lithos_tools`
++- class `ToolListError` — Raised when a ``tools/list`` enumeration could not be completed.
++- def `collect_tool_names` — Collect tool names across every ``tools/list`` page.
++
+ ## Dependencies
+ 
+ - Depends on: [Config](Config.md), [Events](Events.md), [Knowledge](Knowledge.md), [TaskGraph](TaskGraph.md), [Tasks](Tasks.md)
+diff --git a/docs/generated/components/TaskGraph.md b/docs/generated/components/TaskGraph.md
+index 9a5c31d..94289c4 100644
+--- a/docs/generated/components/TaskGraph.md
++++ b/docs/generated/components/TaskGraph.md
+@@ -11,12 +11,14 @@ Task-graph transport records and normalizers (blocked-task rows + edges), plus t
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.frontier` | M | 1 | 2 |
++| `lithos_lens.frontier` | L | 1 | 4 |
+ | `lithos_lens.task_graph` | S | 3 | 3 |
+ 
+ ## Public API
+ 
+ ### `lithos_lens.frontier`
++- def `frontier_tools_absent` — Ask the server whether it actually has the two frontier tools.
++- def `flat_open_sections` — Partition open tasks for the pre-0.4 fallback: one flat ``open`` section.
+ - class `FrontierLithosClient` — The client surface ``load_dashboard`` consumes (the five parallel calls).
+ - def `classify_open_tasks` — Join the master open list against the ready/blocked frontier.
+ - def `load_dashboard` — Assemble the dashboard from the parallel Lithos reads.
+diff --git a/docs/generated/components/Tasks.md b/docs/generated/components/Tasks.md
+index dad4fab..4203708 100644
+--- a/docs/generated/components/Tasks.md
++++ b/docs/generated/components/Tasks.md
+@@ -11,7 +11,7 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ 
+ | Module | Size | Classes | Functions |
+ |---|---|---:|---:|
+-| `lithos_lens.tasks` | M | 16 | 18 |
++| `lithos_lens.tasks` | M | 16 | 19 |
+ 
+ ## Public API
+ 
+@@ -49,6 +49,7 @@ Tasks-dashboard data loading and normalization (task/claim/finding records + vie
+ - def `format_tag`
+ - def `parse_date`
+ - def `matches_filters` — Client-side filter predicate shared by the dashboard sections.
++- def `filters_narrow_the_board` — True when these filters hide part of the corpus from the sections.
+ - def `int_stat`
+ 
+ ## Dependencies
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 67550b0..7d9d900 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -175,6 +175,9 @@ classDiagram
+     +open_total int
+     +reconciliation_pending bool
+     +truncated bool
++    +filters_narrowed bool
++    +graph_available bool
++    +nothing_to_show bool
+     +errors tuple[str, ...]
+   }
+   class FindingRecord {
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index b9777a8..d9752ce 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -43,7 +43,7 @@
+       },
+       "TaskGraph": {
+         "functions_over_10": 3,
+-        "max_complexity": 28,
++        "max_complexity": 33,
+         "max_function": "lithos_lens.frontier.load_dashboard"
+       },
+       "Tasks": {
+@@ -65,7 +65,7 @@
+     "functions_over_10": 14,
+     "top_functions": [
+       {
+-        "complexity": 28,
++        "complexity": 33,
+         "qualname": "lithos_lens.frontier.load_dashboard"
+       },
+       {
+@@ -105,7 +105,7 @@
+         "qualname": "lithos_lens.tasks.matches_filters"
+       }
+     ],
+-    "total_functions": 244
++    "total_functions": 260
+   },
+   "domain": {
+     "associations": 27,
+@@ -257,14 +257,14 @@
+         "sloc": 806
+       },
+       "LithosClient": {
+-        "classes": 7,
+-        "functions": 82,
++        "classes": 8,
++        "functions": 87,
+         "largest_module": "lithos_lens.lithos_client",
+-        "largest_module_lines": 794,
+-        "lines": 1629,
+-        "modules": 3,
+-        "public_symbols": 9,
+-        "sloc": 1360
++        "largest_module_lines": 821,
++        "lines": 1745,
++        "modules": 4,
++        "public_symbols": 11,
++        "sloc": 1450
+       },
+       "Logging": {
+         "classes": 1,
+@@ -278,33 +278,33 @@
+       },
+       "State": {
+         "classes": 2,
+-        "functions": 5,
++        "functions": 7,
+         "largest_module": "lithos_lens.state",
+-        "largest_module_lines": 71,
+-        "lines": 71,
++        "largest_module_lines": 99,
++        "lines": 99,
+         "modules": 1,
+         "public_symbols": 2,
+-        "sloc": 56
++        "sloc": 70
+       },
+       "TaskGraph": {
+         "classes": 5,
+-        "functions": 17,
++        "functions": 24,
+         "largest_module": "lithos_lens.frontier",
+-        "largest_module_lines": 535,
+-        "lines": 654,
++        "largest_module_lines": 752,
++        "lines": 871,
+         "modules": 2,
+-        "public_symbols": 9,
+-        "sloc": 505
++        "public_symbols": 11,
++        "sloc": 677
+       },
+       "Tasks": {
+         "classes": 16,
+-        "functions": 27,
++        "functions": 29,
+         "largest_module": "lithos_lens.tasks",
+-        "largest_module_lines": 567,
+-        "lines": 567,
++        "largest_module_lines": 631,
++        "lines": 631,
+         "modules": 1,
+-        "public_symbols": 34,
+-        "sloc": 443
++        "public_symbols": 35,
++        "sloc": 484
+       },
+       "Telemetry": {
+         "classes": 0,
+@@ -320,23 +320,25 @@
+         "classes": 0,
+         "functions": 21,
+         "largest_module": "lithos_lens.web",
+-        "largest_module_lines": 490,
+-        "lines": 490,
++        "largest_module_lines": 506,
++        "lines": 506,
+         "modules": 1,
+         "public_symbols": 6,
+-        "sloc": 424
++        "sloc": 436
+       }
+     },
+-    "max_module": "lithos_lens.config",
+-    "max_module_lines": 797,
+-    "modules_over_800": [],
+-    "total_lines": 5654,
+-    "total_modules": 19,
+-    "total_sloc": 4580
++    "max_module": "lithos_lens.lithos_client",
++    "max_module_lines": 821,
++    "modules_over_800": [
++      "lithos_lens.lithos_client"
++    ],
++    "total_lines": 6095,
++    "total_modules": 20,
++    "total_sloc": 4909
+   },
+   "tests": {
+-    "ratio": 1.75,
+-    "src_lines": 5654,
+-    "test_lines": 9896
++    "ratio": 1.77,
++    "src_lines": 6095,
++    "test_lines": 10783
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index e8faa94..ba1934c 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -14,9 +14,9 @@ lower a budget after improving the code to lock in the gain.
+ | `component_cycles` | 0 | 0 | 0 |
+ | `cross_component_edges` | 27 | 27 | 0 |
+ | `cross_module_private_refs` | 0 | 0 | 0 |
+-| `max_module_lines` | 797 | 800 | 3 |
++| `max_module_lines` | 821 | 830 | 9 |
+ | `module_cycles` | 0 | 0 | 0 |
+-| `modules_over_800_lines` | 0 | 0 | 0 |
++| `modules_over_800_lines` | 1 | 1 | 0 |
+ | `tests_private_imports` | 0 | 0 | 0 |
+ 
+ ## Import graph
+@@ -39,29 +39,30 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | Errors | 1 | 15 | 9 | 2 | 0 | 0.00 | - | 0 |
+ | Events | 1 | 208 | 180 | 3 | 1 | 0.25 | 10 (`lithos_lens.events.parse_lithos_sse_frame`) | 0 |
+ | Knowledge | 3 | 1057 | 806 | 2 | 1 | 0.33 | 13 (`lithos_lens.knowledge._gather_candidates`) | 2 |
+-| LithosClient | 3 | 1629 | 1360 | 2 | 5 | 0.71 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 4 |
++| LithosClient | 4 | 1745 | 1450 | 2 | 5 | 0.71 | 16 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 4 |
+ | Logging | 1 | 60 | 48 | 1 | 1 | 0.50 | 5 (`lithos_lens.logging.JsonFormatter.format`) | 0 |
+-| State | 1 | 71 | 56 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
+-| TaskGraph | 2 | 654 | 505 | 2 | 1 | 0.33 | 28 (`lithos_lens.frontier.load_dashboard`) | 3 |
+-| Tasks | 1 | 567 | 443 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 3 |
++| State | 1 | 99 | 70 | 1 | 3 | 0.75 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
++| TaskGraph | 2 | 871 | 677 | 2 | 1 | 0.33 | 33 (`lithos_lens.frontier.load_dashboard`) | 3 |
++| Tasks | 1 | 631 | 484 | 5 | 0 | 0.00 | 23 (`lithos_lens.tasks.normalize_task`) | 3 |
+ | Telemetry | 1 | 29 | 20 | 1 | 1 | 0.50 | 2 (`lithos_lens.telemetry.install_request_middleware.lens_request`) | 0 |
+-| Web | 1 | 490 | 424 | 1 | 8 | 0.89 | 11 (`lithos_lens.web.create_app.note`) | 1 |
++| Web | 1 | 506 | 436 | 1 | 8 | 0.89 | 11 (`lithos_lens.web.create_app.note`) | 1 |
+ 
+ ## Size
+ 
+-- Modules: **19**, lines: **5654**, SLOC: **4580**
+-- Largest module: `lithos_lens.config` (797 lines)
+-- Modules over 800 lines: **0**
++- Modules: **20**, lines: **6095**, SLOC: **4909**
++- Largest module: `lithos_lens.lithos_client` (821 lines)
++- Modules over 800 lines: **1**
++  - `lithos_lens.lithos_client`
+ 
+ ## Complexity
+ 
+-- Functions: **244**, cyclomatic > 10: **14**
++- Functions: **260**, cyclomatic > 10: **14**
+ 
+ Top 10 most complex functions:
+ 
+ | Complexity | Function |
+ |---:|---|
+-| 28 | `lithos_lens.frontier.load_dashboard` |
++| 33 | `lithos_lens.frontier.load_dashboard` |
+ | 25 | `lithos_lens.config._apply_env_overrides` |
+ | 23 | `lithos_lens.tasks.normalize_task` |
+ | 16 | `lithos_lens.fake_lithos.FakeLithosClient.list_tasks` |
+@@ -83,4 +84,4 @@ Private-name reaches across module seams. Both counts can be pinned as
+ ## Domain & tests
+ 
+ - Domain models: **31** (27 associations, 15 without docstrings)
+-- Test-to-source line ratio: **1.75** (9896 test lines / 5654 source lines)
++- Test-to-source line ratio: **1.77** (10783 test lines / 6095 source lines)
+diff --git a/pyproject.toml b/pyproject.toml
+index 8b83e2d..f458bb9 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -74,6 +74,7 @@ source_modules = [
+ forbidden_modules = [
+     "lithos_lens.events",
+     "lithos_lens.lithos_client",
++    "lithos_lens.lithos_tools",
+     "lithos_lens.fake_lithos",
+     "lithos_lens.fake_dataset",
+     "lithos_lens.state",
+@@ -88,6 +89,7 @@ type = "forbidden"
+ source_modules = [
+     "lithos_lens.events",
+     "lithos_lens.lithos_client",
++    "lithos_lens.lithos_tools",
+     "lithos_lens.fake_lithos",
+     "lithos_lens.fake_dataset",
+     "lithos_lens.state",
+diff --git a/src/lithos_lens/fake_lithos.py b/src/lithos_lens/fake_lithos.py
+index f412e03..13f8d72 100644
+--- a/src/lithos_lens/fake_lithos.py
++++ b/src/lithos_lens/fake_lithos.py
+@@ -154,6 +154,31 @@ class FakeEventHub(EventHub):
+         await self._stop.wait()
+ 
+ 
++# The tool surface the fake advertises to a ``tools/list`` probe: exactly the
++# Lithos tools this client serves, which is every tool the real client calls
++# (one vendored contract each, tests/contracts/). Fake mode therefore looks
++# like a 0.4-capable server and renders the graph sections.
++FAKE_TOOL_NAMES = frozenset(
++    {
++        "lithos_agent_list",
++        "lithos_agent_register",
++        "lithos_finding_list",
++        "lithos_list",
++        "lithos_read",
++        "lithos_related",
++        "lithos_search",
++        "lithos_stats",
++        "lithos_task_blocked",
++        "lithos_task_children",
++        "lithos_task_edge_list",
++        "lithos_task_get",
++        "lithos_task_list",
++        "lithos_task_ready",
++        "lithos_task_status",
++    }
++)
++
++
+ class FakeLithosClient:
+     """A protocol-complete Lithos client backed by an in-memory dataset.
+ 
+@@ -189,6 +214,9 @@ class FakeLithosClient:
+     async def close(self) -> None:
+         self.closed = True
+ 
++    async def list_tool_names(self) -> set[str]:
++        return set(FAKE_TOOL_NAMES)
++
+     # ── reads ──────────────────────────────────────────────────────────
+ 
+     async def list_tasks(
+diff --git a/src/lithos_lens/frontier.py b/src/lithos_lens/frontier.py
+index 3bc6230..5ebc2a7 100644
+--- a/src/lithos_lens/frontier.py
++++ b/src/lithos_lens/frontier.py
+@@ -17,7 +17,7 @@ on the task-graph records in ``task_graph.py``.
+ from __future__ import annotations
+ 
+ import asyncio
+-from collections.abc import Mapping, Sequence
++from collections.abc import Awaitable, Mapping, Sequence
+ from dataclasses import replace
+ from typing import Any, Protocol, cast
+ 
+@@ -33,6 +33,7 @@ from lithos_lens.tasks import (
+     TaskRecord,
+     TaskStatusName,
+     TaskSummary,
++    filters_narrow_the_board,
+     int_stat,
+     matches_filters,
+ )
+@@ -44,6 +45,79 @@ WORKABLE_TASK_TYPE = "task"
+ # The three workable sections plus the truncation tail, in render order.
+ WORKABLE_SECTIONS: tuple[SectionName, ...] = ("in_progress", "ready", "blocked")
+ 
++# The flat-fallback section, rendered INSTEAD of the workable three when the
++# server has no frontier tools. Kept separate so the two modes never mix.
++FLAT_SECTIONS: tuple[SectionName, ...] = ("open",)
++
++# Every open-side section, in render order (only one mode's are ever filled).
++OPEN_SECTIONS: tuple[SectionName, ...] = (
++    FLAT_SECTIONS + WORKABLE_SECTIONS + ("claims_unknown", "unclassified")
++)
++
++# Version-skew detection (story 27): the names of the two task-graph frontier
++# tools, looked for in the server's own ``tools/list``. A pre-0.4 Lithos has
++# neither.
++READY_TOOL = "lithos_task_ready"
++BLOCKED_TOOL = "lithos_task_blocked"
++
++# One line for both flat-fallback paths (a fresh verdict and a cached one), so
++# the degraded state is continuously visible to the banner and to log-based
++# monitoring rather than only on the render that discovered it.
++FRONTIER_UNAVAILABLE_ERROR = "The Lithos ready/blocked frontier tools are unavailable."
++
++
++async def frontier_tools_absent(lithos: FrontierLithosClient) -> bool:
++    """Ask the server whether it actually has the two frontier tools.
++
++    This is the ONLY input to the fallback verdict. Error text is never
++    consulted: an MCP error result can quote the failing tool's own payload —
++    task titles written by any agent with task-write access, who is strictly
++    less privileged than the Lens operator — so a planted string must not be
++    able to retire the Ready/Blocked/gate surface. ``tools/list`` is the
++    server's structured statement about itself.
++
++    Answers False unless the listing succeeded, was non-empty, and named
++    neither tool: a listing Lens could not make (or an empty one) says nothing
++    about the server, and absence must never be inferred from a failure. A
++    server exposing exactly one of the pair is broken rather than old, and is
++    likewise reported as an error instead of silently losing the graph.
++    """
++    try:
++        names = await lithos.list_tool_names()
++    except Exception:
++        return False
++    return bool(names) and not (names & {READY_TOOL, BLOCKED_TOOL})
++
++
++def flat_open_sections(
++    open_tasks: Sequence[TaskRecord],
++) -> dict[SectionName, tuple[SectionRow, ...]]:
++    """Partition open tasks for the pre-0.4 fallback: one flat ``open`` section.
++
++    Without the frontier there is no honest way to say ready vs blocked, so
++    Lens says neither — every open row lands in one list with its claim chips
++    (the 0.1.0 dashboard's behavior). No task-type filter either: epics and
++    gates do not exist on a server without the task graph. The claims-unknown
++    contract is unchanged: a server old enough to lack the frontier tools may
++    also ignore ``with_claims``, and a row whose claims came back ``None`` must
++    still say "claims unknown" rather than a confident "unclaimed".
++    """
++    return {
++        "open": tuple(
++            SectionRow(
++                task=task,
++                claims=task.claims or (),
++                claims_unknown=task.claims is None,
++            )
++            for task in open_tasks
++        ),
++        "in_progress": (),
++        "ready": (),
++        "blocked": (),
++        "claims_unknown": (),
++        "unclassified": (),
++    }
++
+ 
+ class FrontierLithosClient(Protocol):
+     """The client surface ``load_dashboard`` consumes (the five parallel calls)."""
+@@ -79,6 +153,8 @@ class FrontierLithosClient(Protocol):
+ 
+     async def list_agents(self) -> list[AgentRecord]: ...
+ 
++    async def list_tool_names(self) -> set[str]: ...
++
+ 
+ def _blocker_chips(
+     blockers: Sequence[BlockerRecord],
+@@ -173,6 +249,7 @@ async def load_dashboard(
+     *,
+     filters: TaskFilters,
+     frontier_limit: int,
++    graph_available: bool = True,
+ ) -> DashboardData:
+     """Assemble the dashboard from the parallel Lithos reads.
+ 
+@@ -182,6 +259,13 @@ async def load_dashboard(
+     round-trip is the read-skew retry below — and only when the first pair of
+     frontier responses is inconsistent below the limit.
+ 
++    ``graph_available=False`` says the caller already learned this server has
++    no frontier tools (story 27): the two frontier calls are skipped and the
++    open rows render flat. Detection is the same either way — a frontier call
++    that fails because the TOOL is missing (never because the read failed)
++    switches this load to the flat fallback and reports
++    ``DashboardData.graph_available=False`` so the caller can remember it.
++
+     The open/ready/blocked calls are independent reads, not a snapshot, so a
+     workable open task can be missing from both frontier lists (or present in
+     both) through pure read-skew. Policy: a frontier response that actually
+@@ -203,6 +287,9 @@ async def load_dashboard(
+             since=filters.since,
+         )
+ 
++    ready_read, blocked_read = _frontier_reads(
++        lithos, frontier_limit=frontier_limit, graph_available=graph_available
++    )
+     (
+         open_result,
+         ready_result,
+@@ -220,8 +307,8 @@ async def load_dashboard(
+         # can resolve a predecessor's title even when that predecessor is itself
+         # filtered out of, or older than, the visible sections.
+         lithos.list_tasks(status="open", with_claims=True),
+-        lithos.task_ready(limit=frontier_limit, with_claims=False),
+-        lithos.task_blocked(limit=frontier_limit),
++        ready_read,
++        blocked_read,
+         lithos.stats(),
+         lithos.list_agents(),
+         load_closed("completed"),
+@@ -243,20 +330,24 @@ async def load_dashboard(
+         "open", cast("list[TaskRecord] | BaseException", open_result), errors
+     )
+ 
+-    ready_list: list[TaskRecord] = []
+-    frontier_ok = True
+-    if isinstance(ready_result, BaseException):
+-        errors.append("Could not load the ready frontier.")
+-        frontier_ok = False
+-    else:
+-        ready_list = cast(list[TaskRecord], ready_result)
+-
+-    blocked_records: list[BlockedTaskRecord] = []
+-    if isinstance(blocked_result, BaseException):
+-        errors.append("Could not load the blocked frontier.")
+-        frontier_ok = False
+-    else:
+-        blocked_records = cast(list[BlockedTaskRecord], blocked_result)
++    # Suspicion comes from the reads failing TOGETHER; the verdict comes from
++    # the server's tool list. Both frontier calls failing is already a degraded
++    # render, so the extra round-trip is cheap and never on the happy path.
++    tools_absent = False
++    if (
++        graph_available
++        and isinstance(ready_result, BaseException)
++        and isinstance(blocked_result, BaseException)
++    ):
++        tools_absent = await frontier_tools_absent(lithos)
++
++    graph_available, frontier_ok, ready_list, blocked_records = _resolve_frontier(
++        ready_result,
++        blocked_result,
++        graph_available=graph_available,
++        tools_absent=tools_absent,
++        errors=errors,
++    )
+ 
+     # Raw terminal ids (pre-filter): a task appearing in BOTH the open
+     # snapshot and a terminal result is freshness skew worth a retry, whether
+@@ -319,42 +410,59 @@ async def load_dashboard(
+             skewed_frontier or bool(terminal_overlap),
+         )
+ 
+-    state = _partition_state(open_snapshot, ready_list, blocked_records)
+-
+-    if frontier_ok and state.retry_worthy:
+-        # Read-skew between independent reads (a would-be-Ready task also in
+-        # the blocked response, or a below-limit frontier gap). Retry ALL
+-        # THREE reads together — the master open list too, or a task that
+-        # closed after the stale open read would keep rendering in an open
+-        # section alongside its terminal row. Adopt the retried generation
+-        # only when every read succeeds (no mixed generations); a persisting
+-        # disagreement is handled conservatively below rather than trusted.
+-        retry_open, retry_ready, retry_blocked = await asyncio.gather(
+-            lithos.list_tasks(status="open", with_claims=True),
+-            lithos.task_ready(limit=frontier_limit, with_claims=False),
+-            lithos.task_blocked(limit=frontier_limit),
+-            return_exceptions=True,
+-        )
+-        if not (
+-            isinstance(retry_open, BaseException)
+-            or isinstance(retry_ready, BaseException)
+-            or isinstance(retry_blocked, BaseException)
+-        ):
+-            open_snapshot = sorted(
+-                cast(list[TaskRecord], retry_open),
+-                key=lambda task: task.created_at,
+-                reverse=True,
++    if graph_available:
++        state = _partition_state(open_snapshot, ready_list, blocked_records)
++
++        if frontier_ok and state.retry_worthy:
++            # Read-skew between independent reads (a would-be-Ready task also in
++            # the blocked response, or a below-limit frontier gap). Retry ALL
++            # THREE reads together — the master open list too, or a task that
++            # closed after the stale open read would keep rendering in an open
++            # section alongside its terminal row. Adopt the retried generation
++            # only when every read succeeds (no mixed generations); a persisting
++            # disagreement is handled conservatively below rather than trusted.
++            retry_open, retry_ready, retry_blocked = await asyncio.gather(
++                lithos.list_tasks(status="open", with_claims=True),
++                lithos.task_ready(limit=frontier_limit, with_claims=False),
++                lithos.task_blocked(limit=frontier_limit),
++                return_exceptions=True,
+             )
+-            ready_list = cast(list[TaskRecord], retry_ready)
+-            blocked_records = cast(list[BlockedTaskRecord], retry_blocked)
+-            state = _partition_state(open_snapshot, ready_list, blocked_records)
+-
+-    partition = state.partition
+-    at_limit = state.at_limit
+-    open_index = state.index
+-    reconciliation_pending = frontier_ok and state.skewed_frontier
+-    if reconciliation_pending:
+-        partition = _reclassify_conservative(partition, state.effective_overlap)
++            if not (
++                isinstance(retry_open, BaseException)
++                or isinstance(retry_ready, BaseException)
++                or isinstance(retry_blocked, BaseException)
++            ):
++                open_snapshot = sorted(
++                    cast(list[TaskRecord], retry_open),
++                    key=lambda task: task.created_at,
++                    reverse=True,
++                )
++                ready_list = cast(list[TaskRecord], retry_ready)
++                blocked_records = cast(list[BlockedTaskRecord], retry_blocked)
++                state = _partition_state(open_snapshot, ready_list, blocked_records)
++
++        partition = state.partition
++        at_limit = state.at_limit
++        open_index = state.index
++        reconciliation_pending = frontier_ok and state.skewed_frontier
++        if reconciliation_pending:
++            partition = _reclassify_conservative(partition, state.effective_overlap)
++    else:
++        # Flat fallback (story 27): with no frontier there is nothing to
++        # join, nothing to truncate, and no pair of reads that could
++        # disagree — so the skew machinery above is skipped outright
++        # rather than fed empty frontiers, which would read every open row
++        # as "unclassified" and raise a false reconciliation warning.
++        partition = flat_open_sections(
++            [
++                task
++                for task in open_snapshot
++                if matches_filters(task, filters=filters, status="open")
++            ]
++        )
++        at_limit = False
++        open_index = {task.id: task for task in open_snapshot}
++        reconciliation_pending = False
+ 
+     closed: dict[str, list[TaskRecord]] = {}
+     for status, result in zip(("completed", "cancelled"), closed_results, strict=True):
+@@ -368,8 +476,8 @@ async def load_dashboard(
+ 
+     show_open = "open" in filters.statuses
+     sections: dict[SectionName, tuple[SectionRow, ...]] = {}
+-    for section in WORKABLE_SECTIONS + ("claims_unknown", "unclassified"):
+-        sections[section] = partition[section] if show_open else ()
++    for section in OPEN_SECTIONS:
++        sections[section] = partition.get(section, ()) if show_open else ()
+     for status in ("completed", "cancelled"):
+         sections[status] = (
+             tuple(SectionRow(task=task) for task in closed[status])
+@@ -389,10 +497,13 @@ async def load_dashboard(
+     else:
+         agents = tuple(cast(list[AgentRecord], agents_result))
+ 
+-    open_total = (
+-        sum(len(partition[section]) for section in WORKABLE_SECTIONS)
+-        + len(partition["claims_unknown"])
+-        + len(partition["unclassified"])
++    open_total = sum(len(partition.get(section, ())) for section in OPEN_SECTIONS)
++    filters_narrowed = filters_narrow_the_board(filters)
++    nothing_to_show = _is_nothing_to_show(
++        open_snapshot,
++        closed_results,
++        errors=errors,
++        filters_narrowed=filters_narrowed,
+     )
+     summary = TaskSummary(
+         in_progress=len(partition["in_progress"]),
+@@ -420,10 +531,116 @@ async def load_dashboard(
+         # Blocked above) — neither is mislabelled as truncation.
+         truncated=frontier_ok and at_limit and bool(partition["unclassified"]),
+         reconciliation_pending=reconciliation_pending,
++        filters_narrowed=filters_narrowed,
++        graph_available=graph_available,
++        nothing_to_show=nothing_to_show,
+         errors=tuple(errors),
+     )
+ 
+ 
++def _frontier_reads(
++    lithos: FrontierLithosClient,
++    *,
++    frontier_limit: int,
++    graph_available: bool,
++) -> tuple[Awaitable[Any], Awaitable[Any]]:
++    """The ready/blocked awaitables for one generation of the assembly.
++
++    A server whose tool list recently came back without the frontier tools is
++    not asked again until the caller's re-probe window lapses: two guaranteed
++    failures per render is pure cost, so the two gather slots are filled with
++    placeholders (the fallback still reports itself — see ``_resolve_frontier``).
++    """
++    if not graph_available:
++        return _skipped_frontier_call(), _skipped_frontier_call()
++    return (
++        lithos.task_ready(limit=frontier_limit, with_claims=False),
++        lithos.task_blocked(limit=frontier_limit),
++    )
++
++
++def _resolve_frontier(
++    ready_result: Any,
++    blocked_result: Any,
++    *,
++    graph_available: bool,
++    tools_absent: bool,
++    errors: list[str],
++) -> tuple[bool, bool, list[TaskRecord], list[BlockedTaskRecord]]:
++    """Read the two frontier responses into rows, verdicts, and error lines.
++
++    Returns ``(graph_available, frontier_ok, ready_rows, blocked_rows)``.
++    ``tools_absent`` is the confirmed ``tools/list`` verdict (see
++    ``frontier_tools_absent``); only that drops the load to the flat fallback.
++    Every other failure keeps the graph surface and reports itself.
++
++    The fallback is never silent — on the render that discovers it AND on every
++    render served from the caller's cached verdict. The same symptom is
++    produced by an outage or by the tools being withheld from this client, so
++    the condition has to stay continuously visible to the operator and to
++    log-based monitoring rather than being dressed up as a benign version
++    notice that lapses off the error channel.
++    """
++    if tools_absent or not graph_available:
++        errors.append(FRONTIER_UNAVAILABLE_ERROR)
++        return False, False, [], []
++
++    frontier_ok = True
++    ready_rows: list[TaskRecord] = []
++    blocked_rows: list[BlockedTaskRecord] = []
++    if isinstance(ready_result, BaseException):
++        errors.append("Could not load the ready frontier.")
++        frontier_ok = False
++    else:
++        ready_rows = cast(list[TaskRecord], ready_result)
++    if isinstance(blocked_result, BaseException):
++        errors.append("Could not load the blocked frontier.")
++        frontier_ok = False
++    else:
++        blocked_rows = cast(list[BlockedTaskRecord], blocked_result)
++    return True, frontier_ok, ready_rows, blocked_rows
++
++
++def _is_nothing_to_show(
++    open_snapshot: list[TaskRecord],
++    closed_results: tuple[list[TaskRecord] | BaseException, ...],
++    *,
++    errors: list[str],
++    filters_narrowed: bool,
++) -> bool:
++    """True when Lithos answered everything and returned nothing for this view.
++
++    "Nothing here" as opposed to "your filters hid everything", which the
++    per-section empty lines already say. Three things must hold: no recorded
++    error (an outage empties the snapshot too), an empty master open list
++    (which is read unfiltered), and no narrowing filter — the two terminal
++    reads DO push ``agent``/``tags`` upstream, so under a filter their
++    emptiness says nothing at all.
++
++    ``since`` is the one filter that survives this test, because it always has
++    a value and windowing the resolved sections is the dashboard's normal
++    posture rather than a narrowing choice. That is precisely why this is not a
++    statement about the corpus: work resolved before the window is invisible
++    here, so the panel this drives must name the window rather than claim there
++    are no tasks.
++    """
++    if errors or open_snapshot or filters_narrowed:
++        return False
++    return not any(
++        not isinstance(result, BaseException) and bool(result)
++        for result in closed_results
++    )
++
++
++async def _skipped_frontier_call() -> list[Any]:
++    """Stand in for a frontier call not made (the tools are known absent).
++
++    Keeps ``load_dashboard``'s single gather positional: the slot is filled
++    with an empty result instead of the response, and the flat branch renders.
++    """
++    return []
++
++
+ class _FrontierState:
+     """One generation of the joined reads: snapshot views + skew verdicts.
+ 
+diff --git a/src/lithos_lens/lithos_client.py b/src/lithos_lens/lithos_client.py
+index 7aca853..6cb9b8b 100644
+--- a/src/lithos_lens/lithos_client.py
++++ b/src/lithos_lens/lithos_client.py
+@@ -25,6 +25,7 @@ from lithos_lens.knowledge import (
+     normalize_related,
+     normalize_search_result,
+ )
++from lithos_lens.lithos_tools import collect_tool_names
+ from lithos_lens.task_graph import (
+     BlockedTaskRecord,
+     EdgeRecord,
+@@ -84,6 +85,8 @@ class LithosClientProtocol(Protocol):
+ 
+     async def register_agent(self) -> bool: ...
+ 
++    async def list_tool_names(self) -> set[str]: ...
++
+     async def list_tasks(
+         self,
+         *,
+@@ -652,24 +655,48 @@ class LithosClient:
+             normalize_search_result(item) for item in rows if isinstance(item, dict)
+         ]
+ 
+-    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+-        if self._worker_task is None:
+-            # startup() was never called; fall back to a one-shot session so
+-            # we don't silently break callers that bypass the lifecycle.
+-            result = await self._call_tool_oneshot(name, arguments)
+-            return _decode_tool_result(result)
++    async def list_tool_names(self) -> set[str]:
++        """Every tool name this server advertises (MCP ``tools/list``).
++
++        The authoritative answer to "does this Lithos have <tool>", for
++        task-graph feature detection — which must never be decided from error
++        TEXT, since a tool's error payload can quote task data written by an
++        agent far less privileged than the Lens operator.
++
++        Raises when no session is up (no throwaway fallback, unlike
++        ``_call_tool``, and no waiting): a listing Lens could not make says
++        nothing about the server, and failure is never absence.
++        """
++        return await collect_tool_names(await self._live_session(wait_s=0.0))
+ 
++    async def _live_session(self, *, wait_s: float = _SESSION_WAIT_TIMEOUT_S) -> Any:
++        """The worker's MCP session, waiting up to ``wait_s`` for startup.
++
++        ``wait_s=0`` asks only whether a session exists right now: the probe
++        runs after other reads already failed, so waiting again buys nothing
++        and doubles an unauthenticated request's hold during an outage.
++        """
+         if not self._session_ready.is_set():
++            if wait_s <= 0:
++                raise LithosToolError("Lithos MCP session is not available")
+             try:
+-                await asyncio.wait_for(
+-                    self._session_ready.wait(), timeout=_SESSION_WAIT_TIMEOUT_S
+-                )
++                await asyncio.wait_for(self._session_ready.wait(), timeout=wait_s)
+             except TimeoutError as exc:
+                 raise LithosToolError("Lithos MCP session is not available") from exc
+ 
+         session = self._session
+         if session is None:
+             raise LithosToolError("Lithos MCP session is not available")
++        return session
++
++    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
++        if self._worker_task is None:
++            # startup() was never called; fall back to a one-shot session so
++            # we don't silently break callers that bypass the lifecycle.
++            result = await self._call_tool_oneshot(name, arguments)
++            return _decode_tool_result(result)
++
++        session = await self._live_session()
+         result = await session.call_tool(name, arguments)
+         return _decode_tool_result(result)
+ 
+diff --git a/src/lithos_lens/lithos_tools.py b/src/lithos_lens/lithos_tools.py
+new file mode 100644
+index 0000000..de9a6ff
+--- /dev/null
++++ b/src/lithos_lens/lithos_tools.py
+@@ -0,0 +1,61 @@
++"""MCP tool-surface discovery: which tools does a server actually advertise.
++
++Split out of ``lithos_client`` so the cursor walk and its failure contract sit
++on their own: the answer drives task-graph feature detection, which reads
++ABSENCE from this result, so an incomplete walk must be impossible to mistake
++for a complete one.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Any
++
++logger = logging.getLogger(__name__)
++
++# Guard on the tools/list cursor walk; Lithos serves its surface in one page.
++TOOL_LIST_MAX_PAGES = 20
++
++
++class ToolListError(RuntimeError):
++    """Raised when a ``tools/list`` enumeration could not be completed."""
++
++
++async def collect_tool_names(session: Any) -> set[str]:
++    """Collect tool names across every ``tools/list`` page.
++
++    The MCP client does not auto-follow ``nextCursor`` (see
++    scripts/dump_lithos_tools.py), so a paginating server would silently
++    truncate a single-request listing.
++
++    Raises :class:`ToolListError` unless the walk terminates on its own: a
++    cursor still pending at ``TOOL_LIST_MAX_PAGES``, or one repeating instead
++    of advancing, means the enumeration FAILED. Callers read absence from this
++    result, so handing back the partial set would retire a tool the server does
++    advertise, on a page the walk never reached.
++    """
++    names: set[str] = set()
++    cursor: str | None = None
++    seen: set[str] = set()
++    for _ in range(TOOL_LIST_MAX_PAGES):
++        result = await session.list_tools(cursor=cursor)
++        names.update(
++            str(getattr(tool, "name", "") or "")
++            for tool in getattr(result, "tools", [])
++        )
++        cursor = getattr(result, "nextCursor", None)
++        if not cursor:
++            names.discard("")
++            return names
++        if cursor in seen:
++            break
++        seen.add(cursor)
++    # Callers fail closed by swallowing this, so the log is the only trace.
++    logger.warning(
++        "tools/list did not finish within the %d-page guard; the listing is "
++        "incomplete, NOT evidence that a tool is absent",
++        TOOL_LIST_MAX_PAGES,
++    )
++    raise ToolListError(
++        f"tools/list did not terminate within {TOOL_LIST_MAX_PAGES} pages"
++    )
+diff --git a/src/lithos_lens/state.py b/src/lithos_lens/state.py
+index 7e1c8d0..76bc6f0 100644
+--- a/src/lithos_lens/state.py
++++ b/src/lithos_lens/state.py
+@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
+ 
+ LLMHealth = Literal["disabled", "ok", "error"]
+ 
++# How long a "the frontier tools are missing" verdict is trusted before Lens
++# probes for them again. Long enough that a genuinely pre-0.4 server is not
++# re-probed on every render (the PRD's reason for remembering the answer at
++# all), short enough that the verdict cannot become permanent: the same
++# symptom is produced by an outage or by the tools being withheld from this
++# client, and neither should cost the operator the graph surface until a
++# restart.
++GRAPH_REPROBE_INTERVAL_S = 300.0
++
+ 
+ @dataclass
+ class HealthSnapshot:
+@@ -44,6 +53,25 @@ class AppState:
+         )
+         self.health = HealthSnapshot(llm="disabled" if not config.llm.enabled else "ok")
+         self._last_health_probe_at = 0.0
++        # Task-graph feature detection (T1 story 27): when a frontier read
++        # fails because the TOOL is missing, the verdict is remembered until
++        # this deadline and then re-probed (see GRAPH_REPROBE_INTERVAL_S).
++        self._graph_unavailable_until = 0.0
++
++    @property
++    def graph_available(self) -> bool:
++        """Whether to attempt the task-graph frontier reads on this render.
++
++        False only inside the re-probe window opened by
++        :meth:`note_graph_unavailable`; the next render after it lapses probes
++        again, so an upgrade — or a transient failure that merely looked like
++        version skew — heals without a restart.
++        """
++        return monotonic() >= self._graph_unavailable_until
++
++    def note_graph_unavailable(self) -> None:
++        """Record that a probe found the frontier tools missing."""
++        self._graph_unavailable_until = monotonic() + GRAPH_REPROBE_INTERVAL_S
+ 
+     async def startup(self) -> None:
+         await self.lithos_client.startup()
+diff --git a/src/lithos_lens/static/lens.css b/src/lithos_lens/static/lens.css
+index 00b9fca..b8e118d 100644
+--- a/src/lithos_lens/static/lens.css
++++ b/src/lithos_lens/static/lens.css
+@@ -22,6 +22,12 @@ body {
+   background:
+     radial-gradient(circle at top left, rgba(189, 79, 43, 0.14), transparent 28rem),
+     linear-gradient(135deg, #f7f3ea 0%, #efe8d8 100%);
++  /* The body background propagates to the canvas, so a page shorter than the
++     viewport would TILE the gradient down it — visible banding under short
++     pages (a not-found note, or the "No tasks in this window" board). Cover
++     the viewport, and never repeat whatever is left. */
++  background-repeat: no-repeat;
++  min-height: 100vh;
+   color: var(--ink);
+   font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+ }
+@@ -131,6 +137,17 @@ h1 {
+   border-color: var(--warning-border);
+ }
+ 
++/* The "all systems healthy" stripe: the only positive banner, so it reads
++   green against the warning family it replaces. */
++.banner-healthy {
++  background: rgba(53, 106, 77, 0.08);
++  border-color: var(--ok);
++}
++
++.banner-healthy strong {
++  color: var(--ok);
++}
++
+ .banner span {
+   display: block;
+   margin-top: 0.25rem;
+@@ -197,11 +214,16 @@ h1 {
+   margin-bottom: 1.5rem;
+ }
+ 
++/* Card treatment for the surfaces that sit on the page wash. The just-created
++   strip is a sibling of the .task-group cards and needs the same treatment —
++   but only while it holds a row, or every ordinary render would carry an empty
++   card at the top of the board. */
+ .metric-card,
+ .panel,
+ .detail-panel,
+ .filter-bar,
+-.task-group {
++.task-group,
++.task-list-pending:not(:empty) {
+   background: rgba(255, 250, 240, 0.86);
+   border: 1px solid var(--line);
+   border-radius: 1.25rem;
+@@ -341,10 +363,20 @@ button,
+   gap: 1.25rem;
+ }
+ 
+-.task-group {
++.task-group,
++.task-list-pending:not(:empty) {
+   overflow: hidden;
+ }
+ 
++.task-board-empty {
++  padding: 2rem 1.25rem;
++  text-align: center;
++}
++
++.task-board-empty h2 {
++  margin: 0 0 0.5rem;
++}
++
+ .task-group > header {
+   align-items: center;
+   background: rgba(255, 246, 227, 0.8);
+@@ -591,6 +623,18 @@ button,
+   grid-column: 1 / -1;
+ }
+ 
++/* One claim, one chip: the same pill language as the blocker chips in the row
++   below and the claim/status chips beside them. Scoped away from the detail
++   page's claim-list-large, which keeps its larger bordered box. */
++.claim-list:not(.claim-list-large) span {
++  background: var(--panel-strong);
++  border: 1px solid var(--line);
++  border-radius: 999px;
++  font-size: 0.78rem;
++  line-height: 1;
++  padding: 0.35rem 0.55rem;
++}
++
+ .claim-list-large span {
+   background: var(--panel-strong);
+   border: 1px solid var(--line);
+diff --git a/src/lithos_lens/tasks.py b/src/lithos_lens/tasks.py
+index e66bcd7..c141c3d 100644
+--- a/src/lithos_lens/tasks.py
++++ b/src/lithos_lens/tasks.py
+@@ -13,7 +13,11 @@ TaskStatusName = Literal["open", "completed", "cancelled"]
+ # computed by joining the master open list against the Lithos ready/blocked
+ # frontier (see ``frontier.py``); ``unclassified`` only fills under frontier
+ # truncation. Completed/cancelled window recently-resolved work.
++# ``open`` is the flat-fallback section: it holds every open row when the
++# server has no ready/blocked frontier tools (pre-0.4 Lithos), in which case
++# the three workable sections stay empty. It is never populated alongside them.
+ SectionName = Literal[
++    "open",
+     "in_progress",
+     "ready",
+     "blocked",
+@@ -205,8 +209,50 @@ class DashboardData:
+     open_total: int
+     reconciliation_pending: bool = False
+     truncated: bool = False
++    # True when these filters hide part of the corpus from the sections, so
++    # every per-view signal below (truncation, reconciliation, claims-unknown,
++    # emptiness) describes the filtered subset rather than the whole system.
++    filters_narrowed: bool = False
++    # False when this Lithos has no ready/blocked frontier tools (pre-0.4):
++    # the open rows render in the flat ``open`` section behind the
++    # "graph features need Lithos >= 0.4" notice instead of Ready/Blocked.
++    graph_available: bool = True
++    # True when Lithos answered every read successfully and returned nothing
++    # for this view: no open tasks, and nothing resolved inside the ``since``
++    # window. Distinguishes "there is nothing here" from "your filters hid
++    # everything", which the per-section empty lines already say. Deliberately
++    # NOT a claim about the corpus — the terminal reads are windowed by
++    # ``since``, so work resolved before it is invisible to this flag and the
++    # panel it drives has to name the window.
++    nothing_to_show: bool = False
+     errors: tuple[str, ...] = ()
+ 
++    @property
++    def healthy(self) -> bool:
++        """True when this load carries no degraded signal to report.
++
++        Drives the "All systems healthy" stripe: every read succeeded, the
++        frontier was complete (no truncation) and self-consistent, claims came
++        back for every row, and the graph tools are present. T1-S3 extends this
++        with the needs-attention rules, whose emptiness is the other half of
++        the same statement.
++
++        Withheld on a narrowed view. Truncation, reconciliation and
++        claims-unknown are all measured over the rows the filters left, so on a
++        filtered board they cannot support the stripe's system-wide claim — a
++        ``?tag=`` in a shared link would otherwise turn a degraded system into
++        an affirmative "all healthy". The warning banners are per-view
++        statements and keep rendering under any filter.
++        """
++        return (
++            not self.filters_narrowed
++            and self.graph_available
++            and not self.errors
++            and not self.truncated
++            and not self.reconciliation_pending
++            and not self.sections.get("claims_unknown")
++        )
++
+ 
+ @dataclass(frozen=True)
+ class FindingView:
+@@ -558,6 +604,24 @@ def matches_filters(
+     return True
+ 
+ 
++def filters_narrow_the_board(filters: TaskFilters) -> bool:
++    """True when these filters hide part of the corpus from the sections.
++
++    The whole-system claims on the dashboard (the healthy stripe, the empty
++    corpus panel) are only sound on an unnarrowed board, because both the
++    section partition and the terminal reads are filtered by agent/tag/status.
++
++    ``since`` is deliberately not narrowing here: it windows only the resolved
++    completed/cancelled reads, which the empty-corpus copy names explicitly,
++    and the open reads every degraded signal derives from ignore it.
++    """
++    return (
++        bool(filters.tags)
++        or bool(filters.agent)
++        or set(filters.statuses) != set(TASK_STATUSES)
++    )
++
++
+ def int_stat(stats: dict[str, Any], key: str, *, default: int = 0) -> int:
+     value = stats.get(key, default)
+     return value if isinstance(value, int) else default
+diff --git a/src/lithos_lens/templates/tasks/dashboard.html b/src/lithos_lens/templates/tasks/dashboard.html
+index 5052349..7c2d1ce 100644
+--- a/src/lithos_lens/templates/tasks/dashboard.html
++++ b/src/lithos_lens/templates/tasks/dashboard.html
+@@ -31,22 +31,53 @@
+         </section>
+       {% endif %}
+ 
++      {# No ready/blocked frontier, so the board falls back to the flat 0.1.0
++         open list. Usually version skew — but the same symptom means an
++         outage or tools withheld from this client, so the copy says so and
++         the error banner above carries the machine-readable line. #}
++      {% if not dashboard.graph_available %}
++        <section class="banner banner-warning" role="status" data-graph-unavailable>
++          <strong>Graph features need Lithos 0.4 or newer.</strong>
++          <span>Lithos did not answer the ready/blocked frontier reads, so Lens is showing the flat open task list — no Ready, Blocked, gate, or blocker-chip detail. That usually means a server older than 0.4; it can also mean those tools are unavailable to this client. Lens re-checks periodically and the sections return with the frontier.</span>
++        </section>
++      {% endif %}
++
++      {# The positive counterpart of the banners above: every read landed, the
++         frontier was complete and self-consistent, claims came back for every
++         row. T1-S3 extends this with "nothing needs attention". #}
++      {% if dashboard.healthy and not dashboard.nothing_to_show %}
++        <section class="banner banner-healthy" role="status" data-healthy-stripe>
++          <strong>All systems healthy.</strong>
++          <span>Every open task is classified; no failed reads, truncated frontier, or unresolved frontier disagreement.</span>
++        </section>
++      {% endif %}
++
+       <section class="situation-grid" aria-label="Current situation">
+-        <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-in_progress">
+-          <span>In progress</span>
+-          <strong>{{ dashboard.summary.in_progress }}</strong>
+-          <small>{{ dashboard.summary.open_claims }} active claims</small>
+-        </a>
+-        <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-ready">
+-          <span>Ready</span>
+-          <strong>{{ dashboard.summary.ready }}</strong>
+-          <small>Unclaimed and workable now</small>
+-        </a>
+-        <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-blocked">
+-          <span>Blocked</span>
+-          <strong>{{ dashboard.summary.blocked }}</strong>
+-          <small>Waiting on predecessors or gates</small>
+-        </a>
++        {% if dashboard.graph_available %}
++          <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-in_progress">
++            <span>In progress</span>
++            <strong>{{ dashboard.summary.in_progress }}</strong>
++            <small>{{ dashboard.summary.open_claims }} active claims</small>
++          </a>
++          <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-ready">
++            <span>Ready</span>
++            <strong>{{ dashboard.summary.ready }}</strong>
++            <small>Unclaimed and workable now</small>
++          </a>
++          <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-blocked">
++            <span>Blocked</span>
++            <strong>{{ dashboard.summary.blocked }}</strong>
++            <small>Waiting on predecessors or gates</small>
++          </a>
++        {% else %}
++          {# No frontier: Ready/Blocked counts would be zeros dressed as facts,
++             so the flat fallback shows the one count it can stand behind. #}
++          <a class="metric-card" href="/tasks?status=open&since={{ dashboard.filters.since }}#task-group-open">
++            <span>Open tasks</span>
++            <strong>{{ dashboard.summary.open_total }}</strong>
++            <small>{{ dashboard.summary.open_claims }} active claims</small>
++          </a>
++        {% endif %}
+         <a class="metric-card" href="/tasks?status=completed&since={{ dashboard.filters.since }}">
+           <span>Recently completed</span>
+           <strong>{{ dashboard.summary.recent_completed }}</strong>
+@@ -54,7 +85,7 @@
+              matches_filters); the label must say so. Resolved-time windowing
+              is T1-S10, which should push lithos_task_list's native
+              resolved_since param instead of relabelling this one. #}
+-          <small>Created since {{ dashboard.filters.since }}</small>
++          <small>Created since {{ dashboard.filters.since | display_date }}</small>
+         </a>
+         <a class="metric-card" href="/tasks?status=cancelled&since={{ dashboard.filters.since }}">
+           <span>Recently cancelled</span>
+@@ -63,7 +94,7 @@
+              matches_filters); the label must say so. Resolved-time windowing
+              is T1-S10, which should push lithos_task_list's native
+              resolved_since param instead of relabelling this one. #}
+-          <small>Created since {{ dashboard.filters.since }}</small>
++          <small>Created since {{ dashboard.filters.since | display_date }}</small>
+         </a>
+         <article class="metric-card">
+           <span>Agents</span>
+@@ -128,6 +159,7 @@
+         "Not classified" (frontier truncation) appear only when they have rows.
+       #}
+       {% set section_labels = {
++        "open": "Open",
+         "in_progress": "In progress",
+         "ready": "Ready",
+         "blocked": "Blocked",
+@@ -137,21 +169,36 @@
+         "cancelled": "Cancelled",
+       } %}
+       {% set workable = ("in_progress", "ready", "blocked") %}
+-      {% set section_order = workable + ("claims_unknown", "unclassified", "completed", "cancelled") %}
++      {% set section_order = ("open",) + workable + ("claims_unknown", "unclassified", "completed", "cancelled") %}
+       <section class="task-board" aria-label="Task sections">
+         {# Skeleton strip for just-created tasks: a task.created event lands
+            here (tasks.js insertSkeletonRow) until the ~800ms reconciliation
+            re-renders the board with the task in its real section — a fresh
+            task's frontier membership is unknown until Lithos answers. #}
+         <div class="task-list task-list-pending" data-task-list="pending" aria-label="Just created, awaiting sections"></div>
++        {% if dashboard.nothing_to_show %}
++          {# Nothing came back for this view, and no tag/agent/status filter is
++             narrowing it, so the per-section "no tasks match these filters"
++             lines would misdescribe the cause. The heading is scoped to the
++             one filter still in play: work resolved before the `since` window
++             is invisible here, so this must not claim the tracker is empty. #}
++          <article class="task-group task-board-empty" data-empty-state="window">
++            <h2>No tasks in this window</h2>
++            <p class="empty">Lithos has no open tasks, and nothing was completed or cancelled since {{ dashboard.filters.since | display_date }}. Widen "Created since" to see work resolved before then; new tasks appear here as soon as an agent creates one.</p>
++          </article>
++        {% else %}
+         {% for section in section_order %}
+           {% set rows = dashboard.sections[section] %}
+           {% if section in ("completed", "cancelled") %}
+             {% set active = section in dashboard.filters.statuses %}
+           {% elif section in ("claims_unknown", "unclassified") %}
+             {% set active = "open" in dashboard.filters.statuses and rows %}
++          {% elif section == "open" %}
++            {# The flat fallback's only open section — it replaces the workable
++               three rather than joining them. #}
++            {% set active = "open" in dashboard.filters.statuses and not dashboard.graph_available %}
+           {% else %}
+-            {% set active = "open" in dashboard.filters.statuses %}
++            {% set active = "open" in dashboard.filters.statuses and dashboard.graph_available %}
+           {% endif %}
+           {% if active %}
+             <article class="task-group" id="task-group-{{ section }}" data-task-group="{{ section }}">
+@@ -172,6 +219,7 @@
+             </article>
+           {% endif %}
+         {% endfor %}
++        {% endif %}
+       </section>
+     </div>
+ 
+diff --git a/src/lithos_lens/web.py b/src/lithos_lens/web.py
+index 94c5737..4f2794d 100644
+--- a/src/lithos_lens/web.py
++++ b/src/lithos_lens/web.py
+@@ -40,7 +40,7 @@ from lithos_lens.lithos_client import (
+     LithosClientProtocol,
+     LithosToolError,
+ )
+-from lithos_lens.state import AppState
++from lithos_lens.state import GRAPH_REPROBE_INTERVAL_S, AppState
+ from lithos_lens.tasks import (
+     default_since,
+     find_task,
+@@ -409,11 +409,25 @@ async def _render_tasks(
+                 "frontier_limit": state.config.tasks.frontier_limit,
+             },
+         )
++        probed_graph = state.graph_available
+         dashboard = await load_dashboard(
+             state.lithos_client,
+             filters=filters,
+             frontier_limit=state.config.tasks.frontier_limit,
++            graph_available=probed_graph,
+         )
++        if probed_graph and not dashboard.graph_available:
++            # Only a render that actually PROBED may (re-)open the window;
++            # re-arming it from a cached verdict would make the fallback
++            # permanent again. The warning is per probe, not per request, so
++            # the log shows how long the frontier has really been gone.
++            logger.warning(
++                "Lithos did not answer the task-graph frontier reads; serving "
++                "the flat task list and re-probing in %ss (graph features need "
++                "Lithos >= 0.4, or the tools are unavailable to this client)",
++                GRAPH_REPROBE_INTERVAL_S,
++            )
++            state.note_graph_unavailable()
+         logger.debug(
+             "tasks dashboard loaded",
+             extra={
+@@ -428,6 +442,8 @@ async def _render_tasks(
+                     section: len(rows) for section, rows in dashboard.sections.items()
+                 },
+                 "truncated": dashboard.truncated,
++                "graph_available": dashboard.graph_available,
++                "nothing_to_show": dashboard.nothing_to_show,
+                 "errors": list(dashboard.errors),
+             },
+         )
+diff --git a/tests/test_common_core.py b/tests/test_common_core.py
+index bb45004..561cbb1 100644
+--- a/tests/test_common_core.py
++++ b/tests/test_common_core.py
+@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
+ 
+ from lithos_lens.config import load_config
+ from lithos_lens.errors import ConfigError
++from lithos_lens.fake_lithos import FAKE_TOOL_NAMES
+ from lithos_lens.knowledge import RelatedNeighborhood, SearchResult
+ from lithos_lens.lithos_client import LithosHealth, LithosToolError
+ from lithos_lens.logging import JsonFormatter
+@@ -43,6 +44,9 @@ class RecordingLithosClient:
+         self.register_calls += 1
+         return True
+ 
++    async def list_tool_names(self) -> set[str]:
++        return set(FAKE_TOOL_NAMES)
++
+     async def list_tasks(
+         self,
+         *,
+diff --git a/tests/test_frontier.py b/tests/test_frontier.py
+index 51623c8..9433c1f 100644
+--- a/tests/test_frontier.py
++++ b/tests/test_frontier.py
+@@ -14,9 +14,17 @@ from typing import Any
+ 
+ import pytest
+ 
+-from lithos_lens.frontier import classify_open_tasks, load_dashboard
++from lithos_lens.frontier import (
++    BLOCKED_TOOL,
++    READY_TOOL,
++    classify_open_tasks,
++    load_dashboard,
++)
++from lithos_lens.lithos_client import LithosToolError
++from lithos_lens.lithos_tools import ToolListError
+ from lithos_lens.task_graph import BlockedTaskRecord, BlockerRecord
+ from lithos_lens.tasks import (
++    TASK_STATUSES,
+     AgentRecord,
+     ClaimRecord,
+     SectionName,
+@@ -189,6 +197,10 @@ class _FrontierFake:
+         completed: list[TaskRecord] | None = None,
+         cancelled: list[TaskRecord] | None = None,
+         fail_ready: bool = False,
++        ready_error: BaseException | None = None,
++        blocked_error: BaseException | None = None,
++        tool_names: set[str] | None = None,
++        tool_list_error: BaseException | None = None,
+     ) -> None:
+         self._open_seq = self._as_sequence(open_tasks)
+         self._ready_seq = self._as_sequence(ready)
+@@ -196,6 +208,20 @@ class _FrontierFake:
+         self._completed = completed or []
+         self._cancelled = cancelled or []
+         self._fail_ready = fail_ready
++        # Per-tool frontier failures: version-skew detection is anchored to the
++        # tool whose call failed, so the two are scripted separately.
++        self._ready_error = ready_error
++        self._blocked_error = blocked_error
++        # What a tools/list probe sees — the ONLY input to the fallback
++        # verdict. Defaults to a graph-capable server; ``tool_list_error``
++        # models a listing Lens cannot make.
++        self._tool_names = (
++            {READY_TOOL, BLOCKED_TOOL, "lithos_task_list"}
++            if tool_names is None
++            else tool_names
++        )
++        self._tool_list_error = tool_list_error
++        self.tool_list_calls = 0
+         self.open_calls = 0
+         self.ready_calls = 0
+         self.blocked_calls = 0
+@@ -241,6 +267,9 @@ class _FrontierFake:
+     ) -> list[TaskRecord]:
+         if self._fail_ready:
+             raise RuntimeError("ready frontier unavailable")
++        if self._ready_error is not None:
++            self.ready_calls += 1
++            raise self._ready_error
+         index = min(self.ready_calls, len(self._ready_seq) - 1)
+         self.ready_calls += 1
+         rows = self._ready_seq[index]
+@@ -253,11 +282,20 @@ class _FrontierFake:
+         project: str | None = None,
+         tags: list[str] | None = None,
+     ) -> list[BlockedTaskRecord]:
++        if self._blocked_error is not None:
++            self.blocked_calls += 1
++            raise self._blocked_error
+         index = min(self.blocked_calls, len(self._blocked_seq) - 1)
+         self.blocked_calls += 1
+         rows = self._blocked_seq[index]
+         return rows[:limit] if limit is not None else rows
+ 
++    async def list_tool_names(self) -> set[str]:
++        self.tool_list_calls += 1
++        if self._tool_list_error is not None:
++            raise self._tool_list_error
++        return set(self._tool_names)
++
+     async def stats(self) -> dict[str, Any]:
+         return {"open_claims": 2, "agents": 3}
+ 
+@@ -612,3 +650,394 @@ def test_overlap_row_with_unknown_claims_stays_in_claims_unknown() -> None:
+     assert _section_ids(data.sections, "ready") == []
+     assert _section_ids(data.sections, "blocked") == []
+     assert data.reconciliation_pending is False
++
++
++# --- T1 slice 12: empty/degraded states -------------------------------------
++
++
++def _tool_missing(tool: str) -> LithosToolError:
++    """The error a server raises for a tool it does not have.
++
++    Detection never reads this text (see ``frontier_tools_absent``) — the fakes
++    raise it only because a real pre-0.4 server would.
++    """
++    return LithosToolError(f"Unknown tool: {tool}", code="tool_error")
++
++
++# A tools/list surface without the two frontier tools: a pre-0.4 Lithos.
++_PRE_GRAPH_TOOLS = {"lithos_task_list", "lithos_stats"}
++
++
++def test_error_text_alone_never_retires_the_graph_surface() -> None:
++    """Regression (security f-001): the fallback verdict comes from
++    ``tools/list`` only. A server whose error text quotes agent-authored task
++    data — naming BOTH frontier tools, in the exact shape the old substring
++    matcher accepted — must not be able to switch the graph sections off while
++    the server still advertises them."""
++    planted = LithosToolError(
++        "Output validation error: tasks.0.title 'unknown tool lithos_task_ready "
++        "lithos_task_blocked cleanup' failed",
++        code="tool_error",
++    )
++    fake = _FrontierFake(
++        open_tasks=[_task("r", claims=())],
++        ready=[],
++        blocked=[],
++        ready_error=planted,
++        blocked_error=planted,
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    # The server's own tool list still names both tools, so this is an outage.
++    assert fake.tool_list_calls == 1
++    assert data.graph_available is True
++    assert _section_ids(data.sections, "open") == []
++    assert any("ready frontier" in message for message in data.errors)
++
++
++def test_unlistable_tools_are_never_read_as_absent() -> None:
++    """A tools/list Lens could not make says nothing about the server, so the
++    graph surface survives — absence must never be inferred from failure."""
++    fake = _FrontierFake(
++        open_tasks=[_task("r", claims=())],
++        ready=[],
++        blocked=[],
++        ready_error=_tool_missing(READY_TOOL),
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++        tool_list_error=RuntimeError("session is not available"),
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.graph_available is True
++    assert any("ready frontier" in message for message in data.errors)
++
++
++def test_truncated_tool_listing_does_not_retire_the_graph_surface() -> None:
++    """Regression (correctness f-002 / security f-004): a listing stopped by
++    the page guard is incomplete, not evidence of absence — the graph surface
++    survives it. ``collect_tool_names`` raises rather than returning the
++    partial set precisely so this path is reachable."""
++    fake = _FrontierFake(
++        open_tasks=[_task("r", claims=())],
++        ready=[],
++        blocked=[],
++        ready_error=_tool_missing(READY_TOOL),
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++        tool_list_error=ToolListError("tools/list did not terminate"),
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.graph_available is True
++    assert _section_ids(data.sections, "open") == []
++    assert any("ready frontier" in message for message in data.errors)
++
++
++def test_empty_tool_list_is_not_evidence_of_absence() -> None:
++    """A server advertising no tools at all is broken, not old."""
++    fake = _FrontierFake(
++        open_tasks=[_task("r", claims=())],
++        ready=[],
++        blocked=[],
++        ready_error=_tool_missing(READY_TOOL),
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++        tool_names=set(),
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.graph_available is True
++
++
++def test_half_a_frontier_is_an_outage_not_version_skew() -> None:
++    """A server exposing exactly one of the pair is broken rather than old:
++    the graph surface stays up and the failure is reported."""
++    fake = _FrontierFake(
++        open_tasks=[_task("r", claims=())],
++        ready=[],
++        blocked=[],
++        ready_error=_tool_missing(READY_TOOL),
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++        tool_names=_PRE_GRAPH_TOOLS | {BLOCKED_TOOL},
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.graph_available is True
++    assert any("frontier" in message for message in data.errors)
++
++
++def test_one_failing_frontier_read_does_not_probe_the_tool_list() -> None:
++    """Only a DOUBLE failure is suspicious enough to spend a round trip; a
++    single failed read is an ordinary error."""
++    ready = _task("r", claims=())
++    fake = _FrontierFake(
++        open_tasks=[ready],
++        ready=[ready],
++        blocked=[],
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert fake.tool_list_calls == 0
++    assert data.graph_available is True
++    assert any("blocked frontier" in message for message in data.errors)
++
++
++def test_missing_frontier_tools_fall_back_to_the_flat_open_section() -> None:
++    """Story 27: a Lithos without the frontier tools degrades to the flat
++    0.1.0 open list — every open row in one section, the workable three empty,
++    and ``graph_available=False`` so the caller can render the version notice
++    and remember the answer."""
++    claimed = _task("c", claims=(ClaimRecord(agent="a", aspect="impl"),))
++    unclaimed = _task("u", claims=())
++    fake = _FrontierFake(
++        open_tasks=[claimed, unclaimed],
++        ready=[],
++        blocked=[],
++        ready_error=_tool_missing(READY_TOOL),
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++        tool_names=_PRE_GRAPH_TOOLS,
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.graph_available is False
++    assert fake.tool_list_calls == 1
++    assert _section_ids(data.sections, "open") == ["c", "u"]
++    assert _section_ids(data.sections, "in_progress") == []
++    assert _section_ids(data.sections, "ready") == []
++    assert _section_ids(data.sections, "blocked") == []
++    assert _section_ids(data.sections, "unclassified") == []
++    assert data.summary.open_total == 2
++    # The fallback is never silent (security f-001): the same symptom is an
++    # outage or an authorization filter, so it stays on the error channel.
++    assert any("frontier tools" in message for message in data.errors)
++    assert data.healthy is False
++    # There is no frontier left to truncate or reconcile.
++    assert data.truncated is False
++    assert data.reconciliation_pending is False
++    # Claims still render — they come from the master open list.
++    assert data.sections["open"][0].claims[0].agent == "a"
++    assert data.sections["open"][1].claim_state == "known_unclaimed"
++    # No retry: there is nothing to reconcile.
++    assert fake.ready_calls == 1
++
++
++def test_flat_fallback_keeps_the_claims_unknown_contract() -> None:
++    """A server old enough to lack the frontier tools may also ignore
++    ``with_claims``; a row whose claims came back None must still read
++    "claims unknown", never a confident "unclaimed"."""
++    fake = _FrontierFake(
++        open_tasks=[_task("u", claims=None)],
++        ready=[],
++        blocked=[],
++        ready_error=_tool_missing(READY_TOOL),
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++        tool_names=_PRE_GRAPH_TOOLS,
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    (row,) = data.sections["open"]
++    assert row.claim_state == "unknown"
++
++
++def test_known_missing_frontier_skips_the_frontier_calls() -> None:
++    """``graph_available=False`` from the caller (the process probed recently
++    and found the tools missing) skips both frontier reads instead of buying
++    two guaranteed failures per render."""
++    fake = _FrontierFake(
++        open_tasks=[_task("u", claims=())],
++        ready=[],
++        blocked=[],
++        ready_error=_tool_missing(READY_TOOL),
++        blocked_error=_tool_missing(BLOCKED_TOOL),
++        tool_names=_PRE_GRAPH_TOOLS,
++    )
++
++    data = asyncio.run(
++        load_dashboard(
++            fake, filters=_FILTERS, frontier_limit=500, graph_available=False
++        )
++    )
++
++    assert fake.ready_calls == 0
++    assert fake.blocked_calls == 0
++    assert fake.tool_list_calls == 0
++    assert data.graph_available is False
++    assert _section_ids(data.sections, "open") == ["u"]
++    # Regression (security f-001): the degraded state is reported on EVERY
++    # render it applies to, not only on the one that discovered it — otherwise
++    # most refreshes inside the re-probe window show no error at all.
++    assert any("frontier tools" in message for message in data.errors)
++
++
++def test_frontier_outage_keeps_the_error_banner_and_the_graph_surface() -> None:
++    """The fallback is for missing tools only: a frontier read that fails for
++    any other reason stays an error (banner + unclassified rows), because
++    blanking Ready/Blocked on a transient outage would hide a real problem
++    behind a "your Lithos is too old" story."""
++    fake = _FrontierFake(
++        open_tasks=[_task("r", claims=())],
++        ready=[],
++        blocked=[],
++        ready_error=RuntimeError("connection reset"),
++        blocked_error=RuntimeError("connection reset"),
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.graph_available is True
++    assert _section_ids(data.sections, "open") == []
++    assert _section_ids(data.sections, "unclassified") == ["r"]
++    assert any("ready frontier" in message for message in data.errors)
++    assert data.healthy is False
++
++
++def test_empty_corpus_is_flagged_when_lithos_returns_nothing() -> None:
++    """All reads succeeded and Lithos has nothing at all: the board says "no
++    tasks yet" rather than the per-section "nothing matched these filters"."""
++    fake = _FrontierFake(open_tasks=[], ready=[], blocked=[])
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.nothing_to_show is True
++    assert data.open_total == 0
++    assert data.healthy is True
++
++
++def test_filters_hiding_every_row_is_not_an_empty_corpus() -> None:
++    """nothing_to_show is measured on the RAW responses: a filter that hides
++    every row leaves the corpus non-empty, so the operator is told their
++    filters matched nothing instead of that Lithos is empty."""
++    fake = _FrontierFake(
++        open_tasks=[_task("r", claims=(), tags=("project:a",))],
++        ready=[_task("r", claims=(), tags=("project:a",))],
++        blocked=[],
++    )
++    filters = TaskFilters(statuses=("open",), tags=("project:b",), agent="", since="")
++
++    data = asyncio.run(load_dashboard(fake, filters=filters, frontier_limit=500))
++
++    assert data.nothing_to_show is False
++    assert data.open_total == 0
++
++
++@pytest.mark.parametrize(
++    "filters",
++    [
++        TaskFilters(statuses=TASK_STATUSES, tags=("project:b",), agent="", since=""),
++        TaskFilters(statuses=TASK_STATUSES, tags=(), agent="someone-else", since=""),
++    ],
++)
++def test_terminal_only_corpus_hidden_by_a_filter_is_not_empty(
++    filters: TaskFilters,
++) -> None:
++    """Regression (correctness f-001): the terminal reads push agent/tags
++    UPSTREAM, so when every existing task is completed/cancelled a filter that
++    excludes them empties every response. That is a filter result, not an empty
++    corpus, and must not render as "no tasks yet"."""
++    done = TaskRecord(
++        id="d",
++        title="Done",
++        status="completed",
++        task_type="task",
++        created_by="someone",
++        tags=("project:a",),
++    )
++    fake = _FrontierFake(open_tasks=[], ready=[], blocked=[], completed=[done])
++
++    data = asyncio.run(load_dashboard(fake, filters=filters, frontier_limit=500))
++
++    # The filtered reads came back empty…
++    assert _section_ids(data.sections, "completed") == []
++    # …but the corpus is not known to be empty, so the panel stays away.
++    assert data.nothing_to_show is False
++
++
++def test_terminal_rows_alone_are_not_an_empty_corpus() -> None:
++    """Open is empty but something resolved in the window — there IS work to
++    show, so the empty-corpus panel must not claim otherwise."""
++    done = TaskRecord(id="d", title="Done", status="completed", task_type="task")
++    fake = _FrontierFake(open_tasks=[], ready=[], blocked=[], completed=[done])
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.nothing_to_show is False
++    assert _section_ids(data.sections, "completed") == ["d"]
++
++
++def test_failed_read_is_never_reported_as_an_empty_corpus() -> None:
++    """An outage empties the open snapshot too; "no tasks yet" would be a lie,
++    so any recorded error rules the empty-corpus panel out."""
++    fake = _FrontierFake(open_tasks=[], ready=[], blocked=[], fail_ready=True)
++
++    data = asyncio.run(load_dashboard(fake, filters=_FILTERS, frontier_limit=500))
++
++    assert data.errors
++    assert data.nothing_to_show is False
++
++
++def test_healthy_is_false_while_a_degraded_signal_is_live() -> None:
++    """The healthy stripe is the claim "nothing is wrong": truncation,
++    reconciliation, failed reads, and unknown claims each falsify it."""
++    r1 = _task("r1", claims=())
++    r2 = _task("r2", claims=())
++    truncated = asyncio.run(
++        load_dashboard(
++            _FrontierFake(open_tasks=[r1, r2], ready=[r1, r2], blocked=[]),
++            filters=_FILTERS,
++            frontier_limit=1,
++        )
++    )
++    assert truncated.truncated is True
++    assert truncated.healthy is False
++
++    unknown_claims = asyncio.run(
++        load_dashboard(
++            _FrontierFake(open_tasks=[_task("u", claims=None)], ready=[], blocked=[]),
++            filters=_FILTERS,
++            frontier_limit=500,
++        )
++    )
++    assert unknown_claims.sections["claims_unknown"]
++    assert unknown_claims.healthy is False
++
++    healthy = asyncio.run(
++        load_dashboard(
++            _FrontierFake(open_tasks=[r1], ready=[r1], blocked=[]),
++            filters=_FILTERS,
++            frontier_limit=500,
++        )
++    )
++    assert healthy.healthy is True
++
++
++@pytest.mark.parametrize(
++    "filters",
++    [
++        TaskFilters(statuses=TASK_STATUSES, tags=("project:nope",), agent="", since=""),
++        TaskFilters(statuses=TASK_STATUSES, tags=(), agent="nobody", since=""),
++        TaskFilters(statuses=("completed",), tags=(), agent="", since=""),
++    ],
++)
++def test_healthy_is_withheld_on_a_narrowed_board(filters: TaskFilters) -> None:
++    """Regression (security f-002): truncation, reconciliation and
++    claims-unknown are all measured over the rows the filters left, so on a
++    narrowed board they cannot support the stripe's system-wide claim. The
++    degraded signal here (claims never returned) is real but filtered out of
++    view — the stripe must not turn that into "all systems healthy"."""
++    fake = _FrontierFake(
++        open_tasks=[_task("u", claims=None, tags=("project:a",))],
++        ready=[],
++        blocked=[],
++    )
++
++    data = asyncio.run(load_dashboard(fake, filters=filters, frontier_limit=500))
++
++    assert data.filters_narrowed is True
++    assert data.healthy is False
+diff --git a/tests/test_knowledge_related.py b/tests/test_knowledge_related.py
+index 06626a0..735eb58 100644
+--- a/tests/test_knowledge_related.py
++++ b/tests/test_knowledge_related.py
+@@ -16,6 +16,7 @@ from lithos_lens.config import (
+     LithosConfig,
+     load_config,
+ )
++from lithos_lens.fake_lithos import FAKE_TOOL_NAMES
+ from lithos_lens.knowledge import (
+     RELATED_RENDER_CAP,
+     RelatedNeighborhood,
+@@ -69,6 +70,9 @@ class KnowledgeFakeLithosClient:
+     async def register_agent(self) -> bool:
+         return True
+ 
++    async def list_tool_names(self) -> set[str]:
++        return set(FAKE_TOOL_NAMES)
++
+     async def read_note(
+         self, knowledge_id: str, *, max_length: int | None = None
+     ) -> NoteRecord | None:
+diff --git a/tests/test_tasks_graph_reads.py b/tests/test_tasks_graph_reads.py
+index abe8373..1ebcc6d 100644
+--- a/tests/test_tasks_graph_reads.py
++++ b/tests/test_tasks_graph_reads.py
+@@ -11,13 +11,20 @@ emits exactly ``{kind, task_id, type, status, message}``.
+ from __future__ import annotations
+ 
+ import asyncio
++from time import monotonic
+ from types import SimpleNamespace
+-from typing import Any
++from typing import Any, cast
+ 
+ import pytest
+ 
+ from lithos_lens.config import LithosConfig
++from lithos_lens.frontier import frontier_tools_absent
+ from lithos_lens.lithos_client import LithosClient, LithosToolError
++from lithos_lens.lithos_tools import (
++    TOOL_LIST_MAX_PAGES,
++    ToolListError,
++    collect_tool_names,
++)
+ from lithos_lens.task_graph import (
+     BlockedTaskRecord,
+     BlockerRecord,
+@@ -473,3 +480,116 @@ def test_task_edge_list_sends_direction_and_types_and_normalizes() -> None:
+         "lithos_task_edge_list",
+         {"task_id": "g-1", "direction": "outgoing", "types": ["waits_on_gate"]},
+     )
++
++
++# --- Tool-surface probe (feature detection) --------------------------------
++#
++# ``collect_tool_names`` answers "does this Lithos advertise <tool>", and
++# ``frontier_tools_absent`` reads ABSENCE from it — so an incomplete walk must
++# never be handed back as if it were the whole listing.
++
++
++class _PagedSession:
++    """Fake MCP session serving tools/list in cursor-linked pages."""
++
++    def __init__(self, pages: dict[str | None, tuple[list[str], str | None]]) -> None:
++        self._pages = pages
++        self.cursors_seen: list[str | None] = []
++
++    async def list_tools(self, cursor: str | None = None) -> SimpleNamespace:
++        self.cursors_seen.append(cursor)
++        names, next_cursor = self._pages[cursor]
++        return SimpleNamespace(
++            tools=[SimpleNamespace(name=name) for name in names],
++            nextCursor=next_cursor,
++        )
++
++
++def test_collect_tool_names_follows_cursors_to_the_end() -> None:
++    session = _PagedSession(
++        {
++            None: (["lithos_task_list"], "page-2"),
++            "page-2": (["lithos_task_ready", "lithos_task_blocked"], None),
++        }
++    )
++
++    names = asyncio.run(collect_tool_names(session))
++
++    assert names == {"lithos_task_list", "lithos_task_ready", "lithos_task_blocked"}
++    assert session.cursors_seen == [None, "page-2"]
++
++
++def test_tools_past_the_page_guard_raise_instead_of_reading_as_absent() -> None:
++    """Regression (correctness f-002 / security f-004): a walk stopped by the
++    page guard is a FAILED enumeration. Returning the partial set would let a
++    paginating gateway — frontier tools sitting one page past the guard —
++    retire the graph surface on a server that advertises them."""
++    pages: dict[str | None, tuple[list[str], str | None]] = {
++        None: (["tool-0"], "page-1"),
++    }
++    for page in range(1, TOOL_LIST_MAX_PAGES):
++        pages[f"page-{page}"] = ([f"tool-{page}"], f"page-{page + 1}")
++    # The page the guard never reaches — where the frontier tools live.
++    pages[f"page-{TOOL_LIST_MAX_PAGES}"] = (
++        ["lithos_task_ready", "lithos_task_blocked"],
++        None,
++    )
++    session = _PagedSession(pages)
++
++    with pytest.raises(ToolListError):
++        asyncio.run(collect_tool_names(session))
++
++    # It walked right up to the guard — the cursor was still pending there.
++    assert len(session.cursors_seen) == TOOL_LIST_MAX_PAGES
++
++
++def test_frontier_probe_answers_not_absent_when_the_walk_is_truncated() -> None:
++    """The review's f-004 reproduction, end to end: with the frontier tools on
++    the page after the guard, the probe must answer "not absent" (False) so the
++    graph surface survives — the old collector returned the partial set and the
++    probe answered True on a server that advertises both tools."""
++    pages: dict[str | None, tuple[list[str], str | None]] = {
++        None: (["tool-0"], "page-1"),
++    }
++    for page in range(1, TOOL_LIST_MAX_PAGES):
++        pages[f"page-{page}"] = ([f"tool-{page}"], f"page-{page + 1}")
++    pages[f"page-{TOOL_LIST_MAX_PAGES}"] = (
++        ["lithos_task_ready", "lithos_task_blocked"],
++        None,
++    )
++
++    class _ProbeOnlyClient:
++        async def list_tool_names(self) -> set[str]:
++            return await collect_tool_names(_PagedSession(pages))
++
++    assert asyncio.run(frontier_tools_absent(cast(Any, _ProbeOnlyClient()))) is False
++
++
++def test_a_cursor_that_never_advances_raises() -> None:
++    """A server repeating its cursor never terminates; stop at the repeat
++    rather than spending the whole guard, and still report failure."""
++    session = _PagedSession(
++        {None: (["tool-a"], "stuck"), "stuck": (["tool-b"], "stuck")}
++    )
++
++    with pytest.raises(ToolListError):
++        asyncio.run(collect_tool_names(session))
++
++    assert session.cursors_seen == [None, "stuck"]
++
++
++def test_list_tool_names_does_not_wait_for_a_missing_session() -> None:
++    """Regression (security f-005): the probe runs after other reads have
++    already failed, so it asks only whether a session exists RIGHT NOW. Waiting
++    the full session timeout again would double the hold time of an
++    unauthenticated /tasks request whenever the MCP session is down."""
++    client = LithosClient(LithosConfig())
++
++    started = monotonic()
++    with pytest.raises(LithosToolError):
++        _run(client, client.list_tool_names())
++    elapsed = monotonic() - started
++
++    # The waiting path is 5s (_SESSION_WAIT_TIMEOUT_S); this one must not wait
++    # at all. A generous bound keeps the assertion about behaviour, not speed.
++    assert elapsed < 1.0
+diff --git a/tests/test_tasks_mvp.py b/tests/test_tasks_mvp.py
+index 5bc09ef..a878351 100644
+--- a/tests/test_tasks_mvp.py
++++ b/tests/test_tasks_mvp.py
+@@ -10,7 +10,9 @@ from typing import Any
+ import pytest
+ from fastapi.testclient import TestClient
+ 
++from lithos_lens import state
+ from lithos_lens.config import load_config
++from lithos_lens.fake_lithos import FAKE_TOOL_NAMES
+ from lithos_lens.knowledge import RelatedNeighborhood, SearchResult
+ from lithos_lens.lithos_client import LithosHealth, LithosToolError
+ from lithos_lens.task_graph import BlockedTaskRecord, BlockerRecord, EdgeRecord
+@@ -38,6 +40,10 @@ class TaskFakeLithosClient:
+         self.visible_failures = visible_failures
+         self.ignore_tags = ignore_tags
+         self.closed = False
++        # What a tools/list probe sees. Feature detection reads THIS, never
++        # error text, so a test models a pre-0.4 server by removing the two
++        # frontier tools from the set.
++        self.tool_names: set[str] = set(FAKE_TOOL_NAMES)
+         self.register_calls = 0
+         self.status_calls: list[str] = []
+         self.list_calls: list[dict[str, Any]] = []
+@@ -122,6 +128,10 @@ class TaskFakeLithosClient:
+         self.register_calls += 1
+         return True
+ 
++    async def list_tool_names(self) -> set[str]:
++        """The graph-capable tool surface, unless a test narrows it."""
++        return set(self.tool_names)
++
+     async def list_tasks(
+         self,
+         *,
+@@ -850,3 +860,323 @@ def test_terminal_card_labels_match_the_created_windowing(
+     # …so the cards must describe the filter that actually applies.
+     assert "Created since" in response.text
+     assert "Resolved since" not in response.text
++
++
++# --- T1 slice 12: empty/degraded states -------------------------------------
++
++
++class NoFrontierClient(TaskFakeLithosClient):
++    """A pre-0.4 Lithos: the task-graph frontier tools do not exist.
++
++    Both halves of that server are modelled: the calls fail (MCP answers an
++    unknown tool with an error result), and — the part detection actually
++    reads — ``tools/list`` does not name them.
++    """
++
++    def __init__(self, **kwargs: Any) -> None:
++        super().__init__(**kwargs)
++        self.frontier_calls = 0
++        self.tool_names -= {"lithos_task_ready", "lithos_task_blocked"}
++
++    async def task_ready(self, **kwargs: Any) -> list[TaskRecord]:
++        self.frontier_calls += 1
++        raise LithosToolError("Unknown tool: lithos_task_ready", code="tool_error")
++
++    async def task_blocked(self, **kwargs: Any) -> list[BlockedTaskRecord]:
++        self.frontier_calls += 1
++        raise LithosToolError("Unknown tool: lithos_task_blocked", code="tool_error")
++
++
++def test_dashboard_falls_back_to_flat_list_when_frontier_tools_are_missing(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Story 27: version skew degrades instead of breaking — the flat 0.1.0
++    open list plus a notice naming the version that restores the graph."""
++    fake = NoFrontierClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?since=2026-04-01")
++
++    assert response.status_code == 200
++    assert "Graph features need Lithos 0.4 or newer" in response.text
++    assert "data-graph-unavailable" in response.text
++    # One flat Open section carrying every open row…
++    assert 'data-task-group="open"' in response.text
++    assert "Claimed open task" in response.text
++    assert "Unclaimed open task" in response.text
++    assert "Old open task" in response.text
++    # …instead of the graph sections, which have nothing to say here.
++    assert 'data-task-group="ready"' not in response.text
++    assert 'data-task-group="blocked"' not in response.text
++    assert 'data-task-group="in_progress"' not in response.text
++    # The counters follow: no Ready/Blocked cards, one Open tasks count.
++    assert "#task-group-ready" not in response.text
++    assert "Open tasks" in response.text
++    # The fallback is never silent: the same symptom is an outage or an
++    # authorization filter, so the condition stays on the error channel for the
++    # operator and for log-based monitoring (security f-001).
++    assert "Some task data could not be loaded" in response.text
++    assert "frontier tools are unavailable" in response.text
++    assert "data-healthy-stripe" not in response.text
++    # Terminal sections are unaffected (lithos_task_list predates the graph).
++    assert "Recently completed task" in response.text
++
++
++def test_flat_fallback_is_remembered_and_stops_probing_the_frontier(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Feature detection is a fact about the server build, so it is answered
++    once per process: later renders skip both frontier calls rather than buying
++    two guaranteed failures each."""
++    fake = NoFrontierClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        first = client.get("/tasks")
++        calls_after_first = fake.frontier_calls
++        second = client.get("/tasks")
++
++    assert first.status_code == 200
++    assert second.status_code == 200
++    assert calls_after_first > 0
++    assert fake.frontier_calls == calls_after_first
++    # The fallback still renders on the remembered answer…
++    assert "Graph features need Lithos 0.4 or newer" in second.text
++    assert 'data-task-group="open"' in second.text
++    # …and still reports itself (security f-001): a degraded state that shows
++    # its error only on the render that discovered it is invisible to most
++    # refreshes inside the re-probe window.
++    assert "frontier tools are unavailable" in first.text
++    assert "frontier tools are unavailable" in second.text
++
++
++def test_dashboard_renders_empty_state_when_lithos_has_no_tasks(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Empty corpus: every read succeeded and returned nothing. The board says
++    so once, instead of repeating "nothing matched these filters" per section —
++    a claim about filters that were never the reason."""
++    fake = TaskFakeLithosClient()
++    fake.tasks = []
++    fake.ready_ids = set()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?since=2026-04-01")
++
++    assert response.status_code == 200
++    assert 'data-empty-state="window"' in response.text
++    assert "No tasks in this window" in response.text
++    assert "match these filters" not in response.text
++    # The live-update strip stays, so a task.created event still has somewhere
++    # to land without a reload.
++    assert 'data-task-list="pending"' in response.text
++
++
++def test_empty_filter_result_keeps_the_per_section_message(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The mirror image: Lithos has tasks, the filter hides them all. That is a
++    filter story, not an empty corpus, and must not read as "no tasks yet"."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?tag=project:nope&since=2026-04-01")
++
++    assert response.status_code == 200
++    assert 'data-empty-state="window"' not in response.text
++    assert "No ready tasks match these filters" in response.text
++
++
++def test_dashboard_renders_healthy_stripe_when_nothing_is_degraded(
++    lithos_lens_config_env: Path,
++) -> None:
++    """The positive branch: every read landed, the frontier was complete and
++    self-consistent, claims came back for every row."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?since=2026-04-01")
++
++    assert response.status_code == 200
++    assert "data-healthy-stripe" in response.text
++    assert "All systems healthy" in response.text
++    assert "Some task data could not be loaded" not in response.text
++
++
++def test_healthy_stripe_disappears_when_a_read_fails(
++    lithos_lens_config_env: Path,
++) -> None:
++    """A degraded load must never also claim to be healthy."""
++
++    class FailingStatsClient(TaskFakeLithosClient):
++        async def stats(self) -> dict[str, Any]:
++            raise RuntimeError("stats unavailable")
++
++    fake = FailingStatsClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?since=2026-04-01")
++
++    assert response.status_code == 200
++    assert "Some task data could not be loaded" in response.text
++    assert "data-healthy-stripe" not in response.text
++
++
++def test_dashboard_hides_the_board_when_lithos_is_unreachable(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Lithos unreachable: the banner and the service-status grid replace the
++    board entirely — no sections, no empty state pretending the corpus is
++    empty, and no counts Lens cannot stand behind."""
++    fake = TaskFakeLithosClient(health="unreachable")
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?since=2026-04-01")
++
++    assert response.status_code == 200
++    assert "Lithos is offline or degraded" in response.text
++    assert 'class="status-grid"' in response.text
++    assert 'class="task-board"' not in response.text
++    assert 'data-empty-state="window"' not in response.text
++    assert "data-healthy-stripe" not in response.text
++
++
++def test_missing_frontier_verdict_expires_and_is_re_probed(
++    lithos_lens_config_env: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """Regression (security f-001): the fallback verdict is remembered, never
++    permanent. "The frontier tools are missing" is also what an outage or an
++    authorization filter looks like, so once the re-probe window lapses Lens
++    asks again and the graph sections come back with the frontier — no restart."""
++    monkeypatch.setattr(state, "GRAPH_REPROBE_INTERVAL_S", 0.0)
++
++    class RecoveringClient(NoFrontierClient):
++        recovered = False
++
++        async def task_ready(self, **kwargs: Any) -> list[TaskRecord]:
++            if self.recovered:
++                self.frontier_calls += 1
++                return await TaskFakeLithosClient.task_ready(self, **kwargs)
++            return await super().task_ready(**kwargs)
++
++        async def task_blocked(self, **kwargs: Any) -> list[BlockedTaskRecord]:
++            if self.recovered:
++                self.frontier_calls += 1
++                return await TaskFakeLithosClient.task_blocked(self, **kwargs)
++            return await super().task_blocked(**kwargs)
++
++        def upgrade(self) -> None:
++            """The server gains the task graph (upgraded, or access restored)."""
++            self.recovered = True
++            self.tool_names = set(FAKE_TOOL_NAMES)
++
++    fake = RecoveringClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        degraded = client.get("/tasks?since=2026-04-01")
++        calls_after_probe = fake.frontier_calls
++        fake.upgrade()
++        healed = client.get("/tasks?since=2026-04-01")
++
++    assert "Graph features need Lithos 0.4 or newer" in degraded.text
++    # The lapsed window let the next render probe again…
++    assert fake.frontier_calls > calls_after_probe
++    # …and the graph surface returns without a restart.
++    assert "Graph features need Lithos 0.4 or newer" not in healed.text
++    assert 'data-task-group="ready"' in healed.text
++    assert 'data-task-group="open"' not in healed.text
++
++
++@pytest.mark.parametrize(
++    "query",
++    ["tag=project:nope", "agent=nobody", "status=completed"],
++)
++def test_healthy_stripe_is_withheld_on_a_filtered_board(
++    lithos_lens_config_env: Path, query: str
++) -> None:
++    """Regression (security f-002): the stripe makes a system-wide claim, but
++    truncation, reconciliation and claims-unknown are measured over the rows
++    the filters left. A shared link carrying ?tag=/?agent=/?status= must not be
++    able to turn this degraded server into an affirmative "all healthy"."""
++
++    class NoClaimsClient(TaskFakeLithosClient):
++        async def list_tasks(self, **kwargs: Any) -> list[TaskRecord]:
++            rows = await super().list_tasks(**kwargs)
++            return [replace(task, claims=None) for task in rows]
++
++    fake = NoClaimsClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        unfiltered = client.get("/tasks?since=2026-04-01")
++        filtered = client.get(f"/tasks?since=2026-04-01&{query}")
++
++    # The degraded signal is real and visible on the whole board…
++    assert "data-healthy-stripe" not in unfiltered.text
++    assert 'data-task-group="claims_unknown"' in unfiltered.text
++    # …and filtering it out of view does not make the system healthy.
++    assert "data-healthy-stripe" not in filtered.text
++
++
++def test_empty_state_is_withheld_when_a_filter_could_hide_terminal_rows(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Regression (correctness f-001): the completed/cancelled reads push
++    agent/tags upstream, so with a terminal-only corpus a non-matching filter
++    empties every response. That is a filter result — the board must say so
++    instead of claiming Lithos has no tasks."""
++    fake = TaskFakeLithosClient()
++    fake.tasks = [task for task in fake.tasks if task.status == "completed"]
++    fake.ready_ids = set()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?tag=project:nope&since=2026-04-01")
++
++    assert response.status_code == 200
++    assert 'data-empty-state="window"' not in response.text
++    assert "No tasks in this window" not in response.text
++    assert "No completed tasks match these filters" in response.text
++
++
++def test_since_renders_in_one_format_across_the_page(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Regression: the terminal cards, the filter field and the empty-state
++    panel all show the SAME `since` value, so they must all show it the same
++    way — the cards used to print raw ISO a few hundred pixels above the
++    DD/MM/YYYY input holding the identical date."""
++    fake = TaskFakeLithosClient()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        response = client.get("/tasks?since=2026-04-01")
++
++    assert response.status_code == 200
++    assert "Created since 01/04/2026" in response.text
++    assert "Created since 2026-04-01" not in response.text
++    # The links behind the cards keep the machine format the route parses.
++    assert "/tasks?status=completed&since=2026-04-01" in response.text
++
++
++def test_future_since_does_not_claim_the_tracker_is_empty(
++    lithos_lens_config_env: Path,
++) -> None:
++    """Regression (security f-003): ``since`` is pushed into both terminal
++    reads, so a date newer than every resolved task empties the board on a
++    corpus that holds work. The panel may still render — nothing IS showing —
++    but it must scope its claim to the window it was given rather than
++    announcing an empty tracker, and it must say how to widen it."""
++    fake = TaskFakeLithosClient()
++    fake.tasks = [task for task in fake.tasks if task.status == "completed"]
++    fake.ready_ids = set()
++
++    with _client(lithos_lens_config_env, fake) as client:
++        windowed = client.get("/tasks?since=2099-01-01")
++        in_window = client.get("/tasks?since=2026-04-01")
++
++    assert windowed.status_code == 200
++    assert "No tasks yet" not in windowed.text
++    assert "No tasks in this window" in windowed.text
++    # The window that produced the emptiness is named, with the way out.
++    assert "01/01/2099" in windowed.text
++    assert 'Widen "Created since"' in windowed.text
++    # Same server, a window that contains the work: the rows render.
++    assert "Recently completed task" in in_window.text
++    assert 'data-empty-state="window"' not in in_window.text

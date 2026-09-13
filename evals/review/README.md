@@ -631,6 +631,12 @@ next one:
   has a 95% CI reaching ~52% — "no evidence it sees it", never "confirmed
   never"); 1–3/5 → not decisive at K=5, pay K≈20 or treat as unreliable.
 
+The composed-tree case measures the PANEL on the composition; the S5 path
+as a whole — coder, check-set, panel, rounds, on the real conflicting merge
+— is measured by [`eval resolve`](../resolve/README.md), which reads the
+run's trees against an executable oracle and names the cell that matters
+(approved AND wrong).
+
 `lens43-composed-projects` is a **constructed** case, not a minted escape:
 nothing in §"Escape review" applies to it (no external finding, and bucket 1
 is false by construction — no panel reviewed this diff). It is unmeasured

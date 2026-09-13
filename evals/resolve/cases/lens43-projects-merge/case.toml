@@ -1,0 +1,90 @@
+[case]
+id = "lens43-projects-merge"
+description = """
+PRD pr-reconciliation S8, conflict-resolution shape — the first case. The
+REAL conflict behind lens #43 (T1-S12, story-develop run f2e46eef): the
+story was delivered at d53126a against lens main 6199396; while it awaited
+merge, #44 (T1-S10) and #45 (T1-S9, the project filter) landed and moved
+main to 6e2fcf0. Merging that tip into the delivered head conflicts in TEN
+text paths (frontier.py, tasks.py, dashboard.html, lens.css, two test files,
+architecture.toml and three generated docs) — exactly the intake S5's
+`converge --resolve-conflicts` receives, and the one the operator resolved
+by hand in e1965aa ("Merge main (T1-S9, T1-S10) into T1-S12").
+
+WHAT THE CASE MEASURES: the whole S5 path, end to end, on a merge whose
+correct resolution needs more than resolving the markers. The story's
+`filters_narrow_the_board` helper (the guard that withholds the dashboard's
+whole-system claims on a narrowed board) merges CLEANLY — it is not in any
+conflicted hunk — yet the base it lands on now carries `TaskFilters.projects`
+(T1-S9), so a resolution that only clears the ten conflicts ships a helper
+that lets a `?project=` board make a system-wide "All systems healthy"
+claim. The operator's resolution added `or bool(filters.projects)` (and
+moved the helper into task_filtering.py, the module T1-S9 introduced). The
+ORACLE is that property, executable: probes/projects_narrow.py asks the
+resolved tree whether a projects-only board counts as narrowed — wherever
+the helper lives. Two readings per run: **coder-right** (the round-1 merge
+commit, before any panel feedback: does the resolver read what landed on
+the base, or just clear the markers?) and **pipeline-right** (the final
+tree: did the panel's composed-tree review catch what the coder missed —
+lens43-composed-projects measured that review alone at 5/5 — and did the
+coder then fix it?). Beside them, the panel's verdict: **UNSAFE** = approved
+AND wrong is the merge commit S5 would have pushed onto the PR branch.
+
+CONTROLS (validated before any paid sample): known-good = the operator's
+merge e1965aa (`git diff 6e2fcf0..e1965aa`, applied on base) — the probe
+passes; known-bad = the lens43-composed-projects defect head (applied on
+base) — the probe fails. That head is NOT e1965aa minus the term: it is the
+pre-squash tip 41a43c8 (e1965aa plus the two post-merge fix commits, the
+frontier.py split and the neutralised giveaways) with the projects term
+undone — 17 files apart from the known-good. The oracle discriminates on
+the term alone (the probe prints `… = False` on it, not "helper not
+found"), which is what the pair has to prove. e1965aa fails lens's
+800-line module budget (frontier.py 880 lines; split two commits later),
+which is irrelevant here: the controls are probed, never gated.
+
+THE GATE IS LENS'S: the case declares what a production `--story` run
+resolves from lens's context doc — `image` python-ui, lens's
+`parity_command` (baseline hash of docs/generated → `uv sync --locked &&
+make check && make diagrams` → the hash must not move → `make e2e`) and
+`artifacts_path` e2e/artifacts (so the approval-hold artifact pass runs on
+the e2e captures, as it does live). Three of the ten conflicted paths are
+generated docs; only the parity drift check sees a hand-merged one. The
+profile's catalog checks run beside it.
+
+WHAT A RUN COSTS: round 1 = one coder turn over ten conflicted paths
+(three of them generated docs the coder should regenerate, not hand-merge)
++ lens's check-set (parity incl. e2e: minutes) + a one-persona panel + the
+artifact pass; a blocking finding adds a round. Expect $8–20 per sample on
+a claude coder + codex correctness reviewer.
+
+MDE, STATED BEFORE ANY PAID ARM (README §"How many samples"): the prior is
+UNDEFINED — S5's resolver has run on one live conflict (loom #352, five
+paths) and on no composed-defect merge. Single-arm characterisation at K=5,
+read with a decision rule, not as a rate: UNSAFE ≥1/5 → S5 narrows to
+check-set-only auto-push for non-semantic conflicts (a panel that approved
+a wrong merge once cannot be the guard on the push); UNSAFE 0/5 with
+pipeline-right ≥4/5 → panel-approved auto-push stays for semantic
+conflicts; UNSAFE 0/5 with pipeline-right ≤3/5 → the path is SAFE but
+WASTEFUL (correct or escalated, never wrong) — S5 stays, and the coder-right
+column says whether the fix is the resolve brief (the coder never reads what
+landed) or the panel (it caught nothing). A 0/5 UNSAFE has a 95% CI reaching
+~43%: "no evidence it pushes wrong merges", never "confirmed never".
+"""
+repo = "../lithos-lens"
+title = "T1-S12: Empty/degraded states"
+merge_base = "61993963b10071525c4965abc1d083f444e919b3"   # lens main at #42, the story's own base
+base = "6e2fcf0ccb106c05a09a4e48b0e9dee709a8f3cf"         # lens main after #44 + #45 (the #45 squash)
+head_patch = "delivered-head.patch"                        # git diff 6199396..d53126a — the delivered r5 head
+known_good_patch = "known-good.patch"                      # git diff 6e2fcf0..e1965aa — the operator's merge
+known_bad_patch = "known-bad.patch"                        # the composed-projects defect head: e1965aa's tree, projects term undone
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"                         # the real T1-S12 story body (replay), the PR's intent
+# lens's develop settings, as its context doc declares them (a --story run resolves the same)
+image = "ralph-sandbox:python-ui"
+parity_command = "B=$(find docs/generated -type f -exec sha256sum {} + | sort | sha256sum) && uv sync --locked && make check && make diagrams && A=$(find docs/generated -type f -exec sha256sum {} + | sort | sha256sum) && [ \"$B\" = \"$A\" ] && make e2e"
+artifacts_path = "e2e/artifacts"
+
+[[probe]]
+name = "projects-narrow"
+command = "uv run --quiet python {case_dir}/probes/projects_narrow.py"
