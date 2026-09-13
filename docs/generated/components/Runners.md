@@ -15,7 +15,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | M | 1 | 25 |
-| `lithos_loom.runner.worktree` | S | 0 | 5 |
+| `lithos_loom.runner.worktree` | S | 0 | 6 |
 
 ## Public API
 
@@ -59,6 +59,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.
+- def `current_base_ref` — The commit-ish a fresh branch off *base_branch* starts at (see :func:`create`): ``origin/<base_branch>`` — freshly fetched, or as last fetched when the fetch fails — when the repo has it, else *base_branch* itself.
 - def `create_on_branch` — Create a worktree on a **fresh committable branch at** *start_point*.
 - def `create_at` — Create a worktree with HEAD **detached at an existing commit** *ref*.
 - def `git_common_dir` — Absolute path to the shared git dir for the worktree at *path*.

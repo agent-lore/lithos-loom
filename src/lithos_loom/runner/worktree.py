@@ -12,12 +12,19 @@ directory) so concurrent runs never collide.
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 import subprocess
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+# A remote that does not answer must not hang a dispatch: the fetch is a
+# courtesy to the operator's checkout, not a dependency of the run.
+_FETCH_TIMEOUT_SECONDS = 60
 
 
 def _slug(name: str, *, max_length: int = 50) -> str:
@@ -35,12 +42,60 @@ def create(
 ) -> Path:
     """Create a per-task worktree off *base_branch* and return its path.
 
-    A fresh branch ``{slug(name)}-{8hex}`` is created at *base_branch*. The
-    worktree directory is placed under *parent* (default ``repo.parent``). This
-    is the special case of :func:`create_on_branch` where the start point is a
-    base branch.
+    A fresh branch ``{slug(name)}-{8hex}`` is created at the base's CURRENT
+    tip: ``origin/<base_branch>`` after a fetch when the repo has that remote
+    (#390 — lens #85 was cut at the operator's local ``main``, one merge
+    behind origin, and delivered a PR born in conflict), else the local
+    branch (a repo with no remote, the test fixtures). A fetch that fails
+    (offline, a dead remote) falls back to the last-fetched remote ref and
+    is logged — a stale run is explicable, a dead dispatch is not. The
+    operator's own branch is never moved. The worktree directory is placed
+    under *parent* (default ``repo.parent``). This is the special case of
+    :func:`create_on_branch` where the start point is a base branch.
     """
-    return create_on_branch(repo, base_branch, name, parent=parent)
+    return create_on_branch(
+        repo, current_base_ref(repo, base_branch), name, parent=parent
+    )
+
+
+def current_base_ref(repo: Path, base_branch: str) -> str:
+    """The commit-ish a fresh branch off *base_branch* starts at (see
+    :func:`create`): ``origin/<base_branch>`` — freshly fetched, or as last
+    fetched when the fetch fails — when the repo has it, else *base_branch*
+    itself."""
+    remote_ref = f"origin/{base_branch}"
+    probe = subprocess.run(
+        ["git", "rev-parse", "--verify", "-q", f"refs/remotes/{remote_ref}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return base_branch
+    try:
+        fetched = subprocess.run(
+            ["git", "fetch", "-q", "origin", base_branch],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=_FETCH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "worktree: fetch of %s timed out; starting at the local (last fetched) %s",
+            remote_ref,
+            remote_ref,
+        )
+        return remote_ref
+    if fetched.returncode != 0:
+        logger.warning(
+            "worktree: fetch of %s failed (%s); starting at the local (last "
+            "fetched) %s",
+            remote_ref,
+            fetched.stderr.strip().splitlines()[-1] if fetched.stderr.strip() else "?",
+            remote_ref,
+        )
+    return remote_ref
 
 
 def create_on_branch(

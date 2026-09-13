@@ -94,6 +94,66 @@ def _add_commit(repo: Path, filename: str, content: str) -> str:
     return _sha(repo, "HEAD")
 
 
+def _clone_with_remote(tmp_path: Path, origin: Path) -> Path:
+    """A local clone whose ``main`` tracks *origin* — the operator's checkout."""
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(clone)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"], cwd=clone, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "T"], cwd=clone, check=True)
+    return clone
+
+
+def test_create_starts_at_the_fetched_remote_base_not_the_stale_local_branch(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    """#390 (lens #85): the operator's local `main` was one commit behind
+    origin when the story dispatched; the branch cut there delivered a PR
+    born behind its base. The start point is the remote base, fetched first
+    — the local branch is only what the operator last pulled."""
+    clone = _clone_with_remote(tmp_path, tmp_git_repo)
+    stale_local = _sha(clone, "main")
+    # origin moves on (a PR merges); the clone has not pulled
+    moved = _add_commit(tmp_git_repo, "landed.txt", "merged upstream\n")
+    assert _sha(clone, "main") == stale_local
+
+    wt = worktree.create(clone, "main", "task", parent=tmp_path / "w")
+
+    assert _sha(wt, "HEAD") == moved  # the fetched origin/main, not local main
+    assert _sha(clone, "main") == stale_local  # the operator's branch untouched
+    assert _branch_of(wt).startswith("task-")
+
+
+def test_create_falls_back_to_the_local_branch_without_a_remote(
+    tmp_git_repo: Path, tmp_path: Path
+) -> None:
+    # the test fixtures / a repo with no origin: the local branch is the base
+    wt = worktree.create(tmp_git_repo, "main", "task", parent=tmp_path / "w")
+    assert _sha(wt, "HEAD") == _sha(tmp_git_repo, "main")
+
+
+def test_create_falls_back_to_the_local_branch_when_the_fetch_fails(
+    tmp_git_repo: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Offline (or a dead remote) must not kill the run: the last-fetched
+    remote ref is the base (never behind the operator's branch, unlike a
+    local commit on main), and the fallback is logged so a stale run is
+    explicable."""
+    clone = _clone_with_remote(tmp_path, tmp_git_repo)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(tmp_path / "gone")],
+        cwd=clone,
+        check=True,
+    )
+    with caplog.at_level("WARNING", logger="lithos_loom.runner.worktree"):
+        wt = worktree.create(clone, "main", "task", parent=tmp_path / "w")
+    assert _sha(wt, "HEAD") == _sha(clone, "origin/main")
+    assert any("fetch" in r.message and "local" in r.message for r in caplog.records)
+
+
 def test_create_at_checks_out_detached_at_ref(
     tmp_git_repo: Path, tmp_path: Path
 ) -> None:
